@@ -1,7 +1,9 @@
-Since there are no added, deleted, or modified files listed that require ignoring (only the `.gitignore` file itself was modified), and no specific artifacts, dependencies, or temporary files were mentioned in the change list, no additional ignore rules are needed.
+node_modules/
+out/
+dist/
+.DS_Store
+*.log
+.env
+.env.*
+AGENTS.md
 
-The current `.gitignore` content appears to be empty or doesn't specify any particular content to preserve or modify based on the provided change list.
-
-Therefore, the optimized `.gitignore` content remains empty.
-
-(No output)
