@@ -11,9 +11,13 @@ import { CodefetchResult } from '../../shared/types'
 const TIMEOUT_MS = 120_000
 
 export class CodefetchAdapter {
+  private getCommand(): string {
+    return process.platform === 'win32' ? 'codefetch.cmd' : 'codefetch'
+  }
+
   async checkInstallation(): Promise<boolean> {
     return new Promise((resolve) => {
-      const proc = spawn('codefetch', ['--version'], { shell: true })
+      const proc = spawn(this.getCommand(), ['--version'], { shell: true })
       proc.on('close', (code) => resolve(code === 0))
       proc.on('error', () => resolve(false))
     })
@@ -23,7 +27,7 @@ export class CodefetchAdapter {
     return new Promise((resolve) => {
       let stderr = ''
 
-      const proc = spawn('codefetch', [], {
+      const proc = spawn(this.getCommand(), [], {
         cwd: repoPath,
         shell: true
       })
