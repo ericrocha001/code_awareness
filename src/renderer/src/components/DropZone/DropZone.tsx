@@ -57,8 +57,7 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
     }
 
     const file = files[0]
-    // O Electron adiciona a propriedade path contendo o caminho absoluto do arquivo/pasta
-    const absolutePath = (file as any).path || ''
+    const absolutePath = window.codeAwareness.getPathForFile(file)
     const folderName = file.name
 
     if (!absolutePath) {

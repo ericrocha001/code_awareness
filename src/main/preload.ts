@@ -3,7 +3,7 @@
 // 1. Expor APIs seguras e limitadas do processo principal para o renderer usando contextBridge.
 // 2. Garantir isolamento de contexto impedindo o acesso direto a módulos do Node.js pela interface.
 
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { AppSettings, CodefetchResult } from '../shared/types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
@@ -31,5 +31,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   },
   selectVaultFolder: (): Promise<string | null> => {
     return ipcRenderer.invoke('select-vault-folder')
+  },
+  getPathForFile: (file: File): string => {
+    return webUtils.getPathForFile(file)
   }
 })
