@@ -85,11 +85,8 @@ export const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo-section">
-          <span className="logo-icon">🧠</span>
-          <div>
-            <h1 className="app-title">Code Awareness</h1>
-            <p className="app-subtitle">Converta repositórios locais em Markdown unificado</p>
-          </div>
+          <span className="logo-icon">{"</>"}</span>
+          <h1 className="app-title">Code Awareness</h1>
         </div>
       </header>
 

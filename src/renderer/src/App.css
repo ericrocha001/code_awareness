@@ -6,39 +6,30 @@
 }
 
 .app-header {
-  margin-bottom: 24px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  margin-bottom: 32px;
 }
 
 .logo-section {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 
 .logo-icon {
-  font-size: 36px;
-  background-color: #21262d;
-  width: 56px;
-  height: 56px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  border-radius: 12px;
-  border: 1px solid #30363d;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--accent);
 }
 
 .app-title {
-  font-size: 22px;
-  font-weight: 700;
-  color: #f0f6fc;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
   margin: 0;
-  line-height: 1.2;
-}
-
-.app-subtitle {
-  font-size: 13px;
-  color: #8b949e;
-  margin: 4px 0 0 0;
+  letter-spacing: -0.5px;
 }
 
 .app-main {
@@ -48,9 +39,9 @@
 
 /* Error Banner styling */
 .error-banner {
-  background-color: rgba(248, 81, 73, 0.1);
+  background-color: rgba(248, 81, 73, 0.05);
   border: 1px solid #f85149;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 12px 16px;
   margin-top: 20px;
   display: flex;
@@ -76,25 +67,25 @@
   bottom: 24px;
   right: 24px;
   padding: 12px 20px;
-  border-radius: 6px;
+  border-radius: 999px;
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 13px;
   font-weight: 500;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   z-index: 1000;
   animation: slideIn 0.3s ease-out;
   max-width: 400px;
 }
 
 .status-toast.success {
-  background-color: #1f6feb;
-  color: #ffffff;
-  border: 1px solid #388bfd;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--accent);
 }
 
 .status-toast.error {
-  background-color: #da3633;
-  color: #ffffff;
+  background-color: #1a0f0f;
+  color: #f85149;
   border: 1px solid #f85149;
 }
 

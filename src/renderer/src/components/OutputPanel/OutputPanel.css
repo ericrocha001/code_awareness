@@ -1,17 +1,17 @@
 .output-panel {
   display: flex;
   flex-direction: column;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  background-color: #161b22;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background-color: var(--bg-secondary);
   margin-top: 20px;
   overflow: hidden;
 }
 
 .output-panel-header {
-  background-color: #0d1117;
-  border-bottom: 1px solid #30363d;
-  padding: 10px 16px;
+  background-color: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 18px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -19,22 +19,22 @@
 
 .output-panel-title {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
 }
 
 .output-panel-meta {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #484f58;
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
 .output-panel-container {
-  padding: 16px;
+  padding: 24px;
   overflow: auto;
   max-height: 500px;
-  background-color: #0d1117;
+  background-color: var(--bg-primary);
 }
 
 .output-panel-content {
@@ -42,7 +42,7 @@
   font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
   font-size: 13px;
   line-height: 1.6;
-  color: #e6edf3;
+  color: var(--text-primary);
   white-space: pre;
   tab-size: 4;
 }

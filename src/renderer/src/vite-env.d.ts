@@ -21,6 +21,7 @@ declare global {
       loadSettings: () => Promise<AppSettings>
       saveSettings: (settings: AppSettings) => Promise<{ success: boolean }>
       selectVaultFolder: () => Promise<string | null>
+      selectFolder: () => Promise<{ path: string; name: string } | null>
       getPathForFile: (file: File) => string
     }
   }

@@ -1,10 +1,11 @@
 // Responsabilidades do Script
 //
 // 1. Registrar os handlers IPC para salvar Markdown localmente e no vault do Obsidian.
+// 2. Registrar o handler IPC para selecionar uma pasta de repositório via diálogo nativo do Electron.
 
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { writeFileSync } from 'fs'
-import { join } from 'path'
+import { basename } from 'path'
 import { VaultService } from '../core/vault-service'
 
 const vaultService = new VaultService()
@@ -40,4 +41,18 @@ export function registerFileHandlers(mainWindow: BrowserWindow): void {
       }
     }
   )
+
+  ipcMain.handle('select-folder', async () => {
+    const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Repository Folder',
+      properties: ['openDirectory']
+    })
+
+    if (canceled || !filePaths.length) return null
+    const path = filePaths[0]
+    return {
+      path,
+      name: basename(path)
+    }
+  })
 }

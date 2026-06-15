@@ -32,6 +32,9 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   selectVaultFolder: (): Promise<string | null> => {
     return ipcRenderer.invoke('select-vault-folder')
   },
+  selectFolder: (): Promise<{ path: string; name: string } | null> => {
+    return ipcRenderer.invoke('select-folder')
+  },
   getPathForFile: (file: File): string => {
     return webUtils.getPathForFile(file)
   }

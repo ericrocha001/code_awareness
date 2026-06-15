@@ -1,8 +1,8 @@
 // Responsabilidades do Script
 //
 // 1. Detectar e gerenciar eventos de drag-and-drop nativos na interface.
-// 2. Validar que o item arrastado é um diretório (pasta) e não um arquivo individual.
-// 3. Exibir estados visuais correspondentes (idle, hover, processing, erro).
+// 2. Prover botão "Select Folder" que abre diálogo nativo do Electron para escolha de pasta.
+// 3. Validar se o item arrastado ou selecionado é um diretório (pasta).
 // 4. Invocar o callback onFolderDrop com o caminho absoluto da pasta.
 
 import React, { useState, DragEvent } from 'react'
@@ -26,6 +26,14 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
 
   const handleDragLeave = () => {
     setIsHover(false)
+  }
+
+  const processRepository = (absolutePath: string, folderName: string) => {
+    if (!absolutePath) {
+      setErrorMsg('Não foi possível obter o caminho absoluto da pasta.')
+      return
+    }
+    onFolderDrop(absolutePath, folderName)
   }
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
@@ -60,18 +68,28 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
     const absolutePath = window.codeAwareness.getPathForFile(file)
     const folderName = file.name
 
-    if (!absolutePath) {
-      setErrorMsg('Não foi possível obter o caminho absoluto da pasta.')
-      return
-    }
+    processRepository(absolutePath, folderName)
+  }
 
-    onFolderDrop(absolutePath, folderName)
+  const handleSelectFolderClick = async (e: React.MouseEvent) => {
+    e.stopPropagation() // Evita triggers acidentais
+    if (disabled || isProcessing) return
+    setErrorMsg(null)
+
+    try {
+      const res = await window.codeAwareness.selectFolder()
+      if (res) {
+        processRepository(res.path, res.name)
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Erro ao selecionar a pasta.')
+    }
   }
 
   const getStatusText = () => {
     if (isProcessing) return 'Analisando repositório com Codefetch...'
-    if (isHover) return 'Solte para analisar'
-    return 'Arraste a pasta do seu repositório aqui'
+    if (isHover) return 'Solte para analisar o repositório'
+    return 'Drag & Drop Repository'
   }
 
   return (
@@ -86,15 +104,37 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
           {isProcessing ? (
             <span className="spinner"></span>
           ) : errorMsg ? (
-            '❌'
-          ) : isHover ? (
-            '📂'
+            '⚠️'
           ) : (
-            '📥'
+            <svg
+              width="40"
+              height="40"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
           )}
         </div>
         <p className="dropzone-text">{getStatusText()}</p>
+        {!isProcessing && !errorMsg && (
+          <p className="dropzone-subtitle">or choose a folder manually</p>
+        )}
         {errorMsg && <p className="dropzone-error-text">{errorMsg}</p>}
+        {!isProcessing && (
+          <button
+            type="button"
+            className="select-folder-btn"
+            onClick={handleSelectFolderClick}
+            disabled={disabled}
+          >
+            Select Folder
+          </button>
+        )}
       </div>
     </div>
   )

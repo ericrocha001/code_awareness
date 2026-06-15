@@ -4,10 +4,10 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 16px;
-  background-color: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  padding: 12px 16px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 18px;
   margin-top: 20px;
 }
 
@@ -20,44 +20,46 @@
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 13px;
   font-weight: 600;
-  padding: 8px 16px;
-  border-radius: 6px;
+  height: 42px;
+  padding: 0 18px;
+  border-radius: 999px;
   cursor: pointer;
-  border: 1px solid #30363d;
-  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
-  background-color: #21262d;
-  color: #c9d1d9;
+  border: 1px solid var(--border);
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 .action-btn:hover:not(:disabled) {
-  background-color: #30363d;
-  border-color: #8b949e;
+  background-color: var(--bg-secondary);
+  border-color: var(--accent);
+  color: var(--accent-hover);
 }
 
 .action-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-  background-color: #161b22;
-  border-color: #21262d;
-  color: #484f58;
+  background-color: var(--bg-secondary);
+  border-color: var(--border);
+  color: var(--text-secondary);
 }
 
 /* Specific button accents */
 .copy-btn:hover:not(:disabled) {
-  color: #58a6ff;
-  border-color: #58a6ff;
+  color: var(--accent-hover);
+  border-color: var(--accent);
 }
 
 .obsidian-btn {
-  background-color: #30264d;
-  border-color: #4d3d7a;
-  color: #e2daff;
+  background-color: var(--bg-primary);
+  border-color: var(--border);
+  color: var(--text-primary);
 }
 
 .obsidian-btn:hover:not(:disabled) {
-  background-color: #403266;
-  border-color: #7058b8;
-  color: #f1edff;
+  background-color: var(--bg-secondary);
+  border-color: var(--accent);
+  color: var(--accent-hover);
 }
 
 .vault-config-info {
@@ -67,19 +69,19 @@
 
 .vault-path-text {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
 .vault-path-text code {
-  background-color: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  padding: 2px 6px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
   margin: 0 6px;
   font-family: ui-monospace, monospace;
   font-size: 11px;
-  color: #8b949e;
+  color: var(--text-primary);
   max-width: 250px;
   display: inline-block;
   overflow: hidden;
@@ -91,7 +93,7 @@
 .change-vault-btn {
   background: none;
   border: none;
-  color: #58a6ff;
+  color: var(--accent-hover);
   font-size: 11px;
   cursor: pointer;
   padding: 0 4px;
@@ -99,12 +101,12 @@
 }
 
 .change-vault-btn:hover {
-  color: #79c0ff;
+  color: var(--accent);
 }
 
 .vault-not-configured {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #484f58;
+  color: var(--text-secondary);
   font-size: 12px;
   font-style: italic;
 }
