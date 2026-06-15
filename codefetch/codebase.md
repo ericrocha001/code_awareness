@@ -1,0 +1,1494 @@
+<source_code>
+electron.vite.config.ts
+```
+import { resolve } from 'path'
+import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  main: {
+    build: {
+      lib: {
+        entry: resolve(__dirname, 'src/main/main.ts'),
+        formats: ['cjs']
+      }
+    },
+    plugins: [externalizeDepsPlugin()]
+  },
+  preload: {
+    build: {
+      lib: {
+        entry: resolve(__dirname, 'src/main/preload.ts'),
+        formats: ['cjs']
+      }
+    },
+    plugins: [externalizeDepsPlugin()]
+  },
+  renderer: {
+    root: resolve(__dirname, 'src/renderer'),
+    build: {
+      rollupOptions: {
+        input: resolve(__dirname, 'src/renderer/index.html')
+      }
+    },
+    plugins: [react()]
+  }
+})
+```
+
+package.json
+```
+{
+  "name": "code-awareness",
+  "version": "1.0.0",
+  "description": "Desktop app to analyze code repos and export to Obsidian via Codefetch",
+  "main": "./out/main/main.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "electron": "^33.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "electron-vite": "^2.3.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}
+```
+
+tsconfig.json
+```
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.node.json" },
+    { "path": "./tsconfig.web.json" }
+  ]
+}
+```
+
+tsconfig.node.json
+```
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "Node16",
+    "moduleResolution": "Node16",
+    "strict": true,
+    "skipLibCheck": true,
+    "outDir": "out/main",
+    "rootDir": "src/main"
+  },
+  "include": ["src/main/**/*", "src/shared/**/*"]
+}
+```
+
+tsconfig.web.json
+```
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@shared/*": ["src/shared/*"]
+    }
+  },
+  "include": ["src/renderer/**/*", "src/shared/**/*"]
+}
+```
+
+src/main/main.ts
+```
+// Responsabilidades do Script
+//
+// 1. Inicializar o ciclo de vida do aplicativo Electron.
+// 2. Criar e configurar a janela principal do navegador (BrowserWindow) com segurança (contextIsolation, sandbox, etc).
+// 3. Carregar a interface do usuário correspondente (desenvolvimento vs produção).
+// 4. Registrar todos os manipuladores de IPC (Inter-Process Communication) do aplicativo.
+
+import { app, BrowserWindow } from 'electron'
+import { join } from 'path'
+import { registerCodefetchHandlers } from './ipc/codefetch-handler'
+import { registerFileHandlers } from './ipc/file-handler'
+import { registerSettingsHandlers } from './ipc/settings-handler'
+
+let mainWindow: BrowserWindow | null = null
+
+function createWindow(): void {
+  mainWindow = new BrowserWindow({
+    width: 1200,
+    height: 800,
+    backgroundColor: '#0d1117',
+    webPreferences: {
+      preload: join(__dirname, '../preload/preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true
+    }
+  })
+
+  // Registrar handlers passando a janela onde for necessário (ex: dialogs)
+  registerCodefetchHandlers()
+  registerFileHandlers(mainWindow)
+  registerSettingsHandlers(mainWindow)
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+  } else {
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+  }
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+  })
+}
+
+app.whenReady().then(() => {
+  createWindow()
+
+  app.on('activate', () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow()
+    }
+  })
+})
+
+app.on('window-all-closed', () => {
+  if (process.platform !== 'darwin') {
+    app.quit()
+  }
+})
+```
+
+src/main/preload.ts
+```
+// Responsabilidades do Script
+//
+// 1. Expor APIs seguras e limitadas do processo principal para o renderer usando contextBridge.
+// 2. Garantir isolamento de contexto impedindo o acesso direto a módulos do Node.js pela interface.
+
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { AppSettings, CodefetchResult } from '../shared/types'
+
+contextBridge.exposeInMainWorld('codeAwareness', {
+  checkCodefetch: (): Promise<boolean> => {
+    return ipcRenderer.invoke('check-codefetch')
+  },
+  runCodefetch: (repoPath: string): Promise<CodefetchResult> => {
+    return ipcRenderer.invoke('run-codefetch', repoPath)
+  },
+  saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('save-markdown', markdown, repoName)
+  },
+  saveToObsidian: (
+    markdown: string,
+    repoName: string,
+    vaultPath: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('save-to-obsidian', markdown, repoName, vaultPath)
+  },
+  loadSettings: (): Promise<AppSettings> => {
+    return ipcRenderer.invoke('load-settings')
+  },
+  saveSettings: (settings: AppSettings): Promise<{ success: boolean }> => {
+    return ipcRenderer.invoke('save-settings', settings)
+  },
+  selectVaultFolder: (): Promise<string | null> => {
+    return ipcRenderer.invoke('select-vault-folder')
+  },
+  getPathForFile: (file: File): string => {
+    return webUtils.getPathForFile(file)
+  }
+})
+```
+
+src/renderer/index.html
+```
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Code Awareness</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Segurança CSP básica recomendada pelo Electron -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+```
+
+src/shared/types.ts
+```
+// Responsabilidades do Script
+//
+// 1. Definir os tipos compartilhados entre o processo principal e o renderer do Electron.
+
+export interface AppSettings {
+  obsidianVaultPath: string | null
+}
+
+export interface CodefetchResult {
+  success: boolean
+  markdown?: string
+  error?: string
+}
+```
+
+src/main/core/codefetch-adapter.ts
+```
+// Responsabilidades do Script
+//
+// 1. Verificar se o Codefetch CLI está instalado no sistema.
+// 2. Executar o Codefetch em um repositório e capturar o Markdown gerado.
+
+import { spawn } from 'child_process'
+import { CodefetchResult } from '../../shared/types'
+
+const TIMEOUT_MS = 120_000
+
+export class CodefetchAdapter {
+  async checkInstallation(): Promise<boolean> {
+    return new Promise((resolve) => {
+      const proc = spawn('codefetch', ['--version'], { shell: true })
+      proc.on('close', (code) => resolve(code === 0))
+      proc.on('error', () => resolve(false))
+    })
+  }
+
+  async run(repoPath: string): Promise<CodefetchResult> {
+    return new Promise((resolve) => {
+      let stdout = ''
+      let stderr = ''
+
+      const proc = spawn('codefetch', [], {
+        cwd: repoPath,
+        shell: true
+      })
+
+      const timer = setTimeout(() => {
+        proc.kill()
+        resolve({ success: false, error: 'Repository analysis timed out' })
+      }, TIMEOUT_MS)
+
+      proc.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString()
+      })
+
+      proc.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString()
+      })
+
+      proc.on('close', (code) => {
+        clearTimeout(timer)
+        if (code === 0 && stdout.trim()) {
+          resolve({ success: true, markdown: stdout })
+        } else {
+          resolve({
+            success: false,
+            error: stderr.trim() || 'Codefetch failed to analyze the repository'
+          })
+        }
+      })
+
+      proc.on('error', (err) => {
+        clearTimeout(timer)
+        resolve({ success: false, error: `Could not run codefetch: ${err.message}` })
+      })
+    })
+  }
+}
+```
+
+src/main/core/settings-service.ts
+```
+// Responsabilidades do Script
+//
+// 1. Persistir e recuperar as configurações locais do aplicativo (ex: caminho do vault Obsidian).
+
+import { app } from 'electron'
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
+import { join } from 'path'
+import { AppSettings } from '../../shared/types'
+
+const CONFIG_DIR = app.getPath('userData')
+const CONFIG_FILE = join(CONFIG_DIR, 'settings.json')
+
+const DEFAULT_SETTINGS: AppSettings = {
+  obsidianVaultPath: null
+}
+
+export class SettingsService {
+  loadSettings(): AppSettings {
+    if (!existsSync(CONFIG_FILE)) return { ...DEFAULT_SETTINGS }
+    try {
+      const raw = readFileSync(CONFIG_FILE, 'utf-8')
+      return JSON.parse(raw) as AppSettings
+    } catch {
+      return { ...DEFAULT_SETTINGS }
+    }
+  }
+
+  saveSettings(settings: AppSettings): void {
+    if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
+    writeFileSync(CONFIG_FILE, JSON.stringify(settings, null, 2), 'utf-8')
+  }
+}
+```
+
+src/main/core/vault-service.ts
+```
+// Responsabilidades do Script
+//
+// 1. Salvar o Markdown gerado no vault do Obsidian, tratando colisões de nome de arquivo.
+
+import { writeFileSync, existsSync } from 'fs'
+import { join, extname, basename } from 'path'
+
+export class VaultService {
+  async saveToVault(
+    markdown: string,
+    repoName: string,
+    vaultPath: string
+  ): Promise<void> {
+    const filename = this.resolveFilename(vaultPath, repoName)
+    writeFileSync(filename, markdown, 'utf-8')
+  }
+
+  private resolveFilename(vaultPath: string, repoName: string): string {
+    const base = repoName.replace(/[<>:"/\\|?*]/g, '-')
+    const candidate = join(vaultPath, `${base}.md`)
+    if (!existsSync(candidate)) return candidate
+
+    let counter = 1
+    while (true) {
+      const name = join(vaultPath, `${base} (${counter}).md`)
+      if (!existsSync(name)) return name
+      counter++
+    }
+  }
+}
+```
+
+src/main/ipc/codefetch-handler.ts
+```
+// Responsabilidades do Script
+//
+// 1. Registrar os handlers IPC para verificação e execução do Codefetch.
+
+import { ipcMain } from 'electron'
+import { CodefetchAdapter } from '../core/codefetch-adapter'
+
+const adapter = new CodefetchAdapter()
+
+export function registerCodefetchHandlers(): void {
+  ipcMain.handle('check-codefetch', async () => {
+    return adapter.checkInstallation()
+  })
+
+  ipcMain.handle('run-codefetch', async (_event, repoPath: string) => {
+    return adapter.run(repoPath)
+  })
+}
+```
+
+src/main/ipc/file-handler.ts
+```
+// Responsabilidades do Script
+//
+// 1. Registrar os handlers IPC para salvar Markdown localmente e no vault do Obsidian.
+
+import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { writeFileSync } from 'fs'
+import { join } from 'path'
+import { VaultService } from '../core/vault-service'
+
+const vaultService = new VaultService()
+
+export function registerFileHandlers(mainWindow: BrowserWindow): void {
+  ipcMain.handle('save-markdown', async (_event, markdown: string, repoName: string) => {
+    const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Markdown',
+      defaultPath: `${repoName}.md`,
+      filters: [{ name: 'Markdown', extensions: ['md'] }]
+    })
+
+    if (canceled || !filePath) return { success: false, error: 'Cancelled' }
+
+    try {
+      writeFileSync(filePath, markdown, 'utf-8')
+      return { success: true }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      return { success: false, error: message }
+    }
+  })
+
+  ipcMain.handle(
+    'save-to-obsidian',
+    async (_event, markdown: string, repoName: string, vaultPath: string) => {
+      try {
+        await vaultService.saveToVault(markdown, repoName, vaultPath)
+        return { success: true }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : 'Unknown error'
+        return { success: false, error: message }
+      }
+    }
+  )
+}
+```
+
+src/main/ipc/settings-handler.ts
+```
+// Responsabilidades do Script
+//
+// 1. Registrar os handlers IPC para carregar, salvar configurações e selecionar o vault do Obsidian.
+
+import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { SettingsService } from '../core/settings-service'
+
+const settingsService = new SettingsService()
+
+export function registerSettingsHandlers(mainWindow: BrowserWindow): void {
+  ipcMain.handle('load-settings', async () => {
+    return settingsService.loadSettings()
+  })
+
+  ipcMain.handle('save-settings', async (_event, settings) => {
+    settingsService.saveSettings(settings)
+    return { success: true }
+  })
+
+  ipcMain.handle('select-vault-folder', async () => {
+    const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Obsidian Vault Folder',
+      properties: ['openDirectory']
+    })
+
+    if (canceled || !filePaths.length) return null
+    return filePaths[0]
+  })
+}
+```
+
+src/renderer/src/App.css
+```
+.app-container {
+  max-width: 1000px;
+  margin: 0 auto;
+  padding: 30px 20px;
+  box-sizing: border-box;
+}
+
+.app-header {
+  margin-bottom: 24px;
+}
+
+.logo-section {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.logo-icon {
+  font-size: 36px;
+  background-color: #21262d;
+  width: 56px;
+  height: 56px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  border-radius: 12px;
+  border: 1px solid #30363d;
+}
+
+.app-title {
+  font-size: 22px;
+  font-weight: 700;
+  color: #f0f6fc;
+  margin: 0;
+  line-height: 1.2;
+}
+
+.app-subtitle {
+  font-size: 13px;
+  color: #8b949e;
+  margin: 4px 0 0 0;
+}
+
+.app-main {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Error Banner styling */
+.error-banner {
+  background-color: rgba(248, 81, 73, 0.1);
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-top: 20px;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.error-icon {
+  font-size: 16px;
+  margin-top: 1px;
+}
+
+.error-text {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #f85149;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Status Toast Notification */
+.status-toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  padding: 12px 20px;
+  border-radius: 6px;
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  z-index: 1000;
+  animation: slideIn 0.3s ease-out;
+  max-width: 400px;
+}
+
+.status-toast.success {
+  background-color: #1f6feb;
+  color: #ffffff;
+  border: 1px solid #388bfd;
+}
+
+.status-toast.error {
+  background-color: #da3633;
+  color: #ffffff;
+  border: 1px solid #f85149;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateY(20px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+```
+
+src/renderer/src/App.tsx
+```
+// Responsabilidades do Script
+//
+// 1. Orquestrar o estado global da aplicação (status de instalação, configurações do vault, progresso de análise, markdown gerado).
+// 2. Coordenar o fluxo de inicialização carregando configurações e testando a presença da CLI externa do Codefetch.
+// 3. Gerenciar o fluxo principal de arrastar pasta, acionar análise externa e tratar erros/sucessos do processo.
+
+import React, { useEffect, useState } from 'react'
+import { AppSettings } from '../../shared/types'
+import { SetupBanner } from './components/SetupBanner/SetupBanner'
+import { DropZone } from './components/DropZone/DropZone'
+import { ActionsBar } from './components/ActionsBar/ActionsBar'
+import { OutputPanel } from './components/OutputPanel/OutputPanel'
+import './App.css'
+
+export const App: React.FC = () => {
+  const [isCodefetchInstalled, setIsCodefetchInstalled] = useState<boolean>(true)
+  const [settings, setSettings] = useState<AppSettings>({ obsidianVaultPath: null })
+  const [markdown, setMarkdown] = useState<string>('')
+  const [error, setError] = useState<string>('')
+  const [isProcessing, setIsProcessing] = useState<boolean>(false)
+  const [repoName, setRepoName] = useState<string>('')
+  const [statusMessage, setStatusMessage] = useState<{ text: string; isError: boolean } | null>(null)
+
+  // Fluxo de Inicialização (Startup Flow)
+  useEffect(() => {
+    const init = async () => {
+      try {
+        const installed = await window.codeAwareness.checkCodefetch()
+        setIsCodefetchInstalled(installed)
+
+        const loadedSettings = await window.codeAwareness.loadSettings()
+        setSettings(loadedSettings)
+      } catch (err) {
+        console.error('Falha na inicialização do aplicativo:', err)
+        setError('Ocorreu um erro ao carregar as configurações do sistema.')
+      }
+    }
+    init()
+  }, [])
+
+  // Gerenciamento de mensagens temporárias de status
+  const handleStatusMessage = (text: string, isError = false) => {
+    setStatusMessage({ text, isError })
+    if (!isError) {
+      const timer = setTimeout(() => {
+        setStatusMessage(null)
+      }, 5000)
+      return () => clearTimeout(timer)
+    }
+    return undefined
+  }
+
+  // Fluxo Principal (Main Flow)
+  const handleFolderDrop = async (folderPath: string, folderName: string) => {
+    if (!isCodefetchInstalled) {
+      handleStatusMessage('Codefetch não está instalado. Não é possível rodar a análise.', true)
+      return
+    }
+
+    setIsProcessing(true)
+    setError('')
+    setMarkdown('')
+    setRepoName(folderName)
+    setStatusMessage(null)
+
+    try {
+      const result = await window.codeAwareness.runCodefetch(folderPath)
+
+      if (result.success && result.markdown) {
+        setMarkdown(result.markdown)
+        handleStatusMessage(`Análise concluída com sucesso para o repositório "${folderName}"!`, false)
+      } else {
+        setError(result.error || 'Erro desconhecido durante a execução do Codefetch.')
+        handleStatusMessage('A análise falhou.', true)
+      }
+    } catch (err: any) {
+      setError(err.message || 'Falha na comunicação com o processo principal.')
+      handleStatusMessage('Ocorreu um erro técnico ao executar a análise.', true)
+    } finally {
+      setIsProcessing(false)
+    }
+  }
+
+  return (
+    <div className="app-container">
+      <header className="app-header">
+        <div className="logo-section">
+          <span className="logo-icon">🧠</span>
+          <div>
+            <h1 className="app-title">Code Awareness</h1>
+            <p className="app-subtitle">Converta repositórios locais em Markdown unificado</p>
+          </div>
+        </div>
+      </header>
+
+      <main className="app-main">
+        {!isCodefetchInstalled && <SetupBanner />}
+
+        <DropZone
+          onFolderDrop={handleFolderDrop}
+          isProcessing={isProcessing}
+          disabled={!isCodefetchInstalled}
+        />
+
+        {error && (
+          <div className="error-banner">
+            <span className="error-icon">❌</span>
+            <div className="error-text">
+              <strong>Erro na análise:</strong> {error}
+            </div>
+          </div>
+        )}
+
+        {statusMessage && (
+          <div className={`status-toast ${statusMessage.isError ? 'error' : 'success'}`}>
+            {statusMessage.text}
+          </div>
+        )}
+
+        {markdown && (
+          <>
+            <ActionsBar
+              markdown={markdown}
+              repoName={repoName}
+              settings={settings}
+              onSettingsUpdate={setSettings}
+              onStatusMessage={handleStatusMessage}
+            />
+            <OutputPanel markdown={markdown} />
+          </>
+        )}
+      </main>
+    </div>
+  )
+}
+```
+
+src/renderer/src/index.css
+```
+body {
+  margin: 0;
+  padding: 0;
+  background-color: #0d1117;
+  color: #e6edf3;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-y: auto;
+}
+
+/* Custom Scrollbar styling for premium look */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0d1117;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #30363d;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #8b949e;
+}
+```
+
+src/renderer/src/main.tsx
+```
+// Responsabilidades do Script
+//
+// 1. Inicializar a aplicação React montando o componente raiz App na árvore DOM.
+// 2. Importar e carregar os estilos CSS globais do processo de renderização.
+
+import React from 'react'
+import ReactDOM from 'react-dom/client'
+import { App } from './App'
+import './index.css'
+
+ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
+  <React.StrictMode>
+    <App />
+  </React.StrictMode>
+)
+```
+
+src/renderer/src/vite-env.d.ts
+```
+// Responsabilidades do Script
+//
+// 1. Declarar a interface global do objeto codeAwareness no escopo do objeto Window do browser.
+// 2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
+
+/// <reference types="vite/client" />
+
+import { AppSettings, CodefetchResult } from '../../shared/types'
+
+declare global {
+  interface Window {
+    codeAwareness: {
+      checkCodefetch: () => Promise<boolean>
+      runCodefetch: (repoPath: string) => Promise<CodefetchResult>
+      saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
+      saveToObsidian: (
+        markdown: string,
+        repoName: string,
+        vaultPath: string
+      ) => Promise<{ success: boolean; error?: string }>
+      loadSettings: () => Promise<AppSettings>
+      saveSettings: (settings: AppSettings) => Promise<{ success: boolean }>
+      selectVaultFolder: () => Promise<string | null>
+      getPathForFile: (file: File) => string
+    }
+  }
+}
+```
+
+src/renderer/src/components/ActionsBar/ActionsBar.css
+```
+.actions-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  background-color: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-top: 20px;
+}
+
+.actions-group {
+  display: flex;
+  gap: 10px;
+}
+
+.action-btn {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid #30363d;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+  background-color: #21262d;
+  color: #c9d1d9;
+}
+
+.action-btn:hover:not(:disabled) {
+  background-color: #30363d;
+  border-color: #8b949e;
+}
+
+.action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: #161b22;
+  border-color: #21262d;
+  color: #484f58;
+}
+
+/* Specific button accents */
+.copy-btn:hover:not(:disabled) {
+  color: #58a6ff;
+  border-color: #58a6ff;
+}
+
+.obsidian-btn {
+  background-color: #30264d;
+  border-color: #4d3d7a;
+  color: #e2daff;
+}
+
+.obsidian-btn:hover:not(:disabled) {
+  background-color: #403266;
+  border-color: #7058b8;
+  color: #f1edff;
+}
+
+.vault-config-info {
+  display: flex;
+  align-items: center;
+}
+
+.vault-path-text {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.vault-path-text code {
+  background-color: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin: 0 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #8b949e;
+  max-width: 250px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.change-vault-btn {
+  background: none;
+  border: none;
+  color: #58a6ff;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 4px;
+  text-decoration: underline;
+}
+
+.change-vault-btn:hover {
+  color: #79c0ff;
+}
+
+.vault-not-configured {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #484f58;
+  font-size: 12px;
+  font-style: italic;
+}
+```
+
+src/renderer/src/components/ActionsBar/ActionsBar.tsx
+```
+// Responsabilidades do Script
+//
+// 1. Apresentar as opções de Copy, Save e Save to Obsidian para o Markdown gerado.
+// 2. Controlar o estado de carregamento e desabilitação dos botões baseando-se no conteúdo disponível.
+// 3. Orquestrar a cópia do conteúdo para o clipboard e disparar chamadas de IPC para exportação de arquivos.
+// 4. Gerenciar o fluxo de seleção e salvamento de configurações do Vault do Obsidian quando ausente.
+
+import React, { useState } from 'react'
+import { AppSettings } from '../../../shared/types'
+import './ActionsBar.css'
+
+interface ActionsBarProps {
+  markdown: string
+  repoName: string
+  settings: AppSettings
+  onSettingsUpdate: (settings: AppSettings) => void
+  onStatusMessage: (message: string, isError?: boolean) => void
+}
+
+export const ActionsBar: React.FC<ActionsBarProps> = ({
+  markdown,
+  repoName,
+  settings,
+  onSettingsUpdate,
+  onStatusMessage
+}) => {
+  const [copied, setCopied] = useState(false)
+  const [isSaving, setIsSaving] = useState(false)
+
+  const isDisabled = !markdown || isSaving
+
+  const handleCopy = async () => {
+    if (isDisabled) return
+    try {
+      await navigator.clipboard.writeText(markdown)
+      setCopied(true)
+      onStatusMessage('Markdown copiado para a área de transferência!', false)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (err) {
+      onStatusMessage('Falha ao copiar markdown.', true)
+    }
+  }
+
+  const handleSave = async () => {
+    if (isDisabled) return
+    setIsSaving(true)
+    try {
+      const res = await window.codeAwareness.saveMarkdown(markdown, repoName)
+      if (res.success) {
+        onStatusMessage('Markdown salvo com sucesso!', false)
+      } else if (res.error !== 'Cancelled') {
+        onStatusMessage(`Falha ao salvar: ${res.error}`, true)
+      }
+    } catch (err) {
+      onStatusMessage('Falha ao acionar salvamento local.', true)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleSaveToObsidian = async () => {
+    if (isDisabled) return
+    setIsSaving(true)
+
+    try {
+      let vaultPath = settings.obsidianVaultPath
+
+      if (!vaultPath) {
+        // Fluxo de configuração do Vault pela primeira vez
+        onStatusMessage('Selecione a pasta do seu Vault do Obsidian...', false)
+        const selectedPath = await window.codeAwareness.selectVaultFolder()
+        if (!selectedPath) {
+          onStatusMessage('Seleção de Vault cancelada.', false)
+          setIsSaving(false)
+          return
+        }
+
+        const newSettings: AppSettings = { ...settings, obsidianVaultPath: selectedPath }
+        await window.codeAwareness.saveSettings(newSettings)
+        onSettingsUpdate(newSettings)
+        vaultPath = selectedPath
+      }
+
+      onStatusMessage('Salvando no Obsidian Vault...', false)
+      const res = await window.codeAwareness.saveToObsidian(markdown, repoName, vaultPath)
+
+      if (res.success) {
+        onStatusMessage(`Markdown salvo no Obsidian Vault: ${vaultPath}`, false)
+      } else {
+        onStatusMessage(`Erro ao salvar no Obsidian: ${res.error}`, true)
+      }
+    } catch (err) {
+      onStatusMessage('Falha ao acionar salvamento no Obsidian.', true)
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleConfigureVault = async () => {
+    try {
+      const selectedPath = await window.codeAwareness.selectVaultFolder()
+      if (selectedPath) {
+        const newSettings: AppSettings = { ...settings, obsidianVaultPath: selectedPath }
+        await window.codeAwareness.saveSettings(newSettings)
+        onSettingsUpdate(newSettings)
+        onStatusMessage(`Vault configurado: ${selectedPath}`, false)
+      }
+    } catch (err) {
+      onStatusMessage('Erro ao configurar Vault.', true)
+    }
+  }
+
+  return (
+    <div className="actions-bar" id="actions-bar">
+      <div className="actions-group">
+        <button
+          className="action-btn copy-btn"
+          onClick={handleCopy}
+          disabled={isDisabled}
+        >
+          {copied ? 'Copiado!' : 'Copiar Markdown'}
+        </button>
+        <button
+          className="action-btn save-btn"
+          onClick={handleSave}
+          disabled={isDisabled}
+        >
+          Salvar como arquivo
+        </button>
+        <button
+          className="action-btn obsidian-btn"
+          onClick={handleSaveToObsidian}
+          disabled={isDisabled}
+        >
+          Salvar no Obsidian
+        </button>
+      </div>
+
+      <div className="vault-config-info">
+        {settings.obsidianVaultPath ? (
+          <span className="vault-path-text" title={settings.obsidianVaultPath}>
+            Obsidian: <code>{settings.obsidianVaultPath}</code>
+            <button className="change-vault-btn" onClick={handleConfigureVault}>Alterar</button>
+          </span>
+        ) : (
+          <span className="vault-not-configured">Obsidian Vault não configurado</span>
+        )}
+      </div>
+    </div>
+  )
+}
+```
+
+src/renderer/src/components/DropZone/DropZone.css
+```
+.dropzone {
+  border: 2px dashed #30363d;
+  border-radius: 8px;
+  background-color: #161b22;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s, box-shadow 0.2s;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 180px;
+  box-sizing: border-box;
+}
+
+.dropzone.hover {
+  border-color: #58a6ff;
+  background-color: rgba(88, 166, 255, 0.05);
+  box-shadow: 0 0 15px rgba(88, 166, 255, 0.15);
+}
+
+.dropzone.processing {
+  border-color: #f0b234;
+  background-color: rgba(240, 178, 52, 0.03);
+  cursor: wait;
+}
+
+.dropzone.error {
+  border-color: #f85149;
+  background-color: rgba(248, 81, 73, 0.05);
+}
+
+.dropzone.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: #0d1117;
+}
+
+.dropzone-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.dropzone-icon {
+  font-size: 40px;
+  line-height: 1;
+}
+
+.dropzone-text {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #c9d1d9;
+  font-size: 16px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.dropzone.hover .dropzone-text {
+  color: #58a6ff;
+}
+
+.dropzone.processing .dropzone-text {
+  color: #f0b234;
+}
+
+.dropzone-error-text {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #f85149;
+  font-size: 13px;
+  margin: 4px 0 0 0;
+  max-width: 400px;
+  line-height: 1.4;
+}
+
+/* Spinner Animation */
+.spinner {
+  display: inline-block;
+  width: 40px;
+  height: 40px;
+  border: 4px solid rgba(240, 178, 52, 0.1);
+  border-radius: 50%;
+  border-top-color: #f0b234;
+  animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+```
+
+src/renderer/src/components/DropZone/DropZone.tsx
+```
+// Responsabilidades do Script
+//
+// 1. Detectar e gerenciar eventos de drag-and-drop nativos na interface.
+// 2. Validar que o item arrastado é um diretório (pasta) e não um arquivo individual.
+// 3. Exibir estados visuais correspondentes (idle, hover, processing, erro).
+// 4. Invocar o callback onFolderDrop com o caminho absoluto da pasta.
+
+import React, { useState, DragEvent } from 'react'
+import './DropZone.css'
+
+interface DropZoneProps {
+  onFolderDrop: (folderPath: string, folderName: string) => void
+  isProcessing: boolean
+  disabled: boolean
+}
+
+export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, disabled }) => {
+  const [isHover, setIsHover] = useState(false)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    if (disabled || isProcessing) return
+    setIsHover(true)
+  }
+
+  const handleDragLeave = () => {
+    setIsHover(false)
+  }
+
+  const handleDrop = (e: DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    setIsHover(false)
+    setErrorMsg(null)
+
+    if (disabled || isProcessing) return
+
+    const files = e.dataTransfer.files
+    const items = e.dataTransfer.items
+
+    if (!items || items.length === 0) {
+      setErrorMsg('Nenhum item detectado.')
+      return
+    }
+
+    const item = items[0]
+    const entry = item.webkitGetAsEntry()
+
+    if (!entry) {
+      setErrorMsg('Falha ao processar o item arrastado.')
+      return
+    }
+
+    if (!entry.isDirectory) {
+      setErrorMsg('Por favor, arraste uma pasta (repositório), não arquivos individuais.')
+      return
+    }
+
+    const file = files[0]
+    const absolutePath = window.codeAwareness.getPathForFile(file)
+    const folderName = file.name
+
+    if (!absolutePath) {
+      setErrorMsg('Não foi possível obter o caminho absoluto da pasta.')
+      return
+    }
+
+    onFolderDrop(absolutePath, folderName)
+  }
+
+  const getStatusText = () => {
+    if (isProcessing) return 'Analisando repositório com Codefetch...'
+    if (isHover) return 'Solte para analisar'
+    return 'Arraste a pasta do seu repositório aqui'
+  }
+
+  return (
+    <div
+      className={`dropzone ${isHover ? 'hover' : ''} ${isProcessing ? 'processing' : ''} ${errorMsg ? 'error' : ''} ${disabled ? 'disabled' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      <div className="dropzone-content">
+        <div className="dropzone-icon">
+          {isProcessing ? (
+            <span className="spinner"></span>
+          ) : errorMsg ? (
+            '❌'
+          ) : isHover ? (
+            '📂'
+          ) : (
+            '📥'
+          )}
+        </div>
+        <p className="dropzone-text">{getStatusText()}</p>
+        {errorMsg && <p className="dropzone-error-text">{errorMsg}</p>}
+      </div>
+    </div>
+  )
+}
+```
+
+src/renderer/src/components/OutputPanel/OutputPanel.css
+```
+.output-panel {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background-color: #161b22;
+  margin-top: 20px;
+  overflow: hidden;
+}
+
+.output-panel-header {
+  background-color: #0d1117;
+  border-bottom: 1px solid #30363d;
+  padding: 10px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.output-panel-title {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #8b949e;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.output-panel-meta {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #484f58;
+  font-size: 11px;
+}
+
+.output-panel-container {
+  padding: 16px;
+  overflow: auto;
+  max-height: 500px;
+  background-color: #0d1117;
+}
+
+.output-panel-content {
+  margin: 0;
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #e6edf3;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.output-panel-content code {
+  font-family: inherit;
+}
+```
+
+src/renderer/src/components/OutputPanel/OutputPanel.tsx
+```
+// Responsabilidades do Script
+//
+// 1. Apresentar o conteúdo Markdown gerado de forma estruturada.
+// 2. Garantir a renderização monoespaçada com quebras de linha e espaçamentos originais preservados.
+// 3. Prover rolagem vertical e horizontal adequadas para códigos de qualquer extensão.
+
+import React from 'react'
+import './OutputPanel.css'
+
+interface OutputPanelProps {
+  markdown: string
+}
+
+export const OutputPanel: React.FC<OutputPanelProps> = ({ markdown }) => {
+  if (!markdown) return null
+
+  return (
+    <div className="output-panel" id="output-panel">
+      <div className="output-panel-header">
+        <span className="output-panel-title">Código Markdown Gerado</span>
+        <span className="output-panel-meta">{markdown.length} caracteres</span>
+      </div>
+      <div className="output-panel-container">
+        <pre className="output-panel-content"><code>{markdown}</code></pre>
+      </div>
+    </div>
+  )
+}
+```
+
+src/renderer/src/components/SetupBanner/SetupBanner.css
+```
+.setup-banner {
+  background-color: rgba(240, 178, 52, 0.1);
+  border: 1px solid #f0b234;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+
+.setup-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.setup-banner-warning-icon {
+  font-size: 20px;
+}
+
+.setup-banner-text {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  color: #e6edf3;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.setup-banner-code {
+  display: inline-block;
+  background-color: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 2px 8px;
+  margin-left: 8px;
+  font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px;
+  color: #58a6ff;
+}
+
+.setup-banner-copy-btn {
+  background-color: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.setup-banner-copy-btn:hover {
+  background-color: #30363d;
+  border-color: #8b949e;
+}
+
+.setup-banner-copy-btn:active {
+  background-color: #282e38;
+}
+```
+
+src/renderer/src/components/SetupBanner/SetupBanner.tsx
+```
+// Responsabilidades do Script
+//
+// 1. Renderizar um banner informativo quando a ferramenta Codefetch CLI não for detectada no sistema.
+// 2. Permitir a cópia rápida do comando de instalação para a área de transferência do usuário.
+
+import React, { useState } from 'react'
+import './SetupBanner.css'
+
+export const SetupBanner: React.FC = () => {
+  const [copied, setCopied] = useState(false)
+
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText('npm install -g codefetch')
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch (err) {
+      console.error('Failed to copy command', err)
+    }
+  }
+
+  return (
+    <div className="setup-banner" id="setup-banner">
+      <div className="setup-banner-content">
+        <span className="setup-banner-warning-icon">⚠️</span>
+        <div className="setup-banner-text">
+          <strong>Codefetch CLI não detectado no sistema.</strong> Instale globalmente antes de prosseguir:
+          <code className="setup-banner-code">npm install -g codefetch</code>
+        </div>
+      </div>
+      <button className="setup-banner-copy-btn" onClick={handleCopy}>
+        {copied ? 'Copiado!' : 'Copiar comando'}
+      </button>
+    </div>
+  )
+}
+```
+
+</source_code>
