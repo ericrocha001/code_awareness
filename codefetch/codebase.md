@@ -42,26 +42,49 @@ package.json
   "name": "code-awareness",
   "version": "1.0.0",
   "description": "Desktop app to analyze code repos and export to Obsidian via Codefetch",
+  "author": "Eric Rocha",
+  "homepage": "https://github.com/ericrocha001/code_awareness",
   "main": "./out/main/main.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit"
-  },
-  "dependencies": {
-    "electron": "^33.0.0"
+    "typecheck": "tsc --noEmit",
+    "dist": "npm run build && electron-builder --win"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^24.13.3",
     "electron-vite": "^2.3.0",
     "react": "^18.3.0",
     "react-dom": "^18.3.0",
     "typescript": "^5.5.0",
     "vite": "^5.4.0"
+  },
+  "build": {
+    "appId": "com.ericrocha.codeawareness",
+    "productName": "Code Awareness",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Code Awareness"
+    }
   }
 }
 ```
@@ -213,6 +236,9 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   selectVaultFolder: (): Promise<string | null> => {
     return ipcRenderer.invoke('select-vault-folder')
   },
+  selectFolder: (): Promise<{ path: string; name: string } | null> => {
+    return ipcRenderer.invoke('select-folder')
+  },
   getPathForFile: (file: File): string => {
     return webUtils.getPathForFile(file)
   }
@@ -259,17 +285,23 @@ src/main/core/codefetch-adapter.ts
 // Responsabilidades do Script
 //
 // 1. Verificar se o Codefetch CLI está instalado no sistema.
-// 2. Executar o Codefetch em um repositório e capturar o Markdown gerado.
+// 2. Executar o Codefetch em um repositório e ler o Markdown gerado a partir do arquivo codebase.md.
 
 import { spawn } from 'child_process'
+import { join } from 'path'
+import { existsSync, readFileSync } from 'fs'
 import { CodefetchResult } from '../../shared/types'
 
 const TIMEOUT_MS = 120_000
 
 export class CodefetchAdapter {
+  private getCommand(): string {
+    return process.platform === 'win32' ? 'codefetch.cmd' : 'codefetch'
+  }
+
   async checkInstallation(): Promise<boolean> {
     return new Promise((resolve) => {
-      const proc = spawn('codefetch', ['--version'], { shell: true })
+      const proc = spawn(this.getCommand(), ['--version'], { shell: true })
       proc.on('close', (code) => resolve(code === 0))
       proc.on('error', () => resolve(false))
     })
@@ -277,10 +309,9 @@ export class CodefetchAdapter {
 
   async run(repoPath: string): Promise<CodefetchResult> {
     return new Promise((resolve) => {
-      let stdout = ''
       let stderr = ''
 
-      const proc = spawn('codefetch', [], {
+      const proc = spawn(this.getCommand(), [], {
         cwd: repoPath,
         shell: true
       })
@@ -290,18 +321,30 @@ export class CodefetchAdapter {
         resolve({ success: false, error: 'Repository analysis timed out' })
       }, TIMEOUT_MS)
 
-      proc.stdout.on('data', (chunk: Buffer) => {
-        stdout += chunk.toString()
-      })
-
       proc.stderr.on('data', (chunk: Buffer) => {
         stderr += chunk.toString()
       })
 
       proc.on('close', (code) => {
         clearTimeout(timer)
-        if (code === 0 && stdout.trim()) {
-          resolve({ success: true, markdown: stdout })
+        if (code === 0) {
+          const outputPath = join(repoPath, 'codefetch', 'codebase.md')
+          try {
+            if (existsSync(outputPath)) {
+              const content = readFileSync(outputPath, 'utf-8')
+              resolve({ success: true, markdown: content })
+            } else {
+              resolve({
+                success: false,
+                error: 'Arquivo codebase.md não encontrado no diretório do projeto em <repo>/codefetch/codebase.md'
+              })
+            }
+          } catch (err: any) {
+            resolve({
+              success: false,
+              error: `Erro ao ler o arquivo codebase.md: ${err.message}`
+            })
+          }
         } else {
           resolve({
             success: false,
@@ -416,10 +459,11 @@ src/main/ipc/file-handler.ts
 // Responsabilidades do Script
 //
 // 1. Registrar os handlers IPC para salvar Markdown localmente e no vault do Obsidian.
+// 2. Registrar o handler IPC para selecionar uma pasta de repositório via diálogo nativo do Electron.
 
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { writeFileSync } from 'fs'
-import { join } from 'path'
+import { basename } from 'path'
 import { VaultService } from '../core/vault-service'
 
 const vaultService = new VaultService()
@@ -455,6 +499,20 @@ export function registerFileHandlers(mainWindow: BrowserWindow): void {
       }
     }
   )
+
+  ipcMain.handle('select-folder', async () => {
+    const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+      title: 'Select Repository Folder',
+      properties: ['openDirectory']
+    })
+
+    if (canceled || !filePaths.length) return null
+    const path = filePaths[0]
+    return {
+      path,
+      name: basename(path)
+    }
+  })
 }
 ```
 
@@ -501,39 +559,30 @@ src/renderer/src/App.css
 }
 
 .app-header {
-  margin-bottom: 24px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  margin-bottom: 32px;
 }
 
 .logo-section {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
 }
 
 .logo-icon {
-  font-size: 36px;
-  background-color: #21262d;
-  width: 56px;
-  height: 56px;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  border-radius: 12px;
-  border: 1px solid #30363d;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--accent);
 }
 
 .app-title {
-  font-size: 22px;
-  font-weight: 700;
-  color: #f0f6fc;
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--text-primary);
   margin: 0;
-  line-height: 1.2;
-}
-
-.app-subtitle {
-  font-size: 13px;
-  color: #8b949e;
-  margin: 4px 0 0 0;
+  letter-spacing: -0.5px;
 }
 
 .app-main {
@@ -543,9 +592,9 @@ src/renderer/src/App.css
 
 /* Error Banner styling */
 .error-banner {
-  background-color: rgba(248, 81, 73, 0.1);
+  background-color: rgba(248, 81, 73, 0.05);
   border: 1px solid #f85149;
-  border-radius: 6px;
+  border-radius: 8px;
   padding: 12px 16px;
   margin-top: 20px;
   display: flex;
@@ -571,25 +620,25 @@ src/renderer/src/App.css
   bottom: 24px;
   right: 24px;
   padding: 12px 20px;
-  border-radius: 6px;
+  border-radius: 999px;
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 13px;
   font-weight: 500;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   z-index: 1000;
   animation: slideIn 0.3s ease-out;
   max-width: 400px;
 }
 
 .status-toast.success {
-  background-color: #1f6feb;
-  color: #ffffff;
-  border: 1px solid #388bfd;
+  background-color: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--accent);
 }
 
 .status-toast.error {
-  background-color: #da3633;
-  color: #ffffff;
+  background-color: #1a0f0f;
+  color: #f85149;
   border: 1px solid #f85149;
 }
 
@@ -694,11 +743,8 @@ export const App: React.FC = () => {
     <div className="app-container">
       <header className="app-header">
         <div className="logo-section">
-          <span className="logo-icon">🧠</span>
-          <div>
-            <h1 className="app-title">Code Awareness</h1>
-            <p className="app-subtitle">Converta repositórios locais em Markdown unificado</p>
-          </div>
+          <span className="logo-icon">{"</>"}</span>
+          <h1 className="app-title">Code Awareness</h1>
         </div>
       </header>
 
@@ -746,11 +792,21 @@ export const App: React.FC = () => {
 
 src/renderer/src/index.css
 ```
+:root {
+  --bg-primary: #000000;
+  --bg-secondary: #111111;
+  --border: #262626;
+  --text-primary: #f5f5f5;
+  --text-secondary: #a1a1aa;
+  --accent: #7c3aed;
+  --accent-hover: #8b5cf6;
+}
+
 body {
   margin: 0;
   padding: 0;
-  background-color: #0d1117;
-  color: #e6edf3;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
   font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -764,16 +820,16 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #0d1117;
+  background: var(--bg-primary);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #30363d;
+  background: var(--border);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #8b949e;
+  background: var(--text-secondary);
 }
 ```
 
@@ -821,6 +877,7 @@ declare global {
       loadSettings: () => Promise<AppSettings>
       saveSettings: (settings: AppSettings) => Promise<{ success: boolean }>
       selectVaultFolder: () => Promise<string | null>
+      selectFolder: () => Promise<{ path: string; name: string } | null>
       getPathForFile: (file: File) => string
     }
   }
@@ -835,10 +892,10 @@ src/renderer/src/components/ActionsBar/ActionsBar.css
   align-items: center;
   flex-wrap: wrap;
   gap: 16px;
-  background-color: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  padding: 12px 16px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 18px;
   margin-top: 20px;
 }
 
@@ -851,44 +908,46 @@ src/renderer/src/components/ActionsBar/ActionsBar.css
   font-family: system-ui, -apple-system, sans-serif;
   font-size: 13px;
   font-weight: 600;
-  padding: 8px 16px;
-  border-radius: 6px;
+  height: 42px;
+  padding: 0 18px;
+  border-radius: 999px;
   cursor: pointer;
-  border: 1px solid #30363d;
-  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
-  background-color: #21262d;
-  color: #c9d1d9;
+  border: 1px solid var(--border);
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 .action-btn:hover:not(:disabled) {
-  background-color: #30363d;
-  border-color: #8b949e;
+  background-color: var(--bg-secondary);
+  border-color: var(--accent);
+  color: var(--accent-hover);
 }
 
 .action-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-  background-color: #161b22;
-  border-color: #21262d;
-  color: #484f58;
+  background-color: var(--bg-secondary);
+  border-color: var(--border);
+  color: var(--text-secondary);
 }
 
 /* Specific button accents */
 .copy-btn:hover:not(:disabled) {
-  color: #58a6ff;
-  border-color: #58a6ff;
+  color: var(--accent-hover);
+  border-color: var(--accent);
 }
 
 .obsidian-btn {
-  background-color: #30264d;
-  border-color: #4d3d7a;
-  color: #e2daff;
+  background-color: var(--bg-primary);
+  border-color: var(--border);
+  color: var(--text-primary);
 }
 
 .obsidian-btn:hover:not(:disabled) {
-  background-color: #403266;
-  border-color: #7058b8;
-  color: #f1edff;
+  background-color: var(--bg-secondary);
+  border-color: var(--accent);
+  color: var(--accent-hover);
 }
 
 .vault-config-info {
@@ -898,19 +957,19 @@ src/renderer/src/components/ActionsBar/ActionsBar.css
 
 .vault-path-text {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
 .vault-path-text code {
-  background-color: #0d1117;
-  border: 1px solid #30363d;
-  border-radius: 4px;
-  padding: 2px 6px;
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
   margin: 0 6px;
   font-family: ui-monospace, monospace;
   font-size: 11px;
-  color: #8b949e;
+  color: var(--text-primary);
   max-width: 250px;
   display: inline-block;
   overflow: hidden;
@@ -922,7 +981,7 @@ src/renderer/src/components/ActionsBar/ActionsBar.css
 .change-vault-btn {
   background: none;
   border: none;
-  color: #58a6ff;
+  color: var(--accent-hover);
   font-size: 11px;
   cursor: pointer;
   padding: 0 4px;
@@ -930,12 +989,12 @@ src/renderer/src/components/ActionsBar/ActionsBar.css
 }
 
 .change-vault-btn:hover {
-  color: #79c0ff;
+  color: var(--accent);
 }
 
 .vault-not-configured {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #484f58;
+  color: var(--text-secondary);
   font-size: 12px;
   font-style: italic;
 }
@@ -1099,86 +1158,125 @@ export const ActionsBar: React.FC<ActionsBarProps> = ({
 src/renderer/src/components/DropZone/DropZone.css
 ```
 .dropzone {
-  border: 2px dashed #30363d;
-  border-radius: 8px;
-  background-color: #161b22;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background-color: var(--bg-secondary);
   padding: 40px;
   text-align: center;
   cursor: pointer;
-  transition: border-color 0.2s, background-color 0.2s, box-shadow 0.2s;
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
   display: flex;
   justify-content: center;
   align-items: center;
-  min-height: 180px;
+  min-height: 220px;
   box-sizing: border-box;
 }
 
+.dropzone:hover:not(.disabled):not(.processing) {
+  border-color: var(--accent);
+  box-shadow: 0 0 24px rgba(124, 58, 237, 0.15);
+  transform: scale(1.01);
+}
+
 .dropzone.hover {
-  border-color: #58a6ff;
-  background-color: rgba(88, 166, 255, 0.05);
-  box-shadow: 0 0 15px rgba(88, 166, 255, 0.15);
+  border-color: var(--accent);
+  background-color: rgba(124, 58, 237, 0.02);
+  box-shadow: 0 0 24px rgba(124, 58, 237, 0.2);
+  transform: scale(1.01);
 }
 
 .dropzone.processing {
   border-color: #f0b234;
-  background-color: rgba(240, 178, 52, 0.03);
+  background-color: rgba(240, 178, 52, 0.02);
   cursor: wait;
 }
 
 .dropzone.error {
   border-color: #f85149;
-  background-color: rgba(248, 81, 73, 0.05);
+  background-color: rgba(248, 81, 73, 0.02);
 }
 
 .dropzone.disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
-  background-color: #0d1117;
+  background-color: var(--bg-primary);
 }
 
 .dropzone-content {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
 }
 
 .dropzone-icon {
-  font-size: 40px;
+  font-size: 32px;
   line-height: 1;
+  color: var(--text-secondary);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dropzone.hover .dropzone-icon {
+  color: var(--accent-hover);
 }
 
 .dropzone-text {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #c9d1d9;
+  color: var(--text-primary);
   font-size: 16px;
   font-weight: 500;
   margin: 0;
 }
 
-.dropzone.hover .dropzone-text {
-  color: #58a6ff;
-}
-
-.dropzone.processing .dropzone-text {
-  color: #f0b234;
+.dropzone-subtitle {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: var(--text-secondary);
+  font-size: 13px;
+  margin: 0 0 12px 0;
 }
 
 .dropzone-error-text {
   font-family: system-ui, -apple-system, sans-serif;
   color: #f85149;
   font-size: 13px;
-  margin: 4px 0 0 0;
+  margin: 4px 0 12px 0;
   max-width: 400px;
   line-height: 1.4;
+}
+
+.select-folder-btn {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 8px 18px;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.select-folder-btn:hover:not(:disabled) {
+  background-color: var(--bg-secondary);
+  border-color: var(--accent);
+  color: var(--accent-hover);
+}
+
+.select-folder-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Spinner Animation */
 .spinner {
   display: inline-block;
-  width: 40px;
-  height: 40px;
-  border: 4px solid rgba(240, 178, 52, 0.1);
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(240, 178, 52, 0.1);
   border-radius: 50%;
   border-top-color: #f0b234;
   animation: spin 1s ease-in-out infinite;
@@ -1196,8 +1294,8 @@ src/renderer/src/components/DropZone/DropZone.tsx
 // Responsabilidades do Script
 //
 // 1. Detectar e gerenciar eventos de drag-and-drop nativos na interface.
-// 2. Validar que o item arrastado é um diretório (pasta) e não um arquivo individual.
-// 3. Exibir estados visuais correspondentes (idle, hover, processing, erro).
+// 2. Prover botão "Select Folder" que abre diálogo nativo do Electron para escolha de pasta.
+// 3. Validar se o item arrastado ou selecionado é um diretório (pasta).
 // 4. Invocar o callback onFolderDrop com o caminho absoluto da pasta.
 
 import React, { useState, DragEvent } from 'react'
@@ -1221,6 +1319,14 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
 
   const handleDragLeave = () => {
     setIsHover(false)
+  }
+
+  const processRepository = (absolutePath: string, folderName: string) => {
+    if (!absolutePath) {
+      setErrorMsg('Não foi possível obter o caminho absoluto da pasta.')
+      return
+    }
+    onFolderDrop(absolutePath, folderName)
   }
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
@@ -1255,18 +1361,28 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
     const absolutePath = window.codeAwareness.getPathForFile(file)
     const folderName = file.name
 
-    if (!absolutePath) {
-      setErrorMsg('Não foi possível obter o caminho absoluto da pasta.')
-      return
-    }
+    processRepository(absolutePath, folderName)
+  }
 
-    onFolderDrop(absolutePath, folderName)
+  const handleSelectFolderClick = async (e: React.MouseEvent) => {
+    e.stopPropagation() // Evita triggers acidentais
+    if (disabled || isProcessing) return
+    setErrorMsg(null)
+
+    try {
+      const res = await window.codeAwareness.selectFolder()
+      if (res) {
+        processRepository(res.path, res.name)
+      }
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Erro ao selecionar a pasta.')
+    }
   }
 
   const getStatusText = () => {
     if (isProcessing) return 'Analisando repositório com Codefetch...'
-    if (isHover) return 'Solte para analisar'
-    return 'Arraste a pasta do seu repositório aqui'
+    if (isHover) return 'Solte para analisar o repositório'
+    return 'Drag & Drop Repository'
   }
 
   return (
@@ -1281,15 +1397,37 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
           {isProcessing ? (
             <span className="spinner"></span>
           ) : errorMsg ? (
-            '❌'
-          ) : isHover ? (
-            '📂'
+            '⚠️'
           ) : (
-            '📥'
+            <svg
+              width="40"
+              height="40"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+            </svg>
           )}
         </div>
         <p className="dropzone-text">{getStatusText()}</p>
+        {!isProcessing && !errorMsg && (
+          <p className="dropzone-subtitle">or choose a folder manually</p>
+        )}
         {errorMsg && <p className="dropzone-error-text">{errorMsg}</p>}
+        {!isProcessing && (
+          <button
+            type="button"
+            className="select-folder-btn"
+            onClick={handleSelectFolderClick}
+            disabled={disabled}
+          >
+            Select Folder
+          </button>
+        )}
       </div>
     </div>
   )
@@ -1301,17 +1439,17 @@ src/renderer/src/components/OutputPanel/OutputPanel.css
 .output-panel {
   display: flex;
   flex-direction: column;
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  background-color: #161b22;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  background-color: var(--bg-secondary);
   margin-top: 20px;
   overflow: hidden;
 }
 
 .output-panel-header {
-  background-color: #0d1117;
-  border-bottom: 1px solid #30363d;
-  padding: 10px 16px;
+  background-color: var(--bg-primary);
+  border-bottom: 1px solid var(--border);
+  padding: 12px 18px;
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -1319,22 +1457,22 @@ src/renderer/src/components/OutputPanel/OutputPanel.css
 
 .output-panel-title {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #8b949e;
+  color: var(--text-secondary);
   font-size: 13px;
   font-weight: 600;
 }
 
 .output-panel-meta {
   font-family: system-ui, -apple-system, sans-serif;
-  color: #484f58;
+  color: var(--text-secondary);
   font-size: 11px;
 }
 
 .output-panel-container {
-  padding: 16px;
+  padding: 24px;
   overflow: auto;
   max-height: 500px;
-  background-color: #0d1117;
+  background-color: var(--bg-primary);
 }
 
 .output-panel-content {
@@ -1342,7 +1480,7 @@ src/renderer/src/components/OutputPanel/OutputPanel.css
   font-family: ui-monospace, 'Cascadia Code', 'Fira Code', monospace;
   font-size: 13px;
   line-height: 1.6;
-  color: #e6edf3;
+  color: var(--text-primary);
   white-space: pre;
   tab-size: 4;
 }
