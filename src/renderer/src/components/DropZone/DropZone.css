@@ -1,0 +1,91 @@
+.dropzone {
+  border: 2px dashed #30363d;
+  border-radius: 8px;
+  background-color: #161b22;
+  padding: 40px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.2s, background-color 0.2s, box-shadow 0.2s;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 180px;
+  box-sizing: border-box;
+}
+
+.dropzone.hover {
+  border-color: #58a6ff;
+  background-color: rgba(88, 166, 255, 0.05);
+  box-shadow: 0 0 15px rgba(88, 166, 255, 0.15);
+}
+
+.dropzone.processing {
+  border-color: #f0b234;
+  background-color: rgba(240, 178, 52, 0.03);
+  cursor: wait;
+}
+
+.dropzone.error {
+  border-color: #f85149;
+  background-color: rgba(248, 81, 73, 0.05);
+}
+
+.dropzone.disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: #0d1117;
+}
+
+.dropzone-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.dropzone-icon {
+  font-size: 40px;
+  line-height: 1;
+}
+
+.dropzone-text {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #c9d1d9;
+  font-size: 16px;
+  font-weight: 500;
+  margin: 0;
+}
+
+.dropzone.hover .dropzone-text {
+  color: #58a6ff;
+}
+
+.dropzone.processing .dropzone-text {
+  color: #f0b234;
+}
+
+.dropzone-error-text {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #f85149;
+  font-size: 13px;
+  margin: 4px 0 0 0;
+  max-width: 400px;
+  line-height: 1.4;
+}
+
+/* Spinner Animation */
+.spinner {
+  display: inline-block;
+  width: 40px;
+  height: 40px;
+  border: 4px solid rgba(240, 178, 52, 0.1);
+  border-radius: 50%;
+  border-top-color: #f0b234;
+  animation: spin 1s ease-in-out infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

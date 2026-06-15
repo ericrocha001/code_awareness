@@ -1,0 +1,110 @@
+.actions-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  background-color: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px 16px;
+  margin-top: 20px;
+}
+
+.actions-group {
+  display: flex;
+  gap: 10px;
+}
+
+.action-btn {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  border: 1px solid #30363d;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+  background-color: #21262d;
+  color: #c9d1d9;
+}
+
+.action-btn:hover:not(:disabled) {
+  background-color: #30363d;
+  border-color: #8b949e;
+}
+
+.action-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  background-color: #161b22;
+  border-color: #21262d;
+  color: #484f58;
+}
+
+/* Specific button accents */
+.copy-btn:hover:not(:disabled) {
+  color: #58a6ff;
+  border-color: #58a6ff;
+}
+
+.obsidian-btn {
+  background-color: #30264d;
+  border-color: #4d3d7a;
+  color: #e2daff;
+}
+
+.obsidian-btn:hover:not(:disabled) {
+  background-color: #403266;
+  border-color: #7058b8;
+  color: #f1edff;
+}
+
+.vault-config-info {
+  display: flex;
+  align-items: center;
+}
+
+.vault-path-text {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.vault-path-text code {
+  background-color: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin: 0 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  color: #8b949e;
+  max-width: 250px;
+  display: inline-block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: middle;
+}
+
+.change-vault-btn {
+  background: none;
+  border: none;
+  color: #58a6ff;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 4px;
+  text-decoration: underline;
+}
+
+.change-vault-btn:hover {
+  color: #79c0ff;
+}
+
+.vault-not-configured {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #484f58;
+  font-size: 12px;
+  font-style: italic;
+}

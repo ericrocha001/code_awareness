@@ -1,0 +1,26 @@
+// Responsabilidades do Script
+//
+// 1. Declarar a interface global do objeto codeAwareness no escopo do objeto Window do browser.
+// 2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
+
+/// <reference types="vite/client" />
+
+import { AppSettings, CodefetchResult } from '../../shared/types'
+
+declare global {
+  interface Window {
+    codeAwareness: {
+      checkCodefetch: () => Promise<boolean>
+      runCodefetch: (repoPath: string) => Promise<CodefetchResult>
+      saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
+      saveToObsidian: (
+        markdown: string,
+        repoName: string,
+        vaultPath: string
+      ) => Promise<{ success: boolean; error?: string }>
+      loadSettings: () => Promise<AppSettings>
+      saveSettings: (settings: AppSettings) => Promise<{ success: boolean }>
+      selectVaultFolder: () => Promise<string | null>
+    }
+  }
+}
