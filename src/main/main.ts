@@ -4,12 +4,14 @@
 // 2. Criar e configurar a janela principal do navegador (BrowserWindow) com segurança (contextIsolation, sandbox, etc).
 // 3. Carregar a interface do usuário correspondente (desenvolvimento vs produção).
 // 4. Registrar todos os manipuladores de IPC (Inter-Process Communication) do aplicativo.
+// 5. Normalizar o ambiente PATH no Windows para detectar comandos externos como codefetch.
 
 import { app, BrowserWindow } from 'electron'
 import { join } from 'path'
 import { registerCodefetchHandlers } from './ipc/codefetch-handler'
 import { registerFileHandlers } from './ipc/file-handler'
 import { registerSettingsHandlers } from './ipc/settings-handler'
+import { sanitizeEnvironment } from './utils/env-sanitizer'
 
 let mainWindow: BrowserWindow | null = null
 
@@ -41,6 +43,9 @@ function createWindow(): void {
     mainWindow = null
   })
 }
+
+// Normalizar ambiente PATH antes de qualquer operação
+sanitizeEnvironment()
 
 app.whenReady().then(() => {
   createWindow()

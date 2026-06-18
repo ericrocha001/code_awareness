@@ -65,8 +65,17 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
     }
 
     const file = files[0]
+    if (!file) {
+      setErrorMsg('Não foi possível ler a pasta arrastada. Por favor, use o botão "Select Folder".')
+      return
+    }
     const absolutePath = window.codeAwareness.getPathForFile(file)
     const folderName = file.name
+
+    if (!absolutePath || !folderName) {
+      setErrorMsg('Caminho absoluto ou nome da pasta inválido.')
+      return
+    }
 
     processRepository(absolutePath, folderName)
   }

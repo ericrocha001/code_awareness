@@ -1,4 +1,136 @@
 <source_code>
+AGENTS.md
+```
+---
+aliases: []
+tags: [IDE/antigravity, IDE/antigravity/rules/rule, programação, software, software/engenharia_de_software, software/engenharia_de_software/arquitetura_de_software, software/mecanismo_software, software/resiliencia_software, software/segurança_software, software/software_agentivo, software/software_erro]
+title: AGENTS
+source:
+  - https://chatgpt.com/g/g-p-6981cf9c38988191932b596154a84f94-google-antigravity/c/69cac95e-f804-8328-995e-f5c0f2ce1526
+author:
+  - Eric Rocha
+project:
+connections:
+date created: 2026-03-30 15:53
+date modified: 2026-06-16 00:22
+---
+
+# AGENTS
+
+## Blindagem Arquitetural
+
+### Responsabilidades Do Script
+
+Todo script criado pelo agente **deve obrigatoriamente iniciar** com uma seção chamada:
+
+```
+Responsabilidades do Script
+```
+
+Essa seção deve aparecer nas primeiras linhas do arquivo.
+
+### Objetivo
+
+Permitir entendimento imediato do propósito do arquivo sem leitura completa do código, reduzindo custo cognitivo humano, consumo de contexto por agentes de IA e complexidade arquitetural do sistema.
+
+### Regras Obrigatórias
+
+1. Escrever sempre em português do Brasil.
+2. Listar apenas responsabilidades reais do arquivo.
+3. Cada responsabilidade deve:
+    - começar com verbo de ação;
+    - descrever claramente o que o script faz;
+    - indicar o domínio ou contexto do sistema quando aplicável;
+    - evitar descrições genéricas.
+4. Responsabilidade significa **um único motivo futuro de modificação do arquivo**.
+5. A lista deve ser escrita em formato numerado.
+6. Não descrever detalhes de implementação interna.
+7. Não repetir nomes de funções (`def`) ou classes.
+
+### Limite Arquitetural De Responsabilidades
+
+O arquivo deve possuir:
+
+- Ideal: **1 a 3 responsabilidades**
+- Limite máximo aceitável: **4 responsabilidades**
+
+Se o número ultrapassar 4, o agente deve:
+
+- sugerir divisão do arquivo;
+- propor novos scripts especializados;
+- separar responsabilidades por domínio.
+
+### Critérios De Divisão Automática
+
+O agente deve sugerir refatoração quando o script:
+
+- executa múltiplos papéis distintos;
+- conversa com mais de um sistema externo;
+- mistura regras de negócio, validação e persistência;
+- possui responsabilidades parcialmente reutilizáveis.
+
+### Estrutura Padrão Obrigatória
+
+Exemplo correto:
+
+```
+Responsabilidades do Script
+
+1. Validar dados de entrada do usuário no módulo de autenticação.
+2. Converter respostas da API externa para o modelo interno do sistema.
+3. Persistir logs estruturados no sistema de observabilidade.
+```
+
+### Benefícios Esperados
+
+- Arquivos pequenos e especializados
+- Manutenção simplificada
+- Debugging mais rápido
+- Melhor navegação do código
+- Menor consumo de tokens por agentes de IA
+- Arquitetura naturalmente modular
+
+### Atualização Das Responsabilidades
+
+Sempre que o script for modificado, refatorado ou tiver seu comportamento alterado, o agente deve:
+
+1. revisar a seção "Responsabilidades do Script";
+2. atualizar, adicionar ou remover responsabilidades quando necessário;
+3. garantir que a lista reflita exatamente o estado atual do arquivo.
+  
+A lista de responsabilidades nunca deve ficar desatualizada em relação ao código.
+
+### Princípio Arquitetural Aplicado
+
+Todo arquivo deve representar **uma unidade clara de responsabilidade dentro do sistema**.
+Se o propósito do arquivo não puder ser explicado rapidamente na lista inicial, o design do script deve ser reconsiderado.
+
+-------------------------
+
+## Código Limpo E Enxuto
+
+Todo código criado ou modificado pelo agente deve priorizar simplicidade, legibilidade e baixa complexidade.
+
+## Regras Obrigatórias
+
+1. Preferir sempre a solução mais simples que funcione.
+2. Evitar abstrações, padrões ou otimizações prematuras.
+3. Manter funções pequenas e fáceis de entender.
+4. Utilizar nomes claros e autoexplicativos.
+5. Evitar níveis profundos de indentação.
+6. Remover automaticamente:
+    - código morto;
+    - variáveis não utilizadas;
+    - imports desnecessários;
+    - comentários obsoletos.
+7. Não adicionar lógica, configurações ou estruturas que não sejam necessárias no momento atual.
+8. Sempre que modificar código existente, simplificar o que for possível.
+
+## Regra De Decisão
+
+Se existir dúvida entre uma solução simples e uma solução sofisticada, escolher sempre a mais simples.
+```
+
 electron.vite.config.ts
 ```
 import { resolve } from 'path'
@@ -245,6 +377,23 @@ contextBridge.exposeInMainWorld('codeAwareness', {
 })
 ```
 
+src/shared/types.ts
+```
+// Responsabilidades do Script
+//
+// 1. Definir os tipos compartilhados entre o processo principal e o renderer do Electron.
+
+export interface AppSettings {
+  obsidianVaultPath: string | null
+}
+
+export interface CodefetchResult {
+  success: boolean
+  markdown?: string
+  error?: string
+}
+```
+
 src/renderer/index.html
 ```
 <!DOCTYPE html>
@@ -263,23 +412,6 @@ src/renderer/index.html
 </html>
 ```
 
-src/shared/types.ts
-```
-// Responsabilidades do Script
-//
-// 1. Definir os tipos compartilhados entre o processo principal e o renderer do Electron.
-
-export interface AppSettings {
-  obsidianVaultPath: string | null
-}
-
-export interface CodefetchResult {
-  success: boolean
-  markdown?: string
-  error?: string
-}
-```
-
 src/main/core/codefetch-adapter.ts
 ```
 // Responsabilidades do Script
@@ -289,7 +421,8 @@ src/main/core/codefetch-adapter.ts
 
 import { spawn } from 'child_process'
 import { join } from 'path'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync } from 'fs'
+import { readFile } from 'fs/promises'
 import { CodefetchResult } from '../../shared/types'
 
 const TIMEOUT_MS = 120_000
@@ -300,10 +433,21 @@ export class CodefetchAdapter {
   }
 
   async checkInstallation(): Promise<boolean> {
+    console.log(`[CodefetchAdapter] Verificando instalação na plataforma: ${process.platform}`)
+    const cmd = this.getCommand()
+    console.log(`[CodefetchAdapter] Comando a ser executado: ${cmd}`)
+    console.log(`[CodefetchAdapter] PATH env: ${process.env.PATH}`)
+
     return new Promise((resolve) => {
-      const proc = spawn(this.getCommand(), ['--version'], { shell: true })
-      proc.on('close', (code) => resolve(code === 0))
-      proc.on('error', () => resolve(false))
+      const proc = spawn(cmd, ['--version'], { shell: true })
+      proc.on('close', (code) => {
+        console.log(`[CodefetchAdapter] Verificação de instalação concluída com código: ${code}`)
+        resolve(code === 0)
+      })
+      proc.on('error', (err) => {
+        console.error(`[CodefetchAdapter] Erro ao verificar instalação: ${err.message}`, err)
+        resolve(false)
+      })
     })
   }
 
@@ -325,13 +469,13 @@ export class CodefetchAdapter {
         stderr += chunk.toString()
       })
 
-      proc.on('close', (code) => {
+      proc.on('close', async (code) => {
         clearTimeout(timer)
         if (code === 0) {
           const outputPath = join(repoPath, 'codefetch', 'codebase.md')
           try {
             if (existsSync(outputPath)) {
-              const content = readFileSync(outputPath, 'utf-8')
+              const content = await readFile(outputPath, 'utf-8')
               resolve({ success: true, markdown: content })
             } else {
               resolve({
@@ -414,7 +558,13 @@ export class VaultService {
     vaultPath: string
   ): Promise<void> {
     const filename = this.resolveFilename(vaultPath, repoName)
-    writeFileSync(filename, markdown, 'utf-8')
+    try {
+      writeFileSync(filename, markdown, 'utf-8')
+    } catch (error: any) {
+      throw new Error(
+        `Falha ao salvar o arquivo no vault do Obsidian. Verifique as permissões de escrita do diretório ou se há espaço em disco. Detalhes: ${error.message}`
+      )
+    }
   }
 
   private resolveFilename(vaultPath: string, repoName: string): string {
@@ -700,12 +850,10 @@ export const App: React.FC = () => {
   const handleStatusMessage = (text: string, isError = false) => {
     setStatusMessage({ text, isError })
     if (!isError) {
-      const timer = setTimeout(() => {
+      setTimeout(() => {
         setStatusMessage(null)
       }, 5000)
-      return () => clearTimeout(timer)
     }
-    return undefined
   }
 
   // Fluxo Principal (Main Flow)
@@ -1358,8 +1506,17 @@ export const DropZone: React.FC<DropZoneProps> = ({ onFolderDrop, isProcessing, 
     }
 
     const file = files[0]
+    if (!file) {
+      setErrorMsg('Não foi possível ler a pasta arrastada. Por favor, use o botão "Select Folder".')
+      return
+    }
     const absolutePath = window.codeAwareness.getPathForFile(file)
     const folderName = file.name
+
+    if (!absolutePath || !folderName) {
+      setErrorMsg('Caminho absoluto ou nome da pasta inválido.')
+      return
+    }
 
     processRepository(absolutePath, folderName)
   }

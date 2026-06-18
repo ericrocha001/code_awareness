@@ -5,5 +5,5 @@ dist/
 *.log
 .env
 .env.*
-AGENTS.md
+
 

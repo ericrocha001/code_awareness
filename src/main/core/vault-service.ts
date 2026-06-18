@@ -12,7 +12,13 @@ export class VaultService {
     vaultPath: string
   ): Promise<void> {
     const filename = this.resolveFilename(vaultPath, repoName)
-    writeFileSync(filename, markdown, 'utf-8')
+    try {
+      writeFileSync(filename, markdown, 'utf-8')
+    } catch (error: any) {
+      throw new Error(
+        `Falha ao salvar o arquivo no vault do Obsidian. Verifique as permissões de escrita do diretório ou se há espaço em disco. Detalhes: ${error.message}`
+      )
+    }
   }
 
   private resolveFilename(vaultPath: string, repoName: string): string {

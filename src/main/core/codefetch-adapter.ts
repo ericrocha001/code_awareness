@@ -5,7 +5,8 @@
 
 import { spawn } from 'child_process'
 import { join } from 'path'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync } from 'fs'
+import { readFile } from 'fs/promises'
 import { CodefetchResult } from '../../shared/types'
 
 const TIMEOUT_MS = 120_000
@@ -16,10 +17,21 @@ export class CodefetchAdapter {
   }
 
   async checkInstallation(): Promise<boolean> {
+    console.log(`[CodefetchAdapter] Verificando instalação na plataforma: ${process.platform}`)
+    const cmd = this.getCommand()
+    console.log(`[CodefetchAdapter] Comando a ser executado: ${cmd}`)
+    console.log(`[CodefetchAdapter] PATH env: ${process.env.PATH}`)
+
     return new Promise((resolve) => {
-      const proc = spawn(this.getCommand(), ['--version'], { shell: true })
-      proc.on('close', (code) => resolve(code === 0))
-      proc.on('error', () => resolve(false))
+      const proc = spawn(cmd, ['--version'], { shell: true })
+      proc.on('close', (code) => {
+        console.log(`[CodefetchAdapter] Verificação de instalação concluída com código: ${code}`)
+        resolve(code === 0)
+      })
+      proc.on('error', (err) => {
+        console.error(`[CodefetchAdapter] Erro ao verificar instalação: ${err.message}`, err)
+        resolve(false)
+      })
     })
   }
 
@@ -41,13 +53,13 @@ export class CodefetchAdapter {
         stderr += chunk.toString()
       })
 
-      proc.on('close', (code) => {
+      proc.on('close', async (code) => {
         clearTimeout(timer)
         if (code === 0) {
           const outputPath = join(repoPath, 'codefetch', 'codebase.md')
           try {
             if (existsSync(outputPath)) {
-              const content = readFileSync(outputPath, 'utf-8')
+              const content = await readFile(outputPath, 'utf-8')
               resolve({ success: true, markdown: content })
             } else {
               resolve({

@@ -42,12 +42,10 @@ export const App: React.FC = () => {
   const handleStatusMessage = (text: string, isError = false) => {
     setStatusMessage({ text, isError })
     if (!isError) {
-      const timer = setTimeout(() => {
+      setTimeout(() => {
         setStatusMessage(null)
       }, 5000)
-      return () => clearTimeout(timer)
     }
-    return undefined
   }
 
   // Fluxo Principal (Main Flow)
