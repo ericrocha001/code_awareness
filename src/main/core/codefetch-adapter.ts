@@ -1,12 +1,13 @@
 // Responsabilidades do Script
 //
 // 1. Verificar se o Codefetch CLI está instalado no sistema.
-// 2. Executar o Codefetch em um repositório e ler o Markdown gerado a partir do arquivo codebase.md.
+// 2. Executar o Codefetch em um repositório, copiar o Markdown gerado para code_awareness/[nome].md e fazer a limpeza da pasta temporária codefetch/.
+// 3. Garantir a existência do arquivo .codefetchignore com as exclusões padrão antes de cada execução do Codefetch.
 
 import { spawn } from 'child_process'
-import { join } from 'path'
-import { existsSync } from 'fs'
-import { readFile } from 'fs/promises'
+import { join, basename } from 'path'
+import { existsSync, mkdirSync, rmSync } from 'fs'
+import { readFile, writeFile } from 'fs/promises'
 import { CodefetchResult } from '../../shared/types'
 
 const TIMEOUT_MS = 120_000
@@ -23,7 +24,7 @@ export class CodefetchAdapter {
     console.log(`[CodefetchAdapter] PATH env: ${process.env.PATH}`)
 
     return new Promise((resolve) => {
-      const proc = spawn(cmd, ['--version'], { shell: true })
+      const proc = spawn(cmd, ['--version'], { shell: process.platform === 'win32' })
       proc.on('close', (code) => {
         console.log(`[CodefetchAdapter] Verificação de instalação concluída com código: ${code}`)
         resolve(code === 0)
@@ -35,13 +36,50 @@ export class CodefetchAdapter {
     })
   }
 
+  async cleanupTemp(repoPath: string): Promise<void> {
+    const codefetchDir = join(repoPath, 'codefetch')
+    if (existsSync(codefetchDir)) {
+      rmSync(codefetchDir, { recursive: true, force: true })
+      console.log(`[CodefetchAdapter] Limpeza da pasta codefetch/ em: ${repoPath}`)
+    }
+  }
+
+  private async ensureIgnoreFile(repoPath: string): Promise<void> {
+    const ignorePath = join(repoPath, '.codefetchignore')
+    if (!existsSync(ignorePath)) {
+      const content = [
+        '# Code Awareness Default Ignores',
+        'AGENTS.md',
+        '.codefetchignore',
+        'code_awareness/',
+        'node_modules/',
+        'dist/',
+        'out/'
+      ].join('\n')
+      await writeFile(ignorePath, content, 'utf-8')
+      console.log(`[CodefetchAdapter] .codefetchignore criado em: ${repoPath}`)
+    }
+  }
+
   async run(repoPath: string): Promise<CodefetchResult> {
+    const repoName = basename(repoPath)
+    const fileName = `${repoName}.md`
+    const tempPath = join(repoPath, 'codefetch', fileName)
+    const destPath = join(repoPath, 'code_awareness', fileName)
+
+    // Limpa qualquer resquício da pasta codefetch/ antes de iniciar
+    await this.cleanupTemp(repoPath)
+
+    // Garante o arquivo de exclusões .codefetchignore
+    await this.ensureIgnoreFile(repoPath)
+
     return new Promise((resolve) => {
       let stderr = ''
 
-      const proc = spawn(this.getCommand(), [], {
+      // Salva apenas o nome do arquivo (sem barras) para evitar erro no Codefetch
+      const proc = spawn(this.getCommand(), ['-o', fileName], {
         cwd: repoPath,
-        shell: true
+        shell: process.platform === 'win32'
       })
 
       const timer = setTimeout(() => {
@@ -56,21 +94,30 @@ export class CodefetchAdapter {
       proc.on('close', async (code) => {
         clearTimeout(timer)
         if (code === 0) {
-          const outputPath = join(repoPath, 'codefetch', 'codebase.md')
           try {
-            if (existsSync(outputPath)) {
-              const content = await readFile(outputPath, 'utf-8')
-              resolve({ success: true, markdown: content })
-            } else {
+            if (!existsSync(tempPath)) {
               resolve({
                 success: false,
-                error: 'Arquivo codebase.md não encontrado no diretório do projeto em <repo>/codefetch/codebase.md'
+                error: `Arquivo temporário não encontrado em codefetch/${fileName}`
               })
+              return
             }
+
+            // Lê o conteúdo gerado pelo Codefetch
+            const content = await readFile(tempPath, 'utf-8')
+
+            // Cria a pasta code_awareness/ e copia o arquivo
+            mkdirSync(join(repoPath, 'code_awareness'), { recursive: true })
+            await writeFile(destPath, content, 'utf-8')
+
+            // Limpa a pasta temporária codefetch/ (inclui resquícios antigos como codebase.md)
+            rmSync(join(repoPath, 'codefetch'), { recursive: true, force: true })
+
+            resolve({ success: true, markdown: content })
           } catch (err: any) {
             resolve({
               success: false,
-              error: `Erro ao ler o arquivo codebase.md: ${err.message}`
+              error: `Erro ao processar o arquivo gerado: ${err.message}`
             })
           }
         } else {

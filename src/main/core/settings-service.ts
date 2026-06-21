@@ -7,26 +7,41 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { AppSettings } from '../../shared/types'
 
-const CONFIG_DIR = app.getPath('userData')
-const CONFIG_FILE = join(CONFIG_DIR, 'settings.json')
-
 const DEFAULT_SETTINGS: AppSettings = {
-  obsidianVaultPath: null
+  obsidianVaultPath: null,
+  rootFolders: [],
+  individualProjects: [],
+  hiddenProjects: []
 }
 
 export class SettingsService {
+  private getConfigFile(): string {
+    const configDir = app.getPath('userData')
+    return join(configDir, 'settings.json')
+  }
+
   loadSettings(): AppSettings {
-    if (!existsSync(CONFIG_FILE)) return { ...DEFAULT_SETTINGS }
+    const configFile = this.getConfigFile()
+    if (!existsSync(configFile)) return { ...DEFAULT_SETTINGS }
     try {
-      const raw = readFileSync(CONFIG_FILE, 'utf-8')
-      return JSON.parse(raw) as AppSettings
+      const raw = readFileSync(configFile, 'utf-8')
+      const parsed = JSON.parse(raw) as Partial<AppSettings>
+      return {
+        ...DEFAULT_SETTINGS,
+        ...parsed,
+        rootFolders: parsed.rootFolders || [],
+        individualProjects: parsed.individualProjects || [],
+        hiddenProjects: parsed.hiddenProjects || []
+      }
     } catch {
       return { ...DEFAULT_SETTINGS }
     }
   }
 
   saveSettings(settings: AppSettings): void {
-    if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true })
-    writeFileSync(CONFIG_FILE, JSON.stringify(settings, null, 2), 'utf-8')
+    const configDir = app.getPath('userData')
+    const configFile = this.getConfigFile()
+    if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
+    writeFileSync(configFile, JSON.stringify(settings, null, 2), 'utf-8')
   }
 }

@@ -45,5 +45,8 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Code Awareness"
     }
+  },
+  "dependencies": {
+    "markdown-to-jsx": "^9.8.2"
   }
 }

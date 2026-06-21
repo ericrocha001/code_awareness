@@ -9,7 +9,7 @@ author:
 project:
 connections:
 date created: 2026-03-30 15:53
-date modified: 2026-06-16 00:22
+date modified: 2026-06-20 01:25
 ---
 
 # AGENTS
@@ -111,18 +111,33 @@ Todo código criado ou modificado pelo agente deve priorizar simplicidade, legib
 ## Regras Obrigatórias
 
 1. Preferir sempre a solução mais simples que funcione.
-2. Evitar abstrações, padrões ou otimizações prematuras.
-3. Manter funções pequenas e fáceis de entender.
-4. Utilizar nomes claros e autoexplicativos.
-5. Evitar níveis profundos de indentação.
-6. Remover automaticamente:
+2. Use bastante comentários no código. Deixe claro a razão da existência de cada bloco.
+3. Evitar abstrações, padrões ou otimizações prematuras.
+4. Manter funções pequenas e fáceis de entender.
+5. Utilizar nomes claros e autoexplicativos.
+6. Evitar níveis profundos de indentação.
+7. Remover automaticamente:
     - código morto;
     - variáveis não utilizadas;
     - imports desnecessários;
     - comentários obsoletos.
-7. Não adicionar lógica, configurações ou estruturas que não sejam necessárias no momento atual.
-8. Sempre que modificar código existente, simplificar o que for possível.
+8. Não adicionar lógica, configurações ou estruturas que não sejam necessárias no momento atual.
+9. Sempre que modificar código existente, simplificar o que for possível.
 
 ## Regra De Decisão
 
 Se existir dúvida entre uma solução simples e uma solução sofisticada, escolher sempre a mais simples.
+
+--------------
+
+### Economia de Tokens
+
+1. Não gere plano de implementação.
+2. Não gere walkthrough.
+3. Se houver dúvidas, alertas ou algo a esclarecer antes da implementação, apenas pergunte e faça sugestões.
+4. Após concluir a implementação, forneça apenas um resumo do que foi feito.
+
+### Gerencie o `.gitignore`
+
+1. Adicione `code_awareness/`, `codefetch/` e `.sprintdiff/` ao `.gitignore`. O Git deve ignorar essas pastas nativamente. Garanta também que o `parseGitStatus` ignore tanto o nome puro do diretório (ex.: `"codefetch"`) quanto caminhos internos (ex.: `"codefetch/…"`), evitando entradas fantasmas.
+2. Adicione ao `.gitignore` qualquer outra pasta que também deva ser ignorada.

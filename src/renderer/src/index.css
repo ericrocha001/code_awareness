@@ -1,11 +1,12 @@
 :root {
-  --bg-primary: #000000;
-  --bg-secondary: #111111;
-  --border: #262626;
+  --bg-primary: #1e1e1e;
+  --bg-secondary: #1c1c1c;
+  --border: #2d2d2d;
   --text-primary: #f5f5f5;
   --text-secondary: #a1a1aa;
-  --accent: #7c3aed;
+  --accent: #7852ee;
   --accent-hover: #8b5cf6;
+  --color-green: #44cf6e;
 }
 
 body {
@@ -36,4 +37,34 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-secondary);
+}
+
+/* Global Pill Button - Design System Unificado */
+.app-pill-btn {
+  border-radius: 9999px;
+  height: 38px;
+  padding: 0 20px;
+  font-size: 13px;
+  font-weight: 600;
+  border: 1px solid var(--accent);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.app-pill-btn:hover {
+  background: var(--accent);
+  color: #ffffff;
+  box-shadow: 0 0 12px rgba(120, 82, 238, 0.4);
+}
+
+.app-pill-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }

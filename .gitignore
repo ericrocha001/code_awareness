@@ -5,5 +5,8 @@ dist/
 *.log
 .env
 .env.*
+code_awareness/
+codefetch/
+.sprintdiff/
 
 

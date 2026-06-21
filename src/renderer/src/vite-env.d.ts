@@ -5,7 +5,7 @@
 
 /// <reference types="vite/client" />
 
-import { AppSettings, CodefetchResult } from '../../shared/types'
+import { AppSettings, CodefetchResult, DiffFileStatus, ProjectInfo } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -23,6 +23,16 @@ declare global {
       selectVaultFolder: () => Promise<string | null>
       selectFolder: () => Promise<{ path: string; name: string } | null>
       getPathForFile: (file: File) => string
+      checkRepository: (dirPath: string) => Promise<boolean>
+      getModifiedFiles: (dirPath: string) => Promise<DiffFileStatus[]>
+      startWatcher: (dirPath: string) => Promise<{ success: boolean }>
+      stopWatcher: () => Promise<{ success: boolean }>
+      onFileChanged: (callback: (filePath: string) => void) => () => void
+      generateSemanticDiff: (repoPath: string) => Promise<string>
+      addRootFolder: () => Promise<ProjectInfo[]>
+      addIndividualProject: () => Promise<ProjectInfo[]>
+      getProjectsList: () => Promise<ProjectInfo[]>
+      hideProject: (projectPath: string) => Promise<ProjectInfo[]>
     }
   }
 }

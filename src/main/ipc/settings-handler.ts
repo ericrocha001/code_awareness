@@ -7,7 +7,7 @@ import { SettingsService } from '../core/settings-service'
 
 const settingsService = new SettingsService()
 
-export function registerSettingsHandlers(mainWindow: BrowserWindow): void {
+export function registerSettingsHandlers(): void {
   ipcMain.handle('load-settings', async () => {
     return settingsService.loadSettings()
   })
@@ -17,8 +17,9 @@ export function registerSettingsHandlers(mainWindow: BrowserWindow): void {
     return { success: true }
   })
 
-  ipcMain.handle('select-vault-folder', async () => {
-    const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+  ipcMain.handle('select-vault-folder', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
+    const { filePaths, canceled } = await dialog.showOpenDialog(win, {
       title: 'Select Obsidian Vault Folder',
       properties: ['openDirectory']
     })

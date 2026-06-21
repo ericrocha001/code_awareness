@@ -10,9 +10,10 @@ import { VaultService } from '../core/vault-service'
 
 const vaultService = new VaultService()
 
-export function registerFileHandlers(mainWindow: BrowserWindow): void {
-  ipcMain.handle('save-markdown', async (_event, markdown: string, repoName: string) => {
-    const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
+export function registerFileHandlers(): void {
+  ipcMain.handle('save-markdown', async (event, markdown: string, repoName: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
+    const { filePath, canceled } = await dialog.showSaveDialog(win, {
       title: 'Save Markdown',
       defaultPath: `${repoName}.md`,
       filters: [{ name: 'Markdown', extensions: ['md'] }]
@@ -42,8 +43,9 @@ export function registerFileHandlers(mainWindow: BrowserWindow): void {
     }
   )
 
-  ipcMain.handle('select-folder', async () => {
-    const { filePaths, canceled } = await dialog.showOpenDialog(mainWindow, {
+  ipcMain.handle('select-folder', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
+    const { filePaths, canceled } = await dialog.showOpenDialog(win, {
       title: 'Select Repository Folder',
       properties: ['openDirectory']
     })

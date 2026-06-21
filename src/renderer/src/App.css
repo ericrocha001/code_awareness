@@ -6,9 +6,12 @@
 }
 
 .app-header {
-  height: 72px;
   display: flex;
+  justify-content: space-between;
   align-items: center;
+  gap: 20px;
+  width: 100%;
+  box-sizing: border-box;
   margin-bottom: 32px;
 }
 
@@ -98,4 +101,96 @@
     transform: translateY(0);
     opacity: 1;
   }
+}
+
+/* Tabs System - Pill Shape */
+.tabs-container {
+  display: inline-flex;
+  background-color: #161616;
+  border-radius: 9999px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  gap: 0;
+}
+
+.tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  padding: 8px 16px;
+  border-radius: 9999px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tab-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.tab-btn.active {
+  background: rgba(120, 82, 238, 0.15);
+  border: 1px solid var(--accent);
+  color: var(--text-primary);
+}
+
+.tab-badge {
+  background: rgba(124, 58, 237, 0.2);
+  color: var(--accent-hover);
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+/* Code Source Flow Styles */
+.active-project-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 24px;
+}
+
+.active-project-info h3 {
+  margin: 0 0 4px 0;
+  font-size: 16px;
+  color: var(--text-primary);
+}
+
+.active-project-info .path-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-family: monospace;
+}
+
+.empty-selection-banner {
+  text-align: center;
+  padding: 60px 20px;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+  margin-bottom: 24px;
+}
+
+.empty-selection-banner h3 {
+  margin: 0 0 8px 0;
+  color: var(--text-primary);
+  font-size: 18px;
+}
+
+.empty-selection-banner p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 14px;
 }

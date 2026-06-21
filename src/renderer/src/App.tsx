@@ -7,12 +7,15 @@
 import React, { useEffect, useState } from 'react'
 import { AppSettings } from '../../shared/types'
 import { SetupBanner } from './components/SetupBanner/SetupBanner'
-import { DropZone } from './components/DropZone/DropZone'
 import { ActionsBar } from './components/ActionsBar/ActionsBar'
 import { OutputPanel } from './components/OutputPanel/OutputPanel'
+import { CodeDiffView } from './components/CodeDiffView/CodeDiffView'
+import { HomeView } from './components/HomeView/HomeView'
 import './App.css'
 
 export const App: React.FC = () => {
+  const [activeTab, setActiveTab] = useState<'home' | 'codebase' | 'diff'>('home')
+  const [activeProject, setActiveProject] = useState<{ path: string; name: string } | null>(null)
   const [isCodefetchInstalled, setIsCodefetchInstalled] = useState<boolean>(true)
   const [settings, setSettings] = useState<AppSettings>({ obsidianVaultPath: null })
   const [markdown, setMarkdown] = useState<string>('')
@@ -49,24 +52,29 @@ export const App: React.FC = () => {
   }
 
   // Fluxo Principal (Main Flow)
-  const handleFolderDrop = async (folderPath: string, folderName: string) => {
+  const handleRunAnalysis = async () => {
     if (!isCodefetchInstalled) {
       handleStatusMessage('Codefetch não está instalado. Não é possível rodar a análise.', true)
+      return
+    }
+    
+    if (!activeProject) {
+      handleStatusMessage('Nenhum projeto selecionado.', true)
       return
     }
 
     setIsProcessing(true)
     setError('')
     setMarkdown('')
-    setRepoName(folderName)
+    setRepoName(activeProject.name)
     setStatusMessage(null)
 
     try {
-      const result = await window.codeAwareness.runCodefetch(folderPath)
+      const result = await window.codeAwareness.runCodefetch(activeProject.path)
 
       if (result.success && result.markdown) {
         setMarkdown(result.markdown)
-        handleStatusMessage(`Análise concluída com sucesso para o repositório "${folderName}"!`, false)
+        handleStatusMessage(`Análise concluída com sucesso para o repositório "${activeProject.name}"!`, false)
       } else {
         setError(result.error || 'Erro desconhecido durante a execução do Codefetch.')
         handleStatusMessage('A análise falhou.', true)
@@ -86,16 +94,57 @@ export const App: React.FC = () => {
           <span className="logo-icon">{"</>"}</span>
           <h1 className="app-title">Code Awareness</h1>
         </div>
+        
+        <div className="tabs-container">
+          <button 
+            className={`tab-btn ${activeTab === 'home' ? 'active' : ''}`}
+            onClick={() => setActiveTab('home')}
+          >
+            Projetos
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'codebase' ? 'active' : ''}`}
+            onClick={() => setActiveTab('codebase')}
+          >
+            Code Source
+          </button>
+          <button 
+            className={`tab-btn ${activeTab === 'diff' ? 'active' : ''}`}
+            onClick={() => setActiveTab('diff')}
+          >
+            Code Diff <span className="tab-badge">Live</span>
+          </button>
+        </div>
       </header>
 
       <main className="app-main">
-        {!isCodefetchInstalled && <SetupBanner />}
+        {activeTab === 'home' && (
+          <HomeView activeProject={activeProject} onSelectProject={setActiveProject} />
+        )}
+        {activeTab === 'codebase' && (
+          <>
+            {!isCodefetchInstalled && <SetupBanner />}
 
-        <DropZone
-          onFolderDrop={handleFolderDrop}
-          isProcessing={isProcessing}
-          disabled={!isCodefetchInstalled}
-        />
+            {!activeProject ? (
+              <div className="empty-selection-banner">
+                <h3>Nenhum projeto selecionado</h3>
+                <p>Volte para a aba <strong>Projetos</strong> e ative um repositório para gerar o código fonte.</p>
+              </div>
+            ) : (
+              <div className="active-project-card">
+                <div className="active-project-info">
+                  <h3>{activeProject.name}</h3>
+                  <span className="path-text">{activeProject.path}</span>
+                </div>
+                <button 
+                  className="app-pill-btn" 
+                  onClick={handleRunAnalysis}
+                  disabled={isProcessing || !isCodefetchInstalled}
+                >
+                  {isProcessing ? 'Processando...' : 'Gerar Código Fonte'}
+                </button>
+              </div>
+            )}
 
         {error && (
           <div className="error-banner">
@@ -123,6 +172,11 @@ export const App: React.FC = () => {
             />
             <OutputPanel markdown={markdown} />
           </>
+        )}
+          </>
+        )}
+        {activeTab === 'diff' && (
+          <CodeDiffView activeProject={activeProject} />
         )}
       </main>
     </div>
