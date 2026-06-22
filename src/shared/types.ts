@@ -8,6 +8,8 @@ export interface AppSettings {
   rootFolders: string[]
   individualProjects: string[]
   hiddenProjects: string[]
+  // Chave = repoPath, valor = listas de arquivos ignorados no diff
+  ignoredDiffFiles: Record<string, { temporary: string[]; persistent: string[] }>
 }
 
 export interface ProjectInfo {
@@ -26,6 +28,8 @@ export interface DiffFileStatus {
   relativePath: string
   name: string
   changeType: 'modified' | 'added' | 'deleted'
+  mtime: number
+  size: number
 }
 
 export type WatcherState = 'active' | 'inactive' | 'error'

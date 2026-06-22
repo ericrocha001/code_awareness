@@ -28,11 +28,14 @@ declare global {
       startWatcher: (dirPath: string) => Promise<{ success: boolean }>
       stopWatcher: () => Promise<{ success: boolean }>
       onFileChanged: (callback: (filePath: string) => void) => () => void
-      generateSemanticDiff: (repoPath: string) => Promise<string>
+      generateSemanticDiff: (repoPath: string, selectedFiles?: string[]) => Promise<string>
       addRootFolder: () => Promise<ProjectInfo[]>
       addIndividualProject: () => Promise<ProjectInfo[]>
       getProjectsList: () => Promise<ProjectInfo[]>
       hideProject: (projectPath: string) => Promise<ProjectInfo[]>
+      addIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent') => Promise<AppSettings | null>
+      removeIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent') => Promise<AppSettings | null>
+      reconcileIgnoredFiles: (repoPath: string, currentModifiedFiles: string[]) => Promise<AppSettings | null>
     }
   }
 }

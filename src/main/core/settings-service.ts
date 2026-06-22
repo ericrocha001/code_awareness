@@ -11,7 +11,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   obsidianVaultPath: null,
   rootFolders: [],
   individualProjects: [],
-  hiddenProjects: []
+  hiddenProjects: [],
+  ignoredDiffFiles: {}
 }
 
 export class SettingsService {
@@ -31,7 +32,8 @@ export class SettingsService {
         ...parsed,
         rootFolders: parsed.rootFolders || [],
         individualProjects: parsed.individualProjects || [],
-        hiddenProjects: parsed.hiddenProjects || []
+        hiddenProjects: parsed.hiddenProjects || [],
+        ignoredDiffFiles: parsed.ignoredDiffFiles || {}
       }
     } catch {
       return { ...DEFAULT_SETTINGS }

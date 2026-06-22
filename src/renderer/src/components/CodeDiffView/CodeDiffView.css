@@ -99,6 +99,7 @@
   flex-direction: column;
   background: var(--bg-secondary);
   overflow: hidden;
+  position: relative; /* Ancora para o popup absoluto */
 }
 
 .cdf-sidebar-header {
@@ -141,15 +142,32 @@
   flex: 1;
 }
 
+.cdf-file-checkbox {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
 .cdf-file-card {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  cursor: pointer;
+  gap: 6px;
+  padding: 6px 14px;
   border-radius: 0;
   transition: background 0.12s;
   border-left: 2px solid transparent;
+}
+
+.cdf-file-card-body {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+  padding: 2px 0;
 }
 
 .cdf-file-card:hover {
@@ -159,6 +177,21 @@
 .cdf-file-card.selected {
   background: rgba(124, 58, 237, 0.12);
   border-left-color: var(--accent);
+}
+
+/* Master checkbox no cabeçalho da sidebar */
+.cdf-sidebar-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cdf-master-checkbox {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+  accent-color: var(--accent);
 }
 
 .cdf-type-badge {
@@ -447,6 +480,250 @@
 
 .cdf-prompt-textarea:focus {
   outline: none;
+}
+
+/* Hover hide button — aparece com fade-in ao passar o mouse */
+.cdf-hide-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  line-height: 1;
+}
+
+.cdf-file-card:hover .cdf-hide-btn {
+  opacity: 0.5;
+}
+
+.cdf-file-card:hover .cdf-hide-btn:hover {
+  opacity: 1;
+}
+
+/* Novo Padrão de Botão Circular Premium */
+.cdf-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 0;
+  transition: all 0.15s ease-in-out;
+  outline: none;
+}
+
+.cdf-icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent-hover);
+  box-shadow: 0 0 8px rgba(124, 58, 237, 0.35);
+  background: rgba(124, 58, 237, 0.08);
+}
+
+.cdf-icon-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+
+/* Tamanho menor para listas internas */
+.cdf-icon-btn.small {
+  width: 20px;
+  height: 20px;
+}
+
+.cdf-icon-btn.small svg {
+  width: 11px;
+  height: 11px;
+}
+
+/* Botão Pílula Premium */
+.cdf-pill-btn {
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(124, 58, 237, 0.06);
+  color: var(--accent);
+  border: 1px solid rgba(124, 58, 237, 0.2);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease-in-out;
+  text-transform: none;
+  letter-spacing: normal;
+}
+
+.cdf-pill-btn:hover {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 0 8px rgba(124, 58, 237, 0.3);
+}
+
+/* Sidebar Footer para conter as Sanfonas */
+.cdf-sidebar-footer {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.1);
+  flex-shrink: 0;
+}
+
+/* Sanfona de arquivos ignorados */
+.cdf-ignored-accordion {
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.cdf-ignored-accordion:last-child {
+  border-bottom: none;
+}
+
+.cdf-ignored-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: color 0.15s;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.cdf-ignored-summary:hover {
+  color: var(--text-primary);
+}
+
+.cdf-ignored-title {
+  flex: 1;
+}
+
+.cdf-ignored-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 8px 0;
+}
+
+.cdf-ignored-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 5px 14px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  opacity: 0.65;
+  transition: opacity 0.15s;
+}
+
+.cdf-ignored-item:hover {
+  opacity: 1;
+}
+
+.cdf-ignored-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-decoration: line-through;
+}
+
+/* Estilizando o botão de ocultar e copiar no card do arquivo */
+.cdf-hide-btn,
+.cdf-copy-btn {
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+
+.cdf-file-card:hover .cdf-hide-btn,
+.cdf-file-card:hover .cdf-copy-btn {
+  opacity: 0.8;
+}
+
+.cdf-file-card:hover .cdf-hide-btn:hover,
+.cdf-file-card:hover .cdf-copy-btn:hover {
+  opacity: 1;
+  transform: scale(1.05);
+}
+
+/* Cabeçalho da sidebar — lado direito com sweep button */
+.cdf-sidebar-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Popup flutuante de ignore inteligente */
+.cdf-ignore-popup {
+  position: absolute;
+  z-index: 100;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 4px 14px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 220px;
+}
+
+.cdf-ignore-popup-text {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.cdf-ignore-popup-text strong {
+  color: var(--accent);
+}
+
+.cdf-ignore-popup-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cdf-ignore-popup-btn {
+  font-size: 11px;
+  font-weight: 500;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.cdf-ignore-popup-btn:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--text-secondary);
+}
+
+.cdf-ignore-popup-btn-all {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.cdf-ignore-popup-btn-all:hover {
+  background: rgba(124, 58, 237, 0.1);
+  border-color: var(--accent-hover);
 }
 
 /* Bottom Actions - Botões em Pílula com Glow */

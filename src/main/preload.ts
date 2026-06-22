@@ -56,8 +56,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     ipcRenderer.on('watcher:file-changed', handler)
     return () => ipcRenderer.removeListener('watcher:file-changed', handler)
   },
-  generateSemanticDiff: (repoPath: string): Promise<string> => {
-    return ipcRenderer.invoke('git:generate-semantic-diff', repoPath)
+  generateSemanticDiff: (repoPath: string, selectedFiles?: string[]): Promise<string> => {
+    return ipcRenderer.invoke('git:generate-semantic-diff', repoPath, selectedFiles)
   },
   addRootFolder: (): Promise<ProjectInfo[]> => {
     return ipcRenderer.invoke('workspace:add-root-folder')
@@ -70,5 +70,16 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   },
   hideProject: (projectPath: string): Promise<ProjectInfo[]> => {
     return ipcRenderer.invoke('workspace:hide-project', projectPath)
+  },
+
+  // Gerencia arquivos ignorados no diff (temporary / persistent)
+  addIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent'): Promise<AppSettings | null> => {
+    return ipcRenderer.invoke('git:add-ignored-file', repoPath, relativePath, type)
+  },
+  removeIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent'): Promise<AppSettings | null> => {
+    return ipcRenderer.invoke('git:remove-ignored-file', repoPath, relativePath, type)
+  },
+  reconcileIgnoredFiles: (repoPath: string, currentModifiedFiles: string[]): Promise<AppSettings | null> => {
+    return ipcRenderer.invoke('git:reconcile-ignored-files', repoPath, currentModifiedFiles)
   }
 })

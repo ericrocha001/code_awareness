@@ -9,15 +9,6 @@ import { join, basename, extname } from 'path'
 import { GitService } from './git-service'
 import { DiffFileStatus } from '../../shared/types'
 
-// Lista de bloqueio de arquivos que nunca devem aparecer no relatório de diff
-const CORE_IGNORED_FILES = new Set([
-  'AGENTS.md',
-  '.codefetchignore',
-  '.gitignore',
-  'package-lock.json',
-  'yarn.lock',
-  'pnpm-lock.yaml'
-])
 
 interface SemanticBlock {
   signature: string
@@ -71,7 +62,6 @@ export class DiffService {
     const sections: string[] = []
     for (const file of files) {
       if (file.relativePath.includes('code_awareness/')) continue
-      if (CORE_IGNORED_FILES.has(file.relativePath)) continue
       const section = await this.analyzeFile(repoPath, file)
       if (section) sections.push(section)
     }

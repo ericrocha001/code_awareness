@@ -65,13 +65,12 @@ export class GitService {
         .map(f => {
           try {
             const st = statSync(join(dirPath, f.relativePath))
-            return { ...f, mtime: st.mtimeMs }
+            return { ...f, mtime: st.mtimeMs, size: st.size }
           } catch {
-            return { ...f, mtime: 0 }
+            return { ...f, mtime: 0, size: 0 }
           }
         })
         .sort((a, b) => b.mtime - a.mtime)
-        .map(({ mtime, ...f }) => f)
     } catch {
       return []
     }
@@ -138,7 +137,7 @@ export class GitService {
         
         const code = line.substring(0, 2).trim()
         const changeType = GIT_STATUS_CODE_MAP[code[0]] ?? 'modified'
-        return { relativePath, name, changeType }
+        return { relativePath, name, changeType, mtime: 0, size: 0 }
       })
       .filter((item): item is DiffFileStatus => item !== null)
   }
