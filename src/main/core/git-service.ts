@@ -1,7 +1,7 @@
 // Responsabilidades do Script
 //
 // 1. Verificar se um diretório é um repositório Git válido.
-// 2. Obter a lista de arquivos modificados (staged e unstaged) via comandos nativos do Git.
+// 2. Obter a lista de arquivos modificados (staged, unstaged e untracked individuais) via comandos nativos do Git.
 // 3. Extrair os hunks de alteração de um arquivo específico para mapeamento de linhas.
 // 4. Ler o conteúdo de um arquivo no estado do commit HEAD anterior.
 
@@ -59,9 +59,45 @@ export class GitService {
 
   async getModifiedFiles(dirPath: string): Promise<DiffFileStatus[]> {
     try {
-      const stdout = await this.runGit(['status', '--porcelain'], dirPath)
-      const files = this.parseGitStatus(stdout)
-      return files
+      // Executa os dois comandos em paralelo para performance
+      const [statusOutput, untrackedOutput] = await Promise.all([
+        this.runGit(['status', '--porcelain'], dirPath),
+        // ls-files lista cada arquivo untracked individualmente (nunca agrupa diretórios)
+        // --exclude-standard respeita o .gitignore do projeto
+        this.runGit(['ls-files', '--others', '--exclude-standard'], dirPath)
+      ])
+
+      // Arquivos M/A/D do git status (modified, staged, deleted)
+      const statusFiles = this.parseGitStatus(statusOutput)
+
+      // Caminhos já cobertos pelo git status (evita duplicatas)
+      const statusPaths = new Set(statusFiles.map(f => f.relativePath))
+
+      // Arquivos untracked individuais vindos do ls-files
+      const untrackedFiles: DiffFileStatus[] = untrackedOutput
+        .split('\n')
+        .map(line => line.trim())
+        // Ignora linhas vazias ou caminhos que terminam em '/' (defesa em profundidade)
+        .filter(p => p.length > 0 && !p.endsWith('/'))
+        // Ignora pastas internas do code_awareness que não devem aparecer
+        .filter(p =>
+          p !== 'code_awareness' && !p.startsWith('code_awareness/') &&
+          p !== 'codefetch'     && !p.startsWith('codefetch/')     &&
+          p !== '.sprintdiff'   && !p.startsWith('.sprintdiff/')
+        )
+        // Ignora arquivos já presentes no git status (ex: staged untracked via 'A')
+        .filter(p => !statusPaths.has(p))
+        .map(relativePath => ({
+          relativePath,
+          name: relativePath.split('/').pop() ?? relativePath,
+          changeType: 'added' as DiffFileStatus['changeType'],
+          mtime: 0,
+          size: 0
+        }))
+
+      // Merge e enriquecimento com mtime/size via statSync
+      const allFiles = [...statusFiles, ...untrackedFiles]
+      return allFiles
         .map(f => {
           try {
             const st = statSync(join(dirPath, f.relativePath))

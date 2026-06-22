@@ -184,15 +184,6 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
     })
   }, [visibleFiles]) // Escuta apenas a lista visível filtrada
 
-  // Efeito 2: Aciona o reconciliador do Git apenas quando os arquivos modificados de fato mudarem
-  useEffect(() => {
-    if (activeProject) {
-      const currentPaths = modifiedFiles.map(f => f.relativePath)
-      window.codeAwareness.reconcileIgnoredFiles(activeProject.path, currentPaths).then(() => {
-        loadIgnoredFiles()
-      })
-    }
-  }, [modifiedFiles, activeProject, loadIgnoredFiles]) // ignoredFiles NÃO entra aqui para evitar loop infinito
 
   // Atualiza apenas o indeterminate visual do master checkbox (checked é controlado pelo React)
   useEffect(() => {
@@ -477,6 +468,16 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
         ])
 
         if (!isMounted) return
+
+        // Reconcilia os ignores usando a lista recém-obtida para este projeto.
+        // Feito aqui (e não num useEffect) para garantir que os dados são do projeto atual,
+        // evitando race condition ao trocar de projeto.
+        const currentPaths = files.map(f => f.relativePath)
+        await window.codeAwareness.reconcileIgnoredFiles(activeProject.path, currentPaths)
+        if (!isMounted) return
+        await loadIgnoredFiles()
+        if (!isMounted) return
+
         setModifiedFiles(files)
         setDiffMarkdown(markdown)
         setIsWatching(true)
@@ -494,6 +495,15 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
         window.codeAwareness.generateSemanticDiff(activeProject.path)
       ])
       if (!isMounted) return
+
+      // Reconcilia com a lista atual do evento de mudança de arquivo,
+      // garantindo que os ignores reflitam o estado real do projeto no momento certo.
+      const currentPaths = files.map(f => f.relativePath)
+      await window.codeAwareness.reconcileIgnoredFiles(activeProject.path, currentPaths)
+      if (!isMounted) return
+      await loadIgnoredFiles()
+      if (!isMounted) return
+
       setModifiedFiles(files)
       setDiffMarkdown(markdown)
     })
