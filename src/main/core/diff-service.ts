@@ -1,40 +1,16 @@
 // Responsabilidades do Script
 //
-// 1. Identificar semanticamente blocos de código (funções, classes) em torno das linhas modificadas pelo Git.
-// 2. Gerar a string de Markdown estruturado com os blocos funcionais (Original vs Novo).
-// 3. Fornecer fallback de exibição de linhas alteradas para arquivos sem assinaturas de bloco detectáveis (CSS, JSON, etc).
+// 1. Gerar o relatório Markdown estruturado de diff semântico para arquivos selecionados do repositório Git,
+//    usando o gitdiff-parser para extrair hunks precisos.
 
-import { readFile, stat } from 'fs/promises'
-import { join, basename, extname } from 'path'
+import { spawn } from 'child_process'
+import { extname, basename, join } from 'path'
+import * as gitdiffParser from 'gitdiff-parser'
+import { readFile } from 'fs/promises'
 import { GitService } from './git-service'
 import { DiffFileStatus } from '../../shared/types'
 
-
-interface SemanticBlock {
-  signature: string
-  startLine: number // 1-indexed
-  endLine: number   // 1-indexed
-  lines: string[]
-}
-
-const SIGNATURE_PATTERNS: RegExp[] = [
-  /^\s*(export\s+)?(default\s+)?(async\s+)?function\s*\*?\s*\w+/,
-  /^\s*(export\s+)?(abstract\s+)?(default\s+)?class\s+\w+/,
-  /^\s*(export\s+)?interface\s+\w+/,
-  /^\s*(export\s+)?(const|let|var)\s+\w+\s*=\s*(async\s*)?(function|\(|[a-z_]\w*\s*=>)/i,
-  /^\s*(public|private|protected|static|override|abstract|async)(\s+(public|private|protected|static|override|abstract|async))*\s+\w+\s*[<(]/,
-  /^\s*def\s+\w+\s*\(/,
-]
-
-// Limite saudável de tamanho de arquivo para leitura de diff (2 MB)
-const MAX_FILE_SIZE = 2 * 1024 * 1024
-
-const CHANGE_TYPE_LABEL: Record<DiffFileStatus['changeType'], string> = {
-  modified: 'modificado',
-  added: 'adicionado',
-  deleted: 'excluído'
-}
-
+// Mapa de extensão para nome de linguagem usado nos blocos de código Markdown
 const EXTENSION_MAP: Record<string, string> = {
   '.ts': 'typescript',
   '.tsx': 'tsx',
@@ -48,180 +24,248 @@ const EXTENSION_MAP: Record<string, string> = {
   '.md': 'markdown'
 }
 
+// Rótulo em português para cada tipo de alteração
+const CHANGE_TYPE_LABEL: Record<DiffFileStatus['changeType'], string> = {
+  modified: 'modificado',
+  added: 'adicionado',
+  deleted: 'excluído'
+}
+
+// Timeout máximo para execuções de subprocesso Git
+const GIT_TIMEOUT_MS = 10_000
+
+// Limite saudável de tamanho de arquivo para leitura de diff (2 MB)
+const MAX_FILE_SIZE = 2 * 1024 * 1024
+
 export class DiffService {
   private git = new GitService()
 
-  async generateSemanticDiff(repoPath: string): Promise<string> {
-    const files = await this.git.getModifiedFiles(repoPath)
-    if (files.length === 0) return '# Nenhuma alteração detectada.'
+  /**
+   * Ponto de entrada principal.
+   * Se `selectedFiles` for informado, processa apenas esses arquivos.
+   * Caso contrário, usa todos os arquivos modificados detectados pelo Git.
+   */
+  async generateSemanticDiff(repoPath: string, selectedFiles?: string[]): Promise<string> {
+    // Obtém a lista completa de alterados para usar como fallback ou para filtrar
+    const allModified = await this.git.getModifiedFiles(repoPath)
 
-    const name = basename(repoPath)
+    // Determina quais arquivos serão processados
+    const filesToProcess = (selectedFiles && selectedFiles.length > 0)
+      ? allModified.filter(f => selectedFiles.includes(f.relativePath))
+      : allModified
+
+    if (filesToProcess.length === 0) return '# Nenhuma alteração detectada.'
+
+    const repoName = basename(repoPath)
     const date = new Date().toLocaleString('pt-BR')
-    const header = `# Semantic Diff — \`${name}\`\n\n*Gerado em: ${date}*`
 
+    // Cabeçalho global do relatório com instrução para a IA
+    const header = [
+      `# Semantic Diff — \`${repoName}\``,
+      ``,
+      `*Gerado em: ${date}*`,
+      ``,
+      `> Este documento foi gerado automaticamente para auxiliar modelos de linguagem na compreensão das alterações do repositório.`,
+      `> Cada seção contém os blocos exatos de código removido (🟥) e adicionado (🟩), organizados por hunk de diff.`
+    ].join('\n')
+
+    // Processa cada arquivo e coleta as seções
     const sections: string[] = []
-    for (const file of files) {
-      if (file.relativePath.includes('code_awareness/')) continue
-      const section = await this.analyzeFile(repoPath, file)
+    for (const file of filesToProcess) {
+      const section = await this.buildFileSection(repoPath, file)
       if (section) sections.push(section)
     }
 
-    if (sections.length === 0) return `${header}\n\n*Nenhum bloco semântico identificado.*`
+    if (sections.length === 0) return `${header}\n\n*Nenhuma alteração significativa encontrada.*`
 
+    // Une o cabeçalho e as seções com divisores horizontais
     return [header, ...sections].join('\n\n---\n\n')
   }
 
-  private async analyzeFile(repoPath: string, file: DiffFileStatus): Promise<string> {
+  /**
+   * Constrói a seção Markdown completa para um único arquivo.
+   */
+  private async buildFileSection(repoPath: string, file: DiffFileStatus): Promise<string> {
     const ext = extname(file.relativePath).toLowerCase()
     const lang = EXTENSION_MAP[ext] || 'text'
+    const label = CHANGE_TYPE_LABEL[file.changeType]
+    const fileHeader = `## 📄 \`${file.relativePath}\` (${label})`
 
-    // Proteção: arquivos maiores que 2MB são ignorados para evitar travamento
-    try {
-      const stats = await stat(join(repoPath, file.relativePath))
-      if (stats.size > MAX_FILE_SIZE) {
-        return `## 📄 \`${file.relativePath}\` (${CHANGE_TYPE_LABEL[file.changeType]})\n\n` +
-          `*Arquivo muito grande para gerar o diff (> 2MB).*`
-      }
-    } catch {
-      // Se não conseguir ler o tamanho, segue o fluxo normal
+    // --- Proteção contra Arquivos Gigantes ---
+    if (file.size > MAX_FILE_SIZE) {
+      return [
+        fileHeader,
+        ``,
+        `*Arquivo muito grande para gerar o diff semântico (> 2MB).*`,
+        `> Nota para IA: Devido ao tamanho excessivo, este arquivo não foi processado para extração de contexto ou de mudanças linha a linha.`
+      ].join('\n')
     }
 
-    // Arquivo deletado — exibe o conteúdo antigo completo como remoção
+    // --- Arquivo Deletado ---
+    // Exibe o conteúdo completo do HEAD no bloco negativo.
     if (file.changeType === 'deleted') {
-      const oldContentRaw = await this.git.getFileAtHead(repoPath, file.relativePath)
-      if (!oldContentRaw) return ''
-      const oldLines = oldContentRaw.split('\n')
-      return `## 📄 \`${file.relativePath}\` (${CHANGE_TYPE_LABEL.deleted})\n\n` +
-        `#### 🟥 [Código Original / Removido]\n\`\`\`${lang}\n${oldLines.join('\n')}\n\`\`\``
+      const oldContent = await this.git.getFileAtHead(repoPath, file.relativePath)
+      if (!oldContent) return ''
+
+      // Checagem de limite também para o conteúdo histórico
+      if (Buffer.byteLength(oldContent, 'utf-8') > MAX_FILE_SIZE) {
+        return [
+          fileHeader,
+          ``,
+          `*Arquivo original removido era muito grande (> 2MB).*`
+        ].join('\n')
+      }
+
+      return [
+        fileHeader,
+        ``,
+        `#### 🟥 [Código Original / Removido]`,
+        `\`\`\`${lang}`,
+        oldContent.trimEnd(),
+        `\`\`\``
+      ].join('\n')
     }
 
-    let newContent: string
-    try {
-      newContent = await readFile(join(repoPath, file.relativePath), 'utf-8')
-    } catch {
-      return ''
-    }
-
-    const newLines = newContent.split('\n')
-
-    // Arquivo novo (added) — exibe o conteúdo completo como adição
+    // --- Arquivo Adicionado ---
+    // Não há hunks de diff — exibe o arquivo inteiro como bloco positivo.
     if (file.changeType === 'added') {
-      const block: SemanticBlock = {
-        signature: `Arquivo Novo`,
-        startLine: 1,
-        endLine: newLines.length,
-        lines: newLines
-      }
-      return `## 📄 \`${file.relativePath}\` (${CHANGE_TYPE_LABEL.added})\n\n` +
-        this.formatDoubleBlock(block, null, lang)
+      const newContent = await this.readFileContent(repoPath, file.relativePath)
+      // Evita renderizar se o arquivo não existe (ex: renomeado mas o git status listou o nome antigo)
+      if (!newContent && newContent !== '') return ''
+
+      const parts: string[] = [fileHeader]
+
+      parts.push(
+        `### 🔍 Hunk 1 (Arquivo novo)`,
+        ``,
+        `#### 🟥 [Código Original / Removido]`,
+        `*(Nenhuma versão anterior identificada)*`,
+        ``,
+        `#### 🟩 [Código Novo / Adicionado]`,
+        `\`\`\`${lang}`,
+        newContent,
+        `\`\`\``
+      )
+
+      return parts.join('\n')
     }
 
-    const oldContentRaw = await this.git.getFileAtHead(repoPath, file.relativePath)
-    const oldContent = oldContentRaw || ''
+    // --- Arquivo Modificado ---
+    // Obtém o diff raw via Git e parseia com gitdiff-parser
+    const rawDiff = await this.runGitDiff(repoPath, file.relativePath)
+    if (!rawDiff.trim()) return ''
 
-    const oldLines = oldContent.split('\n')
+    const parsedFiles = gitdiffParser.parse(rawDiff)
+    if (!parsedFiles.length || !parsedFiles[0].hunks.length) return ''
 
-    const hunks = await this.git.getModifiedHunks(repoPath, file.relativePath)
-    if (hunks.length === 0) return ''
+    const hunks = parsedFiles[0].hunks
+    const hunkSections: string[] = []
 
-    const blocksOutput: string[] = []
-    const coveredNewBlocks = new Set<string>()
+    // Monta uma seção Markdown para cada hunk identificado pelo parser
+    hunks.forEach((hunk, index) => {
+      // Separa as linhas removidas das adicionadas dentro deste hunk
+      const removedLines = hunk.changes
+        .filter(c => c.type === 'delete')
+        .map(c => c.content)
 
-    for (const hunk of hunks) {
-      // Tenta encontrar um bloco semântico (função, classe)
-      const newBlock = this.findContainingBlock(newLines, hunk.start)
+      const addedLines = hunk.changes
+        .filter(c => c.type === 'insert')
+        .map(c => c.content)
 
-      if (newBlock) {
-        const blockKey = `${newBlock.startLine}-${newBlock.endLine}`
-        if (coveredNewBlocks.has(blockKey)) continue
-        coveredNewBlocks.add(blockKey)
-
-        const oldBlock = this.findContainingBlock(oldLines, hunk.oldStart)
-        blocksOutput.push(this.formatDoubleBlock(newBlock, oldBlock, lang))
+      // --- Formatação do intervalo de linhas original (removido) ---
+      let originalRange: string
+      if (hunk.oldLines === 0) {
+        originalRange = 'Sem alterações no arquivo original'
+      } else if (hunk.oldLines === 1) {
+        originalRange = `Linha ${hunk.oldStart}`
       } else {
-        // Fallback: arquivo sem assinatura (CSS, JSON, etc) — exibe as linhas exatas do hunk com contexto
-        const margin = 2
-        const startLine = Math.max(1, hunk.start - margin)
-        const endLine = Math.min(newLines.length, hunk.start + hunk.count - 1 + margin)
-        const fallbackBlock: SemanticBlock = {
-          signature: `Alteração de Linhas`,
-          startLine,
-          endLine,
-          lines: newLines.slice(startLine - 1, endLine)
-        }
-        let oldFallback: SemanticBlock | null = null
-        if (oldLines.length > 0 && hunk.oldStart > 0) {
-          const oldStartLine = Math.max(1, hunk.oldStart - margin)
-          const oldEndLine = Math.min(oldLines.length, hunk.oldStart + hunk.oldCount - 1 + margin)
-          oldFallback = {
-            signature: `Alteração de Linhas`,
-            startLine: oldStartLine,
-            endLine: oldEndLine,
-            lines: oldLines.slice(oldStartLine - 1, oldEndLine)
-          }
-        }
-        blocksOutput.push(this.formatDoubleBlock(fallbackBlock, oldFallback, lang))
+        const oldEnd = hunk.oldStart + hunk.oldLines - 1
+        originalRange = `Linhas ${hunk.oldStart} a ${oldEnd}`
       }
-    }
 
-    if (blocksOutput.length === 0) return ''
+      // --- Formatação do intervalo de linhas novo (adicionado) ---
+      let newRange: string
+      if (hunk.newLines === 0) {
+        newRange = 'Sem linhas no arquivo novo'
+      } else if (hunk.newLines === 1) {
+        newRange = `Linha ${hunk.newStart}`
+      } else {
+        const newEnd = hunk.newStart + hunk.newLines - 1
+        newRange = `Linhas ${hunk.newStart} a ${newEnd}`
+      }
 
-    return `## 📄 \`${file.relativePath}\` (${CHANGE_TYPE_LABEL.modified})\n\n${blocksOutput.join('\n\n')}`
+      // Título do hunk com as descrições formatadas
+      const hunkTitle = `### 🔍 Hunk ${index + 1} (${originalRange} ➔ ${newRange})`
+
+      // Bloco negativo (removido)
+      const negativeBlock = removedLines.length > 0
+        ? [`#### 🟥 [Código Original / Removido]`, `\`\`\`${lang}`, removedLines.join('\n'), `\`\`\``].join('\n')
+        : [`#### 🟥 [Código Original / Removido]`, `*(Nenhuma versão anterior identificada)*`].join('\n')
+
+      // Bloco positivo (adicionado)
+      const positiveBlock = addedLines.length > 0
+        ? [`#### 🟩 [Código Novo / Adicionado]`, `\`\`\`${lang}`, addedLines.join('\n'), `\`\`\``].join('\n')
+        : [`#### 🟩 [Código Novo / Adicionado]`, `*(Nenhuma linha adicionada neste hunk)*`].join('\n')
+
+      hunkSections.push([hunkTitle, '', negativeBlock, '', positiveBlock].join('\n'))
+    })
+
+    const parts: string[] = [fileHeader]
+    parts.push(...hunkSections)
+
+    return parts.join('\n\n')
   }
 
-  private findContainingBlock(lines: string[], targetLine: number): SemanticBlock | null {
-    if (lines.length === 0 || targetLine <= 0) return null
-    const target = Math.min(targetLine - 1, lines.length - 1)
+  /**
+   * Executa `git diff HEAD --no-color --no-ext-diff -U0 -- <relativePath>`
+   * e retorna a saída raw do diff como string.
+   * O -U0 garante zero linhas de contexto, focando estritamente nas mudanças.
+   */
+  private runGitDiff(repoPath: string, relativePath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let stdout = ''
+      let stderr = ''
 
-    let sigLine = -1
-    for (let i = target; i >= 0; i--) {
-      if (SIGNATURE_PATTERNS.some(p => p.test(lines[i]))) {
-        sigLine = i
-        break
-      }
-    }
+      const proc = spawn('git', [
+        'diff', 'HEAD',
+        '--no-color',
+        '--no-ext-diff',
+        '-U0',
+        '--',
+        relativePath
+      ], { cwd: repoPath, shell: false })
 
-    if (sigLine === -1) return null
+      const timer = setTimeout(() => {
+        proc.kill()
+        reject(new Error('git diff timed out'))
+      }, GIT_TIMEOUT_MS)
 
-    let depth = 0
-    let foundOpen = false
-    let endLine = -1
+      proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
 
-    for (let i = sigLine; i < lines.length; i++) {
-      const opens = (lines[i].match(/\{/g) || []).length
-      const closes = (lines[i].match(/\}/g) || []).length
-      if (opens > 0) foundOpen = true
-      depth += opens - closes
-      if (foundOpen && depth <= 0) { endLine = i; break }
-    }
+      proc.on('close', (code) => {
+        clearTimeout(timer)
+        // git diff retorna 0 (sem erros) mesmo quando há diferenças
+        if (code === 0 || code === 1) resolve(stdout)
+        else reject(new Error(stderr.trim() || `git diff exited with code ${code}`))
+      })
 
-    if (endLine === -1) endLine = Math.min(sigLine + 80, lines.length - 1)
-
-    return {
-      signature: lines[sigLine].trim(),
-      startLine: sigLine + 1,
-      endLine: endLine + 1,
-      lines: lines.slice(sigLine, endLine + 1)
-    }
+      proc.on('error', (err) => {
+        clearTimeout(timer)
+        reject(err)
+      })
+    })
   }
 
-  private formatDoubleBlock(newBlock: SemanticBlock, oldBlock: SemanticBlock | null, lang: string): string {
-    const label = newBlock.signature.replace(/[{].*$/, '').replace(/=>\s*$/, '').trim()
-    const linesInterval = `(Linhas ${newBlock.startLine} a ${newBlock.endLine})`
-    
-    let output = `### Bloco: \`${label}\` ${linesInterval}\n\n`
-
-    if (oldBlock) {
-      output += `#### 🟥 [Código Original / Negativo]\n`
-      output += `\`\`\`${lang}\n${oldBlock.lines.join('\n')}\n\`\`\`\n\n`
-    } else {
-      output += `#### 🟥 [Código Original / Negativo]\n`
-      output += `*(Nenhuma versão anterior identificada)*\n\n`
+  /**
+   * Lê o conteúdo atual de um arquivo em disco como string.
+   * Retorna string vazia em caso de falha.
+   */
+  private async readFileContent(repoPath: string, relativePath: string): Promise<string | null> {
+    try {
+      return (await readFile(join(repoPath, relativePath), 'utf-8')).trimEnd()
+    } catch {
+      return null
     }
-
-    output += `#### 🟩 [Código Novo / Positivo]\n`
-    output += `\`\`\`${lang}\n${newBlock.lines.join('\n')}\n\`\`\``
-
-    return output
   }
 }

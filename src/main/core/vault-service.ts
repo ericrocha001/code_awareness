@@ -22,7 +22,12 @@ export class VaultService {
   }
 
   private resolveFilename(vaultPath: string, repoName: string): string {
-    const base = repoName.replace(/[<>:"/\\|?*]/g, '-')
+    const base = repoName
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .trim() || 'diff-export'
+      
     const candidate = join(vaultPath, `${base}.md`)
     if (!existsSync(candidate)) return candidate
 

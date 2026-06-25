@@ -29,6 +29,8 @@ declare global {
       stopWatcher: () => Promise<{ success: boolean }>
       onFileChanged: (callback: (filePath: string) => void) => () => void
       generateSemanticDiff: (repoPath: string, selectedFiles?: string[]) => Promise<string>
+      getAllTrackedFiles: (dirPath: string) => Promise<DiffFileStatus[]>
+      generateCompressionMarkdown: (repoPath: string, selectedFiles: string[]) => Promise<string>
       addRootFolder: () => Promise<ProjectInfo[]>
       addIndividualProject: () => Promise<ProjectInfo[]>
       getProjectsList: () => Promise<ProjectInfo[]>

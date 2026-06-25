@@ -27,9 +27,8 @@ export interface CodefetchResult {
 export interface DiffFileStatus {
   relativePath: string
   name: string
-  changeType: 'modified' | 'added' | 'deleted'
+  changeType: 'modified' | 'added' | 'deleted' | 'tracked'
   mtime: number
   size: number
 }
 
-export type WatcherState = 'active' | 'inactive' | 'error'

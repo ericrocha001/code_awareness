@@ -59,6 +59,12 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   generateSemanticDiff: (repoPath: string, selectedFiles?: string[]): Promise<string> => {
     return ipcRenderer.invoke('git:generate-semantic-diff', repoPath, selectedFiles)
   },
+  getAllTrackedFiles: (dirPath: string): Promise<DiffFileStatus[]> => {
+    return ipcRenderer.invoke('git:get-all-tracked-files', dirPath)
+  },
+  generateCompressionMarkdown: (repoPath: string, selectedFiles: string[]): Promise<string> => {
+    return ipcRenderer.invoke('git:generate-compression-markdown', repoPath, selectedFiles)
+  },
   addRootFolder: (): Promise<ProjectInfo[]> => {
     return ipcRenderer.invoke('workspace:add-root-folder')
   },

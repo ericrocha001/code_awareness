@@ -6,10 +6,15 @@
 // 4. Gerenciar arquivos ignorados (temporary) com botão de ocultar por hover e sanfona de restauração.
 // 5. Botão "🧹 Limpar ruídos" para ignorar lockfiles/config em massa como temporary.
 // 6. Popup de ignore inteligente por extensão (temporary vs persistent) ao ocultar arquivos.
+// 7. Copiar diff semântico de um único arquivo selecionado para a área de transferência.
+////
+// Nota: Estados de compressão estrutural e bulk update foram removidos deste componente
+// e movidos para uma aba dedicada (CodeCompressionView).
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Markdown from 'markdown-to-jsx'
 import { DiffFileStatus } from '../../../../shared/types'
+import { NOISE_FILES, COMMON_IGNORE_EXTENSIONS } from '../../constants/ignore-patterns'
 import './CodeDiffView.css'
 
 const CHANGE_TYPE_LABEL: Record<DiffFileStatus['changeType'], string> = {
@@ -31,29 +36,6 @@ Instruções da sua auditoria:
 
 Abaixo está o mapeamento semântico das funções alteradas:
 --------------------------------------------------`
-
-// Lista de arquivos de ruído comuns que o botão "Limpar ruídos" ignora em massa
-const NOISE_FILES = new Set([
-  'package-lock.json',
-  'pnpm-lock.yaml',
-  'yarn.lock',
-  '.DS_Store',
-  'tsconfig.tsbuildinfo',
-  'bun.lock',
-  'Gemfile.lock',
-  'Cargo.lock',
-  'composer.lock',
-  'poetry.lock'
-])
-
-// Extensões comuns que disparam o popup de ignore inteligente
-const COMMON_IGNORE_EXTENSIONS = new Set([
-  '.css', '.scss', '.sass', '.less',
-  '.json', '.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp',
-  '.md', '.txt', '.yaml', '.yml', '.toml', '.ini', '.cfg',
-  '.log', '.csv', '.xlsx', '.pdf', '.docx',
-  '.eslintrc', '.prettierrc', '.babelrc', '.editorconfig'
-])
 
 export const CodeDiffView: React.FC<{ activeProject: { path: string; name: string } | null }> = ({ activeProject }) => {
   const [isWatching, setIsWatching] = useState(false)
@@ -85,6 +67,9 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
   // Estado para armazenar o path do arquivo copiado recentemente para feedback de 1.5s
   const [copiedFile, setCopiedFile] = useState<string | null>(null)
 
+  // Estados de compressão e bulk update foram removidos (movidos para nova aba)
+
+
 
   // Ref para o popup (detectar clique fora)
   const ignorePopupRef = useRef<HTMLDivElement>(null)
@@ -94,6 +79,11 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
 
   // Ref para o timer do debounce
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // Ref que rastreia quais caminhos já estavam em visibleFiles na última renderização.
+  // Usado pelo Efeito 1 para distinguir arquivos GENUINAMENTE novos de arquivos que
+  // o usuário apenas desmarcou — impedindo que desmarcações sejam revertidas automaticamente.
+  const prevVisiblePathsRef = useRef<Set<string>>(new Set())
 
   // Ref de versionamento de request
   const requestIdRef = useRef(0)
@@ -163,26 +153,20 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
 
   // Efeito 1: Sincroniza a seleção usando apenas visibleFiles como fonte da verdade
   useEffect(() => {
+    const currentPaths = new Set(visibleFiles.map(f => f.relativePath))
+
     setSelectedFiles(prev => {
-      const currentPaths = new Set(visibleFiles.map(f => f.relativePath))
       const next = new Set<string>()
 
       // 1. Mantém os que já estavam ativos e ainda estão visíveis
       for (const path of prev) {
-        if (currentPaths.has(path)) {
-          next.add(path)
-        }
+        if (currentPaths.has(path)) next.add(path)
       }
 
-      // 2. Arquivos NOVOS entram marcados por padrão
-      for (const path of currentPaths) {
-        if (!prev.has(path)) {
-          next.add(path)
-        }
-      }
+      // Arquivos iniciam estritamente desmarcados. O usuário marca individualmente.
       return next
     })
-  }, [visibleFiles]) // Escuta apenas a lista visível filtrada
+  }, [visibleFiles])
 
 
   // Atualiza apenas o indeterminate visual do master checkbox (checked é controlado pelo React)
@@ -461,10 +445,11 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
           return
         }
 
-        const [, files, markdown] = await Promise.all([
+        const [, files] = await Promise.all([
           window.codeAwareness.startWatcher(activeProject.path),
-          window.codeAwareness.getModifiedFiles(activeProject.path),
-          window.codeAwareness.generateSemanticDiff(activeProject.path)
+          window.codeAwareness.getModifiedFiles(activeProject.path)
+          // generateSemanticDiff removido: o pipeline reativo (debounce effect) é
+          // o único produtor de diffMarkdown. Múltiplos escritores causavam inconsistências.
         ])
 
         if (!isMounted) return
@@ -478,8 +463,9 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
         await loadIgnoredFiles()
         if (!isMounted) return
 
+        // Apenas atualiza a lista de arquivos. O diff será gerado pelo debounce effect
+        // assim que o Efeito 1 sincronizar selectedFiles com os novos visibleFiles.
         setModifiedFiles(files)
-        setDiffMarkdown(markdown)
         setIsWatching(true)
       } finally {
         if (isMounted) setIsLoading(false)
@@ -490,14 +476,14 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
 
     const unsubscribe = window.codeAwareness.onFileChanged(async () => {
       if (!activeProject || !isMounted) return
-      const [files, markdown] = await Promise.all([
-        window.codeAwareness.getModifiedFiles(activeProject.path),
-        window.codeAwareness.generateSemanticDiff(activeProject.path)
-      ])
+
+      // Apenas busca a lista de arquivos — sem gerar diff aqui.
+      // O diff será recalculado pelo pipeline reativo (debounce effect) após
+      // setModifiedFiles atualizar visibleFiles e Efeito 1 atualizar selectedFiles.
+      const files = await window.codeAwareness.getModifiedFiles(activeProject.path)
       if (!isMounted) return
 
-      // Reconcilia com a lista atual do evento de mudança de arquivo,
-      // garantindo que os ignores reflitam o estado real do projeto no momento certo.
+      // Reconcilia os ignores com a lista atual do evento
       const currentPaths = files.map(f => f.relativePath)
       await window.codeAwareness.reconcileIgnoredFiles(activeProject.path, currentPaths)
       if (!isMounted) return
@@ -505,7 +491,6 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
       if (!isMounted) return
 
       setModifiedFiles(files)
-      setDiffMarkdown(markdown)
     })
 
     return () => {
@@ -548,12 +533,24 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
   }
 
   const handleExportObsidian = async () => {
-    if (!activeProject) return
+    // Guard clause: não exporta se não houver projeto ou markdown de diff vazio
+    if (!activeProject || !diffMarkdown) return
     setIsExporting(true)
     try {
-      const fixedPath = "C:\\Users\\ericr\\Documents\\Projetos de Softwares"
+      // Obtém as configurações atuais do app
+      const settings = await window.codeAwareness.loadSettings()
+      let vaultPath = settings.obsidianVaultPath
+
+      // Se não houver vault configurado, solicita que o usuário selecione uma pasta
+      if (!vaultPath) {
+        const selectedPath = await window.codeAwareness.selectVaultFolder()
+        if (!selectedPath) return
+        vaultPath = selectedPath
+        await window.codeAwareness.saveSettings({ ...settings, obsidianVaultPath: vaultPath })
+      }
+
       const name = activeProject.name + "-diff"
-      await window.codeAwareness.saveToObsidian(diffMarkdown, name, fixedPath)
+      await window.codeAwareness.saveToObsidian(diffMarkdown, name, vaultPath)
     } catch (err) {
       console.error("Falha ao exportar:", err)
     } finally {
@@ -658,11 +655,11 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
                     onClick={(e) => handleCopySingleFileDiff(file.relativePath, e)}
                   >
                     {copiedFile === file.relativePath ? (
-                      <svg viewBox="0 0 24 24" style={{ stroke: '#4ade80' }}>
+                      <svg viewBox="0 0 24 24" style={{ stroke: '#4ade80', fill: 'none', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }}>
                         <polyline points="20 6 9 17 4 12" />
                       </svg>
                     ) : (
-                      <svg viewBox="0 0 24 24">
+                      <svg viewBox="0 0 24 24" style={{ stroke: 'currentColor', fill: 'none', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }}>
                         <rect width="14" height="14" x="8" y="8" rx="2" ry="2" />
                         <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
                       </svg>

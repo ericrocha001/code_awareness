@@ -42,12 +42,12 @@ export function sanitizeEnvironment(): void {
   const pathsToAdd: string[] = []
 
   // Verificar NPM global bin
+  // No Windows, o NPM salva os .cmd diretamente em %APPDATA%\npm (sem subpasta bin)
   const npmPath = join(appData, 'npm')
   if (existsSync(npmPath)) {
-    const npmBin = join(npmPath, 'bin')
-    if (!currentPath.toLowerCase().includes(npmBin.toLowerCase())) {
-      pathsToAdd.push(npmBin)
-      console.log(`[EnvSanitizer] Adicionando ao PATH: ${npmBin}`)
+    if (!currentPath.toLowerCase().includes(npmPath.toLowerCase())) {
+      pathsToAdd.push(npmPath)
+      console.log(`[EnvSanitizer] Adicionando ao PATH: ${npmPath}`)
     }
   }
 

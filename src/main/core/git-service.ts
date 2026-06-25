@@ -112,6 +112,43 @@ export class GitService {
     }
   }
 
+  async getAllTrackedFiles(dirPath: string): Promise<DiffFileStatus[]> {
+    try {
+      const stdout = await this.runGit(['ls-files'], dirPath)
+      const files: DiffFileStatus[] = stdout
+        .split('\n')
+        .map(line => line.trim())
+        .filter(p => p.length > 0 && !p.endsWith('/'))
+        .filter(p =>
+          p !== 'code_awareness' && !p.startsWith('code_awareness/') &&
+          p !== 'codefetch'     && !p.startsWith('codefetch/')     &&
+          p !== '.sprintdiff'   && !p.startsWith('.sprintdiff/')
+        )
+        .map(relativePath => {
+          let mtime = 0
+          let size = 0
+          try {
+            const st = statSync(join(dirPath, relativePath))
+            mtime = st.mtimeMs
+            size = st.size
+          } catch {
+            // keep 0
+          }
+          return {
+            relativePath,
+            name: relativePath.split('/').pop() ?? relativePath,
+            changeType: 'tracked',
+            mtime,
+            size
+          }
+        })
+
+      return files.sort((a, b) => b.mtime - a.mtime)
+    } catch {
+      return []
+    }
+  }
+
   async getModifiedHunks(dirPath: string, relativePath: string): Promise<DiffHunk[]> {
     try {
       const stdout = await this.runGit(['diff', 'HEAD', '-U0', '--', relativePath], dirPath)

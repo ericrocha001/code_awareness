@@ -10,11 +10,12 @@ import { SetupBanner } from './components/SetupBanner/SetupBanner'
 import { ActionsBar } from './components/ActionsBar/ActionsBar'
 import { OutputPanel } from './components/OutputPanel/OutputPanel'
 import { CodeDiffView } from './components/CodeDiffView/CodeDiffView'
+import { CodeCompressionView } from './components/CodeCompressionView/CodeCompressionView'
 import { HomeView } from './components/HomeView/HomeView'
 import './App.css'
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'home' | 'codebase' | 'diff'>('home')
+  const [activeTab, setActiveTab] = useState<'home' | 'codebase' | 'compression' | 'diff'>('home')
   const [activeProject, setActiveProject] = useState<{ path: string; name: string } | null>(null)
   const [isCodefetchInstalled, setIsCodefetchInstalled] = useState<boolean>(true)
   const [settings, setSettings] = useState<AppSettings>({ obsidianVaultPath: null })
@@ -109,6 +110,12 @@ export const App: React.FC = () => {
             Code Source
           </button>
           <button 
+            className={`tab-btn ${activeTab === 'compression' ? 'active' : ''}`}
+            onClick={() => setActiveTab('compression')}
+          >
+            Code Compression
+          </button>
+          <button 
             className={`tab-btn ${activeTab === 'diff' ? 'active' : ''}`}
             onClick={() => setActiveTab('diff')}
           >
@@ -174,6 +181,9 @@ export const App: React.FC = () => {
           </>
         )}
           </>
+        )}
+        {activeTab === 'compression' && (
+          <CodeCompressionView activeProject={activeProject} />
         )}
         {activeTab === 'diff' && (
           <CodeDiffView activeProject={activeProject} />

@@ -5,9 +5,7 @@
 import { ipcMain, dialog, BrowserWindow } from 'electron'
 import { SettingsService } from '../core/settings-service'
 
-const settingsService = new SettingsService()
-
-export function registerSettingsHandlers(): void {
+export function registerSettingsHandlers(settingsService: SettingsService): void {
   ipcMain.handle('load-settings', async () => {
     return settingsService.loadSettings()
   })

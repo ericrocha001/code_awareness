@@ -71,8 +71,8 @@ app.whenReady().then(() => {
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
   registerCodefetchHandlers()
   registerFileHandlers()
-  registerSettingsHandlers()
-  registerGitHandlers(watcherService)
+  registerSettingsHandlers(settingsService)
+  registerGitHandlers(watcherService, settingsService)
   registerWorkspaceHandlers(settingsService, workspaceService)
 
   createWindow()

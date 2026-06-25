@@ -642,19 +642,22 @@
 
 /* Estilizando o botão de ocultar e copiar no card do arquivo */
 .cdf-hide-btn,
-.cdf-copy-btn {
+.cdf-copy-btn,
+.cdf-compress-copy-btn {
   flex-shrink: 0;
   opacity: 0;
   transition: opacity 0.15s ease, transform 0.1s ease;
 }
 
 .cdf-file-card:hover .cdf-hide-btn,
-.cdf-file-card:hover .cdf-copy-btn {
+.cdf-file-card:hover .cdf-copy-btn,
+.cdf-file-card:hover .cdf-compress-copy-btn {
   opacity: 0.8;
 }
 
 .cdf-file-card:hover .cdf-hide-btn:hover,
-.cdf-file-card:hover .cdf-copy-btn:hover {
+.cdf-file-card:hover .cdf-copy-btn:hover,
+.cdf-file-card:hover .cdf-compress-copy-btn:hover {
   opacity: 1;
   transform: scale(1.05);
 }
