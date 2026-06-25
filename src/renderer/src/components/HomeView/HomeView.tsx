@@ -11,9 +11,10 @@ import './HomeView.css'
 interface HomeViewProps {
   activeProject: { path: string; name: string } | null
   onSelectProject: (project: { path: string; name: string }) => void
+  onStatusMessage: (message: string, isError?: boolean) => void
 }
 
-export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProject }) => {
+export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProject, onStatusMessage }) => {
   const [projects, setProjects] = useState<ProjectInfo[]>([])
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [projectToHide, setProjectToHide] = useState<ProjectInfo | null>(null)
@@ -54,12 +55,14 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
     setIsMenuOpen(false)
     const list = await window.codeAwareness.addRootFolder()
     if (list) setProjects(list)
+    if (list) onStatusMessage('Pasta raiz importada com sucesso!')
   }
 
   const handleAddIndividualProject = async () => {
     setIsMenuOpen(false)
     const list = await window.codeAwareness.addIndividualProject()
     if (list) setProjects(list)
+    if (list) onStatusMessage('Projeto adicionado com sucesso!')
   }
 
   return (
@@ -153,6 +156,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
                   const list = await window.codeAwareness.hideProject(projectToHide.path)
                   setProjects(list)
                   setProjectToHide(null)
+                  if (list) onStatusMessage(`Projeto ${projectToHide.name} ocultado com sucesso!`)
                 }}
               >
                 Confirmar e Remover

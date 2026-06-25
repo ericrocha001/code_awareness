@@ -37,7 +37,7 @@ Instruções da sua auditoria:
 Abaixo está o mapeamento semântico das funções alteradas:
 --------------------------------------------------`
 
-export const CodeDiffView: React.FC<{ activeProject: { path: string; name: string } | null }> = ({ activeProject }) => {
+export const CodeDiffView: React.FC<{ activeProject: { path: string; name: string } | null; onStatusMessage: (message: string, isError?: boolean) => void }> = ({ activeProject, onStatusMessage }) => {
   const [isWatching, setIsWatching] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null)
@@ -247,8 +247,9 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
     if (result) {
       const repoIgnores = result.ignoredDiffFiles[activeProject.path]
       setIgnoredFiles(repoIgnores?.temporary || [])
+      onStatusMessage('Arquivo ocultado!')
     }
-  }, [activeProject])
+  }, [activeProject, onStatusMessage])
 
   // Ignora um padrão de extensão como persistent
   const ignoreExtensionPersistent = useCallback(async (ext: string) => {
@@ -271,8 +272,9 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
     if (result) {
       const repoIgnores = result.ignoredDiffFiles[activeProject.path]
       setPersistentPatterns(repoIgnores?.persistent || [])
+      onStatusMessage(`Padrão ${pattern} ignorado permanentemente!`)
     }
-  }, [activeProject, modifiedFiles, ignoredFiles])
+  }, [activeProject, modifiedFiles, ignoredFiles, onStatusMessage])
 
   // Handler do botão de ocultar: abre popup se extensão comum, senão faz temporary direto
   const handleHideClick = useCallback((relativePath: string, e: React.MouseEvent) => {
@@ -288,6 +290,7 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
   }, [ignoreFileTemporary])
 
   // Handler do popup: ignorar apenas este (temporary)
+  // Nota: o toast já é disparado dentro de ignoreFileTemporary
   const handlePopupIgnoreThis = useCallback(() => {
     if (!ignorePopup) return
     ignoreFileTemporary(ignorePopup.path)
@@ -322,7 +325,8 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
 
     // Recarrega ignorados
     await loadIgnoredFiles()
-  }, [activeProject, visibleFiles, loadIgnoredFiles])
+    onStatusMessage(`${noiseToIgnore.length} arquivo(s) de ruído ignorado(s)!`)
+  }, [activeProject, visibleFiles, loadIgnoredFiles, onStatusMessage])
 
   // Restaura um arquivo ignorado
   const handleRestoreFile = useCallback(async (relativePath: string) => {
@@ -331,17 +335,19 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
     if (result) {
       const repoIgnores = result.ignoredDiffFiles[activeProject.path]
       setIgnoredFiles(repoIgnores?.temporary || [])
+      onStatusMessage('Arquivo restaurado!')
     }
     setSelectedFiles(prev => {
       const next = new Set(prev)
       next.add(relativePath)
       return next
     })
-  }, [activeProject])
+  }, [activeProject, onStatusMessage])
 
   // Restaura todos os arquivos ignorados
   const handleRestoreAll = useCallback(async () => {
     if (!activeProject) return
+    const count = ignoredFiles.length
     for (const path of ignoredFiles) {
       await window.codeAwareness.removeIgnoredFile(activeProject.path, path, 'temporary')
     }
@@ -353,7 +359,8 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
       }
       return next
     })
-  }, [activeProject, ignoredFiles, loadIgnoredFiles])
+    onStatusMessage(`${count} arquivo(s) restaurado(s)!`)
+  }, [activeProject, ignoredFiles, loadIgnoredFiles, onStatusMessage])
 
   // Restaura um padrão persistente
   const handleRestorePersistentPattern = useCallback(async (pattern: string) => {
@@ -362,17 +369,20 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
     if (result) {
       const repoIgnores = result.ignoredDiffFiles[activeProject.path]
       setPersistentPatterns(repoIgnores?.persistent || [])
+      onStatusMessage('Padrão restaurado!')
     }
-  }, [activeProject])
+  }, [activeProject, onStatusMessage])
 
   // Restaura todos os padrões persistentes
   const handleRestoreAllPersistent = useCallback(async () => {
     if (!activeProject) return
+    const count = persistentPatterns.length
     for (const pattern of persistentPatterns) {
       await window.codeAwareness.removeIgnoredFile(activeProject.path, pattern, 'persistent')
     }
     await loadIgnoredFiles()
-  }, [activeProject, persistentPatterns, loadIgnoredFiles])
+    onStatusMessage(`${count} padrão(ões) restaurado(s)!`)
+  }, [activeProject, persistentPatterns, loadIgnoredFiles, onStatusMessage])
 
   // Promove um arquivo temporário para persistente
   const handleUpgradeToPersistent = useCallback(async (relativePath: string) => {
@@ -380,7 +390,8 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
     await window.codeAwareness.removeIgnoredFile(activeProject.path, relativePath, 'temporary')
     await window.codeAwareness.addIgnoredFile(activeProject.path, relativePath, 'persistent')
     await loadIgnoredFiles()
-  }, [activeProject, loadIgnoredFiles])
+    onStatusMessage('Arquivo promovido para permanente!')
+  }, [activeProject, loadIgnoredFiles, onStatusMessage])
 
   // Copia o diff semântico de um único arquivo
   const handleCopySingleFileDiff = useCallback(async (relativePath: string, e: React.MouseEvent) => {
@@ -822,7 +833,7 @@ export const CodeDiffView: React.FC<{ activeProject: { path: string; name: strin
               </details>
             </div>
 
-            <div className="cdf-diff-code-rendered">
+            <div className={`cdf-diff-code-rendered${!diffMarkdown || diffMarkdown.startsWith('# Nenhum') ? ' empty-state' : ''}`}>
               <Markdown>{diffMarkdown}</Markdown>
             </div>
           </main>

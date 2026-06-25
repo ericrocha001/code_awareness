@@ -126,7 +126,7 @@ export const App: React.FC = () => {
 
       <main className="app-main">
         {activeTab === 'home' && (
-          <HomeView activeProject={activeProject} onSelectProject={setActiveProject} />
+          <HomeView activeProject={activeProject} onSelectProject={setActiveProject} onStatusMessage={handleStatusMessage} />
         )}
         {activeTab === 'codebase' && (
           <>
@@ -183,10 +183,10 @@ export const App: React.FC = () => {
           </>
         )}
         {activeTab === 'compression' && (
-          <CodeCompressionView activeProject={activeProject} />
+          <CodeCompressionView activeProject={activeProject} onStatusMessage={handleStatusMessage} />
         )}
         {activeTab === 'diff' && (
-          <CodeDiffView activeProject={activeProject} />
+          <CodeDiffView activeProject={activeProject} onStatusMessage={handleStatusMessage} />
         )}
       </main>
     </div>

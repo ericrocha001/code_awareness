@@ -25,9 +25,10 @@ Abaixo está o esqueleto estrutural dos arquivos selecionados:
 
 interface CodeCompressionViewProps {
   activeProject: { path: string; name: string } | null
+  onStatusMessage: (message: string, isError?: boolean) => void
 }
 
-export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ activeProject }) => {
+export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ activeProject, onStatusMessage }) => {
   const [trackedFiles, setTrackedFiles] = useState<DiffFileStatus[]>([])
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [markdown, setMarkdown] = useState<string>('')
@@ -188,8 +189,11 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
     if (!activeProject) return
     setSelectedFiles(prev => { const next = new Set(prev); next.delete(relativePath); return next })
     const result = await window.codeAwareness.addIgnoredFile(activeProject.path, relativePath, 'temporary')
-    if (result) setIgnoredFiles(result.ignoredDiffFiles[activeProject.path]?.temporary || [])
-  }, [activeProject])
+    if (result) {
+      setIgnoredFiles(result.ignoredDiffFiles[activeProject.path]?.temporary || [])
+      onStatusMessage('Arquivo ocultado!')
+    }
+  }, [activeProject, onStatusMessage])
 
   // Ignora todos os arquivos da extensão como persistent
   const ignoreExtensionPersistent = useCallback(async (ext: string) => {
@@ -201,8 +205,11 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
       return next
     })
     const result = await window.codeAwareness.addIgnoredFile(activeProject.path, pattern, 'persistent')
-    if (result) setPersistentPatterns(result.ignoredDiffFiles[activeProject.path]?.persistent || [])
-  }, [activeProject, trackedFiles])
+    if (result) {
+      setPersistentPatterns(result.ignoredDiffFiles[activeProject.path]?.persistent || [])
+      onStatusMessage(`Padrão ${pattern} ignorado permanentemente!`)
+    }
+  }, [activeProject, trackedFiles, onStatusMessage])
 
   // Abre popup inteligente ou ignora diretamente dependendo da extensão
   const handleHideClick = useCallback((relativePath: string, e: React.MouseEvent) => {
@@ -215,6 +222,7 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
     }
   }, [ignoreFileTemporary])
 
+  // Nota: o toast já é disparado dentro de ignoreFileTemporary
   const handlePopupIgnoreThis = useCallback(() => {
     if (!ignorePopup) return
     ignoreFileTemporary(ignorePopup.path)
@@ -240,37 +248,48 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
       return next
     })
     await loadIgnoredFiles()
-  }, [activeProject, visibleFiles, loadIgnoredFiles])
+    onStatusMessage(`${noiseToIgnore.length} arquivo(s) de ruído ignorado(s)!`)
+  }, [activeProject, visibleFiles, loadIgnoredFiles, onStatusMessage])
 
   const handleRestoreFile = useCallback(async (relativePath: string) => {
     if (!activeProject) return
     const result = await window.codeAwareness.removeIgnoredFile(activeProject.path, relativePath, 'temporary')
-    if (result) setIgnoredFiles(result.ignoredDiffFiles[activeProject.path]?.temporary || [])
+    if (result) {
+      setIgnoredFiles(result.ignoredDiffFiles[activeProject.path]?.temporary || [])
+      onStatusMessage('Arquivo restaurado!')
+    }
     setSelectedFiles(prev => { const next = new Set(prev); next.add(relativePath); return next })
-  }, [activeProject])
+  }, [activeProject, onStatusMessage])
 
   const handleRestoreAll = useCallback(async () => {
     if (!activeProject) return
+    const count = ignoredFiles.length
     for (const path of ignoredFiles) {
       await window.codeAwareness.removeIgnoredFile(activeProject.path, path, 'temporary')
     }
     await loadIgnoredFiles()
     setSelectedFiles(prev => { const next = new Set(prev); ignoredFiles.forEach(p => next.add(p)); return next })
-  }, [activeProject, ignoredFiles, loadIgnoredFiles])
+    onStatusMessage(`${count} arquivo(s) restaurado(s)!`)
+  }, [activeProject, ignoredFiles, loadIgnoredFiles, onStatusMessage])
 
   const handleRestorePersistentPattern = useCallback(async (pattern: string) => {
     if (!activeProject) return
     const result = await window.codeAwareness.removeIgnoredFile(activeProject.path, pattern, 'persistent')
-    if (result) setPersistentPatterns(result.ignoredDiffFiles[activeProject.path]?.persistent || [])
-  }, [activeProject])
+    if (result) {
+      setPersistentPatterns(result.ignoredDiffFiles[activeProject.path]?.persistent || [])
+      onStatusMessage('Padrão restaurado!')
+    }
+  }, [activeProject, onStatusMessage])
 
   const handleRestoreAllPersistent = useCallback(async () => {
     if (!activeProject) return
+    const count = persistentPatterns.length
     for (const pattern of persistentPatterns) {
       await window.codeAwareness.removeIgnoredFile(activeProject.path, pattern, 'persistent')
     }
     await loadIgnoredFiles()
-  }, [activeProject, persistentPatterns, loadIgnoredFiles])
+    onStatusMessage(`${count} padrão(ões) restaurado(s)!`)
+  }, [activeProject, persistentPatterns, loadIgnoredFiles, onStatusMessage])
 
   // Promove um arquivo temporário para persistente
   const handleUpgradeToPersistent = useCallback(async (relativePath: string) => {
@@ -278,7 +297,8 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
     await window.codeAwareness.removeIgnoredFile(activeProject.path, relativePath, 'temporary')
     await window.codeAwareness.addIgnoredFile(activeProject.path, relativePath, 'persistent')
     await loadIgnoredFiles()
-  }, [activeProject, loadIgnoredFiles])
+    onStatusMessage('Arquivo promovido para permanente!')
+  }, [activeProject, loadIgnoredFiles, onStatusMessage])
 
   const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newVal = e.target.value
@@ -524,7 +544,7 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
             </details>
           </div>
 
-          <div className="cdf-diff-code-rendered">
+          <div className={`cdf-diff-code-rendered${!markdown && !isGenerating && !error ? ' empty-state' : ''}`}>
             {/* Banner de erro da geração */}
             {error && (
               <div className="error-banner">
@@ -543,7 +563,7 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
               <Markdown>{markdown}</Markdown>
             ) : (
               <div className="cdf-empty-hero">
-                <svg viewBox="0 0 24 24" style={{ width: '48px', height: '48px', stroke: 'var(--text-secondary)', fill: 'none', strokeWidth: 1.5, margin: '0 auto 16px auto', display: 'block' }}>
+                <svg viewBox="0 0 24 24" style={{ width: '48px', height: '48px', stroke: 'var(--text-secondary)', fill: 'none', strokeWidth: 1.5 }}>
                   <path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z" />
                   <polyline points="14 2 14 8 20 8" />
                   <line x1="16" x2="8" y1="13" y2="13" />
