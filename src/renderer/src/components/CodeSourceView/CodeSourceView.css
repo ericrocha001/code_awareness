@@ -1,0 +1,417 @@
+/* 
+  Reaproveitamento de estilos do CodeCompressionView com alteração de prefixo 'cdf' para 'cs'. 
+  Isto garante paridade de design e simplifica a transição. 
+*/
+.cs-container {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 220px);
+  min-height: 500px;
+  background: var(--bg-primary);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cs-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.cs-repo-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.cs-repo-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-primary);
+}
+
+.cs-status-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cs-status-badge.watching {
+  background: rgba(16, 185, 129, 0.15);
+  color: #10b981;
+}
+
+.cs-split {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 12px 12px;
+}
+
+.cs-sidebar {
+  width: 280px;
+  min-width: 280px;
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cs-sidebar-header {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cs-sidebar-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cs-sidebar-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cs-master-checkbox {
+  margin: 0;
+  cursor: pointer;
+}
+
+.cs-count-badge {
+  background: var(--bg-tertiary);
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.cs-empty-state {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-style: italic;
+}
+
+.cs-file-list {
+  list-style: none;
+  padding: 8px;
+  margin: 0;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cs-file-card {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: transparent;
+  gap: 8px;
+  position: relative;
+}
+
+.cs-file-card:hover {
+  background: var(--bg-tertiary);
+}
+
+.cs-file-checkbox {
+  margin: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.cs-file-card-body {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  cursor: pointer;
+}
+
+.cs-file-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.cs-hide-btn {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.cs-file-card:hover .cs-hide-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.cs-icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+  padding: 4px;
+}
+
+.cs-icon-btn:hover {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+.cs-icon-btn.small {
+  padding: 2px;
+}
+
+.cs-icon-btn svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Sidebar Footer & Ignorados */
+.cs-sidebar-footer {
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.cs-ignored-accordion {
+  font-size: 12px;
+}
+
+.cs-ignored-summary {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.cs-ignored-summary:hover {
+  background: var(--bg-tertiary);
+}
+
+.cs-ignored-title {
+  font-weight: 600;
+}
+
+.cs-pill-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  border-radius: 12px;
+  padding: 2px 8px;
+  font-size: 10px;
+  cursor: pointer;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.cs-pill-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.cs-ignored-list {
+  list-style: none;
+  padding: 0;
+  margin: 4px 0 0 0;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.cs-ignored-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 6px 4px 16px;
+  color: var(--text-tertiary);
+}
+
+.cs-ignored-item:hover {
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+}
+
+.cs-ignored-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 150px;
+}
+
+/* Ignore Popup Inteligente */
+.cs-ignore-popup {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 220px;
+}
+
+.cs-ignore-popup-text {
+  font-size: 13px;
+  color: var(--text-primary);
+  text-align: center;
+  word-break: break-all;
+}
+
+.cs-ignore-popup-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cs-ignore-popup-btn {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+
+.cs-ignore-popup-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.cs-ignore-popup-btn-all {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.cs-ignore-popup-btn-all:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+/* Painel Principal */
+.cs-diff-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.cs-diff-actions {
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.cs-diff-code-rendered {
+  flex: 1;
+  padding: 24px;
+  overflow-y: auto;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.cs-diff-code-rendered.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.cs-empty-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  text-align: center;
+  max-width: 400px;
+}
+
+.cs-empty-hero h3 {
+  margin: 16px 0 8px 0;
+  color: var(--text-primary);
+}
+
+.cs-empty-hero p {
+  margin: 0;
+  font-size: 14px;
+}
+
+.cs-diff-actions-bottom {
+  display: flex;
+  gap: 12px;
+  padding: 12px 24px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.cs-xml-code {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: monospace;
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* Dropzone (estado inicial) */
+.cs-dropzone-wrapper {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}

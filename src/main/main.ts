@@ -6,7 +6,6 @@
 
 import { app, BrowserWindow, Menu, shell } from 'electron'
 import { join } from 'path'
-import { registerCodefetchHandlers } from './ipc/codefetch-handler'
 import { registerFileHandlers } from './ipc/file-handler'
 import { registerSettingsHandlers } from './ipc/settings-handler'
 import { registerGitHandlers } from './ipc/git-handler'
@@ -69,7 +68,6 @@ app.whenReady().then(() => {
   const workspaceService = new WorkspaceService()
 
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
-  registerCodefetchHandlers()
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
   registerGitHandlers(watcherService, settingsService)

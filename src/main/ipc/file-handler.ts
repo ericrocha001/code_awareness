@@ -30,6 +30,25 @@ export function registerFileHandlers(): void {
     }
   })
 
+  ipcMain.handle('save-xml', async (event, xml: string, repoName: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
+    const { filePath, canceled } = await dialog.showSaveDialog(win, {
+      title: 'Save XML',
+      defaultPath: `${repoName}.xml`,
+      filters: [{ name: 'XML', extensions: ['xml'] }]
+    })
+
+    if (canceled || !filePath) return { success: false, error: 'Cancelled' }
+
+    try {
+      writeFileSync(filePath, xml, 'utf-8')
+      return { success: true }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      return { success: false, error: message }
+    }
+  })
+
   ipcMain.handle(
     'save-to-obsidian',
     async (_event, markdown: string, repoName: string, vaultPath: string) => {

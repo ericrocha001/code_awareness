@@ -16,10 +16,14 @@ import { WatcherService } from '../core/watcher-service'
 import { DiffService } from '../core/diff-service'
 import { SettingsService } from '../core/settings-service'
 import { CompressionService } from '../core/compression-service'
+import { CodeSourceService } from '../core/code-source-service'
+import { RepomixAdapter } from '../core/repomix-adapter'
 
 const gitService = new GitService()
 const diffService = new DiffService()
 const compressionService = new CompressionService()
+const codeSourceService = new CodeSourceService()
+const repomixAdapter = new RepomixAdapter()
 
 // Valida se o path recebido via IPC é uma string não vazia
 function isValidPath(value: unknown): value is string {
@@ -66,6 +70,18 @@ export function registerGitHandlers(watcherService: WatcherService, settingsServ
   ipcMain.handle('git:generate-compression-markdown', async (_event, repoPath: string, selectedFiles: string[]) => {
     if (!isValidPath(repoPath) || !Array.isArray(selectedFiles) || selectedFiles.length === 0) return ''
     return compressionService.generateCompressionMarkdown(repoPath, selectedFiles)
+  })
+
+  ipcMain.handle('code-source:generate', async (_event, repoPath: string, options?: {
+    selectedFiles?: string[]
+    format?: 'markdown' | 'xml'
+  }) => {
+    if (!isValidPath(repoPath)) return { success: false, error: 'Invalid path' }
+    return codeSourceService.generateCodeSource(repoPath, options)
+  })
+
+  ipcMain.handle('code-source:check-installation', async () => {
+    return repomixAdapter.checkInstallation()
   })
 
   // Adiciona um arquivo à lista de ignorados (temporary ou persistent) para o repositório informado

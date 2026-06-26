@@ -10,9 +10,8 @@ import { AppSettings, CodefetchResult, DiffFileStatus, ProjectInfo } from '../..
 declare global {
   interface Window {
     codeAwareness: {
-      checkCodefetch: () => Promise<boolean>
-      runCodefetch: (repoPath: string) => Promise<CodefetchResult>
       saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
+      saveXml: (xml: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveToObsidian: (
         markdown: string,
         repoName: string,
@@ -38,6 +37,11 @@ declare global {
       addIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent') => Promise<AppSettings | null>
       removeIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent') => Promise<AppSettings | null>
       reconcileIgnoredFiles: (repoPath: string, currentModifiedFiles: string[]) => Promise<AppSettings | null>
+      checkCodeSourceInstallation: () => Promise<boolean>
+      generateCodeSource: (
+        repoPath: string,
+        options?: { selectedFiles?: string[]; format?: 'markdown' | 'xml' }
+      ) => Promise<CodefetchResult & { tokenCount?: number }>
     }
   }
 }

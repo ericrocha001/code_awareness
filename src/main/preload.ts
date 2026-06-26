@@ -8,14 +8,11 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { AppSettings, CodefetchResult, DiffFileStatus, ProjectInfo } from '../shared/types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
-  checkCodefetch: (): Promise<boolean> => {
-    return ipcRenderer.invoke('check-codefetch')
-  },
-  runCodefetch: (repoPath: string): Promise<CodefetchResult> => {
-    return ipcRenderer.invoke('run-codefetch', repoPath)
-  },
   saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('save-markdown', markdown, repoName)
+  },
+  saveXml: (xml: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('save-xml', xml, repoName)
   },
   saveToObsidian: (
     markdown: string,
@@ -87,5 +84,15 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   },
   reconcileIgnoredFiles: (repoPath: string, currentModifiedFiles: string[]): Promise<AppSettings | null> => {
     return ipcRenderer.invoke('git:reconcile-ignored-files', repoPath, currentModifiedFiles)
+  },
+  
+  checkCodeSourceInstallation: (): Promise<boolean> => {
+    return ipcRenderer.invoke('code-source:check-installation')
+  },
+  generateCodeSource: (
+    repoPath: string,
+    options?: { selectedFiles?: string[]; format?: 'markdown' | 'xml' }
+  ): Promise<CodefetchResult & { tokenCount?: number }> => {
+    return ipcRenderer.invoke('code-source:generate', repoPath, options)
   }
 })

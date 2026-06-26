@@ -3,12 +3,73 @@
 // 1. Detectar e executar o Repomix CLI no sistema operacional do usuário.
 // 2. Comprimir um único arquivo do repositório via --include, retornando apenas o
 //    bloco de código comprimido limpo, sem cabeçalhos ou rodapés de boilerplate.
+// 3. Gerar o Markdown completo do repositório para o Code Source, verificando sua instalação.
+// 4. Gerar Markdown seletivo (arquivos escolhidos) com contagem de tokens.
 
 import { spawn } from 'child_process'
 
 export class RepomixAdapter {
   private getCommand(): string {
     return process.platform === 'win32' ? 'repomix.cmd' : 'repomix'
+  }
+
+  /**
+   * Verifica se o Repomix está instalado e acessível no sistema.
+   */
+  async checkInstallation(): Promise<boolean> {
+    try {
+      await this.runProcess(this.getCommand(), ['--version'], process.cwd(), 10000)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Gera o markdown completo de um repositório via Repomix.
+   */
+  async generateFullRepositoryMarkdown(repoPath: string): Promise<string> {
+    const command = this.getCommand()
+    const args = [
+      '--style', 'markdown',
+      '--stdout'
+      // Omitido --no-file-summary para manter o resumo padrão
+    ]
+
+    return this.runProcess(command, args, repoPath, 120000)
+  }
+
+  /**
+   * Gera Markdown apenas dos arquivos selecionados e retorna também a contagem de tokens.
+   * A contagem é calculada diretamente sobre o conteúdo gerado, refletindo o tamanho real
+   * do texto que será enviado para a IA.
+   */
+  async generateSelectiveMarkdown(
+    repoPath: string,
+    selectedFiles: string[],
+    format: 'markdown' | 'xml' = 'markdown'
+  ): Promise<{ content: string; tokenCount: number }> {
+    if (selectedFiles.length === 0) {
+      throw new Error('Nenhum arquivo selecionado para geração seletiva.')
+    }
+
+    const command = this.getCommand()
+    const includePattern = selectedFiles.join(',')
+
+    // Execução única: gera o conteúdo Markdown/XML dos arquivos selecionados
+    const content = await this.runProcess(command, [
+      '--include', includePattern,
+      '--style', format,
+      '--stdout',
+      '--no-file-summary'
+    ], repoPath, 120000)
+
+    // Contagem de tokens diretamente sobre o conteúdo gerado.
+    // Estimativa conservadora: ~4 caracteres por token (média para texto em inglês/código).
+    // Sem dependência externa de tokenização, esta é a aproximação mais simples e confiável.
+    const tokenCount = Math.ceil(content.length / 4)
+
+    return { content, tokenCount }
   }
 
   /**
@@ -40,7 +101,7 @@ export class RepomixAdapter {
    * Executa o processo filho e retorna stdout como string.
    * Rejeita se o processo sair com código diferente de 0.
    */
-  private runProcess(command: string, args: string[], cwd: string): Promise<string> {
+  private runProcess(command: string, args: string[], cwd: string, timeoutMs: number = 120000): Promise<string> {
     return new Promise((resolve, reject) => {
       const proc = spawn(command, args, {
         cwd,
@@ -50,10 +111,16 @@ export class RepomixAdapter {
       let stdout = ''
       let stderr = ''
 
+      const timer = setTimeout(() => {
+        proc.kill()
+        reject(new Error(`Processo do Repomix excedeu o timeout de ${timeoutMs / 1000}s.`))
+      }, timeoutMs)
+
       proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
       proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
 
       proc.on('close', (code) => {
+        clearTimeout(timer)
         if (code === 0) {
           resolve(stdout)
         } else {
@@ -65,6 +132,7 @@ export class RepomixAdapter {
       })
 
       proc.on('error', (err) => {
+        clearTimeout(timer)
         reject(new Error(`Repomix não encontrado. Detalhes: ${err.message}`))
       })
     })
@@ -113,4 +181,4 @@ export class RepomixAdapter {
 
     return collected.join('\n').trim()
   }
-}
+}
