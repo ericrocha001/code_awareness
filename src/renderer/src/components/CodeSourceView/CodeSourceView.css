@@ -58,14 +58,36 @@
   border-radius: 0 0 12px 12px;
 }
 
+/* Sidebar com largura dinâmica e posição relativa para o resize handle */
 .cs-sidebar {
-  width: 280px;
+  width: 450px;
   min-width: 280px;
+  max-width: 500px;
   background: var(--bg-secondary);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;
+  font-size: 13px;
+}
+
+/* Resize handle na borda direita da sidebar */
+.cs-sidebar-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.cs-sidebar-resize-handle:hover,
+.cs-sidebar-resize-handle.resizing {
+  background: var(--accent);
 }
 
 .cs-sidebar-header {
@@ -90,7 +112,7 @@
 .cs-sidebar-header-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
 }
 
 .cs-master-checkbox {
@@ -124,13 +146,14 @@
   gap: 2px;
 }
 
+/* Card de arquivo em duas linhas */
 .cs-file-card {
   display: flex;
-  align-items: center;
-  padding: 6px 8px;
+  align-items: flex-start;
+  padding: 8px 10px;
   border-radius: 6px;
   background: transparent;
-  gap: 8px;
+  gap: 6px;
   position: relative;
 }
 
@@ -142,29 +165,66 @@
   margin: 0;
   cursor: pointer;
   flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
 }
 
-.cs-file-card-body {
+/* Conteúdo do card em duas linhas */
+.cs-file-card-content {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.cs-file-name-row {
   display: flex;
   align-items: center;
-  min-width: 0;
-  cursor: pointer;
+  gap: 6px;
 }
 
 .cs-file-name {
   font-size: 13px;
+  font-weight: 500;
   color: var(--text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  direction: rtl;
-  text-align: left;
+}
+
+.cs-file-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cs-file-path {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cs-token-estimate {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .cs-hide-btn {
   opacity: 0;
   pointer-events: none;
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  margin-top: 2px;
 }
 
 .cs-file-card:hover .cs-hide-btn {
@@ -361,6 +421,8 @@
   font-size: 14px;
   line-height: 1.6;
   color: var(--text-primary);
+  max-width: 800px;
+  margin: 0 auto;
 }
 
 .cs-diff-code-rendered.empty-state {
@@ -414,4 +476,13 @@
   align-items: center;
   justify-content: center;
   padding: 24px;
+}
+
+/* Total de tokens selecionados no cabeçalho */
+.cs-token-total {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  margin-left: 8px;
 }

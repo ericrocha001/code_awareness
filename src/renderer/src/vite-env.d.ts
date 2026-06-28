@@ -5,7 +5,7 @@
 
 /// <reference types="vite/client" />
 
-import { AppSettings, CodefetchResult, DiffFileStatus, ProjectInfo } from '../../shared/types'
+import { AppSettings, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ProjectInfo } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -42,6 +42,33 @@ declare global {
         repoPath: string,
         options?: { selectedFiles?: string[]; format?: 'markdown' | 'xml' }
       ) => Promise<CodefetchResult & { tokenCount?: number }>
+
+      // ─── Importância Arquitetural ─────────────────────────────────
+      classifyImportance: (
+        repoPath: string,
+        repoName: string,
+        files: { relativePath: string }[]
+      ) => Promise<{ success: boolean; data?: Record<string, FileImportance>; error?: string }>
+
+      setImportanceOverride: (
+        repoPath: string,
+        repoName: string,
+        relativePath: string,
+        level: ImportanceLevel
+      ) => Promise<{ success: boolean; data?: Record<string, FileImportance>; error?: string }>
+
+      revealInExplorer: (repoPath: string, relativePath: string) => Promise<boolean>
+
+      onImportanceUpdated: (
+        callback: (data: {
+          repoPath: string
+          relativePath: string
+          level: string
+          source: string
+        }) => void
+      ) => Electron.IpcRenderer
+
+      removeImportanceUpdatedListener: () => void
     }
   }
 }

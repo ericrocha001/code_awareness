@@ -1,0 +1,88 @@
+/* Wrapper do dropdown com posicionamento relativo */
+.sidebar-actions-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+/* Botão "Ações" — estilo pill com borda sutil */
+.sidebar-actions-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.sidebar-actions-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary);
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+/* Ícone de menu ⋮ */
+.sidebar-actions-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+/* Menu Dropdown */
+.sidebar-actions-menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  min-width: 200px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  padding: 4px 0;
+}
+
+/* Itens do dropdown */
+.sidebar-actions-menu button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+  width: 100%;
+  white-space: nowrap;
+}
+
+.sidebar-actions-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Emoji/ícone da ação */
+.sidebar-action-emoji {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* Separador visual entre ações */
+.sidebar-actions-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 10px;
+}

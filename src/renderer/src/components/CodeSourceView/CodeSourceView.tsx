@@ -1,14 +1,67 @@
-// Responsabilidades do Script
-//
-// 1. Renderizar a interface da aba Code Source com paridade de design ao CodeCompressionView.
-// 2. Gerenciar a seleção reativa de arquivos com sistema de Ignore, seletor de formato (Markdown/XML) e contagem de tokens.
-// 3. Monitorar alterações de arquivos em tempo real via WatcherService com debounce de 300ms.
-// 4. Fornecer ações contextuais (Copiar, Salvar XML, Exportar Obsidian).
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Renderizar a interface da aba Code Source com sidebar redimensionável e layout de duas linhas.
+2. Gerenciar a seleção reativa de arquivos com sistema de Ignore, seletor de formato (Markdown/XML) e contagem de tokens.
+3. Monitorar alterações de arquivos em tempo real via WatcherService com debounce de 300ms.
+4. Fornecer ações contextuais (Copiar, Salvar XML, Exportar Obsidian).
+5. Sincronizar classificações de importância em tempo real com outras abas via evento IPC.
+
+Mapa de Relacionamentos do Script
+
+1. CodeSourceView.css
+   - Tipo: Relação de UI
+   - Relação: Consome estilos CSS do componente.
+   - Criticidade: Alta
+
+2. ImportanceBadge.tsx
+   - Tipo: Dependência Direta
+   - Relação: Renderiza badge de importância para cada arquivo.
+   - Criticidade: Alta
+
+3. ignore-patterns.ts
+   - Tipo: Dependência Direta
+   - Relação: Fornece padrões de ruído e extensões ignoradas.
+   - Criticidade: Média
+
+4. CodeCompressionView.tsx
+   - Tipo: Fluxo de Dados
+   - Relação: Compartilha estrutura de sidebar e layout similar.
+   - Criticidade: Média
+
+5. SidebarActions.tsx
+   - Tipo: Dependência Direta
+   - Relação: Renderiza dropdown unificado de ações da sidebar (Varrer Mesa, Selecionar Críticos e Altos).
+   - Criticidade: Alta
+
+6. window.codeAwareness.onImportanceUpdated
+   - Tipo: Comunicação por Evento
+   - Relação: Escuta eventos de atualização de importância emitidos por outras abas.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. A sidebar deve ter largura entre 280px e 500px, nunca fora desse intervalo.
+2. O resize handle deve estar sempre na borda direita da sidebar.
+3. Os nomes dos arquivos nunca devem ser truncados sem ellipsis.
+4. O total de tokens selecionados deve ser calculado apenas com base nos arquivos checkados.
+5. A tríade arquitetural deve ser sempre atualizada junto com o código.
+6. A sincronização de importância não deve afetar a seleção de arquivos (checkboxes).
+7. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Markdown from 'markdown-to-jsx'
-import { DiffFileStatus } from '../../../../shared/types'
+import { DiffFileStatus, ImportanceLevel, ImportanceSource } from '../../../../shared/types'
 import { NOISE_FILES, COMMON_IGNORE_EXTENSIONS } from '../../constants/ignore-patterns'
+import { ImportanceBadge } from '../ImportanceBadge/ImportanceBadge'
+import { ImportanceGroup } from '../ImportanceGroup/ImportanceGroup'
+import { SidebarActions } from '../SidebarActions/SidebarActions'
+import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
 import './CodeSourceView.css'
 
 interface CodeSourceViewProps {
@@ -28,16 +81,85 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
   const [isCopied, setIsCopied] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
 
+  // Sistema de Importância Arquitetural
+  const [importanceMap, setImportanceMap] = useState<Record<string, ImportanceLevel>>({})
+  const [importanceSource, setImportanceSource] = useState<Record<string, ImportanceSource>>({})
+  const [tokenEstimates, setTokenEstimates] = useState<Record<string, number>>({})
+  const [isClassifying, setIsClassifying] = useState(false)
+
   // Ignore system
   const [ignoredFiles, setIgnoredFiles] = useState<string[]>([])
   const [persistentPatterns, setPersistentPatterns] = useState<string[]>([])
   const [ignoredAccordionOpen, setIgnoredAccordionOpen] = useState(false)
   const [ignorePopup, setIgnorePopup] = useState<{ path: string; ext: string } | null>(null)
 
-  const masterCheckboxRef = useRef<HTMLInputElement>(null)
   const ignorePopupRef = useRef<HTMLDivElement>(null)
   const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const requestIdRef = useRef(0)
+  const sidebarRef = useRef<HTMLDivElement>(null)
+
+  // Sidebar redimensionável: largura inicial de 450px, min 280, max 500
+  const [sidebarWidth, setSidebarWidth] = useState(450)
+  const [isResizing, setIsResizing] = useState(false)
+
+  // Formata contagem de tokens para exibição amigável (ex: 1234 → "1.2k")
+  const formatTokenCount = useCallback((count: number): string => {
+    if (count >= 1000) {
+      return `${(count / 1000).toFixed(1)}k`
+    }
+    return count.toString()
+  }, [])
+
+  // Extrai o diretório de um path relativo (ex: "src/components/foo.ts" → "src/components/")
+  const getDirectoryPath = (relativePath: string): string => {
+    const parts = relativePath.split('/')
+    if (parts.length <= 1) return ''
+    return parts.slice(0, -1).join('/') + '/'
+  }
+
+  // Handlers de resize da sidebar: mouse down inicia, mouse move atualiza, mouse up finaliza
+  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    setIsResizing(true)
+  }, [])
+
+  useEffect(() => {
+    if (!isResizing) return
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!sidebarRef.current) return
+      const rect = sidebarRef.current.getBoundingClientRect()
+      const newWidth = Math.max(280, Math.min(500, e.clientX - rect.left))
+      setSidebarWidth(newWidth)
+    }
+
+    const handleMouseUp = () => {
+      setIsResizing(false)
+    }
+
+    document.addEventListener('mousemove', handleMouseMove)
+    document.addEventListener('mouseup', handleMouseUp)
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove)
+      document.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isResizing])
+
+  // Carrega largura da sidebar do localStorage por projeto
+  useEffect(() => {
+    if (!activeProject) return
+    const saved = localStorage.getItem(`code_source_sidebar_width_${activeProject.path}`)
+    if (saved) {
+      const width = parseInt(saved, 10)
+      if (width >= 280 && width <= 500) setSidebarWidth(width)
+    }
+  }, [activeProject])
+
+  // Salva largura da sidebar no localStorage quando muda (não durante o arrasto)
+  useEffect(() => {
+    if (!activeProject || isResizing) return
+    localStorage.setItem(`code_source_sidebar_width_${activeProject.path}`, sidebarWidth.toString())
+  }, [sidebarWidth, activeProject, isResizing])
 
   // Carrega formato do localStorage
   useEffect(() => {
@@ -151,23 +273,123 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
     return false
   }, [persistentPatterns])
 
-  // Lista visível
+  // Sincroniza classificações de importância quando outra aba faz override
+  useEffect(() => {
+    if (!activeProject) return
+
+    const handleImportanceUpdated = (data: { repoPath: string; relativePath: string; level: ImportanceLevel; source: ImportanceSource }) => {
+      // Só processa se o evento for para o projeto atual
+      if (data.repoPath !== activeProject.path) return
+
+      // Atualiza o estado local com a nova classificação
+      setImportanceMap(prev => ({
+        ...prev,
+        [data.relativePath]: data.level
+      }))
+      setImportanceSource(prev => ({
+        ...prev,
+        [data.relativePath]: data.source
+      }))
+    }
+
+    // Registra o listener
+    window.codeAwareness.onImportanceUpdated(handleImportanceUpdated)
+
+    // Cleanup: remove o listener quando o componente desmonta ou activeProject muda
+    return () => {
+      window.codeAwareness.removeImportanceUpdatedListener()
+    }
+  }, [activeProject])
+
+  // Classifica a importância dos arquivos quando o projeto ou tracked files mudam
+  useEffect(() => {
+    if (!activeProject || trackedFiles.length === 0) {
+      setImportanceMap({})
+      setImportanceSource({})
+      setTokenEstimates({})
+      return
+    }
+
+    const classifyFiles = async () => {
+      setIsClassifying(true)
+      try {
+        const result = await window.codeAwareness.classifyImportance(
+          activeProject.path,
+          activeProject.name,
+          trackedFiles.map(f => ({ relativePath: f.relativePath }))
+        )
+
+        if (result.success && result.data) {
+          const levelMap: Record<string, ImportanceLevel> = {}
+          const sourceMap: Record<string, ImportanceSource> = {}
+          const estimateMap: Record<string, number> = {}
+
+          for (const [relativePath, importance] of Object.entries(result.data)) {
+            levelMap[relativePath] = importance.level
+            sourceMap[relativePath] = importance.source
+            estimateMap[relativePath] = importance.tokenEstimate || 0
+          }
+
+          setImportanceMap(levelMap)
+          setImportanceSource(sourceMap)
+          setTokenEstimates(estimateMap)
+        } else {
+          console.error('Falha ao classificar importância:', result.error)
+        }
+      } catch (error) {
+        console.error('Erro ao classificar importância:', error)
+      } finally {
+        setIsClassifying(false)
+      }
+    }
+
+    classifyFiles()
+  }, [activeProject, trackedFiles])
+
+  // Lista visível: filtra ignorados e padrões persistentes, ordenada por importância
   const visibleFiles = useMemo(() => {
-    return trackedFiles.filter(f => {
+    const filtered = trackedFiles.filter(f => {
       if (ignoredFiles.includes(f.relativePath)) return false
       if (matchesPersistentPattern(f.relativePath)) return false
       return true
     })
-  }, [trackedFiles, ignoredFiles, matchesPersistentPattern])
+
+    // Ordena por importância: critical > high > medium > low
+    const importanceOrder: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3 }
+
+    return filtered.sort((a, b) => {
+      const levelA = importanceMap[a.relativePath] || 'low'
+      const levelB = importanceMap[b.relativePath] || 'low'
+      const orderDiff = importanceOrder[levelA] - importanceOrder[levelB]
+
+      // Se mesma importância, ordena alfabeticamente
+      if (orderDiff === 0) {
+        return a.relativePath.localeCompare(b.relativePath)
+      }
+
+      return orderDiff
+    })
+  }, [trackedFiles, ignoredFiles, matchesPersistentPattern, importanceMap])
+
+  // Arquivos agrupados por nível de importância para renderização por seção
+  const groupedFiles = useMemo(() => ({
+    critical: visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'critical'),
+    high:     visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'high'),
+    medium:   visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'medium'),
+    low:      visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'low')
+  }), [visibleFiles, importanceMap])
+
+  // Total de tokens selecionados
+  const totalSelectedTokens = useMemo(() => {
+    let total = 0
+    for (const path of selectedFiles) {
+      total += tokenEstimates[path] || 0
+    }
+    return total
+  }, [selectedFiles, tokenEstimates])
 
   const hasNoiseFiles = useMemo(() => visibleFiles.some(f => NOISE_FILES.has(f.name)), [visibleFiles])
 
-  // Estado indeterminate do master checkbox
-  useEffect(() => {
-    const el = masterCheckboxRef.current
-    if (!el) return
-    el.indeterminate = selectedFiles.size > 0 && selectedFiles.size < visibleFiles.length
-  }, [selectedFiles, visibleFiles.length])
 
   // Geração reativa
   useEffect(() => {
@@ -211,7 +433,7 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
           setIsGenerating(false)
         }
       }
-    }, 300) // 300ms de debounce: tempo suficiente para salvar múltiplos arquivos sem regenerações desnecessárias
+    }, 300)
 
     return () => {
       if (debounceTimerRef.current) { clearTimeout(debounceTimerRef.current); debounceTimerRef.current = null }
@@ -268,6 +490,26 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
     }
   }, [ignoreFileTemporary])
 
+  // Handlers para ActionsDropdown
+  const handleCopyPath = useCallback((relativePath: string) => {
+    navigator.clipboard.writeText(relativePath)
+    onStatusMessage('Caminho copiado!')
+  }, [onStatusMessage])
+
+  const handleCopyName = useCallback((name: string) => {
+    navigator.clipboard.writeText(name)
+    onStatusMessage('Nome copiado!')
+  }, [onStatusMessage])
+
+  const handleRevealInExplorer = useCallback(async (relativePath: string) => {
+    if (!activeProject) return
+    await window.codeAwareness.revealInExplorer(activeProject.path, relativePath)
+  }, [activeProject])
+
+  const handleHideExtension = useCallback(async (ext: string) => {
+    await ignoreExtensionPersistent(`.${ext}`)
+  }, [ignoreExtensionPersistent])
+
   const handlePopupIgnoreThis = useCallback(() => {
     if (!ignorePopup) return
     ignoreFileTemporary(ignorePopup.path)
@@ -279,6 +521,42 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
     ignoreExtensionPersistent(ignorePopup.ext)
     setIgnorePopup(null)
   }, [ignorePopup, ignoreExtensionPersistent])
+
+  // Handler para override manual da importância de um arquivo
+  const handleImportanceChange = useCallback(async (relativePath: string, newLevel: ImportanceLevel) => {
+    if (!activeProject) return
+
+    try {
+      const result = await window.codeAwareness.setImportanceOverride(
+        activeProject.path,
+        activeProject.name,
+        relativePath,
+        newLevel
+      )
+
+      if (result.success && result.data) {
+        const importance = result.data[relativePath]
+        if (importance) {
+          setImportanceMap(prev => ({ ...prev, [relativePath]: importance.level }))
+          setImportanceSource(prev => ({ ...prev, [relativePath]: importance.source }))
+        }
+        onStatusMessage('Importância atualizada!')
+      }
+    } catch (error) {
+      console.error('Erro ao atualizar importância:', error)
+    }
+  }, [activeProject, onStatusMessage])
+
+  // Handler para selecionar todos os arquivos críticos e altos de uma vez
+  const handleSelectCriticalAndHigh = useCallback(() => {
+    const criticalAndHighFiles = visibleFiles.filter(f => {
+      const level = importanceMap[f.relativePath] || 'low'
+      return level === 'critical' || level === 'high'
+    })
+
+    setSelectedFiles(new Set(criticalAndHighFiles.map(f => f.relativePath)))
+    onStatusMessage(`${criticalAndHighFiles.length} arquivo(s) crítico(s) e alto(s) selecionado(s)!`)
+  }, [visibleFiles, importanceMap, onStatusMessage])
 
   const handleSweepNoise = useCallback(async () => {
     if (!activeProject) return
@@ -418,15 +696,18 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
 
       <div className="cs-split">
         {/* Sidebar com lista de arquivos tracked */}
-        <aside className="cs-sidebar">
+        <aside className="cs-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
+          {/* Resize handle na borda direita — permite arrastar para redimensionar */}
+          <div
+            className={`cs-sidebar-resize-handle${isResizing ? ' resizing' : ''}`}
+            onMouseDown={handleResizeMouseDown}
+          />
           <div className="cs-sidebar-header">
             <span className="cs-sidebar-header-left">
               {visibleFiles.length > 0 && (
-                <input
-                  type="checkbox"
-                  ref={masterCheckboxRef}
-                  className="cs-master-checkbox"
+                <ToggleSwitch
                   checked={selectedFiles.size === visibleFiles.length && visibleFiles.length > 0}
+                  indeterminate={selectedFiles.size > 0 && selectedFiles.size < visibleFiles.length}
                   onChange={toggleMasterCheckbox}
                   onClick={(e) => e.stopPropagation()}
                 />
@@ -434,20 +715,22 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
               <span>Arquivos Tracked</span>
             </span>
             <span className="cs-sidebar-header-right">
-              {hasNoiseFiles && (
-                <button
-                  className="cs-icon-btn"
-                  title="Varrer Mesa (Limpar ruídos)"
-                  onClick={handleSweepNoise}
-                >
-                  <svg viewBox="0 0 24 24">
-                    <path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275Z" />
-                    <path d="m5 3 1 2.5L8.5 6 6 7 5 9.5 4 7 1.5 6 4 5Z" />
-                    <path d="m19 17 1 2.5 2.5.5-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1Z" />
-                  </svg>
-                </button>
-              )}
+              {/* Dropdown unificado de ações no topo da sidebar */}
+              <SidebarActions
+                classPrefix="cs"
+                hasNoiseFiles={hasNoiseFiles}
+                onSweepNoise={handleSweepNoise}
+                hasImportanceData={Object.keys(importanceMap).length > 0}
+                onSelectCriticalAndHigh={handleSelectCriticalAndHigh}
+                isClassifying={isClassifying}
+              />
+
               <span className="cs-count-badge">{trackedFiles.length}</span>
+              {totalSelectedTokens > 0 && (
+                <span className="cs-token-total" title="Total de tokens selecionados (estimativa)">
+                  ≈ {formatTokenCount(totalSelectedTokens)} tokens
+                </span>
+              )}
             </span>
           </div>
 
@@ -456,40 +739,35 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
           ) : visibleFiles.length === 0 ? (
             <p className="cs-empty-state">Todos os arquivos estão ocultos.</p>
           ) : (
-            <ul className="cs-file-list">
-              {visibleFiles.map((file) => (
-                <li
-                  key={file.relativePath}
-                  className="cs-file-card"
-                >
-                  <input
-                    type="checkbox"
-                    className="cs-file-checkbox"
-                    checked={selectedFiles.has(file.relativePath)}
-                    onChange={() => toggleFileSelection(file.relativePath)}
-                    onClick={(e) => e.stopPropagation()}
+            // Arquivos agrupados por nível de importância
+            <div className="cs-file-list">
+              {(['critical', 'high', 'medium', 'low'] as const).map((level) => {
+                const levelLabels = { critical: 'Críticos', high: 'Altos', medium: 'Médios', low: 'Baixos' }
+                const levelEmojis = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪' }
+                return (
+                  <ImportanceGroup
+                    key={level}
+                    level={level}
+                    files={groupedFiles[level]}
+                    emoji={levelEmojis[level]}
+                    label={levelLabels[level]}
+                    classPrefix="cs"
+                    selectedFiles={selectedFiles}
+                    importanceMap={importanceMap}
+                    importanceSource={importanceSource}
+                    tokenEstimates={tokenEstimates}
+                    formatTokenCount={formatTokenCount}
+                    toggleFileSelection={toggleFileSelection}
+                    handleImportanceChange={handleImportanceChange}
+                    onHideFile={ignoreFileTemporary}
+                    onHideExtension={handleHideExtension}
+                    onCopyPath={handleCopyPath}
+                    onCopyName={handleCopyName}
+                    onRevealInExplorer={handleRevealInExplorer}
                   />
-                  <span
-                    className="cs-file-card-body"
-                    onClick={() => toggleFileSelection(file.relativePath)}
-                  >
-                    <span className="cs-file-name" title={file.relativePath}>{file.name}</span>
-                  </span>
-                  <button
-                    className="cs-hide-btn cs-icon-btn small"
-                    title="Ocultar este arquivo"
-                    onClick={(e) => handleHideClick(file.relativePath, e)}
-                  >
-                    <svg viewBox="0 0 24 24">
-                      <path d="M9.88 9.88a3 3 0 1 0 4.24 4.24" />
-                      <path d="M10.73 5.08A10.43 10.43 0 0 1 12 5c7 0 10 7 10 7a13.16 13.16 0 0 1-1.67 2.68" />
-                      <path d="M6.61 6.61A13.52 13.52 0 0 0 2 12s3 7 10 7a9.74 9.74 0 0 0 5.39-1.61" />
-                      <line x1="2" x2="22" y1="2" y2="22" />
-                    </svg>
-                  </button>
-                </li>
-              ))}
-            </ul>
+                )
+              })}
+            </div>
           )}
 
           {/* Popup flutuante de ignore inteligente */}

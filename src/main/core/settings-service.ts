@@ -1,6 +1,30 @@
-// Responsabilidades do Script
-//
-// 1. Persistir e recuperar as configurações locais do aplicativo (ex: caminho do vault Obsidian).
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Persistir e recuperar as configurações locais do aplicativo (ex: caminho do vault Obsidian).
+2. Prover instância singleton do serviço de configurações para outros módulos.
+
+Mapa de Relacionamentos do Script
+
+1. importance-service.ts
+   - Tipo: Dependência Direta
+   - Relação: Consome a instância singleton para carregar/salvar classificações de importância.
+   - Criticidade: Alta
+
+2. git-handler.ts
+   - Tipo: Dependência Direta
+   - Relação: Consome a instância para gerenciar arquivos ignorados no diff.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. A instância singleton nunca deve ser recriada após inicialização.
+2. Settings antigos sem campos novos devem ser carregados sem erro (compatibilidade retroativa).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
 
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
@@ -12,10 +36,20 @@ const DEFAULT_SETTINGS: AppSettings = {
   rootFolders: [],
   individualProjects: [],
   hiddenProjects: [],
-  ignoredDiffFiles: {}
+  ignoredDiffFiles: {},
+  fileImportance: {}
 }
 
 export class SettingsService {
+  private static instance: SettingsService
+
+  static getInstance(): SettingsService {
+    if (!SettingsService.instance) {
+      SettingsService.instance = new SettingsService()
+    }
+    return SettingsService.instance
+  }
+
   private getConfigFile(): string {
     const configDir = app.getPath('userData')
     return join(configDir, 'settings.json')
@@ -33,7 +67,8 @@ export class SettingsService {
         rootFolders: parsed.rootFolders || [],
         individualProjects: parsed.individualProjects || [],
         hiddenProjects: parsed.hiddenProjects || [],
-        ignoredDiffFiles: parsed.ignoredDiffFiles || {}
+        ignoredDiffFiles: parsed.ignoredDiffFiles || {},
+        fileImportance: parsed.fileImportance || {}
       }
     } catch {
       return { ...DEFAULT_SETTINGS }
@@ -47,3 +82,6 @@ export class SettingsService {
     writeFileSync(configFile, JSON.stringify(settings, null, 2), 'utf-8')
   }
 }
+
+// Instância singleton para ser compartilhada entre os módulos
+export const settingsService = SettingsService.getInstance()

@@ -25,7 +25,6 @@
   min-width: 0;
 }
 
-
 .cdf-repo-name {
   font-size: 13px;
   font-weight: 600;
@@ -90,16 +89,18 @@
   border-radius: 0 0 12px 12px;
 }
 
-/* Sidebar */
+/* Sidebar — largura controlada por JS (sidebarWidth), com limite 280–500px */
 .cdf-sidebar {
-  width: 260px;
+  width: 350px;
+  min-width: 280px;
+  max-width: 500px;
   flex-shrink: 0;
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   background: var(--bg-secondary);
   overflow: hidden;
-  position: relative; /* Ancora para o popup absoluto */
+  position: relative;
 }
 
 .cdf-sidebar-header {
@@ -134,10 +135,28 @@
   margin: 0;
 }
 
+/* Handle de resize — aparece na borda direita da sidebar ao hover */
+.cdf-sidebar-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.cdf-sidebar-resize-handle:hover,
+.cdf-sidebar-resize-handle.resizing {
+  background: var(--accent);
+}
+
+/* Lista de arquivos — agora div (não ul) para suportar ImportanceGroup */
 .cdf-file-list {
-  list-style: none;
   margin: 0;
-  padding: 6px 0;
+  padding: 4px 0;
   overflow-y: auto;
   flex: 1;
 }
@@ -150,16 +169,53 @@
   accent-color: var(--accent);
 }
 
+/* Card em layout de duas linhas (nome + diretório + tokens) */
 .cdf-file-card {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
-  padding: 6px 14px;
+  padding: 8px 10px;
   border-radius: 0;
   transition: background 0.12s;
   border-left: 2px solid transparent;
 }
 
+/* Área clicável central do card */
+.cdf-file-card-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+/* Linha 1: badge de tipo + nome do arquivo */
+.cdf-file-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Linha 2: diretório e estimativa de tokens */
+.cdf-file-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+/* Caminho do diretório em fonte mono */
+.cdf-file-path {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Mantém compatibilidade com o card-body legado (ainda usado pelo popup/sanfona) */
 .cdf-file-card-body {
   display: flex;
   align-items: center;
@@ -678,7 +734,7 @@
 .cdf-sidebar-header-right {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
 }
 
 /* Popup flutuante de ignore inteligente */
@@ -750,4 +806,32 @@
   background: var(--bg-primary);
 }
 
+/* Estimativa de tokens por arquivo (linha 2 do card) */
+.cdf-token-estimate {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
 
+/* Total de tokens selecionados no cabeçalho da sidebar */
+.cdf-token-total {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  margin-left: 4px;
+}
+
+/* ─── Melhorias de Layout do Painel de Diff ─────────────────────────── */
+
+/* Permite que o flexbox funcione corretamente */
+.cdf-diff-panel {
+  min-width: 0;
+}
+
+/* Centraliza o conteúdo do diff e limita a largura máxima */
+.cdf-diff-code-rendered {
+  max-width: 800px;
+  margin: 0 auto;
+}

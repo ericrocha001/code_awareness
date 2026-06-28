@@ -2,3 +2,122 @@
   background: rgba(124, 58, 237, 0.15);
   color: #a78bfa;
 }
+
+/* Sidebar redimensionável — largura dinâmica */
+.cdf-sidebar {
+  width: 450px;
+  min-width: 280px;
+  max-width: 500px;
+  position: relative;
+  font-size: 13px;
+}
+
+/* Resize handle na borda direita da sidebar */
+.cdf-sidebar-resize-handle {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 10;
+  transition: background 0.15s ease;
+}
+
+.cdf-sidebar-resize-handle:hover,
+.cdf-sidebar-resize-handle.resizing {
+  background: var(--accent);
+}
+
+/* Card de arquivo em duas linhas */
+.cdf-file-card {
+  display: flex;
+  align-items: flex-start;
+  padding: 8px 10px;
+  gap: 6px;
+}
+
+.cdf-file-checkbox {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+}
+
+/* Conteúdo do card em duas linhas */
+.cdf-file-card-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  cursor: pointer;
+}
+
+.cdf-file-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cdf-file-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cdf-file-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cdf-file-path {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  opacity: 0.7;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Estimativa de tokens na linha de metadados */
+.cdf-token-estimate {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  color: var(--accent);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Botão ocultar maior */
+.cdf-hide-btn {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* Total de tokens selecionados no cabeçalho */
+.cdf-token-total {
+  font-size: 11px;
+  color: var(--accent);
+  font-weight: 600;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  margin-left: 8px;
+}
+
+/* ─── Melhorias de Layout do Painel de Diff ─────────────────────────── */
+
+/* Permite que o flexbox funcione corretamente */
+.cdf-diff-panel {
+  min-width: 0;
+}
+
+/* Centraliza o conteúdo do diff e limita a largura máxima */
+.cdf-diff-code-rendered {
+  max-width: 800px;
+  margin: 0 auto;
+}

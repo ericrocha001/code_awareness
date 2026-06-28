@@ -1,0 +1,127 @@
+/* Wrapper: posicionamento relativo para ancorar o dropdown absoluto */
+.importance-badge-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+/* ─── Badge principal ─────────────────────────────────────────────────────── */
+
+.importance-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  border: 1px solid;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+/* Badge clicável: cursor e hover effect */
+.importance-badge.clickable {
+  cursor: pointer;
+}
+
+.importance-badge.clickable:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 8px rgba(0, 0, 0, 0.2);
+}
+
+/* ─── Cores por nível ─────────────────────────────────────────────────────── */
+
+.importance-badge.badge-critical {
+  background: rgba(248, 81, 73, 0.15);
+  border-color: rgba(248, 81, 73, 0.4);
+  color: #f85149;
+}
+
+.importance-badge.badge-high {
+  background: rgba(251, 146, 60, 0.15);
+  border-color: rgba(251, 146, 60, 0.4);
+  color: #fb923c;
+}
+
+.importance-badge.badge-medium {
+  background: rgba(251, 191, 36, 0.15);
+  border-color: rgba(251, 191, 36, 0.4);
+  color: #fbbf24;
+}
+
+.importance-badge.badge-low {
+  background: rgba(161, 161, 170, 0.15);
+  border-color: rgba(161, 161, 170, 0.4);
+  color: #a1a1aa;
+}
+
+/* ─── Ícones e labels ─────────────────────────────────────────────────────── */
+
+.badge-emoji {
+  font-size: 10px;
+  line-height: 1;
+}
+
+.badge-label {
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* Ícone de edição manual: levemente menor e mais suave */
+.badge-manual-icon {
+  font-size: 9px;
+  opacity: 0.7;
+  margin-left: 2px;
+}
+
+/* ─── Dropdown ────────────────────────────────────────────────────────────── */
+
+.importance-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 100;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 120px;
+}
+
+/* Item do dropdown: mesmo esquema de cor do badge, fundo sutil no hover */
+.importance-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.importance-dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+/* Cores dos itens do dropdown (herdadas do LEVEL_CONFIG) */
+.importance-dropdown-item.badge-critical {
+  color: #f85149;
+}
+
+.importance-dropdown-item.badge-high {
+  color: #fb923c;
+}
+
+.importance-dropdown-item.badge-medium {
+  color: #fbbf24;
+}
+
+.importance-dropdown-item.badge-low {
+  color: #a1a1aa;
+}
