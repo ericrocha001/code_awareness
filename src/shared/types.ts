@@ -29,7 +29,6 @@ Invariantes do Script
 // ─── Configurações do App ───────────────────────────────────────────────────
 
 export interface AppSettings {
-  obsidianVaultPath: string | null
   rootFolders: string[]
   individualProjects: string[]
   hiddenProjects: string[]

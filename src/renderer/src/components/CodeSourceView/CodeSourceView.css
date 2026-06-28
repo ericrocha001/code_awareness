@@ -486,3 +486,113 @@
   font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
   margin-left: 8px;
 }
+
+/* ─── Renderização Markdown ─────────────────────────────────────────────────── */
+
+/* Centraliza o conteúdo e limita a largura máxima */
+.cs-diff-code-rendered {
+  max-width: 800px;
+  margin: 0 auto;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Título de Arquivo H2 */
+.cs-diff-code-rendered h2 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin: 24px 0 16px 0;
+}
+
+.cs-diff-code-rendered h2:first-child {
+  margin-top: 0;
+}
+
+/* Nome de Bloco/Função H3 */
+.cs-diff-code-rendered h3 {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent);
+  margin: 20px 0 10px 0;
+}
+
+/* Marcadores H4 */
+.cs-diff-code-rendered h4 {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin: 12px 0 6px 0;
+}
+
+/* Blocos de Código */
+.cs-diff-code-rendered pre {
+  background-color: #161616;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0 0 12px 0;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cs-diff-code-rendered pre code {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  padding: 0;
+  border: none;
+}
+
+/* HR — separador entre arquivos */
+.cs-diff-code-rendered hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 28px 0;
+}
+
+/* Parágrafos e texto normal */
+.cs-diff-code-rendered p {
+  margin: 0 0 8px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* Inline code */
+.cs-diff-code-rendered code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  background-color: rgba(255, 255, 255, 0.05);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Listas */
+.cs-diff-code-rendered ul,
+.cs-diff-code-rendered ol {
+  margin: 0 0 12px 0;
+  padding-left: 24px;
+}
+
+.cs-diff-code-rendered li {
+  margin: 4px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* Blockquote */
+.cs-diff-code-rendered blockquote {
+  border-left: 3px solid var(--accent);
+  padding-left: 16px;
+  margin: 12px 0;
+  color: var(--text-secondary);
+  font-style: italic;
+}

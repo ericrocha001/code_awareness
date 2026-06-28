@@ -89,7 +89,6 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
   const [error, setError] = useState<string>('')
   const [auditPromptTemplate, setAuditPromptTemplate] = useState('')
   const [isCopied, setIsCopied] = useState(false)
-  const [isCopyMarkdown, setIsCopyMarkdown] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
 
   // Sistema de Importância Arquitetural
@@ -498,7 +497,8 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
   const handleRevealInExplorer = useCallback(async (relativePath: string) => {
     if (!activeProject) return
     await window.codeAwareness.revealInExplorer(activeProject.path, relativePath)
-  }, [activeProject])
+    onStatusMessage('Arquivo revelado no sistema!')
+  }, [activeProject, onStatusMessage])
 
   const handleHideExtension = useCallback(async (ext: string) => {
     await ignoreExtensionPersistent(`.${ext}`)
@@ -589,33 +589,24 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
   const handleCopyPrompt = () => {
     navigator.clipboard.writeText(`${auditPromptTemplate}\n\n${markdown}`)
     setIsCopied(true)
+    onStatusMessage('Prompt com compressão copiado!')
     setTimeout(() => setIsCopied(false), 2000)
   }
 
-  const handleCopyMarkdown = () => {
-    navigator.clipboard.writeText(markdown)
-    setIsCopyMarkdown(true)
-    setTimeout(() => setIsCopyMarkdown(false), 2000)
-  }
-
-  const handleExportObsidian = async () => {
-    if (!activeProject) return
+  const handleExportDownloads = async () => {
+    if (!activeProject || !markdown) return
     setIsExporting(true)
     try {
-      const settings = await window.codeAwareness.loadSettings()
-      let vaultPath = settings.obsidianVaultPath
-
-      if (!vaultPath) {
-        const selectedPath = await window.codeAwareness.selectVaultFolder()
-        if (!selectedPath) return
-        vaultPath = selectedPath
-        await window.codeAwareness.saveSettings({ ...settings, obsidianVaultPath: vaultPath })
+      const fileName = `${activeProject.name}-compression`
+      const result = await window.codeAwareness.saveToDownloads(markdown, fileName)
+      if (result.success) {
+        onStatusMessage('Exportado para Downloads!')
+      } else {
+        onStatusMessage('Erro ao exportar', true)
       }
-
-      const result = await window.codeAwareness.saveToObsidian(markdown, `${activeProject.name}-compression`, vaultPath)
-      if (!result.success) console.error('Erro na exportação para Obsidian:', result.error)
     } catch (err) {
       console.error('Falha ao exportar:', err)
+      onStatusMessage('Erro ao exportar', true)
     } finally {
       setIsExporting(false)
     }
@@ -859,13 +850,10 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
       {/* Barra de ações inferior */}
       <div className="cdf-diff-actions-bottom">
         <button className="app-pill-btn" onClick={handleCopyPrompt} disabled={!markdown}>
-          {isCopied ? 'Copiado!' : 'Copiar Prompt de Auditoria'}
+          {isCopied ? 'Copiado!' : 'Copiar com Prompt'}
         </button>
-        <button className="app-pill-btn" onClick={handleCopyMarkdown} disabled={!markdown}>
-          {isCopyMarkdown ? 'Markdown Copiado!' : 'Copiar Markdown'}
-        </button>
-        <button className="app-pill-btn" onClick={handleExportObsidian} disabled={isExporting || !markdown}>
-          {isExporting ? 'Exportando...' : 'Exportar para Obsidian'}
+        <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting || !markdown}>
+          {isExporting ? 'Exportando...' : 'Exportar'}
         </button>
       </div>
     </div>

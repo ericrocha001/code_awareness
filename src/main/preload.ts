@@ -20,6 +20,11 @@ Mapa de Relacionamentos do Script
    - Relação: Registra os handlers correspondentes aos métodos invocados pelo preload.
    - Criticidade: Alta
 
+3. file-handler.ts
+   - Tipo: Dependência Inversa
+   - Relação: Registra os handlers correspondentes a salvamento, seleção e propagação de arquivos expostos por este preload.
+   - Criticidade: Alta
+
 Invariantes do Script
 
 1. O isolamento de contexto deve ser sempre mantido.
@@ -39,12 +44,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   saveXml: (xml: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('save-xml', xml, repoName)
   },
-  saveToObsidian: (
-    markdown: string,
-    repoName: string,
-    vaultPath: string
-  ): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('save-to-obsidian', markdown, repoName, vaultPath)
+  saveToDownloads: (markdown: string, fileName: string): Promise<{ success: boolean; filePath?: string; error?: string }> => {
+    return ipcRenderer.invoke('save-to-downloads', markdown, fileName)
   },
   loadSettings: (): Promise<AppSettings> => {
     return ipcRenderer.invoke('load-settings')
@@ -52,11 +53,17 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   saveSettings: (settings: AppSettings): Promise<{ success: boolean }> => {
     return ipcRenderer.invoke('save-settings', settings)
   },
-  selectVaultFolder: (): Promise<string | null> => {
-    return ipcRenderer.invoke('select-vault-folder')
-  },
   selectFolder: (): Promise<{ path: string; name: string } | null> => {
     return ipcRenderer.invoke('select-folder')
+  },
+  selectDocumentForPropagation: (): Promise<{ path: string; name: string } | null> => {
+    return ipcRenderer.invoke('select-document-for-propagation')
+  },
+  propagateDocument: (
+    sourceFilePath: string,
+    destinationRepoPaths: string[]
+  ): Promise<{ success: number; failed: number; errors: string[] }> => {
+    return ipcRenderer.invoke('propagate-document', sourceFilePath, destinationRepoPaths)
   },
   getPathForFile: (file: File): string => {
     return webUtils.getPathForFile(file)

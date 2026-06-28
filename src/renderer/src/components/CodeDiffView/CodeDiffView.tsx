@@ -107,7 +107,6 @@ export const CodeDiffView: React.FC<{
   const [diffMarkdown, setDiffMarkdown] = useState<string>('')
   const [auditPromptTemplate, setAuditPromptTemplate] = useState('')
   const [isCopied, setIsCopied] = useState(false)
-  const [isCopyMarkdown, setIsCopyMarkdown] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
 
   // Seleção de arquivos para o diff
@@ -202,7 +201,8 @@ export const CodeDiffView: React.FC<{
     if (activeProject) {
       localStorage.setItem(`code_diff_sort_mode_${activeProject.path}`, mode)
     }
-  }, [activeProject])
+    onStatusMessage(mode === 'importance' ? 'Ordenação por importância!' : 'Ordenação por recência!')
+  }, [activeProject, onStatusMessage])
 
   // ── Classificação de importância ──────────────────────────────────────────
   useEffect(() => {
@@ -635,8 +635,9 @@ export const CodeDiffView: React.FC<{
     async (relativePath: string) => {
       if (!activeProject) return
       await window.codeAwareness.revealInExplorer(activeProject.path, relativePath)
+      onStatusMessage('Arquivo revelado no sistema!')
     },
-    [activeProject]
+    [activeProject, onStatusMessage]
   )
 
   const handleHideExtension = useCallback(
@@ -671,9 +672,10 @@ export const CodeDiffView: React.FC<{
 
       await navigator.clipboard.writeText(markdown)
       setCopiedFile(relativePath)
+      onStatusMessage('Diff do arquivo copiado!')
       setTimeout(() => setCopiedFile(null), 1500)
     },
-    [activeProject]
+    [activeProject, onStatusMessage]
   )
 
   // ── Watcher do projeto ────────────────────────────────────────────────────
@@ -757,13 +759,27 @@ export const CodeDiffView: React.FC<{
     const finalPrompt = `${auditPromptTemplate}\n\n${diffMarkdown}`
     navigator.clipboard.writeText(finalPrompt)
     setIsCopied(true)
+    onStatusMessage('Prompt com diff copiado!')
     setTimeout(() => setIsCopied(false), 2000)
   }
 
-  const handleCopyMarkdown = () => {
-    navigator.clipboard.writeText(diffMarkdown)
-    setIsCopyMarkdown(true)
-    setTimeout(() => setIsCopyMarkdown(false), 2000)
+  const handleExportDownloads = async () => {
+    if (!activeProject || !diffMarkdown) return
+    setIsExporting(true)
+    try {
+      const fileName = `${activeProject.name}-diff`
+      const result = await window.codeAwareness.saveToDownloads(diffMarkdown, fileName)
+      if (result.success) {
+        onStatusMessage('Exportado para Downloads!')
+      } else {
+        onStatusMessage('Erro ao exportar', true)
+      }
+    } catch (err) {
+      console.error('Falha ao exportar:', err)
+      onStatusMessage('Erro ao exportar', true)
+    } finally {
+      setIsExporting(false)
+    }
   }
 
   const handleFileClick = (relativePath: string) => {
@@ -779,28 +795,6 @@ export const CodeDiffView: React.FC<{
     }, 50)
   }
 
-  const handleExportObsidian = async () => {
-    if (!activeProject || !diffMarkdown) return
-    setIsExporting(true)
-    try {
-      const settings = await window.codeAwareness.loadSettings()
-      let vaultPath = settings.obsidianVaultPath
-
-      if (!vaultPath) {
-        const selectedPath = await window.codeAwareness.selectVaultFolder()
-        if (!selectedPath) return
-        vaultPath = selectedPath
-        await window.codeAwareness.saveSettings({ ...settings, obsidianVaultPath: vaultPath })
-      }
-
-      const name = activeProject.name + '-diff'
-      await window.codeAwareness.saveToObsidian(diffMarkdown, name, vaultPath)
-    } catch (err) {
-      console.error('Falha ao exportar:', err)
-    } finally {
-      setIsExporting(false)
-    }
-  }
 
   if (!activeProject) {
     return (
@@ -1121,13 +1115,10 @@ export const CodeDiffView: React.FC<{
 
       <div className="cdf-diff-actions-bottom">
         <button className="app-pill-btn" onClick={handleCopyPrompt}>
-          {isCopied ? 'Copiado!' : 'Copiar Prompt de Auditoria'}
+          {isCopied ? 'Copiado!' : 'Copiar com Prompt'}
         </button>
-        <button className="app-pill-btn" onClick={handleCopyMarkdown}>
-          {isCopyMarkdown ? 'Markdown Copiado!' : 'Copiar Markdown de Diff'}
-        </button>
-        <button className="app-pill-btn" onClick={handleExportObsidian} disabled={isExporting}>
-          {isExporting ? 'Exportando...' : 'Exportar para Obsidian'}
+        <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting}>
+          {isExporting ? 'Exportando...' : 'Exportar'}
         </button>
       </div>
     </div>

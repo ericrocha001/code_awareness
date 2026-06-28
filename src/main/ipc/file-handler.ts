@@ -1,14 +1,33 @@
-// Responsabilidades do Script
-//
-// 1. Registrar os handlers IPC para salvar Markdown localmente e no vault do Obsidian.
-// 2. Registrar o handler IPC para selecionar uma pasta de repositório via diálogo nativo do Electron.
+/*
+--- ARQUITETURA DO SCRIPT ---
 
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+Responsabilidades do Script
+
+1. Registrar handlers IPC relacionados a operações com arquivos (Markdown, XML e Downloads).
+2. Prover caixa de diálogo para seleção de pastas e arquivos no sistema operacional.
+3. Propagar arquivos para múltiplos repositórios destino através do serviço DocumentPropagator.
+
+Mapa de Relacionamentos do Script
+
+1. document-propagator.ts
+   - Tipo: Dependência Direta
+   - Relação: Instancia e consome o serviço para propagar documentos nos destinos configurados.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Todos os handlers IPC devem interceptar erros de sistema e retorná-los de forma amigável ao renderer.
+2. A seleção de diretórios e arquivos deve usar caixas de diálogo nativas da janela ativa para evitar perda de foco.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+import { ipcMain, dialog, BrowserWindow, app } from 'electron'
 import { writeFileSync } from 'fs'
-import { basename } from 'path'
-import { VaultService } from '../core/vault-service'
+import { basename, join } from 'path'
+import { DocumentPropagator } from '../core/document-propagator'
 
-const vaultService = new VaultService()
+const documentPropagator = new DocumentPropagator()
 
 export function registerFileHandlers(): void {
   ipcMain.handle('save-markdown', async (event, markdown: string, repoName: string) => {
@@ -49,18 +68,17 @@ export function registerFileHandlers(): void {
     }
   })
 
-  ipcMain.handle(
-    'save-to-obsidian',
-    async (_event, markdown: string, repoName: string, vaultPath: string) => {
-      try {
-        await vaultService.saveToVault(markdown, repoName, vaultPath)
-        return { success: true }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Unknown error'
-        return { success: false, error: message }
-      }
+  ipcMain.handle('save-to-downloads', async (_event, markdown: string, fileName: string) => {
+    try {
+      const downloadsPath = app.getPath('downloads')
+      const filePath = join(downloadsPath, `${fileName}.md`)
+      writeFileSync(filePath, markdown, 'utf-8')
+      return { success: true, filePath }
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Unknown error'
+      return { success: false, error: message }
     }
-  )
+  })
 
   ipcMain.handle('select-folder', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
@@ -75,5 +93,27 @@ export function registerFileHandlers(): void {
       path,
       name: basename(path)
     }
+  })
+
+  ipcMain.handle('select-document-for-propagation', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
+    const { filePaths, canceled } = await dialog.showOpenDialog(win, {
+      title: 'Selecionar Documento para Propagar',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Markdown', extensions: ['md'] },
+        { name: 'Todos os Arquivos', extensions: ['*'] }
+      ]
+    })
+
+    if (canceled || !filePaths.length) return null
+    return { path: filePaths[0], name: basename(filePaths[0]) }
+  })
+
+  ipcMain.handle('propagate-document', async (_event, sourceFilePath: string, destinationRepoPaths: string[]) => {
+    if (!sourceFilePath || !Array.isArray(destinationRepoPaths)) {
+      return { success: 0, failed: 0, errors: ['Parâmetros inválidos'] }
+    }
+    return documentPropagator.propagate(sourceFilePath, destinationRepoPaths)
   })
 }

@@ -1,7 +1,24 @@
-// Responsabilidades do Script
-//
-// 1. Declarar a interface global do objeto codeAwareness no escopo do objeto Window do browser.
-// 2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Declarar a interface global do objeto codeAwareness no escopo do objeto Window do browser.
+2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
+
+Mapa de Relacionamentos do Script
+
+1. preload.ts
+   - Tipo: Contrato / Interface
+   - Relação: Define a tipagem do objeto codeAwareness injetado por preload.ts.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Os métodos declarados em Window.codeAwareness devem corresponder exatamente à interface exposta em preload.ts.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
 
 /// <reference types="vite/client" />
 
@@ -12,15 +29,15 @@ declare global {
     codeAwareness: {
       saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveXml: (xml: string, repoName: string) => Promise<{ success: boolean; error?: string }>
-      saveToObsidian: (
-        markdown: string,
-        repoName: string,
-        vaultPath: string
-      ) => Promise<{ success: boolean; error?: string }>
+      saveToDownloads: (markdown: string, fileName: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
       loadSettings: () => Promise<AppSettings>
       saveSettings: (settings: AppSettings) => Promise<{ success: boolean }>
-      selectVaultFolder: () => Promise<string | null>
       selectFolder: () => Promise<{ path: string; name: string } | null>
+      selectDocumentForPropagation: () => Promise<{ path: string; name: string } | null>
+      propagateDocument: (
+        sourceFilePath: string,
+        destinationRepoPaths: string[]
+      ) => Promise<{ success: number; failed: number; errors: string[] }>
       getPathForFile: (file: File) => string
       checkRepository: (dirPath: string) => Promise<boolean>
       getModifiedFiles: (dirPath: string) => Promise<DiffFileStatus[]>

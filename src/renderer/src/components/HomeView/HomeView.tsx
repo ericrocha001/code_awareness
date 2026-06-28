@@ -6,6 +6,7 @@
 
 import React, { useState, useEffect, useRef } from 'react'
 import { ProjectInfo } from '../../../../shared/types'
+import { DocumentPropagator } from '../DocumentPropagator/DocumentPropagator'
 import './HomeView.css'
 
 interface HomeViewProps {
@@ -18,6 +19,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
   const [projects, setProjects] = useState<ProjectInfo[]>([])
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [projectToHide, setProjectToHide] = useState<ProjectInfo | null>(null)
+  const [isPropagatorOpen, setIsPropagatorOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
 
   // Carrega a listagem de projetos
@@ -83,6 +85,9 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
           
           {isMenuOpen && (
             <div className="home-dropdown-menu">
+              <button onClick={() => { setIsMenuOpen(false); setIsPropagatorOpen(true) }}>
+                <span>📤</span> Propagar Documento
+              </button>
               <button onClick={handleAddRootFolder}>
                 <span>📁</span> Importar Pasta Raiz (Múltiplos)
               </button>
@@ -136,6 +141,14 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
             )
           })}
         </div>
+      )}
+
+      {isPropagatorOpen && (
+        <DocumentPropagator
+          projects={projects}
+          onClose={() => setIsPropagatorOpen(false)}
+          onStatusMessage={onStatusMessage}
+        />
       )}
 
       {projectToHide && (

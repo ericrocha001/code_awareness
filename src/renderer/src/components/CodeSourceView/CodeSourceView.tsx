@@ -504,7 +504,8 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
   const handleRevealInExplorer = useCallback(async (relativePath: string) => {
     if (!activeProject) return
     await window.codeAwareness.revealInExplorer(activeProject.path, relativePath)
-  }, [activeProject])
+    onStatusMessage('Arquivo revelado no sistema!')
+  }, [activeProject, onStatusMessage])
 
   const handleHideExtension = useCallback(async (ext: string) => {
     await ignoreExtensionPersistent(`.${ext}`)
@@ -624,47 +625,21 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
   const handleCopy = () => {
     navigator.clipboard.writeText(markdown)
     setIsCopied(true)
+    const label = format === 'markdown' ? 'Markdown' : 'XML'
+    onStatusMessage(`${label} copiado!`)
     setTimeout(() => setIsCopied(false), 2000)
   }
 
-  const handleDownloadXml = async () => {
-    if (!activeProject || format !== 'xml') return
+  const handleExportDownloads = async () => {
+    if (!activeProject || !markdown) return
     setIsExporting(true)
     try {
-      const result = await window.codeAwareness.saveXml(markdown, activeProject.name)
+      const fileName = `${activeProject.name}-source`
+      const result = await window.codeAwareness.saveToDownloads(markdown, fileName)
       if (result.success) {
-        onStatusMessage('XML salvo com sucesso!')
-      } else if (result.error !== 'Cancelled') {
-        onStatusMessage('Erro ao salvar XML', true)
-      }
-    } catch (err) {
-      console.error('Falha ao baixar XML:', err)
-      onStatusMessage('Erro ao salvar XML', true)
-    } finally {
-      setIsExporting(false)
-    }
-  }
-
-  const handleExportObsidian = async () => {
-    if (!activeProject || format !== 'markdown') return
-    setIsExporting(true)
-    try {
-      const settings = await window.codeAwareness.loadSettings()
-      let vaultPath = settings.obsidianVaultPath
-
-      if (!vaultPath) {
-        const selectedPath = await window.codeAwareness.selectVaultFolder()
-        if (!selectedPath) return
-        vaultPath = selectedPath
-        await window.codeAwareness.saveSettings({ ...settings, obsidianVaultPath: vaultPath })
-      }
-
-      const result = await window.codeAwareness.saveToObsidian(markdown, `${activeProject.name}-source`, vaultPath)
-      if (!result.success) {
-        console.error('Erro na exportação para Obsidian:', result.error)
-        onStatusMessage('Erro ao exportar', true)
+        onStatusMessage('Exportado para Downloads!')
       } else {
-        onStatusMessage('Exportado para o Obsidian com sucesso!')
+        onStatusMessage('Erro ao exportar', true)
       }
     } catch (err) {
       console.error('Falha ao exportar:', err)
@@ -919,18 +894,11 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
       {/* Barra de ações inferior */}
       <div className="cs-diff-actions-bottom">
         <button className="app-pill-btn" onClick={handleCopy} disabled={!markdown || isGenerating}>
-          {isCopied ? 'Copiado!' : `Copiar ${format.toUpperCase()}`}
+          {isCopied ? 'Copiado!' : 'Copiar'}
         </button>
-        {format === 'xml' && (
-          <button className="app-pill-btn" onClick={handleDownloadXml} disabled={!markdown || isGenerating || isExporting}>
-            {isExporting ? 'Baixando...' : 'Baixar XML'}
-          </button>
-        )}
-        {format === 'markdown' && (
-          <button className="app-pill-btn" onClick={handleExportObsidian} disabled={!markdown || isGenerating || isExporting}>
-            {isExporting ? 'Exportando...' : 'Exportar para Obsidian'}
-          </button>
-        )}
+        <button className="app-pill-btn" onClick={handleExportDownloads} disabled={!markdown || isGenerating || isExporting}>
+          {isExporting ? 'Exportando...' : 'Exportar'}
+        </button>
       </div>
     </div>
   )

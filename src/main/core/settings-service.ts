@@ -32,7 +32,6 @@ import { join } from 'path'
 import { AppSettings } from '../../shared/types'
 
 const DEFAULT_SETTINGS: AppSettings = {
-  obsidianVaultPath: null,
   rootFolders: [],
   individualProjects: [],
   hiddenProjects: [],
