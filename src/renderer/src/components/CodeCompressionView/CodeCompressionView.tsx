@@ -3,9 +3,9 @@
 
 Responsabilidades do Script
 
-1. Renderizar a interface da aba Code Compression com sidebar redimensionável e layout de duas linhas.
+1. Renderizar a interface da aba Code Compression com layout de painéis independentes desacoplados e barra lateral retrátil.
 2. Gerenciar a seleção reativa de arquivos rastreados com sistema completo de Ignore (temporary/persistent).
-3. Fornecer exportação dinâmica para Obsidian e prompt de auditoria customizável via localStorage.
+3. Fornecer ações de Copiar (prompt + markdown) e Exportar (markdown apenas) no cabeçalho do painel principal, com prompt de auditoria customizável via localStorage.
 4. Sincronizar classificações de importância em tempo real com outras abas via evento IPC.
 
 Mapa de Relacionamentos do Script
@@ -40,15 +40,21 @@ Mapa de Relacionamentos do Script
    - Relação: Escuta eventos de atualização de importância emitidos por outras abas.
    - Criticidade: Alta
 
+7. ProjectSwitcher.tsx
+   - Tipo: Dependência Direta
+   - Relação: Renderiza o componente de seleção e alternância do projeto ativo na topbar.
+   - Criticidade: Alta
+
 Invariantes do Script
 
-1. A sidebar deve ter largura entre 280px e 500px, nunca fora desse intervalo.
+1. A sidebar deve ter largura entre 280px e 500px quando visível.
 2. O resize handle deve estar sempre na borda direita da sidebar.
 3. Os nomes dos arquivos nunca devem ser truncados sem ellipsis.
-4. O total de tokens selecionados deve ser calculado apenas com base nos arquivos checkados.
+4. O total de tokens selecionados deve ser calculated apenas com base nos arquivos checkados.
 5. A tríade arquitetural deve ser sempre atualizada junto com o código.
 6. A sincronização de importância não deve afetar a seleção de arquivos (checkboxes).
 7. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
+8. O estado de abertura da barra lateral (aberto/fechado) deve ser persistido por projeto no localStorage.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -61,6 +67,7 @@ import { ImportanceBadge } from '../ImportanceBadge/ImportanceBadge'
 import { ImportanceGroup } from '../ImportanceGroup/ImportanceGroup'
 import { SidebarActions } from '../SidebarActions/SidebarActions'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
+import { ProjectSwitcher } from '../ProjectSwitcher/ProjectSwitcher'
 import './CodeCompressionView.css'
 
 // Prompt padrão para análise de estrutura de código
@@ -78,11 +85,39 @@ Abaixo está o esqueleto estrutural dos arquivos selecionados:
 
 interface CodeCompressionViewProps {
   activeProject: { path: string; name: string } | null
+  onSelectProject: (project: { path: string; name: string } | null) => void
   onStatusMessage: (message: string, isError?: boolean) => void
 }
 
-export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ activeProject, onStatusMessage }) => {
+export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ 
+  activeProject, 
+  onSelectProject, 
+  onStatusMessage 
+}) => {
   const [trackedFiles, setTrackedFiles] = useState<DiffFileStatus[]>([])
+
+  // Estado de controle da abertura da barra lateral (persistido por projeto no localStorage)
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
+    if (!activeProject) return true
+    const saved = localStorage.getItem(`code_compression_sidebar_open_${activeProject.path}`)
+    return saved !== 'false'
+  })
+
+  // Sincroniza o estado de abertura da barra lateral no localStorage
+  useEffect(() => {
+    if (activeProject) {
+      localStorage.setItem(`code_compression_sidebar_open_${activeProject.path}`, isSidebarOpen.toString())
+    }
+  }, [isSidebarOpen, activeProject])
+
+  // Restaura o estado da barra lateral quando o projeto ativo muda
+  useEffect(() => {
+    if (activeProject) {
+      const saved = localStorage.getItem(`code_compression_sidebar_open_${activeProject.path}`)
+      setIsSidebarOpen(saved !== 'false')
+    }
+  }, [activeProject])
+
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [markdown, setMarkdown] = useState<string>('')
   const [isGenerating, setIsGenerating] = useState<boolean>(false)
@@ -586,8 +621,9 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
     localStorage.setItem('code_compression_prompt_template', newVal)
   }
 
-  const handleCopyPrompt = () => {
-    navigator.clipboard.writeText(`${auditPromptTemplate}\n\n${markdown}`)
+  const handleCopy = () => {
+    const finalPrompt = `${auditPromptTemplate}\n\n${markdown}`
+    navigator.clipboard.writeText(finalPrompt)
     setIsCopied(true)
     onStatusMessage('Prompt com compressão copiado!')
     setTimeout(() => setIsCopied(false), 2000)
@@ -625,192 +661,216 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
 
   return (
     <div className="cdf-container">
+      {/* Topbar global com ProjectSwitcher */}
       <div className="cdf-topbar">
         <div className="cdf-repo-info">
-          <span className="cdf-repo-name">{activeProject.name}</span>
-          <span className="cdf-status-badge watching">Compressão Estrutural</span>
+          <ProjectSwitcher activeProject={activeProject} onSelectProject={onSelectProject} />
         </div>
       </div>
 
-      <div className="cdf-split">
+      <div className="cdf-layout-wrapper">
         {/* Sidebar com lista de arquivos tracked */}
-        <aside className="cdf-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
-          {/* Resize handle na borda direita — permite arrastar para redimensionar */}
-          <div
-            className={`cdf-sidebar-resize-handle${isResizing ? ' resizing' : ''}`}
-            onMouseDown={handleResizeMouseDown}
-          />
-          <div className="cdf-sidebar-header">
-            <span className="cdf-sidebar-header-left">
-              {visibleFiles.length > 0 && (
-                <ToggleSwitch
-                  checked={selectedFiles.size === visibleFiles.length && visibleFiles.length > 0}
-                  indeterminate={selectedFiles.size > 0 && selectedFiles.size < visibleFiles.length}
-                  onChange={toggleMasterCheckbox}
-                  onClick={(e) => e.stopPropagation()}
-                />
-              )}
-              <span>Arquivos Tracked</span>
-            </span>
-            <span className="cdf-sidebar-header-right">
-              {/* Dropdown unificado de ações no topo da sidebar */}
-              <SidebarActions
-                classPrefix="cdf"
-                hasNoiseFiles={hasNoiseFiles}
-                onSweepNoise={handleSweepNoise}
-                hasImportanceData={Object.keys(importanceMap).length > 0}
-                onSelectCriticalAndHigh={handleSelectCriticalAndHigh}
-                isClassifying={isClassifying}
-              />
-
-              <span className="cdf-count-badge">{trackedFiles.length}</span>
-              {totalSelectedTokens > 0 && (
-                <span className="cdf-token-total" title="Total de tokens selecionados (estimativa)">
-                  ≈ {formatTokenCount(totalSelectedTokens)} tokens
-                </span>
-              )}
-            </span>
-          </div>
-
-          {visibleFiles.length === 0 && trackedFiles.length === 0 ? (
-            <p className="cdf-empty-state">Nenhum arquivo encontrado.</p>
-          ) : visibleFiles.length === 0 ? (
-            <p className="cdf-empty-state">Todos os arquivos estão ocultos.</p>
-          ) : (
-            // Arquivos agrupados por nível de importância
-            <div className="cdf-file-list">
-              {(['critical', 'high', 'medium', 'low'] as const).map((level) => {
-                const levelLabels = { critical: 'Críticos', high: 'Altos', medium: 'Médios', low: 'Baixos' }
-                const levelEmojis = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪' }
-                return (
-                  <ImportanceGroup
-                    key={level}
-                    level={level}
-                    files={groupedFiles[level]}
-                    emoji={levelEmojis[level]}
-                    label={levelLabels[level]}
-                    classPrefix="cdf"
-                    selectedFiles={selectedFiles}
-                    importanceMap={importanceMap}
-                    importanceSource={importanceSource}
-                    tokenEstimates={tokenEstimates}
-                    formatTokenCount={formatTokenCount}
-                    toggleFileSelection={toggleFileSelection}
-                    handleImportanceChange={handleImportanceChange}
-                    onHideFile={ignoreFileTemporary}
-                    onHideExtension={handleHideExtension}
-                    onCopyPath={handleCopyPath}
-                    onCopyName={handleCopyName}
-                    onRevealInExplorer={handleRevealInExplorer}
+        {isSidebarOpen && (
+          <aside className="cdf-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
+            {/* Resize handle na borda direita — permite arrastar para redimensionar */}
+            <div
+              className={`cdf-sidebar-resize-handle${isResizing ? ' resizing' : ''}`}
+              onMouseDown={handleResizeMouseDown}
+            />
+            <div className="cdf-sidebar-header">
+              <span className="cdf-sidebar-header-left">
+                {visibleFiles.length > 0 && (
+                  <ToggleSwitch
+                    checked={selectedFiles.size === visibleFiles.length && visibleFiles.length > 0}
+                    indeterminate={selectedFiles.size > 0 && selectedFiles.size < visibleFiles.length}
+                    onChange={toggleMasterCheckbox}
+                    onClick={(e) => e.stopPropagation()}
                   />
-                )
-              })}
-            </div>
-          )}
+                )}
+                <span>Arquivos Tracked</span>
+              </span>
+              <span className="cdf-sidebar-header-right">
+                {/* Dropdown unificado de ações no topo da sidebar */}
+                <SidebarActions
+                  classPrefix="cdf"
+                  hasNoiseFiles={hasNoiseFiles}
+                  onSweepNoise={handleSweepNoise}
+                  hasImportanceData={Object.keys(importanceMap).length > 0}
+                  onSelectCriticalAndHigh={handleSelectCriticalAndHigh}
+                  isClassifying={isClassifying}
+                />
 
-          {/* Popup flutuante de ignore inteligente */}
-          {ignorePopup && (
-            <div className="cdf-ignore-popup" ref={ignorePopupRef}>
-              <div className="cdf-ignore-popup-text">
-                Ignorar <strong>{ignorePopup.path.split('/').pop()}</strong>
-              </div>
-              <div className="cdf-ignore-popup-actions">
-                <button className="cdf-ignore-popup-btn" onClick={handlePopupIgnoreThis}>
-                  Ignorar apenas este
-                </button>
-                <button className="cdf-ignore-popup-btn cdf-ignore-popup-btn-all" onClick={handlePopupIgnoreAll}>
-                  Ignorar todos os *{ignorePopup.ext}
-                </button>
-              </div>
+                <span className="cdf-count-badge">{trackedFiles.length}</span>
+                {totalSelectedTokens > 0 && (
+                  <span className="cdf-token-total" title="Total de tokens selecionados (estimativa)">
+                    ≈ {formatTokenCount(totalSelectedTokens)} tokens
+                  </span>
+                )}
+              </span>
             </div>
-          )}
 
-          {/* Sanfona de arquivos ignorados no rodapé */}
-          <div className="cdf-sidebar-footer">
-            {ignoredFiles.length > 0 && (
-              <details
-                className="cdf-ignored-accordion"
-                open={ignoredAccordionOpen}
-                onToggle={(e) => setIgnoredAccordionOpen((e.target as HTMLDetailsElement).open)}
-              >
-                <summary className="cdf-ignored-summary">
-                  <span className="cdf-ignored-title">🚫 Ignorados nesta sessão ({ignoredFiles.length})</span>
-                  <button
-                    className="cdf-pill-btn"
-                    onClick={(e) => { e.stopPropagation(); handleRestoreAll() }}
-                  >
-                    Restaurar Todos
+            {visibleFiles.length === 0 && trackedFiles.length === 0 ? (
+              <p className="cdf-empty-state">Nenhum arquivo encontrado.</p>
+            ) : visibleFiles.length === 0 ? (
+              <p className="cdf-empty-state">Todos os arquivos estão ocultos.</p>
+            ) : (
+              // Arquivos agrupados por nível de importância
+              <div className="cdf-file-list">
+                {(['critical', 'high', 'medium', 'low'] as const).map((level) => {
+                  const levelLabels = { critical: 'Críticos', high: 'Altos', medium: 'Médios', low: 'Baixos' }
+                  const levelEmojis = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪' }
+                  return (
+                    <ImportanceGroup
+                      key={level}
+                      level={level}
+                      files={groupedFiles[level]}
+                      emoji={levelEmojis[level]}
+                      label={levelLabels[level]}
+                      classPrefix="cdf"
+                      selectedFiles={selectedFiles}
+                      importanceMap={importanceMap}
+                      importanceSource={importanceSource}
+                      tokenEstimates={tokenEstimates}
+                      formatTokenCount={formatTokenCount}
+                      toggleFileSelection={toggleFileSelection}
+                      handleImportanceChange={handleImportanceChange}
+                      onHideFile={ignoreFileTemporary}
+                      onHideExtension={handleHideExtension}
+                      onCopyPath={handleCopyPath}
+                      onCopyName={handleCopyName}
+                      onRevealInExplorer={handleRevealInExplorer}
+                    />
+                  )
+                })}
+              </div>
+            )}
+
+            {/* Popup flutuante de ignore inteligente */}
+            {ignorePopup && (
+              <div className="cdf-ignore-popup" ref={ignorePopupRef}>
+                <div className="cdf-ignore-popup-text">
+                  Ignorar <strong>{ignorePopup.path.split('/').pop()}</strong>
+                </div>
+                <div className="cdf-ignore-popup-actions">
+                  <button className="cdf-ignore-popup-btn" onClick={handlePopupIgnoreThis}>
+                    Ignorar apenas este
                   </button>
-                </summary>
-                <ul className="cdf-ignored-list">
-                  {ignoredFiles.map((path) => {
-                    const name = path.split('/').pop() ?? path
-                    return (
-                      <li key={path} className="cdf-ignored-item">
-                        <span className="cdf-ignored-name" title={path}>{name}</span>
-                        <div style={{ display: 'flex', gap: '4px' }}>
-                          <button className="cdf-icon-btn small" title="Restaurar este arquivo" onClick={() => handleRestoreFile(path)}>
-                            <svg viewBox="0 0 24 24">
-                              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                              <path d="M3 3v5h5" />
-                            </svg>
-                          </button>
-                          <button className="cdf-icon-btn small" title="Promover para permanente" onClick={() => handleUpgradeToPersistent(path)}>
-                            <svg viewBox="0 0 24 24">
-                              <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-                              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                            </svg>
-                          </button>
-                        </div>
+                  <button className="cdf-ignore-popup-btn cdf-ignore-popup-btn-all" onClick={handlePopupIgnoreAll}>
+                    Ignorar todos os *{ignorePopup.ext}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Sanfona de arquivos ignorados no rodapé */}
+            <div className="cdf-sidebar-footer">
+              {ignoredFiles.length > 0 && (
+                <details
+                  className="cdf-ignored-accordion"
+                  open={ignoredAccordionOpen}
+                  onToggle={(e) => setIgnoredAccordionOpen((e.target as HTMLDetailsElement).open)}
+                >
+                  <summary className="cdf-ignored-summary">
+                    <span className="cdf-ignored-title">🚫 Ignorados nesta sessão ({ignoredFiles.length})</span>
+                    <button
+                      className="cdf-pill-btn"
+                      onClick={(e) => { e.stopPropagation(); handleRestoreAll() }}
+                    >
+                      Restaurar Todos
+                    </button>
+                  </summary>
+                  <ul className="cdf-ignored-list">
+                    {ignoredFiles.map((path) => {
+                      const name = path.split('/').pop() ?? path
+                      return (
+                        <li key={path} className="cdf-ignored-item">
+                          <span className="cdf-ignored-name" title={path}>{name}</span>
+                          <div style={{ display: 'flex', gap: '4px' }}>
+                            <button className="cdf-icon-btn small" title="Restaurar este arquivo" onClick={() => handleRestoreFile(path)}>
+                              <svg viewBox="0 0 24 24">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                                <path d="M3 3v5h5" />
+                              </svg>
+                            </button>
+                            <button className="cdf-icon-btn small" title="Promover para permanente" onClick={() => handleUpgradeToPersistent(path)}>
+                              <svg viewBox="0 0 24 24">
+                                <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                              </svg>
+                            </button>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </details>
+              )}
+
+              {persistentPatterns.length > 0 && (
+                <details className="cdf-ignored-accordion">
+                  <summary className="cdf-ignored-summary">
+                    <span className="cdf-ignored-title">🔒 Ignorados no Projeto ({persistentPatterns.length})</span>
+                    <button
+                      className="cdf-pill-btn"
+                      onClick={(e) => { e.stopPropagation(); handleRestoreAllPersistent() }}
+                    >
+                      Restaurar Todos
+                    </button>
+                  </summary>
+                  <ul className="cdf-ignored-list">
+                    {persistentPatterns.map((pattern) => (
+                      <li key={pattern} className="cdf-ignored-item">
+                        <span className="cdf-ignored-name" title={pattern}>{pattern}</span>
+                        <button className="cdf-icon-btn small" title="Restaurar este padrão" onClick={() => handleRestorePersistentPattern(pattern)}>
+                          <svg viewBox="0 0 24 24">
+                            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                            <path d="M3 3v5h5" />
+                          </svg>
+                        </button>
                       </li>
-                    )
-                  })}
-                </ul>
-              </details>
-            )}
-
-            {persistentPatterns.length > 0 && (
-              <details className="cdf-ignored-accordion">
-                <summary className="cdf-ignored-summary">
-                  <span className="cdf-ignored-title">🔒 Ignorados no Projeto ({persistentPatterns.length})</span>
-                  <button
-                    className="cdf-pill-btn"
-                    onClick={(e) => { e.stopPropagation(); handleRestoreAllPersistent() }}
-                  >
-                    Restaurar Todos
-                  </button>
-                </summary>
-                <ul className="cdf-ignored-list">
-                  {persistentPatterns.map((pattern) => (
-                    <li key={pattern} className="cdf-ignored-item">
-                      <span className="cdf-ignored-name" title={pattern}>{pattern}</span>
-                      <button className="cdf-icon-btn small" title="Restaurar este padrão" onClick={() => handleRestorePersistentPattern(pattern)}>
-                        <svg viewBox="0 0 24 24">
-                          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                          <path d="M3 3v5h5" />
-                        </svg>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
-          </div>
-        </aside>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          </aside>
+        )}
 
         {/* Painel principal de renderização */}
         <main className="cdf-diff-panel">
-          <div className="cdf-diff-actions">
-            {/* Prompt customizável — salvo no localStorage */}
-            <details className="cdf-prompt-details">
-              <summary>Personalizar Instruções do Prompt (Opcional)</summary>
-              <textarea
-                className="cdf-prompt-textarea"
-                value={auditPromptTemplate}
-                onChange={handlePromptChange}
-                rows={8}
-              />
-            </details>
+          {/* Cabeçalho do painel principal */}
+          <div className="cdf-panel-header">
+            <div className="cdf-panel-header-left">
+              <button
+                className={`cdf-sidebar-toggle-btn ${!isSidebarOpen ? 'sidebar-closed' : ''}`}
+                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                title={isSidebarOpen ? 'Ocultar barra lateral' : 'Mostrar barra lateral'}
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <line x1="9" y1="3" x2="9" y2="21" />
+                </svg>
+              </button>
+            </div>
+
+            <div className="cdf-panel-header-right">
+              <details className="cdf-prompt-details">
+                <summary>Instruções do Prompt</summary>
+                <textarea
+                  className="cdf-prompt-textarea"
+                  value={auditPromptTemplate}
+                  onChange={handlePromptChange}
+                  rows={6}
+                />
+              </details>
+
+              <button className="app-pill-btn" onClick={handleCopy} disabled={!markdown || isGenerating}>
+                {isCopied ? 'Copiado!' : 'Copiar'}
+              </button>
+              <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting || !markdown}>
+                {isExporting ? 'Exportando...' : 'Exportar'}
+              </button>
+            </div>
           </div>
 
           <div className={`cdf-diff-code-rendered${!markdown && !isGenerating && !error ? ' empty-state' : ''}`}>
@@ -845,16 +905,6 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({ active
             )}
           </div>
         </main>
-      </div>
-
-      {/* Barra de ações inferior */}
-      <div className="cdf-diff-actions-bottom">
-        <button className="app-pill-btn" onClick={handleCopyPrompt} disabled={!markdown}>
-          {isCopied ? 'Copiado!' : 'Copiar com Prompt'}
-        </button>
-        <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting || !markdown}>
-          {isExporting ? 'Exportando...' : 'Exportar'}
-        </button>
       </div>
     </div>
   )

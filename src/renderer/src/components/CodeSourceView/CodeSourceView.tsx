@@ -3,7 +3,7 @@
 
 Responsabilidades do Script
 
-1. Renderizar a interface da aba Code Source com sidebar redimensionável e layout de duas linhas.
+1. Renderizar a interface da aba Code Source com layout de painéis independentes desacoplados e barra lateral retrátil.
 2. Gerenciar a seleção reativa de arquivos com sistema de Ignore, seletor de formato (Markdown/XML) e contagem de tokens.
 3. Monitorar alterações de arquivos em tempo real via WatcherService com debounce de 300ms.
 4. Fornecer ações contextuais (Copiar, Salvar XML, Exportar Obsidian).
@@ -41,15 +41,21 @@ Mapa de Relacionamentos do Script
    - Relação: Escuta eventos de atualização de importância emitidos por outras abas.
    - Criticidade: Alta
 
+7. ProjectSwitcher.tsx
+   - Tipo: Dependência Direta
+   - Relação: Renderiza o componente de seleção e alternância do projeto ativo na topbar.
+   - Criticidade: Alta
+
 Invariantes do Script
 
-1. A sidebar deve ter largura entre 280px e 500px, nunca fora desse intervalo.
+1. A sidebar deve ter largura entre 280px e 500px quando visível.
 2. O resize handle deve estar sempre na borda direita da sidebar.
 3. Os nomes dos arquivos nunca devem ser truncados sem ellipsis.
 4. O total de tokens selecionados deve ser calculado apenas com base nos arquivos checkados.
 5. A tríade arquitetural deve ser sempre atualizada junto com o código.
 6. A sincronização de importância não deve afetar a seleção de arquivos (checkboxes).
 7. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
+8. O estado de abertura da barra lateral (aberto/fechado) deve ser persistido por projeto no localStorage.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -62,15 +68,44 @@ import { ImportanceBadge } from '../ImportanceBadge/ImportanceBadge'
 import { ImportanceGroup } from '../ImportanceGroup/ImportanceGroup'
 import { SidebarActions } from '../SidebarActions/SidebarActions'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
+import { ProjectSwitcher } from '../ProjectSwitcher/ProjectSwitcher'
 import './CodeSourceView.css'
 
 interface CodeSourceViewProps {
   activeProject: { path: string; name: string } | null
+  onSelectProject: (project: { path: string; name: string } | null) => void
   onStatusMessage: (message: string, isError?: boolean) => void
 }
 
-export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, onStatusMessage }) => {
+export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ 
+  activeProject, 
+  onSelectProject, 
+  onStatusMessage 
+}) => {
   const [trackedFiles, setTrackedFiles] = useState<DiffFileStatus[]>([])
+
+  // Estado de controle da abertura da barra lateral (persistido por projeto no localStorage)
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
+    if (!activeProject) return true
+    const saved = localStorage.getItem(`code_source_sidebar_open_${activeProject.path}`)
+    return saved !== 'false'
+  })
+
+  // Sincroniza o estado de abertura da barra lateral no localStorage
+  useEffect(() => {
+    if (activeProject) {
+      localStorage.setItem(`code_source_sidebar_open_${activeProject.path}`, isSidebarOpen.toString())
+    }
+  }, [isSidebarOpen, activeProject])
+
+  // Restaura o estado da barra lateral quando o projeto ativo muda
+  useEffect(() => {
+    if (activeProject) {
+      const saved = localStorage.getItem(`code_source_sidebar_open_${activeProject.path}`)
+      setIsSidebarOpen(saved !== 'false')
+    }
+  }, [activeProject])
+
   // Checkboxes iniciam desmarcados por padrão, diferente do CodeCompressionView
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [markdown, setMarkdown] = useState<string>('')
@@ -662,200 +697,227 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
 
   return (
     <div className="cs-container">
+      {/* Topbar global para alternância e status do projeto */}
       <div className="cs-topbar">
         <div className="cs-repo-info">
-          <span className="cs-repo-name">{activeProject.name}</span>
+          <ProjectSwitcher activeProject={activeProject} onSelectProject={onSelectProject} />
           <span className="cs-status-badge watching">● Monitorando</span>
         </div>
       </div>
 
-      <div className="cs-split">
+      <div className="cs-layout-wrapper">
         {/* Sidebar com lista de arquivos tracked */}
-        <aside className="cs-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
-          {/* Resize handle na borda direita — permite arrastar para redimensionar */}
-          <div
-            className={`cs-sidebar-resize-handle${isResizing ? ' resizing' : ''}`}
-            onMouseDown={handleResizeMouseDown}
-          />
-          <div className="cs-sidebar-header">
-            <span className="cs-sidebar-header-left">
-              {visibleFiles.length > 0 && (
-                <ToggleSwitch
-                  checked={selectedFiles.size === visibleFiles.length && visibleFiles.length > 0}
-                  indeterminate={selectedFiles.size > 0 && selectedFiles.size < visibleFiles.length}
-                  onChange={toggleMasterCheckbox}
-                  onClick={(e) => e.stopPropagation()}
-                />
-              )}
-              <span>Arquivos Tracked</span>
-            </span>
-            <span className="cs-sidebar-header-right">
-              {/* Dropdown unificado de ações no topo da sidebar */}
-              <SidebarActions
-                classPrefix="cs"
-                hasNoiseFiles={hasNoiseFiles}
-                onSweepNoise={handleSweepNoise}
-                hasImportanceData={Object.keys(importanceMap).length > 0}
-                onSelectCriticalAndHigh={handleSelectCriticalAndHigh}
-                isClassifying={isClassifying}
-              />
-
-              <span className="cs-count-badge">{trackedFiles.length}</span>
-              {totalSelectedTokens > 0 && (
-                <span className="cs-token-total" title="Total de tokens selecionados (estimativa)">
-                  ≈ {formatTokenCount(totalSelectedTokens)} tokens
-                </span>
-              )}
-            </span>
-          </div>
-
-          {visibleFiles.length === 0 && trackedFiles.length === 0 ? (
-            <p className="cs-empty-state">Nenhum arquivo encontrado.</p>
-          ) : visibleFiles.length === 0 ? (
-            <p className="cs-empty-state">Todos os arquivos estão ocultos.</p>
-          ) : (
-            // Arquivos agrupados por nível de importância
-            <div className="cs-file-list">
-              {(['critical', 'high', 'medium', 'low'] as const).map((level) => {
-                const levelLabels = { critical: 'Críticos', high: 'Altos', medium: 'Médios', low: 'Baixos' }
-                const levelEmojis = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪' }
-                return (
-                  <ImportanceGroup
-                    key={level}
-                    level={level}
-                    files={groupedFiles[level]}
-                    emoji={levelEmojis[level]}
-                    label={levelLabels[level]}
-                    classPrefix="cs"
-                    selectedFiles={selectedFiles}
-                    importanceMap={importanceMap}
-                    importanceSource={importanceSource}
-                    tokenEstimates={tokenEstimates}
-                    formatTokenCount={formatTokenCount}
-                    toggleFileSelection={toggleFileSelection}
-                    handleImportanceChange={handleImportanceChange}
-                    onHideFile={ignoreFileTemporary}
-                    onHideExtension={handleHideExtension}
-                    onCopyPath={handleCopyPath}
-                    onCopyName={handleCopyName}
-                    onRevealInExplorer={handleRevealInExplorer}
+        {isSidebarOpen && (
+          <aside className="cs-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
+            {/* Resize handle na borda direita — permite arrastar para redimensionar */}
+            <div
+              className={`cs-sidebar-resize-handle${isResizing ? ' resizing' : ''}`}
+              onMouseDown={handleResizeMouseDown}
+            />
+            <div className="cs-sidebar-header">
+              <span className="cs-sidebar-header-left">
+                {visibleFiles.length > 0 && (
+                  <ToggleSwitch
+                    checked={selectedFiles.size === visibleFiles.length && visibleFiles.length > 0}
+                    indeterminate={selectedFiles.size > 0 && selectedFiles.size < visibleFiles.length}
+                    onChange={toggleMasterCheckbox}
+                    onClick={(e) => e.stopPropagation()}
                   />
-                )
-              })}
-            </div>
-          )}
+                )}
+                <span>Arquivos Tracked</span>
+              </span>
+              <span className="cs-sidebar-header-right">
+                {/* Dropdown unificado de ações no topo da sidebar */}
+                <SidebarActions
+                  classPrefix="cs"
+                  hasNoiseFiles={hasNoiseFiles}
+                  onSweepNoise={handleSweepNoise}
+                  hasImportanceData={Object.keys(importanceMap).length > 0}
+                  onSelectCriticalAndHigh={handleSelectCriticalAndHigh}
+                  isClassifying={isClassifying}
+                />
 
-          {/* Popup flutuante de ignore inteligente */}
-          {ignorePopup && (
-            <div className="cs-ignore-popup" ref={ignorePopupRef}>
-              <div className="cs-ignore-popup-text">
-                Ignorar <strong>{ignorePopup.path.split('/').pop()}</strong>
-              </div>
-              <div className="cs-ignore-popup-actions">
-                <button className="cs-ignore-popup-btn" onClick={handlePopupIgnoreThis}>
-                  Ignorar apenas este
-                </button>
-                <button className="cs-ignore-popup-btn cs-ignore-popup-btn-all" onClick={handlePopupIgnoreAll}>
-                  Ignorar todos os *{ignorePopup.ext}
-                </button>
-              </div>
+                <span className="cs-count-badge">{trackedFiles.length}</span>
+                {totalSelectedTokens > 0 && (
+                  <span className="cs-token-total" title="Total de tokens selecionados (estimativa)">
+                    ≈ {formatTokenCount(totalSelectedTokens)} tokens
+                  </span>
+                )}
+              </span>
             </div>
-          )}
 
-          {/* Sanfona de arquivos ignorados no rodapé */}
-          <div className="cs-sidebar-footer">
-            {ignoredFiles.length > 0 && (
-              <details
-                className="cs-ignored-accordion"
-                open={ignoredAccordionOpen}
-                onToggle={(e) => setIgnoredAccordionOpen((e.target as HTMLDetailsElement).open)}
-              >
-                <summary className="cs-ignored-summary">
-                  <span className="cs-ignored-title">🚫 Ignorados nesta sessão ({ignoredFiles.length})</span>
-                  <button
-                    className="cs-pill-btn"
-                    onClick={(e) => { e.stopPropagation(); handleRestoreAll() }}
-                  >
-                    Restaurar Todos
+            {visibleFiles.length === 0 && trackedFiles.length === 0 ? (
+              <p className="cs-empty-state">Nenhum arquivo encontrado.</p>
+            ) : visibleFiles.length === 0 ? (
+              <p className="cs-empty-state">Todos os arquivos estão ocultos.</p>
+            ) : (
+              // Arquivos agrupados por nível de importância
+              <div className="cs-file-list">
+                {(['critical', 'high', 'medium', 'low'] as const).map((level) => {
+                  const levelLabels = { critical: 'Críticos', high: 'Altos', medium: 'Médios', low: 'Baixos' }
+                  const levelEmojis = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪' }
+                  return (
+                    <ImportanceGroup
+                      key={level}
+                      level={level}
+                      files={groupedFiles[level]}
+                      emoji={levelEmojis[level]}
+                      label={levelLabels[level]}
+                      classPrefix="cs"
+                      selectedFiles={selectedFiles}
+                      importanceMap={importanceMap}
+                      importanceSource={importanceSource}
+                      tokenEstimates={tokenEstimates}
+                      formatTokenCount={formatTokenCount}
+                      toggleFileSelection={toggleFileSelection}
+                      handleImportanceChange={handleImportanceChange}
+                      onHideFile={ignoreFileTemporary}
+                      onHideExtension={handleHideExtension}
+                      onCopyPath={handleCopyPath}
+                      onCopyName={handleCopyName}
+                      onRevealInExplorer={handleRevealInExplorer}
+                    />
+                  )
+                })}
+              </div>
+            )}
+
+            {/* Popup flutuante de ignore inteligente */}
+            {ignorePopup && (
+              <div className="cs-ignore-popup" ref={ignorePopupRef}>
+                <div className="cs-ignore-popup-text">
+                  Ignorar <strong>{ignorePopup.path.split('/').pop()}</strong>
+                </div>
+                <div className="cs-ignore-popup-actions">
+                  <button className="cs-ignore-popup-btn" onClick={handlePopupIgnoreThis}>
+                    Ignorar apenas este
                   </button>
-                </summary>
-                <ul className="cs-ignored-list">
-                  {ignoredFiles.map((path) => {
-                    const name = path.split('/').pop() ?? path
-                    return (
-                      <li key={path} className="cs-ignored-item">
-                        <span className="cs-ignored-name" title={path}>{name}</span>
-                        <div style={{ display: 'flex', gap: '4px' }}>
-                          <button className="cs-icon-btn small" title="Restaurar este arquivo" onClick={() => handleRestoreFile(path)}>
-                            <svg viewBox="0 0 24 24">
-                              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                              <path d="M3 3v5h5" />
-                            </svg>
-                          </button>
-                          <button className="cs-icon-btn small" title="Promover para permanente" onClick={() => handleUpgradeToPersistent(path)}>
-                            <svg viewBox="0 0 24 24">
-                              <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-                              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                            </svg>
-                          </button>
-                        </div>
+                  <button className="cs-ignore-popup-btn cs-ignore-popup-btn-all" onClick={handlePopupIgnoreAll}>
+                    Ignorar todos os *{ignorePopup.ext}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Sanfona de arquivos ignorados no rodapé */}
+            <div className="cs-sidebar-footer">
+              {ignoredFiles.length > 0 && (
+                <details
+                  className="cs-ignored-accordion"
+                  open={ignoredAccordionOpen}
+                  onToggle={(e) => setIgnoredAccordionOpen((e.target as HTMLDetailsElement).open)}
+                >
+                  <summary className="cs-ignored-summary">
+                    <span className="cs-ignored-title">🚫 Ignorados nesta sessão ({ignoredFiles.length})</span>
+                    <button
+                      className="cs-pill-btn"
+                      onClick={(e) => { e.stopPropagation(); handleRestoreAll() }}
+                    >
+                      Restaurar Todos
+                    </button>
+                  </summary>
+                  <ul className="cs-ignored-list">
+                    {ignoredFiles.map((path) => {
+                      const name = path.split('/').pop() ?? path
+                      return (
+                        <li key={path} className="cs-ignored-item">
+                          <span className="cs-ignored-name" title={path}>{name}</span>
+                          <div style={{ display: 'flex', gap: '4px' }}>
+                            <button className="cs-icon-btn small" title="Restaurar este arquivo" onClick={() => handleRestoreFile(path)}>
+                              <svg viewBox="0 0 24 24">
+                                <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                                <path d="M3 3v5h5" />
+                              </svg>
+                            </button>
+                            <button className="cs-icon-btn small" title="Promover para permanente" onClick={() => handleUpgradeToPersistent(path)}>
+                              <svg viewBox="0 0 24 24">
+                                <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
+                                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                              </svg>
+                            </button>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </details>
+              )}
+
+              {persistentPatterns.length > 0 && (
+                <details className="cs-ignored-accordion">
+                  <summary className="cs-ignored-summary">
+                    <span className="cs-ignored-title">🔒 Ignorados no Projeto ({persistentPatterns.length})</span>
+                    <button
+                      className="cs-pill-btn"
+                      onClick={(e) => { e.stopPropagation(); handleRestoreAllPersistent() }}
+                    >
+                      Restaurar Todos
+                    </button>
+                  </summary>
+                  <ul className="cs-ignored-list">
+                    {persistentPatterns.map((pattern) => (
+                      <li key={pattern} className="cs-ignored-item">
+                        <span className="cs-ignored-name" title={pattern}>{pattern}</span>
+                        <button className="cs-icon-btn small" title="Restaurar este padrão" onClick={() => handleRestorePersistentPattern(pattern)}>
+                          <svg viewBox="0 0 24 24">
+                            <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                            <path d="M3 3v5h5" />
+                          </svg>
+                        </button>
                       </li>
-                    )
-                  })}
-                </ul>
-              </details>
-            )}
-
-            {persistentPatterns.length > 0 && (
-              <details className="cs-ignored-accordion">
-                <summary className="cs-ignored-summary">
-                  <span className="cs-ignored-title">🔒 Ignorados no Projeto ({persistentPatterns.length})</span>
-                  <button
-                    className="cs-pill-btn"
-                    onClick={(e) => { e.stopPropagation(); handleRestoreAllPersistent() }}
-                  >
-                    Restaurar Todos
-                  </button>
-                </summary>
-                <ul className="cs-ignored-list">
-                  {persistentPatterns.map((pattern) => (
-                    <li key={pattern} className="cs-ignored-item">
-                      <span className="cs-ignored-name" title={pattern}>{pattern}</span>
-                      <button className="cs-icon-btn small" title="Restaurar este padrão" onClick={() => handleRestorePersistentPattern(pattern)}>
-                        <svg viewBox="0 0 24 24">
-                          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                          <path d="M3 3v5h5" />
-                        </svg>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
-          </div>
-        </aside>
+                    ))}
+                  </ul>
+                </details>
+              )}
+            </div>
+          </aside>
+        )}
 
         {/* Painel principal de renderização */}
         <main className="cs-diff-panel">
-          <div className="cs-diff-actions" style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <label htmlFor="format-select" style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Formato:</label>
-              <select
-                id="format-select"
-                value={format}
-                onChange={handleFormatChange}
-                className="cs-format-select"
-                style={{ padding: '4px 8px', borderRadius: '4px', background: 'var(--bg-secondary)', color: 'var(--text-primary)', border: '1px solid var(--border)' }}
+          {/* Cabeçalho do painel principal */}
+          <div className="cs-panel-header">
+            <div className="cs-panel-header-left">
+              <button
+                className={`cs-sidebar-toggle-btn ${!isSidebarOpen ? 'sidebar-closed' : ''}`}
+                onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                title={isSidebarOpen ? 'Ocultar barra lateral' : 'Mostrar barra lateral'}
               >
-                <option value="markdown">Markdown</option>
-                <option value="xml">XML</option>
-              </select>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <rect x="3" y="3" width="18" height="18" rx="2" />
+                  <line x1="9" y1="3" x2="9" y2="21" />
+                </svg>
+              </button>
             </div>
-            
-            {/* Contagem de Tokens */}
-            <div className="cs-token-panel" style={{ padding: '8px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '12px', color: 'var(--text-secondary)', display: 'flex', gap: '16px', alignItems: 'center' }}>
-              <strong>Total: {tokenCount > 0 ? tokenCount.toLocaleString('pt-BR') : 'Indisponível'} tokens</strong>
+
+            <div className="cs-panel-header-right">
+              <div className="cs-format-container">
+                <label htmlFor="format-select" className="cs-format-label">Formato:</label>
+                <select
+                  id="format-select"
+                  value={format}
+                  onChange={handleFormatChange}
+                  className="cs-format-select"
+                >
+                  <option value="markdown">Markdown</option>
+                  <option value="xml">XML</option>
+                </select>
+              </div>
+
+              <button className="app-pill-btn" onClick={handleCopy} disabled={!markdown || isGenerating}>
+                {isCopied ? 'Copiado!' : 'Copiar'}
+              </button>
+              <button className="app-pill-btn" onClick={handleExportDownloads} disabled={!markdown || isGenerating || isExporting}>
+                {isExporting ? 'Exportando...' : 'Exportar'}
+              </button>
             </div>
+          </div>
+
+          {/* Contagem de Tokens secundária */}
+          <div className="cs-token-bar">
+            <strong>Total estimado: {tokenCount > 0 ? tokenCount.toLocaleString('pt-BR') : '0'} tokens</strong>
+            <span style={{ opacity: 0.3 }}>|</span>
+            <span>{selectedFiles.size} arquivo(s) selecionado(s)</span>
           </div>
 
           <div className={`cs-diff-code-rendered${!markdown && !isGenerating && !error ? ' empty-state' : ''}`}>
@@ -889,16 +951,6 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({ activeProject, o
             )}
           </div>
         </main>
-      </div>
-
-      {/* Barra de ações inferior */}
-      <div className="cs-diff-actions-bottom">
-        <button className="app-pill-btn" onClick={handleCopy} disabled={!markdown || isGenerating}>
-          {isCopied ? 'Copiado!' : 'Copiar'}
-        </button>
-        <button className="app-pill-btn" onClick={handleExportDownloads} disabled={!markdown || isGenerating || isExporting}>
-          {isExporting ? 'Exportando...' : 'Exportar'}
-        </button>
       </div>
     </div>
   )

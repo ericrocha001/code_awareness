@@ -4,14 +4,15 @@
 Responsabilidades do Script
 
 1. Gerenciar o ciclo de vida do WatcherService e monitorar alterações de arquivos.
-2. Renderizar a interface dividida em lista de arquivos alterados e painel de diff semântico.
+2. Renderizar a interface com topbar global (ProjectSwitcher + badges), sidebar retrátil e painel de diff semântico.
 3. Gerenciar seleção de arquivos e sistema de ignore (temporary/persistent).
 4. Classificar arquivos por importância arquitetural com override manual.
 5. Suportar ordenação por importância ou recência com persistência em localStorage.
 6. Exibir badges de tipo (M/A/D) e badges de importância por arquivo, agrupados por nível.
-7. Sidebar redimensionável entre 280px e 500px.
-8. Copiar diff semântico de um único arquivo selecionado.
-9. Sincronizar classificações de importância em tempo real com outras abas via evento IPC.
+7. Sidebar retrátil com persistência no localStorage por projeto.
+8. Sidebar redimensionável entre 280px e 500px.
+9. Copiar (diff + prompt) e Exportar (diff apenas) como ações no cabeçalho do painel principal; copiar diff semântico de um único arquivo selecionado na sidebar.
+10. Sincronizar classificações de importância em tempo real com outras abas via evento IPC.
 
 Mapa de Relacionamentos do Script
 
@@ -40,17 +41,22 @@ Mapa de Relacionamentos do Script
    - Relação: Renderiza dropdown unificado de ações com toggle de ordenação.
    - Criticidade: Alta
 
-6. shared/types.ts
+6. ProjectSwitcher.tsx
+   - Tipo: Dependência Direta
+   - Relação: Renderiza dropdown de troca de projeto ativo na topbar.
+   - Criticidade: Alta
+
+7. shared/types.ts
    - Tipo: Contrato / Interface
    - Relação: Define DiffFileStatus, ImportanceLevel e ImportanceSource.
    - Criticidade: Alta
 
-7. ignore-patterns.ts
+8. ignore-patterns.ts
    - Tipo: Dependência Direta
    - Relação: Fornece padrões de ruído e extensões ignoradas.
    - Criticidade: Média
 
-8. window.codeAwareness.onImportanceUpdated
+9. window.codeAwareness.onImportanceUpdated
    - Tipo: Comunicação por Evento
    - Relação: Escuta eventos de atualização de importância emitidos por outras abas.
    - Criticidade: Alta
@@ -67,6 +73,9 @@ Invariantes do Script
 8. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
 9. No modo recência, a lista deve ser plana (sem agrupamentos), mantendo a mesma estrutura visual do modo importância.
 10. No modo importância, grupos vazios não devem ser renderizados.
+11. O estado de abertura da sidebar deve ser persistido por projeto no localStorage.
+12. A topbar deve exibir o ProjectSwitcher e badges de status; a sidebar é condicional com base em isSidebarOpen.
+13. A lógica interna da sidebar (ordenamento, ImportanceGroup, SidebarActions) nunca deve ser alterada.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -79,6 +88,7 @@ import { ImportanceGroup } from '../ImportanceGroup/ImportanceGroup'
 import { ActionsDropdown } from '../ActionsDropdown/ActionsDropdown'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
 import { SidebarActions } from '../SidebarActions/SidebarActions'
+import { ProjectSwitcher } from '../ProjectSwitcher/ProjectSwitcher'
 import './CodeDiffView.css'
 
 const DEFAULT_PROMPT = `Analise as alterações de código abaixo como um Engenheiro de Software Staff extremamente rigoroso.
@@ -97,8 +107,9 @@ Abaixo está o mapeamento semântico das funções alteradas:
 
 export const CodeDiffView: React.FC<{
   activeProject: { path: string; name: string } | null
+  onSelectProject: (project: { path: string; name: string } | null) => void
   onStatusMessage: (message: string, isError?: boolean) => void
-}> = ({ activeProject, onStatusMessage }) => {
+}> = ({ activeProject, onSelectProject, onStatusMessage }) => {
   const [isWatching, setIsWatching] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null)
@@ -106,7 +117,7 @@ export const CodeDiffView: React.FC<{
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [diffMarkdown, setDiffMarkdown] = useState<string>('')
   const [auditPromptTemplate, setAuditPromptTemplate] = useState('')
-  const [isCopied, setIsCopied] = useState(false)
+  const [isCopyMarkdown, setIsCopyMarkdown] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
 
   // Seleção de arquivos para o diff
@@ -129,9 +140,31 @@ export const CodeDiffView: React.FC<{
   const [tokenEstimates, setTokenEstimates] = useState<Record<string, number>>({})
   const [isClassifying, setIsClassifying] = useState(false)
 
+  // ── Sidebar retrátil (persistida no localStorage) ─────────────────────────
+  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
+    if (!activeProject) return true
+    const saved = localStorage.getItem(`code_diff_sidebar_open_${activeProject.path}`)
+    return saved !== 'false'
+  })
+
+  // Sincroniza o estado de abertura da barra lateral no localStorage
+  useEffect(() => {
+    if (activeProject) {
+      localStorage.setItem(`code_diff_sidebar_open_${activeProject.path}`, isSidebarOpen.toString())
+    }
+  }, [isSidebarOpen, activeProject])
+
+  // Restaura o estado da barra lateral quando o projeto ativo muda
+  useEffect(() => {
+    if (activeProject) {
+      const saved = localStorage.getItem(`code_diff_sidebar_open_${activeProject.path}`)
+      setIsSidebarOpen(saved !== 'false')
+    }
+  }, [activeProject])
+
   // ── Sidebar redimensionável ───────────────────────────────────────────────
   const sidebarRef = useRef<HTMLDivElement>(null)
-  const [sidebarWidth, setSidebarWidth] = useState(350)
+  const [sidebarWidth, setSidebarWidth] = useState(450)
   const [isResizing, setIsResizing] = useState(false)
 
   // Refs auxiliares
@@ -755,12 +788,12 @@ export const CodeDiffView: React.FC<{
     localStorage.setItem('code_diff_prompt_template', newVal)
   }
 
-  const handleCopyPrompt = () => {
+  const handleCopy = () => {
     const finalPrompt = `${auditPromptTemplate}\n\n${diffMarkdown}`
     navigator.clipboard.writeText(finalPrompt)
-    setIsCopied(true)
+    setIsCopyMarkdown(true)
     onStatusMessage('Prompt com diff copiado!')
-    setTimeout(() => setIsCopied(false), 2000)
+    setTimeout(() => setIsCopyMarkdown(false), 2000)
   }
 
   const handleExportDownloads = async () => {
@@ -815,7 +848,7 @@ export const CodeDiffView: React.FC<{
     <div className="cdf-container">
       <div className="cdf-topbar">
         <div className="cdf-repo-info">
-          <span className="cdf-repo-name">{activeProject.name}</span>
+          <ProjectSwitcher activeProject={activeProject} onSelectProject={onSelectProject} />
           {isLoading && <span className="cdf-status-badge loading">carregando...</span>}
           {!isLoading && isWatching && <span className="cdf-status-badge watching">● Monitorando</span>}
           {!isLoading && isGitRepo === false && (
@@ -824,8 +857,9 @@ export const CodeDiffView: React.FC<{
         </div>
       </div>
 
-      <div className="cdf-split">
+      <div className="cdf-layout-wrapper">
         {/* ── Sidebar ─────────────────────────────────────────────────────── */}
+        {isSidebarOpen && (
         <aside className="cdf-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
           {/* Handle de resize */}
           <div
@@ -885,7 +919,7 @@ export const CodeDiffView: React.FC<{
                   medium: 'Médios',
                   low: 'Baixos'
                 }
-                const levelEmojis = { critical: '', high: '🟠', medium: '🟡', low: '⚪' }
+                const levelEmojis = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪' }
                 return (
                   <ImportanceGroup
                     key={level}
@@ -1063,6 +1097,7 @@ export const CodeDiffView: React.FC<{
             )}
           </div>
         </aside>
+        )}
 
         {/* ── Painel de diff ───────────────────────────────────────────────── */}
         {modifiedFiles.length === 0 ? (
@@ -1092,16 +1127,39 @@ export const CodeDiffView: React.FC<{
           </main>
         ) : (
           <main className="cdf-diff-panel">
-            <div className="cdf-diff-actions">
-              <details className="cdf-prompt-details">
-                <summary>Personalizar Instruções do Prompt (Opcional)</summary>
-                <textarea
-                  className="cdf-prompt-textarea"
-                  value={auditPromptTemplate}
-                  onChange={handlePromptChange}
-                  rows={8}
-                />
-              </details>
+            {/* Cabeçalho do painel principal */}
+            <div className="cdf-panel-header">
+              <div className="cdf-panel-header-left">
+                <button
+                  className={`cdf-sidebar-toggle-btn ${!isSidebarOpen ? 'sidebar-closed' : ''}`}
+                  onClick={() => setIsSidebarOpen(!isSidebarOpen)}
+                  title={isSidebarOpen ? 'Ocultar barra lateral' : 'Mostrar barra lateral'}
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <rect x="3" y="3" width="18" height="18" rx="2" />
+                    <line x1="9" y1="3" x2="9" y2="21" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="cdf-panel-header-right">
+                <details className="cdf-prompt-details">
+                  <summary>Instruções do Prompt</summary>
+                  <textarea
+                    className="cdf-prompt-textarea"
+                    value={auditPromptTemplate}
+                    onChange={handlePromptChange}
+                    rows={6}
+                  />
+                </details>
+
+                <button className="app-pill-btn" onClick={handleCopy}>
+                  {isCopyMarkdown ? 'Copiado!' : 'Copiar'}
+                </button>
+                <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting}>
+                  {isExporting ? 'Exportando...' : 'Exportar'}
+                </button>
+              </div>
             </div>
 
             <div
@@ -1111,15 +1169,6 @@ export const CodeDiffView: React.FC<{
             </div>
           </main>
         )}
-      </div>
-
-      <div className="cdf-diff-actions-bottom">
-        <button className="app-pill-btn" onClick={handleCopyPrompt}>
-          {isCopied ? 'Copiado!' : 'Copiar com Prompt'}
-        </button>
-        <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting}>
-          {isExporting ? 'Exportando...' : 'Exportar'}
-        </button>
       </div>
     </div>
   )

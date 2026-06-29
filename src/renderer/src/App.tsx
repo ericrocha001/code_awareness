@@ -107,13 +107,25 @@ export const App: React.FC = () => {
           <HomeView activeProject={activeProject} onSelectProject={setActiveProject} onStatusMessage={handleStatusMessage} />
         )}
         {activeTab === 'codebase' && (
-          <CodeSourceView activeProject={activeProject} onStatusMessage={handleStatusMessage} />
+          <CodeSourceView 
+            activeProject={activeProject} 
+            onSelectProject={setActiveProject} 
+            onStatusMessage={handleStatusMessage} 
+          />
         )}
         {activeTab === 'compression' && (
-          <CodeCompressionView activeProject={activeProject} onStatusMessage={handleStatusMessage} />
+          <CodeCompressionView 
+            activeProject={activeProject} 
+            onSelectProject={setActiveProject} 
+            onStatusMessage={handleStatusMessage} 
+          />
         )}
         {activeTab === 'diff' && (
-          <CodeDiffView activeProject={activeProject} onStatusMessage={handleStatusMessage} />
+          <CodeDiffView
+            activeProject={activeProject}
+            onSelectProject={setActiveProject}
+            onStatusMessage={handleStatusMessage}
+          />
         )}
       </main>
 
