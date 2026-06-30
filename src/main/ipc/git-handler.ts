@@ -60,6 +60,7 @@ import { CompressionService } from '../core/compression-service'
 import { CodeSourceService } from '../core/code-source-service'
 import { RepomixAdapter } from '../core/repomix-adapter'
 import { importanceService } from '../core/importance-service'
+import { CheckpointService } from '../core/checkpoint-service'
 import { ImportanceLevel } from '../../shared/types'
 
 const gitService = new GitService()
@@ -67,6 +68,7 @@ const diffService = new DiffService()
 const compressionService = new CompressionService()
 const codeSourceService = new CodeSourceService()
 const repomixAdapter = new RepomixAdapter()
+const checkpointService = new CheckpointService()
 
 // Valida se o path recebido via IPC é uma string não vazia
 function isValidPath(value: unknown): value is string {
@@ -87,6 +89,34 @@ export function registerGitHandlers(watcherService: WatcherService, settingsServ
   ipcMain.handle('watcher:start', async (event, dirPath: string) => {
     if (!isValidPath(dirPath)) return { success: false }
     const webContents = event.sender
+    const repoPath = dirPath
+
+    // Registra o callback de detecção de commits no watcher
+    watcherService.setOnCommitDetected(async () => {
+      try {
+        const commitDetected = await checkpointService.checkForCommits(repoPath)
+        if (commitDetected) {
+          console.log('[GitHandler] Commit detectado, limpando checkpoints...')
+          const result = await checkpointService.handleCommitDetected(repoPath)
+          console.log(`[GitHandler] ${result.deletedCount} checkpoint(s) deletado(s), novo "🏁 Início" criado`)
+
+          // Notifica todos os renderers via IPC event
+          const windows = BrowserWindow.getAllWindows()
+          for (const win of windows) {
+            if (!win.webContents.isDestroyed()) {
+              win.webContents.send('checkpoint:commit-detected', {
+                repoPath,
+                deletedCount: result.deletedCount,
+                newCheckpointId: result.newCheckpoint.id
+              })
+            }
+          }
+        }
+      } catch (error) {
+        console.error('[GitHandler] Erro ao verificar commits:', error)
+      }
+    })
+
     watcherService.start(dirPath, (filePath) => {
       if (!webContents.isDestroyed()) {
         webContents.send('watcher:file-changed', filePath)
@@ -105,9 +135,9 @@ export function registerGitHandlers(watcherService: WatcherService, settingsServ
     return diffService.generateSemanticDiff(repoPath, selectedFiles)
   })
 
-  ipcMain.handle('git:get-all-tracked-files', async (_event, dirPath: string) => {
+  ipcMain.handle('git:get-all-files', async (_event, dirPath: string) => {
     if (!isValidPath(dirPath)) return []
-    return gitService.getAllTrackedFiles(dirPath)
+    return gitService.getAllFiles(dirPath)
   })
 
   ipcMain.handle('git:generate-compression-markdown', async (_event, repoPath: string, selectedFiles: string[]) => {

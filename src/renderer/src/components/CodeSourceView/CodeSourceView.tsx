@@ -239,7 +239,7 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
         // Inicia watcher e busca arquivos em paralelo
         const [, files] = await Promise.all([
           window.codeAwareness.startWatcher(activeProject.path),
-          window.codeAwareness.getAllTrackedFiles(activeProject.path)
+          window.codeAwareness.getAllFiles(activeProject.path)
         ])
         if (!isMounted) return
 
@@ -263,7 +263,7 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
     const unsubscribe = window.codeAwareness.onFileChanged(async () => {
       if (!activeProject || !isMounted) return
       try {
-        const files = await window.codeAwareness.getAllTrackedFiles(activeProject.path)
+        const files = await window.codeAwareness.getAllFiles(activeProject.path)
         if (!isMounted) return
 
         const currentPaths = files.map(f => f.relativePath)

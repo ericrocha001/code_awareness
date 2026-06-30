@@ -9,6 +9,7 @@ import { join } from 'path'
 import { registerFileHandlers } from './ipc/file-handler'
 import { registerSettingsHandlers } from './ipc/settings-handler'
 import { registerGitHandlers } from './ipc/git-handler'
+import { registerCheckpointHandlers } from './ipc/checkpoint-handler'
 import { registerWorkspaceHandlers } from './ipc/workspace-handler'
 import { SettingsService } from './core/settings-service'
 import { WorkspaceService } from './core/workspace-service'
@@ -72,6 +73,7 @@ app.whenReady().then(() => {
   registerSettingsHandlers(settingsService)
   registerGitHandlers(watcherService, settingsService)
   registerWorkspaceHandlers(settingsService, workspaceService)
+  registerCheckpointHandlers()
 
   createWindow()
 

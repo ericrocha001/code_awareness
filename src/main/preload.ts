@@ -35,7 +35,7 @@ Invariantes do Script
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { AppSettings, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ImportanceSource, ProjectInfo } from '../shared/types'
+import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ImportanceSource, ProjectInfo } from '../shared/types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
@@ -88,8 +88,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   generateSemanticDiff: (repoPath: string, selectedFiles?: string[]): Promise<string> => {
     return ipcRenderer.invoke('git:generate-semantic-diff', repoPath, selectedFiles)
   },
-  getAllTrackedFiles: (dirPath: string): Promise<DiffFileStatus[]> => {
-    return ipcRenderer.invoke('git:get-all-tracked-files', dirPath)
+  getAllFiles: (dirPath: string): Promise<DiffFileStatus[]> => {
+    return ipcRenderer.invoke('git:get-all-files', dirPath)
   },
   generateCompressionMarkdown: (repoPath: string, selectedFiles: string[]): Promise<string> => {
     return ipcRenderer.invoke('git:generate-compression-markdown', repoPath, selectedFiles)
@@ -166,5 +166,88 @@ contextBridge.exposeInMainWorld('codeAwareness', {
 
   removeImportanceUpdatedListener: () => {
     ipcRenderer.removeAllListeners('importance:updated')
+  },
+
+  // ─── Checkpoints ──────────────────────────────────────────────────────
+
+  createCheckpoint: (
+    repoPath: string,
+    name: string,
+    strategy: 'all' | 'critical-high'
+  ): Promise<{ success: boolean; data?: CheckpointData; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:create', repoPath, name, strategy)
+  },
+
+  listCheckpoints: (
+    repoPath: string
+  ): Promise<{ success: boolean; data?: CheckpointSummary[]; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:list', repoPath)
+  },
+
+  loadCheckpoint: (
+    repoPath: string,
+    checkpointId: string
+  ): Promise<{ success: boolean; data?: CheckpointData; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:load', repoPath, checkpointId)
+  },
+
+  deleteCheckpoint: (
+    repoPath: string,
+    checkpointId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:delete', repoPath, checkpointId)
+  },
+
+  deleteAllCheckpoints: (
+    repoPath: string
+  ): Promise<{ success: boolean; deletedCount: number; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:delete-all', repoPath)
+  },
+
+  generateCheckpointDiff: (
+    repoPath: string,
+    fromCheckpointId: string,
+    toCheckpointId?: string
+  ): Promise<{ success: boolean; data?: string; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:generate-diff', repoPath, fromCheckpointId, toCheckpointId)
+  },
+
+  restoreCheckpoint: (
+    repoPath: string,
+    checkpointId: string
+  ): Promise<{ success: boolean; data?: { restored: number; failed: number; errors: string[] }; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:restore', repoPath, checkpointId)
+  },
+
+  initializeCommitDetection: (
+    repoPath: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:initialize-commit-detection', repoPath)
+  },
+
+  renameCheckpoint: (
+    repoPath: string,
+    checkpointId: string,
+    newName: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:rename', repoPath, checkpointId, newName)
+  },
+
+  getCheckpointChangedFiles: (
+    repoPath: string,
+    fromCheckpointId: string,
+    toCheckpointId?: string
+  ): Promise<{ success: boolean; data?: CheckpointDiffFile[]; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:get-changed-files', repoPath, fromCheckpointId, toCheckpointId)
+  },
+
+  onCommitDetected: (
+    callback: (event: any, data: { repoPath: string; deletedCount: number; newCheckpointId: string }) => void
+  ) => {
+    ipcRenderer.on('checkpoint:commit-detected', callback)
+  },
+
+  removeCommitDetectedListener: () => {
+    ipcRenderer.removeAllListeners('checkpoint:commit-detected')
   }
 })

@@ -22,7 +22,7 @@ Invariantes do Script
 
 /// <reference types="vite/client" />
 
-import { AppSettings, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ProjectInfo } from '../../shared/types'
+import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ProjectInfo } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -45,7 +45,7 @@ declare global {
       stopWatcher: () => Promise<{ success: boolean }>
       onFileChanged: (callback: (filePath: string) => void) => () => void
       generateSemanticDiff: (repoPath: string, selectedFiles?: string[]) => Promise<string>
-      getAllTrackedFiles: (dirPath: string) => Promise<DiffFileStatus[]>
+      getAllFiles: (dirPath: string) => Promise<DiffFileStatus[]>
       generateCompressionMarkdown: (repoPath: string, selectedFiles: string[]) => Promise<string>
       addRootFolder: () => Promise<ProjectInfo[]>
       addIndividualProject: () => Promise<ProjectInfo[]>
@@ -86,6 +86,64 @@ declare global {
       ) => Electron.IpcRenderer
 
       removeImportanceUpdatedListener: () => void
+
+      // ─── Checkpoints ─────────────────────────────────────────────────
+      createCheckpoint: (
+        repoPath: string,
+        name: string,
+        strategy: 'all' | 'critical-high'
+      ) => Promise<{ success: boolean; data?: CheckpointData; error?: string }>
+
+      listCheckpoints: (
+        repoPath: string
+      ) => Promise<{ success: boolean; data?: CheckpointSummary[]; error?: string }>
+
+      loadCheckpoint: (
+        repoPath: string,
+        checkpointId: string
+      ) => Promise<{ success: boolean; data?: CheckpointData; error?: string }>
+
+      deleteCheckpoint: (
+        repoPath: string,
+        checkpointId: string
+      ) => Promise<{ success: boolean; error?: string }>
+
+      deleteAllCheckpoints: (
+        repoPath: string
+      ) => Promise<{ success: boolean; deletedCount: number; error?: string }>
+
+      generateCheckpointDiff: (
+        repoPath: string,
+        fromCheckpointId: string,
+        toCheckpointId?: string
+      ) => Promise<{ success: boolean; data?: string; error?: string }>
+
+      restoreCheckpoint: (
+        repoPath: string,
+        checkpointId: string
+      ) => Promise<{ success: boolean; data?: { restored: number; failed: number; errors: string[] }; error?: string }>
+
+      initializeCommitDetection: (
+        repoPath: string
+      ) => Promise<{ success: boolean; error?: string }>
+
+      renameCheckpoint: (
+        repoPath: string,
+        checkpointId: string,
+        newName: string
+      ) => Promise<{ success: boolean; error?: string }>
+
+      getCheckpointChangedFiles: (
+        repoPath: string,
+        fromCheckpointId: string,
+        toCheckpointId?: string
+      ) => Promise<{ success: boolean; data?: CheckpointDiffFile[]; error?: string }>
+
+      onCommitDetected: (
+        callback: (event: any, data: { repoPath: string; deletedCount: number; newCheckpointId: string }) => void
+      ) => void
+
+      removeCommitDetectedListener: () => void
     }
   }
 }

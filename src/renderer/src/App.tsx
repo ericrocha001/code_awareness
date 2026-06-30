@@ -47,11 +47,12 @@ import React, { useEffect, useState } from 'react'
 import { CodeDiffView } from './components/CodeDiffView/CodeDiffView'
 import { CodeCompressionView } from './components/CodeCompressionView/CodeCompressionView'
 import { CodeSourceView } from './components/CodeSourceView/CodeSourceView'
+import { CodeCheckpointsView } from './components/CodeCheckpointsView/CodeCheckpointsView'
 import { HomeView } from './components/HomeView/HomeView'
 import './App.css'
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'home' | 'codebase' | 'compression' | 'diff'>('home')
+  const [activeTab, setActiveTab] = useState<'home' | 'codebase' | 'compression' | 'diff' | 'checkpoints'>('home')
   const [activeProject, setActiveProject] = useState<{ path: string; name: string } | null>(null)
   const [statusMessage, setStatusMessage] = useState<{ text: string; isError: boolean } | null>(null)
 
@@ -99,6 +100,12 @@ export const App: React.FC = () => {
           >
             Code Diff <span className="tab-badge">Live</span>
           </button>
+          <button 
+            className={`tab-btn ${activeTab === 'checkpoints' ? 'active' : ''}`}
+            onClick={() => setActiveTab('checkpoints')}
+          >
+            Code Checkpoints
+          </button>
         </div>
       </header>
 
@@ -122,6 +129,13 @@ export const App: React.FC = () => {
         )}
         {activeTab === 'diff' && (
           <CodeDiffView
+            activeProject={activeProject}
+            onSelectProject={setActiveProject}
+            onStatusMessage={handleStatusMessage}
+          />
+        )}
+        {activeTab === 'checkpoints' && (
+          <CodeCheckpointsView
             activeProject={activeProject}
             onSelectProject={setActiveProject}
             onStatusMessage={handleStatusMessage}

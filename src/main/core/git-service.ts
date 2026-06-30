@@ -1,9 +1,48 @@
-// Responsabilidades do Script
-//
-// 1. Verificar se um diretório é um repositório Git válido.
-// 2. Obter a lista de arquivos modificados (staged, unstaged e untracked individuais) via comandos nativos do Git.
-// 3. Extrair os hunks de alteração de um arquivo específico para mapeamento de linhas.
-// 4. Ler o conteúdo de um arquivo no estado do commit HEAD anterior.
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Verificar se um diretório representa um repositório Git válido.
+2. Executar comandos nativos do Git e capturar suas saídas de forma assíncrona.
+3. Obter a lista de todos os arquivos rastreados (tracked) e não rastreados (untracked) do repositório (getAllFiles).
+4. Obter a lista de arquivos modificados (staged, unstaged e untracked individuais) do repositório.
+5. Extrair os hunks de alteração (intervalos de linhas modificadas) de um arquivo específico.
+6. Recuperar o conteúdo de um arquivo no estado do commit HEAD.
+7. Obter o hash do commit HEAD atual do repositório.
+
+Mapa de Relacionamentos do Script
+
+1. src/main/ipc/git-handler.ts
+   - Tipo: Dependência Inversa
+   - Relação: Expõe as funcionalidades de Git por meio de handlers IPC para a interface gráfica.
+   - Criticidade: Alta
+
+2. src/main/core/diff-service.ts
+   - Tipo: Dependência Inversa
+   - Relação: Fornece informações de arquivos modificados e hunks para a lógica de diff semântico.
+   - Criticidade: Alta
+
+3. src/main/core/checkpoint-service.ts
+   - Tipo: Dependência Inversa
+   - Relação: Fornece o hash do commit HEAD para validação de integridade nos checkpoints.
+   - Criticidade: Média
+
+4. src/shared/types.ts
+   - Tipo: Contrato / Interface
+   - Relação: Retorna estruturas de dados que devem obedecer às interfaces declaradas nos tipos do projeto.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O método de listagem de arquivos rastreados deve retornar a propriedade changeType sempre definida como 'tracked'.
+2. Métodos de listagem de arquivos não devem expor caminhos pertencentes às pastas de infraestrutura interna (como code_awareness, codefetch, .sprintdiff, code_checkpoints).
+3. Todas as chamadas aos comandos nativos do Git devem possuir um limite de tempo máximo (timeout) para evitar travamentos de processos.
+4. Em caso de erro na execução dos comandos Git, os métodos públicos devem retornar estruturas vazias ou nulas ao invés de propagar exceções para o chamador.
+5. Em caso de falha ao ler o mtime de um arquivo (statSync), o método deve usar Date.now() como fallback para garantir ordenação por recência consistente.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
 
 import { spawn } from 'child_process'
 import { existsSync, statSync } from 'fs'
@@ -11,6 +50,20 @@ import { join } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 
 const GIT_TIMEOUT_MS = 10_000
+
+// Pastas internas que devem ser ignoradas em todas as listagens de arquivos
+const INTERNAL_FOLDERS = [
+  'code_awareness',
+  'codefetch',
+  '.sprintdiff',
+  'code_checkpoints'
+]
+
+function isInternalPath(path: string): boolean {
+  return INTERNAL_FOLDERS.some(folder =>
+    path === folder || path.startsWith(`${folder}/`)
+  )
+}
 
 export interface DiffHunk {
   oldStart: number
@@ -79,12 +132,8 @@ export class GitService {
         .map(line => line.trim())
         // Ignora linhas vazias ou caminhos que terminam em '/' (defesa em profundidade)
         .filter(p => p.length > 0 && !p.endsWith('/'))
-        // Ignora pastas internas do code_awareness que não devem aparecer
-        .filter(p =>
-          p !== 'code_awareness' && !p.startsWith('code_awareness/') &&
-          p !== 'codefetch'     && !p.startsWith('codefetch/')     &&
-          p !== '.sprintdiff'   && !p.startsWith('.sprintdiff/')
-        )
+        // Usa a função compartilhada para ignorar pastas internas
+        .filter(p => !isInternalPath(p))
         // Ignora arquivos já presentes no git status (ex: staged untracked via 'A')
         .filter(p => !statusPaths.has(p))
         .map(relativePath => ({
@@ -103,7 +152,10 @@ export class GitService {
             const st = statSync(join(dirPath, f.relativePath))
             return { ...f, mtime: st.mtimeMs, size: st.size }
           } catch {
-            return { ...f, mtime: 0, size: 0 }
+            // Fallback: se não conseguir ler o mtime (arquivo deletado, permissão, etc.),
+            // usa Date.now() para tratar como recente na ordenação por recência
+            console.warn(`[GitService] Falha ao ler mtime de ${f.relativePath}, usando fallback`)
+            return { ...f, mtime: Date.now(), size: 0 }
           }
         })
         .sort((a, b) => b.mtime - a.mtime)
@@ -112,37 +164,55 @@ export class GitService {
     }
   }
 
-  async getAllTrackedFiles(dirPath: string): Promise<DiffFileStatus[]> {
+  async getAllFiles(dirPath: string): Promise<DiffFileStatus[]> {
     try {
-      const stdout = await this.runGit(['ls-files'], dirPath)
-      const files: DiffFileStatus[] = stdout
+      // Executa os dois comandos Git em paralelo (tracked + untracked)
+      const [trackedOutput, untrackedOutput] = await Promise.all([
+        this.runGit(['ls-files'], dirPath),
+        this.runGit(['ls-files', '--others', '--exclude-standard'], dirPath)
+      ])
+
+      // Filtra e normaliza os arquivos tracked
+      const trackedPaths = trackedOutput
         .split('\n')
         .map(line => line.trim())
         .filter(p => p.length > 0 && !p.endsWith('/'))
-        .filter(p =>
-          p !== 'code_awareness' && !p.startsWith('code_awareness/') &&
-          p !== 'codefetch'     && !p.startsWith('codefetch/')     &&
-          p !== '.sprintdiff'   && !p.startsWith('.sprintdiff/')
-        )
-        .map(relativePath => {
-          let mtime = 0
-          let size = 0
-          try {
-            const st = statSync(join(dirPath, relativePath))
-            mtime = st.mtimeMs
-            size = st.size
-          } catch {
-            // keep 0
-          }
-          return {
-            relativePath,
-            name: relativePath.split('/').pop() ?? relativePath,
-            changeType: 'tracked',
-            mtime,
-            size
-          }
-        })
+        .filter(p => !isInternalPath(p))
 
+      const pathSet = new Set(trackedPaths)
+
+      // Filtra e normaliza os arquivos untracked, evitando duplicatas com os tracked
+      const untrackedPaths = untrackedOutput
+        .split('\n')
+        .map(line => line.trim())
+        .filter(p => p.length > 0 && !p.endsWith('/'))
+        .filter(p => !isInternalPath(p))
+        .filter(p => !pathSet.has(p))
+
+      // Une as duas listas e mapeia os status para o formato DiffFileStatus
+      const allPaths = [...trackedPaths, ...untrackedPaths]
+      const files: DiffFileStatus[] = allPaths.map(relativePath => {
+        let mtime = 0
+        let size = 0
+        try {
+          const st = statSync(join(dirPath, relativePath))
+          mtime = st.mtimeMs
+          size = st.size
+        } catch {
+          // Fallback: se não conseguir ler o mtime, usa Date.now() para tratar como recente
+          console.warn(`[GitService] Falha ao ler mtime de ${relativePath}, usando fallback`)
+          mtime = Date.now()
+        }
+        return {
+          relativePath,
+          name: relativePath.split('/').pop() ?? relativePath,
+          changeType: 'tracked',
+          mtime,
+          size
+        }
+      })
+
+      // Ordena por mtime descendente para priorizar arquivos alterados recentemente
       return files.sort((a, b) => b.mtime - a.mtime)
     } catch {
       return []
@@ -182,6 +252,22 @@ export class GitService {
     return hunks
   }
 
+  /**
+   * Obtém o hash do commit HEAD atual do repositório.
+   *
+   * @param dirPath Caminho absoluto para a raiz do repositório.
+   * @returns Hash completo do HEAD atual ou null se não for possível obter.
+   */
+  async getCurrentCommitHash(dirPath: string): Promise<string | null> {
+    try {
+      const stdout = await this.runGit(['rev-parse', 'HEAD'], dirPath)
+      return stdout.trim() || null
+    } catch {
+      // Repositório sem commits ou erro ao executar git rev-parse
+      return null
+    }
+  }
+
   private parseGitStatus(output: string): DiffFileStatus[] {
     return output
       .split('\n')
@@ -204,9 +290,7 @@ export class GitService {
         const name = relativePath.split('/').pop() ?? relativePath
         if (!name) return null
         
-        if (relativePath === 'code_awareness' || relativePath.startsWith('code_awareness/')) return null
-        if (relativePath === 'codefetch' || relativePath.startsWith('codefetch/')) return null
-        if (relativePath === '.sprintdiff' || relativePath.startsWith('.sprintdiff/')) return null
+        if (isInternalPath(relativePath)) return null
         
         const code = line.substring(0, 2).trim()
         const changeType = GIT_STATUS_CODE_MAP[code[0]] ?? 'modified'

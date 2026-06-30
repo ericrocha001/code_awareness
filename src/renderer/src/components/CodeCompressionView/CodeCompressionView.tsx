@@ -233,7 +233,7 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
         return
       }
       try {
-        const files = await window.codeAwareness.getAllTrackedFiles(activeProject.path)
+        const files = await window.codeAwareness.getAllFiles(activeProject.path)
         if (isMounted) { setTrackedFiles(files); setSelectedFiles(new Set()) }
       } catch (err) {
         console.error('Falha ao carregar tracked files:', err)

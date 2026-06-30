@@ -383,6 +383,14 @@ export const CodeDiffView: React.FC<{
       return true
     })
 
+    // DEBUG: Log para verificar se o mtime está sendo populado corretamente
+    // TODO: Remover quando a ordenação por recência estiver validada em produção
+    if (sortMode === 'recent' && import.meta.env.DEV) {
+      console.log('[CodeDiffView] Ordenação por recência - mtimes:',
+        filtered.map(f => ({ path: f.relativePath, mtime: f.mtime, changeType: f.changeType }))
+      )
+    }
+
     if (sortMode === 'recent') {
       const active = filtered.filter(f => f.changeType !== 'deleted')
       const deleted = filtered.filter(f => f.changeType === 'deleted')
