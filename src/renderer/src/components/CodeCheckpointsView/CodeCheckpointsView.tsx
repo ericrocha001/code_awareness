@@ -97,6 +97,9 @@ Invariantes do Script
 18. A lista de arquivos deve exibir badges de importância usando o componente ImportanceBadge.
 19. A contagem de tokens do diff deve ser calculada ao selecionar checkpoint usando estimativa baseada nos hunks.
 20. A contagem de tokens deve ser recalculada quando a seleção de arquivos muda.
+21. Restaurações parciais (com falhas) devem exibir modal de confirmação antes de aceitar o estado parcial.
+22. O método validateRestore() deve ser chamado antes da restauração real para permitir confirmação prévia de falhas (dry-run).
+23. O diff de um checkpoint deve ser comparado automaticamente com o checkpoint anterior (se existir), não com o disco atual. Isso garante que cada checkpoint mostre apenas as mudanças da sprint correspondente.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -442,6 +445,14 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   const [isRestoreModalOpen, setIsRestoreModalOpen] = useState(false)
   const [isRestoring, setIsRestoring] = useState(false)
 
+  // Modal de confirmação de restauração parcial (proativo)
+  const [partialRestoreModal, setPartialRestoreModal] = useState<{
+    open: boolean
+    canRestore: string[]
+    cannotRestore: Array<{ path: string; reason: string }>
+    checkpointId: string
+  } | null>(null)
+
   // Modal de confirmação de exclusão
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
@@ -583,9 +594,23 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
     }
 
     loadCheckpointData(activeProject.path, selectedCheckpointId)
-    loadChangedFiles(activeProject.path, selectedCheckpointId, compareWithCheckpointId || undefined)
+
+    // Comportamento padrão: comparar com o checkpoint anterior (se existir)
+    // Isso garante que cada checkpoint mostre APENAS as mudanças da sprint correspondente
+    // O usuário pode sobrescrever esse comportamento via dropdown "Comparar com:"
+    let compareWithId = compareWithCheckpointId
+    if (!compareWithId) {
+      // Encontra o checkpoint anterior na timeline (ordenado por createdAt descendente)
+      const selectedIndex = checkpoints.findIndex(cp => cp.id === selectedCheckpointId)
+      if (selectedIndex !== -1 && selectedIndex < checkpoints.length - 1) {
+        // Existe um checkpoint mais antigo
+        compareWithId = checkpoints[selectedIndex + 1].id
+      }
+    }
+
+    loadChangedFiles(activeProject.path, selectedCheckpointId, compareWithId || undefined)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCheckpointId, compareWithCheckpointId])
+  }, [selectedCheckpointId, compareWithCheckpointId, checkpoints])
 
   /**
    * Após carregar o checkpointData, extrai os paths dos changed files, carrega o cache de importância,
@@ -918,43 +943,87 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   }
 
   /**
-   * Restaura os arquivos do checkpoint selecionado.
-   * Após restaurar, reseta o preview pois os arquivos no disco mudaram.
+   * Tenta restaurar os arquivos do checkpoint selecionado.
+   * Faz um dry-run primeiro via validateRestore.
+   * Se houver erros potenciais, abre o modal de confirmação.
+   * Caso contrário, executa direto.
    */
   const handleRestoreCheckpoint = useCallback(async () => {
     if (!activeProject || !selectedCheckpointId) return
 
     setIsRestoring(true)
     try {
-      const result = await window.codeAwareness.restoreCheckpoint(
+      // 1. Dry-run: valida se a restauração pode ser executada
+      const validation = await window.codeAwareness.validateRestore(
         activeProject.path,
         selectedCheckpointId
       )
 
-      if (result.success && result.data) {
-        const { restored, failed, errors } = result.data
+      if (!validation.success || !validation.data) {
+        onStatusMessage(`❌ Erro na validação: ${validation.error}`, true)
+        return
+      }
 
-        if (failed === 0) {
-          onStatusMessage(`✓ ${restored} arquivo(s) restaurado(s) com sucesso!`)
-        } else {
-          onStatusMessage(`⚠️ ${restored} restaurado(s), ${failed} falha(s)`, true)
-          console.error('[CodeCheckpointsView] Erros na restauração:', errors)
-        }
+      // 2. Se há arquivos que não podem ser restaurados, mostra modal ANTES de executar
+      if (validation.data.cannotRestore.length > 0) {
+        setIsRestoreModalOpen(false) // Fecha o modal normal
+        setPartialRestoreModal({
+          open: true,
+          canRestore: validation.data.canRestore,
+          cannotRestore: validation.data.cannotRestore,
+          checkpointId: selectedCheckpointId
+        })
+        return // Não executa a restauração ainda — espera confirmação do usuário
+      }
+
+      // 3. Se tudo pode ser restaurado, executa direto
+      await executeRestore(selectedCheckpointId)
+      setIsRestoreModalOpen(false)
+    } catch (error: any) {
+      onStatusMessage(`❌ Erro na validação: ${error.message}`, true)
+    } finally {
+      setIsRestoring(false)
+    }
+  }, [activeProject, selectedCheckpointId, onStatusMessage])
+
+  const executeRestore = async (checkpointId: string) => {
+    // isRestoring já é gerenciado por quem chama esta função
+    try {
+      const result = await window.codeAwareness.restoreCheckpoint(activeProject!.path, checkpointId)
+
+      if (result.success && result.data) {
+        const { restored } = result.data
+        onStatusMessage(`✓ ${restored} arquivo(s) restaurado(s) com sucesso!`)
 
         // Reseta o preview pois os arquivos no disco mudaram
         setPreviewMarkdown('')
         setPreviewError('')
-
-        setIsRestoreModalOpen(false)
       } else {
         onStatusMessage(result.error || 'Erro ao restaurar checkpoint', true)
       }
     } catch (error: any) {
       onStatusMessage(error.message || 'Erro ao restaurar checkpoint', true)
+    }
+    // Sem finally aqui para não causar race condition com os métodos pai
+  }
+
+  const handleConfirmPartialRestore = async () => {
+    if (!partialRestoreModal) return
+    
+    setIsRestoring(true)
+    try {
+      // Usuário confirmou — executa a restauração real mesmo com falhas potenciais
+      await executeRestore(partialRestoreModal.checkpointId)
+      setPartialRestoreModal(null)
     } finally {
       setIsRestoring(false)
     }
-  }, [activeProject, selectedCheckpointId, onStatusMessage])
+  }
+
+  const handleCancelPartialRestore = () => {
+    onStatusMessage('❌ Restauração cancelada. O disco não foi modificado.')
+    setPartialRestoreModal(null)
+  }
 
   /**
    * Exclui o checkpoint selecionado e recarrega a lista.
@@ -1567,6 +1636,60 @@ Abaixo está o diff semântico das alterações:
                 disabled={isDeleting}
               >
                 {isDeleting ? 'Excluindo...' : 'Confirmar Exclusão'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Modal de Restauração Parcial — Proativo (antes da ação) */}
+      {partialRestoreModal?.open && (
+        <div className="cc-modal-overlay">
+          <div className="cc-modal-content cc-confirm-modal">
+            <h3>⚠️ Restauração Incompleta Detectada</h3>
+            <p>
+              Alguns arquivos não podem ser restaurados. Deseja prosseguir mesmo assim?
+            </p>
+            <div className="cc-partial-restore-details">
+              <div className="cc-partial-stat success">
+                <span className="cc-partial-icon">✅</span>
+                <span className="cc-partial-label">{partialRestoreModal.canRestore.length} arquivo(s) podem ser restaurados</span>
+              </div>
+              <div className="cc-partial-stat error">
+                <span className="cc-partial-icon">❌</span>
+                <span className="cc-partial-label">{partialRestoreModal.cannotRestore.length} arquivo(s) não podem ser restaurados</span>
+              </div>
+              {partialRestoreModal.cannotRestore.length > 0 && (
+                <div className="cc-partial-errors">
+                  <strong>Arquivos que vão falhar:</strong>
+                  <ul>
+                    {partialRestoreModal.cannotRestore.slice(0, 5).map((err, index) => (
+                      <li key={index}>{err.path} ({err.reason})</li>
+                    ))}
+                    {partialRestoreModal.cannotRestore.length > 5 && (
+                      <li>... e mais {partialRestoreModal.cannotRestore.length - 5} arquivo(s)</li>
+                    )}
+                  </ul>
+                </div>
+              )}
+            </div>
+            {/* Aviso explícito: a ação AINDA NÃO foi executada */}
+            <p className="cc-modal-warning">
+              ⚠️ Os arquivos que não podem ser restaurados manterão o estado atual do disco. O disco ainda não foi modificado.
+            </p>
+            <div className="cc-modal-actions">
+              <button
+                className="cc-modal-cancel"
+                onClick={handleCancelPartialRestore}
+                disabled={isRestoring}
+              >
+                Cancelar
+              </button>
+              <button
+                className="cc-modal-confirm cc-modal-confirm-warning"
+                onClick={handleConfirmPartialRestore}
+                disabled={isRestoring}
+              >
+                {isRestoring ? 'Restaurando...' : 'Restaurar Mesmo Assim'}
               </button>
             </div>
           </div>

@@ -35,7 +35,7 @@ Invariantes do Script
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ImportanceSource, ProjectInfo } from '../shared/types'
+import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ImportanceSource, ProjectInfo, RestoreValidation } from '../shared/types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
@@ -210,6 +210,13 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     toCheckpointId?: string
   ): Promise<{ success: boolean; data?: string; error?: string }> => {
     return ipcRenderer.invoke('checkpoint:generate-diff', repoPath, fromCheckpointId, toCheckpointId)
+  },
+
+  validateRestore: (
+    repoPath: string,
+    checkpointId: string
+  ): Promise<{ success: boolean; data?: RestoreValidation; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:validate-restore', repoPath, checkpointId)
   },
 
   restoreCheckpoint: (

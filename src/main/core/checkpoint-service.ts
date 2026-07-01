@@ -12,6 +12,7 @@ Responsabilidades do Script
 7. Detectar commits via comparação de HEAD e limpar checkpoints automaticamente.
 8. Renomear checkpoints existentes, atualizando o campo name no JSON persistido.
 9. Retornar lista de arquivos alterados entre checkpoints sem gerar Markdown.
+10. Validar (dry-run) se uma restauração pode ser executada antes de modificar o disco.
 
 Mapa de Relacionamentos do Script
 
@@ -51,7 +52,7 @@ Invariantes do Script
 2. O id do checkpoint deve ser único — usa timestamp + sufixo aleatório.
 3. A pasta code_checkpoints/ deve ser ignorada pelo Git e não entrar no snapshot.
 4. Nunca retornar dados corrompidos — toda leitura de JSON deve ser validada.
-5. O checkpointId é validado contra path traversal antes de qualquer operação de arquivo.
+5. TODO método público que recebe checkpointId deve validar contra path traversal antes de qualquer operação de arquivo.
 6. O diff gerado deve seguir exatamente o mesmo formato Markdown do DiffService (blocos 🟥 e 🟩 com hunks numerados).
 7. A restauração deve validar se o checkpoint existe antes de sobrescrever arquivos.
 8. Arquivos que não existem no checkpoint mas existem no disco não devem ser deletados durante restauração.
@@ -60,16 +61,20 @@ Invariantes do Script
 11. Após detectar um commit, todos os checkpoints devem ser deletados e um novo "🏁 Início" criado.
 12. O renome de checkpoint deve validar que o novo nome não esteja vazio e não exista duplicata.
 13. O método getChangedFiles deve retornar arquivos ordenados por mtime descendente, com deleted no final.
+14. O arquivo .metadata.json nunca deve ser apagado por deleteAllCheckpoints(), pois contém o estado do último HEAD conhecido para detecção de commits.
+15. Em handleCommitDetected(), temporários órfãos devem ser limpos antes de criar o novo checkpoint, e o novo checkpoint deve ser criado ANTES de deletar os antigos, para evitar perda de dados em caso de falha.
+16. Arquivos binários não devem ser lidos completamente — apenas os primeiros 4096 bytes são analisados para detecção.
+17. O método validateRestore() deve ser chamado antes de restoreCheckpoint() para permitir confirmação do usuário em caso de falhas potenciais.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-import { existsSync } from 'fs'
-import { readFile, writeFile, readdir, unlink, mkdir, stat } from 'fs/promises'
+import { existsSync, constants } from 'fs'
+import { readFile, writeFile, readdir, unlink, mkdir, stat, open, access } from 'fs/promises'
 import { createHash } from 'crypto'
 import { join, basename, dirname } from 'path'
 import { diffLines } from 'diff'
-import { CheckpointData, CheckpointFileEntry, CheckpointSummary, CheckpointHunk, CheckpointDiffFile } from '../../shared/types'
+import { CheckpointData, CheckpointFileEntry, CheckpointSummary, CheckpointHunk, CheckpointDiffFile, RestoreValidation } from '../../shared/types'
 import { GitService } from './git-service'
 import { importanceService } from './importance-service'
 
@@ -142,17 +147,41 @@ export class CheckpointService {
   }
 
   /**
-   * Detecta se o conteúdo de um arquivo é binário (não UTF-8 válido).
+   * Detecta se o conteúdo de um buffer é binário (não UTF-8 válido).
+   * Analisa apenas os primeiros 4096 bytes para evitar processamento desnecessário.
    */
-  private isBinaryContent(content: string): boolean {
+  private isBinaryContent(content: Buffer): boolean {
     for (let i = 0; i < Math.min(content.length, 4096); i++) {
-      const code = content.charCodeAt(i)
-      if (code === 0) return true
-      if (code < 32 && code !== 9 && code !== 10 && code !== 13) {
+      const byte = content[i]
+      if (byte === 0) return true
+      if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) {
         return true
       }
     }
     return false
+  }
+
+  /**
+   * Lê apenas os primeiros 4096 bytes de um arquivo para detectar se é binário.
+   * Evita carregar arquivos binários grandes inteiros na memória.
+   * Usa open/read/close de fs/promises já importados no topo do arquivo.
+   */
+  private async isBinaryFile(filePath: string): Promise<boolean> {
+    const buffer = Buffer.alloc(4096)
+    let handle: import('fs').promises.FileHandle | undefined
+    try {
+      handle = await open(filePath, 'r')
+      const { bytesRead } = await handle.read(buffer, 0, 4096, 0)
+      return this.isBinaryContent(buffer.subarray(0, bytesRead))
+    } catch {
+      // Se não conseguir ler (permissão, arquivo inexistente), assume não-binário
+      return false
+    } finally {
+      // Garante que o file handle seja fechado mesmo em caso de erro
+      if (handle !== undefined) {
+        await handle.close()
+      }
+    }
   }
 
   /**
@@ -205,11 +234,12 @@ export class CheckpointService {
           continue
         }
 
-        const content = await readFile(filePath, 'utf-8')
-
-        if (this.isBinaryContent(content)) {
+        // Primeiro detecta se é binário lendo apenas 4096 bytes (evita carregar binários grandes)
+        if (await this.isBinaryFile(filePath)) {
           continue
         }
+
+        const content = await readFile(filePath, 'utf-8')
 
         const hash = createHash('sha256').update(content).digest('hex')
 
@@ -280,6 +310,11 @@ export class CheckpointService {
    * Carrega um checkpoint específico pelo ID.
    */
   async loadCheckpoint(repoPath: string, checkpointId: string): Promise<CheckpointData | null> {
+    // Defesa em profundidade contra path traversal — valida o checkpointId antes de usá-lo em caminhos de arquivo
+    if (!/^[a-zA-Z0-9_-]+$/.test(checkpointId)) {
+      return null
+    }
+
     const filePath = join(this.getCheckpointDir(repoPath), `${checkpointId}.json`)
 
     try {
@@ -294,6 +329,11 @@ export class CheckpointService {
    * Deleta um checkpoint específico pelo ID.
    */
   async deleteCheckpoint(repoPath: string, checkpointId: string): Promise<boolean> {
+    // Defesa em profundidade contra path traversal — valida o checkpointId antes de usá-lo em caminhos de arquivo
+    if (!/^[a-zA-Z0-9_-]+$/.test(checkpointId)) {
+      return false
+    }
+
     const filePath = join(this.getCheckpointDir(repoPath), `${checkpointId}.json`)
 
     try {
@@ -306,13 +346,20 @@ export class CheckpointService {
 
   /**
    * Deleta todos os checkpoints do repositório.
+   * @param excludeCheckpointId Se fornecido, este checkpoint específico não será deletado.
    */
-  async deleteAllCheckpoints(repoPath: string): Promise<number> {
+  async deleteAllCheckpoints(repoPath: string, excludeCheckpointId?: string): Promise<number> {
     const dir = this.getCheckpointDir(repoPath)
 
     try {
       const entries = await readdir(dir)
-      const jsonFiles = entries.filter(e => e.endsWith('.json'))
+      // Preserva o .metadata.json — ele contém o último HEAD conhecido e não deve ser apagado
+      let jsonFiles = entries.filter(e => e.endsWith('.json') && e !== METADATA_FILE_NAME)
+
+      // Se um checkpoint deve ser preservado, remove seu arquivo da lista de deleção
+      if (excludeCheckpointId) {
+        jsonFiles = jsonFiles.filter(e => e !== `${excludeCheckpointId}.json`)
+      }
 
       if (jsonFiles.length === 0) {
         console.warn('[CheckpointService] Nenhum checkpoint encontrado para deletar')
@@ -372,6 +419,66 @@ export class CheckpointService {
     }
 
     return { restored, failed, errors }
+  }
+
+  /**
+   * Dry-run: verifica se a restauração pode ser executada sem modificar o disco.
+   * Usado pelo frontend para mostrar modal de confirmação ANTES de executar.
+   *
+   * Para cada arquivo no checkpoint verifica:
+   * - O diretório pai existe ou pode ser criado?
+   * - O arquivo pode ser escrito (permissões)?
+   */
+  async validateRestore(
+    repoPath: string,
+    checkpointId: string
+  ): Promise<RestoreValidation> {
+    if (!/^[a-zA-Z0-9_-]+$/.test(checkpointId)) {
+      return { canRestore: [], cannotRestore: [] }
+    }
+
+    if (!existsSync(repoPath)) {
+      return { canRestore: [], cannotRestore: [] }
+    }
+
+    const checkpoint = await this.loadCheckpoint(repoPath, checkpointId)
+    // Se o checkpoint não existe, deixa o restoreCheckpoint() real tratar depois
+    if (!checkpoint) {
+      return { canRestore: [], cannotRestore: [] }
+    }
+
+    const canRestore: string[] = []
+    const cannotRestore: Array<{ path: string; reason: string }> = []
+
+    for (const relativePath of Object.keys(checkpoint.files)) {
+      const filePath = join(repoPath, relativePath)
+      const parentDir = dirname(filePath)
+
+      // 1. Verifica se o diretório pai existe e é um diretório
+      try {
+        const parentStat = await stat(parentDir)
+        if (!parentStat.isDirectory()) {
+          cannotRestore.push({ path: relativePath, reason: 'diretório pai é um arquivo' })
+          continue
+        }
+      } catch {
+        // Diretório não existe — mkdir recursive vai criar
+      }
+
+      // 2. Se o arquivo já existe, verifica se pode ser escrito
+      if (existsSync(filePath)) {
+        try {
+          await access(filePath, constants.W_OK)
+        } catch {
+          cannotRestore.push({ path: relativePath, reason: 'permissão negada' })
+          continue
+        }
+      }
+
+      canRestore.push(relativePath)
+    }
+
+    return { canRestore, cannotRestore }
   }
 
   // ─── Métodos de Detecção de Commits ────────────────────────────────────
@@ -500,10 +607,17 @@ export class CheckpointService {
   }
 
   /**
+   * Nome temporário usado durante a rotação segura de checkpoints.
+   * Usa prefixo __temp_ para evitar conflito com nomes de usuário.
+   */
+  private readonly TEMP_CHECKPOINT_NAME = '__temp_inicio__'
+
+  /**
    * Manipula a detecção de um commit:
-   * 1. Deleta todos os checkpoints existentes.
-   * 2. Cria um novo checkpoint "🏁 Início".
-   * 3. Atualiza os metadados com o novo HEAD.
+   * 1. Cria um novo checkpoint com nome temporário (se falhar, checkpoints antigos não são perdidos).
+   * 2. Deleta todos os checkpoints antigos, preservando o temporário.
+   * 3. Renomeia o temporário para "🏁 Início".
+   * 4. Atualiza os metadados com o novo HEAD.
    *
    * @returns Objeto com o novo checkpoint criado e contagem de checkpoints deletados.
    */
@@ -511,17 +625,26 @@ export class CheckpointService {
     newCheckpoint: CheckpointData
     deletedCount: number
   }> {
-    // 1. Primeiro cria o novo checkpoint (se falhar, checkpoints antigos não são perdidos)
-    let newCheckpoint: CheckpointData
-    try {
-      newCheckpoint = await this.createCheckpoint(repoPath, '🏁 Início', 'all')
-    } catch (error) {
-      console.error('[CheckpointService] Falha ao criar novo checkpoint após commit:', error)
-      throw new Error('Falha ao criar checkpoint inicial após commit')
+    // 0. Limpa temporários órfãos de execuções anteriores que falharam (ex: crash durante renameCheckpoint)
+    //    Isso evita conflito de nome duplicado ao tentar criar __temp_inicio__ novamente
+    const existing = await this.listCheckpoints(repoPath)
+    const orphanTemp = existing.find(cp => cp.name === this.TEMP_CHECKPOINT_NAME)
+    if (orphanTemp) {
+      await this.deleteCheckpoint(repoPath, orphanTemp.id)
     }
 
-    // 2. Só então deleta os checkpoints antigos (operação segura pois o novo já existe)
-    const deletedCount = await this.deleteAllCheckpoints(repoPath)
+    // 1. Cria o novo checkpoint com nome temporário primeiro
+    //    Se falhar (disco cheio, permissão), os checkpoints antigos permanecem intactos
+    const tempCheckpoint = await this.createCheckpoint(repoPath, this.TEMP_CHECKPOINT_NAME, 'all')
+
+    // 2. Deleta todos os checkpoints antigos, preservando o temporário recém-criado
+    const deletedCount = await this.deleteAllCheckpoints(repoPath, tempCheckpoint.id)
+
+    // 3. Renomeia o temporário para o nome definitivo "🏁 Início"
+    await this.renameCheckpoint(repoPath, tempCheckpoint.id, '🏁 Início')
+
+    // Carrega o checkpoint já renomeado para retornar com o nome correto
+    const newCheckpoint = (await this.loadCheckpoint(repoPath, tempCheckpoint.id))!
 
     // Atualiza os metadados com o novo HEAD
     const currentHead = await this.getCurrentHead(repoPath)
@@ -739,8 +862,10 @@ export class CheckpointService {
 
             if (fileStat.size > MAX_FILE_SIZE) continue
 
+            // Primeiro detecta se é binário lendo apenas 4096 bytes (evita carregar binários grandes)
+            if (await this.isBinaryFile(filePath)) continue
+
             const currentContent = await readFile(filePath, 'utf-8')
-            if (this.isBinaryContent(currentContent)) continue
 
             diffFiles.push({ relativePath: file.relativePath, changeType: 'added', hunks: [], newContent: currentContent })
           } catch {

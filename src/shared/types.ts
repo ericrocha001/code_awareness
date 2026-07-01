@@ -113,6 +113,11 @@ export interface CheckpointSummary {
 
 // ─── Checkpoint Diff ──────────────────────────────────────────────────────
 
+export interface RestoreValidation {
+  canRestore: string[]
+  cannotRestore: Array<{ path: string; reason: string }>
+}
+
 export interface CheckpointHunk {
   oldStart: number    // Linha inicial no conteúdo antigo (1-indexed)
   oldLines: number    // Quantidade de linhas no conteúdo antigo

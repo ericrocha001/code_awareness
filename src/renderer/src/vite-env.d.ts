@@ -22,7 +22,7 @@ Invariantes do Script
 
 /// <reference types="vite/client" />
 
-import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ProjectInfo } from '../../shared/types'
+import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ProjectInfo, RestoreValidation } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -117,6 +117,11 @@ declare global {
         fromCheckpointId: string,
         toCheckpointId?: string
       ) => Promise<{ success: boolean; data?: string; error?: string }>
+
+      validateRestore: (
+        repoPath: string,
+        checkpointId: string
+      ) => Promise<{ success: boolean; data?: RestoreValidation; error?: string }>
 
       restoreCheckpoint: (
         repoPath: string,

@@ -9,6 +9,7 @@ Responsabilidades do Script
 4. Registrar handler IPC para geração de diff semântico entre checkpoints.
 5. Registrar handler IPC para renomear checkpoints.
 6. Registrar handler IPC para obter lista de arquivos alterados entre checkpoints.
+7. Registrar handler IPC para validação de restauração (dry-run) antes da execução real.
 
 Mapa de Relacionamentos do Script
 
@@ -32,6 +33,7 @@ Invariantes do Script
 1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
 2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
 3. Toda resposta de handler deve conter o campo success.
+4. Se a restauração tiver qualquer falha parcial, o handler deve retornar success: false com flag partial: true para forçar confirmação do usuário.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -143,9 +145,34 @@ export function registerCheckpointHandlers(): void {
   })
 
   /**
+   * checkpoint:validate-restore — Valida se uma restauração pode ser executada (dry-run).
+   * Parâmetros: repoPath, checkpointId
+   * Retorna: { success: boolean, data?: RestoreValidation, error?: string }
+   *   - data contém canRestore (arquivos que podem ser restaurados) e
+   *     cannotRestore (arquivos que falhariam, com motivo).
+   */
+  ipcMain.handle('checkpoint:validate-restore', async (_event, repoPath: string, checkpointId: string) => {
+    try {
+      if (!isValidPath(repoPath)) {
+        return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
+      }
+      if (!isValidCheckpointId(checkpointId)) {
+        return { success: false, error: 'checkpointId contém caracteres inválidos' }
+      }
+
+      const validation = await checkpointService.validateRestore(repoPath, checkpointId)
+      return { success: true, data: validation }
+    } catch (error: any) {
+      console.error('[CheckpointHandler] Erro ao validar restauração:', error)
+      return { success: false, error: error.message || 'Erro ao validar restauração' }
+    }
+  })
+
+  /**
    * checkpoint:restore — Restaura arquivos do repositório para o estado de um checkpoint.
    * Parâmetros: repoPath, checkpointId
    * Retorna: { success: boolean, data?: { restored: number, failed: number, errors: string[] }, error?: string }
+   *   - Se partial for true, ocorreu restauração parcial.
    */
   ipcMain.handle('checkpoint:restore', async (_event, repoPath: string, checkpointId: string) => {
     try {
@@ -158,10 +185,18 @@ export function registerCheckpointHandlers(): void {
 
       const result = await checkpointService.restoreCheckpoint(repoPath, checkpointId)
 
-      if (result.errors.length > 0 && result.restored === 0) {
-        return { success: false, error: result.errors[0], data: result }
+      // Se houve qualquer falha, retorna success: false para forçar confirmação do usuário.
+      // Isso evita que o usuário ache que tudo foi restaurado quando na verdade houve falhas parciais.
+      if (result.failed > 0) {
+        return {
+          success: false,
+          error: `Restauração parcial: ${result.restored} restaurado(s), ${result.failed} falha(ram)`,
+          data: result,
+          partial: true // Flag para o frontend distinguir entre falha total e parcial
+        }
       }
 
+      // Todos os arquivos foram restaurados com sucesso
       return { success: true, data: result }
     } catch (error: any) {
       console.error('[CheckpointHandler] Erro ao restaurar checkpoint:', error)

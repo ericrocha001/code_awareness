@@ -19,6 +19,7 @@ Invariantes do Script
 1. O watcher principal deve ignorar extensões binárias e pastas de build/node_modules/.git.
 2. O watcher principal NUNCA deve monitorar recursivamente a pasta .git — usa polling de HEAD.
 3. A detecção de commits deve ser assíncrona e usar debounce de 2s para evitar execuções concorrentes.
+4. A flag isProcessingCommit deve ser resetada via .finally() para garantir que a detecção de commits não fique travada em caso de erro no callback.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -123,7 +124,9 @@ export class WatcherService {
         // Dispara o callback de forma assíncrona (não bloqueia o intervalo)
         const callback = this.onCommitDetected
         if (callback) {
-          Promise.resolve(callback()).then(() => {
+          // Usa .finally() para garantir que a flag seja resetada mesmo se o callback lançar exceção
+          // Isso evita que a detecção de commits fique permanentemente travada em caso de erro
+          Promise.resolve(callback()).finally(() => {
             this.isProcessingCommit = false
           })
         }
