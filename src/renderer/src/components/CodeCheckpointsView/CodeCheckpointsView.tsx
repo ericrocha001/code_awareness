@@ -17,6 +17,7 @@ Responsabilidades do Script
 12. Gerenciar estado de seleção de arquivos para filtrar quais entram no preview do diff.
 13. Carregar lista de arquivos alterados via getCheckpointChangedFiles ao selecionar checkpoint.
 14. Calcular e exibir contagem de tokens do Semantic Diff gerado.
+15. Fornecer botão manual para limpar todos os checkpoints com confirmação de segurança.
 
 Mapa de Relacionamentos do Script
 
@@ -75,6 +76,11 @@ Mapa de Relacionamentos do Script
     - Relação: Invoca API IPC para carregar lista de arquivos alterados.
     - Criticidade: Alta
 
+12. window.codeAwareness.deleteAllCheckpoints
+    - Tipo: Dependência Inversa
+    - Relação: Invoca API IPC para deletar todos os checkpoints do repositório.
+    - Criticidade: Alta
+
 Invariantes do Script
 
 1. A timeline deve exibir checkpoints ordenados por createdAt descendente (mais recente no topo).
@@ -99,7 +105,8 @@ Invariantes do Script
 20. A contagem de tokens deve ser recalculada quando a seleção de arquivos muda.
 21. Restaurações parciais (com falhas) devem exibir modal de confirmação antes de aceitar o estado parcial.
 22. O método validateRestore() deve ser chamado antes da restauração real para permitir confirmação prévia de falhas (dry-run).
-23. O diff de um checkpoint deve ser comparado automaticamente com o checkpoint anterior (se existir), não com o disco atual. Isso garante que cada checkpoint mostre apenas as mudanças da sprint correspondente.
+23. A comparação é automática: primeiro checkpoint (mais antigo) compara com disco; demais comparam com o checkpoint anterior. Os parâmetros são passados na ordem correta (from=antigo, to=recente) para garantir que os blocos 🟥 e 🟩 apareçam corretamente.
+24. O botão "Limpar Tudo" deve exibir modal de confirmação antes de executar a exclusão.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -148,10 +155,6 @@ interface CheckpointDetailsProps {
   isCopying: boolean
   isGeneratingPreview: boolean
   previewError: string
-  checkpoints: CheckpointSummary[]
-  selectedCheckpointId: string | null
-  compareWithCheckpointId: string | null
-  onCompareWithChange: (id: string | null) => void
   auditPrompt: string
   onPromptChange: (e: React.ChangeEvent<HTMLTextAreaElement>) => void
 }
@@ -206,7 +209,7 @@ function formatTokens(count: number): string {
 
 /**
  * Componente auxiliar que exibe os detalhes de um checkpoint selecionado.
- * Mostra nome, métricas, lista de arquivos com ToggleSwitches, comparação, botões e prompt.
+ * Mostra nome, métricas, lista de arquivos com ToggleSwitches, botões e prompt.
  */
 const CheckpointDetails: React.FC<CheckpointDetailsProps> = ({
   checkpoint,
@@ -224,25 +227,12 @@ const CheckpointDetails: React.FC<CheckpointDetailsProps> = ({
   isCopying,
   isGeneratingPreview,
   previewError,
-  checkpoints,
-  selectedCheckpointId,
-  compareWithCheckpointId,
-  onCompareWithChange,
   auditPrompt,
   onPromptChange
 }) => {
   if (!checkpoint) {
     return <div className="cc-empty-details">Checkpoint não encontrado.</div>
   }
-
-  // Filtra checkpoints mais antigos que o selecionado
-  const selectedDate = new Date(
-    checkpoints.find(cp => cp.id === selectedCheckpointId)?.createdAt || 0
-  )
-  const olderCheckpoints = checkpoints.filter(c => {
-    const currentDate = new Date(c.createdAt)
-    return currentDate < selectedDate
-  })
 
   return (
     <div className="cc-details-content">
@@ -285,24 +275,7 @@ const CheckpointDetails: React.FC<CheckpointDetailsProps> = ({
         </div>
       </div>
 
-      {/* Dropdown de comparação */}
-      <div className="cc-compare-section">
-        <label className="cc-compare-label">Comparar com:</label>
-        <select
-          className="cc-compare-select"
-          value={compareWithCheckpointId || ''}
-          onChange={(e) => onCompareWithChange(e.target.value || null)}
-        >
-          <option value="">Estado Atual do Disco</option>
-          {olderCheckpoints.map(cp => (
-            <option key={cp.id} value={cp.id}>
-              {cp.name} ({new Date(cp.createdAt).toLocaleString('pt-BR')})
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {/* Botões de ação — reposicionados logo após o dropdown */}
+      {/* Botões de ação */}
       <div className="cc-actions-row">
         <button
           className="app-pill-btn"
@@ -310,28 +283,28 @@ const CheckpointDetails: React.FC<CheckpointDetailsProps> = ({
           disabled={isGeneratingPreview || selectedFilePaths.size === 0}
           title={selectedFilePaths.size === 0 ? 'Selecione ao menos um arquivo para gerar o preview' : ''}
         >
-          {isGeneratingPreview ? '⏳ Gerando...' : '👁️ Preview'}
+          {isGeneratingPreview ? '⏳ Gerando...' : 'Preview'}
         </button>
         <button
           className="app-pill-btn"
           onClick={onCopy}
           disabled={isCopying}
         >
-          {isCopying ? '⏳ Copiando...' : '📋 Copiar Diff'}
+          {isCopying ? '⏳ Copiando...' : 'Copiar Diff'}
         </button>
         <button
           className="app-pill-btn cc-restore-btn"
           onClick={onRestore}
           title="Restaurar arquivos para o estado deste checkpoint"
         >
-          🔄 Restaurar
+          Restaurar
         </button>
         <button
           className="app-pill-btn cc-delete-btn"
           onClick={onDelete}
           title="Excluir este checkpoint permanentemente"
         >
-          🗑️ Excluir
+          Excluir
         </button>
       </div>
 
@@ -388,6 +361,46 @@ const CheckpointDetails: React.FC<CheckpointDetailsProps> = ({
 }
 
 /**
+ * Determina os IDs de checkpoint para comparação na ordem correta.
+ * Retorna { fromCheckpointId, toCheckpointId } onde:
+ * - fromCheckpointId = checkpoint mais antigo (origem)
+ * - toCheckpointId = checkpoint mais recente (destino)
+ *
+ * Isso garante que o backend calcule o diff na ordem correta:
+ * calculateHunks(antigo, recente) → 🟥 mostra o que foi removido, 🟩 mostra o que foi adicionado.
+ *
+ * Casos:
+ * 1. Primeiro checkpoint (mais antigo): compara com disco
+ *    - Retorna { fromCheckpointId: selected, toCheckpointId: selected }
+ *    - Backend detecta toCheckpointId === fromCheckpointId e compara com disco
+ *
+ * 2. Demais checkpoints: compara com checkpoint anterior
+ *    - Retorna { fromCheckpointId: anterior, toCheckpointId: selecionado }
+ */
+function getCompareIds(
+  checkpoints: CheckpointSummary[],
+  selectedCheckpointId: string
+): { fromCheckpointId: string; toCheckpointId: string } {
+  const selectedIndex = checkpoints.findIndex(cp => cp.id === selectedCheckpointId)
+
+  if (selectedIndex === checkpoints.length - 1) {
+    // Primeiro checkpoint (mais antigo) - comparar com disco
+    // Sinal: passar o mesmo ID para from e to
+    return {
+      fromCheckpointId: selectedCheckpointId,
+      toCheckpointId: selectedCheckpointId
+    }
+  }
+
+  // Demais checkpoints - comparar com anterior
+  // from = anterior (mais antigo), to = selecionado (mais recente)
+  return {
+    fromCheckpointId: checkpoints[selectedIndex + 1].id,  // anterior
+    toCheckpointId: selectedCheckpointId                   // selecionado
+  }
+}
+
+/**
  * Componente principal da aba Code Checkpoints.
  * Gerencia timeline, seleção, criação, preview, restauração e exclusão.
  */
@@ -435,9 +448,6 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   const [isExporting, setIsExporting] = useState(false)
   const [isCopying, setIsCopying] = useState(false)
 
-  // Dropdown de comparação
-  const [compareWithCheckpointId, setCompareWithCheckpointId] = useState<string | null>(null)
-
   // Prompt de auditoria customizável (persistido por projeto)
   const [auditPrompt, setAuditPrompt] = useState<string>('')
 
@@ -456,6 +466,10 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   // Modal de confirmação de exclusão
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false)
   const [isDeleting, setIsDeleting] = useState(false)
+
+  // Modal de confirmação de limpeza total
+  const [isClearAllModalOpen, setIsClearAllModalOpen] = useState(false)
+  const [isClearingAll, setIsClearingAll] = useState(false)
 
   // Modal de renomear checkpoint (usa nome separado para não conflitar com o modal de criação)
   const [isRenameModalOpen, setIsRenameModalOpen] = useState(false)
@@ -510,7 +524,7 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   }, [])
 
   /**
-   * Carrega os dados completos do checkpoint e calcula métricas.
+   * Carrega os dados completos do checkpoint.
    */
   const loadCheckpointData = useCallback(async (repoPath: string, checkpointId: string) => {
     try {
@@ -524,15 +538,16 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   }, [])
 
   /**
-   * Carrega a lista de arquivos alterados entre o checkpoint selecionado e o estado atual do disco.
+   * Carrega a lista de arquivos alterados entre fromCheckpointId e toCheckpointId.
+   * fromCheckpointId = mais antigo (origem), toCheckpointId = mais recente (destino).
    * Usa a API getCheckpointChangedFiles do backend.
    */
-  const loadChangedFiles = useCallback(async (repoPath: string, checkpointId: string, compareWithId?: string) => {
+  const loadChangedFiles = useCallback(async (repoPath: string, fromCheckpointId: string, toCheckpointId: string) => {
     try {
       const result = await window.codeAwareness.getCheckpointChangedFiles(
         repoPath,
-        checkpointId,
-        compareWithId || undefined
+        fromCheckpointId,
+        toCheckpointId
       )
       if (result.success && result.data) {
         console.log('[CodeCheckpointsView] Changed files carregados:', result.data.length, 'arquivos')
@@ -549,7 +564,6 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
 
   /**
    * Calcula métricas a partir dos changedFiles: tokens e lista de arquivos.
-   * Usa changedFiles (arquivos alterados) ao invés de todos os arquivos do snapshot.
    */
   const calculateMetrics = useCallback((data: CheckpointData | null) => {
     if (!data || changedFiles.length === 0) {
@@ -584,7 +598,9 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   }, [activeProject, getFileImportance, changedFiles])
 
   /**
-   * Carrega dados completos do checkpoint e arquivos alterados quando a seleção muda.
+   * Carrega dados do checkpoint e arquivos alterados quando a seleção muda.
+   * A comparação é automática: primeiro checkpoint compara com disco,
+   * demais comparam com o checkpoint anterior.
    */
   useEffect(() => {
     if (!activeProject || !selectedCheckpointId) {
@@ -595,22 +611,10 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
 
     loadCheckpointData(activeProject.path, selectedCheckpointId)
 
-    // Comportamento padrão: comparar com o checkpoint anterior (se existir)
-    // Isso garante que cada checkpoint mostre APENAS as mudanças da sprint correspondente
-    // O usuário pode sobrescrever esse comportamento via dropdown "Comparar com:"
-    let compareWithId = compareWithCheckpointId
-    if (!compareWithId) {
-      // Encontra o checkpoint anterior na timeline (ordenado por createdAt descendente)
-      const selectedIndex = checkpoints.findIndex(cp => cp.id === selectedCheckpointId)
-      if (selectedIndex !== -1 && selectedIndex < checkpoints.length - 1) {
-        // Existe um checkpoint mais antigo
-        compareWithId = checkpoints[selectedIndex + 1].id
-      }
-    }
-
-    loadChangedFiles(activeProject.path, selectedCheckpointId, compareWithId || undefined)
+    const { fromCheckpointId, toCheckpointId } = getCompareIds(checkpoints, selectedCheckpointId)
+    loadChangedFiles(activeProject.path, fromCheckpointId, toCheckpointId)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedCheckpointId, compareWithCheckpointId, checkpoints])
+  }, [selectedCheckpointId, checkpoints, activeProject])
 
   /**
    * Após carregar o checkpointData, extrai os paths dos changed files, carrega o cache de importância,
@@ -642,17 +646,15 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   useEffect(() => {
     if (!changedFiles.length) return
 
-    // Recalcula tokens quando a seleção de arquivos muda
     const estimatedTokens = estimateDiffTokens(changedFiles, selectedFilePaths)
     setDiffTokenCount(estimatedTokens)
   }, [changedFiles, selectedFilePaths, estimateDiffTokens])
 
   /**
-   * Limpa o cache de importância ao trocar de projeto e recarrega.
+   * Limpa o cache de importância ao trocar de projeto.
    */
   useEffect(() => {
     if (!activeProject) return
-    // Remove o cache antigo; será recarregado via efeito acima quando checkpointData chegar
     importanceCacheRef.current.delete(activeProject.path)
   }, [activeProject])
 
@@ -730,18 +732,14 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
 
   /**
    * Filtra o markdown do diff para manter apenas as seções de arquivos selecionados.
-   * Cada arquivo no diff começa com "## 📄 `caminho/do/arquivo`".
    */
   const filterMarkdownBySelection = useCallback((markdown: string): string => {
-    // Divide o markdown em seções por "## 📄"
     const sections = markdown.split(/\n(?=## 📄)/)
-    if (sections.length <= 1) return markdown // Sem seções de arquivo, retorna inteiro
+    if (sections.length <= 1) return markdown
 
-    // A primeira seção (cabeçalho) sempre fica
     const [header, ...fileSections] = sections
 
     const filtered = fileSections.filter(section => {
-      // Extrai o path do arquivo do cabeçalho "## 📄 `path`"
       const match = section.match(/## 📄 `(.+?)`/)
       if (!match) return true
       const path = match[1]
@@ -752,13 +750,11 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   }, [selectedFilePaths])
 
   /**
-   * Gera o preview do diff entre o checkpoint selecionado e o estado atual (ou outro checkpoint).
-   * Respeita a seleção de arquivos — apenas arquivos com toggle ligado entram no diff.
+   * Gera o preview do diff com comparação automática.
    */
   const handlePreview = useCallback(async () => {
     if (!activeProject || !selectedCheckpointId) return
 
-    // Proteção contra gerar preview com zero arquivos selecionados
     if (selectedFilePaths.size === 0) {
       setPreviewError('Selecione ao menos um arquivo para gerar o preview.')
       onStatusMessage('Selecione ao menos um arquivo para gerar o preview', true)
@@ -770,18 +766,17 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
     setPreviewMarkdown('')
 
     try {
+      const { fromCheckpointId, toCheckpointId } = getCompareIds(checkpoints, selectedCheckpointId)
       const result = await window.codeAwareness.generateCheckpointDiff(
         activeProject.path,
-        selectedCheckpointId,
-        compareWithCheckpointId || undefined
+        fromCheckpointId,
+        toCheckpointId
       )
 
       if (result.success && result.data) {
-        // Filtra o markdown para manter apenas seções de arquivos selecionados
         const filtered = filterMarkdownBySelection(result.data)
         setPreviewMarkdown(filtered)
 
-        // Calcula e armazena a contagem de tokens do diff filtrado
         const tokenCount = calculateTokens(filtered)
         setDiffTokenCount(tokenCount)
       } else {
@@ -794,16 +789,14 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
     } finally {
       setIsGeneratingPreview(false)
     }
-  }, [activeProject, selectedCheckpointId, compareWithCheckpointId, filterMarkdownBySelection, onStatusMessage])
+  }, [activeProject, selectedCheckpointId, checkpoints, filterMarkdownBySelection, onStatusMessage])
 
   /**
-   * Exporta o Markdown do diff para a pasta Downloads sem passar pela tela de preview.
-   * Gera o diff e já salva — fluxo direto, sem navegar para o preview.
+   * Exporta o Markdown do diff para Downloads.
    */
   const handleGenerateAndExport = useCallback(async () => {
     if (!activeProject || !selectedCheckpointId) return
 
-    // Proteção contra exportar com zero arquivos selecionados
     if (selectedFilePaths.size === 0) {
       onStatusMessage('Selecione ao menos um arquivo para exportar o diff', true)
       return
@@ -811,14 +804,14 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
 
     setIsExporting(true)
     try {
+      const { fromCheckpointId, toCheckpointId } = getCompareIds(checkpoints, selectedCheckpointId)
       const result = await window.codeAwareness.generateCheckpointDiff(
         activeProject.path,
-        selectedCheckpointId,
-        compareWithCheckpointId || undefined
+        fromCheckpointId,
+        toCheckpointId
       )
 
       if (result.success && result.data) {
-        // Filtra o markdown para manter apenas seções de arquivos selecionados
         const filtered = filterMarkdownBySelection(result.data)
 
         const fileName = `${activeProject.name}-checkpoint-diff`
@@ -836,16 +829,14 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
     } finally {
       setIsExporting(false)
     }
-  }, [activeProject, selectedCheckpointId, compareWithCheckpointId, filterMarkdownBySelection, onStatusMessage])
+  }, [activeProject, selectedCheckpointId, checkpoints, filterMarkdownBySelection, onStatusMessage])
 
   /**
-   * Gera o diff e copia diretamente para a área de transferência.
-   * Não passa pela tela de preview — fluxo direto.
+   * Gera o diff e copia para a área de transferência.
    */
   const handleGenerateAndCopy = useCallback(async () => {
     if (!activeProject || !selectedCheckpointId) return
 
-    // Proteção contra copiar com zero arquivos selecionados
     if (selectedFilePaths.size === 0) {
       onStatusMessage('Selecione ao menos um arquivo para copiar o diff', true)
       return
@@ -853,17 +844,16 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
 
     setIsCopying(true)
     try {
+      const { fromCheckpointId, toCheckpointId } = getCompareIds(checkpoints, selectedCheckpointId)
       const result = await window.codeAwareness.generateCheckpointDiff(
         activeProject.path,
-        selectedCheckpointId,
-        compareWithCheckpointId || undefined
+        fromCheckpointId,
+        toCheckpointId
       )
 
       if (result.success && result.data) {
-        // Filtra o markdown para manter apenas seções de arquivos selecionados
         const filtered = filterMarkdownBySelection(result.data)
 
-        // Adiciona o prompt de auditoria se houver
         const finalContent = auditPrompt
           ? `${auditPrompt}\n\n${filtered}`
           : filtered
@@ -878,10 +868,10 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
     } finally {
       setIsCopying(false)
     }
-  }, [activeProject, selectedCheckpointId, compareWithCheckpointId, selectedFilePaths, filterMarkdownBySelection, auditPrompt, onStatusMessage])
+  }, [activeProject, selectedCheckpointId, checkpoints, selectedFilePaths, filterMarkdownBySelection, auditPrompt, onStatusMessage])
 
   /**
-   * Exporta o Markdown do preview para a pasta Downloads do sistema.
+   * Exporta o Markdown do preview para Downloads.
    */
   const handleExportDiff = useCallback(async () => {
     if (!activeProject || !previewMarkdown) return
@@ -928,11 +918,10 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   const handleBackToDetails = useCallback(() => {
     setPreviewMarkdown('')
     setPreviewError('')
-    // Não resetar diffTokenCount - manter visível na área de métricas
   }, [])
 
   /**
-   * Persiste o prompt de auditoria no localStorage ao ser alterado.
+   * Persiste o prompt de auditoria no localStorage.
    */
   const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const newPrompt = e.target.value
@@ -944,16 +933,12 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
 
   /**
    * Tenta restaurar os arquivos do checkpoint selecionado.
-   * Faz um dry-run primeiro via validateRestore.
-   * Se houver erros potenciais, abre o modal de confirmação.
-   * Caso contrário, executa direto.
    */
   const handleRestoreCheckpoint = useCallback(async () => {
     if (!activeProject || !selectedCheckpointId) return
 
     setIsRestoring(true)
     try {
-      // 1. Dry-run: valida se a restauração pode ser executada
       const validation = await window.codeAwareness.validateRestore(
         activeProject.path,
         selectedCheckpointId
@@ -964,19 +949,17 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
         return
       }
 
-      // 2. Se há arquivos que não podem ser restaurados, mostra modal ANTES de executar
       if (validation.data.cannotRestore.length > 0) {
-        setIsRestoreModalOpen(false) // Fecha o modal normal
+        setIsRestoreModalOpen(false)
         setPartialRestoreModal({
           open: true,
           canRestore: validation.data.canRestore,
           cannotRestore: validation.data.cannotRestore,
           checkpointId: selectedCheckpointId
         })
-        return // Não executa a restauração ainda — espera confirmação do usuário
+        return
       }
 
-      // 3. Se tudo pode ser restaurado, executa direto
       await executeRestore(selectedCheckpointId)
       setIsRestoreModalOpen(false)
     } catch (error: any) {
@@ -987,15 +970,12 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
   }, [activeProject, selectedCheckpointId, onStatusMessage])
 
   const executeRestore = async (checkpointId: string) => {
-    // isRestoring já é gerenciado por quem chama esta função
     try {
       const result = await window.codeAwareness.restoreCheckpoint(activeProject!.path, checkpointId)
 
       if (result.success && result.data) {
         const { restored } = result.data
         onStatusMessage(`✓ ${restored} arquivo(s) restaurado(s) com sucesso!`)
-
-        // Reseta o preview pois os arquivos no disco mudaram
         setPreviewMarkdown('')
         setPreviewError('')
       } else {
@@ -1004,15 +984,13 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
     } catch (error: any) {
       onStatusMessage(error.message || 'Erro ao restaurar checkpoint', true)
     }
-    // Sem finally aqui para não causar race condition com os métodos pai
   }
 
   const handleConfirmPartialRestore = async () => {
     if (!partialRestoreModal) return
-    
+
     setIsRestoring(true)
     try {
-      // Usuário confirmou — executa a restauração real mesmo com falhas potenciais
       await executeRestore(partialRestoreModal.checkpointId)
       setPartialRestoreModal(null)
     } finally {
@@ -1024,6 +1002,43 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
     onStatusMessage('❌ Restauração cancelada. O disco não foi modificado.')
     setPartialRestoreModal(null)
   }
+
+  /**
+   * Abre o modal de confirmação para limpar todos os checkpoints.
+   */
+  const handleOpenClearAllModal = useCallback(() => {
+    setIsClearAllModalOpen(true)
+  }, [])
+
+  /**
+   * Executa a limpeza de todos os checkpoints após confirmação.
+   */
+  const handleClearAllCheckpoints = useCallback(async () => {
+    if (!activeProject) return
+
+    setIsClearingAll(true)
+    try {
+      const result = await window.codeAwareness.deleteAllCheckpoints(activeProject.path)
+
+      if (result.success) {
+        onStatusMessage('✓ Todos os checkpoints foram excluídos!')
+
+        setCheckpoints([])
+        setSelectedCheckpointId(null)
+        setCheckpointData(null)
+        setPreviewMarkdown('')
+        setPreviewError('')
+
+        setIsClearAllModalOpen(false)
+      } else {
+        onStatusMessage(result.error || 'Erro ao limpar checkpoints', true)
+      }
+    } catch (error: any) {
+      onStatusMessage(error.message || 'Erro ao limpar checkpoints', true)
+    } finally {
+      setIsClearingAll(false)
+    }
+  }, [activeProject, onStatusMessage])
 
   /**
    * Exclui o checkpoint selecionado e recarrega a lista.
@@ -1041,17 +1056,14 @@ export const CodeCheckpointsView: React.FC<CodeCheckpointsViewProps> = ({
       if (result.success) {
         onStatusMessage('✓ Checkpoint excluído com sucesso!')
 
-        // Reseta o preview se estava visível (checkpoint não existe mais)
         setPreviewMarkdown('')
         setPreviewError('')
         setCheckpointData(null)
 
-        // Recarrega a lista de checkpoints
         const reloadResult = await window.codeAwareness.listCheckpoints(activeProject.path)
         if (reloadResult.success && reloadResult.data) {
           setCheckpoints(reloadResult.data)
 
-          // Seleciona o primeiro checkpoint disponível, ou reseta se vazio
           if (reloadResult.data.length > 0) {
             setSelectedCheckpointId(reloadResult.data[0].id)
           } else {
@@ -1155,7 +1167,6 @@ Abaixo está o diff semântico das alterações:
           setCheckpointData(null)
           setPreviewMarkdown('')
           setPreviewError('')
-          setCompareWithCheckpointId(null)
         }
         return
       }
@@ -1164,7 +1175,6 @@ Abaixo está o diff semântico das alterações:
       setCheckpointData(null)
       setPreviewMarkdown('')
       setPreviewError('')
-      setCompareWithCheckpointId(null)
 
       setIsLoading(true)
       try {
@@ -1203,73 +1213,10 @@ Abaixo está o diff semântico das alterações:
     setPreviewMarkdown('')
     setPreviewError('')
     setDiffTokenCount(0)
-    setCompareWithCheckpointId(null)
   }, [selectedCheckpointId])
 
   /**
-   * Inicializa a detecção de commits ao abrir a aba com um projeto ativo.
-   */
-  useEffect(() => {
-    if (!activeProject) return
-
-    const initializeDetection = async () => {
-      try {
-        await window.codeAwareness.initializeCommitDetection(activeProject.path)
-      } catch (error) {
-        console.error('[CodeCheckpointsView] Erro ao inicializar detecção de commits:', error)
-      }
-    }
-
-    initializeDetection()
-  }, [activeProject])
-
-  /**
-   * Escuta eventos de commit detectado e recarrega a lista de checkpoints automaticamente.
-   */
-  useEffect(() => {
-    if (!activeProject) return
-
-    const handleCommitDetected = (_event: any, data: { repoPath: string; deletedCount: number; newCheckpointId: string }) => {
-      // Verifica se o evento é para o projeto ativo
-      if (data.repoPath !== activeProject.path) return
-
-      // Recarrega a lista de checkpoints
-      const reloadCheckpoints = async () => {
-        try {
-          const result = await window.codeAwareness.listCheckpoints(activeProject.path)
-          if (result.success && result.data) {
-            setCheckpoints(result.data)
-
-            // Seleciona o novo checkpoint "🏁 Início"
-            setSelectedCheckpointId(data.newCheckpointId)
-
-            // Reseta o preview
-            setPreviewMarkdown('')
-            setPreviewError('')
-            setCompareWithCheckpointId(null)
-
-            // Mostra notificação
-            onStatusMessage(`✓ Commit detectado! ${data.deletedCount} checkpoint(s) limpo(s), novo "🏁 Início" criado.`)
-          }
-        } catch (error) {
-          console.error('[CodeCheckpointsView] Erro ao recarregar checkpoints após commit:', error)
-        }
-      }
-
-      reloadCheckpoints()
-    }
-
-    // Registra o listener
-    window.codeAwareness.onCommitDetected(handleCommitDetected)
-
-    // Remove o listener ao desmontar ou trocar de projeto
-    return () => {
-      window.codeAwareness.removeCommitDetectedListener()
-    }
-  }, [activeProject, onStatusMessage])
-
-  /**
-   * Fecha modal ao pressionar ESC.
+   * Fecha modal de criação ao pressionar ESC.
    */
   useEffect(() => {
     if (!isCreateModalOpen) return
@@ -1285,6 +1232,24 @@ Abaixo está o diff semântico das alterações:
       document.removeEventListener('keydown', handleEsc)
     }
   }, [isCreateModalOpen, isCreating])
+
+  /**
+   * Fecha modal de limpeza total ao pressionar ESC.
+   */
+  useEffect(() => {
+    if (!isClearAllModalOpen) return
+
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isClearingAll) {
+        setIsClearAllModalOpen(false)
+      }
+    }
+
+    document.addEventListener('keydown', handleEsc)
+    return () => {
+      document.removeEventListener('keydown', handleEsc)
+    }
+  }, [isClearAllModalOpen, isClearingAll])
 
   /**
    * Handler do botão "Criar Checkpoint".
@@ -1362,13 +1327,24 @@ Abaixo está o diff semântico das alterações:
         <aside className="cc-sidebar">
           <div className="cc-sidebar-header">
             <span>Timeline de Checkpoints</span>
-            <button
-              className="cc-create-btn"
-              onClick={() => setIsCreateModalOpen(true)}
-              disabled={isCreating}
-            >
-              📸 Criar Checkpoint
-            </button>
+            <div className="cc-sidebar-header-actions">
+              <button
+                className="cc-create-btn"
+                onClick={() => setIsCreateModalOpen(true)}
+                disabled={isCreating}
+              >
+                Criar Checkpoint
+              </button>
+              {checkpoints.length > 0 && (
+                <button
+                  className="cc-clear-all-btn"
+                  onClick={handleOpenClearAllModal}
+                  disabled={isClearingAll}
+                >
+                  Limpar Tudo
+                </button>
+              )}
+            </div>
           </div>
 
           {checkpoints.length === 0 ? (
@@ -1426,27 +1402,19 @@ Abaixo está o diff semântico das alterações:
                     onClick={handleCopyDiff}
                     disabled={!previewMarkdown}
                   >
-                    {isCopied ? '✓ Copiado!' : '📋 Copiar Diffs'}
+                    {isCopied ? '✓ Copiado!' : 'Copiar Diffs'}
                   </button>
                   <button
                     className="app-pill-btn"
                     onClick={handleExportDiff}
                     disabled={isExporting || !previewMarkdown}
                   >
-                    {isExporting ? 'Exportando...' : '💾 Exportar'}
+                    {isExporting ? 'Exportando...' : 'Exportar'}
                   </button>
                 </div>
               </div>
 
               <div className="cc-preview-content">
-                {/*
-                  RESPONSABILIDADE DOS BADGES DE IMPORTÂNCIA:
-                  O backend (checkpoint-service.ts buildFileSection) injeta os emojis
-                  (🔴🟠🟡⚪) diretamente no Markdown diff via cabeçalho ## de cada arquivo.
-                  Já o componente React <ImportanceBadge> abaixo na lista de arquivos
-                  renderiza badges interativos com dropdown para override manual.
-                  Ambos coexistem: um no preview do diff (passivo), outro na lista (interativo).
-                */}
                 <Markdown>{previewMarkdown}</Markdown>
               </div>
             </div>
@@ -1467,10 +1435,6 @@ Abaixo está o diff semântico das alterações:
               isCopying={isCopying}
               isGeneratingPreview={isGeneratingPreview}
               previewError={previewError}
-              checkpoints={checkpoints}
-              selectedCheckpointId={selectedCheckpointId}
-              compareWithCheckpointId={compareWithCheckpointId}
-              onCompareWithChange={setCompareWithCheckpointId}
               auditPrompt={auditPrompt}
               onPromptChange={handlePromptChange}
             />
@@ -1641,7 +1605,39 @@ Abaixo está o diff semântico das alterações:
           </div>
         </div>
       )}
-      {/* Modal de Restauração Parcial — Proativo (antes da ação) */}
+
+      {/* Modal de Limpeza Total */}
+      {isClearAllModalOpen && (
+        <div className="cc-modal-overlay" onClick={() => !isClearingAll && setIsClearAllModalOpen(false)}>
+          <div className="cc-modal-content cc-confirm-modal" onClick={(e) => e.stopPropagation()}>
+            <h3>🧹 Limpar Todos os Checkpoints</h3>
+            <p>
+              Tem certeza que deseja excluir permanentemente todos os checkpoints?
+            </p>
+            <p className="cc-modal-warning">
+              ⚠️ Esta ação não pode ser desfeita. Todos os checkpoints serão removidos permanentemente do repositório.
+            </p>
+            <div className="cc-modal-actions">
+              <button
+                className="cc-modal-cancel"
+                onClick={() => setIsClearAllModalOpen(false)}
+                disabled={isClearingAll}
+              >
+                Cancelar
+              </button>
+              <button
+                className="cc-modal-confirm cc-delete-confirm"
+                onClick={handleClearAllCheckpoints}
+                disabled={isClearingAll}
+              >
+                {isClearingAll ? 'Limpando...' : 'Confirmar Limpeza'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Restauração Parcial */}
       {partialRestoreModal?.open && (
         <div className="cc-modal-overlay">
           <div className="cc-modal-content cc-confirm-modal">
@@ -1672,7 +1668,6 @@ Abaixo está o diff semântico das alterações:
                 </div>
               )}
             </div>
-            {/* Aviso explícito: a ação AINDA NÃO foi executada */}
             <p className="cc-modal-warning">
               ⚠️ Os arquivos que não podem ser restaurados manterão o estado atual do disco. O disco ainda não foi modificado.
             </p>

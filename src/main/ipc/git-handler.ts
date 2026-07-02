@@ -60,7 +60,6 @@ import { CompressionService } from '../core/compression-service'
 import { CodeSourceService } from '../core/code-source-service'
 import { RepomixAdapter } from '../core/repomix-adapter'
 import { importanceService } from '../core/importance-service'
-import { CheckpointService } from '../core/checkpoint-service'
 import { ImportanceLevel } from '../../shared/types'
 
 const gitService = new GitService()
@@ -68,8 +67,6 @@ const diffService = new DiffService()
 const compressionService = new CompressionService()
 const codeSourceService = new CodeSourceService()
 const repomixAdapter = new RepomixAdapter()
-const checkpointService = new CheckpointService()
-
 // Valida se o path recebido via IPC é uma string não vazia
 function isValidPath(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
@@ -91,31 +88,7 @@ export function registerGitHandlers(watcherService: WatcherService, settingsServ
     const webContents = event.sender
     const repoPath = dirPath
 
-    // Registra o callback de detecção de commits no watcher
-    watcherService.setOnCommitDetected(async () => {
-      try {
-        const commitDetected = await checkpointService.checkForCommits(repoPath)
-        if (commitDetected) {
-          console.log('[GitHandler] Commit detectado, limpando checkpoints...')
-          const result = await checkpointService.handleCommitDetected(repoPath)
-          console.log(`[GitHandler] ${result.deletedCount} checkpoint(s) deletado(s), novo "🏁 Início" criado`)
-
-          // Notifica todos os renderers via IPC event
-          const windows = BrowserWindow.getAllWindows()
-          for (const win of windows) {
-            if (!win.webContents.isDestroyed()) {
-              win.webContents.send('checkpoint:commit-detected', {
-                repoPath,
-                deletedCount: result.deletedCount,
-                newCheckpointId: result.newCheckpoint.id
-              })
-            }
-          }
-        }
-      } catch (error) {
-        console.error('[GitHandler] Erro ao verificar commits:', error)
-      }
-    })
+    // Callback de detecção de commits removido — limpeza agora é manual via botão 'Limpar Tudo' na UI
 
     watcherService.start(dirPath, (filePath) => {
       if (!webContents.isDestroyed()) {

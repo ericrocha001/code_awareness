@@ -34,6 +34,7 @@ Invariantes do Script
 2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
 3. Toda resposta de handler deve conter o campo success.
 4. Se a restauração tiver qualquer falha parcial, o handler deve retornar success: false com flag partial: true para forçar confirmação do usuário.
+5. toCheckpointId é obrigatório nos handlers de diff — não existe mais comparação com disco.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -205,12 +206,12 @@ export function registerCheckpointHandlers(): void {
   })
 
   /**
-   * checkpoint:generate-diff — Gera diff semântico entre checkpoints ou entre checkpoint e disco.
-   * Parâmetros: repoPath, fromCheckpointId, toCheckpointId (opcional)
+   * checkpoint:generate-diff — Gera diff semântico entre dois checkpoints.
+   * Parâmetros: repoPath, fromCheckpointId, toCheckpointId (obrigatório)
    * Retorna: { success: boolean, data?: string, error?: string }
    *   - data contém o Markdown formatado com as diferenças.
    */
-  ipcMain.handle('checkpoint:generate-diff', async (_event, repoPath: string, fromCheckpointId: string, toCheckpointId?: string) => {
+  ipcMain.handle('checkpoint:generate-diff', async (_event, repoPath: string, fromCheckpointId: string, toCheckpointId: string) => {
     try {
       // Valida parâmetros obrigatórios
       if (!isValidPath(repoPath)) {
@@ -219,15 +220,14 @@ export function registerCheckpointHandlers(): void {
       if (!isValidCheckpointId(fromCheckpointId)) {
         return { success: false, error: 'fromCheckpointId contém caracteres inválidos' }
       }
-      // toCheckpointId é opcional, mas se fornecido, deve ser válido
-      if (toCheckpointId !== undefined && toCheckpointId !== null && !isValidCheckpointId(toCheckpointId)) {
+      if (!isValidCheckpointId(toCheckpointId)) {
         return { success: false, error: 'toCheckpointId contém caracteres inválidos' }
       }
 
       const markdown = await checkpointService.generateDiffBetween(
         repoPath,
         fromCheckpointId,
-        toCheckpointId || undefined
+        toCheckpointId
       )
       return { success: true, data: markdown }
     } catch (error: any) {
@@ -238,11 +238,11 @@ export function registerCheckpointHandlers(): void {
 
   /**
    * checkpoint:get-changed-files — Retorna lista de arquivos alterados entre checkpoints.
-   * Parâmetros: repoPath, fromCheckpointId, toCheckpointId (opcional)
+   * Parâmetros: repoPath, fromCheckpointId, toCheckpointId (obrigatório)
    * Retorna: { success: boolean, data?: CheckpointDiffFile[], error?: string }
    *   - data contém array de arquivos com relativePath, changeType, importance e mtime.
    */
-  ipcMain.handle('checkpoint:get-changed-files', async (_event, repoPath: string, fromCheckpointId: string, toCheckpointId?: string) => {
+  ipcMain.handle('checkpoint:get-changed-files', async (_event, repoPath: string, fromCheckpointId: string, toCheckpointId: string) => {
     try {
       // Valida parâmetros obrigatórios
       if (!isValidPath(repoPath)) {
@@ -251,60 +251,19 @@ export function registerCheckpointHandlers(): void {
       if (!isValidCheckpointId(fromCheckpointId)) {
         return { success: false, error: 'fromCheckpointId contém caracteres inválidos' }
       }
-      // toCheckpointId é opcional, mas se fornecido, deve ser válido
-      if (toCheckpointId !== undefined && toCheckpointId !== null && !isValidCheckpointId(toCheckpointId)) {
+      if (!isValidCheckpointId(toCheckpointId)) {
         return { success: false, error: 'toCheckpointId contém caracteres inválidos' }
       }
 
       const changedFiles = await checkpointService.getChangedFiles(
         repoPath,
         fromCheckpointId,
-        toCheckpointId || undefined
+        toCheckpointId
       )
       return { success: true, data: changedFiles }
     } catch (error: any) {
       console.error('[CheckpointHandler] Erro ao obter changed files:', error)
       return { success: false, error: error.message || 'Erro ao obter arquivos alterados' }
-    }
-  })
-
-  /**
-   * checkpoint:initialize-commit-detection — Inicializa a detecção de commits para um repositório.
-   * Chamado quando o usuário abre a aba Code Checkpoints.
-   * Salva o HEAD atual como referência inicial.
-   *
-   * Parâmetros: repoPath
-   * Retorna: { success: boolean, error?: string }
-   */
-  ipcMain.handle('checkpoint:initialize-commit-detection', async (_event, repoPath: string) => {
-    try {
-      if (!isValidPath(repoPath)) {
-        return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
-      }
-
-      // Obtém o HEAD atual
-      const currentHead = await checkpointService.getCurrentHead(repoPath)
-
-      if (!currentHead) {
-        return { success: false, error: 'Não foi possível obter o HEAD atual do repositório' }
-      }
-
-      // Verifica se já existe metadados
-      const metadata = await checkpointService.getMetadata(repoPath)
-
-      // Se não existe, salva o HEAD atual como referência inicial
-      if (!metadata) {
-        await checkpointService.setMetadata(repoPath, {
-          lastHead: currentHead,
-          lastChecked: new Date().toISOString()
-        })
-        console.log(`[CheckpointHandler] Detecção de commits inicializada para ${repoPath}`)
-      }
-
-      return { success: true }
-    } catch (error: any) {
-      console.error('[CheckpointHandler] Erro ao inicializar detecção de commits:', error)
-      return { success: false, error: error.message || 'Erro ao inicializar detecção de commits' }
     }
   })
 

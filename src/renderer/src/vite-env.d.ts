@@ -115,7 +115,7 @@ declare global {
       generateCheckpointDiff: (
         repoPath: string,
         fromCheckpointId: string,
-        toCheckpointId?: string
+        toCheckpointId: string
       ) => Promise<{ success: boolean; data?: string; error?: string }>
 
       validateRestore: (
@@ -128,10 +128,6 @@ declare global {
         checkpointId: string
       ) => Promise<{ success: boolean; data?: { restored: number; failed: number; errors: string[] }; error?: string }>
 
-      initializeCommitDetection: (
-        repoPath: string
-      ) => Promise<{ success: boolean; error?: string }>
-
       renameCheckpoint: (
         repoPath: string,
         checkpointId: string,
@@ -141,14 +137,9 @@ declare global {
       getCheckpointChangedFiles: (
         repoPath: string,
         fromCheckpointId: string,
-        toCheckpointId?: string
+        toCheckpointId: string
       ) => Promise<{ success: boolean; data?: CheckpointDiffFile[]; error?: string }>
 
-      onCommitDetected: (
-        callback: (event: any, data: { repoPath: string; deletedCount: number; newCheckpointId: string }) => void
-      ) => void
-
-      removeCommitDetectedListener: () => void
     }
   }
 }

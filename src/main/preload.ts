@@ -207,7 +207,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   generateCheckpointDiff: (
     repoPath: string,
     fromCheckpointId: string,
-    toCheckpointId?: string
+    toCheckpointId: string
   ): Promise<{ success: boolean; data?: string; error?: string }> => {
     return ipcRenderer.invoke('checkpoint:generate-diff', repoPath, fromCheckpointId, toCheckpointId)
   },
@@ -226,11 +226,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     return ipcRenderer.invoke('checkpoint:restore', repoPath, checkpointId)
   },
 
-  initializeCommitDetection: (
-    repoPath: string
-  ): Promise<{ success: boolean; error?: string }> => {
-    return ipcRenderer.invoke('checkpoint:initialize-commit-detection', repoPath)
-  },
+  // APIs de detecção de commits removidas — limpeza agora é manual via botão 'Limpar Tudo' na UI
 
   renameCheckpoint: (
     repoPath: string,
@@ -243,18 +239,9 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getCheckpointChangedFiles: (
     repoPath: string,
     fromCheckpointId: string,
-    toCheckpointId?: string
+    toCheckpointId: string
   ): Promise<{ success: boolean; data?: CheckpointDiffFile[]; error?: string }> => {
     return ipcRenderer.invoke('checkpoint:get-changed-files', repoPath, fromCheckpointId, toCheckpointId)
   },
 
-  onCommitDetected: (
-    callback: (event: any, data: { repoPath: string; deletedCount: number; newCheckpointId: string }) => void
-  ) => {
-    ipcRenderer.on('checkpoint:commit-detected', callback)
-  },
-
-  removeCommitDetectedListener: () => {
-    ipcRenderer.removeAllListeners('checkpoint:commit-detected')
-  }
 })

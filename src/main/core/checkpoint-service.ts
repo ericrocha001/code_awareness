@@ -7,12 +7,11 @@ Responsabilidades do Script
 2. Capturar o conteúdo completo dos arquivos do repositório no momento do checkpoint.
 3. Persistir cada checkpoint como um arquivo JSON em code_checkpoints/<id>.json.
 4. Filtrar arquivos binários e arquivos maiores que 2MB do snapshot.
-5. Gerar diffs semânticos entre checkpoints ou entre checkpoint e estado atual do disco.
+5. Gerar diffs semânticos entre checkpoints ou entre checkpoint e estado atual do disco (para o primeiro checkpoint).
 6. Restaurar arquivos do repositório para o estado de um checkpoint específico.
-7. Detectar commits via comparação de HEAD e limpar checkpoints automaticamente.
-8. Renomear checkpoints existentes, atualizando o campo name no JSON persistido.
-9. Retornar lista de arquivos alterados entre checkpoints sem gerar Markdown.
-10. Validar (dry-run) se uma restauração pode ser executada antes de modificar o disco.
+7. Renomear checkpoints existentes, atualizando o campo name no JSON persistido.
+8. Retornar lista de arquivos alterados entre checkpoints sem gerar Markdown.
+9. Validar (dry-run) se uma restauração pode ser executada antes de modificar o disco.
 
 Mapa de Relacionamentos do Script
 
@@ -41,10 +40,6 @@ Mapa de Relacionamentos do Script
    - Relação: Usa writeFile para sobrescrever arquivos no disco durante restauração.
    - Criticidade: Alta
 
-6. watcher-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Registra listener para detectar mudanças no .git e trigger detecção de commits.
-   - Criticidade: Alta
 
 Invariantes do Script
 
@@ -56,15 +51,11 @@ Invariantes do Script
 6. O diff gerado deve seguir exatamente o mesmo formato Markdown do DiffService (blocos 🟥 e 🟩 com hunks numerados).
 7. A restauração deve validar se o checkpoint existe antes de sobrescrever arquivos.
 8. Arquivos que não existem no checkpoint mas existem no disco não devem ser deletados durante restauração.
-9. O arquivo .metadata.json deve ser criado automaticamente se não existir.
-10. A detecção de commit deve comparar o hash do HEAD atual com o HEAD conhecido.
-11. Após detectar um commit, todos os checkpoints devem ser deletados e um novo "🏁 Início" criado.
-12. O renome de checkpoint deve validar que o novo nome não esteja vazio e não exista duplicata.
-13. O método getChangedFiles deve retornar arquivos ordenados por mtime descendente, com deleted no final.
-14. O arquivo .metadata.json nunca deve ser apagado por deleteAllCheckpoints(), pois contém o estado do último HEAD conhecido para detecção de commits.
-15. Em handleCommitDetected(), temporários órfãos devem ser limpos antes de criar o novo checkpoint, e o novo checkpoint deve ser criado ANTES de deletar os antigos, para evitar perda de dados em caso de falha.
-16. Arquivos binários não devem ser lidos completamente — apenas os primeiros 4096 bytes são analisados para detecção.
-17. O método validateRestore() deve ser chamado antes de restoreCheckpoint() para permitir confirmação do usuário em caso de falhas potenciais.
+9. O renome de checkpoint deve validar que o novo nome não esteja vazio e não exista duplicata.
+10. O método getChangedFiles deve retornar arquivos ordenados por mtime descendente, com deleted no final.
+11. Arquivos binários não devem ser lidos completamente — apenas os primeiros 4096 bytes são analisados para detecção.
+12. O método validateRestore() deve ser chamado antes de restoreCheckpoint() para permitir confirmação do usuário em caso de falhas potenciais.
+13. O primeiro checkpoint (mais antigo) deve comparar com o estado atual do disco quando não há checkpoint anterior.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -83,9 +74,6 @@ const MAX_FILE_SIZE = 2 * 1024 * 1024
 
 // Nome da pasta onde os checkpoints são persistidos
 const CHECKPOINT_DIR_NAME = 'code_checkpoints'
-
-// Nome do arquivo de metadados (armazena último HEAD conhecido)
-const METADATA_FILE_NAME = '.metadata.json'
 
 // Mapa de extensão para nome de linguagem usado nos blocos de código Markdown
 // Deve ser idêntico ao do DiffService para manter consistência visual
@@ -107,15 +95,6 @@ const CHANGE_TYPE_LABEL: Record<'modified' | 'added' | 'deleted', string> = {
   modified: 'modificado',
   added: 'adicionado',
   deleted: 'excluído'
-}
-
-/**
- * Metadados persistidos sobre o estado do repositório.
- * Usado para detectar commits comparando o HEAD atual com o HEAD conhecido.
- */
-interface CheckpointMetadata {
-  lastHead: string           // Hash do último commit conhecido
-  lastChecked: string        // Timestamp da última verificação (ISO string)
 }
 
 export class CheckpointService {
@@ -346,20 +325,15 @@ export class CheckpointService {
 
   /**
    * Deleta todos os checkpoints do repositório.
-   * @param excludeCheckpointId Se fornecido, este checkpoint específico não será deletado.
+   * Remove todos os arquivos .json da pasta de checkpoints.
    */
-  async deleteAllCheckpoints(repoPath: string, excludeCheckpointId?: string): Promise<number> {
+  async deleteAllCheckpoints(repoPath: string): Promise<number> {
     const dir = this.getCheckpointDir(repoPath)
 
     try {
       const entries = await readdir(dir)
-      // Preserva o .metadata.json — ele contém o último HEAD conhecido e não deve ser apagado
-      let jsonFiles = entries.filter(e => e.endsWith('.json') && e !== METADATA_FILE_NAME)
-
-      // Se um checkpoint deve ser preservado, remove seu arquivo da lista de deleção
-      if (excludeCheckpointId) {
-        jsonFiles = jsonFiles.filter(e => e !== `${excludeCheckpointId}.json`)
-      }
+      // Deleta TODOS os arquivos .json da pasta de checkpoints
+      const jsonFiles = entries.filter(e => e.endsWith('.json'))
 
       if (jsonFiles.length === 0) {
         console.warn('[CheckpointService] Nenhum checkpoint encontrado para deletar')
@@ -481,42 +455,7 @@ export class CheckpointService {
     return { canRestore, cannotRestore }
   }
 
-  // ─── Métodos de Detecção de Commits ────────────────────────────────────
-
-  /**
-   * Carrega os metadados do repositório (último HEAD conhecido).
-   * Se o arquivo não existir ou o repo for inválido, retorna null.
-   */
-  async getMetadata(repoPath: string): Promise<CheckpointMetadata | null> {
-    // Valida que o repositório existe no disco
-    if (!existsSync(repoPath)) {
-      return null
-    }
-
-    const metadataPath = join(this.getCheckpointDir(repoPath), METADATA_FILE_NAME)
-
-    try {
-      const data = JSON.parse(await readFile(metadataPath, 'utf-8')) as CheckpointMetadata
-      return data
-    } catch {
-      return null
-    }
-  }
-
-  /**
-   * Salva os metadados do repositório (último HEAD conhecido).
-   * Cria o diretório de checkpoints se não existir.
-   * Valida que o repoPath existe antes de escrever.
-   */
-  async setMetadata(repoPath: string, metadata: CheckpointMetadata): Promise<void> {
-    if (!existsSync(repoPath)) {
-      throw new Error(`Repositório não encontrado: ${repoPath}`)
-    }
-
-    await this.ensureCheckpointDir(repoPath)
-    const metadataPath = join(this.getCheckpointDir(repoPath), METADATA_FILE_NAME)
-    await writeFile(metadataPath, JSON.stringify(metadata, null, 2), 'utf-8')
-  }
+  // Métodos de detecção de commits removidos — limpeza agora é manual via botão 'Limpar Tudo' na UI
 
   // ─── Métodos de Renomeação ───────────────────────────────────────────────
 
@@ -564,110 +503,17 @@ export class CheckpointService {
     return true
   }
 
-  /**
-   * Obtém o hash do HEAD atual do repositório via GitService.
-   */
-  async getCurrentHead(repoPath: string): Promise<string | null> {
-    try {
-      const head = await this.gitService.getCurrentCommitHash(repoPath)
-      return head
-    } catch {
-      return null
-    }
-  }
-
-  /**
-   * Verifica se houve um commit desde a última verificação.
-   * Compara o HEAD atual com o HEAD conhecido armazenado em .metadata.json.
-   *
-   * @returns true se houve um commit (HEAD mudou), false caso contrário.
-   */
-  async checkForCommits(repoPath: string): Promise<boolean> {
-    const currentHead = await this.getCurrentHead(repoPath)
-    if (!currentHead) return false
-
-    const metadata = await this.getMetadata(repoPath)
-
-    // Primeira vez: salva o HEAD atual como referência
-    if (!metadata) {
-      await this.setMetadata(repoPath, {
-        lastHead: currentHead,
-        lastChecked: new Date().toISOString()
-      })
-      return false
-    }
-
-    // HEAD mudou → commit detectado
-    if (metadata.lastHead !== currentHead) {
-      return true
-    }
-
-    // HEAD não mudou, não há necessidade de atualizar o timestamp (evita I/O desnecessário)
-    return false
-  }
-
-  /**
-   * Nome temporário usado durante a rotação segura de checkpoints.
-   * Usa prefixo __temp_ para evitar conflito com nomes de usuário.
-   */
-  private readonly TEMP_CHECKPOINT_NAME = '__temp_inicio__'
-
-  /**
-   * Manipula a detecção de um commit:
-   * 1. Cria um novo checkpoint com nome temporário (se falhar, checkpoints antigos não são perdidos).
-   * 2. Deleta todos os checkpoints antigos, preservando o temporário.
-   * 3. Renomeia o temporário para "🏁 Início".
-   * 4. Atualiza os metadados com o novo HEAD.
-   *
-   * @returns Objeto com o novo checkpoint criado e contagem de checkpoints deletados.
-   */
-  async handleCommitDetected(repoPath: string): Promise<{
-    newCheckpoint: CheckpointData
-    deletedCount: number
-  }> {
-    // 0. Limpa temporários órfãos de execuções anteriores que falharam (ex: crash durante renameCheckpoint)
-    //    Isso evita conflito de nome duplicado ao tentar criar __temp_inicio__ novamente
-    const existing = await this.listCheckpoints(repoPath)
-    const orphanTemp = existing.find(cp => cp.name === this.TEMP_CHECKPOINT_NAME)
-    if (orphanTemp) {
-      await this.deleteCheckpoint(repoPath, orphanTemp.id)
-    }
-
-    // 1. Cria o novo checkpoint com nome temporário primeiro
-    //    Se falhar (disco cheio, permissão), os checkpoints antigos permanecem intactos
-    const tempCheckpoint = await this.createCheckpoint(repoPath, this.TEMP_CHECKPOINT_NAME, 'all')
-
-    // 2. Deleta todos os checkpoints antigos, preservando o temporário recém-criado
-    const deletedCount = await this.deleteAllCheckpoints(repoPath, tempCheckpoint.id)
-
-    // 3. Renomeia o temporário para o nome definitivo "🏁 Início"
-    await this.renameCheckpoint(repoPath, tempCheckpoint.id, '🏁 Início')
-
-    // Carrega o checkpoint já renomeado para retornar com o nome correto
-    const newCheckpoint = (await this.loadCheckpoint(repoPath, tempCheckpoint.id))!
-
-    // Atualiza os metadados com o novo HEAD
-    const currentHead = await this.getCurrentHead(repoPath)
-    if (currentHead) {
-      await this.setMetadata(repoPath, {
-        lastHead: currentHead,
-        lastChecked: new Date().toISOString()
-      })
-    }
-
-    return { newCheckpoint, deletedCount }
-  }
-
   // ─── Métodos de Geração de Diff ──────────────────────────────────────────
 
   /**
-   * Gera um diff semântico em Markdown entre dois checkpoints, ou entre um checkpoint
-   * e o estado atual do disco.
+   * Gera um diff semântico em Markdown entre dois checkpoints.
+   * Se toCheckpointId for igual a fromCheckpointId, compara com o estado atual do disco.
+   * Isso é usado pelo frontend para comparar o primeiro checkpoint (mais antigo) com o disco.
    */
   async generateDiffBetween(
     repoPath: string,
     fromCheckpointId: string,
-    toCheckpointId?: string
+    toCheckpointId: string
   ): Promise<string> {
     const fromCheckpoint = await this.loadCheckpoint(repoPath, fromCheckpointId)
     if (!fromCheckpoint) {
@@ -676,18 +522,58 @@ export class CheckpointService {
 
     const diffFiles: CheckpointDiffFile[] = []
 
-    if (toCheckpointId) {
-      const toCheckpoint = await this.loadCheckpoint(repoPath, toCheckpointId)
-      if (!toCheckpoint) {
-        return '# ❌ Erro: Checkpoint de destino não encontrado.'
-      }
-      this.compareCheckpoints(fromCheckpoint, toCheckpoint, diffFiles)
-    } else {
+    // Se toCheckpointId === fromCheckpointId, é um sinal do frontend para comparar com disco.
+    // Isso ocorre quando o checkpoint selecionado é o primeiro/mais antigo na timeline.
+    if (toCheckpointId === fromCheckpointId) {
       await this.compareCheckpointWithDisk(repoPath, fromCheckpoint, diffFiles)
+
+      if (diffFiles.length === 0) {
+        const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, 'atual')
+        return `${header}\n\n*Nenhuma alteração detectada entre o checkpoint e o estado atual do disco.*`
+      }
+
+      // Classifica todos os arquivos do diff por importância (usando ImportanceService real)
+      const importancePromises = diffFiles.map(async (file) => {
+        try {
+          const result = await importanceService.classifyFile(repoPath, file.relativePath)
+          return { file, level: result.level }
+        } catch {
+          return { file, level: 'low' as const }
+        }
+      })
+      const importanceResults = await Promise.all(importancePromises)
+      const importanceMap = new Map<string, string>()
+      for (const { file, level } of importanceResults) {
+        importanceMap.set(file.relativePath, level)
+      }
+
+      const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, 'atual')
+      const sections: string[] = []
+
+      for (const file of diffFiles) {
+        // Injeta a importância real no arquivo de diff para o buildFileSection usar
+        file.importance = (importanceMap.get(file.relativePath) || 'low') as 'critical' | 'high' | 'medium' | 'low'
+        const section = this.buildFileSection(file)
+        if (section) sections.push(section)
+      }
+
+      if (sections.length === 0) {
+        return `${header}\n\n*Nenhuma alteração significativa encontrada.*`
+      }
+
+      return [header, ...sections].join('\n\n---\n\n')
     }
 
+    // Fluxo normal: comparar com outro checkpoint
+    const toCheckpoint = await this.loadCheckpoint(repoPath, toCheckpointId)
+    if (!toCheckpoint) {
+      return '# ❌ Erro: Checkpoint de destino não encontrado.'
+    }
+
+    this.compareCheckpoints(fromCheckpoint, toCheckpoint, diffFiles)
+
     if (diffFiles.length === 0) {
-      const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, toCheckpointId ? 'outro checkpoint' : 'atual')
+      const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, toCheckpoint.name)
       return `${header}\n\n*Nenhuma alteração detectada entre os checkpoints.*`
     }
 
@@ -706,7 +592,7 @@ export class CheckpointService {
       importanceMap.set(file.relativePath, level)
     }
 
-    const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, toCheckpointId ? 'outro checkpoint' : 'atual')
+    const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, toCheckpoint.name)
     const sections: string[] = []
 
     for (const file of diffFiles) {
@@ -725,18 +611,19 @@ export class CheckpointService {
 
   /**
    * Retorna apenas a lista de arquivos alterados entre dois checkpoints,
-   * ou entre um checkpoint e o estado atual do disco.
+   * ou entre um checkpoint e o estado atual do disco (para o primeiro checkpoint).
    * Não gera Markdown — apenas retorna os metadados dos arquivos changed.
    *
    * @param repoPath Caminho absoluto para a raiz do repositório.
    * @param fromCheckpointId ID do checkpoint de origem.
-   * @param toCheckpointId ID do checkpoint de destino (opcional — se omitido, compara com disco).
+   * @param toCheckpointId ID do checkpoint de destino (obrigatório).
+   *   Se igual a fromCheckpointId, compara com o estado atual do disco.
    * @returns Array de CheckpointDiffFile ordenado por mtime descendente (deleted no final).
    */
   async getChangedFiles(
     repoPath: string,
     fromCheckpointId: string,
-    toCheckpointId?: string
+    toCheckpointId: string
   ): Promise<CheckpointDiffFile[]> {
     const fromCheckpoint = await this.loadCheckpoint(repoPath, fromCheckpointId)
     if (!fromCheckpoint) {
@@ -745,14 +632,15 @@ export class CheckpointService {
 
     const diffFiles: CheckpointDiffFile[] = []
 
-    if (toCheckpointId) {
+    // Se toCheckpointId === fromCheckpointId, compara com disco (primeiro checkpoint)
+    if (toCheckpointId === fromCheckpointId) {
+      await this.compareCheckpointWithDisk(repoPath, fromCheckpoint, diffFiles)
+    } else {
       const toCheckpoint = await this.loadCheckpoint(repoPath, toCheckpointId)
       if (!toCheckpoint) {
         return []
       }
       this.compareCheckpoints(fromCheckpoint, toCheckpoint, diffFiles)
-    } else {
-      await this.compareCheckpointWithDisk(repoPath, fromCheckpoint, diffFiles)
     }
 
     // Classifica todos os arquivos por importância e obtém mtime real do disco
@@ -828,6 +716,10 @@ export class CheckpointService {
     }
   }
 
+  /**
+   * Compara o conteúdo de um checkpoint com o estado atual dos arquivos no disco.
+   * Usado quando o checkpoint selecionado é o primeiro/mais antigo na timeline.
+   */
   private async compareCheckpointWithDisk(
     repoPath: string,
     checkpoint: CheckpointData,
