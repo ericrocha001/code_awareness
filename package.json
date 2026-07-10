@@ -52,6 +52,7 @@
   },
   "dependencies": {
     "diff": "^9.0.0",
+    "docx": "^9.7.1",
     "gitdiff-parser": "^0.3.1",
     "markdown-to-jsx": "^9.8.2"
   }

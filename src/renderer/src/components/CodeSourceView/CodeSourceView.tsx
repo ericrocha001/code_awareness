@@ -6,7 +6,7 @@ Responsabilidades do Script
 1. Renderizar a interface da aba Code Source com layout de painéis independentes desacoplados e barra lateral retrátil.
 2. Gerenciar a seleção reativa de arquivos com sistema de Ignore, seletor de formato (Markdown/XML) e contagem de tokens.
 3. Monitorar alterações de arquivos em tempo real via WatcherService com debounce de 300ms.
-4. Fornecer ações contextuais (Copiar, Salvar XML, Exportar Obsidian).
+4. Fornecer ações contextuais (Copiar, Exportar Normal, Exportar para NotebookLM).
 5. Sincronizar classificações de importância em tempo real com outras abas via evento IPC.
 
 Mapa de Relacionamentos do Script
@@ -46,6 +46,11 @@ Mapa de Relacionamentos do Script
    - Relação: Renderiza o componente de seleção e alternância do projeto ativo na topbar.
    - Criticidade: Alta
 
+8. window.codeAwareness.exportToNotebookLM
+   - Tipo: Dependência Inversa
+   - Relação: Consome API IPC para exportação no formato NotebookLM.
+   - Criticidade: Alta
+
 Invariantes do Script
 
 1. A sidebar deve ter largura entre 280px e 500px quando visível.
@@ -56,6 +61,7 @@ Invariantes do Script
 6. A sincronização de importância não deve afetar a seleção de arquivos (checkboxes).
 7. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
 8. O estado de abertura da barra lateral (aberto/fechado) deve ser persistido por projeto no localStorage.
+9. O dropdown de exportação deve sempre fechar ao clicar fora ou após selecionar uma opção.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -115,6 +121,8 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
   const [error, setError] = useState<string>('')
   const [isCopied, setIsCopied] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
+  const [isExportDropdownOpen, setIsExportDropdownOpen] = useState(false)
+  const exportDropdownRef = useRef<HTMLDivElement>(null)
 
   // Sistema de Importância Arquitetural
   const [importanceMap, setImportanceMap] = useState<Record<string, ImportanceLevel>>({})
@@ -665,8 +673,21 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
     setTimeout(() => setIsCopied(false), 2000)
   }
 
-  const handleExportDownloads = async () => {
+  // Fecha o dropdown de exportação ao clicar fora
+  useEffect(() => {
+    if (!isExportDropdownOpen) return
+    const handleClickOutside = (e: MouseEvent) => {
+      if (exportDropdownRef.current && !exportDropdownRef.current.contains(e.target as Node)) {
+        setIsExportDropdownOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [isExportDropdownOpen])
+
+  const handleExportNormal = async () => {
     if (!activeProject || !markdown) return
+    setIsExportDropdownOpen(false)
     setIsExporting(true)
     try {
       const fileName = `${activeProject.name}-source`
@@ -679,6 +700,29 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
     } catch (err) {
       console.error('Falha ao exportar:', err)
       onStatusMessage('Erro ao exportar', true)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  const handleExportNotebookLM = async () => {
+    if (!activeProject || !markdown) return
+    setIsExportDropdownOpen(false)
+    setIsExporting(true)
+    try {
+      const fileName = `${activeProject.name}-notebooklm`
+      const result = await window.codeAwareness.exportToNotebookLM(markdown, fileName)
+      if (result.success) {
+        const message = result.fileCount === 1
+          ? 'Exportado para Downloads (.docx)!'
+          : `Exportado ${result.fileCount} arquivo(s) .docx para Downloads!`
+        onStatusMessage(message)
+      } else {
+        onStatusMessage(result.error || 'Erro ao exportar para NotebookLM', true)
+      }
+    } catch (err) {
+      console.error('Falha ao exportar para NotebookLM:', err)
+      onStatusMessage('Erro ao exportar para NotebookLM', true)
     } finally {
       setIsExporting(false)
     }
@@ -907,9 +951,30 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
               <button className="app-pill-btn" onClick={handleCopy} disabled={!markdown || isGenerating}>
                 {isCopied ? 'Copiado!' : 'Copiar'}
               </button>
-              <button className="app-pill-btn" onClick={handleExportDownloads} disabled={!markdown || isGenerating || isExporting}>
-                {isExporting ? 'Exportando...' : 'Exportar'}
-              </button>
+              <div className="cs-export-dropdown-wrapper" ref={exportDropdownRef}>
+                <button
+                  className="app-pill-btn cs-export-dropdown-btn"
+                  onClick={() => setIsExportDropdownOpen(!isExportDropdownOpen)}
+                  disabled={!markdown || isGenerating || isExporting}
+                >
+                  {isExporting ? 'Exportando...' : 'Exportar'}
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                    <polyline points="6 9 12 15 18 9" />
+                  </svg>
+                </button>
+                {isExportDropdownOpen && (
+                  <div className="cs-export-dropdown-menu">
+                    <button onClick={handleExportNormal}>
+                      <span className="cs-export-action-emoji">📄</span>
+                      Exportar Normal
+                    </button>
+                    <button onClick={handleExportNotebookLM}>
+                      <span className="cs-export-action-emoji">📓</span>
+                      Exportar para NotebookLM (.docx)
+                    </button>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 

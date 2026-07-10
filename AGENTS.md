@@ -9,7 +9,7 @@ author:
 project:
 connections:
 date created: 2026-03-30 15:53
-date modified: 2026-06-26 17:09
+date modified: 2026-07-02 18:29
 ---
 
 # AGENTS
@@ -81,11 +81,11 @@ Responsabilidades do Script
 1. Escrever em português do Brasil.
 2. Listar apenas responsabilidades reais.
 3. Cada responsabilidade deve:
-    
+
     - começar com verbo de ação;
     - descrever claramente o propósito do arquivo;
     - evitar descrições genéricas.
-        
+
 4. Responsabilidade significa **um único motivo futuro de modificação**.
 5. Usar lista numerada.
 6. Não descrever implementação interna.
@@ -113,12 +113,12 @@ Mapa de Relacionamentos do Script
 
 1. Listar apenas relacionamentos arquiteturalmente relevantes.
 2. Cada item deve conter:
-    
+
     - nome do arquivo;
     - tipo;
     - relação;
     - criticidade.
-        
+
 3. Não listar imports triviais.
 4. Usar lista numerada.
 
@@ -167,11 +167,10 @@ Se um invariante for quebrado, o comportamento do sistema é considerado incorre
 1. Escrever em português do Brasil.
 2. Listar apenas invariantes reais.
 3. Cada invariante deve:
-    
     - ser verificável;
     - ser específico;
     - descrever uma garantia obrigatória.
-        
+
 4. Usar lista numerada.
 5. Não descrever detalhes de implementação.
 
@@ -268,36 +267,95 @@ Se um script não puder explicar claramente essas três dimensões, sua arquitet
 
 Todo código criado ou modificado pelo agente deve priorizar simplicidade, legibilidade e baixa complexidade.
 
-## Regras Obrigatórias
+### Regras Obrigatórias
 
 1. Preferir sempre a solução mais simples que funcione.
-2. Use bastante comentários no código. Deixe claro a razão da existência de cada bloco.
-3. Evitar abstrações, padrões ou otimizações prematuras.
-4. Manter funções pequenas e fáceis de entender.
-5. Utilizar nomes claros e autoexplicativos.
-6. Evitar níveis profundos de indentação.
-7. Remover automaticamente:
+2. Evitar abstrações, padrões ou otimizações prematuras.
+3. Manter funções pequenas e fáceis de entender.
+4. Utilizar nomes claros e autoexplicativos.
+5. Evitar níveis profundos de indentação.
+6. Remover automaticamente:
     - código morto;
     - variáveis não utilizadas;
     - imports desnecessários;
     - comentários obsoletos.
-8. Não adicionar lógica, configurações ou estruturas que não sejam necessárias no momento atual.
-9. Sempre que modificar código existente, simplificar o que for possível.
+7. Não adicionar lógica, configurações ou estruturas que não sejam necessárias no momento atual.
+8. Sempre que modificar código existente, simplificar o que for possível.
 
-## Regra De Decisão
+### Regra De Decisão
 
 Se existir dúvida entre uma solução simples e uma solução sofisticada, escolher sempre a mais simples.
 
+---------
+
+## Política Universal De Comentários Para Código (Humanos + IA)
+
+### Objetivo
+
+Comentários devem adicionar contexto que o código sozinho não transmite, permitindo que humanos e agentes de IA entendam rapidamente a arquitetura, lógica, decisões críticas e riscos do sistema, mesmo em código comprimido.
+
+### Regras
+
+#### 1. Comente Apenas Lógica Não Trivial
+
+Todo bloco com regras de negócio, validações complexas, concorrência, integrações, performance, cache, retries, workarounds ou fluxo crítico deve ter comentário curto (1–3 frases) explicando sua intenção e motivo de existir.
+
+#### 2. Não Comente Sintaxe Óbvia
+
+Nunca escreva comentários que apenas repetem o código. Priorize explicar **por que** a lógica existe, qual problema resolve e o que quebra se for alterada.
+
+#### 3. Documente Estrutura E Contratos
+
+Módulos, classes ou arquivos complexos devem declarar suas responsabilidades no topo. Funções críticas devem explicar entrada, saída, side effects e dependências importantes.
+
+#### 4. Documente Bugs, Invariantes E Áreas Sensíveis
+
+Toda correção relevante deve gerar comentário local contendo:
+
+- natureza do bug
+- causa
+- consequência de remover a correção
+
+Também documente invariantes, warnings e regras que nunca podem ser quebradas.
+
+Use tags quando útil:
+
+- `BUGFIX`
+- `WARNING`
+- `INVARIANT`
+- `HACK`
+- `TODO`
+
+#### 5. Comentários Devem Sobreviver à Compressão
+
+Escreva assumindo que a IA pode ver apenas imports, interfaces, assinaturas e comentários. Se o corpo da função desaparecer, o comentário ainda deve transmitir a lógica central.
+
+#### 6. Comentários Devem Evoluir Com O Código
+
+Ao alterar uma lógica comentada, revise e atualize seus comentários imediatamente. Comentário desatualizado é pior que ausência de comentário.
+
+#### 7. Respeite a Linguagem
+
+Sempre adapte o formato dos comentários às convenções da linguagem usada (ex.: JSDoc, docstrings, GoDoc, JavaDoc, XML docs).
+
+### Regra Suprema
+
+Escreva comentários como se eles fossem a principal fonte de contexto para reconstruir mentalmente toda a arquitetura e decisões críticas do sistema.
+
 --------------
 
-### Economia De Tokens
+## Economia De Tokens
 
 1. Não gere plano de implementação.
 2. Não gere walkthrough.
 3. Se houver dúvidas, alertas ou algo a esclarecer antes da implementação, apenas pergunte e faça sugestões.
 4. Após concluir a implementação, forneça apenas um resumo do que foi feito.
 
-### Gerencie O `.gitignore`
+---------------
 
-1. Adicione `code_awareness/`, `codefetch/` e `.sprintdiff/` ao `.gitignore`. O Git deve ignorar essas pastas nativamente. Garanta também que o `parseGitStatus` ignore tanto o nome puro do diretório (ex.: `"codefetch"`) quanto caminhos internos (ex.: `"codefetch/…"`), evitando entradas fantasmas.
-2. Adicione ao `.gitignore` qualquer outra pasta que também deva ser ignorada.
+## Política De `.gitignore`
+
+1. Adicione ao `.gitignore` todo arquivo ou diretório temporário, gerado automaticamente, local ou derivado (ex.: caches, logs, builds, outputs e arquivos intermediários).
+2. Ignore arquivos criados por ferramentas, agentes, IDEs ou automações que não sejam necessários para reproduzir o projeto em outra máquina.
+3. Nunca versione arquivos sensíveis ou específicos da máquina, como credenciais, tokens, paths locais e estados de runtime.
+4. Se um arquivo ou pasta pode ser recriado automaticamente ou não é essencial ao projeto, ele deve estar no `.gitignore`.

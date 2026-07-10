@@ -47,6 +47,12 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   saveToDownloads: (markdown: string, fileName: string): Promise<{ success: boolean; filePath?: string; error?: string }> => {
     return ipcRenderer.invoke('save-to-downloads', markdown, fileName)
   },
+  exportToNotebookLM: (markdown: string, fileName: string): Promise<{ success: boolean; fileCount: number; filePaths?: string[]; error?: string }> => {
+    return ipcRenderer.invoke('export-to-notebooklm', markdown, fileName)
+  },
+  exportToDocx: (markdown: string, fileName: string): Promise<{ success: boolean; fileCount: number; filePaths?: string[]; error?: string }> => {
+    return ipcRenderer.invoke('export-to-docx', markdown, fileName)
+  },
   loadSettings: (): Promise<AppSettings> => {
     return ipcRenderer.invoke('load-settings')
   },

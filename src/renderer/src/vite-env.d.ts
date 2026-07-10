@@ -30,6 +30,8 @@ declare global {
       saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveXml: (xml: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveToDownloads: (markdown: string, fileName: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
+      exportToNotebookLM: (markdown: string, fileName: string) => Promise<{ success: boolean; fileCount: number; filePaths?: string[]; error?: string }>
+      exportToDocx: (markdown: string, fileName: string) => Promise<{ success: boolean; fileCount: number; filePaths?: string[]; error?: string }>
       loadSettings: () => Promise<AppSettings>
       saveSettings: (settings: AppSettings) => Promise<{ success: boolean }>
       selectFolder: () => Promise<{ path: string; name: string } | null>

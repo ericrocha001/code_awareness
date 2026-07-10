@@ -13,6 +13,75 @@
   overflow: hidden;
 }
 
+/* ─── Export Dropdown ───────────────────────────────────────────────────── */
+.cs-export-dropdown-wrapper {
+  position: relative;
+}
+
+.cs-export-dropdown-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cs-export-dropdown-btn svg {
+  transition: transform 0.2s ease;
+}
+
+.cs-export-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 260px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 100;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  animation: csDropdownFadeIn 0.15s ease-out;
+}
+
+@keyframes csDropdownFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.cs-export-dropdown-menu button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cs-export-dropdown-menu button:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.cs-export-dropdown-menu button:not(:last-child) {
+  border-bottom: 1px solid var(--border);
+}
+
+.cs-export-action-emoji {
+  font-size: 16px;
+}
+
 .cs-topbar {
   display: flex;
   justify-content: space-between;
