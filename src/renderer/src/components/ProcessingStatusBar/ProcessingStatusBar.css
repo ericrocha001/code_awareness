@@ -1,0 +1,58 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a barra de progresso shimmer com gradiente verde e animação contínua.
+2. Garantir transição suave de aparecimento/desaparecimento via opacity.
+3. Posicionar a barra em flow normal (flex-shrink: 0) entre actions bar e file grid.
+
+Mapa de Relacionamentos do Script
+
+1. ProcessingStatusBar.tsx
+   - Tipo: Dependência Direta
+   - Relação: Consome estas regras de estilo para renderizar o componente visual.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. A animação shimmer deve usar apenas transform: translateX() (GPU-accelerated).
+2. A barra deve ter altura entre 10px e 12px.
+3. A transição de opacity deve ser de 0.3s ease.
+4. O z-index deve ser 100 para ficar acima do conteúdo mas abaixo de modais.
+5. Nunca usar position absolute ou fixed — a barra deve fluir no layout normal.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.processing-status-bar {
+  height: 12px;
+  z-index: 100;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  pointer-events: none;
+  flex-shrink: 0;
+}
+
+.processing-status-bar--visible {
+  opacity: 1;
+}
+
+.processing-status-bar-fill {
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, var(--color-green) 0%, var(--color-green) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 2s infinite linear;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+}
+
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}

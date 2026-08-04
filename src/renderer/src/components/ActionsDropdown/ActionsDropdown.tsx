@@ -27,6 +27,7 @@ Invariantes do Script
 */
 
 import React, { useState, useRef, useEffect } from 'react'
+import { EyeOff, FolderOpen, Copy, FileText, Search, FileDiff } from 'lucide-react'
 import './ActionsDropdown.css'
 
 interface ActionsDropdownProps {
@@ -90,29 +91,29 @@ export const ActionsDropdown: React.FC<ActionsDropdownProps> = ({
       {isOpen && (
         <div className="actions-dropdown-menu">
           <button onClick={() => handleAction(() => onHideFile(relativePath))}>
-            <span className="action-emoji">👁️‍🗨️</span>
+            <span className="action-icon"><EyeOff size={14} strokeWidth={2} /></span>
             <span>Ocultar este arquivo</span>
           </button>
           
           {extension && (
             <button onClick={() => handleAction(() => onHideExtension(extension))}>
-              <span className="action-emoji">📂</span>
+              <span className="action-icon"><FolderOpen size={14} strokeWidth={2} /></span>
               <span>Ocultar todos *.{extension}</span>
             </button>
           )}
 
           <button onClick={() => handleAction(() => onCopyPath(relativePath))}>
-            <span className="action-emoji">📋</span>
+            <span className="action-icon"><Copy size={14} strokeWidth={2} /></span>
             <span>Copiar caminho relativo</span>
           </button>
 
           <button onClick={() => handleAction(() => onCopyName(filename))}>
-            <span className="action-emoji">📝</span>
+            <span className="action-icon"><FileText size={14} strokeWidth={2} /></span>
             <span>Copiar nome do arquivo</span>
           </button>
 
           <button onClick={() => handleAction(() => onRevealInExplorer(relativePath))}>
-            <span className="action-emoji">🔍</span>
+            <span className="action-icon"><Search size={14} strokeWidth={2} /></span>
             <span>Revelar no sistema</span>
           </button>
 
@@ -124,8 +125,8 @@ export const ActionsDropdown: React.FC<ActionsDropdownProps> = ({
                 setIsOpen(false)
               }}
             >
-              <span className="action-emoji">📋</span>
-              <span>{copiedFile === relativePath ? '✓ Copiado!' : 'Copiar diff deste arquivo'}</span>
+              <span className="action-icon"><FileDiff size={14} strokeWidth={2} /></span>
+              <span>{copiedFile === relativePath ? 'Copiado!' : 'Copiar diff deste arquivo'}</span>
             </button>
           )}
         </div>

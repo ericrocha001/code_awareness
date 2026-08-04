@@ -1,0 +1,112 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a seção de mudanças (ChangesSection) com cabeçalho, subgrupos e erro de preview.
+2. Garantir vão entre cards (gap) em vez de divisórias — produz o respiro da referência.
+
+Mapa de Relacionamentos do Script
+
+1. ChangesSection.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo cs- para evitar colisões.
+2. Os cards de arquivo são separados por gap — nunca por border-bottom.
+3. O botão de visualizar diff deve ter aparência de ação secundária, não primária.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.cs-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.cs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cs-header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cs-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.cs-scope {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* ─── Erro de preview ───────────────────────────────────────────────────── */
+
+.cs-preview-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: rgba(248, 81, 73, 0.05);
+  border: 1px solid rgba(248, 81, 73, 0.3);
+  border-radius: 6px;
+  color: #f85149;
+  font-size: 12px;
+}
+
+/* ─── Subgrupos de arquivos ──────────────────────────────────────────────── */
+
+.cs-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.cs-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.cs-group-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.cs-group-count {
+  font-weight: 500;
+  opacity: 0.7;
+}
+
+/* Cards separados por vão — gap entre DrawerFileCard */
+.cs-group-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cs-empty {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  padding: 16px 0;
+  margin: 0;
+}

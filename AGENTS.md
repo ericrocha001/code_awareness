@@ -9,7 +9,7 @@ author:
 project:
 connections:
 date created: 2026-03-30 15:53
-date modified: 2026-07-02 18:29
+date modified: 2026-07-25 15:41
 ---
 
 # AGENTS
@@ -263,28 +263,54 @@ Se um script não puder explicar claramente essas três dimensões, sua arquitet
 
 ----------
 
-## Código Limpo E Enxuto
+## Diretrizes de Desacoplamento
 
-Todo código criado ou modificado pelo agente deve priorizar simplicidade, legibilidade e baixa complexidade.
+- Implemente novas funcionalidades priorizando separação de responsabilidades, baixo acoplamento e alta coesão.
+- Cada módulo, serviço, classe ou script deve possuir uma única responsabilidade arquitetural e, consequentemente, apenas um motivo para mudar.
+- Antes de adicionar uma nova funcionalidade a um arquivo existente, verifique se ela pertence à responsabilidade atual. Caso contrário, implemente-a em um novo módulo ou serviço.
+- Não introduza novos motivos para mudança em um módulo existente. Quando necessário, crie um novo módulo.
+- Prefira composição e colaboração entre módulos menores e coesos em vez de concentrar comportamentos em componentes universais ou excessivamente abrangentes.
+- Evite módulos que concentrem responsabilidades de coordenação, regras de negócio e infraestrutura ao mesmo tempo.
+- Não introduza dependências circulares entre módulos.
+- Não introduza dependências diretas entre camadas distintas sem uma justificativa arquitetural explícita.
+- Exponha apenas interfaces, contratos e comportamentos necessários. Não exponha detalhes internos de implementação.
+- Crie abstrações somente quando houver benefício prático e imediato. Evite camadas, padrões ou interfaces desnecessárias.
+- Organize os arquivos de forma que as responsabilidades de cada módulo permaneçam claras e bem delimitadas.
+- Toda alteração deve preservar ou aumentar a coesão e preservar ou reduzir o acoplamento do sistema.
+- Limite o impacto das mudanças ao menor número possível de módulos. Mudanças locais devem permanecer locais.
+- Expanda um módulo existente apenas quando a nova funcionalidade pertencer claramente à sua responsabilidade. Caso contrário, crie um novo módulo.
+- Mantenha a comunicação entre módulos simples, explícita e baseada em contratos bem definidos.
+- Em caso de conflito entre simplicidade e desacoplamento, escolha a solução mais simples que preserve uma única responsabilidade por módulo e minimize o acoplamento global.
+
+--------------
+
+## Código Limpo e Enxuto
+
+Todo código criado ou modificado pelo agente deve priorizar simplicidade, legibilidade, consistência e baixa complexidade.
 
 ### Regras Obrigatórias
 
-1. Preferir sempre a solução mais simples que funcione.
-2. Evitar abstrações, padrões ou otimizações prematuras.
-3. Manter funções pequenas e fáceis de entender.
-4. Utilizar nomes claros e autoexplicativos.
-5. Evitar níveis profundos de indentação.
-6. Remover automaticamente:
+1. Preferir sempre a solução mais simples que atenda corretamente aos requisitos atuais.
+2. Evitar abstrações, padrões, configurações, estruturas e otimizações prematuras.
+3. Não implementar funcionalidades, comportamentos ou configurações que ainda não sejam necessários.
+4. Manter funções pequenas, coesas e fáceis de compreender.
+5. Utilizar nomes claros, consistentes e autoexplicativos para variáveis, funções, classes, módulos e arquivos.
+6. Evitar níveis profundos de indentação e estruturas de controle desnecessariamente complexas.
+7. Não duplicar lógica. Sempre que uma implementação começar a se repetir de forma significativa, avaliar sua extração para um componente reutilizável.
+8. Remover automaticamente:
+
     - código morto;
     - variáveis não utilizadas;
     - imports desnecessários;
-    - comentários obsoletos.
-7. Não adicionar lógica, configurações ou estruturas que não sejam necessárias no momento atual.
-8. Sempre que modificar código existente, simplificar o que for possível.
+    - comentários obsoletos;
+    - trechos redundantes ou simplificáveis.
 
-### Regra De Decisão
+9. Sempre que modificar código existente, simplificar o que for possível sem alterar o comportamento esperado.
+10. Toda alteração deve reduzir ou, no mínimo, não aumentar desnecessariamente a complexidade do código.
 
-Se existir dúvida entre uma solução simples e uma solução sofisticada, escolher sempre a mais simples.
+### Regra de Decisão
+
+Em caso de dúvida entre duas ou mais soluções que atendam igualmente aos requisitos, escolher sempre a mais simples, clara e fácil de manter.
 
 ---------
 
@@ -341,6 +367,10 @@ Sempre adapte o formato dos comentários às convenções da linguagem usada (ex
 ### Regra Suprema
 
 Escreva comentários como se eles fossem a principal fonte de contexto para reconstruir mentalmente toda a arquitetura e decisões críticas do sistema.
+
+### ATENÇÃO
+
+- NUNCA remova comentários de `BUGFIX`. Porque eles servem de alerta para agentes futuros não repetir o erro que foi corrigido.
 
 --------------
 

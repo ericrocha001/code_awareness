@@ -5,6 +5,7 @@ Responsabilidades do Script
 
 1. Declarar a interface global do objeto codeAwareness no escopo do objeto Window do browser.
 2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
+3. Tipar as APIs de deep link (getPendingDeepLink e onDeepLink) expostas pelo preload.
 
 Mapa de Relacionamentos do Script
 
@@ -22,7 +23,7 @@ Invariantes do Script
 
 /// <reference types="vite/client" />
 
-import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ProjectInfo, RestoreValidation } from '../../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, OrphanFile, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -53,8 +54,8 @@ declare global {
       addIndividualProject: () => Promise<ProjectInfo[]>
       getProjectsList: () => Promise<ProjectInfo[]>
       hideProject: (projectPath: string) => Promise<ProjectInfo[]>
-      addIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent') => Promise<AppSettings | null>
-      removeIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent') => Promise<AppSettings | null>
+      addIgnoredFile: (repoPath: string, relativePath: string) => Promise<AppSettings | null>
+      removeIgnoredFile: (repoPath: string, relativePath: string) => Promise<AppSettings | null>
       reconcileIgnoredFiles: (repoPath: string, currentModifiedFiles: string[]) => Promise<AppSettings | null>
       checkCodeSourceInstallation: () => Promise<boolean>
       generateCodeSource: (
@@ -62,38 +63,18 @@ declare global {
         options?: { selectedFiles?: string[]; format?: 'markdown' | 'xml' }
       ) => Promise<CodefetchResult & { tokenCount?: number }>
 
-      // ─── Importância Arquitetural ─────────────────────────────────
-      classifyImportance: (
-        repoPath: string,
-        repoName: string,
-        files: { relativePath: string }[]
-      ) => Promise<{ success: boolean; data?: Record<string, FileImportance>; error?: string }>
-
-      setImportanceOverride: (
-        repoPath: string,
-        repoName: string,
-        relativePath: string,
-        level: ImportanceLevel
-      ) => Promise<{ success: boolean; data?: Record<string, FileImportance>; error?: string }>
 
       revealInExplorer: (repoPath: string, relativePath: string) => Promise<boolean>
 
-      onImportanceUpdated: (
-        callback: (data: {
-          repoPath: string
-          relativePath: string
-          level: string
-          source: string
-        }) => void
-      ) => Electron.IpcRenderer
+      onThemeChanged: (callback: (isDarkMode: boolean) => void) => () => void
 
-      removeImportanceUpdatedListener: () => void
+
 
       // ─── Checkpoints ─────────────────────────────────────────────────
       createCheckpoint: (
         repoPath: string,
         name: string,
-        strategy: 'all' | 'critical-high'
+        details?: CheckpointDetails
       ) => Promise<{ success: boolean; data?: CheckpointData; error?: string }>
 
       listCheckpoints: (
@@ -110,25 +91,11 @@ declare global {
         checkpointId: string
       ) => Promise<{ success: boolean; error?: string }>
 
-      deleteAllCheckpoints: (
-        repoPath: string
-      ) => Promise<{ success: boolean; deletedCount: number; error?: string }>
-
       generateCheckpointDiff: (
         repoPath: string,
         fromCheckpointId: string,
         toCheckpointId: string
       ) => Promise<{ success: boolean; data?: string; error?: string }>
-
-      validateRestore: (
-        repoPath: string,
-        checkpointId: string
-      ) => Promise<{ success: boolean; data?: RestoreValidation; error?: string }>
-
-      restoreCheckpoint: (
-        repoPath: string,
-        checkpointId: string
-      ) => Promise<{ success: boolean; data?: { restored: number; failed: number; errors: string[] }; error?: string }>
 
       renameCheckpoint: (
         repoPath: string,
@@ -141,6 +108,93 @@ declare global {
         fromCheckpointId: string,
         toCheckpointId: string
       ) => Promise<{ success: boolean; data?: CheckpointDiffFile[]; error?: string }>
+
+      updateCheckpointDetails: (
+        repoPath: string,
+        checkpointId: string,
+        details: CheckpointDetails
+      ) => Promise<{ success: boolean; error?: string }>
+
+      setCheckpointCampaigns: (
+        repoPath: string,
+        checkpointId: string,
+        campaignIds: string[]
+      ) => Promise<{ success: boolean; error?: string }>
+
+      // ─── Restauração ──────────────────────────────────────────────────
+
+      restorePreview: (
+        repoPath: string,
+        checkpointId: string
+      ) => Promise<{ success: boolean; data?: RestorePreviewResult; error?: string }>
+
+      restoreExecute: (
+        repoPath: string,
+        checkpointId: string,
+        options: RestoreExecuteOptions
+      ) => Promise<{ success: boolean; data?: RestoreExecuteResult; error?: string; partial?: boolean }>
+
+      restoreMarkManual: (
+        repoPath: string,
+        checkpointId: string
+      ) => Promise<{ success: boolean; error?: string }>
+
+      restoreUnmark: (
+        repoPath: string,
+        checkpointId: string
+      ) => Promise<{ success: boolean; error?: string }>
+
+      // ─── Tags Manuais ──────────────────────────────────────────────────
+
+      getTags: (repoPath: string) => Promise<{ success: boolean; data?: Tag[]; error?: string }>
+
+      upsertTag: (
+        repoPath: string,
+        tag: Tag
+      ) => Promise<{ success: boolean; data?: Tag; error?: string }>
+
+      deleteTag: (repoPath: string, tagId: string) => Promise<{ success: boolean; error?: string }>
+
+      // ─── Associação Arquivo ↔ Tag ──────────────────────────────────────────
+
+      getFileTags: (repoPath: string) => Promise<{ success: boolean; data?: Record<string, string[]>; error?: string }>
+
+      setFileTag: (repoPath: string, relativePath: string, tagId: string) => Promise<{ success: boolean; error?: string }>
+
+      removeFileTag: (repoPath: string, relativePath: string, tagId: string) => Promise<{ success: boolean; error?: string }>
+
+      toggleDevTools: () => Promise<{ success: boolean }>
+
+      // ─── Banco de Dados (Code Checkpoints) ───────────────────────────
+      initializeDatabase: (repoPath: string) => Promise<{ success: boolean; error?: string }>
+      insertAction: (action: Omit<ActionLog, 'id'>) => Promise<{ success: boolean; error?: string }>
+      getActions: (repoPath: string, limit?: number) => Promise<{ success: boolean; data?: ActionLog[]; error?: string }>
+      getActionsByDateRange: (repoPath: string, startDate: number, endDate: number) => Promise<{ success: boolean; data?: ActionLog[]; error?: string }>
+
+      // ─── Code Campaign ──────────────────────────────────────────────────────
+      createCampaign: (
+        repoPath: string,
+        data: { name: string; description?: string }
+      ) => Promise<{ success: boolean; data?: Campaign; error?: string }>
+
+      listCampaigns: (
+        repoPath: string
+      ) => Promise<{ success: boolean; data?: Campaign[]; error?: string }>
+
+      getCampaign: (
+        repoPath: string,
+        campaignId: string
+      ) => Promise<{ success: boolean; data?: Campaign | null; error?: string }>
+
+      updateCampaign: (
+        repoPath: string,
+        campaignId: string,
+        patch: { name?: string; description?: string; status?: CampaignStatus }
+      ) => Promise<{ success: boolean; data?: Campaign; error?: string }>
+
+      // ─── Deep Link ──────────────────────────────────────────────────────
+      getPendingDeepLink: () => Promise<string | null>
+      onDeepLink: (callback: (url: string) => void) => () => void
 
     }
   }

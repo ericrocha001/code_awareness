@@ -1,0 +1,105 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a seção de documentação (DocumentationSection) com campos amplos e selo de status do autosave.
+2. Garantir respiro generoso e textareas com min-height protagonista.
+
+Mapa de Relacionamentos do Script
+
+1. DocumentationSection.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo ds- para evitar colisões.
+2. Os textareas têm min-height generoso — nunca abaixo de 100px.
+3. O selo de status nunca aparece quando o estado é idle (não renderizado).
+4. O botão de retry herda a pele do app-ghost-btn via componente Button.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.ds-section {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ds-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ds-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.ds-status {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.ds-status--saving {
+  color: var(--text-secondary);
+  opacity: 0.8;
+}
+
+.ds-status--saved {
+  color: var(--success, #22c55e);
+}
+
+.ds-retry-btn {
+  /* Herda a pele do app-ghost-btn.sm — sem !important */
+}
+
+.ds-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.ds-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.ds-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  min-height: 110px;
+}
+
+.ds-textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.12);
+}
+
+.ds-textarea::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.55;
+}

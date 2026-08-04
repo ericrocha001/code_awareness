@@ -50,7 +50,7 @@ export class WatcherService {
       const fullPath = join(rootPath, filename).replace(/\\/g, '/')
       this.modifiedFiles.add(fullPath)
 
-      console.log(`[WatcherService] Arquivo modificado: ${fullPath}`)
+      console.debug(`[WatcherService] Arquivo modificado: ${fullPath}`)
       onFileChanged(fullPath)
     })
 

@@ -1,0 +1,129 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o menu ExportDropdown com prefixo ed-.
+2. Garantir que o botão use a classe global .app-pill-btn e o ícone ChevronDown gire 180° quando aberto.
+3. Posicionar o menu abaixo do botão, alinhado à borda direita.
+4. Estilizar os itens do menu com visual premium e consistente com o design system.
+
+Mapa de Relacionamentos do Script
+
+1. ExportDropdown.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo ed- para evitar colisões com outros componentes.
+2. Nenhuma cor hardcoded — apenas variáveis CSS globais.
+3. O menu usa position: absolute para flutuar abaixo do botão.
+4. Os itens do menu são estilizados por seletor de descendente (.ed-menu button), sem exigir classe extra nos consumidores.
+5. O estado disabled suprime o hover nos itens.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.ed-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.ed-btn {
+  gap: 6px;
+}
+
+.ed-caret {
+  transition: transform 0.2s ease;
+}
+
+.ed-caret.open {
+  transform: rotate(180deg);
+}
+
+.ed-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 260px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, var(--shadow-opacity));
+  padding: 6px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-primary);
+  animation: edFadeIn 0.12s ease-out;
+}
+
+/* ─── Itens do menu ─────────────────────────────────────────────────────── */
+.ed-menu button,
+.ed-menu [role="menuitem"] {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.4;
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.ed-menu button:hover,
+.ed-menu [role="menuitem"]:hover {
+  background: var(--hover-overlay);
+}
+
+.ed-menu button:disabled,
+.ed-menu [role="menuitem"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ed-menu button:disabled:hover,
+.ed-menu [role="menuitem"]:disabled:hover {
+  background: transparent;
+}
+
+.ed-menu button:focus-visible,
+.ed-menu [role="menuitem"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* ─── Ícones nos itens ──────────────────────────────────────────────────── */
+.ed-menu button svg,
+.ed-menu [role="menuitem"] svg {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  transition: color 0.15s ease;
+}
+
+.ed-menu button:hover svg,
+.ed-menu [role="menuitem"]:hover svg {
+  color: var(--accent);
+}
+
+@keyframes edFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}

@@ -1,0 +1,148 @@
+.preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.preview-modal {
+  width: 80vw;
+  height: 80vh;
+  max-width: 1200px;
+  max-height: 800px;
+  background: var(--bg-secondary);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: modalFadeIn 0.2s ease-out;
+}
+
+@keyframes modalFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.preview-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.preview-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.preview-modal-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preview-modal-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  padding: 8px 12px;
+  border-radius: 10px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s ease;
+}
+
+.preview-modal-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.preview-modal-btn.close {
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+
+.preview-modal-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.preview-markdown > * {
+  color: var(--text-primary);
+}
+
+/* Paridade visual com painéis existentes (.cdf-diff-code-rendered) */
+.preview-markdown h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 12px 0;
+}
+
+.preview-markdown h2:first-child {
+  margin-top: 0;
+}
+
+.preview-markdown h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 18px 0 8px 0;
+}
+
+.preview-markdown h4 {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin: 14px 0 6px 0;
+}
+
+.preview-markdown p {
+  margin: 0 0 8px 0;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.preview-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+.preview-markdown pre {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0 0 12px 0;
+}
+
+.preview-markdown pre code {
+  font-family: inherit;
+  color: var(--text-primary);
+}
+
+.preview-markdown code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 0.92em;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: var(--text-primary);
+}

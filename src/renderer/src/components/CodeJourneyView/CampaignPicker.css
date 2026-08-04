@@ -1,0 +1,231 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilos do componente CampaignPicker.
+2. Badge nas variantes compact e field.
+3. Dropdown flutuante com pele visual (fundo, borda, sombra).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.cpk-badge-multi {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.cpk-badge-multi:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.cpk-badge-multi--empty {
+  cursor: pointer;
+}
+
+.cpk-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--hover-overlay);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-family: inherit;
+  align-self: flex-start;
+}
+
+.cpk-badge--compact {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.cpk-badge--field {
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  background: transparent;
+  border-color: transparent;
+}
+
+.cpk-badge--empty {
+  color: var(--text-secondary);
+  border-style: dashed;
+  opacity: 0.8;
+}
+
+.cpk-badge--field.cpk-badge--empty {
+  border: 1px dashed var(--border);
+}
+
+.cpk-badge--active {
+  color: #fbbf24;
+  border-color: rgba(251, 191, 36, 0.33);
+}
+
+.cpk-badge--completed {
+  color: #4ade80;
+  border-color: rgba(74, 222, 128, 0.33);
+}
+
+.cpk-badge:hover {
+  background: var(--bg-primary);
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.cpk-badge--empty:hover {
+  opacity: 1;
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.cpk-dropdown {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  min-width: 180px;
+  max-height: 250px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="light"] .cpk-dropdown {
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+}
+
+.cpk-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s ease;
+  font-family: inherit;
+  width: 100%;
+}
+
+.cpk-option:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.cpk-option--active {
+  background: var(--hover-overlay);
+}
+
+.cpk-option-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cpk-option-check {
+  flex-shrink: 0;
+  color: transparent;
+}
+
+.cpk-option-check--active {
+  color: var(--accent);
+}
+
+.cpk-clear-btn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  font-family: inherit;
+  width: 100%;
+}
+
+.cpk-clear-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+/* ─── Busca no popover ──────────────────────────────────────────────────── */
+/* Input fixo no topo, não rola; a zona rolável é o .cpk-dropdown-list */
+.cpk-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+
+.cpk-search:focus-within {
+  border-color: var(--accent);
+}
+
+.cpk-search-icon {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.cpk-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.cpk-search-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.7;
+}
+
+/* Zona rolável: rola independentemente do input de busca */
+.cpk-dropdown-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
+/* Estado vazio de busca — espelha o .file-card-tag-popover-empty */
+.cpk-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}

@@ -7,6 +7,7 @@ Responsabilidades do Script
 2. Garantir isolamento de contexto impedindo o acesso direto a módulos do Node.js pela interface.
 3. Mapear os canais IPC do fluxo de monitoramento Git, de arquivos modificados e de importância para o renderer.
 4. Expor listeners e APIs para permitir a sincronização em tempo real de importância entre abas.
+5. Expor ao renderer a URL de deep link pendente (getPendingDeepLink) e a escuta de novas URLs (onDeepLink).
 
 Mapa de Relacionamentos do Script
 
@@ -35,7 +36,7 @@ Invariantes do Script
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { AppSettings, CheckpointData, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, FileImportance, ImportanceLevel, ImportanceSource, ProjectInfo, RestoreValidation } from '../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, OrphanFile, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
@@ -113,12 +114,12 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     return ipcRenderer.invoke('workspace:hide-project', projectPath)
   },
 
-  // Gerencia arquivos ignorados no diff (temporary / persistent)
-  addIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent'): Promise<AppSettings | null> => {
-    return ipcRenderer.invoke('git:add-ignored-file', repoPath, relativePath, type)
+  // Gerencia arquivos ignorados no diff
+  addIgnoredFile: (repoPath: string, relativePath: string): Promise<AppSettings | null> => {
+    return ipcRenderer.invoke('git:add-ignored-file', repoPath, relativePath)
   },
-  removeIgnoredFile: (repoPath: string, relativePath: string, type: 'temporary' | 'persistent'): Promise<AppSettings | null> => {
-    return ipcRenderer.invoke('git:remove-ignored-file', repoPath, relativePath, type)
+  removeIgnoredFile: (repoPath: string, relativePath: string): Promise<AppSettings | null> => {
+    return ipcRenderer.invoke('git:remove-ignored-file', repoPath, relativePath)
   },
   reconcileIgnoredFiles: (repoPath: string, currentModifiedFiles: string[]): Promise<AppSettings | null> => {
     return ipcRenderer.invoke('git:reconcile-ignored-files', repoPath, currentModifiedFiles)
@@ -134,54 +135,26 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     return ipcRenderer.invoke('code-source:generate', repoPath, options)
   },
 
-  // ─── Importância Arquitetural ─────────────────────────────────────────
-
-  classifyImportance: (
-    repoPath: string,
-    repoName: string,
-    files: { relativePath: string }[]
-  ): Promise<{ success: boolean; data?: Record<string, FileImportance>; error?: string }> => {
-    return ipcRenderer.invoke('importance:classify', repoPath, repoName, files)
-  },
-
-  setImportanceOverride: (
-    repoPath: string,
-    repoName: string,
-    relativePath: string,
-    level: ImportanceLevel
-  ): Promise<{ success: boolean; data?: Record<string, FileImportance>; error?: string }> => {
-    return ipcRenderer.invoke('importance:set-override', repoPath, repoName, relativePath, level)
-  },
 
   revealInExplorer: (repoPath: string, relativePath: string): Promise<boolean> => {
     return ipcRenderer.invoke('git:reveal-in-explorer', repoPath, relativePath)
   },
 
-  onImportanceUpdated: (
-    callback: (data: {
-      repoPath: string
-      relativePath: string
-      level: ImportanceLevel
-      source: ImportanceSource
-    }) => void
-  ): Electron.IpcRenderer => {
-    return ipcRenderer.on('importance:updated', (_event, data) => {
-      callback(data)
-    })
+  onThemeChanged: (callback: (isDarkMode: boolean) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, isDarkMode: boolean): void => callback(isDarkMode)
+    ipcRenderer.on('theme-changed', handler)
+    return () => ipcRenderer.removeListener('theme-changed', handler)
   },
 
-  removeImportanceUpdatedListener: () => {
-    ipcRenderer.removeAllListeners('importance:updated')
-  },
 
   // ─── Checkpoints ──────────────────────────────────────────────────────
 
   createCheckpoint: (
     repoPath: string,
     name: string,
-    strategy: 'all' | 'critical-high'
+    details?: CheckpointDetails
   ): Promise<{ success: boolean; data?: CheckpointData; error?: string }> => {
-    return ipcRenderer.invoke('checkpoint:create', repoPath, name, strategy)
+    return ipcRenderer.invoke('checkpoint:create', repoPath, name, details)
   },
 
   listCheckpoints: (
@@ -204,12 +177,6 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     return ipcRenderer.invoke('checkpoint:delete', repoPath, checkpointId)
   },
 
-  deleteAllCheckpoints: (
-    repoPath: string
-  ): Promise<{ success: boolean; deletedCount: number; error?: string }> => {
-    return ipcRenderer.invoke('checkpoint:delete-all', repoPath)
-  },
-
   generateCheckpointDiff: (
     repoPath: string,
     fromCheckpointId: string,
@@ -217,22 +184,6 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   ): Promise<{ success: boolean; data?: string; error?: string }> => {
     return ipcRenderer.invoke('checkpoint:generate-diff', repoPath, fromCheckpointId, toCheckpointId)
   },
-
-  validateRestore: (
-    repoPath: string,
-    checkpointId: string
-  ): Promise<{ success: boolean; data?: RestoreValidation; error?: string }> => {
-    return ipcRenderer.invoke('checkpoint:validate-restore', repoPath, checkpointId)
-  },
-
-  restoreCheckpoint: (
-    repoPath: string,
-    checkpointId: string
-  ): Promise<{ success: boolean; data?: { restored: number; failed: number; errors: string[] }; error?: string }> => {
-    return ipcRenderer.invoke('checkpoint:restore', repoPath, checkpointId)
-  },
-
-  // APIs de detecção de commits removidas — limpeza agora é manual via botão 'Limpar Tudo' na UI
 
   renameCheckpoint: (
     repoPath: string,
@@ -249,5 +200,133 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   ): Promise<{ success: boolean; data?: CheckpointDiffFile[]; error?: string }> => {
     return ipcRenderer.invoke('checkpoint:get-changed-files', repoPath, fromCheckpointId, toCheckpointId)
   },
+
+  updateCheckpointDetails: (
+    repoPath: string,
+    checkpointId: string,
+    details: CheckpointDetails
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:update-details', repoPath, checkpointId, details)
+  },
+
+  setCheckpointCampaigns: (
+    repoPath: string,
+    checkpointId: string,
+    campaignIds: string[]
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('checkpoint:set-campaigns', repoPath, checkpointId, campaignIds)
+  },
+
+  // ─── Restauração ──────────────────────────────────────────────────────
+
+  restorePreview: (
+    repoPath: string,
+    checkpointId: string
+  ): Promise<{ success: boolean; data?: RestorePreviewResult; error?: string }> => {
+    return ipcRenderer.invoke('restore:preview', repoPath, checkpointId)
+  },
+
+  restoreExecute: (
+    repoPath: string,
+    checkpointId: string,
+    options: RestoreExecuteOptions
+  ): Promise<{ success: boolean; data?: RestoreExecuteResult; error?: string; partial?: boolean }> => {
+    return ipcRenderer.invoke('restore:execute', repoPath, checkpointId, options)
+  },
+
+  restoreMarkManual: (
+    repoPath: string,
+    checkpointId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('restore:mark-manual', repoPath, checkpointId)
+  },
+
+  restoreUnmark: (
+    repoPath: string,
+    checkpointId: string
+  ): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('restore:unmark', repoPath, checkpointId)
+  },
+
+  // ─── Tags Manuais ──────────────────────────────────────────────────────
+
+  getTags: (repoPath: string): Promise<{ success: boolean; data?: Tag[]; error?: string }> => {
+    return ipcRenderer.invoke('tags:get', repoPath)
+  },
+  upsertTag: (
+    repoPath: string,
+    tag: Tag
+  ): Promise<{ success: boolean; data?: Tag; error?: string }> => {
+    return ipcRenderer.invoke('tags:upsert', repoPath, tag)
+  },
+  deleteTag: (repoPath: string, tagId: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('tags:delete', repoPath, tagId)
+  },
+
+  // ─── Associação Arquivo ↔ Tag ──────────────────────────────────────────
+
+  getFileTags: (repoPath: string): Promise<{ success: boolean; data?: Record<string, string[]>; error?: string }> => {
+    return ipcRenderer.invoke('tag:getFileTags', repoPath)
+  },
+
+  setFileTag: (repoPath: string, relativePath: string, tagId: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('tag:setFileTag', repoPath, relativePath, tagId)
+  },
+
+  removeFileTag: (repoPath: string, relativePath: string, tagId: string): Promise<{ success: boolean; error?: string }> => {
+    return ipcRenderer.invoke('tag:removeFileTag', repoPath, relativePath, tagId)
+  },
+
+  toggleDevTools: (): Promise<{ success: boolean }> =>
+    ipcRenderer.invoke('devtools:toggle'),
+
+  // ─── Banco de Dados (Code Checkpoints) ──────────────────────────────────────
+  initializeDatabase: (repoPath: string) =>
+    ipcRenderer.invoke('database:initialize', repoPath),
+  insertAction: (action: Omit<ActionLog, 'id'>) =>
+    ipcRenderer.invoke('database:insert-action', action),
+  getActions: (repoPath: string, limit?: number) =>
+    ipcRenderer.invoke('database:get-actions', repoPath, limit),
+  getActionsByDateRange: (repoPath: string, startDate: number, endDate: number) =>
+    ipcRenderer.invoke('database:get-actions-by-date-range', repoPath, startDate, endDate),
+
+  // ─── Deep Link ──────────────────────────────────────────────────────────
+  getPendingDeepLink: (): Promise<string | null> => {
+    return ipcRenderer.invoke('deeplink:get-pending')
+  },
+  onDeepLink: (callback: (url: string) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, url: string): void => callback(url)
+    ipcRenderer.on('deeplink:received', handler)
+    return () => ipcRenderer.removeListener('deeplink:received', handler)
+  },
+
+  // ─── Code Campaign ──────────────────────────────────────────────────────
+  createCampaign: (
+    repoPath: string,
+    data: { name: string; description?: string }
+  ): Promise<{ success: boolean; data?: Campaign; error?: string }> => {
+    return ipcRenderer.invoke('campaign:create', repoPath, data)
+  },
+
+  listCampaigns: (
+    repoPath: string
+  ): Promise<{ success: boolean; data?: Campaign[]; error?: string }> => {
+    return ipcRenderer.invoke('campaign:list', repoPath)
+  },
+
+  getCampaign: (
+    repoPath: string,
+    campaignId: string
+  ): Promise<{ success: boolean; data?: Campaign | null; error?: string }> => {
+    return ipcRenderer.invoke('campaign:get', repoPath, campaignId)
+  },
+
+  updateCampaign: (
+    repoPath: string,
+    campaignId: string,
+    patch: { name?: string; description?: string; status?: CampaignStatus }
+  ): Promise<{ success: boolean; data?: Campaign; error?: string }> => {
+    return ipcRenderer.invoke('campaign:update', repoPath, campaignId, patch)
+  }
 
 })

@@ -1,0 +1,118 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o modal data-driven de recursos da campanha com prefixo crp-.
+
+Mapa de Relacionamentos do Script
+
+1. CampaignResourcePanel.tsx
+   - Tipo: Dependência Inversa
+   - Relação: Consome os estilos deste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Todos os seletores usam o prefixo crp- para evitar colisão com outros componentes.
+2. O overlay cobre toda a tela e o modal fica centralizado acima dele.
+3. O clique no overlay fecha o modal; o clique no modal não propaga para o overlay.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.crp-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.crp-modal {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--bg-primary);
+  border-radius: 12px;
+  padding: 24px;
+  z-index: 1001;
+  min-width: 480px;
+  max-width: 560px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+}
+
+.crp-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.crp-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.crp-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 4px;
+}
+
+.crp-close:hover {
+  color: var(--text-primary);
+}
+
+.crp-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.crp-resource {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.crp-resource-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.crp-resource-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.crp-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.crp-btn:hover {
+  background: var(--bg-hover);
+}

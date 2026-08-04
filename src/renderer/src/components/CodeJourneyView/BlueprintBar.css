@@ -1,0 +1,54 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o indicador Blueprint Bar com prefixo bpb- para evitar colisões.
+2. Definir a aparência azul dos segmentos preenchidos e do ícone de documento (identidade de blueprint).
+3. Manter o componente compacto para os cards da timeline.
+
+Mapa de Relacionamentos do Script
+
+1. BlueprintBar.tsx
+   - Tipo: Dependência Inversa
+   - Relação: Consome as classes bpb- definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O azul `#3b82f6` é a cor fixa de status da Blueprint Bar, exceção aceita com semântica de status fixa (mesmo padrão do CampaignList.css).
+2. Nunca usar outras cores fixas — o restante vem das variáveis globais do tema (--border, --bg-secondary).
+3. Os segmentos vazios e preenchidos devem ser visivelmente distintos em temas claro e escuro.
+4. O ícone nunca deve ser interativo nem capturar eventos de clique.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.bpb-bar {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+  vertical-align: middle;
+  flex-shrink: 0;
+}
+
+.bpb-icon {
+  display: block; /* Defensivo: evita deslocamento de linha de base do SVG no inline-flex */
+  color: #3b82f6;
+  flex-shrink: 0;
+}
+
+.bpb-segment {
+  width: 14px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  box-sizing: border-box;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.bpb-segment.filled {
+  background: #3b82f6;
+  border-color: #3b82f6;
+}

@@ -3,15 +3,16 @@
 
 Responsabilidades do Script
 
-1. Criar, listar, carregar e deletar checkpoints de um repositório.
+1. Criar, listar, carregar e deletar (individual) checkpoints de um repositório.
 2. Capturar o conteúdo completo dos arquivos do repositório no momento do checkpoint.
 3. Persistir cada checkpoint como um arquivo JSON em code_checkpoints/<id>.json.
 4. Filtrar arquivos binários e arquivos maiores que 2MB do snapshot.
 5. Gerar diffs semânticos entre checkpoints ou entre checkpoint e estado atual do disco (para o primeiro checkpoint).
-6. Restaurar arquivos do repositório para o estado de um checkpoint específico.
-7. Renomear checkpoints existentes, atualizando o campo name no JSON persistido.
+6. Renomear checkpoints existentes, atualizando o nome exclusivamente no banco.
+7. Atualizar metadados (instructions, agentSummary, restoredAt) exclusivamente no banco.
 8. Retornar lista de arquivos alterados entre checkpoints sem gerar Markdown.
-9. Validar (dry-run) se uma restauração pode ser executada antes de modificar o disco.
+9. Unir conteúdo do JSON (arquivos) com metadados atuais do banco no loadCheckpoint.
+10. Gerenciar o vínculo de um checkpoint com várias campanhas via a caderneta checkpoint_campaigns.
 
 Mapa de Relacionamentos do Script
 
@@ -20,14 +21,14 @@ Mapa de Relacionamentos do Script
    - Relação: Consome getAllFiles e getCurrentCommitHash para listar arquivos e detectar commits.
    - Criticidade: Alta
 
-2. importance-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome classifyFile para filtrar por importância no modo 'critical-high'.
-   - Criticidade: Alta
-
-3. ../../shared/types.ts
+2. ../../shared/types
    - Tipo: Contrato / Interface
    - Relação: Fornece os tipos CheckpointData, CheckpointFileEntry e CheckpointSummary.
+   - Criticidade: Alta
+
+3. database-service.ts
+   - Tipo: Dependência Direta
+   - Relação: Fornece funções para inicializar o banco e gerenciar o catálogo de checkpoints (fonte autoritativa de metadados).
    - Criticidade: Alta
 
 4. diff (biblioteca npm)
@@ -37,7 +38,7 @@ Mapa de Relacionamentos do Script
 
 5. fs/promises (writeFile)
    - Tipo: Dependência Direta
-   - Relação: Usa writeFile para sobrescrever arquivos no disco durante restauração.
+   - Relação: Usa writeFile para persistir checkpoints JSON (apenas na criação).
    - Criticidade: Alta
 
 
@@ -49,31 +50,46 @@ Invariantes do Script
 4. Nunca retornar dados corrompidos — toda leitura de JSON deve ser validada.
 5. TODO método público que recebe checkpointId deve validar contra path traversal antes de qualquer operação de arquivo.
 6. O diff gerado deve seguir exatamente o mesmo formato Markdown do DiffService (blocos 🟥 e 🟩 com hunks numerados).
-7. A restauração deve validar se o checkpoint existe antes de sobrescrever arquivos.
-8. Arquivos que não existem no checkpoint mas existem no disco não devem ser deletados durante restauração.
-9. O renome de checkpoint deve validar que o novo nome não esteja vazio e não exista duplicata.
-10. O método getChangedFiles deve retornar arquivos ordenados por mtime descendente, com deleted no final.
-11. Arquivos binários não devem ser lidos completamente — apenas os primeiros 4096 bytes são analisados para detecção.
-12. O método validateRestore() deve ser chamado antes de restoreCheckpoint() para permitir confirmação do usuário em caso de falhas potenciais.
-13. O primeiro checkpoint (mais antigo) deve comparar com o estado atual do disco quando não há checkpoint anterior.
+7. O renome de checkpoint deve validar que o novo nome não esteja vazio e não exista duplicata.
+8. O método getChangedFiles deve retornar arquivos ordenados por mtime descendente, com deleted no final.
+9. Arquivos binários não devem ser lidos completamente — apenas os primeiros 4096 bytes são analisados para detecção.
+10. O primeiro checkpoint (mais antigo) deve comparar com o estado atual do disco quando não há checkpoint anterior.
+11. Metadados no JSON são congelados no momento da criação e nunca atualizados — o banco é a fonte autoritativa.
+12. A leitura do banco no loadCheckpoint é best-effort — se falhar, retorna os dados do JSON com metadados congelados.
+13. campaignIds vive na caderneta, nunca gravados no JSON (snapshot congelado).
+14. Todo método público que aceita lista de campanhas deduplica e rejeita strings vazias.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-import { existsSync, constants } from 'fs'
-import { readFile, writeFile, readdir, unlink, mkdir, stat, open, access } from 'fs/promises'
+import { existsSync } from 'fs'
+import { readFile, writeFile, readdir, unlink, mkdir, stat, open } from 'fs/promises'
 import { createHash } from 'crypto'
-import { join, basename, dirname } from 'path'
+import { join, basename } from 'path'
 import { diffLines } from 'diff'
-import { CheckpointData, CheckpointFileEntry, CheckpointSummary, CheckpointHunk, CheckpointDiffFile, RestoreValidation } from '../../shared/types'
+import { CheckpointData, CheckpointDetails, CheckpointFileEntry, CheckpointSummary, CheckpointHunk, CheckpointDiffFile, CheckpointCatalogRecord } from '../../shared/types'
 import { GitService } from './git-service'
-import { importanceService } from './importance-service'
+import {
+  initializeDatabase,
+  insertCheckpointCatalog,
+  getCheckpointsCatalog,
+  getCheckpointCatalog,
+  getContentCheckpoints,
+  updateCheckpointCatalog,
+  deleteCheckpointCatalog,
+  archiveCheckpointCatalog,
+  setCheckpointCampaignLinks,
+  getCheckpointCampaignIdsMap
+} from './database-service'
 
 // Limite máximo de tamanho de arquivo para incluir no snapshot (2MB)
 const MAX_FILE_SIZE = 2 * 1024 * 1024
 
 // Nome da pasta onde os checkpoints são persistidos
 const CHECKPOINT_DIR_NAME = 'code_checkpoints'
+
+// Limite máximo de checkpoints com conteúdo (JSON) por repositório
+const MAX_CONTENT_CHECKPOINTS = 100
 
 // Mapa de extensão para nome de linguagem usado nos blocos de código Markdown
 // Deve ser idêntico ao do DiffService para manter consistência visual
@@ -126,6 +142,53 @@ export class CheckpointService {
   }
 
   /**
+   * Garante que os checkpoints em JSON foram migrados para o catálogo do banco.
+   * Migração idempotente: se o banco já tiver registros, retorna imediatamente.
+   */
+  private async ensureCatalogMigrated(repoPath: string): Promise<void> {
+    initializeDatabase(repoPath)
+    const existingCatalog = getCheckpointsCatalog(repoPath)
+
+    const dir = this.getCheckpointDir(repoPath)
+    if (!existsSync(dir)) return
+
+    try {
+      const entries = await readdir(dir)
+      const jsonFiles = entries.filter(e => e.endsWith('.json'))
+
+      // BUGFIX: Compara contagem de JSONs com contagem do catálogo para detectar
+      // migrações parciais (ex.: crash durante migração anterior).
+      // Se os números divergirem, re-executa a migração (idempotente via INSERT OR REPLACE).
+      if (existingCatalog.length >= jsonFiles.length) {
+        return
+      }
+
+      // Usando insert individualmente, como try/catch isola as falhas por arquivo
+      // (Poderia usar transação para atomicidade completa, mas iterar com replace é simples e idempotente)
+      for (const jsonFile of jsonFiles) {
+        try {
+          const filePath = join(dir, jsonFile)
+          const data = JSON.parse(await readFile(filePath, 'utf-8')) as CheckpointData
+          insertCheckpointCatalog(repoPath, {
+            id: data.id,
+            name: data.name,
+            createdAt: data.createdAt,
+            instructions: data.instructions ?? null,
+            agentSummary: data.agentSummary ?? null,
+            restoredAt: data.restoredAt ?? null,
+            fileCount: Object.keys(data.files).length,
+            hasContent: true // Nesta sprint, todos têm conteúdo
+          })
+        } catch (e) {
+          console.error(`[CheckpointService] Falha ao migrar ${jsonFile} para o catálogo:`, e)
+        }
+      }
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao ler diretório de checkpoints para migração:', e)
+    }
+  }
+
+  /**
    * Detecta se o conteúdo de um buffer é binário (não UTF-8 válido).
    * Analisa apenas os primeiros 4096 bytes para evitar processamento desnecessário.
    */
@@ -169,7 +232,7 @@ export class CheckpointService {
   async createCheckpoint(
     repoPath: string,
     name: string,
-    strategy: 'all' | 'critical-high'
+    details?: CheckpointDetails
   ): Promise<CheckpointData> {
     if (!existsSync(repoPath)) {
       throw new Error(`Repositório não encontrado: ${repoPath}`)
@@ -184,22 +247,7 @@ export class CheckpointService {
 
     const allFiles = await this.gitService.getAllFiles(repoPath)
 
-    let filesToSnapshot = allFiles
-    if (strategy === 'critical-high') {
-      const classificationPromises = allFiles.map(async (file) => {
-        try {
-          const result = await importanceService.classifyFile(repoPath, file.relativePath)
-          return { file, level: result.level }
-        } catch {
-          return { file, level: 'critical' as const }
-        }
-      })
-
-      const classified = await Promise.all(classificationPromises)
-      filesToSnapshot = classified
-        .filter(({ level }) => level === 'critical' || level === 'high')
-        .map(({ file }) => file)
-    }
+    const filesToSnapshot = allFiles
 
     const files: Record<string, CheckpointFileEntry> = {}
 
@@ -239,12 +287,61 @@ export class CheckpointService {
       id,
       name,
       createdAt,
-      snapshotStrategy: strategy,
       files
+    }
+
+    // Se detalhes forem fornecidos, grava instruções e resumo no checkpoint
+    if (details) {
+      if (details.instructions !== undefined) {
+        checkpointData.instructions = details.instructions
+      }
+      if (details.agentSummary !== undefined) {
+        checkpointData.agentSummary = details.agentSummary
+      }
     }
 
     const checkpointPath = join(this.getCheckpointDir(repoPath), `${id}.json`)
     await writeFile(checkpointPath, JSON.stringify(checkpointData, null, 2), 'utf-8')
+
+    // Dual-write: atualizar catálogo no banco (best-effort)
+    try {
+      initializeDatabase(repoPath)
+      insertCheckpointCatalog(repoPath, {
+        id: checkpointData.id,
+        name: checkpointData.name,
+        createdAt: checkpointData.createdAt,
+        instructions: checkpointData.instructions ?? null,
+        agentSummary: checkpointData.agentSummary ?? null,
+        restoredAt: checkpointData.restoredAt ?? null,
+        fileCount: Object.keys(checkpointData.files).length,
+        hasContent: true
+      })
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao gravar checkpoint no catálogo do banco (best-effort):', e)
+    }
+
+    // Aplica o limite de checkpoints com conteúdo (best-effort)
+    try {
+      const contentCheckpoints = getContentCheckpoints(repoPath)
+      if (contentCheckpoints.length > MAX_CONTENT_CHECKPOINTS) {
+        const toArchiveCount = contentCheckpoints.length - MAX_CONTENT_CHECKPOINTS
+        for (let i = 0; i < toArchiveCount; i++) {
+          const cp = contentCheckpoints[i]
+          // Exclui o arquivo JSON (ignora falha — pode já não existir)
+          try {
+            const cpPath = join(this.getCheckpointDir(repoPath), `${cp.id}.json`)
+            await unlink(cpPath)
+          } catch {
+            // ignora
+          }
+          // Marca como sem conteúdo no banco
+          archiveCheckpointCatalog(repoPath, cp.id)
+          console.log(`[CheckpointService] Checkpoint "${cp.name}" arquivado (limite de ${MAX_CONTENT_CHECKPOINTS} atingido)`)
+        }
+      }
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao aplicar limite de checkpoints (best-effort):', e)
+    }
 
     return checkpointData
   }
@@ -253,40 +350,36 @@ export class CheckpointService {
    * Lista todos os checkpoints do repositório.
    */
   async listCheckpoints(repoPath: string): Promise<CheckpointSummary[]> {
-    const dir = this.getCheckpointDir(repoPath)
+    await this.ensureCatalogMigrated(repoPath)
 
     try {
-      const entries = await readdir(dir)
-      const jsonFiles = entries.filter(e => e.endsWith('.json'))
+      // Lê do catálogo do banco, que já retorna ordenado
+      const catalog = getCheckpointsCatalog(repoPath)
+      const campaignIdsMap = getCheckpointCampaignIdsMap(repoPath)
 
-      const summaries: CheckpointSummary[] = []
-
-      for (const jsonFile of jsonFiles) {
-        try {
-          const filePath = join(dir, jsonFile)
-          const data = JSON.parse(await readFile(filePath, 'utf-8')) as CheckpointData
-
-          summaries.push({
-            id: data.id,
-            name: data.name,
-            createdAt: data.createdAt,
-            fileCount: Object.keys(data.files).length
-          })
-        } catch {
-          continue
-        }
-      }
-
-      return summaries.sort(
-        (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
-      )
-    } catch {
+      return catalog.map(record => ({
+        id: record.id,
+        name: record.name,
+        createdAt: record.createdAt,
+        fileCount: record.fileCount,
+        restoredAt: record.restoredAt,
+        instructions: record.instructions ?? undefined,
+        agentSummary: record.agentSummary ?? undefined,
+        // BUGFIX: Default defensivo — se hasContent vier como undefined/null (dado corrompido),
+        // trata como true (tem conteúdo) para evitar falso positivo do selo "Arquivado".
+        hasContent: record.hasContent ?? true,
+        campaignIds: campaignIdsMap[record.id] ?? []
+      }))
+    } catch (e) {
+      console.error('[CheckpointService] Erro ao listar checkpoints do catálogo:', e)
       return []
     }
   }
 
   /**
    * Carrega um checkpoint específico pelo ID.
+   * Une o conteúdo do JSON (arquivos) com os metadados atuais do banco.
+   * O banco é a fonte autoritativa de metadados; o JSON contém os arquivos congelados.
    */
   async loadCheckpoint(repoPath: string, checkpointId: string): Promise<CheckpointData | null> {
     // Defesa em profundidade contra path traversal — valida o checkpointId antes de usá-lo em caminhos de arquivo
@@ -296,12 +389,30 @@ export class CheckpointService {
 
     const filePath = join(this.getCheckpointDir(repoPath), `${checkpointId}.json`)
 
+    let data: CheckpointData
     try {
-      const data = JSON.parse(await readFile(filePath, 'utf-8')) as CheckpointData
-      return data
+      data = JSON.parse(await readFile(filePath, 'utf-8')) as CheckpointData
     } catch {
       return null
     }
+
+    // União com metadados do banco (best-effort)
+    try {
+      initializeDatabase(repoPath)
+      const dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+      if (dbRecord) {
+        // Sobrescreve metadados com os valores atuais do banco
+        data.name = dbRecord.name
+        data.instructions = dbRecord.instructions ?? undefined
+        data.agentSummary = dbRecord.agentSummary ?? undefined
+        data.restoredAt = dbRecord.restoredAt ?? undefined
+      }
+    } catch (e) {
+      // Se o banco falhar, retorna os dados do JSON com metadados congelados
+      console.error('[CheckpointService] Falha ao ler metadados do banco para loadCheckpoint:', e)
+    }
+
+    return data
   }
 
   /**
@@ -315,157 +426,145 @@ export class CheckpointService {
 
     const filePath = join(this.getCheckpointDir(repoPath), `${checkpointId}.json`)
 
+    // BUGFIX: Deleta do catálogo primeiro (best-effort) e depois do JSON.
+    // Se a deleção do JSON falhar, o registro já foi removido do catálogo
+    // (checkpoint some da timeline, JSON órfão pode ser limpo manualmente).
+    // Se o JSON já não existir (ENOENT), prossegue com a deleção do catálogo.
+    try {
+      initializeDatabase(repoPath)
+      deleteCheckpointCatalog(repoPath, checkpointId)
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao deletar checkpoint do catálogo do banco (best-effort):', e)
+    }
+
     try {
       await unlink(filePath)
       return true
-    } catch {
+    } catch (err: any) {
+      // Se o JSON já foi removido (ENOENT), considera sucesso (registro órfão limpo)
+      if (err.code === 'ENOENT') {
+        return true
+      }
       return false
     }
   }
 
-  /**
-   * Deleta todos os checkpoints do repositório.
-   * Remove todos os arquivos .json da pasta de checkpoints.
-   */
-  async deleteAllCheckpoints(repoPath: string): Promise<number> {
-    const dir = this.getCheckpointDir(repoPath)
-
-    try {
-      const entries = await readdir(dir)
-      // Deleta TODOS os arquivos .json da pasta de checkpoints
-      const jsonFiles = entries.filter(e => e.endsWith('.json'))
-
-      if (jsonFiles.length === 0) {
-        console.warn('[CheckpointService] Nenhum checkpoint encontrado para deletar')
-        return 0
-      }
-
-      await Promise.all(
-        jsonFiles.map(jsonFile => unlink(join(dir, jsonFile)))
-      )
-
-      return jsonFiles.length
-    } catch {
-      console.warn('[CheckpointService] Pasta de checkpoints não encontrada ou erro ao ler')
-      return 0
-    }
-  }
-
-  // ─── Métodos de Restauração ──────────────────────────────────────────────
+  // ─── Métodos de Metadados ──────────────────────────────────────────────
 
   /**
-   * Restaura os arquivos do repositório para o estado de um checkpoint específico.
-   */
-  async restoreCheckpoint(
-    repoPath: string,
-    checkpointId: string
-  ): Promise<{ restored: number; failed: number; errors: string[] }> {
-    if (!/^[a-zA-Z0-9_-]+$/.test(checkpointId)) {
-      return { restored: 0, failed: 0, errors: ['checkpointId contém caracteres inválidos'] }
-    }
-
-    if (!existsSync(repoPath)) {
-      return { restored: 0, failed: 0, errors: [`Repositório não encontrado: ${repoPath}`] }
-    }
-
-    const checkpoint = await this.loadCheckpoint(repoPath, checkpointId)
-    if (!checkpoint) {
-      return { restored: 0, failed: 0, errors: ['Checkpoint não encontrado'] }
-    }
-
-    let restored = 0
-    let failed = 0
-    const errors: string[] = []
-
-    for (const [relativePath, fileEntry] of Object.entries(checkpoint.files)) {
-      const filePath = join(repoPath, relativePath)
-
-      try {
-        const dir = dirname(filePath)
-        await mkdir(dir, { recursive: true })
-        await writeFile(filePath, fileEntry.content, 'utf-8')
-        restored++
-      } catch (error: any) {
-        failed++
-        errors.push(`${relativePath}: ${error.message}`)
-        console.error(`[CheckpointService] Falha ao restaurar ${relativePath}:`, error)
-      }
-    }
-
-    return { restored, failed, errors }
-  }
-
-  /**
-   * Dry-run: verifica se a restauração pode ser executada sem modificar o disco.
-   * Usado pelo frontend para mostrar modal de confirmação ANTES de executar.
+   * Atualiza campos de metadados de um checkpoint existente exclusivamente no banco.
+   * O JSON não é reescrito — os metadados no JSON são congelados no momento da criação.
+   * Esta é a correção do pico de CPU: atualizar uma linha no banco é instantâneo.
    *
-   * Para cada arquivo no checkpoint verifica:
-   * - O diretório pai existe ou pode ser criado?
-   * - O arquivo pode ser escrito (permissões)?
+   * @param repoPath Caminho absoluto para a raiz do repositório.
+   * @param checkpointId ID do checkpoint a ser atualizado.
+   * @param patch Objeto com campos opcionais a serem atualizados.
+   * @returns true se atualizou com sucesso, false se o checkpoint não existe no catálogo.
    */
-  async validateRestore(
+  async updateCheckpointMetadata(
     repoPath: string,
-    checkpointId: string
-  ): Promise<RestoreValidation> {
+    checkpointId: string,
+    patch: Partial<Pick<CheckpointData, 'instructions' | 'agentSummary' | 'restoredAt'>>
+  ): Promise<boolean> {
+    // Validação contra path traversal (defesa em profundidade)
     if (!/^[a-zA-Z0-9_-]+$/.test(checkpointId)) {
-      return { canRestore: [], cannotRestore: [] }
+      return false
     }
 
-    if (!existsSync(repoPath)) {
-      return { canRestore: [], cannotRestore: [] }
-    }
-
-    const checkpoint = await this.loadCheckpoint(repoPath, checkpointId)
-    // Se o checkpoint não existe, deixa o restoreCheckpoint() real tratar depois
-    if (!checkpoint) {
-      return { canRestore: [], cannotRestore: [] }
-    }
-
-    const canRestore: string[] = []
-    const cannotRestore: Array<{ path: string; reason: string }> = []
-
-    for (const relativePath of Object.keys(checkpoint.files)) {
-      const filePath = join(repoPath, relativePath)
-      const parentDir = dirname(filePath)
-
-      // 1. Verifica se o diretório pai existe e é um diretório
-      try {
-        const parentStat = await stat(parentDir)
-        if (!parentStat.isDirectory()) {
-          cannotRestore.push({ path: relativePath, reason: 'diretório pai é um arquivo' })
-          continue
-        }
-      } catch {
-        // Diretório não existe — mkdir recursive vai criar
+    // Valida existência no catálogo do banco (não lê o JSON)
+    try {
+      initializeDatabase(repoPath)
+      const dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+      if (!dbRecord) {
+        return false
       }
-
-      // 2. Se o arquivo já existe, verifica se pode ser escrito
-      if (existsSync(filePath)) {
-        try {
-          await access(filePath, constants.W_OK)
-        } catch {
-          cannotRestore.push({ path: relativePath, reason: 'permissão negada' })
-          continue
-        }
-      }
-
-      canRestore.push(relativePath)
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao verificar existência do checkpoint no catálogo:', e)
+      return false
     }
 
-    return { canRestore, cannotRestore }
+    // Atualiza exclusivamente no banco — sem reescrita do JSON
+    try {
+      initializeDatabase(repoPath)
+      updateCheckpointCatalog(repoPath, checkpointId, {
+        ...(patch.instructions !== undefined && { instructions: patch.instructions ?? null }),
+        ...(patch.agentSummary !== undefined && { agentSummary: patch.agentSummary ?? null }),
+        ...(patch.restoredAt !== undefined && { restoredAt: patch.restoredAt ?? null })
+      })
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao atualizar metadados do checkpoint no catálogo:', e)
+      return false
+    }
+
+    return true
   }
 
-  // Métodos de detecção de commits removidos — limpeza agora é manual via botão 'Limpar Tudo' na UI
+   /**
+    * Define as campanhas vinculadas a um checkpoint.
+    * Grava as ligações na caderneta.
+    * 
+    * @param repoPath Caminho absoluto para a raiz do repositório.
+    * @param checkpointId ID do checkpoint.
+    * @param campaignIds Array de IDs das campanhas.
+    * @returns true se atualizado com sucesso.
+    * @throws Error se checkpointId for inválido ou se houver falha de banco.
+    */
+  async setCheckpointCampaigns(
+    repoPath: string,
+    checkpointId: string,
+    campaignIds: string[]
+  ): Promise<boolean> {
+    // Validação contra path traversal (defesa em profundidade)
+    if (!/^[a-zA-Z0-9_-]+$/.test(checkpointId)) {
+      return false
+    }
+
+    // Normalizar a lista: remover não-strings ou vazios após trim; remover duplicatas preservando a ordem
+    const cleanedIds = Array.from(new Set(
+      campaignIds
+        .filter(id => typeof id === 'string' && id.trim().length > 0)
+        .map(id => id.trim())
+    ))
+
+    // Inicializa o banco uma única vez (idempotente — R1 da auditoria)
+    initializeDatabase(repoPath)
+
+    // Valida existência no catálogo do banco (não lê o JSON)
+    let dbRecord: CheckpointCatalogRecord | null = null
+    try {
+      dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao verificar existência do checkpoint no catálogo:', e)
+      // R2 da auditoria: falha de banco lança Error (o handler traduz em mensagem específica)
+      throw new Error('Falha ao verificar existência do checkpoint no catálogo')
+    }
+
+    if (!dbRecord) {
+      return false
+    }
+
+    // Atualiza ligações na caderneta
+    try {
+      setCheckpointCampaignLinks(repoPath, checkpointId, cleanedIds)
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao atualizar vínculo de campanha no catálogo:', e)
+      // R2 da auditoria: falha de banco lança Error (o handler traduz em mensagem específica)
+      throw new Error('Falha ao atualizar vínculo de campanha no catálogo/caderneta')
+    }
+
+    return true
+  }
 
   // ─── Métodos de Renomeação ───────────────────────────────────────────────
 
   /**
-   * Renomeia um checkpoint existente, atualizando o campo name no JSON persistido.
+   * Renomeia um checkpoint existente exclusivamente no banco.
+   * O JSON não é reescrito — o nome no JSON é congelado no momento da criação.
    *
    * @param repoPath Caminho absoluto para a raiz do repositório.
    * @param checkpointId ID do checkpoint a ser renomeado.
    * @param newName Novo nome para o checkpoint.
-   * @returns true se renomeou com sucesso, false se o checkpoint não existe.
+   * @returns true se renomeou com sucesso, false se o checkpoint não existe no catálogo.
    * @throws Error se o novo nome estiver vazio ou já existir duplicata.
    */
   async renameCheckpoint(
@@ -482,23 +581,36 @@ export class CheckpointService {
       throw new Error('O novo nome não pode estar vazio')
     }
 
-    const checkpoint = await this.loadCheckpoint(repoPath, checkpointId)
-    if (!checkpoint) {
+    // Valida existência no catálogo do banco (não lê o JSON)
+    let dbRecord: CheckpointCatalogRecord | null = null
+    try {
+      initializeDatabase(repoPath)
+      dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao verificar existência do checkpoint no catálogo:', e)
       return false
     }
 
-    // Valida unicidade do novo nome
-    const existing = await this.listCheckpoints(repoPath)
-    if (existing.some(cp => cp.name === newName.trim() && cp.id !== checkpointId)) {
+    if (!dbRecord) {
+      return false
+    }
+
+    // Valida unicidade do novo nome via catálogo do banco
+    // BUGFIX: Sem try/catch — o throw intencional de nome duplicado deve propagar
+    // ao caller (checkpoint-handler) para exibir a mensagem específica ao usuário.
+    const catalog = getCheckpointsCatalog(repoPath)
+    if (catalog.some(cp => cp.name === newName.trim() && cp.id !== checkpointId)) {
       throw new Error(`Já existe um checkpoint com o nome "${newName.trim()}"`)
     }
 
-    // Atualiza o nome
-    checkpoint.name = newName.trim()
-
-    // Persiste as alterações
-    const checkpointPath = join(this.getCheckpointDir(repoPath), `${checkpointId}.json`)
-    await writeFile(checkpointPath, JSON.stringify(checkpoint, null, 2), 'utf-8')
+    // Atualiza exclusivamente no banco — sem reescrita do JSON
+    try {
+      initializeDatabase(repoPath)
+      updateCheckpointCatalog(repoPath, checkpointId, { name: newName.trim() })
+    } catch (e) {
+      console.error('[CheckpointService] Falha ao atualizar nome do checkpoint no catálogo:', e)
+      return false
+    }
 
     return true
   }
@@ -532,27 +644,10 @@ export class CheckpointService {
         return `${header}\n\n*Nenhuma alteração detectada entre o checkpoint e o estado atual do disco.*`
       }
 
-      // Classifica todos os arquivos do diff por importância (usando ImportanceService real)
-      const importancePromises = diffFiles.map(async (file) => {
-        try {
-          const result = await importanceService.classifyFile(repoPath, file.relativePath)
-          return { file, level: result.level }
-        } catch {
-          return { file, level: 'low' as const }
-        }
-      })
-      const importanceResults = await Promise.all(importancePromises)
-      const importanceMap = new Map<string, string>()
-      for (const { file, level } of importanceResults) {
-        importanceMap.set(file.relativePath, level)
-      }
-
       const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, 'atual')
       const sections: string[] = []
 
       for (const file of diffFiles) {
-        // Injeta a importância real no arquivo de diff para o buildFileSection usar
-        file.importance = (importanceMap.get(file.relativePath) || 'low') as 'critical' | 'high' | 'medium' | 'low'
         const section = this.buildFileSection(file)
         if (section) sections.push(section)
       }
@@ -577,27 +672,10 @@ export class CheckpointService {
       return `${header}\n\n*Nenhuma alteração detectada entre os checkpoints.*`
     }
 
-    // Classifica todos os arquivos do diff por importância (usando ImportanceService real)
-    const importancePromises = diffFiles.map(async (file) => {
-      try {
-        const result = await importanceService.classifyFile(repoPath, file.relativePath)
-        return { file, level: result.level }
-      } catch {
-        return { file, level: 'low' as const }
-      }
-    })
-    const importanceResults = await Promise.all(importancePromises)
-    const importanceMap = new Map<string, string>()
-    for (const { file, level } of importanceResults) {
-      importanceMap.set(file.relativePath, level)
-    }
-
     const header = this.buildDiffHeader(repoPath, fromCheckpoint.name, toCheckpoint.name)
     const sections: string[] = []
 
     for (const file of diffFiles) {
-      // Injeta a importância real no arquivo de diff para o buildFileSection usar
-      file.importance = (importanceMap.get(file.relativePath) || 'low') as 'critical' | 'high' | 'medium' | 'low'
       const section = this.buildFileSection(file)
       if (section) sections.push(section)
     }
@@ -643,29 +721,22 @@ export class CheckpointService {
       this.compareCheckpoints(fromCheckpoint, toCheckpoint, diffFiles)
     }
 
-    // Classifica todos os arquivos por importância e obtém mtime real do disco
+    // Obtém mtime real do disco
     const metadataPromises = diffFiles.map(async (file) => {
+      let mtime = 0
       try {
-        const result = await importanceService.classifyFile(repoPath, file.relativePath)
-        // Obtém mtime real do arquivo no disco (ou 0 se não existir/deleted)
-        let mtime = 0
-        try {
-          const fileStat = await stat(join(repoPath, file.relativePath))
-          mtime = fileStat.mtimeMs
-        } catch {
-          mtime = 0
-        }
-        return { file, level: result.level, mtime }
+        const fileStat = await stat(join(repoPath, file.relativePath))
+        mtime = fileStat.mtimeMs
       } catch {
-        return { file, level: 'low' as const, mtime: 0 }
+        mtime = 0
       }
+      return { file, mtime }
     })
     const metadataResults = await Promise.all(metadataPromises)
 
-    // Injeta importância e mtime nos arquivos de diff
-    const filesWithMetadata: CheckpointDiffFile[] = metadataResults.map(({ file, level, mtime }) => ({
+    // Injeta mtime nos arquivos de diff
+    const filesWithMetadata: CheckpointDiffFile[] = metadataResults.map(({ file, mtime }) => ({
       ...file,
-      importance: level,
       mtime
     }))
 
@@ -817,17 +888,7 @@ export class CheckpointService {
     const lang = EXTENSION_MAP[ext.toLowerCase()] || 'text'
     const label = CHANGE_TYPE_LABEL[file.changeType]
 
-    // Mapeia nível de importância para emoji (mesmo padrão do ImportanceBadge)
-    const importanceEmoji: Record<string, string> = {
-      critical: '🔴',
-      high: '🟠',
-      medium: '🟡',
-      low: '⚪'
-    }
-    const emoji = file.importance ? importanceEmoji[file.importance] || '' : ''
-    const badge = emoji ? ` ${emoji}` : ''
-
-    const fileHeader = `## 📄 \`${file.relativePath}\` (${label})${badge}`
+    const fileHeader = `## 📄 \`${file.relativePath}\` (${label})`
 
     if (file.changeType === 'deleted') {
       if (!file.oldContent) return ''

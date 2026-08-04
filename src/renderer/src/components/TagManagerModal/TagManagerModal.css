@@ -1,0 +1,263 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir o layout visual do modal e lista de tags.
+
+Mapa de Relacionamentos do Script
+
+1. TagManagerModal.tsx
+   - Tipo: Relação de UI
+   - Relação: Usa essas classes para renderizar o modal.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O overlay deve permanecer por trás do conteúdo modal e evitar vazamento visual.
+2. A lista de tags não deve transbordar a altura do modal (max-height: 600px dentro de 90vh).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.tag-manager-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.tag-manager-modal {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  width: 100%;
+  max-width: 680px;
+  max-height: 90vh;
+  min-height: 500px;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+
+.tag-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tag-manager-header h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-primary);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.tag-manager-header-icon {
+  color: var(--accent);
+}
+
+.tag-manager-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+}
+
+.tag-manager-close:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.tag-manager-body {
+  padding: 14px 18px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+}
+
+.tag-manager-form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.tag-manager-form-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  padding: 10px 12px;
+  transition: border-color 0.2s;
+}
+
+.tag-manager-form-input-wrapper:focus-within {
+  border-color: var(--accent);
+}
+
+.tag-manager-form-input-wrapper input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+}
+
+.tag-manager-form input[type='color'] {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 2px solid var(--border);
+  background: transparent;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.tag-manager-form input[type='color']:hover {
+  border-color: var(--accent);
+}
+
+.tag-manager-form input[type='color']::-webkit-color-swatch-wrapper {
+  padding: 2px;
+}
+
+.tag-manager-form input[type='color']::-webkit-color-swatch {
+  border: none;
+  border-radius: 50%;
+}
+
+.tag-manager-form button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+
+.tag-manager-form button:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: 0 0 12px rgba(120, 82, 238, 0.4);
+}
+
+.tag-manager-form button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.tag-manager-form button.secondary {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+}
+
+.tag-manager-form button.secondary:hover {
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: none;
+}
+
+.tag-manager-error {
+  color: #f85149;
+  font-size: 13px;
+}
+
+.tag-manager-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  max-height: 600px;
+}
+
+.tag-manager-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+}
+
+.tag-dot {
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  flex-shrink: 0;
+}
+
+.tag-name {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tag-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tag-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 14px;
+  transition: all 0.2s ease;
+}
+
+.tag-actions button:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+}
+
+.tag-manager-empty {
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 18px 0;
+}
+
+.tag-manager-loading {
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 18px 0;
+}

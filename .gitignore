@@ -10,4 +10,6 @@ codefetch/
 .sprintdiff/
 code_checkpoints/
 
+# Devicon assets copiados localmente para funcionamento offline-first
+src/renderer/public/devicon/
 

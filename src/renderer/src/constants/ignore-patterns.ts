@@ -1,7 +1,6 @@
 // Responsabilidades do Script
 //
 // 1. Centralizar as definições de padrões de arquivos de ruído (NOISE_FILES) para o sistema de ignore.
-// 2. Centralizar as definições de extensões comuns (COMMON_IGNORE_EXTENSIONS) para o popup de ignore inteligente.
 //
 // Fonte única de verdade: altere aqui para refletir em todos os componentes que usam ignore.
 
@@ -19,7 +18,7 @@ export const NOISE_FILES = new Set([
   'poetry.lock'
 ])
 
-// Extensões comuns que disparam o popup de ignore inteligente
+// Extensões comuns usadas pelo popup de ignore inteligente no CodeDiffView
 export const COMMON_IGNORE_EXTENSIONS = new Set([
   '.css', '.scss', '.sass', '.less',
   '.json', '.svg', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.webp',

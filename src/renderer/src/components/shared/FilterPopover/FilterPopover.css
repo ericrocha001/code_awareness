@@ -1,0 +1,59 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o badge numérico do gatilho (fp-badge) e o item ativo do filtro (fp-item.active).
+2. A pele do gatilho (app-ghost-btn) e do balão/itens (am-menu/am-item) vem dos componentes compartilhados.
+3. O véu de hover sobre o item ativo com cor de tag é aplicado via box-shadow inset.
+
+Mapa de Relacionamentos do Script
+
+1. FilterPopover.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo fp- para evitar colisões com outros componentes.
+2. Nenhuma cor hardcoded — apenas variáveis CSS.
+3. O véu de hover no ativo (box-shadow inset) nunca usa !important.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+/* ─── Badge numérico no gatilho ──────────────────────────────────────────── */
+
+.fp-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* ─── Item ativo do filtro ───────────────────────────────────────────────── */
+/* A pele base (hover, zebrado, padding) vem de am-item.
+   O fp-item.active só existe para a cor de tag via inline style.
+   O véu de hover sobre o ativo preserva a cor de tag por baixo. */
+
+.fp-item.active {
+  /* Destaque de tema para itens sem cor de tag (ex.: filtro de período do CodeAudit).
+     Inline style de cor de tag (aplicado pelos filtros de tag) sobrescreve este
+     destaque via especificidade (inline vence classe). */
+  background: rgba(124, 58, 237, 0.12);
+  color: var(--accent-hover);
+}
+
+.fp-item.active:hover {
+  /* Véu translúcido por cima da cor da tag — não substitui o background inline */
+  box-shadow: inset 0 0 0 9999px var(--hover-overlay);
+}

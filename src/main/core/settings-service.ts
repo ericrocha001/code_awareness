@@ -8,12 +8,7 @@ Responsabilidades do Script
 
 Mapa de Relacionamentos do Script
 
-1. importance-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome a instância singleton para carregar/salvar classificações de importância.
-   - Criticidade: Alta
-
-2. git-handler.ts
+1. git-handler.ts
    - Tipo: Dependência Direta
    - Relação: Consome a instância para gerenciar arquivos ignorados no diff.
    - Criticidade: Alta
@@ -31,13 +26,15 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { AppSettings } from '../../shared/types'
 
-const DEFAULT_SETTINGS: AppSettings = {
+const DEFAULT_SETTINGS = {
   rootFolders: [],
   individualProjects: [],
   hiddenProjects: [],
   ignoredDiffFiles: {},
-  fileImportance: {}
-}
+  tags: {},
+  fileTags: {},
+  projectPreferences: {}
+} as AppSettings
 
 export class SettingsService {
   private static instance: SettingsService
@@ -60,15 +57,41 @@ export class SettingsService {
     try {
       const raw = readFileSync(configFile, 'utf-8')
       const parsed = JSON.parse(raw) as Partial<AppSettings>
-      return {
+
+      // Descarta o campo legado fileImportance (subsistema removido) antes de construir merged
+      const { fileImportance: _legacyImportance, ...rest } = parsed
+
+      const merged = {
         ...DEFAULT_SETTINGS,
-        ...parsed,
-        rootFolders: parsed.rootFolders || [],
-        individualProjects: parsed.individualProjects || [],
-        hiddenProjects: parsed.hiddenProjects || [],
-        ignoredDiffFiles: parsed.ignoredDiffFiles || {},
-        fileImportance: parsed.fileImportance || {}
+        ...rest
       }
+
+      // Migração de formato antigo (temporary + persistent) para array simples
+      if (rest.ignoredDiffFiles) {
+        merged.ignoredDiffFiles = {}
+        for (const [repoPath, value] of Object.entries(rest.ignoredDiffFiles)) {
+          if (Array.isArray(value)) {
+            // Já está no novo formato (array simples)
+            merged.ignoredDiffFiles[repoPath] = value
+          } else if (typeof value === 'object' && value !== null) {
+            // Formato antigo: { temporary: string[], persistent: string[] }
+            const { temporary = [], persistent = [] } = value as { temporary?: string[]; persistent?: string[] }
+            merged.ignoredDiffFiles[repoPath] = [...temporary, ...persistent]
+          }
+        }
+      }
+
+      merged.rootFolders = rest.rootFolders || []
+      merged.individualProjects = rest.individualProjects || []
+      merged.hiddenProjects = rest.hiddenProjects || []
+      merged.tags = rest.tags || {}
+      merged.fileTags = rest.fileTags || {}
+      // Defesa em profundidade: se for array (inválido), usa objeto vazio
+      merged.projectPreferences = (typeof rest.projectPreferences !== 'object' || Array.isArray(rest.projectPreferences))
+        ? {}
+        : rest.projectPreferences
+
+      return merged as AppSettings
     } catch {
       return { ...DEFAULT_SETTINGS }
     }

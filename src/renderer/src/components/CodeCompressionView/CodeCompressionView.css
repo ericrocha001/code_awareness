@@ -1,292 +1,70 @@
-.cdf-container {
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Fornecer estilos CSS para o layout CommandBar + FileGrid da aba Code Compression.
+2. Estilizar a barra de ações com botões Copiar e Exportar.
+3. Estilizar o estado vazio (dropzone).
+4. Estilizar o toggle "Selecionados no topo".
+
+Mapa de Relacionamentos do Script
+
+1. CodeCompressionView.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome estilos CSS do componente.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O FileGrid deve ocupar 100% do espaço disponível (flex: 1).
+2. O layout não deve quebrar em larguras pequenas.
+3. Não deve conter estilos duplicados com CommandBar.css ou FileGrid.css.
+4. O toggle cc-sort-toggle usa prefixo cc-; cores sólidas via variáveis de tema (--accent); variações de opacidade do destaque em rgba(120, 82, 238, …), conforme o padrão do projeto.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+/* Layout simplificado: CommandBar + FileGrid ocupam 100% */
+.cc-container {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 220px);
-  min-height: 500px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-.cdf-topbar {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-
-.cdf-repo-info {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.cdf-layout-wrapper {
-  display: flex;
-  flex-direction: row;
   flex: 1;
+  height: 100%;
   overflow: hidden;
+  background: none;
+  position: relative;
 }
 
-/* Cabeçalho do painel principal */
-.cdf-panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 12px 16px;
-  background: var(--bg-secondary);
-  border-bottom: 1px solid var(--border);
+.cc-container > .vt-root {
   flex-shrink: 0;
+  margin-bottom: 16px;
 }
 
-.cdf-panel-header-left {
-  display: flex;
+.cc-container > .file-grid {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ─── Sort Toggle (Selecionados no topo) ──────────────────────────────────── */
+.cc-sort-toggle {
+  display: inline-flex;
   align-items: center;
-  gap: 16px;
-  min-width: 0;
+  gap: 6px;
 }
 
-.cdf-panel-header-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.cc-sort-toggle.active {
+  border-color: var(--accent);
+  background: rgba(120, 82, 238, 0.10);
+  color: var(--accent);
 }
 
-/* Botão de Toggle da barra lateral */
-.cdf-sidebar-toggle-btn {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-secondary);
-  cursor: pointer;
-  border-radius: 6px;
+/* Dropzone (estado inicial) */
+.cc-dropzone-wrapper {
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-  padding: 6px;
-  width: 32px;
-  height: 32px;
-  flex-shrink: 0;
-}
-
-.cdf-sidebar-toggle-btn:hover {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
-  border-color: var(--accent);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-}
-
-.cdf-sidebar-toggle-btn.sidebar-closed {
-  color: var(--accent);
-  background: rgba(100, 108, 255, 0.08);
-  border-color: var(--accent);
-}
-
-.cdf-sidebar-toggle-btn svg {
-  width: 18px;
-  height: 18px;
-  stroke: currentColor;
-  fill: none;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-/* Prompt details compacto no cabeçalho */
-.cdf-prompt-details {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.cdf-prompt-details summary {
-  cursor: pointer;
-  padding: 4px 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-primary);
-  user-select: none;
-  transition: border-color 0.15s ease;
-}
-
-.cdf-prompt-details summary:hover {
-  border-color: var(--accent);
-  color: var(--text-primary);
-}
-
-.cdf-prompt-details[open] {
-  position: absolute;
-  top: 60px;
-  right: 16px;
-  z-index: 100;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
-  width: 380px;
-}
-
-.cdf-prompt-textarea {
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: 8px;
-  padding: 8px;
-  border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
-  border: 1px solid var(--border);
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  resize: vertical;
-  outline: none;
-}
-
-.cdf-prompt-textarea:focus {
-  border-color: var(--accent);
-}
-
-.cdf-type-badge.tracked {
-  background: rgba(124, 58, 237, 0.15);
-  color: #a78bfa;
-}
-
-/* Sidebar redimensionável — largura dinâmica */
-.cdf-sidebar {
-  width: 450px;
-  min-width: 280px;
-  max-width: 500px;
-  background: var(--bg-secondary);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  position: relative;
-  font-size: 13px;
-  flex-shrink: 0;
-}
-
-/* Resize handle na borda direita da sidebar */
-.cdf-sidebar-resize-handle {
-  position: absolute;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-  cursor: col-resize;
-  background: transparent;
-  z-index: 10;
-  transition: background 0.15s ease;
-}
-
-.cdf-sidebar-resize-handle:hover,
-.cdf-sidebar-resize-handle.resizing {
-  background: var(--accent);
-}
-
-/* Card de arquivo em duas linhas */
-.cdf-file-card {
-  display: flex;
-  align-items: flex-start;
-  padding: 8px 10px;
-  gap: 6px;
-}
-
-.cdf-file-checkbox {
-  width: 16px;
-  height: 16px;
-  margin-top: 2px;
-}
-
-/* Conteúdo do card em duas linhas */
-.cdf-file-card-content {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  cursor: pointer;
-}
-
-.cdf-file-name-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.cdf-file-name {
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.cdf-file-meta-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-
-.cdf-file-path {
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-  opacity: 0.7;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Estimativa de tokens na linha de metadados */
-.cdf-token-estimate {
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-  color: var(--accent);
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-/* Botão ocultar maior */
-.cdf-hide-btn {
-  width: 24px;
-  height: 24px;
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
-/* Total de tokens selecionados no cabeçalho */
-.cdf-token-total {
-  font-size: 11px;
-  color: var(--accent);
-  font-weight: 600;
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-  margin-left: 8px;
-}
-
-/* ─── Melhorias de Layout do Painel de Diff ─────────────────────────── */
-
-.cdf-diff-panel {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background: var(--bg-primary);
-  min-width: 0;
-  height: 100%;
-}
-
-.cdf-diff-code-rendered {
-  padding: 20px 24px;
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--text-primary);
-  overflow-y: auto;
-  flex: 1;
-  height: 100%;
-  max-width: 100%;
-  margin: 0;
-  box-sizing: border-box;
+  padding: 24px;
 }

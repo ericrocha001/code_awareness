@@ -1,0 +1,402 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a timeline full-width com grupos por data e cards conectados por linha vertical.
+2. Garantir aparência visual consistente com o design system global e tema claro/escuro.
+3. Estilizar a badge de campanha de cada card e o dropdown de troca rápida (Popover).
+4. Posicionar a linha do nome do card com o indicador BlueprintBar (layout flex com ellipsis).
+5. Estilizar os campos do card com rótulos nomeados discretos (ctl-field-label) e valores (ctl-field-value), com respiro generoso entre informações.
+
+Mapa de Relacionamentos do Script
+
+1. CheckpointTimeline.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo ctl- para evitar colisões com outros componentes.
+2. O design deve respeitar as variáveis CSS globais (--bg-primary, --bg-secondary, --border, --accent).
+3. As etiquetas (badge de campanha, RestoreStatusBadge) têm a largura do conteúdo (não esticam) — garantido via `align-self: flex-start` nos CSS dos respectivos componentes.
+4. O recuo esquerdo da trilha é aplicado via `margin-left` no `.ctl-card`, NUNCA via `padding` no `.ctl-timeline-container`. Os elementos `.ctl-date-column` e `.ctl-timeline-dot` são `position: absolute` orientados pelo `.ctl-timeline-item` (que possui `transform` da animação e, por isso, vira a referência de posicionamento). Logo, o `.ctl-timeline-item` deve ocupar a largura total do container para que `left: 0` coincida com a margem esquerda da trilha.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.ctl-root {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ctl-empty {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+
+.ctl-loading {
+  padding: 40px 20px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+  flex-shrink: 0;
+}
+
+.ctl-clear-filters-btn {
+  margin-top: 12px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.ctl-clear-filters-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ─── Scroll da área de grupos ──────────────────────────────────────────── */
+
+.ctl-groups-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px 0 16px 0;
+}
+
+/* ─── Grupo por data ────────────────────────────────────────────────────── */
+
+.ctl-group {
+  margin-bottom: 24px;
+}
+
+.ctl-group-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-secondary);
+  padding: 0 0 12px 0;
+  opacity: 0.7;
+}
+
+/* ─── Container da linha do tempo ─────────────────────────────────────── */
+
+.ctl-timeline-container {
+  position: relative;
+}
+
+/* ─── Linha vertical da timeline ───────────────────────────────────────── */
+
+.ctl-timeline-line {
+  position: absolute;
+  left: 112px; /* Centro da bolinha (106px + 6px) */
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+
+/* ─── Item da timeline (wrapper de cada card) ──────────────────────────────────── */
+
+.ctl-timeline-item {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  margin-bottom: 16px;
+  animation: ctlCardEnter 0.3s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+
+.ctl-timeline-item:last-child {
+  margin-bottom: 0;
+}
+
+/* ─── Coluna de data relativa (à esquerda da linha) ────────────────────────── */
+
+.ctl-date-column {
+  position: absolute;
+  left: 0;
+  top: 16px; /* Alinhado verticalmente com o início do conteúdo do card */
+  width: 96px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  text-align: right;
+  pointer-events: none; /* INVARIANT: não bloqueia interação com o card */
+}
+
+.ctl-date-relative {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-primary);
+  line-height: 1.2;
+  white-space: normal;
+}
+
+.ctl-date-full {
+  font-size: 9px;
+  font-weight: 400;
+  color: var(--text-secondary);
+  line-height: 1.2;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+/* ─── Ponto na linha do tempo ──────────────────────────────────────────── */
+
+.ctl-timeline-dot {
+  position: absolute;
+  left: 106px; /* 112px (centro da linha) - 6px (raio) */
+  top: 20px;  /* Alinhado com o início do conteúdo do card */
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  border: 2px solid var(--bg-primary);
+  z-index: 2;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.ctl-timeline-item:hover .ctl-timeline-dot {
+  transform: scale(1.2);
+  box-shadow: 0 0 0 3px var(--hover-overlay);
+}
+
+/* ─── Variações de cor da bolinha por status ──────────────────────────── */
+
+.ctl-dot-restored {
+  background: var(--status-restored-dot);
+  border-color: var(--status-restored-dot);
+}
+
+.ctl-dot-reverted {
+  background: var(--status-reverted-dot);
+  border-color: var(--status-reverted-dot);
+}
+
+/* ─── Card do checkpoint ───────────────────────────────────────────────── */
+
+.ctl-card {
+  position: relative;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin-left: 128px; /* Recuo da trilha: data 0-96px, respiro 96-106px, bolinha 106-118px, respiro 118-128px */
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  flex: 1;
+  min-width: 0;
+}
+
+.ctl-card:hover {
+  background: var(--bg-primary);
+  border-color: var(--accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.ctl-card.selected {
+  border-color: var(--accent);
+  background: var(--hover-overlay);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.ctl-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ─── Conteúdo do card ─────────────────────────────────────────────────── */
+
+.ctl-card-content {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.ctl-card-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ctl-card-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.ctl-card-field {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ctl-field-label {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  opacity: 0.75;
+  flex-shrink: 0;
+  min-width: 68px;
+}
+
+.ctl-field-value {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.4;
+  min-width: 0;
+}
+
+/* ─── Card "+" de criação ────────────────────────────────────────────────── */
+
+.ctl-create-card {
+  margin-left: 128px;
+  margin-bottom: 16px;
+  border: 2px dashed var(--border);
+  border-radius: 10px;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.ctl-create-card:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(124, 58, 237, 0.04);
+}
+
+.ctl-create-card:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ctl-create-icon {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.ctl-create-label {
+  font-size: 13px;
+}
+
+/* ─── Selo "Arquivado" ──────────────────────────────────────────────────── */
+
+.ctl-archived-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--hover-overlay);
+  padding: 2px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  display: inline-block;
+  margin-top: 4px;
+  align-self: flex-start;
+}
+
+/* ─── Variações de cor do card por status ─────────────────────────────── */
+
+.ctl-card-restored {
+  background: var(--status-restored-card-bg);
+  border-color: var(--status-restored-card-border);
+}
+
+.ctl-card-restored:hover {
+  background: var(--status-restored-bg);
+  border-color: var(--status-restored-dot);
+}
+
+.ctl-card-restored.selected {
+  border-color: var(--status-restored-dot);
+  background: var(--status-restored-bg);
+  box-shadow: 0 0 0 1px var(--status-restored-dot);
+}
+
+.ctl-card-reverted {
+  opacity: 0.65;
+}
+
+.ctl-card-reverted:hover {
+  opacity: 0.85;
+  border-color: var(--border);
+}
+
+.ctl-card-reverted.selected {
+  opacity: 1;
+  border-color: var(--accent);
+  background: var(--hover-overlay);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+/* ─── Animações de entrada ─────────────────────────────────────────────── */
+
+@keyframes ctlCardEnter {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+    pointer-events: none;
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+
+/* ─── Ações de ciclo de vida no rodapé do card ──────────────────────────── */
+
+.ctl-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px; /* Respiração já vem do gap 14px do content */
+  flex-wrap: wrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ctl-timeline-item {
+    animation: none;
+  }
+
+  .ctl-card,
+  .ctl-timeline-dot {
+    transition: none;
+  }
+}

@@ -4,15 +4,10 @@
 Responsabilidades do Script
 
 1. Gerenciar o ciclo de vida do WatcherService e monitorar alterações de arquivos.
-2. Renderizar a interface com topbar global (ProjectSwitcher + badges), sidebar retrátil e painel de diff semântico.
-3. Gerenciar seleção de arquivos e sistema de ignore (temporary/persistent).
-4. Classificar arquivos por importância arquitetural com override manual.
-5. Suportar ordenação por importância ou recência com persistência em localStorage.
-6. Exibir badges de tipo (M/A/D) e badges de importância por arquivo, agrupados por nível.
-7. Sidebar retrátil com persistência no localStorage por projeto.
-8. Sidebar redimensionável entre 280px e 500px.
-9. Copiar (diff + prompt) e Exportar (diff apenas) como ações no cabeçalho do painel principal; copiar diff semântico de um único arquivo selecionado na sidebar.
-10. Sincronizar classificações de importância em tempo real com outras abas via evento IPC.
+2. Gerenciar seleção de arquivos e sistema de ignore.
+3. Renderizar interface de tela única com ViewToolbar + ActionBar + StatusStrip + FileGrid.
+4. Fornecer ações de visualização de diff (PreviewModal), cópia com prompt e exportação.
+5. Ordenar arquivos por recência (mtime), com arquivos deleted no final.
 
 Mapa de Relacionamentos do Script
 
@@ -21,74 +16,71 @@ Mapa de Relacionamentos do Script
    - Relação: Consome estilos CSS do componente.
    - Criticidade: Alta
 
-2. ImportanceGroup.tsx
+2. ViewToolbar.tsx (shared)
    - Tipo: Dependência Direta
-   - Relação: Renderiza grupos colapsáveis por nível de importância com badges M/A/D.
+   - Relação: Renderiza a Camada 1 com SearchBox, contagem e FilterPopover de tags.
    - Criticidade: Alta
 
-3. ActionsDropdown.tsx
+3. ActionBar.tsx (shared)
    - Tipo: Dependência Direta
-   - Relação: Renderiza dropdown de ações contextuais para cada arquivo no modo recência.
+   - Relação: Renderiza a Camada 2 com botões de ação à direita.
+   - Criticidade: Alta
+
+4. FilterPopover.tsx (shared)
+   - Tipo: Dependência Direta
+   - Relação: Renderiza o dropdown de filtro de tags coloridas.
    - Criticidade: Média
 
-4. ToggleSwitch.tsx
+5. StatusStrip.tsx (shared)
    - Tipo: Dependência Direta
-   - Relação: Usado como master toggle de seleção no cabeçalho da sidebar.
+   - Relação: Exibe faixa de feedback com status do watcher.
    - Criticidade: Média
 
-5. SidebarActions.tsx
+6. FileGrid.tsx
    - Tipo: Dependência Direta
-   - Relação: Renderiza dropdown unificado de ações com toggle de ordenação.
+   - Relação: Renderiza grade de FileCards com badges M/A/D.
    - Criticidade: Alta
 
-6. ProjectSwitcher.tsx
+7. PreviewModal.tsx
    - Tipo: Dependência Direta
-   - Relação: Renderiza dropdown de troca de projeto ativo na topbar.
+   - Relação: Exibe diff semântico gerado sob demanda em modal.
    - Criticidade: Alta
 
-7. shared/types.ts
+8. FileCard.tsx (via FileGrid)
+   - Tipo: Dependência Indireta
+   - Relação: Exibe cada arquivo com nome, caminho, tokens e tags.
+   - Criticidade: Alta
+
+9. shared/types.ts
    - Tipo: Contrato / Interface
-   - Relação: Define DiffFileStatus, ImportanceLevel e ImportanceSource.
-   - Criticidade: Alta
-
-8. ignore-patterns.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece padrões de ruído e extensões ignoradas.
-   - Criticidade: Média
-
-9. window.codeAwareness.onImportanceUpdated
-   - Tipo: Comunicação por Evento
-   - Relação: Escuta eventos de atualização de importância emitidos por outras abas.
+   - Relação: Define DiffFileStatus e Tag.
    - Criticidade: Alta
 
 Invariantes do Script
 
-1. A sidebar deve ter largura entre 280px e 500px.
-2. As badges de tipo (M/A/D) devem ser preservadas para todos os arquivos.
-3. O diff só é regenerado via pipeline reativo com debounce.
-4. Erros de classificação não devem impedir a renderização da lista.
-5. A preferência de ordenação deve ser persistida por projeto no localStorage.
-6. Deleted devem aparecer sempre no final da lista, independente do modo de ordenação.
-7. A sincronização de importância não deve afetar a seleção de arquivos (checkboxes).
-8. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
-9. No modo recência, a lista deve ser plana (sem agrupamentos), mantendo a mesma estrutura visual do modo importância.
-10. No modo importância, grupos vazios não devem ser renderizados.
-11. O estado de abertura da sidebar deve ser persistido por projeto no localStorage.
-12. A topbar deve exibir o ProjectSwitcher e badges de status; a sidebar é condicional com base em isSidebarOpen.
-13. A lógica interna da sidebar (ordenamento, ImportanceGroup, SidebarActions) nunca deve ser alterada.
+1. A ordenação dos arquivos é sempre por recência (mtime descendente, com arquivos deleted no final).
+   Filtros de busca e tags apenas filtram a lista — nunca alteram a ordenação.
+   Esta é uma invariante de negócio.
+2. Arquivos deleted devem aparecer sempre no final da lista.
+3. O diff só é gerado sob demanda, via handleOpenPreview.
+4. As tags devem estar sincronizadas com as outras abas via evento global tags-changed.
+5. O badge de tipo de alteração só deve ser renderizado quando changeType não for undefined nem 'tracked'.
+6. O botão "Visualizar Diff" deve estar desabilitado quando selectedFiles.size === 0.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
-
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
-import Markdown from 'markdown-to-jsx'
-import { DiffFileStatus, ImportanceLevel, ImportanceSource } from '../../../../shared/types'
-import { NOISE_FILES, COMMON_IGNORE_EXTENSIONS } from '../../constants/ignore-patterns'
-import { ImportanceGroup } from '../ImportanceGroup/ImportanceGroup'
-import { ActionsDropdown } from '../ActionsDropdown/ActionsDropdown'
-import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
-import { SidebarActions } from '../SidebarActions/SidebarActions'
-import { ProjectSwitcher } from '../ProjectSwitcher/ProjectSwitcher'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import { DiffFileStatus, Tag } from '../../../../shared/types'
+import { ViewToolbar } from '../shared/ViewToolbar/ViewToolbar'
+import { ActionBar } from '../shared/ActionBar/ActionBar'
+import { FilterPopover } from '../shared/FilterPopover/FilterPopover'
+import { StatusStrip } from '../shared/StatusStrip/StatusStrip'
+import { FileGrid } from '../FileGrid/FileGrid'
+import { PreviewModal } from '../PreviewModal/PreviewModal'
+import { PromptEditorModal } from '../PromptEditorModal/PromptEditorModal'
+import type { FileCardFile } from '../FileCard/FileCard'
+import { estimateTokensFromSize } from '../../utils/token-utils'
+import { getContrastColor } from '../../utils/color-utils'
 import './CodeDiffView.css'
 
 const DEFAULT_PROMPT = `Analise as alterações de código abaixo como um Engenheiro de Software Staff extremamente rigoroso.
@@ -114,337 +106,176 @@ export const CodeDiffView: React.FC<{
   const [isLoading, setIsLoading] = useState(false)
   const [isGitRepo, setIsGitRepo] = useState<boolean | null>(null)
   const [modifiedFiles, setModifiedFiles] = useState<DiffFileStatus[]>([])
-  const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [diffMarkdown, setDiffMarkdown] = useState<string>('')
-  const [auditPromptTemplate, setAuditPromptTemplate] = useState('')
-  const [isCopyMarkdown, setIsCopyMarkdown] = useState(false)
-  const [isExporting, setIsExporting] = useState(false)
+  const [isGeneratingPreview, setIsGeneratingPreview] = useState(false)
+  const [isPreviewModalOpen, setIsPreviewModalOpen] = useState(false)
 
-  // Seleção de arquivos para o diff
+  // Seleção de arquivos
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
 
-  // Ignorados temporários (sessão) e persistentes (projeto)
+  // Ignorados (arquivos ocultos)
   const [ignoredFiles, setIgnoredFiles] = useState<string[]>([])
-  const [persistentPatterns, setPersistentPatterns] = useState<string[]>([])
-  const [ignoredAccordionOpen, setIgnoredAccordionOpen] = useState(false)
 
-  // Popup de ignore inteligente: { path, ext } | null
-  const [ignorePopup, setIgnorePopup] = useState<{ path: string; ext: string } | null>(null)
-
-  // Feedback visual de cópia unitária
-  const [copiedFile, setCopiedFile] = useState<string | null>(null)
-
-  // ── Importância Arquitetural ──────────────────────────────────────────────
-  const [importanceMap, setImportanceMap] = useState<Record<string, ImportanceLevel>>({})
-  const [importanceSource, setImportanceSource] = useState<Record<string, ImportanceSource>>({})
-  const [tokenEstimates, setTokenEstimates] = useState<Record<string, number>>({})
-  const [isClassifying, setIsClassifying] = useState(false)
-
-  // ── Sidebar retrátil (persistida no localStorage) ─────────────────────────
-  const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(() => {
-    if (!activeProject) return true
-    const saved = localStorage.getItem(`code_diff_sidebar_open_${activeProject.path}`)
-    return saved !== 'false'
-  })
-
-  // Sincroniza o estado de abertura da barra lateral no localStorage
-  useEffect(() => {
-    if (activeProject) {
-      localStorage.setItem(`code_diff_sidebar_open_${activeProject.path}`, isSidebarOpen.toString())
+  // Token estimates: derivado de modifiedFiles via heurística Math.ceil(size/4)
+  // BUGFIX: antes era useState({}) — nunca preenchido, causando tokens sempre zerados
+  const tokenEstimates = useMemo(() => {
+    const estimates: Record<string, number> = {}
+    for (const f of modifiedFiles) {
+      estimates[f.relativePath] = estimateTokensFromSize(f.size)
     }
-  }, [isSidebarOpen, activeProject])
+    return estimates
+  }, [modifiedFiles])
 
-  // Restaura o estado da barra lateral quando o projeto ativo muda
-  useEffect(() => {
-    if (activeProject) {
-      const saved = localStorage.getItem(`code_diff_sidebar_open_${activeProject.path}`)
-      setIsSidebarOpen(saved !== 'false')
-    }
-  }, [activeProject])
-
-  // ── Sidebar redimensionável ───────────────────────────────────────────────
-  const sidebarRef = useRef<HTMLDivElement>(null)
-  const [sidebarWidth, setSidebarWidth] = useState(450)
-  const [isResizing, setIsResizing] = useState(false)
-
-  // Refs auxiliares
-  const ignorePopupRef = useRef<HTMLDivElement>(null)
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const requestIdRef = useRef(0)
-
-  // ── Resize da sidebar ─────────────────────────────────────────────────────
-  const handleResizeMouseDown = useCallback((e: React.MouseEvent) => {
-    e.preventDefault()
-    setIsResizing(true)
-  }, [])
-
-  useEffect(() => {
-    if (!isResizing) return
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (!sidebarRef.current) return
-      const rect = sidebarRef.current.getBoundingClientRect()
-      const newWidth = Math.max(280, Math.min(500, e.clientX - rect.left))
-      setSidebarWidth(newWidth)
-    }
-
-    const handleMouseUp = () => setIsResizing(false)
-
-    document.addEventListener('mousemove', handleMouseMove)
-    document.addEventListener('mouseup', handleMouseUp)
-    return () => {
-      document.removeEventListener('mousemove', handleMouseMove)
-      document.removeEventListener('mouseup', handleMouseUp)
-    }
-  }, [isResizing])
-
-  // Carrega largura da sidebar do localStorage
-  useEffect(() => {
-    if (!activeProject) return
-    const saved = localStorage.getItem(`code_diff_sidebar_width_${activeProject.path}`)
-    if (saved) {
-      const width = parseInt(saved, 10)
-      if (width >= 280 && width <= 500) {
-        setSidebarWidth(width)
-      }
-    }
-  }, [activeProject])
-
-  // Salva largura da sidebar no localStorage quando muda
-  useEffect(() => {
-    if (!activeProject || isResizing) return
-    localStorage.setItem(`code_diff_sidebar_width_${activeProject.path}`, sidebarWidth.toString())
-  }, [sidebarWidth, activeProject, isResizing])
-
-  // ── Ordenação por Data de Modificação / Recência ──────────────────────────
-  const [sortMode, setSortMode] = useState<'importance' | 'recent'>('importance')
-
-  useEffect(() => {
-    if (!activeProject) return
-    const saved = localStorage.getItem(`code_diff_sort_mode_${activeProject.path}`)
-    if (saved === 'importance' || saved === 'recent') {
-      setSortMode(saved)
-    } else {
-      setSortMode('importance')
-    }
-  }, [activeProject])
-
-  const handleSortModeChange = useCallback((mode: 'importance' | 'recent') => {
-    setSortMode(mode)
-    if (activeProject) {
-      localStorage.setItem(`code_diff_sort_mode_${activeProject.path}`, mode)
-    }
-    onStatusMessage(mode === 'importance' ? 'Ordenação por importância!' : 'Ordenação por recência!')
-  }, [activeProject, onStatusMessage])
-
-  // ── Classificação de importância ──────────────────────────────────────────
-  useEffect(() => {
-    if (!activeProject) return
-
-    const handleImportanceUpdated = (data: {
-      repoPath: string
-      relativePath: string
-      level: ImportanceLevel
-      source: ImportanceSource
-    }) => {
-      if (data.repoPath !== activeProject.path) return
-      setImportanceMap(prev => ({ ...prev, [data.relativePath]: data.level }))
-      setImportanceSource(prev => ({ ...prev, [data.relativePath]: data.source }))
-    }
-
-    window.codeAwareness.onImportanceUpdated(handleImportanceUpdated)
-    return () => {
-      window.codeAwareness.removeImportanceUpdatedListener()
-    }
-  }, [activeProject])
-
-  useEffect(() => {
-    if (!activeProject || modifiedFiles.length === 0) {
-      setImportanceMap({})
-      setImportanceSource({})
-      setTokenEstimates({})
-      return
-    }
-
-    const classifyFiles = async () => {
-      setIsClassifying(true)
-      try {
-        const result = await window.codeAwareness.classifyImportance(
-          activeProject.path,
-          activeProject.name,
-          modifiedFiles.map(f => ({ relativePath: f.relativePath }))
-        )
-
-        if (result.success && result.data) {
-          const levelMap: Record<string, ImportanceLevel> = {}
-          const sourceMap: Record<string, ImportanceSource> = {}
-          const estimateMap: Record<string, number> = {}
-
-          for (const [relativePath, importance] of Object.entries(result.data)) {
-            levelMap[relativePath] = importance.level
-            sourceMap[relativePath] = importance.source
-            estimateMap[relativePath] = importance.tokenEstimate || 0
-          }
-
-          setImportanceMap(levelMap)
-          setImportanceSource(sourceMap)
-          setTokenEstimates(estimateMap)
-        }
-      } catch (error) {
-        console.error('Erro ao classificar importância:', error)
-      } finally {
-        setIsClassifying(false)
-      }
-    }
-
-    classifyFiles()
-  }, [activeProject, modifiedFiles])
-
+  // Formata contagem de tokens
   const formatTokenCount = useCallback((count: number): string => {
     if (count >= 1000) return `${(count / 1000).toFixed(1)}k`
     return count.toString()
   }, [])
 
-  const handleImportanceChange = useCallback(
-    async (relativePath: string, newLevel: ImportanceLevel) => {
-      if (!activeProject) return
-      try {
-        const result = await window.codeAwareness.setImportanceOverride(
-          activeProject.path,
-          activeProject.name,
-          relativePath,
-          newLevel
-        )
-        if (result.success && result.data) {
-          const importance = result.data[relativePath]
-          if (importance) {
-            setImportanceMap(prev => ({ ...prev, [relativePath]: importance.level }))
-            setImportanceSource(prev => ({ ...prev, [relativePath]: importance.source }))
-          }
-          onStatusMessage('Importância atualizada!')
-        }
-      } catch (error) {
-        console.error('Erro ao atualizar importância:', error)
-      }
-    },
-    [activeProject, onStatusMessage]
-  )
+  // Filtro de busca
+  const [searchQuery, setSearchQuery] = useState('')
 
-  // ── Carregamento de ignorados ─────────────────────────────────────────────
-  const loadIgnoredFiles = useCallback(async () => {
-    if (!activeProject) return
-    const settings = await window.codeAwareness.loadSettings()
-    const repoIgnores = settings.ignoredDiffFiles[activeProject.path]
-    setIgnoredFiles(repoIgnores?.temporary || [])
-    setPersistentPatterns(repoIgnores?.persistent || [])
-  }, [activeProject])
+  // Tags
+  const [allTags, setAllTags] = useState<Tag[]>([])
+  const [fileTagsMap, setFileTagsMap] = useState<Record<string, string[]>>({})
+  const [filterTagIds, setFilterTagIds] = useState<string[]>([])
 
+  // Prompt de auditoria e ações de cópia/exportação
+  const [auditPromptTemplate, setAuditPromptTemplate] = useState('')
+  const [isCopyMarkdown, setIsCopyMarkdown] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+  const [isPromptModalOpen, setIsPromptModalOpen] = useState(false)
+
+  // Carrega o template de prompt do localStorage
   useEffect(() => {
     const saved = localStorage.getItem('code_diff_prompt_template')
     setAuditPromptTemplate(saved ?? DEFAULT_PROMPT)
     if (!saved) localStorage.setItem('code_diff_prompt_template', DEFAULT_PROMPT)
   }, [])
 
+  // ── Tags ───────────────────────────────────────────────────────────────────
+  const loadFileTagsMap = useCallback(async () => {
+    if (!activeProject?.path) {
+      setFileTagsMap({})
+      return
+    }
+    try {
+      const result = await window.codeAwareness.getFileTags(activeProject.path)
+      if (result.success && result.data) {
+        setFileTagsMap(result.data)
+      } else {
+        setFileTagsMap({})
+      }
+    } catch (err) {
+      console.error('Erro ao carregar fileTagsMap:', err)
+      setFileTagsMap({})
+    }
+  }, [activeProject?.path])
+
+  const loadTags = useCallback(async () => {
+    if (!activeProject?.path) {
+      setAllTags([])
+      return
+    }
+    try {
+      const result = await window.codeAwareness.getTags(activeProject.path)
+      if (result.success && result.data) {
+        setAllTags(result.data)
+      } else {
+        setAllTags([])
+      }
+    } catch (err) {
+      console.error('Erro ao carregar tags:', err)
+      setAllTags([])
+    }
+  }, [activeProject?.path])
+
+  const refreshTagsData = useCallback(async () => {
+    await Promise.all([loadTags(), loadFileTagsMap()])
+  }, [loadTags, loadFileTagsMap])
+
+  useEffect(() => {
+    refreshTagsData()
+  }, [refreshTagsData])
+
+  // Escuta evento global de mudança de tags
+  useEffect(() => {
+    const handleTagsChanged = () => refreshTagsData()
+    window.addEventListener('tags-changed', handleTagsChanged)
+    return () => window.removeEventListener('tags-changed', handleTagsChanged)
+  }, [refreshTagsData])
+
+  // ── Carregamento de ignorados ─────────────────────────────────────────────
+  const loadIgnoredFiles = useCallback(async () => {
+    if (!activeProject) return
+    const settings = await window.codeAwareness.loadSettings()
+    setIgnoredFiles(settings.ignoredDiffFiles[activeProject.path] || [])
+  }, [activeProject])
+
   useEffect(() => {
     loadIgnoredFiles()
   }, [loadIgnoredFiles])
 
-  useEffect(() => {
-    if (!ignorePopup) return
-    const handleClick = (e: MouseEvent) => {
-      if (ignorePopupRef.current && !ignorePopupRef.current.contains(e.target as Node)) {
-        setIgnorePopup(null)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [ignorePopup])
-
   // ── Computados ────────────────────────────────────────────────────────────
-  const matchesPersistentPattern = useCallback(
-    (relativePath: string): boolean => {
-      for (const pattern of persistentPatterns) {
-        if (pattern.startsWith('*.')) {
-          const ext = pattern.slice(1)
-          if (relativePath.endsWith(ext)) return true
-        }
-        if (pattern === relativePath) return true
-      }
-      return false
-    },
-    [persistentPatterns]
-  )
 
-  // Lista filtrada e ordenada (importância vs recência)
+  // Etapa 1: lista após ignore (base para contagem do summaryText)
+  const afterIgnore = useMemo(() => {
+    return modifiedFiles.filter(f => !ignoredFiles.includes(f.relativePath))
+  }, [modifiedFiles, ignoredFiles])
+
+  // Etapa 2: lista após busca + tags + ordenação por recência
   const visibleFiles = useMemo(() => {
-    const filtered = modifiedFiles.filter(f => {
-      if (ignoredFiles.includes(f.relativePath)) return false
-      if (matchesPersistentPattern(f.relativePath)) return false
-      return true
-    })
+    // Aplica filtro de busca
+    const searchFiltered = searchQuery
+      ? afterIgnore.filter(f =>
+          f.relativePath.toLowerCase().includes(searchQuery.toLowerCase())
+        )
+      : afterIgnore
 
-    // DEBUG: Log para verificar se o mtime está sendo populado corretamente
-    // TODO: Remover quando a ordenação por recência estiver validada em produção
-    if (sortMode === 'recent' && import.meta.env.DEV) {
-      console.log('[CodeDiffView] Ordenação por recência - mtimes:',
-        filtered.map(f => ({ path: f.relativePath, mtime: f.mtime, changeType: f.changeType }))
-      )
-    }
+    // Aplica filtro de tags
+    const tagFiltered = filterTagIds.length === 0
+      ? searchFiltered
+      : searchFiltered.filter(file => {
+          const fileTagIds = fileTagsMap[file.relativePath] || []
+          return filterTagIds.some(tagId => fileTagIds.includes(tagId))
+        })
 
-    if (sortMode === 'recent') {
-      const active = filtered.filter(f => f.changeType !== 'deleted')
-      const deleted = filtered.filter(f => f.changeType === 'deleted')
-      active.sort((a, b) => (b.mtime || 0) - (a.mtime || 0))
-      deleted.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
-      return [...active, ...deleted]
-    } else {
-      const importanceOrder: Record<string, number> = {
-        critical: 0,
-        bridge: 4,
-        high: 1,
-        medium: 2,
-        low: 3
+    // INVARIANTE: Ordenação por recência — active (não-deleted) primeiro, depois deleted
+    const active = tagFiltered.filter(f => f.changeType !== 'deleted')
+    const deleted = tagFiltered.filter(f => f.changeType === 'deleted')
+    active.sort((a, b) => (b.mtime || 0) - (a.mtime || 0))
+    deleted.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+    return [...active, ...deleted]
+  }, [afterIgnore, searchQuery, filterTagIds, fileTagsMap])
+
+  // Mapeia visibleFiles para FileCardFile[] com changeType
+  const gridFiles = useMemo(() => {
+    return visibleFiles.map(f => {
+      const file: FileCardFile = {
+        relativePath: f.relativePath,
+        name: f.name,
+        changeType: f.changeType,
+        tokenEstimate: tokenEstimates[f.relativePath] || 0
       }
+      return file
+    })
+  }, [visibleFiles, tokenEstimates])
 
-      return filtered.sort((a, b) => {
-        const levelA = importanceMap[a.relativePath] || 'low'
-        const levelB = importanceMap[b.relativePath] || 'low'
-        const orderDiff = (importanceOrder[levelA] ?? 3) - (importanceOrder[levelB] ?? 3)
-        if (orderDiff === 0) {
-          return a.relativePath.localeCompare(b.relativePath)
-        }
-        return orderDiff
-      })
+  // ── Contagem para a ViewToolbar ──────────────────────────────────────────
+  const summaryText = useMemo(() => {
+    if (visibleFiles.length === afterIgnore.length) {
+      return `${visibleFiles.length} arquivo${visibleFiles.length !== 1 ? 's' : ''}`
     }
-  }, [modifiedFiles, ignoredFiles, matchesPersistentPattern, importanceMap, sortMode])
+    return `${visibleFiles.length} de ${afterIgnore.length} arquivo${afterIgnore.length !== 1 ? 's' : ''}`
+  }, [visibleFiles, afterIgnore])
 
-  const groupedFiles = useMemo(
-    () => ({
-      critical: visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'critical'),
-      high: visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'high'),
-      medium: visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'medium'),
-      low: visibleFiles.filter(f => (importanceMap[f.relativePath] || 'low') === 'low')
-    }),
-    [visibleFiles, importanceMap]
-  )
-
-  const changeTypeMap = useMemo(() => {
-    const map: Record<string, 'modified' | 'added' | 'deleted' | 'tracked'> = {}
-    for (const f of modifiedFiles) {
-      map[f.relativePath] = f.changeType
-    }
-    return map
-  }, [modifiedFiles])
-
-  const totalSelectedTokens = useMemo(() => {
-    let total = 0
-    for (const path of selectedFiles) {
-      total += tokenEstimates[path] || 0
-    }
-    return total
-  }, [selectedFiles, tokenEstimates])
-
-  const hasNoiseFiles = useMemo(() => visibleFiles.some(f => NOISE_FILES.has(f.name)), [visibleFiles])
+  // ── Status do watcher para o StatusStrip ─────────────────────────────────
+  const watcherStatus = useMemo(() => {
+    if (isLoading) return 'loading' as const
+    if (isGitRepo === false) return 'not-git' as const
+    if (isWatching) return 'watching' as const
+    return null
+  }, [isLoading, isGitRepo, isWatching])
 
   // ── Efeitos de sincronização ──────────────────────────────────────────────
   useEffect(() => {
@@ -458,60 +289,33 @@ export const CodeDiffView: React.FC<{
     })
   }, [visibleFiles])
 
-  // Pipeline reativo: gera diff com debounce de 200ms ao mudar seleção
-  useEffect(() => {
-    if (!activeProject) return
-    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
-
-    if (selectedFiles.size === 0) {
-      const name = modifiedFiles.length > 0 ? `\`${activeProject.name}\`` : ''
-      setDiffMarkdown(
-        `# Nenhum arquivo selecionado\n\n${name ? `*Nenhuma alteração de ${name} será incluída.*` : ''}`
-      )
-      return
-    }
-
-    const thisRequestId = ++requestIdRef.current
-    debounceTimerRef.current = setTimeout(async () => {
+  // ── Geração de diff sob demanda ──────────────────────────────────────────
+  const handleOpenPreview = useCallback(async () => {
+    if (!activeProject || selectedFiles.size === 0) return
+    setIsGeneratingPreview(true)
+    try {
       const selectedArray = Array.from(selectedFiles)
       const markdown = await window.codeAwareness.generateSemanticDiff(activeProject.path, selectedArray)
-      if (thisRequestId === requestIdRef.current) {
-        setDiffMarkdown(markdown)
-      }
-    }, 200)
-
-    return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current)
-        debounceTimerRef.current = null
-      }
+      setDiffMarkdown(markdown)
+      setIsPreviewModalOpen(true)
+    } catch (error) {
+      console.error('Erro ao gerar diff:', error)
+      onStatusMessage('Erro ao gerar diff', true)
+    } finally {
+      setIsGeneratingPreview(false)
     }
-  }, [activeProject, selectedFiles, modifiedFiles.length])
+  }, [activeProject, selectedFiles, onStatusMessage])
 
   // ── Handlers de seleção ───────────────────────────────────────────────────
-  const toggleMasterCheckbox = useCallback(() => {
-    setSelectedFiles(prev => {
-      const allSelected = prev.size === visibleFiles.length
-      return allSelected ? new Set() : new Set(visibleFiles.map(f => f.relativePath))
-    })
-  }, [visibleFiles])
-
-  const toggleFileSelection = useCallback((relativePath: string) => {
-    setSelectedFiles(prev => {
-      const next = new Set(prev)
-      next.has(relativePath) ? next.delete(relativePath) : next.add(relativePath)
-      return next
-    })
+  const handleSelectionChange = useCallback((next: Set<string>) => {
+    setSelectedFiles(next)
   }, [])
 
-  const handleSelectCriticalAndHigh = useCallback(() => {
-    const targets = visibleFiles.filter(f => {
-      const level = importanceMap[f.relativePath] || 'low'
-      return level === 'critical' || level === 'high'
-    })
-    setSelectedFiles(new Set(targets.map(f => f.relativePath)))
-    onStatusMessage(`${targets.length} arquivo(s) crítico(s) e alto(s) selecionado(s)!`)
-  }, [visibleFiles, importanceMap, onStatusMessage])
+  const toggleTag = useCallback((tagId: string) => {
+    setFilterTagIds(prev =>
+      prev.includes(tagId) ? prev.filter(id => id !== tagId) : [...prev, tagId]
+    )
+  }, [])
 
   // ── Handlers de ignore ────────────────────────────────────────────────────
   const ignoreFileTemporary = useCallback(
@@ -522,140 +326,49 @@ export const CodeDiffView: React.FC<{
         next.delete(relativePath)
         return next
       })
-      const result = await window.codeAwareness.addIgnoredFile(activeProject.path, relativePath, 'temporary')
+      const result = await window.codeAwareness.addIgnoredFile(activeProject.path, relativePath)
       if (result) {
-        const repoIgnores = result.ignoredDiffFiles[activeProject.path]
-        setIgnoredFiles(repoIgnores?.temporary || [])
+        setIgnoredFiles(result.ignoredDiffFiles[activeProject.path] || [])
         onStatusMessage('Arquivo ocultado!')
       }
     },
     [activeProject, onStatusMessage]
   )
 
-  const ignoreExtensionPersistent = useCallback(
-    async (ext: string) => {
-      if (!activeProject) return
-      const pattern = `*${ext}`
-      setSelectedFiles(prev => {
-        const next = new Set(prev)
-        for (const path of modifiedFiles) {
-          if (path.relativePath.endsWith(ext) && !ignoredFiles.includes(path.relativePath)) {
-            next.delete(path.relativePath)
-          }
-        }
-        return next
-      })
-      const result = await window.codeAwareness.addIgnoredFile(activeProject.path, pattern, 'persistent')
-      if (result) {
-        const repoIgnores = result.ignoredDiffFiles[activeProject.path]
-        setPersistentPatterns(repoIgnores?.persistent || [])
-        onStatusMessage(`Padrão ${pattern} ignorado permanentemente!`)
-      }
-    },
-    [activeProject, modifiedFiles, ignoredFiles, onStatusMessage]
-  )
+  // ── Handlers de cópia e exportação ───────────────────────────────────────
+  const handlePromptSave = useCallback((prompt: string) => {
+    setAuditPromptTemplate(prompt)
+    localStorage.setItem('code_diff_prompt_template', prompt)
+  }, [])
 
-  const handleHideClick = useCallback(
-    (relativePath: string, e: React.MouseEvent) => {
-      e.stopPropagation()
-      const ext = relativePath.slice(relativePath.lastIndexOf('.'))
-      if (COMMON_IGNORE_EXTENSIONS.has(ext)) {
-        setIgnorePopup({ path: relativePath, ext })
+  const handleCopy = useCallback(() => {
+    const finalPrompt = `${auditPromptTemplate}\n\n${diffMarkdown}`
+    navigator.clipboard.writeText(finalPrompt)
+    setIsCopyMarkdown(true)
+    onStatusMessage('Prompt com diff copiado!')
+    setTimeout(() => setIsCopyMarkdown(false), 2000)
+  }, [auditPromptTemplate, diffMarkdown, onStatusMessage])
+
+  const handleExportDownloads = useCallback(async () => {
+    if (!activeProject || !diffMarkdown) return
+    setIsExporting(true)
+    try {
+      const fileName = `${activeProject.name}-diff.md`
+      const result = await window.codeAwareness.saveToDownloads(diffMarkdown, fileName)
+      if (result.success) {
+        onStatusMessage('Exportado para Downloads!')
       } else {
-        ignoreFileTemporary(relativePath)
+        onStatusMessage('Erro ao exportar', true)
       }
-    },
-    [ignoreFileTemporary]
-  )
-
-  const handlePopupIgnoreThis = useCallback(() => {
-    if (!ignorePopup) return
-    ignoreFileTemporary(ignorePopup.path)
-    setIgnorePopup(null)
-  }, [ignorePopup, ignoreFileTemporary])
-
-  const handlePopupIgnoreAll = useCallback(() => {
-    if (!ignorePopup) return
-    ignoreExtensionPersistent(ignorePopup.ext)
-    setIgnorePopup(null)
-  }, [ignorePopup, ignoreExtensionPersistent])
-
-  const handleSweepNoise = useCallback(async () => {
-    if (!activeProject) return
-    const noiseToIgnore = visibleFiles.filter(f => NOISE_FILES.has(f.name))
-    for (const file of noiseToIgnore) {
-      await window.codeAwareness.addIgnoredFile(activeProject.path, file.relativePath, 'temporary')
+    } catch (err) {
+      console.error('Falha ao exportar:', err)
+      onStatusMessage('Erro ao exportar', true)
+    } finally {
+      setIsExporting(false)
     }
-    setSelectedFiles(prev => {
-      const next = new Set(prev)
-      for (const file of noiseToIgnore) next.delete(file.relativePath)
-      return next
-    })
-    await loadIgnoredFiles()
-    onStatusMessage(`${noiseToIgnore.length} arquivo(s) de ruído ignorado(s)!`)
-  }, [activeProject, visibleFiles, loadIgnoredFiles, onStatusMessage])
+  }, [activeProject, diffMarkdown, onStatusMessage])
 
-  // ── Handlers de restauração ───────────────────────────────────────────────
-  const handleRestoreFile = useCallback(
-    async (relativePath: string) => {
-      if (!activeProject) return
-      const result = await window.codeAwareness.removeIgnoredFile(activeProject.path, relativePath, 'temporary')
-      if (result) {
-        const repoIgnores = result.ignoredDiffFiles[activeProject.path]
-        setIgnoredFiles(repoIgnores?.temporary || [])
-        onStatusMessage('Arquivo restaurado!')
-      }
-      setSelectedFiles(prev => new Set([...prev, relativePath]))
-    },
-    [activeProject, onStatusMessage]
-  )
-
-  const handleRestoreAll = useCallback(async () => {
-    if (!activeProject) return
-    const count = ignoredFiles.length
-    for (const path of ignoredFiles) {
-      await window.codeAwareness.removeIgnoredFile(activeProject.path, path, 'temporary')
-    }
-    await loadIgnoredFiles()
-    setSelectedFiles(prev => new Set([...prev, ...ignoredFiles]))
-    onStatusMessage(`${count} arquivo(s) restaurado(s)!`)
-  }, [activeProject, ignoredFiles, loadIgnoredFiles, onStatusMessage])
-
-  const handleRestorePersistentPattern = useCallback(
-    async (pattern: string) => {
-      if (!activeProject) return
-      const result = await window.codeAwareness.removeIgnoredFile(activeProject.path, pattern, 'persistent')
-      if (result) {
-        const repoIgnores = result.ignoredDiffFiles[activeProject.path]
-        setPersistentPatterns(repoIgnores?.persistent || [])
-        onStatusMessage('Padrão restaurado!')
-      }
-    },
-    [activeProject, onStatusMessage]
-  )
-
-  const handleRestoreAllPersistent = useCallback(async () => {
-    if (!activeProject) return
-    const count = persistentPatterns.length
-    for (const pattern of persistentPatterns) {
-      await window.codeAwareness.removeIgnoredFile(activeProject.path, pattern, 'persistent')
-    }
-    await loadIgnoredFiles()
-    onStatusMessage(`${count} padrão(ões) restaurado(s)!`)
-  }, [activeProject, persistentPatterns, loadIgnoredFiles, onStatusMessage])
-
-  const handleUpgradeToPersistent = useCallback(
-    async (relativePath: string) => {
-      if (!activeProject) return
-      await window.codeAwareness.removeIgnoredFile(activeProject.path, relativePath, 'temporary')
-      await window.codeAwareness.addIgnoredFile(activeProject.path, relativePath, 'persistent')
-      await loadIgnoredFiles()
-      onStatusMessage('Arquivo promovido para permanente!')
-    },
-    [activeProject, loadIgnoredFiles, onStatusMessage]
-  )
-
-  // ── Handlers para ActionsDropdown ─────────────────────────────────────────
+  // ── Handlers para FileGrid ────────────────────────────────────────────────
   const handleCopyPath = useCallback(
     (relativePath: string) => {
       navigator.clipboard.writeText(relativePath)
@@ -681,44 +394,6 @@ export const CodeDiffView: React.FC<{
     [activeProject, onStatusMessage]
   )
 
-  const handleHideExtension = useCallback(
-    async (ext: string) => {
-      await ignoreExtensionPersistent(`.${ext}`)
-    },
-    [ignoreExtensionPersistent]
-  )
-
-  // ── Handlers de cópia e exportação ───────────────────────────────────────
-  const handleCopySingleFileDiff = useCallback(
-    async (relativePath: string, e: React.MouseEvent) => {
-      e.stopPropagation()
-      if (!activeProject) return
-
-      let markdown = await window.codeAwareness.generateSemanticDiff(activeProject.path, [relativePath])
-
-      const fileHeaderPattern = new RegExp(
-        `^## 📄 \`${relativePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\``,
-        'm'
-      )
-      const match = markdown.match(fileHeaderPattern)
-
-      if (match && match.index !== undefined) {
-        const afterMatch = markdown.substring(match.index)
-        const nextFileMatch = afterMatch.match(/\n## 📄 /)
-        markdown =
-          nextFileMatch?.index !== undefined
-            ? afterMatch.substring(0, nextFileMatch.index).trim()
-            : afterMatch.trim()
-      }
-
-      await navigator.clipboard.writeText(markdown)
-      setCopiedFile(relativePath)
-      onStatusMessage('Diff do arquivo copiado!')
-      setTimeout(() => setCopiedFile(null), 1500)
-    },
-    [activeProject, onStatusMessage]
-  )
-
   // ── Watcher do projeto ────────────────────────────────────────────────────
   useEffect(() => {
     let isMounted = true
@@ -730,7 +405,6 @@ export const CodeDiffView: React.FC<{
           setDiffMarkdown('')
           setIsGitRepo(null)
           setIsWatching(false)
-          setSelectedFile(null)
         }
         await window.codeAwareness.stopWatcher()
         return
@@ -790,53 +464,7 @@ export const CodeDiffView: React.FC<{
     }
   }, [activeProject])
 
-  const handlePromptChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    const newVal = e.target.value
-    setAuditPromptTemplate(newVal)
-    localStorage.setItem('code_diff_prompt_template', newVal)
-  }
-
-  const handleCopy = () => {
-    const finalPrompt = `${auditPromptTemplate}\n\n${diffMarkdown}`
-    navigator.clipboard.writeText(finalPrompt)
-    setIsCopyMarkdown(true)
-    onStatusMessage('Prompt com diff copiado!')
-    setTimeout(() => setIsCopyMarkdown(false), 2000)
-  }
-
-  const handleExportDownloads = async () => {
-    if (!activeProject || !diffMarkdown) return
-    setIsExporting(true)
-    try {
-      const fileName = `${activeProject.name}-diff`
-      const result = await window.codeAwareness.saveToDownloads(diffMarkdown, fileName)
-      if (result.success) {
-        onStatusMessage('Exportado para Downloads!')
-      } else {
-        onStatusMessage('Erro ao exportar', true)
-      }
-    } catch (err) {
-      console.error('Falha ao exportar:', err)
-      onStatusMessage('Erro ao exportar', true)
-    } finally {
-      setIsExporting(false)
-    }
-  }
-
-  const handleFileClick = (relativePath: string) => {
-    setSelectedFile(relativePath)
-    setTimeout(() => {
-      const headings = document.querySelectorAll('.cdf-diff-code-rendered h2')
-      for (const heading of headings) {
-        if (heading.textContent?.includes(relativePath)) {
-          heading.scrollIntoView({ behavior: 'smooth', block: 'start' })
-          break
-        }
-      }
-    }, 50)
-  }
-
-
+  // ── Render quando não há projeto ativo ────────────────────────────────────
   if (!activeProject) {
     return (
       <div className="cdf-dropzone-wrapper">
@@ -854,330 +482,100 @@ export const CodeDiffView: React.FC<{
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="cdf-container">
-      <div className="cdf-topbar">
-        <div className="cdf-repo-info">
-          <ProjectSwitcher activeProject={activeProject} onSelectProject={onSelectProject} />
-          {isLoading && <span className="cdf-status-badge loading">carregando...</span>}
-          {!isLoading && isWatching && <span className="cdf-status-badge watching">● Monitorando</span>}
-          {!isLoading && isGitRepo === false && (
-            <span className="cdf-status-badge error">Não é um repositório Git</span>
-          )}
-        </div>
-      </div>
-
-      <div className="cdf-layout-wrapper">
-        {/* ── Sidebar ─────────────────────────────────────────────────────── */}
-        {isSidebarOpen && (
-        <aside className="cdf-sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
-          {/* Handle de resize */}
-          <div
-            className={`cdf-sidebar-resize-handle${isResizing ? ' resizing' : ''}`}
-            onMouseDown={handleResizeMouseDown}
-          />
-
-          <div className="cdf-sidebar-header">
-            <span className="cdf-sidebar-header-left">
-              {/* Toggle circular — substitui o checkbox tradicional */}
-              {visibleFiles.length > 0 && (
-                <ToggleSwitch
-                  checked={selectedFiles.size === visibleFiles.length && visibleFiles.length > 0}
-                  onChange={toggleMasterCheckbox}
-                  indeterminate={selectedFiles.size > 0 && selectedFiles.size < visibleFiles.length}
-                />
-              )}
-              <span>Arquivos alterados</span>
-            </span>
-            <span className="cdf-sidebar-header-right">
-              {/* Dropdown unificado de ações no topo da sidebar */}
-              <SidebarActions
-                classPrefix="cdf"
-                hasNoiseFiles={hasNoiseFiles}
-                onSweepNoise={handleSweepNoise}
-                hasImportanceData={Object.keys(importanceMap).length > 0}
-                onSelectCriticalAndHigh={handleSelectCriticalAndHigh}
-                isClassifying={isClassifying}
-                sortMode={sortMode}
-                onSortModeChange={handleSortModeChange}
-              />
-
-              {totalSelectedTokens > 0 && (
-                <span className="cdf-token-total" title="Total de tokens selecionados (estimativa)">
-                  ≈ {formatTokenCount(totalSelectedTokens)} tokens
-                </span>
-              )}
-              <span className="cdf-count-badge">{modifiedFiles.length}</span>
-            </span>
-          </div>
-
-          {modifiedFiles.length === 0 ? (
-            <p className="cdf-empty-state">
-              {isGitRepo === false
-                ? 'O diretório não é um repositório Git.'
-                : 'Nenhuma alteração detectada ainda.'}
-            </p>
-          ) : visibleFiles.length === 0 ? (
-            <p className="cdf-empty-state">Todos os arquivos estão ocultos.</p>
-          ) : sortMode === 'importance' ? (
-            // Modo importância: renderiza com agrupamentos por nível
-            <div className="cdf-file-list">
-              {(['critical', 'high', 'medium', 'low'] as const).map(level => {
-                const levelLabels = {
-                  critical: 'Críticos',
-                  high: 'Altos',
-                  medium: 'Médios',
-                  low: 'Baixos'
-                }
-                const levelEmojis = { critical: '🔴', high: '🟠', medium: '🟡', low: '⚪' }
-                return (
-                  <ImportanceGroup
-                    key={level}
-                    level={level}
-                    files={groupedFiles[level]}
-                    emoji={levelEmojis[level]}
-                    label={levelLabels[level]}
-                    classPrefix="cdf"
-                    selectedFiles={selectedFiles}
-                    importanceMap={importanceMap}
-                    importanceSource={importanceSource}
-                    tokenEstimates={tokenEstimates}
-                    formatTokenCount={formatTokenCount}
-                    toggleFileSelection={toggleFileSelection}
-                    handleImportanceChange={handleImportanceChange}
-                    onHideFile={ignoreFileTemporary}
-                    onHideExtension={handleHideExtension}
-                    onCopyPath={handleCopyPath}
-                    onCopyName={handleCopyName}
-                    onRevealInExplorer={handleRevealInExplorer}
-                    changeTypeMap={changeTypeMap}
-                    onFileClick={handleFileClick}
-                    selectedFile={selectedFile}
-                    onCopySingleFileDiff={handleCopySingleFileDiff}
-                    copiedFile={copiedFile}
-                  />
-                )
-              })}
-            </div>
-          ) : (
-            // Modo recência: lista plana usando ImportanceGroup sem cabeçalho
-            <div className="cdf-file-list">
-              <ImportanceGroup
-                level="low"
-                files={visibleFiles}
-                emoji=""
-                label=""
-                classPrefix="cdf"
-                selectedFiles={selectedFiles}
-                importanceMap={importanceMap}
-                importanceSource={importanceSource}
-                tokenEstimates={tokenEstimates}
-                formatTokenCount={formatTokenCount}
-                toggleFileSelection={toggleFileSelection}
-                handleImportanceChange={handleImportanceChange}
-                onHideFile={ignoreFileTemporary}
-                onHideExtension={handleHideExtension}
-                onCopyPath={handleCopyPath}
-                onCopyName={handleCopyName}
-                onRevealInExplorer={handleRevealInExplorer}
-                changeTypeMap={changeTypeMap}
-                onFileClick={handleFileClick}
-                selectedFile={selectedFile}
-                onCopySingleFileDiff={handleCopySingleFileDiff}
-                copiedFile={copiedFile}
-              />
-            </div>
-          )}
-
-          {/* Popup flutuante de ignore inteligente */}
-          {ignorePopup && (
-            <div className="cdf-ignore-popup" ref={ignorePopupRef}>
-              <div className="cdf-ignore-popup-text">
-                Ignorar <strong>{ignorePopup.path.split('/').pop()}</strong>
-              </div>
-              <div className="cdf-ignore-popup-actions">
-                <button className="cdf-ignore-popup-btn" onClick={handlePopupIgnoreThis}>
-                  Ignorar apenas este
-                </button>
+      {/* Camada 1: ViewToolbar com busca + contagem + funil de tags */}
+      <ViewToolbar
+        searchValue={searchQuery}
+        onSearchChange={setSearchQuery}
+        searchPlaceholder="Buscar por nome ou caminho..."
+        summary={<span>{summaryText}</span>}
+        filterSlot={
+          <FilterPopover activeCount={filterTagIds.length}>
+            {allTags.map(tag => {
+              const isActive = filterTagIds.includes(tag.id)
+              return (
                 <button
-                  className="cdf-ignore-popup-btn cdf-ignore-popup-btn-all"
-                  onClick={handlePopupIgnoreAll}
+                  key={tag.id}
+                  className={`am-item fp-item${isActive ? ' active' : ''}`}
+                  onClick={() => toggleTag(tag.id)}
+                  role="menuitemcheckbox"
+                  aria-checked={isActive}
+                  style={isActive ? {
+                    backgroundColor: tag.color,
+                    borderColor: tag.color,
+                    color: getContrastColor(tag.color)
+                  } : undefined}
                 >
-                  Ignorar todos os *{ignorePopup.ext}
+                  {tag.name}
                 </button>
-              </div>
-            </div>
-          )}
+              )
+            })}
+          </FilterPopover>
+        }
+      />
 
-          {/* Sanfona de arquivos ignorados (Temporários e Permanentes) */}
-          <div className="cdf-sidebar-footer">
-            {ignoredFiles.length > 0 && (
-              <details
-                className="cdf-ignored-accordion"
-                open={ignoredAccordionOpen}
-                onToggle={e => setIgnoredAccordionOpen((e.target as HTMLDetailsElement).open)}
-              >
-                <summary className="cdf-ignored-summary">
-                  <span className="cdf-ignored-title">🚫 Ignorados nesta sessão ({ignoredFiles.length})</span>
-                  <button
-                    className="cdf-pill-btn"
-                    title="Restaurar todos os arquivos ignorados nesta sessão"
-                    onClick={e => {
-                      e.stopPropagation()
-                      handleRestoreAll()
-                    }}
-                  >
-                    Restaurar Todos
-                  </button>
-                </summary>
-                <ul className="cdf-ignored-list">
-                  {ignoredFiles.map(path => {
-                    const name = path.split('/').pop() ?? path
-                    return (
-                      <li key={path} className="cdf-ignored-item">
-                        <span className="cdf-ignored-name" title={path}>
-                          {name}
-                        </span>
-                        <div style={{ display: 'flex', gap: '4px' }}>
-                          <button
-                            className="cdf-icon-btn small"
-                            title="Restaurar este arquivo"
-                            onClick={() => handleRestoreFile(path)}
-                          >
-                            <svg viewBox="0 0 24 24">
-                              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                              <path d="M3 3v5h5" />
-                            </svg>
-                          </button>
-                          <button
-                            className="cdf-icon-btn small"
-                            title="Promover para permanente"
-                            onClick={() => handleUpgradeToPersistent(path)}
-                          >
-                            <svg viewBox="0 0 24 24">
-                              <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-                              <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                            </svg>
-                          </button>
-                        </div>
-                      </li>
-                    )
-                  })}
-                </ul>
-              </details>
-            )}
-
-            {persistentPatterns.length > 0 && (
-              <details className="cdf-ignored-accordion">
-                <summary className="cdf-ignored-summary">
-                  <span className="cdf-ignored-title">
-                    🔒 Ignorados no Projeto ({persistentPatterns.length})
-                  </span>
-                  <button
-                    className="cdf-pill-btn"
-                    title="Restaurar todos os padrões persistentes"
-                    onClick={e => {
-                      e.stopPropagation()
-                      handleRestoreAllPersistent()
-                    }}
-                  >
-                    Restaurar Todos
-                  </button>
-                </summary>
-                <ul className="cdf-ignored-list">
-                  {persistentPatterns.map(pattern => (
-                    <li key={pattern} className="cdf-ignored-item">
-                      <span className="cdf-ignored-name" title={pattern}>
-                        {pattern}
-                      </span>
-                      <button
-                        className="cdf-icon-btn small"
-                        title="Restaurar este padrão"
-                        onClick={() => handleRestorePersistentPattern(pattern)}
-                      >
-                        <svg viewBox="0 0 24 24">
-                          <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
-                          <path d="M3 3v5h5" />
-                        </svg>
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            )}
-          </div>
-        </aside>
-        )}
-
-        {/* ── Painel de diff ───────────────────────────────────────────────── */}
-        {modifiedFiles.length === 0 ? (
-          <main className="cdf-diff-panel empty-state">
-            <div className="cdf-empty-hero">
-              <svg
-                viewBox="0 0 24 24"
-                style={{
-                  width: '48px',
-                  height: '48px',
-                  stroke: 'var(--text-secondary)',
-                  fill: 'none',
-                  strokeWidth: 1.5,
-                  margin: '0 auto 16px auto',
-                  display: 'block'
-                }}
-              >
-                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
-                <circle cx="12" cy="12" r="3" />
-              </svg>
-              <h3>Aguardando modificações...</h3>
-              <p>
-                A pasta ativa está sendo monitorada. Salve alterações no repositório para inspecionar
-                os blocos semânticos e realizar a auditoria.
-              </p>
-            </div>
-          </main>
-        ) : (
-          <main className="cdf-diff-panel">
-            {/* Cabeçalho do painel principal */}
-            <div className="cdf-panel-header">
-              <div className="cdf-panel-header-left">
-                <button
-                  className={`cdf-sidebar-toggle-btn ${!isSidebarOpen ? 'sidebar-closed' : ''}`}
-                  onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                  title={isSidebarOpen ? 'Ocultar barra lateral' : 'Mostrar barra lateral'}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="3" y="3" width="18" height="18" rx="2" />
-                    <line x1="9" y1="3" x2="9" y2="21" />
-                  </svg>
-                </button>
-              </div>
-
-              <div className="cdf-panel-header-right">
-                <details className="cdf-prompt-details">
-                  <summary>Instruções do Prompt</summary>
-                  <textarea
-                    className="cdf-prompt-textarea"
-                    value={auditPromptTemplate}
-                    onChange={handlePromptChange}
-                    rows={6}
-                  />
-                </details>
-
-                <button className="app-pill-btn" onClick={handleCopy}>
-                  {isCopyMarkdown ? 'Copiado!' : 'Copiar'}
-                </button>
-                <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting}>
-                  {isExporting ? 'Exportando...' : 'Exportar'}
-                </button>
-              </div>
-            </div>
-
-            <div
-              className={`cdf-diff-code-rendered${!diffMarkdown || diffMarkdown.startsWith('# Nenhum') ? ' empty-state' : ''}`}
+      {/* Camada 2: ActionBar com botões à direita */}
+      <ActionBar
+        right={
+          <>
+            <button
+              className="app-pill-btn"
+              onClick={() => setIsPromptModalOpen(true)}
             >
-              <Markdown>{diffMarkdown}</Markdown>
-            </div>
-          </main>
-        )}
-      </div>
+              Instruções do Prompt
+            </button>
+            <button
+              className="app-pill-btn"
+              onClick={handleOpenPreview}
+              disabled={selectedFiles.size === 0 || isGeneratingPreview}
+            >
+              {isGeneratingPreview ? 'Gerando...' : 'Visualizar Diff'}
+            </button>
+            <button className="app-pill-btn" onClick={handleCopy}>
+              {isCopyMarkdown ? 'Copiado!' : 'Copiar com Prompt'}
+            </button>
+            <button className="app-pill-btn" onClick={handleExportDownloads} disabled={isExporting}>
+              {isExporting ? 'Exportando...' : 'Exportar'}
+            </button>
+          </>
+        }
+      />
+
+      {/* Faixa de feedback: StatusStrip com status do watcher */}
+      <StatusStrip status={watcherStatus} />
+
+      {/* Grade de Arquivos */}
+      <FileGrid
+        files={gridFiles}
+        allTags={allTags}
+        fileTagsMap={fileTagsMap}
+        selectedFiles={selectedFiles}
+        onSelectionChange={handleSelectionChange}
+        tokenEstimates={tokenEstimates}
+        formatTokenCount={formatTokenCount}
+        onHideFile={ignoreFileTemporary}
+        onRevealInExplorer={handleRevealInExplorer}
+        onCopyPath={handleCopyPath}
+        onCopyName={handleCopyName}
+        onOpenTagManager={() => {}}
+        onTagsChanged={refreshTagsData}
+        repoPath={activeProject?.path}
+      />
+
+      {/* Modais */}
+      <PreviewModal
+        isOpen={isPreviewModalOpen}
+        onClose={() => setIsPreviewModalOpen(false)}
+        markdown={diffMarkdown}
+        title="Diff Semântico"
+        onExportDownloads={handleExportDownloads}
+        onStatusMessage={onStatusMessage}
+      />
+      <PromptEditorModal
+        isOpen={isPromptModalOpen}
+        onClose={() => setIsPromptModalOpen(false)}
+        initialPrompt={auditPromptTemplate}
+        onSave={handlePromptSave}
+      />
     </div>
   )
 }

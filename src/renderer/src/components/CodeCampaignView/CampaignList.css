@@ -1,0 +1,246 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir os estilos da listagem de campanhas.
+2. Garantir que cada card de campanha exiba bandeira (Flag), nome, status e ações.
+
+Mapa de Relacionamentos do Script
+
+1. CampaignList.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo (prefixo cl-).
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O design deve respeitar estritamente as variáveis de cores globais.
+2. Todas as classes usam prefixo cl- para evitar colisão com outras abas.
+3. Cores sólidas de status (`#fbbf24` em andamento / `#4ade80` concluída) e seus tingimentos translúcidos em `rgba()` são a exceção aceita neste arquivo — representam semântica de status fixa e o CSS puro não deriva opacidade a partir de variável; as demais cores vêm de variáveis globais. Caminho futuro opcional: `color-mix(in srgb, var(--accent) n%, transparent)`, quando a base do Electron garantir suporte.
+4. As classes de cor de status (cl-action-reopen, cl-action-complete) sobrescrevem apenas a cor do texto/ícone do Button ghost, sem usar !important.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.cl-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 16px 16px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.cl-create-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px dashed var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  width: 100%;
+  font-family: inherit;
+}
+
+.cl-create-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(120, 82, 238, 0.05);
+}
+
+.cl-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  transition: border-color 0.2s;
+}
+
+.cl-card:hover {
+  border-color: var(--accent);
+}
+
+.cl-card-active:hover {
+  border-color: rgba(251, 191, 36, 0.5);
+}
+
+.cl-card-completed:hover {
+  border-color: rgba(74, 222, 128, 0.5);
+}
+
+.cl-flag {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+}
+
+.cl-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cl-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cl-status {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cl-card-active {
+  background: rgba(251, 191, 36, 0.08);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+.cl-card-completed {
+  background: rgba(74, 222, 128, 0.08);
+  border-color: rgba(74, 222, 128, 0.35);
+}
+
+.cl-card-active .cl-flag {
+  color: #fbbf24;
+}
+
+.cl-card-completed .cl-flag {
+  color: #4ade80;
+}
+
+.cl-status-active {
+  color: #fbbf24;
+}
+
+.cl-status-completed {
+  color: #4ade80;
+}
+
+/* ─── Linha de ações do card ────────────────────────────────────────────── */
+/* gap e flex-wrap acomodam os três elementos (Contexto, Editar, Concluir/Reabrir) */
+.cl-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* ─── Cor de status do botão Concluir/Reabrir ───────────────────────────── */
+/* Sobrescreve apenas a cor do texto/ícone do Button ghost, sem !important.
+   A especificidade .cl-actions .cl-action-* empata com .app-ghost-btn:hover
+   e vence por ordem de declaração (este arquivo é importado depois do index.css
+   via o componente). O hover do ghost define background e border-color; estas
+   regras preservam a cor de status no texto. */
+.cl-actions .cl-action-reopen {
+  color: #3fb950;
+}
+
+.cl-actions .cl-action-reopen:hover {
+  color: #3fb950;
+  background: rgba(63, 185, 80, 0.1);
+  border-color: rgba(63, 185, 80, 0.3);
+}
+
+.cl-actions .cl-action-complete {
+  color: var(--text-secondary);
+}
+
+.cl-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  text-align: center;
+  padding: 40px 16px;
+}
+
+.cl-empty button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.cl-empty button:hover {
+  background: var(--accent-hover);
+  box-shadow: 0 0 12px rgba(120, 82, 238, 0.4);
+}
+
+.cl-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* ─── Busca sem resultado ───────────────────────────────────────────────── */
+/* Espelha o respiro do .cl-empty; o strong destaca o termo digitado */
+.cl-no-results {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 40px 16px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  text-align: center;
+}
+
+.cl-no-results strong {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+/* Espelha o padrão do "Limpar filtros" da timeline do Code Audit (ctl-clear-filters-btn) */
+.cl-clear-search-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cl-clear-search-btn:hover {
+  background: var(--accent);
+  color: #fff;
+}

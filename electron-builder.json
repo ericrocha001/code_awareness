@@ -1,0 +1,29 @@
+{
+  "appId": "com.ericrocha.codeawareness",
+  "productName": "Code Awareness",
+  "directories": {
+    "output": "dist"
+  },
+  "files": [
+    "out/**/*",
+    "assets/**/*",
+    "package.json"
+  ],
+  "win": {
+    "target": "nsis",
+    "icon": "assets/app-icon-1024x1024.png"
+  },
+  "mac": {
+    "icon": "assets/app-icon-1024x1024.png"
+  },
+  "linux": {
+    "icon": "assets/app-icon-1024x1024.png"
+  },
+  "nsis": {
+    "oneClick": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Code Awareness"
+  }
+}

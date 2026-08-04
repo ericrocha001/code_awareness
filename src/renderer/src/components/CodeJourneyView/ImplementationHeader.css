@@ -1,0 +1,124 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o topo fixo do drawer (ImplementationHeader) com avatar, nome e ficha de identidade.
+2. Definir a moldura única da ficha com fio entre linhas.
+
+Mapa de Relacionamentos do Script
+
+1. ImplementationHeader.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo ih- para evitar colisões.
+2. A ficha usa uma única borda/fundo — as divisórias são fios internos, não bordas separadas.
+3. O nome (ih-name) nunca quebra linha — truncar com ellipsis.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.ih-header {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 28px 24px 20px 24px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+/* ─── Identidade ─────────────────────────────────────────────────────────── */
+
+.ih-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding-right: 36px; /* espaço para o botão de fechar do drawer */
+}
+
+.ih-avatar {
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: rgba(124, 58, 237, 0.18);
+  border: 1px solid rgba(124, 58, 237, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-hover);
+  flex-shrink: 0;
+}
+
+.ih-identity-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  flex: 1;
+}
+
+.ih-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ih-name {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 1.3;
+  min-width: 0;
+  flex: 1;
+}
+
+.ih-rename-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text-secondary);
+  padding: 4px;
+  opacity: 0.5;
+  transition: opacity 0.15s ease, transform 0.1s ease, color 0.15s ease;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+}
+
+.ih-rename-btn:hover {
+  opacity: 1;
+  transform: scale(1.1);
+  color: var(--text-primary);
+}
+
+.ih-subtitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* ─── Ficha de identidade ────────────────────────────────────────────────── */
+
+.ih-card {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.ih-field-row--border-top {
+  border-top: 1px solid var(--border);
+}
+

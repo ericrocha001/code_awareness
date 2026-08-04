@@ -1,0 +1,222 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o preview do diff Markdown dentro do drawer, harmonizado com a pele do drawer (Sprint 4).
+2. Suportar dropdowns via Popover (portal) — sem posicionamento inline nos menus.
+3. Garantir tipografia de contraste no markdown e respiro generoso.
+
+Mapa de Relacionamentos do Script
+
+1. CheckpointPreview.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo cp- para evitar colisões.
+2. O design deve respeitar as variáveis CSS globais — nenhuma cor hardcoded.
+3. Os menus não têm posicionamento próprio (position/top/left/z-index) — a responsabilidade é do Popover.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+/* ─── Root ──────────────────────────────────────────────────────────────── */
+
+.cp-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  animation: cpFadeIn 0.2s ease-in;
+}
+
+@keyframes cpFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Cabeçalho harmonizado com o drawer (respiro ~24px, borda fina) ──────── */
+
+.cp-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 24px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* ─── Botão "Voltar" discreto (ícone de seta, sem borda, opaco no hover) ── */
+
+.cp-back-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.cp-back-btn:hover {
+  opacity: 1;
+  background: var(--hover-overlay);
+  color: var(--text-primary);
+}
+
+.cp-back-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  opacity: 1;
+}
+
+/* ─── Chip de tokens em destaque (pílula roxa translúcida) ────────────────── */
+
+.cp-token-count {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(124, 58, 237, 0.12);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 4px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.cp-token-label {
+  color: var(--text-secondary);
+}
+
+.cp-token-value {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+/* ─── Ações ────────────────────────────────────────────────────────────────── */
+
+.cp-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+/* ─── Conteúdo Markdown (respiro 24px, tipografia de contraste) ────────────── */
+
+.cp-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+/* Títulos com peso e contraste fortes */
+.cp-content h2 {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+  margin: 24px 0 14px 0;
+}
+
+.cp-content h2:first-child {
+  margin-top: 0;
+}
+
+.cp-content h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--accent);
+  margin: 20px 0 10px 0;
+}
+
+.cp-content h4 {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 14px 0 6px 0;
+}
+
+/* Blocos de código com fundo distinto e cantos arredondados */
+.cp-content pre {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 16px;
+  margin: 0 0 12px 0;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+.cp-content pre code {
+  font-family: inherit;
+  font-size: inherit;
+  background: none;
+  padding: 0;
+  border: none;
+}
+
+.cp-content hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 24px 0;
+}
+
+/* Corpo do texto em cinza-claro com bom espaçamento */
+.cp-content p {
+  margin: 0 0 10px 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* Código inline */
+.cp-content code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  background-color: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* Listas */
+.cp-content ul,
+.cp-content ol {
+  margin: 0 0 10px 0;
+  padding-left: 20px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.cp-content li {
+  margin: 4px 0;
+}
+
+.cp-content blockquote {
+  border-left: 3px solid var(--accent);
+  margin: 12px 0;
+  padding: 8px 16px;
+  background: rgba(124, 58, 237, 0.04);
+  border-radius: 0 6px 6px 0;
+  color: var(--text-secondary);
+  font-style: italic;
+}

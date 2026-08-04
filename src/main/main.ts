@@ -1,17 +1,77 @@
-// Responsabilidades do Script
-//
-// 1. Inicializar o ciclo de vida e a janela principal do aplicativo Electron.
-// 2. Registrar todos os manipuladores de IPC (Inter-Process Communication).
-// 3. Normalizar as variáveis de ambiente PATH para compatibilidade com CLI.
+/*
+--- ARQUITETURA DO SCRIPT ---
 
-import { app, BrowserWindow, Menu, shell } from 'electron'
-import { join } from 'path'
+Responsabilidades do Script
+
+1. Inicializar o ciclo de vida e a janela principal do aplicativo Electron.
+2. Registrar todos os manipuladores de IPC (Inter-Process Communication).
+3. Normalizar as variáveis de ambiente PATH para compatibilidade com CLI.
+4. Registrar o protocolo codeawareness:// no SO e capturar deep links em cold start e warm start, garantindo single instance.
+
+Mapa de Relacionamentos do Script
+
+1. ipc/file-handler.ts
+   - Tipo: Dependência Direta
+   - Relação: Registra manipuladores de arquivos via IPC.
+   - Criticidade: Alta
+
+2. ipc/settings-handler.ts
+   - Tipo: Dependência Direta
+   - Relação: Registra manipuladores de configurações via IPC.
+   - Criticidade: Alta
+
+3. ipc/git-handler.ts
+   - Tipo: Dependência Direta
+   - Relação: Registra manipuladores de operações Git via IPC.
+   - Criticidade: Alta
+
+4. core/workspace-service.ts
+   - Tipo: Dependência Direta
+   - Relação: Fornece serviço de workspace para manipuladores.
+   - Criticidade: Alta
+
+5. core/watcher-service.ts
+   - Tipo: Dependência Direta
+   - Relação: Monitora mudanças no sistema de arquivos.
+   - Criticidade: Alta
+
+6. utils/env-sanitizer.ts
+   - Tipo: Dependência Direta
+   - Relação: Normaliza variáveis de ambiente PATH.
+   - Criticidade: Média
+
+7. assets/app-icon-1024x1024.png
+   - Tipo: Relação de UI
+   - Relação: Ícone único e colorido da janela principal, resolvido via getWindowIconPath().
+   - Criticidade: Baixa
+
+Invariantes do Script
+
+1. A janela principal nunca deve ser instanciada mais de uma vez enquanto estiver ativa.
+2. Handlers IPC devem ser registrados antes de criar a janela principal.
+3. O serviço de watcher deve ser interrompido antes do encerramento do aplicativo.
+4. O app garante single instance via requestSingleInstanceLock e captura a URL de deep link em cold start (argv) e warm start (second-instance/open-url), sem nunca abrir uma segunda janela.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
+import { existsSync } from 'fs'
+import { join, resolve } from 'path'
 import { registerFileHandlers } from './ipc/file-handler'
 import { registerSettingsHandlers } from './ipc/settings-handler'
 import { registerGitHandlers } from './ipc/git-handler'
 import { registerCheckpointHandlers } from './ipc/checkpoint-handler'
+import { registerRestoreHandlers } from './ipc/restore-handler'
 import { registerWorkspaceHandlers } from './ipc/workspace-handler'
-import { SettingsService } from './core/settings-service'
+import { registerTagHandlers } from './ipc/tag-handler'
+import { registerDatabaseHandlers } from './ipc/database-handler'
+import { registerCampaignHandlers } from './ipc/campaign-handler'
+import { registerDevToolsHandlers } from './ipc/devtools-handler'
+import { registerDeepLinkHandlers } from './ipc/deeplink-handler'
+import { setPendingDeepLink, emitDeepLinkToRenderer } from './core/deeplink-manager'
+import { DevToolsManager } from './core/devtools-manager'
+import { settingsService } from './core/settings-service'
 import { WorkspaceService } from './core/workspace-service'
 import { sanitizeEnvironment } from './utils/env-sanitizer'
 import { WatcherService } from './core/watcher-service'
@@ -29,18 +89,68 @@ process.on('unhandledRejection', (reason) => {
 let mainWindow: BrowserWindow | null = null
 const watcherService = new WatcherService()
 
+// Single instance lock ANTES de app.whenReady() — evita race condition de duas janelas.
+// Se outra instância já está rodando, esta encerra imediatamente.
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.quit()
+} else {
+  // Warm start (Windows/Linux): a URL chega nos argv da segunda instância
+  app.on('second-instance', (_event, commandLine) => {
+    console.log('[DL][main-warm-cmdline]', JSON.stringify(commandLine))
+    const url = commandLine.find(arg => arg.startsWith('codeawareness://'))
+    console.log('[DL][main-warm-url]', JSON.stringify(url))
+    if (url && mainWindow) {
+      setPendingDeepLink(url)
+      emitDeepLinkToRenderer(mainWindow, url)
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+}
+
+// Resolve caminho de assets de forma robusta: dev usa caminho relativo,
+// produção usa resourcesPath (build empacotado) com fallback para app.getAppPath()
+const getAssetPath = (filename: string): string => {
+  const isDev = !!process.env.ELECTRON_RENDERER_URL
+  if (isDev) {
+    return join(__dirname, '../assets', filename)
+  }
+  // BUGFIX: No build de produção, __dirname resolve para dentro do asar.
+  // Usar process.resourcesPath ou app.getAppPath() garante resolução correta.
+  const basePath = process.resourcesPath ?? app.getAppPath()
+  return join(basePath, 'assets', filename)
+}
+
+// Retorna o caminho do ícone único e colorido da janela.
+// Não há mais variante por tema — usa-se sempre o ícone colorido.
+const getWindowIconPath = (): string => {
+  return getAssetPath('app-icon-1024x1024.png')
+}
+
 function createWindow(): void {
-  mainWindow = new BrowserWindow({
+  // BUGFIX: Verifica se o ícone existe antes de passá-lo ao BrowserWindow.
+  // Se estiver ausente, omite a opção icon para evitar falha na criação da janela.
+  const iconPath = getWindowIconPath()
+  const windowOptions: Electron.BrowserWindowConstructorOptions = {
     width: 1200,
     height: 800,
-    backgroundColor: '#0d1117',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#18181B' : '#F9FAFB',
     webPreferences: {
       preload: join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
     }
-  })
+  }
+
+  if (existsSync(iconPath)) {
+    windowOptions.icon = iconPath
+  } else {
+    console.warn('[Main] Ícone não encontrado em:', iconPath, '— usando ícone padrão do Electron')
+  }
+
+  mainWindow = new BrowserWindow(windowOptions)
 
   Menu.setApplicationMenu(null)
 
@@ -65,7 +175,20 @@ function createWindow(): void {
 sanitizeEnvironment()
 
 app.whenReady().then(() => {
-  const settingsService = new SettingsService()
+  // Força o Electron a seguir o tema do sistema operacional antes de criar a janela
+  nativeTheme.themeSource = 'system'
+
+  // Registra o protocolo codeawareness:// no SO — deve ser chamado no whenReady.
+  // No Windows em modo dev, o executável é o Electron e o app é o argv[1];
+  // sem esses argumentos extras o protocolo seria registrado com o caminho errado.
+  if (process.defaultApp) {
+    if (process.argv.length >= 2) {
+      app.setAsDefaultProtocolClient('codeawareness', process.execPath, [resolve(process.argv[1])])
+    }
+  } else {
+    app.setAsDefaultProtocolClient('codeawareness')
+  }
+
   const workspaceService = new WorkspaceService()
 
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
@@ -74,8 +197,39 @@ app.whenReady().then(() => {
   registerGitHandlers(watcherService, settingsService)
   registerWorkspaceHandlers(settingsService, workspaceService)
   registerCheckpointHandlers()
+  registerRestoreHandlers()
+  registerTagHandlers()
+  registerDatabaseHandlers()
+  registerCampaignHandlers()
 
   createWindow()
+
+  // Registra handler IPC e atalhos F12 / Ctrl+Shift+I para DevTools
+  registerDevToolsHandlers(mainWindow!)
+  DevToolsManager.registerShortcuts(mainWindow!)
+
+  // Warm start (Mac): a URL chega via evento open-url
+  app.on('open-url', (event, url) => {
+    event.preventDefault()
+    if (mainWindow) {
+      setPendingDeepLink(url)
+      emitDeepLinkToRenderer(mainWindow, url)
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+
+  // Cold start (Windows/Linux): a URL pode estar nos argv do processo.
+  // Não emite imediatamente — espera o renderer montar e pedir via getPendingDeepLink.
+  console.log('[DL][main-cold-argv]', JSON.stringify(process.argv))
+  const url = process.argv.find(arg => arg.startsWith('codeawareness://'))
+  console.log('[DL][main-cold-url]', JSON.stringify(url))
+  if (url && mainWindow) {
+    setPendingDeepLink(url)
+  }
+
+  // Expõe a URL pendente ao renderer via IPC deeplink:get-pending
+  registerDeepLinkHandlers()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -85,7 +239,23 @@ app.whenReady().then(() => {
 })
 
 app.on('before-quit', () => {
+  DevToolsManager.unregisterShortcuts()
   watcherService.stop()
+  // Fecha conexões de banco de dados ao encerrar o app
+  try {
+    const { closeAllDatabases } = require('./core/database-service')
+    closeAllDatabases()
+  } catch (error: any) {
+    console.error('[Main] Erro ao fechar conexões de banco:', error)
+  }
+})
+
+// Notifica o renderer quando o tema do SO muda.
+// O ícone da janela não é mais trocado por tema — usa-se sempre o ícone colorido.
+nativeTheme.on('updated', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('theme-changed', nativeTheme.shouldUseDarkColors)
+  }
 })
 
 app.on('window-all-closed', () => {

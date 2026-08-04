@@ -9,7 +9,8 @@ Responsabilidades do Script
 4. Registrar handler IPC para geração de diff semântico entre checkpoints.
 5. Registrar handler IPC para renomear checkpoints.
 6. Registrar handler IPC para obter lista de arquivos alterados entre checkpoints.
-7. Registrar handler IPC para validação de restauração (dry-run) antes da execução real.
+7. Registrar handler IPC para atualização de metadados editáveis do checkpoint.
+8. Registrar handler IPC para definir/limpar vínculos de checkpoint com campanhas (plural).
 
 Mapa de Relacionamentos do Script
 
@@ -20,7 +21,7 @@ Mapa de Relacionamentos do Script
 
 2. ../../shared/types.ts
    - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos CheckpointData, CheckpointSummary retornados pelos handlers.
+   - Relação: Fornece os tipos CheckpointData, CheckpointSummary, CheckpointDetails retornados pelos handlers.
    - Criticidade: Alta
 
 3. diff (biblioteca npm)
@@ -33,14 +34,17 @@ Invariantes do Script
 1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
 2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
 3. Toda resposta de handler deve conter o campo success.
-4. Se a restauração tiver qualquer falha parcial, o handler deve retornar success: false com flag partial: true para forçar confirmação do usuário.
+4. A restauração e a exclusão em massa são tratadas exclusivamente pelo restore-handler.
 5. toCheckpointId é obrigatório nos handlers de diff — não existe mais comparação com disco.
+6. O handler checkpoint:set-campaigns valida que campaignIds é array de strings não vazias.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
 import { ipcMain } from 'electron'
 import { CheckpointService } from '../core/checkpoint-service'
+import { insertAction } from '../core/database-service'
+import { CheckpointDetails } from '../../shared/types'
 
 const checkpointService = new CheckpointService()
 
@@ -55,26 +59,57 @@ function isValidCheckpointId(value: unknown): value is string {
   return typeof value === 'string' && /^[a-zA-Z0-9_-]+$/.test(value)
 }
 
+// Valida que, se presentes, os campos de CheckpointDetails são strings
+// Defesa em profundidade: o renderer é confiável em compilação, mas runtime pode receber valores inesperados
+function validateDetailsFields(details: unknown): string | null {
+  if (typeof details !== 'object' || details === null || Array.isArray(details)) {
+    return 'details deve ser um objeto'
+  }
+  const d = details as Record<string, unknown>
+  if (d.instructions !== undefined && typeof d.instructions !== 'string') {
+    return 'instructions deve ser uma string quando presente'
+  }
+  if (d.agentSummary !== undefined && typeof d.agentSummary !== 'string') {
+    return 'agentSummary deve ser uma string quando presente'
+  }
+  return null
+}
+
 export function registerCheckpointHandlers(): void {
   /**
    * checkpoint:create — Cria um novo checkpoint do repositório.
-   * Parâmetros: repoPath, name, strategy ('all' | 'critical-high')
+   * Parâmetros: repoPath, name, details? (CheckpointDetails opcional)
    * Retorna: { success, data?: CheckpointData, error?: string }
    */
-  ipcMain.handle('checkpoint:create', async (_event, repoPath: string, name: string, strategy: 'all' | 'critical-high') => {
+  ipcMain.handle('checkpoint:create', async (_event, repoPath: string, name: string, details?: CheckpointDetails) => {
     try {
-      // Valida parâmetros obrigatórios
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
       }
       if (!isValidPath(name)) {
         return { success: false, error: 'name é obrigatório e não pode ser vazio' }
       }
-      if (strategy !== 'all' && strategy !== 'critical-high') {
-        return { success: false, error: 'strategy deve ser "all" ou "critical-high"' }
+      if (details !== undefined) {
+        const fieldError = validateDetailsFields(details)
+        if (fieldError) {
+          return { success: false, error: fieldError }
+        }
       }
 
-      const data = await checkpointService.createCheckpoint(repoPath, name, strategy)
+      const data = await checkpointService.createCheckpoint(repoPath, name, details)
+
+      try {
+        insertAction({
+          actionType: 'checkpoint_created',
+          timestamp: Date.now(),
+          checkpointId: data.id,
+          checkpointName: name,
+          repoPath
+        })
+      } catch (err) {
+        console.error('[CheckpointHandler] Falha ao logar ação no DB:', err)
+      }
+
       return { success: true, data }
     } catch (error: any) {
       console.error('[CheckpointHandler] Erro ao criar checkpoint:', error)
@@ -137,7 +172,28 @@ export function registerCheckpointHandlers(): void {
         return { success: false, error: 'checkpointId contém caracteres inválidos' }
       }
 
+      let cpName = checkpointId
+      try {
+        const cp = await checkpointService.loadCheckpoint(repoPath, checkpointId)
+        if (cp) cpName = cp.name
+      } catch (_) {}
+
       const deleted = await checkpointService.deleteCheckpoint(repoPath, checkpointId)
+
+      if (deleted) {
+        try {
+          insertAction({
+            actionType: 'checkpoint_deleted',
+            timestamp: Date.now(),
+            checkpointId,
+            checkpointName: cpName,
+            repoPath
+          })
+        } catch (err) {
+          console.error('[CheckpointHandler] Falha ao logar ação no DB:', err)
+        }
+      }
+
       return { success: deleted }
     } catch (error: any) {
       console.error('[CheckpointHandler] Erro ao deletar checkpoint:', error)
@@ -146,74 +202,12 @@ export function registerCheckpointHandlers(): void {
   })
 
   /**
-   * checkpoint:validate-restore — Valida se uma restauração pode ser executada (dry-run).
-   * Parâmetros: repoPath, checkpointId
-   * Retorna: { success: boolean, data?: RestoreValidation, error?: string }
-   *   - data contém canRestore (arquivos que podem ser restaurados) e
-   *     cannotRestore (arquivos que falhariam, com motivo).
-   */
-  ipcMain.handle('checkpoint:validate-restore', async (_event, repoPath: string, checkpointId: string) => {
-    try {
-      if (!isValidPath(repoPath)) {
-        return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
-      }
-      if (!isValidCheckpointId(checkpointId)) {
-        return { success: false, error: 'checkpointId contém caracteres inválidos' }
-      }
-
-      const validation = await checkpointService.validateRestore(repoPath, checkpointId)
-      return { success: true, data: validation }
-    } catch (error: any) {
-      console.error('[CheckpointHandler] Erro ao validar restauração:', error)
-      return { success: false, error: error.message || 'Erro ao validar restauração' }
-    }
-  })
-
-  /**
-   * checkpoint:restore — Restaura arquivos do repositório para o estado de um checkpoint.
-   * Parâmetros: repoPath, checkpointId
-   * Retorna: { success: boolean, data?: { restored: number, failed: number, errors: string[] }, error?: string }
-   *   - Se partial for true, ocorreu restauração parcial.
-   */
-  ipcMain.handle('checkpoint:restore', async (_event, repoPath: string, checkpointId: string) => {
-    try {
-      if (!isValidPath(repoPath)) {
-        return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
-      }
-      if (!isValidCheckpointId(checkpointId)) {
-        return { success: false, error: 'checkpointId contém caracteres inválidos' }
-      }
-
-      const result = await checkpointService.restoreCheckpoint(repoPath, checkpointId)
-
-      // Se houve qualquer falha, retorna success: false para forçar confirmação do usuário.
-      // Isso evita que o usuário ache que tudo foi restaurado quando na verdade houve falhas parciais.
-      if (result.failed > 0) {
-        return {
-          success: false,
-          error: `Restauração parcial: ${result.restored} restaurado(s), ${result.failed} falha(ram)`,
-          data: result,
-          partial: true // Flag para o frontend distinguir entre falha total e parcial
-        }
-      }
-
-      // Todos os arquivos foram restaurados com sucesso
-      return { success: true, data: result }
-    } catch (error: any) {
-      console.error('[CheckpointHandler] Erro ao restaurar checkpoint:', error)
-      return { success: false, error: error.message || 'Erro ao restaurar checkpoint' }
-    }
-  })
-
-  /**
    * checkpoint:generate-diff — Gera diff semântico entre dois checkpoints.
    * Parâmetros: repoPath, fromCheckpointId, toCheckpointId (obrigatório)
    * Retorna: { success: boolean, data?: string, error?: string }
-   *   - data contém o Markdown formatado com as diferenças.
    */
   ipcMain.handle('checkpoint:generate-diff', async (_event, repoPath: string, fromCheckpointId: string, toCheckpointId: string) => {
     try {
-      // Valida parâmetros obrigatórios
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
       }
@@ -240,11 +234,9 @@ export function registerCheckpointHandlers(): void {
    * checkpoint:get-changed-files — Retorna lista de arquivos alterados entre checkpoints.
    * Parâmetros: repoPath, fromCheckpointId, toCheckpointId (obrigatório)
    * Retorna: { success: boolean, data?: CheckpointDiffFile[], error?: string }
-   *   - data contém array de arquivos com relativePath, changeType, importance e mtime.
    */
   ipcMain.handle('checkpoint:get-changed-files', async (_event, repoPath: string, fromCheckpointId: string, toCheckpointId: string) => {
     try {
-      // Valida parâmetros obrigatórios
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
       }
@@ -268,6 +260,75 @@ export function registerCheckpointHandlers(): void {
   })
 
   /**
+   * checkpoint:update-details — Atualiza metadados editáveis de um checkpoint.
+   * Parâmetros: repoPath, checkpointId, details (CheckpointDetails)
+   * Retorna: { success: boolean, error?: string }
+   */
+  ipcMain.handle('checkpoint:update-details', async (_event, repoPath: string, checkpointId: string, details: CheckpointDetails) => {
+    try {
+      if (!isValidPath(repoPath)) {
+        return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
+      }
+      if (!isValidCheckpointId(checkpointId)) {
+        return { success: false, error: 'checkpointId contém caracteres inválidos' }
+      }
+      const fieldError = validateDetailsFields(details)
+      if (fieldError) {
+        return { success: false, error: fieldError }
+      }
+
+      const success = await checkpointService.updateCheckpointMetadata(repoPath, checkpointId, {
+        instructions: details.instructions,
+        agentSummary: details.agentSummary
+      })
+
+      if (success) {
+        return { success: true }
+      } else {
+        return { success: false, error: 'Checkpoint não encontrado' }
+      }
+    } catch (error: any) {
+      console.error('[CheckpointHandler] Erro ao atualizar detalhes do checkpoint:', error)
+      return { success: false, error: error.message || 'Erro ao atualizar detalhes do checkpoint' }
+    }
+  })
+
+  /**
+   * checkpoint:set-campaigns — Define as campanhas vinculadas a um checkpoint.
+   * Parâmetros: repoPath, checkpointId, campaignIds (string[])
+   * Retorna: { success: boolean, error?: string }
+   */
+  ipcMain.handle('checkpoint:set-campaigns', async (_event, repoPath: string, checkpointId: string, campaignIds: string[]) => {
+    try {
+      if (!isValidPath(repoPath)) {
+        return { success: false, error: 'repoPath é obrigatório e não pode ser vazio' }
+      }
+      if (!isValidCheckpointId(checkpointId)) {
+        return { success: false, error: 'checkpointId contém caracteres inválidos' }
+      }
+      if (!Array.isArray(campaignIds)) {
+        return { success: false, error: 'campaignIds deve ser um array de strings não vazias' }
+      }
+      for (const id of campaignIds) {
+        if (typeof id !== 'string' || id.trim().length === 0) {
+          return { success: false, error: 'campaignIds deve ser um array de strings não vazias' }
+        }
+      }
+
+      const success = await checkpointService.setCheckpointCampaigns(repoPath, checkpointId, campaignIds)
+
+      if (success) {
+        return { success: true }
+      } else {
+        return { success: false, error: 'Checkpoint não encontrado' }
+      }
+    } catch (error: any) {
+      console.error('[CheckpointHandler] Erro ao definir vínculos de campanha:', error)
+      return { success: false, error: error.message || 'Erro ao definir vínculos de campanha' }
+    }
+  })
+
+  /**
    * checkpoint:rename — Renomeia um checkpoint existente.
    * Parâmetros: repoPath, checkpointId, newName
    * Retorna: { success: boolean, error?: string }
@@ -284,9 +345,28 @@ export function registerCheckpointHandlers(): void {
         return { success: false, error: 'O novo nome não pode estar vazio' }
       }
 
+      let oldName = checkpointId
+      try {
+        const cp = await checkpointService.loadCheckpoint(repoPath, checkpointId)
+        if (cp) oldName = cp.name
+      } catch (_) {}
+
       const success = await checkpointService.renameCheckpoint(repoPath, checkpointId, newName)
 
       if (success) {
+        try {
+          insertAction({
+            actionType: 'checkpoint_renamed',
+            timestamp: Date.now(),
+            checkpointId,
+            checkpointName: newName,
+            details: `Renomeado de ${oldName} para ${newName}`,
+            repoPath
+          })
+        } catch (err) {
+          console.error('[CheckpointHandler] Falha ao logar ação no DB:', err)
+        }
+
         return { success: true }
       } else {
         return { success: false, error: 'Checkpoint não encontrado' }
@@ -294,25 +374,6 @@ export function registerCheckpointHandlers(): void {
     } catch (error: any) {
       console.error('[CheckpointHandler] Erro ao renomear checkpoint:', error)
       return { success: false, error: error.message || 'Erro ao renomear checkpoint' }
-    }
-  })
-
-  /**
-   * checkpoint:delete-all — Deleta todos os checkpoints do repositório.
-   * Parâmetros: repoPath
-   * Retorna: { success: boolean, deletedCount: number }
-   */
-  ipcMain.handle('checkpoint:delete-all', async (_event, repoPath: string) => {
-    try {
-      if (!isValidPath(repoPath)) {
-        return { success: false, deletedCount: 0, error: 'repoPath é obrigatório e não pode ser vazio' }
-      }
-
-      const deletedCount = await checkpointService.deleteAllCheckpoints(repoPath)
-      return { success: true, deletedCount }
-    } catch (error: any) {
-      console.error('[CheckpointHandler] Erro ao deletar todos os checkpoints:', error)
-      return { success: false, deletedCount: 0, error: error.message || 'Erro ao deletar todos os checkpoints' }
     }
   })
 }

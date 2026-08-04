@@ -1,10 +1,35 @@
-// Responsabilidades do Script
-//
-// 1. Detectar e executar o Repomix CLI no sistema operacional do usuário.
-// 2. Comprimir um único arquivo do repositório via --include, retornando apenas o
-//    bloco de código comprimido limpo, sem cabeçalhos ou rodapés de boilerplate.
-// 3. Gerar o Markdown completo do repositório para o Code Source, verificando sua instalação.
-// 4. Gerar Markdown seletivo (arquivos escolhidos) com contagem de tokens.
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Detectar e executar o Repomix CLI no sistema operacional do usuário.
+2. Comprimir um único arquivo do repositório via --include, retornando apenas o bloco de código comprimido limpo.
+3. Comprimir múltiplos arquivos em uma única chamada CLI, retornando um dicionário relativePath -> conteúdo comprimido.
+4. Gerar o Markdown completo do repositório para o Code Source, verificando sua instalação.
+5. Gerar Markdown seletivo (arquivos escolhidos) com contagem de tokens.
+
+Mapa de Relacionamentos do Script
+
+1. CodeSourceService
+   - Tipo: Dependência Inversa
+   - Relação: Consome generateFullRepositoryMarkdown e generateSelectiveMarkdown.
+   - Criticidade: Alta
+
+2. CompressionService (futuro)
+   - Tipo: Dependência Inversa
+   - Relação: Consumirá compressSingleFile e compressMultipleFiles.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O método compressSingleFile nunca deve ser alterado ou removido.
+2. O parse de blocos deve corresponder exatamente ao relativePath solicitado (não substring).
+3. Quebras de linha mistas (\r\n e \n) devem ser normalizadas antes do parse.
+4. Falhas em arquivos individuais no lote nunca devem quebrar o lote inteiro.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
 
 import { spawn } from 'child_process'
 
@@ -98,6 +123,60 @@ export class RepomixAdapter {
   }
 
   /**
+   * Comprime múltiplos arquivos usando chamadas individuais paralelas.
+   *
+   * Estratégia:
+   *   1. Processa arquivos em paralelo com limite de concorrência (MAX_CONCURRENT).
+   *   2. Usa compressSingleFile para cada arquivo individualmente (confiável).
+   *   3. Usa Promise.allSettled para capturar erros individuais sem quebrar o lote.
+   *
+   * Por que não usar múltiplos --include?
+   *   O Repomix CLI não suporta de forma confiável múltiplos flags --include
+   *   quando há muitos arquivos, resultando em falhas silenciosas.
+   */
+  async compressMultipleFiles(
+    repoPath: string,
+    relativePaths: string[]
+  ): Promise<Record<string, string>> {
+    if (relativePaths.length === 0) {
+      return {}
+    }
+
+    const MAX_CONCURRENT = 5
+    const results: Record<string, string> = {}
+    const errors: string[] = []
+
+    // Processa em chunks para limitar concorrência
+    for (let i = 0; i < relativePaths.length; i += MAX_CONCURRENT) {
+      const chunk = relativePaths.slice(i, i + MAX_CONCURRENT)
+
+      const chunkResults = await Promise.allSettled(
+        chunk.map(async (relativePath) => {
+          const content = await this.compressSingleFile(repoPath, relativePath)
+          return { path: relativePath, content }
+        })
+      )
+
+      for (let j = 0; j < chunkResults.length; j++) {
+        const result = chunkResults[j]
+        const path = chunk[j]
+
+        if (result.status === 'fulfilled') {
+          results[path] = result.value.content
+        } else {
+          console.error(`Erro ao comprimir ${path}:`, result.reason)
+          errors.push(path)
+        }
+      }
+    }
+
+    // Falhas individuais são omitidas do resultado sem lançar exceção.
+    // O CompressionService (consumidor) já lida com arquivos ausentes no dicionário,
+    // adicionando-os à seção de erros sem descartar os resultados bem-sucedidos.
+    return results
+  }
+
+  /**
    * Executa o processo filho e retorna stdout como string.
    * Rejeita se o processo sair com código diferente de 0.
    */
@@ -181,4 +260,5 @@ export class RepomixAdapter {
 
     return collected.join('\n').trim()
   }
+
 }

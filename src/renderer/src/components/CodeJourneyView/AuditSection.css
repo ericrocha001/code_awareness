@@ -1,0 +1,54 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a seção de auditoria (AuditSection) com cabeçalho, volume de tokens e container de ações.
+
+Mapa de Relacionamentos do Script
+
+1. AuditSection.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo as- para evitar colisões.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.as-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.as-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.as-title {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+  letter-spacing: 0.01em;
+}
+
+.as-volume {
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+
+/* ─── Container de ações ────────────────────────────────────────────────── */
+
+.as-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

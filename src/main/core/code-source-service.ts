@@ -27,14 +27,12 @@ export class CodeSourceService {
       let markdown: string
       let tokenCount: number | undefined
 
-      const hasSelectedFiles = options?.selectedFiles && options.selectedFiles.length > 0
-
-      if (hasSelectedFiles) {
-        // Modo seletivo: gera apenas os arquivos escolhidos e obtém contagem de tokens
+      // Modo seletivo: gera apenas os arquivos escolhidos e obtém contagem de tokens
+      if (options?.selectedFiles && options.selectedFiles.length > 0) {
         const result = await this.repomix.generateSelectiveMarkdown(
           repoPath,
-          options!.selectedFiles!,
-          options?.format ?? 'markdown'
+          options.selectedFiles,
+          options.format ?? 'markdown'
         )
         markdown = result.content
         tokenCount = result.tokenCount

@@ -39,7 +39,8 @@ Invariantes do Script
 2. Métodos de listagem de arquivos não devem expor caminhos pertencentes às pastas de infraestrutura interna (como code_awareness, codefetch, .sprintdiff, code_checkpoints).
 3. Todas as chamadas aos comandos nativos do Git devem possuir um limite de tempo máximo (timeout) para evitar travamentos de processos.
 4. Em caso de erro na execução dos comandos Git, os métodos públicos devem retornar estruturas vazias ou nulas ao invés de propagar exceções para o chamador.
-5. Em caso de falha ao ler o mtime de um arquivo (statSync), o método deve usar Date.now() como fallback para garantir ordenação por recência consistente.
+5. Arquivos que não existem mais no filesystem devem ser excluídos das listagens, mesmo que ainda estejam no índice do Git.
+6. Em caso de falha ao ler o mtime de um arquivo existente (statSync), o método deve usar Date.now() como fallback para garantir ordenação por recência consistente.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -136,28 +137,42 @@ export class GitService {
         .filter(p => !isInternalPath(p))
         // Ignora arquivos já presentes no git status (ex: staged untracked via 'A')
         .filter(p => !statusPaths.has(p))
-        .map(relativePath => ({
-          relativePath,
-          name: relativePath.split('/').pop() ?? relativePath,
-          changeType: 'added' as DiffFileStatus['changeType'],
-          mtime: 0,
-          size: 0
-        }))
+        .map(relativePath => {
+          const fullPath = join(dirPath, relativePath)
+          if (!existsSync(fullPath)) {
+            console.debug(`[GitService] Arquivo deletado ignorado (untracked): ${relativePath}`)
+            return null
+          }
+          return {
+            relativePath,
+            name: relativePath.split('/').pop() ?? relativePath,
+            changeType: 'added' as DiffFileStatus['changeType'],
+            mtime: 0,
+            size: 0
+          }
+        })
+        .filter((f): f is DiffFileStatus => f !== null)
 
       // Merge e enriquecimento com mtime/size via statSync
       const allFiles = [...statusFiles, ...untrackedFiles]
       return allFiles
         .map(f => {
+          const fullPath = join(dirPath, f.relativePath)
+          if (!existsSync(fullPath)) {
+            console.debug(`[GitService] Arquivo deletado ignorado: ${f.relativePath}`)
+            return null
+          }
           try {
-            const st = statSync(join(dirPath, f.relativePath))
+            const st = statSync(fullPath)
             return { ...f, mtime: st.mtimeMs, size: st.size }
           } catch {
-            // Fallback: se não conseguir ler o mtime (arquivo deletado, permissão, etc.),
+            // Fallback: se não conseguir ler o mtime (permissão, etc.),
             // usa Date.now() para tratar como recente na ordenação por recência
             console.warn(`[GitService] Falha ao ler mtime de ${f.relativePath}, usando fallback`)
             return { ...f, mtime: Date.now(), size: 0 }
           }
         })
+        .filter((f): f is DiffFileStatus => f !== null)
         .sort((a, b) => b.mtime - a.mtime)
     } catch {
       return []
@@ -190,12 +205,20 @@ export class GitService {
         .filter(p => !pathSet.has(p))
 
       // Une as duas listas e mapeia os status para o formato DiffFileStatus
+      // Filtra arquivos que não existem mais no filesystem (deletados mas ainda no índice git)
       const allPaths = [...trackedPaths, ...untrackedPaths]
-      const files: DiffFileStatus[] = allPaths.map(relativePath => {
+      const files: DiffFileStatus[] = []
+      for (const relativePath of allPaths) {
+        const fullPath = join(dirPath, relativePath)
+        if (!existsSync(fullPath)) {
+          // Arquivo deletado do disco mas ainda presente no índice git — exclui da listagem
+          console.debug(`[GitService] Arquivo deletado ignorado: ${relativePath}`)
+          continue
+        }
         let mtime = 0
         let size = 0
         try {
-          const st = statSync(join(dirPath, relativePath))
+          const st = statSync(fullPath)
           mtime = st.mtimeMs
           size = st.size
         } catch {
@@ -203,14 +226,14 @@ export class GitService {
           console.warn(`[GitService] Falha ao ler mtime de ${relativePath}, usando fallback`)
           mtime = Date.now()
         }
-        return {
+        files.push({
           relativePath,
           name: relativePath.split('/').pop() ?? relativePath,
           changeType: 'tracked',
           mtime,
           size
-        }
-      })
+        })
+      }
 
       // Ordena por mtime descendente para priorizar arquivos alterados recentemente
       return files.sort((a, b) => b.mtime - a.mtime)

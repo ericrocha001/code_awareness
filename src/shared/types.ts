@@ -4,23 +4,17 @@
 Responsabilidades do Script
 
 1. Definir os tipos compartilhados entre o processo principal e o renderer do Electron.
-2. Declarar tipos do sistema de classificação de importância arquitetural de arquivos.
-3. Declarar os tipos do sistema de checkpoints para persistência de snapshots de código.
-4. Declarar os tipos do sistema de diff de checkpoints (CheckpointHunk, CheckpointDiffFile).
+2. Declarar os tipos do sistema de checkpoints para persistência de snapshots de código.
+3. Declarar os tipos do sistema de diff de checkpoints (CheckpointHunk, CheckpointDiffFile).
 
 Mapa de Relacionamentos do Script
 
 1. settings-service.ts
    - Tipo: Dependência Direta
-   - Relação: Consome os tipos AppSettings, RepoImportanceData e FileImportance para persistir classificações.
+   - Relação: Consome o tipo AppSettings para persistir configurações.
    - Criticidade: Alta
 
-2. importance-fingerprint.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome o tipo RepoImportanceData para estrutura de dados do fingerprint.
-   - Criticidade: Alta
-
-3. checkpoint-service.ts
+2. checkpoint-service.ts
    - Tipo: Dependência Direta
    - Relação: Consome os tipos CheckpointData, CheckpointFileEntry e CheckpointSummary para persistir checkpoints.
    - Criticidade: Alta
@@ -28,42 +22,37 @@ Mapa de Relacionamentos do Script
 Invariantes do Script
 
 1. Novos campos opcionais em AppSettings nunca devem quebrar a leitura de settings.json existentes.
-2. Todos os tipos de importância devem ser exportados para uso em outros módulos.
-3. Todos os tipos de checkpoint devem ser exportados para uso em preload.ts e vite-env.d.ts.
+2. Todos os tipos de checkpoint devem ser exportados para uso em preload.ts e vite-env.d.ts.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
+// ─── Tags Manuais ───────────────────────────────────────────────────────────
+
+export interface Tag {
+  id: string
+  name: string
+  color: string
+}
+
 // ─── Configurações do App ───────────────────────────────────────────────────
+
+export interface ProjectPreferences {
+  sidebarOpen: boolean
+}
 
 export interface AppSettings {
   rootFolders: string[]
   individualProjects: string[]
   hiddenProjects: string[]
-  // Chave = repoPath, valor = listas de arquivos ignorados no diff
-  ignoredDiffFiles: Record<string, { temporary: string[]; persistent: string[] }>
-  // Chave = fingerprint do repositório, valor = dados de classificação
-  fileImportance: Record<string, RepoImportanceData>
-}
-
-// ─── Importância Arquitetural ───────────────────────────────────────────────
-
-export type ImportanceLevel = 'critical' | 'high' | 'medium' | 'low'
-
-export type ImportanceSource = 'heuristic' | 'manual'
-
-export interface FileImportance {
-  level: ImportanceLevel
-  source: ImportanceSource
-  mtime: number
-  score?: number
-  tokenEstimate?: number // Estimativa de tokens (≈ 1 token = 4 chars)
-}
-
-export interface RepoImportanceData {
-  repoName: string
-  lastKnownPath: string
-  files: Record<string, FileImportance>
+  // Chave = repoPath, valor = lista de arquivos/padrões ignorados
+  ignoredDiffFiles: Record<string, string[]>
+  // Chave = repoPath, valor = lista de tags do projeto
+  tags: Record<string, Tag[]>
+  // Chave = repoPath, valor = mapa de relativePath para array de tagIds
+  fileTags: Record<string, Record<string, string[]>>
+  // Chave = repoPath, valor = preferências de UI por projeto
+  projectPreferences: Record<string, ProjectPreferences>
 }
 
 // ─── Projetos e Diff ────────────────────────────────────────────────────────
@@ -96,12 +85,21 @@ export interface CheckpointFileEntry {
   size: number
 }
 
+export interface CheckpointDetails {
+  instructions?: string
+  agentSummary?: string
+}
+
+export type CheckpointStatus = 'active' | 'restored' | 'reverted'
+
 export interface CheckpointData {
   id: string
   name: string
   createdAt: string
-  snapshotStrategy: 'all' | 'critical-high'
   files: Record<string, CheckpointFileEntry>
+  instructions?: string
+  agentSummary?: string
+  restoredAt?: string | null
 }
 
 export interface CheckpointSummary {
@@ -109,14 +107,97 @@ export interface CheckpointSummary {
   name: string
   createdAt: string
   fileCount: number
+  restoredAt: string | null
+  instructions?: string
+  agentSummary?: string
+  hasContent: boolean
+  campaignIds?: string[]
+}
+
+export interface CheckpointCatalogRecord {
+  id: string
+  name: string
+  createdAt: string
+  instructions: string | null
+  agentSummary: string | null
+  restoredAt: string | null
+  fileCount: number
+  hasContent: boolean
+  repoPath: string
+}
+
+// ─── Banco de Dados (Code Checkpoints) ──────────────────────────────────────
+
+export interface ActionLog {
+  id: string
+  actionType: 'checkpoint_created' | 'checkpoint_restored' | 'checkpoint_deleted' | 'checkpoint_renamed' | 'all_checkpoints_deleted' | 'checkpoint_marked_restored' | 'checkpoint_cleanup' | 'checkpoint_unmarked'
+  timestamp: number
+  checkpointId?: string
+  checkpointName?: string
+  details?: string
+  repoPath: string
+}
+
+export interface SprintData {
+  id: string
+  name: string
+  objective: string
+  instructions: string
+  createdAt: number
+  updatedAt: number
+  status: 'planned' | 'in_progress' | 'completed' | 'archived'
+  repoPath: string
+}
+
+// ─── Restauração ──────────────────────────────────────────────────────────
+
+export interface OrphanFile {
+  relativePath: string
+  originCheckpointId: string
+  originCheckpointName: string
+}
+
+export interface RestorePreviewResult {
+  canRestore: string[]
+  cannotRestore: Array<{ path: string; reason: string }>
+  orphanFiles: OrphanFile[]
+  currentRestorePoint: { id: string; name: string } | null
+}
+
+export interface RestoreExecuteOptions {
+  createSafety: boolean
+  cleanupFiles: string[]
+}
+
+export interface CleanupResult {
+  removed: number
+  errors: string[]
+}
+
+export interface RestoreExecuteResult {
+  restored: number
+  failed: number
+  errors: string[]
+  partial: boolean
+  safetyBackupId?: string
+  cleanup?: CleanupResult
+}
+
+// ─── Code Campaign ────────────────────────────────────────────────────────────
+
+export type CampaignStatus = 'active' | 'completed'
+
+export interface Campaign {
+  id: string
+  slug: string
+  name: string
+  description: string
+  status: CampaignStatus
+  createdAt: string
+  updatedAt: string
 }
 
 // ─── Checkpoint Diff ──────────────────────────────────────────────────────
-
-export interface RestoreValidation {
-  canRestore: string[]
-  cannotRestore: Array<{ path: string; reason: string }>
-}
 
 export interface CheckpointHunk {
   oldStart: number    // Linha inicial no conteúdo antigo (1-indexed)
@@ -133,6 +214,5 @@ export interface CheckpointDiffFile {
   hunks: CheckpointHunk[]
   oldContent?: string  // Presente apenas para 'deleted'
   newContent?: string  // Presente apenas para 'added'
-  importance?: 'critical' | 'high' | 'medium' | 'low'  // Nível de importância arquitetural
   mtime?: number  // Timestamp de modificação para ordenação
 }

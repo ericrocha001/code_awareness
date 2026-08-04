@@ -69,8 +69,10 @@
   background: rgba(255, 255, 255, 0.06);
 }
 
-.action-emoji {
-  font-size: 14px;
+.action-icon {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
 }
 
 .actions-dropdown-menu button:not(:last-child) {

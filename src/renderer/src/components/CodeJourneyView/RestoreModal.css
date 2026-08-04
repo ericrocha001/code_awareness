@@ -1,0 +1,322 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir estilos específicos do modal de restauração (prefixo rm-).
+2. Respeitar as variáveis CSS globais do tema.
+
+Mapa de Relacionamentos do Script
+
+1. RestoreModal.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS com prefixo rm-.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Nenhuma classe deve conflitar com as classes existentes (.cc-modal-overlay, .cc-modal-content, etc).
+2. O overlay e estrutura do modal reutilizam as classes existentes — não duplicar esses estilos.
+3. O prefixo rm- garante isolamento semântico.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+/* ─── Modal de restauração — largura maior para conteúdo educativo ──────── */
+
+.rm-modal {
+  width: 560px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  padding: 24px;
+  overflow: hidden;
+}
+
+.rm-target-name {
+  margin: 4px 0 12px 0;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.rm-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.rm-footer {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-top: 8px;
+}
+
+/* ─── Bloco educativo ───────────────────────────────────────────────────── */
+
+.rm-explanation {
+  display: flex;
+  gap: 12px;
+  background: var(--hover-overlay);
+  border-left: 3px solid var(--accent);
+  border-radius: 6px;
+  padding: 12px 14px;
+}
+
+.rm-explanation-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+.rm-explanation-text {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rm-explanation-text p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+.rm-explanation-text strong {
+  color: var(--text-primary);
+}
+
+/* ─── Dry-run ────────────────────────────────────────────────────────────── */
+
+.rm-dry-run {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rm-dry-run-stat {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.rm-dry-run-stat.success {
+  background: rgba(68, 207, 110, 0.1);
+  border: 1px solid rgba(68, 207, 110, 0.3);
+  color: var(--color-green);
+}
+
+.rm-dry-run-stat.error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--color-danger);
+}
+
+.rm-dry-run-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* ─── Não restauráveis ──────────────────────────────────────────────────── */
+
+.rm-cannot-restore {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.rm-cannot-restore-list {
+  margin: 0;
+  padding-left: 20px;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rm-cannot-restore-list li {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  padding: 3px 8px;
+  background: rgba(239, 68, 68, 0.04);
+  border-radius: 4px;
+}
+
+.rm-cannot-restore-list code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--color-danger);
+}
+
+/* ─── Checkpoints revertidos ────────────────────────────────────────────── */
+
+.rm-reverted-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rm-reverted-section > strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.rm-reverted-desc {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.rm-reverted-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.rm-reverted-list li {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* ─── Checkbox row ──────────────────────────────────────────────────────── */
+
+.rm-checkbox-row {
+  display: flex;
+  align-items: flex-start;
+  padding: 0;
+}
+
+.rm-checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+  width: 100%;
+}
+
+.rm-checkbox-label input[type="checkbox"] {
+  margin-top: 2px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.rm-checkbox-label input[type="checkbox"]:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rm-checkbox-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.rm-checkbox-title {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+.rm-checkbox-hint {
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+/* ─── Seção de remanescentes ────────────────────────────────────────────── */
+
+.rm-orphan-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+
+.rm-orphan-section > strong {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+.rm-orphan-list {
+  max-height: 140px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  background: var(--hover-overlay);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.rm-orphan-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 3px 4px;
+  border-radius: 3px;
+}
+
+.rm-orphan-item:hover {
+  background: var(--hover-overlay);
+}
+
+.rm-orphan-item code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.rm-orphan-origin {
+  font-size: 10px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+/* ─── Scrollbar da lista de remanescentes ──────────────────────────────── */
+
+.rm-orphan-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.rm-orphan-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.rm-orphan-list::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+/* ─── Scrollbar do body do modal ────────────────────────────────────────── */
+
+.rm-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.rm-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.rm-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}

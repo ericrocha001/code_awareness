@@ -1,41 +1,20 @@
-.app-container {
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 30px 20px;
-  box-sizing: border-box;
-}
-
-.app-header {
+.app-layout {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 20px;
-  width: 100%;
-  box-sizing: border-box;
-  margin-bottom: 32px;
+  min-height: 100vh;
 }
 
-.logo-section {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+.app-layout.sidebar-open .app-main {
+  margin-left: 280px;
 }
 
-.logo-icon {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--accent);
-}
-
-.app-title {
-  font-size: 28px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0;
-  letter-spacing: -0.5px;
+.app-layout.sidebar-closed .app-main {
+  margin-left: 64px;
 }
 
 .app-main {
+  flex: 1;
+  padding: 30px 20px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
 }
@@ -87,7 +66,7 @@
 }
 
 .status-toast.error {
-  background-color: #1a0f0f;
+  background-color: var(--bg-primary);
   color: #f85149;
   border: 1px solid #f85149;
 }
@@ -106,7 +85,7 @@
 /* Tabs System - Pill Shape */
 .tabs-container {
   display: inline-flex;
-  background-color: #161616;
+  background-color: var(--bg-secondary);
   border-radius: 9999px;
   padding: 4px;
   border: 1px solid var(--border);
@@ -130,7 +109,7 @@
 
 .tab-btn:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--hover-overlay);
 }
 
 .tab-btn.active {

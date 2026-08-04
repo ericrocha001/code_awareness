@@ -1,0 +1,64 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o componente SearchBox com prefixo sb-.
+2. Garantir aparência visual consistente com o design system global.
+
+Mapa de Relacionamentos do Script
+
+1. SearchBox.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo sb- para evitar colisões com outros componentes.
+2. O design deve respeitar as variáveis CSS globais (--bg-primary, --bg-secondary, --border, --accent).
+3. Nenhuma cor hardcoded — apenas variáveis CSS.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.sb-root {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  transition: border-color 0.15s ease;
+  flex: 1;
+  max-width: 320px;
+}
+
+.sb-root:focus-within {
+  border-color: var(--accent);
+}
+
+.sb-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+.sb-input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  min-width: 0;
+}
+
+.sb-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}

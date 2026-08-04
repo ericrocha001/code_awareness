@@ -1,0 +1,176 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o modal de nome personalizado para exportação com prefixo enm-.
+2. Espelhar o padrão dos modais existentes: overlay escurecido, painel centralizado, cabeçalho, corpo, rodapé.
+
+Mapa de Relacionamentos do Script
+
+1. ExportNameModal.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo enm- para evitar colisões com outros componentes.
+2. Nenhuma cor hardcoded — apenas variáveis CSS globais.
+3. O overlay usa position: fixed para cobrir a tela inteira.
+4. Os botões de ação do rodapé usam o design system global de pílula (app-pill-btn para o secundário, app-pill-btn primary para o primário); o botão de fechar do cabeçalho e os botões de formato NÃO são pílula.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.enm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.enm-modal {
+  width: 100%;
+  max-width: 480px;
+  background: var(--bg-secondary);
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: enmFadeIn 0.2s ease-out;
+}
+
+@keyframes enmFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.enm-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.enm-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.enm-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.enm-close:hover {
+  background: var(--hover-overlay);
+  color: var(--text-primary);
+}
+
+.enm-body {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.enm-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.enm-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.enm-input {
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.enm-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(120, 82, 238, 0.15);
+}
+
+.enm-formats {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.enm-format-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.enm-format-option:hover {
+  background: var(--hover-overlay);
+}
+
+.enm-format-option.active {
+  border-color: var(--accent);
+  background: rgba(120, 82, 238, 0.1);
+  color: var(--accent);
+}
+
+.enm-format-fixed {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding: 8px 0;
+}
+
+.enm-footer {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+}

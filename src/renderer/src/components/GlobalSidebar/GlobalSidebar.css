@@ -1,0 +1,212 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir o layout visual da GlobalSidebar e comportamentos relacionados.
+
+Mapa de Relacionamentos do Script
+
+1. GlobalSidebar.tsx
+   - Tipo: Relação de UI
+   - Relação: Usa essas classes para renderizar a sidebar.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. A largura alterna entre 280px e 64px com transição suave.
+2. A sidebar não deve sobrepor indevidamente o conteúdo principal.
+3. Os tokens de tema locais devem ser respeitados mantendo legibilidade.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+:root {
+  --sidebar-width-open: 280px;
+  --sidebar-width-closed: 64px;
+}
+
+.global-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 100vh;
+  width: var(--sidebar-width-open);
+  background: var(--bg-secondary);
+  border-right: 1px solid var(--border);
+  z-index: 1000;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 24px rgba(0, 0, 0, var(--shadow-opacity));
+  transition: width 0.3s ease;
+}
+
+.global-sidebar.sidebar-closed {
+  width: var(--sidebar-width-closed);
+}
+
+/* Header / Logo */
+.global-sidebar-header {
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.global-sidebar-logo-title-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.global-sidebar-logo-img {
+  flex-shrink: 0;
+  border-radius: 6px;
+  width: 200px;
+  height: 200px;
+  transition: width 0.3s ease, height 0.3s ease;
+}
+
+.sidebar-closed .global-sidebar-logo-img {
+  width: 28px;
+  height: 28px;
+}
+
+.global-sidebar-logo-title {
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Projeto / Dropdown */
+.global-sidebar-project {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* Navegação */
+.global-sidebar-nav {
+  padding: 12px;
+  flex: 1;
+  min-height: 0;
+}
+
+.global-sidebar-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.global-sidebar-nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.global-sidebar-nav-item:hover {
+  background: var(--hover-overlay);
+  color: var(--text-primary);
+}
+
+.global-sidebar-nav-item.active {
+  background: rgba(120, 82, 238, 0.12);
+  color: var(--text-primary);
+  border: 1px solid rgba(120, 82, 238, 0.25);
+}
+
+.global-sidebar-nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+
+.global-sidebar-nav-label {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Footer */
+.global-sidebar-footer {
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.global-sidebar-footer-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.global-sidebar-footer-btn:hover {
+  background: var(--hover-overlay);
+  color: var(--text-primary);
+}
+
+/* Botão de alternância de tema — destaque sutil no hover */
+.global-sidebar-theme-btn:hover {
+  color: var(--accent);
+  background: rgba(120, 82, 238, 0.1);
+}
+
+/* Botão de DevTools — mesmo padrão visual do botão de tema */
+.global-sidebar-devtools-btn:hover {
+  color: var(--accent);
+  background: rgba(120, 82, 238, 0.1);
+}
+
+/* Quando colapsada, centralizar ícones */
+.sidebar-closed .global-sidebar-logo-title,
+.sidebar-closed .global-sidebar-nav-label {
+  display: none;
+}
+
+.sidebar-closed .global-sidebar-nav-item,
+.sidebar-closed .global-sidebar-footer-btn {
+  justify-content: center;
+  padding: 10px;
+}
+
+.sidebar-closed .global-sidebar-project {
+  display: none;
+}
+
+/* Responsividade básica */
+@media (max-width: 768px) {
+  .global-sidebar {
+    width: var(--sidebar-width-open);
+  }
+
+  .global-sidebar.sidebar-closed {
+    width: var(--sidebar-width-closed);
+  }
+}

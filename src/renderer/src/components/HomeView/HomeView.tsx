@@ -5,6 +5,7 @@
 // 3. Renderizar a grade de projetos retornados do backend e permitir a seleção do projeto ativo.
 
 import React, { useState, useEffect, useRef } from 'react'
+import { Upload, FolderOpen, Package, Folder, X, Check, Plus } from 'lucide-react'
 import { ProjectInfo } from '../../../../shared/types'
 import { DocumentPropagator } from '../DocumentPropagator/DocumentPropagator'
 import './HomeView.css'
@@ -80,19 +81,19 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
             className="app-pill-btn" 
             onClick={() => setIsMenuOpen(!isMenuOpen)}
           >
-            <span className="home-add-icon">+</span> Adicionar
+            <Plus size={16} strokeWidth={2} /> Adicionar
           </button>
           
           {isMenuOpen && (
             <div className="home-dropdown-menu">
               <button onClick={() => { setIsMenuOpen(false); setIsPropagatorOpen(true) }}>
-                <span>📤</span> Propagar Documento
+                <Upload size={14} strokeWidth={2} /> Propagar Documento
               </button>
               <button onClick={handleAddRootFolder}>
-                <span>📁</span> Importar Pasta Raiz (Múltiplos)
+                <FolderOpen size={14} strokeWidth={2} /> Importar Pasta Raiz (Múltiplos)
               </button>
               <button onClick={handleAddIndividualProject}>
-                <span>📦</span> Importar Projeto Avulso
+                <Package size={14} strokeWidth={2} /> Importar Projeto Avulso
               </button>
             </div>
           )}
@@ -101,7 +102,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
 
       {projects.length === 0 ? (
         <div className="home-empty-state">
-          <div className="home-empty-icon">📂</div>
+          <div className="home-empty-icon"><Folder size={48} strokeWidth={1.5} /></div>
           <h3>Nenhum projeto cadastrado ainda</h3>
           <p>Clique no botão <strong>+ Adicionar</strong> acima para carregar seus diretórios e começar.</p>
         </div>
@@ -118,7 +119,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
                 <div className="project-card-header">
                   <div className="project-card-title-row">
                     <h4 className="project-card-title">{proj.name}</h4>
-                    {isActive && <span className="project-card-selected">✓ Selecionado</span>}
+                    {isActive && <span className="project-card-selected"><Check size={12} strokeWidth={3} /> Selecionado</span>}
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                     {proj.isGit && <span className="project-card-badge git">Git</span>}
@@ -130,7 +131,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectProje
                         setProjectToHide(proj)
                       }}
                     >
-                      ✕
+                      <X size={14} strokeWidth={2} />
                     </button>
                   </div>
                 </div>

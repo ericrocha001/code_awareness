@@ -1,0 +1,89 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o card de arquivo (DrawerFileCard) com cantos arredondados, fundo elevado e hover.
+2. Definir variantes de cor do badge por tipo de mudança (added, modified, deleted).
+
+Mapa de Relacionamentos do Script
+
+1. DrawerFileCard.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo dfc- para evitar colisões.
+2. O hover acende o card — transição suave é obrigatória.
+3. O caminho (.dfc-path) deve sempre truncar com ellipsis, nunca quebrar.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.dfc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  transition: background 0.15s ease, border-color 0.15s ease;
+  cursor: default;
+}
+
+.dfc-card:hover {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.dfc-top-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.dfc-badge {
+  font-size: 10px;
+  font-weight: 700;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  flex-shrink: 0;
+  letter-spacing: 0;
+}
+
+.dfc-badge--added    { background: rgba(74, 222, 128, 0.15); color: #4ade80; }
+.dfc-badge--modified { background: rgba(251, 191, 36, 0.15);  color: #fbbf24; }
+.dfc-badge--deleted  { background: rgba(248, 113, 113, 0.15); color: #f87171; }
+
+.dfc-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.dfc-toggle {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.dfc-path {
+  font-size: 11px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-left: 26px; /* alinha ao nome, descontando badge */
+  opacity: 0.75;
+}

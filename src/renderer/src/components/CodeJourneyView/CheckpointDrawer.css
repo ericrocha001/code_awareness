@@ -1,0 +1,187 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o painel drawer lateral (cd-panel) com animação de entrada/saída via translateX.
+2. Estilizar o overlay escurecido com backdrop-filter blur.
+3. Estilizar o miolo rolável (cd-body) com respiro generoso e vão entre seções.
+4. Estilizar o input de nome do modo criação (cd-create-input) com a mesma pele do ds-textarea.
+5. Estilizar as ações do modo criação (cd-create-actions) como wrapper flex-end.
+
+Mapa de Relacionamentos do Script
+
+1. CheckpointDrawer.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes do painel/overlay usam o prefixo cd- para evitar colisões.
+2. O z-index do drawer deve ser superior ao overlay (500 > 400).
+3. O topo fixo (ImplementationHeader) nunca rola — apenas o cd-body rola.
+4. O cd-create-input replica os valores do ds-textarea, mas sem resize nem min-height (é input).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+/* ─── Overlay escurecido ────────────────────────────────────────────────── */
+
+.cd-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0);
+  backdrop-filter: blur(0px);
+  z-index: 400;
+  pointer-events: none;
+  transition: background 0.3s ease, backdrop-filter 0.3s ease;
+}
+
+.cd-overlay.visible {
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(2px);
+  pointer-events: all;
+}
+
+/* ─── Painel deslizante ─────────────────────────────────────────────────── */
+
+.cd-panel {
+  position: fixed;
+  top: 0;
+  right: 0;
+  height: 100%;
+  width: 600px;
+  max-width: 90vw;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border);
+  border-radius: 16px 0 0 16px;
+  box-shadow: -4px 0 32px rgba(0, 0, 0, 0.2);
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+
+  /* INVARIANT: fechado por padrão — translateX(100%) fora da tela */
+  transform: translateX(100%);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  will-change: transform;
+}
+
+.cd-panel.open {
+  transform: translateX(0);
+}
+
+/* ─── Botão de fechar ───────────────────────────────────────────────────── */
+
+.cd-close-btn {
+  position: absolute;
+  top: 14px;
+  right: 16px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+  z-index: 10;
+}
+
+.cd-close-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+/* ─── Miolo rolável ─────────────────────────────────────────────────────── */
+
+.cd-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 24px 40px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  animation: cdFadeIn 0.2s ease-in;
+}
+
+@keyframes cdFadeIn {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Divisória suave entre seções ─────────────────────────────────────── */
+
+.cd-section-divider {
+  height: 1px;
+  background: var(--border);
+  opacity: 0.5;
+  margin: 0 -2px; /* sangra levemente para dar sensação de linha corrida */
+}
+
+/* ─── Estado vazio ──────────────────────────────────────────────────────── */
+
+.cd-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* ─── Aviso de arquivamento ──────────────────────────────────────────────── */
+
+.cd-archived-notice {
+  padding: 10px 14px;
+  background: var(--hover-overlay);
+  border-left: 3px solid var(--text-secondary);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* ─── Input de nome do modo criação ──────────────────────────────────────── */
+/* Replica os valores do ds-textarea, mas sem resize nem min-height (é input) */
+
+.cd-create-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+  line-height: 1.6;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.cd-create-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(124, 58, 237, 0.12);
+}
+
+.cd-create-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.55;
+}
+
+/* ─── Ações do modo criação (rodapé dos botões) ─────────────────────────── */
+
+.cd-create-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}

@@ -1,0 +1,45 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a faixa horizontal da ActionBar com prefixo ab-.
+2. Organizar encaixe esquerdo e direito com space-between.
+
+Mapa de Relacionamentos do Script
+
+1. ActionBar.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo ab- para evitar colisões com outros componentes.
+2. O design é apenas layout — sem fundo, sem borda.
+3. O container usa flex-shrink: 0 e margin-bottom: 16px para consistência vertical.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.ab-root {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  margin-bottom: 16px;
+}
+
+.ab-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ab-right {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}

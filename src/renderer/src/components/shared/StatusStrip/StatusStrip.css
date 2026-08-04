@@ -1,0 +1,69 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o componente StatusStrip com prefixo ss-.
+2. Garantir aparência visual consistente com o design system global.
+
+Mapa de Relacionamentos do Script
+
+1. StatusStrip.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo ss- para evitar colisões com outros componentes.
+2. O design deve respeitar as variáveis CSS globais (--bg-primary, --bg-secondary, --border, --accent).
+3. Nenhuma cor hardcoded — apenas variáveis CSS ou cores específicas de status.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.ss-root {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+
+.ss-watching {
+  color: #4ade80;
+  background: rgba(74, 222, 128, 0.08);
+  border: 1px solid rgba(74, 222, 128, 0.2);
+}
+
+.ss-error {
+  color: #f87171;
+  background: rgba(248, 113, 113, 0.08);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+}
+
+.ss-not-git {
+  color: var(--text-secondary);
+  background: rgba(161, 161, 170, 0.08);
+  border: 1px solid var(--border);
+}
+
+.ss-loading {
+  color: var(--text-secondary);
+  background: rgba(161, 161, 170, 0.08);
+  border: 1px solid var(--border);
+  animation: ssPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes ssPulse {
+  0%, 100% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+}
