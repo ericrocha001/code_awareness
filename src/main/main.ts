@@ -7,6 +7,8 @@ Responsabilidades do Script
 2. Registrar todos os manipuladores de IPC (Inter-Process Communication).
 3. Normalizar as variáveis de ambiente PATH para compatibilidade com CLI.
 4. Registrar o protocolo codeawareness:// no SO e capturar deep links em cold start e warm start, garantindo single instance.
+5. Compor a injeção de dependência no bootstrap como único Composition Root: instancia BetterSqlite3DatabaseAdapter, CheckpointService, CampaignService, RestoreService e CompressionService, injetando as dependências prontas nos handlers IPC.
+6. Aplicar guarda defensiva com log de warning em desenvolvimento no ContentIdentityProvider, antes de chamadas ao codeMapService não inicializado.
 
 Mapa de Relacionamentos do Script
 
@@ -22,7 +24,7 @@ Mapa de Relacionamentos do Script
 
 3. ipc/git-handler.ts
    - Tipo: Dependência Direta
-   - Relação: Registra manipuladores de operações Git via IPC.
+   - Relação: Registra manipuladores de operações Git via IPC; recebe a instância do CompressionService por parâmetro.
    - Criticidade: Alta
 
 4. core/workspace-service.ts
@@ -45,12 +47,28 @@ Mapa de Relacionamentos do Script
    - Relação: Ícone único e colorido da janela principal, resolvido via getWindowIconPath().
    - Criticidade: Baixa
 
+8. core/compression-service.ts
+   - Tipo: Dependência Direta
+   - Relação: Instancia um único CompressionService, injetado na porta CompressionPort do CodeMapService (com ContentIdentityPort composta) e repassado ao git-handler.
+   - Criticidade: Alta
+
+9. core/content-identity-port.ts
+   - Tipo: Contrato / Interface
+   - Relação: Implementa a porta delegando ao CodeMapService.getFileContentHash para reuso de hashes SHA-256.
+   - Criticidade: Alta
+
+10. core/better-sqlite3-database-adapter.ts
+    - Tipo: Dependência Direta
+    - Relação: Instancia o adaptador SQLite e injeta como porta de persistência nos serviços e handlers.
+    - Criticidade: Alta
+
 Invariantes do Script
 
 1. A janela principal nunca deve ser instanciada mais de uma vez enquanto estiver ativa.
 2. Handlers IPC devem ser registrados antes de criar a janela principal.
 3. O serviço de watcher deve ser interrompido antes do encerramento do aplicativo.
 4. O app garante single instance via requestSingleInstanceLock e captura a URL de deep link em cold start (argv) e warm start (second-instance/open-url), sem nunca abrir uma segunda janela.
+5. main.ts é o único Composition Root do app — instancia adaptadores e serviços e injeta-os nos handlers.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -75,6 +93,14 @@ import { settingsService } from './core/settings-service'
 import { WorkspaceService } from './core/workspace-service'
 import { sanitizeEnvironment } from './utils/env-sanitizer'
 import { WatcherService } from './core/watcher-service'
+import { getCodeMapService, closeCodeMapService, type CodeMapService } from './core/code-map-service'
+import { CompressionService } from './core/compression-service'
+import type { ContentIdentityPort } from './core/content-identity-port'
+import { registerCodeMapHandlers } from './ipc/code-map-handler'
+import { BetterSqlite3DatabaseAdapter } from './core/better-sqlite3-database-adapter'
+import { CheckpointService } from './core/checkpoint-service'
+import { CampaignService } from './core/campaign-service'
+import { RestoreService } from './core/restore-service'
 
 // Handlers globais de crash para evitar quedas silenciosas
 process.on('uncaughtException', (error) => {
@@ -87,6 +113,7 @@ process.on('unhandledRejection', (reason) => {
 })
 
 let mainWindow: BrowserWindow | null = null
+let dbAdapter: BetterSqlite3DatabaseAdapter | null = null
 const watcherService = new WatcherService()
 
 // Single instance lock ANTES de app.whenReady() — evita race condition de duas janelas.
@@ -191,16 +218,46 @@ app.whenReady().then(() => {
 
   const workspaceService = new WorkspaceService()
 
+  // Composição de dependências (bootstrap): o CodeMapService depende apenas das portas
+  // CompressionPort/ContentIdentityPort. A implementação concreta do ContentIdentityPort
+  // consulta o CodeMapService para reusar hashes SHA-256 do RepositoryModel sem I/O
+  // redundante, e um único CompressionService concreto é injetado tanto no CodeMapService
+  // (via porta) quanto repassado ao git-handler.
+  let codeMapService: CodeMapService | null = null
+  const contentIdentityProvider: ContentIdentityPort = {
+    getContentHash: (repoPath, relativePath) => {
+      // Guarda defensiva: protege contra chamadas ao getContentHash antes do
+      // codeMapService ser atribuído (ex.: compressão disparada prematuramente).
+      if (!codeMapService) {
+        if (process.env.NODE_ENV === 'development') {
+          console.warn('[main] getContentHash chamado antes da inicialização do codeMapService')
+        }
+        return Promise.resolve(null)
+      }
+      const contentHash = codeMapService.getFileContentHash(repoPath, relativePath)
+      return Promise.resolve(contentHash)
+    }
+  }
+  const compressionService = new CompressionService(undefined, contentIdentityProvider)
+  codeMapService = getCodeMapService(watcherService, compressionService)
+
+  // Composição de persistência e serviços de domínio
+  dbAdapter = new BetterSqlite3DatabaseAdapter()
+  const checkpointService = new CheckpointService(dbAdapter)
+  const campaignService = new CampaignService(dbAdapter)
+  const restoreService = new RestoreService(checkpointService, dbAdapter)
+
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
-  registerGitHandlers(watcherService, settingsService)
+  registerGitHandlers(watcherService, settingsService, compressionService)
   registerWorkspaceHandlers(settingsService, workspaceService)
-  registerCheckpointHandlers()
-  registerRestoreHandlers()
+  registerCheckpointHandlers(checkpointService, dbAdapter)
+  registerRestoreHandlers(restoreService)
   registerTagHandlers()
-  registerDatabaseHandlers()
-  registerCampaignHandlers()
+  registerDatabaseHandlers(dbAdapter)
+  registerCampaignHandlers(campaignService)
+  registerCodeMapHandlers(codeMapService)
 
   createWindow()
 
@@ -241,10 +298,17 @@ app.whenReady().then(() => {
 app.on('before-quit', () => {
   DevToolsManager.unregisterShortcuts()
   watcherService.stop()
+  // Fecha o Code Map Service (fecha conexões de banco e watchers do Repository Model)
+  try {
+    closeCodeMapService()
+  } catch (error: any) {
+    console.error('[Main] Erro ao fechar Code Map Service:', error)
+  }
   // Fecha conexões de banco de dados ao encerrar o app
   try {
-    const { closeAllDatabases } = require('./core/database-service')
-    closeAllDatabases()
+    if (dbAdapter) {
+      dbAdapter.closeAll()
+    }
   } catch (error: any) {
     console.error('[Main] Erro ao fechar conexões de banco:', error)
   }

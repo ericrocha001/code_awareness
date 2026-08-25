@@ -46,7 +46,7 @@ Invariantes do Script
 */
 
 import { useState, useCallback, useMemo } from 'react'
-import { CheckpointSummary, RestorePreviewResult } from '../../../../../shared/types'
+import { CheckpointSummary, RestorePreviewResult, RestoreExecuteOptions } from '../../../../../shared/types'
 import { reloadCheckpoints } from '../../../../../shared/utils/reloadCheckpoints'
 import { getRevertedCheckpointNames } from '../../../utils/reverted-checkpoints'
 
@@ -122,7 +122,7 @@ export function useJourneyRestore({
    * Executa restore:execute e trata sucesso, parcial e erro.
    * Usa restoreTargetId (que pode vir da timeline via actionTargetId ou do drawer).
    */
-  const handleConfirmRestore = useCallback(async (options: { createSafety: boolean; cleanupFiles: string[] }) => {
+  const handleConfirmRestore = useCallback(async (options: RestoreExecuteOptions) => {
     if (!activeProject || !restoreTargetId) return
 
     setIsExecutingRestore(true)

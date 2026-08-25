@@ -1,0 +1,285 @@
+/* OutputModal.css — estilos do modal "Gerar Saída" (prefixo om-). */
+
+.om-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  backdrop-filter: blur(4px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.om-modal {
+  width: 50vw;
+  height: 90vh;
+  min-width: 600px;
+  min-height: 500px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  animation: omFadeIn 0.2s ease-out;
+}
+
+@keyframes omFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.om-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--border);
+}
+
+.om-header h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.om-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease;
+}
+
+.om-close:hover {
+  background: var(--hover-overlay);
+  color: var(--text-primary);
+}
+
+/* ─── Corpo: duas colunas ─────────────────────────────────────────────── */
+.om-body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 380px 1fr;
+  min-height: 0;
+}
+
+.om-config {
+  overflow-y: auto;
+  padding: 16px 20px;
+  border-right: 1px solid var(--border);
+}
+
+.om-preview {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.om-preview-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.om-preview-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.om-generating {
+  font-size: 12px;
+  color: var(--accent);
+  animation: omPulse 1.2s ease-in-out infinite;
+}
+
+@keyframes omPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.om-preview-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 20px;
+  background: var(--bg-primary);
+}
+
+.om-preview-content pre {
+  margin: 0;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── Seções de configuração ───────────────────────────────────────────── */
+.om-section {
+  margin-bottom: 20px;
+}
+
+.om-section h4 {
+  margin: 0 0 10px 0;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+
+.om-limitation-note {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin: 0 0 12px 0;
+  padding: 8px 10px;
+  background: var(--hover-overlay);
+  border-radius: 12px;
+  border-left: 3px solid var(--accent);
+}
+
+.om-format-options {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+/* Botões de formato: estilo visual herdado de .app-ghost-btn; .om-format-btn
+   apenas dimensiona (grid + padding + raio). O estado ativo é preenchido com a
+   cor de destaque e precisa vencer o hover do ghost (maior especificidade). */
+.om-format-btn {
+  padding: 8px 10px;
+  border-radius: 9999px;
+  font-size: 0.85rem;
+}
+
+.om-format-btn.active,
+.om-format-btn.active:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
+}
+
+.om-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  cursor: pointer;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  user-select: none;
+}
+
+.om-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.om-field > span {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.om-field textarea,
+.om-field input[type="text"],
+.om-field input[type="number"] {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.om-field textarea {
+  resize: vertical;
+}
+
+.om-field input:focus,
+.om-field textarea:focus {
+  border-color: var(--accent);
+}
+
+.om-filename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.om-filename-input {
+  flex: 1;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.2s ease;
+}
+
+.om-filename-input:focus {
+  border-color: var(--accent);
+}
+
+.om-filename-ext {
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+}
+
+/* ─── Rodapé ───────────────────────────────────────────────────────────── */
+.om-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+}
+
+/* ─── Responsivo ───────────────────────────────────────────────────────── */
+@media (max-width: 860px) {
+  .om-body {
+    grid-template-columns: 1fr;
+    overflow-y: auto;
+  }
+
+  .om-config {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .om-preview-content {
+    min-height: 220px;
+  }
+}

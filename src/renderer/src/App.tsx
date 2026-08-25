@@ -49,16 +49,18 @@ Invariantes do Script
 5. Deep links inválidos, de projeto não aberto ou de campanha inexistente sempre produzem erro e nunca navegam.
 6. A URL pendente é consumida exatamente uma vez (limpa após a resolução).
 7. O resolvedCampaignId é limpo após o CodeCampaignView consumir (via onResolvedCampaignConsumed), impedindo reabertura automática do painel.
+8. handleStatusMessage é estável (useCallback com dependências vazias) — nunca recriada a cada render, evitando reexecuções redundantes de effects dependentes.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { CodeDiffView } from "./components/CodeDiffView/CodeDiffView";
 import { CodeCompressionView } from "./components/CodeCompressionView/CodeCompressionView";
 import { CodeSourceView } from "./components/CodeSourceView/CodeSourceView";
 import { CodeCampaignView } from "./components/CodeCampaignView/CodeCampaignView";
 import { CodeJourneyView } from "./components/CodeJourneyView/CodeJourneyView";
+import { CodeMapView } from "./components/CodeMapView/CodeMapView";
 import { HomeView } from "./components/HomeView/HomeView";
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
 import { TagManagerModal } from "./components/TagManagerModal/TagManagerModal";
@@ -66,15 +68,14 @@ import { CodeAwarenessIgnoreModal } from "./components/CodeAwarenessIgnoreModal/
 import { useProjectPreferences } from "./hooks/useProjectPreferences";
 import { useTheme } from "./hooks/useTheme";
 import { resolveDeepLink } from "./utils/deep-link-resolver";
+import type { Tab } from "./config/navigation";
 import "./App.css";
 
 export const App: React.FC = () => {
   // Invoca o hook para aplicar data-theme no <body> imediatamente
   useTheme();
 
-  const [activeTab, setActiveTab] = useState<
-    "home" | "campaigns" | "codebase" | "compression" | "diff" | "journey"
-  >("home");
+  const [activeTab, setActiveTab] = useState<Tab>("home");
     const [activeProject, setActiveProject] = useState<{
     path: string;
     name: string;
@@ -91,14 +92,17 @@ export const App: React.FC = () => {
     useProjectPreferences(activeProject?.path ?? null);
 
   // Gerenciamento de mensagens temporárias de status
-  const handleStatusMessage = (text: string, isError = false) => {
+  // BUGFIX: useCallback com dependências vazias estabiliza a referência. Antes, a função era
+  // recriada a cada render do App, recriando loadData no CodeMapView e reexecutando o effect
+  // de troca de projeto, que limpava selectedFileId (reset duplo da seleção).
+  const handleStatusMessage = useCallback((text: string, isError = false) => {
     setStatusMessage({ text, isError });
     if (!isError) {
       setTimeout(() => {
         setStatusMessage(null);
       }, 5000);
     }
-  };
+  }, []);
 
   // Pede a URL pendente no mount (cold start) e ouve novas URLs (warm start)
   useEffect(() => {
@@ -198,6 +202,13 @@ export const App: React.FC = () => {
         )}
         {activeTab === "journey" && (
           <CodeJourneyView
+            activeProject={activeProject}
+            onSelectProject={setActiveProject}
+            onStatusMessage={handleStatusMessage}
+          />
+        )}
+        {activeTab === "code-map" && (
+          <CodeMapView
             activeProject={activeProject}
             onSelectProject={setActiveProject}
             onStatusMessage={handleStatusMessage}

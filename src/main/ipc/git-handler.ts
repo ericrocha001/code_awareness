@@ -4,7 +4,7 @@
 Responsabilidades do Script
 
 1. Registrar os handlers IPC para verificação de repositório Git e listagem de arquivos modificados.
-2. Registrar os handlers IPC para controle do ciclo de vida do WatcherService.
+2. Registrar os handlers IPC para controle do ciclo de vida das assinaturas de observação do WatcherService.
 3. Emitir eventos push ao renderer via webContents.send quando arquivos forem detectados pelo watcher.
 4. Registrar o handler IPC que dispara a geração do Semantic Diff via DiffService.
 5. Registrar handlers IPC para gerenciamento de arquivos ignorados no diff.
@@ -20,7 +20,7 @@ Mapa de Relacionamentos do Script
 
 2. watcher-service.ts
    - Tipo: Dependência Direta
-   - Relação: Registra eventos de alteração de arquivo do WatcherService.
+   - Relação: Registra assinaturas de alteração de arquivo do WatcherService por raiz.
    - Criticidade: Alta
 
 3. diff-service.ts
@@ -33,10 +33,16 @@ Mapa de Relacionamentos do Script
    - Relação: Consome SettingsService para ler/gravar configurações globais.
    - Criticidade: Alta
 
+5. compression-service.ts
+   - Tipo: Dependência Inversa
+   - Relação: Instância injetada via parâmetro no registerGitHandlers para gerar o Markdown de compressão.
+   - Criticidade: Alta
+
 Invariantes do Script
 
 1. Handlers IPC nunca devem lançar exceções não tratadas para o renderer; erros devem ser capturados e retornados de forma estruturada.
 2. Caminhos de repositório recebidos devem sempre ser validados antes de qualquer operação no disco.
+3. O encerramento do watcher via IPC (watcher:stop) desassina apenas os ouvintes registrados via IPC, sem afetar outras raízes ou serviços como o Code Map.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -48,21 +54,28 @@ import { GitService } from '../core/git-service'
 import { WatcherService } from '../core/watcher-service'
 import { DiffService } from '../core/diff-service'
 import { SettingsService } from '../core/settings-service'
-import { CompressionService } from '../core/compression-service'
+import type { CompressionService } from '../core/compression-service'
+import type { CompressionSettingsPayload } from '../../shared/types'
 import { CodeSourceService } from '../core/code-source-service'
-import { RepomixAdapter } from '../core/repomix-adapter'
+import { RepomixOutputAdapter } from '../core/repomix-output-adapter'
 
 const gitService = new GitService()
 const diffService = new DiffService()
-const compressionService = new CompressionService()
 const codeSourceService = new CodeSourceService()
-const repomixAdapter = new RepomixAdapter()
+const repomixOutputAdapter = new RepomixOutputAdapter()
+
+const watcherUnsubscribers = new Map<string, () => void>()
+
 // Valida se o path recebido via IPC é uma string não vazia
 function isValidPath(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-export function registerGitHandlers(watcherService: WatcherService, settingsService: SettingsService): void {
+export function registerGitHandlers(
+  watcherService: WatcherService,
+  settingsService: SettingsService,
+  compressionService: CompressionService
+): void {
   ipcMain.handle('git:check-repository', async (_event, dirPath: string) => {
     if (!isValidPath(dirPath)) return false
     return gitService.isGitRepository(dirPath)
@@ -76,20 +89,31 @@ export function registerGitHandlers(watcherService: WatcherService, settingsServ
   ipcMain.handle('watcher:start', async (event, dirPath: string) => {
     if (!isValidPath(dirPath)) return { success: false }
     const webContents = event.sender
-    const repoPath = dirPath
+    const normalizedPath = dirPath.replace(/\\/g, '/').replace(/\/$/, '')
 
-    // Callback de detecção de commits removido — limpeza agora é manual via botão 'Limpar Tudo' na UI
+    if (watcherUnsubscribers.has(normalizedPath)) {
+      return { success: true }
+    }
 
-    watcherService.start(dirPath, (filePath) => {
+    const unsubscribe = watcherService.subscribe(normalizedPath, (filePath) => {
       if (!webContents.isDestroyed()) {
         webContents.send('watcher:file-changed', filePath)
       }
     })
+
+    watcherUnsubscribers.set(normalizedPath, unsubscribe)
     return { success: true }
   })
 
   ipcMain.handle('watcher:stop', async () => {
-    watcherService.stop()
+    for (const unsubscribe of watcherUnsubscribers.values()) {
+      try {
+        unsubscribe()
+      } catch (err) {
+        console.error('[GitHandler] Erro ao desassinar watcher IPC:', err)
+      }
+    }
+    watcherUnsubscribers.clear()
     return { success: true }
   })
 
@@ -103,9 +127,10 @@ export function registerGitHandlers(watcherService: WatcherService, settingsServ
     return gitService.getAllFiles(dirPath)
   })
 
-  ipcMain.handle('git:generate-compression-markdown', async (_event, repoPath: string, selectedFiles: string[]) => {
+  ipcMain.handle('git:generate-compression-markdown', async (_event, repoPath: string, selectedFiles: string[], settings?: CompressionSettingsPayload) => {
     if (!isValidPath(repoPath) || !Array.isArray(selectedFiles) || selectedFiles.length === 0) return ''
-    return compressionService.generateCompressionMarkdown(repoPath, selectedFiles)
+    const { profile, outputFormat, enrichment } = settings ?? {}
+    return compressionService.generateCompressionMarkdown(repoPath, selectedFiles, profile, outputFormat, enrichment)
   })
 
   ipcMain.handle('code-source:generate', async (_event, repoPath: string, options?: {
@@ -117,7 +142,7 @@ export function registerGitHandlers(watcherService: WatcherService, settingsServ
   })
 
   ipcMain.handle('code-source:check-installation', async () => {
-    return repomixAdapter.checkInstallation()
+    return repomixOutputAdapter.checkInstallation()
   })
 
   // Adiciona um arquivo/padrão à lista de ignorados para o repositório informado

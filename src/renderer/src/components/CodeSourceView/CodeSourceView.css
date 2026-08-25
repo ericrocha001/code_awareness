@@ -5,8 +5,13 @@
 .cs-container {
   display: flex;
   flex-direction: column;
-  flex: 1;
-  height: 100%;
+  /* Sprint 5: normalização da cadeia de altura ao padrão funcional do CodeMap
+     (.cmv-container). A raiz não participa do flex-grow — a fonte da altura é o
+     height constrito ao viewport. O FileCollectionView recebe o espaço restante
+     exclusivamente via flex: 1 no filho (.fcv-container). */
+  /* Sprint (Correção): .app-main não tem mais padding — altura 100vh e a
+     scrollbar gruda na borda da janela. */
+  height: 100vh;
   overflow: hidden;
   background: none;
   position: relative;
@@ -17,9 +22,18 @@
   margin-bottom: 16px;
 }
 
-.cs-container > .file-grid {
+.cs-container > .ab-root {
+  /* Sprint 5: elemento fixo — não encolhe na cadeia flex da view. */
+  flex-shrink: 0;
+}
+
+.cs-container > .processing-status-bar {
+  /* Sprint 5: barra de progresso fixa — não encolhe na cadeia flex da view. */
+  flex-shrink: 0;
+}
+
+.cs-container > .fcv-container {
   flex: 1;
-  overflow-y: auto;
   min-height: 0;
 }
 

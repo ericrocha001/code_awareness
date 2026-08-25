@@ -5,6 +5,7 @@ Responsabilidades do Script
 
 1. Persistir e recuperar as configurações locais do aplicativo (ex: caminho do vault Obsidian).
 2. Prover instância singleton do serviço de configurações para outros módulos.
+3. Persistir e restaurar o CompressionSettings (perfil + outputFormat), aplicando o default quando o campo estiver ausente ou corrompido.
 
 Mapa de Relacionamentos do Script
 
@@ -17,6 +18,7 @@ Invariantes do Script
 
 1. A instância singleton nunca deve ser recriada após inicialização.
 2. Settings antigos sem campos novos devem ser carregados sem erro (compatibilidade retroativa).
+3. CompressionSettings ausente ou corrompido é sempre normalizado para um valor válido — nunca lança.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -24,7 +26,8 @@ Invariantes do Script
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
-import { AppSettings } from '../../shared/types'
+import { AppSettings, OutputFormat, ContextEnrichment } from '../../shared/types'
+import { DEFAULT_COMPRESSION_SETTINGS, normalizeCompressionProfile } from './compression-profile'
 
 const DEFAULT_SETTINGS = {
   rootFolders: [],
@@ -33,7 +36,8 @@ const DEFAULT_SETTINGS = {
   ignoredDiffFiles: {},
   tags: {},
   fileTags: {},
-  projectPreferences: {}
+  projectPreferences: {},
+  compressionSettings: DEFAULT_COMPRESSION_SETTINGS
 } as AppSettings
 
 export class SettingsService {
@@ -90,6 +94,26 @@ export class SettingsService {
       merged.projectPreferences = (typeof rest.projectPreferences !== 'object' || Array.isArray(rest.projectPreferences))
         ? {}
         : rest.projectPreferences
+
+      // CompressionSettings: ausente/corrompido → default; presente → normaliza o perfil defensivamente
+      if (rest.compressionSettings && typeof rest.compressionSettings === 'object') {
+        const raw = rest.compressionSettings as { profile?: unknown; outputFormat?: unknown; enrichment?: unknown }
+        const format: OutputFormat =
+          raw.outputFormat === 'markdown' || raw.outputFormat === 'xml' || raw.outputFormat === 'json'
+            ? raw.outputFormat
+            : 'plain'
+        const enrichment =
+          raw.enrichment && typeof raw.enrichment === 'object' && !Array.isArray(raw.enrichment)
+            ? (raw.enrichment as ContextEnrichment)
+            : undefined
+        merged.compressionSettings = {
+          profile: normalizeCompressionProfile(raw.profile),
+          outputFormat: format,
+          ...(enrichment ? { enrichment } : {})
+        }
+      } else {
+        merged.compressionSettings = { ...DEFAULT_COMPRESSION_SETTINGS }
+      }
 
       return merged as AppSettings
     } catch {

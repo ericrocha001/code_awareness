@@ -1,0 +1,749 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Implementar a persistência SQLite do Repository Model.
+2. Criar e manter o schema do banco repository_model.db.
+3. Converter entre tipos Row (flat) e tipos de domínio (estruturados).
+4. Gerenciar conexões com cache por repoPath (mesmo padrão do database-service.ts).
+5. Validar a integridade dos dados na conversão Row → Domain.
+
+Mapa de Relacionamentos do Script
+
+1. repository-repository.ts
+   - Tipo: Contrato / Interface
+   - Relação: Implementa a interface RepositoryRepository e consome os tipos Row.
+   - Criticidade: Alta
+
+2. ../../shared/types
+   - Tipo: Contrato / Interface
+   - Relação: Consome os tipos de domínio para retorno das operações.
+   - Criticidade: Alta
+
+3. better-sqlite3
+   - Tipo: Dependência Direta
+   - Relação: Biblioteca SQLite para persistência síncrona.
+   - Criticidade: Alta
+
+4. repository-model.ts (Sprint 5)
+   - Tipo: Dependência Inversa
+   - Relação: Consumirá esta implementação via injeção de dependência no bootstrap.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O banco é criado dentro de code_awareness/repository_model.db no repositório.
+2. O schema é criado idempotentemente (CREATE TABLE IF NOT EXISTS).
+3. Os mappers Row→Domain validam integridade dos dados.
+4. Operações em lote (saveElements, saveRelationships) usam transações.
+5. Conexões são cacheadas por repoPath e fechadas quando o repositório é fechado.
+6. Nenhuma lógica de parsing, análise ou sincronização neste arquivo.
+7. A migração de schema (content_hash) é idempotente e usa PRAGMA table_info antes de ALTER TABLE.
+8. getFileById nunca lança exceção — retorna null para ids inexistentes.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+import Database from 'better-sqlite3'
+import type { Database as BetterSqlite3Database } from 'better-sqlite3'
+import { existsSync, mkdirSync } from 'fs'
+import { join } from 'path'
+import type {
+  CodeMapElement,
+  CodeMapElementKind,
+  CodeMapElementVisibility,
+  CodeMapFile,
+  CodeMapFileStatus,
+  CodeMapRelationship,
+  CodeMapRelationshipType,
+  CodeMapRepository,
+  CodeMapSyncStatus
+} from '../../shared/types'
+import type {
+  CodeMapElementRow,
+  CodeMapFileRow,
+  CodeMapRelationshipRow,
+  CodeMapRepositoryRow,
+  RepositoryRepository
+} from './repository-repository'
+
+// Cache de conexões abertas: chave = repoPath, valor = instância do banco
+interface DatabaseConnection {
+  db: BetterSqlite3Database
+  repoPath: string
+}
+
+const connections = new Map<string, DatabaseConnection>()
+
+const FILE_STATUSES: readonly CodeMapFileStatus[] = ['indexed', 'modified'] as const
+const ELEMENT_KINDS: readonly CodeMapElementKind[] = ['class', 'function', 'method', 'interface', 'enum', 'typeAlias', 'variable', 'constant', 'import', 'export'] as const
+const ELEMENT_VISIBILITIES: readonly Exclude<CodeMapElementVisibility, null>[] = ['public', 'private', 'protected'] as const
+const RELATIONSHIP_TYPES: readonly CodeMapRelationshipType[] = ['contains', 'extends', 'implements', 'imports', 'exports'] as const
+
+// ─── Gestão de Conexões ─────────────────────────────────────────────────────
+
+/** Retorna o caminho do arquivo do banco dentro da pasta code_awareness/ do repositório. */
+function getDbPath(repoPath: string): string {
+  return join(repoPath, 'code_awareness', 'repository_model.db')
+}
+
+/** Garante que a pasta code_awareness existe no repositório. */
+function ensureDir(repoPath: string): void {
+  const dir = join(repoPath, 'code_awareness')
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true })
+  }
+}
+
+/** Cria o schema completo com CREATE TABLE IF NOT EXISTS (idempotente). */
+function ensureSchema(db: BetterSqlite3Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS repositories (
+      id TEXT PRIMARY KEY,
+      path TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      model_version INTEGER NOT NULL DEFAULT 1,
+      last_indexed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS files (
+      id TEXT PRIMARY KEY,
+      repository_id TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      language TEXT NOT NULL,
+      extension TEXT NOT NULL,
+      lines INTEGER NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      mtime INTEGER NOT NULL,
+      content_hash TEXT,
+      status TEXT NOT NULL DEFAULT 'modified',
+      FOREIGN KEY (repository_id) REFERENCES repositories(id),
+      UNIQUE(repository_id, relative_path)
+    );
+
+    CREATE TABLE IF NOT EXISTS elements (
+      id TEXT PRIMARY KEY,
+      repository_id TEXT NOT NULL,
+      file_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      name TEXT NOT NULL,
+      parent_element_id TEXT,
+      start_line INTEGER NOT NULL,
+      start_column INTEGER NOT NULL,
+      start_byte INTEGER NOT NULL,
+      end_line INTEGER NOT NULL,
+      end_column INTEGER NOT NULL,
+      end_byte INTEGER NOT NULL,
+      size_lines INTEGER NOT NULL,
+      size_bytes INTEGER NOT NULL,
+      visibility TEXT,
+      modifiers TEXT NOT NULL DEFAULT '[]',
+      return_type TEXT,
+      base_class TEXT,
+      has_documentation INTEGER NOT NULL DEFAULT 0,
+      parameter_count INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (repository_id) REFERENCES repositories(id),
+      FOREIGN KEY (file_id) REFERENCES files(id),
+      FOREIGN KEY (parent_element_id) REFERENCES elements(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS relationships (
+      id TEXT PRIMARY KEY,
+      repository_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      target_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      FOREIGN KEY (repository_id) REFERENCES repositories(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS repository_settings (
+      repository_id TEXT PRIMARY KEY,
+      enabled_languages TEXT NOT NULL DEFAULT '["typescript"]',
+      ignored_patterns TEXT NOT NULL DEFAULT '[]',
+      max_file_size_bytes INTEGER NOT NULL DEFAULT 2097152,
+      last_sync_at TEXT,
+      gitignore_hash TEXT,
+      FOREIGN KEY (repository_id) REFERENCES repositories(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS schema_versions (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      model_version INTEGER NOT NULL DEFAULT 1,
+      parser_version TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS element_parameters (
+      element_id TEXT NOT NULL,
+      position INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      type TEXT,
+      FOREIGN KEY (element_id) REFERENCES elements(id),
+      PRIMARY KEY (element_id, position)
+    );
+
+    CREATE TABLE IF NOT EXISTS element_interfaces (
+      element_id TEXT NOT NULL,
+      interface_name TEXT NOT NULL,
+      FOREIGN KEY (element_id) REFERENCES elements(id),
+      PRIMARY KEY (element_id, interface_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS element_decorators (
+      element_id TEXT NOT NULL,
+      decorator_name TEXT NOT NULL,
+      FOREIGN KEY (element_id) REFERENCES elements(id),
+      PRIMARY KEY (element_id, decorator_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS element_type_parameters (
+      element_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      constraint_text TEXT,
+      FOREIGN KEY (element_id) REFERENCES elements(id),
+      PRIMARY KEY (element_id, name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_files_repository_id ON files(repository_id);
+    CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+    CREATE INDEX IF NOT EXISTS idx_elements_file_id ON elements(file_id);
+    CREATE INDEX IF NOT EXISTS idx_elements_repository_id ON elements(repository_id);
+    CREATE INDEX IF NOT EXISTS idx_elements_parent ON elements(parent_element_id);
+    CREATE INDEX IF NOT EXISTS idx_relationships_repository_id ON relationships(repository_id);
+    CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_id);
+    CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_id);
+
+    INSERT OR IGNORE INTO schema_versions (id, schema_version, model_version, parser_version, created_at, updated_at)
+    VALUES (1, 1, 1, NULL, datetime('now'), datetime('now'));
+  `)
+
+  // Migração idempotente: adicionar content_hash apenas se a coluna ainda não existir.
+  // PRAGMA table_info é preferível a try/catch pois evita o overhead de tentar ALTER e capturar erro.
+  const columns = db.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>
+  const hasContentHash = columns.some(col => col.name === 'content_hash')
+  if (!hasContentHash) {
+    db.exec('ALTER TABLE files ADD COLUMN content_hash TEXT')
+  }
+}
+
+/** Retorna uma conexão existente ou cria uma nova com WAL mode e schema garantido. */
+function getOrCreateConnection(repoPath: string): BetterSqlite3Database {
+  const existing = connections.get(repoPath)
+  if (existing) {
+    return existing.db
+  }
+
+  ensureDir(repoPath)
+  const dbPath = getDbPath(repoPath)
+  const db = new Database(dbPath)
+  db.pragma('journal_mode = WAL')
+  ensureSchema(db)
+
+  const conn: DatabaseConnection = { db, repoPath }
+  connections.set(repoPath, conn)
+  return db
+}
+
+// ─── Mappers: Domain → Row (escrita) ────────────────────────────────────────
+
+/** Converte um repositório do domínio para o formato flat da tabela repositories. */
+function domainToRepositoryRow(repo: CodeMapRepository): CodeMapRepositoryRow {
+  return {
+    id: repo.id,
+    path: repo.path,
+    name: repo.name,
+    model_version: repo.modelVersion,
+    last_indexed_at: repo.lastIndexedAt
+  }
+}
+
+/** Converte um arquivo do domínio para o formato flat da tabela files. */
+function domainToFileRow(file: CodeMapFile): CodeMapFileRow {
+  return {
+    id: file.id,
+    repository_id: file.repositoryId,
+    relative_path: file.relativePath,
+    language: file.language,
+    extension: file.extension,
+    lines: file.lines,
+    size_bytes: file.sizeBytes,
+    mtime: file.mtime,
+    content_hash: file.contentHash ?? null,
+    status: file.status
+  }
+}
+
+/** Converte um elemento do domínio para o formato flat da tabela elements (JSON serializado em modifiers). */
+function domainToElementRow(element: CodeMapElement): CodeMapElementRow {
+  return {
+    id: element.id,
+    repository_id: element.repositoryId,
+    file_id: element.fileId,
+    kind: element.kind,
+    name: element.name,
+    parent_element_id: element.parentElementId,
+    start_line: element.location.start.line,
+    start_column: element.location.start.column,
+    start_byte: element.location.start.byte,
+    end_line: element.location.end.line,
+    end_column: element.location.end.column,
+    end_byte: element.location.end.byte,
+    size_lines: element.sizeLines,
+    size_bytes: element.sizeBytes,
+    visibility: element.visibility,
+    modifiers: JSON.stringify(element.modifiers),
+    return_type: element.returnType,
+    base_class: element.baseClass,
+    has_documentation: element.hasDocumentation ? 1 : 0,
+    parameter_count: element.parameterCount
+  }
+}
+
+/** Converte uma relação do domínio para o formato flat da tabela relationships. */
+function domainToRelationshipRow(rel: CodeMapRelationship): CodeMapRelationshipRow {
+  return {
+    id: rel.id,
+    repository_id: rel.repositoryId,
+    source_id: rel.sourceId,
+    target_id: rel.targetId,
+    type: rel.type
+  }
+}
+
+// ─── Mappers: Row → Domain (leitura com validação) ──────────────────────────
+
+/** Valida que um valor string pertence ao conjunto permitido; caso contrário, lança erro descritivo. */
+function validateEnum<T extends string>(value: string, allowed: readonly T[], fieldName: string): T {
+  const found = allowed.find((v) => v === value)
+  if (!found) {
+    throw new Error(`Valor inválido para ${fieldName}: "${value}". Valores permitidos: ${allowed.join(', ')}`)
+  }
+  return found
+}
+
+/** Converte uma linha da tabela repositories para o tipo de domínio. */
+function rowToRepository(row: any): CodeMapRepository {
+  return {
+    id: row.id,
+    path: row.path,
+    name: row.name,
+    modelVersion: row.model_version,
+    lastIndexedAt: row.last_indexed_at ?? null
+  }
+}
+
+/** Converte uma linha da tabela files para o tipo de domínio, validando o status. */
+function rowToFile(row: any): CodeMapFile {
+  return {
+    id: row.id,
+    repositoryId: row.repository_id,
+    relativePath: row.relative_path,
+    language: row.language,
+    extension: row.extension,
+    lines: row.lines,
+    sizeBytes: row.size_bytes,
+    mtime: row.mtime,
+    contentHash: row.content_hash ?? null,
+    status: validateEnum(row.status, FILE_STATUSES, 'status')
+  }
+}
+
+/** Converte uma linha da tabela elements para o tipo de domínio, validando kind e visibility, e desserializando modifiers. */
+function rowToElement(row: any): CodeMapElement {
+  let modifiers: string[] = []
+  try {
+    const parsed = JSON.parse(row.modifiers)
+    if (Array.isArray(parsed)) {
+      modifiers = parsed.filter((m): m is string => typeof m === 'string')
+    }
+  } catch {
+    // BUGFIX: JSON inválido no campo modifiers não deve quebrar a leitura.
+    // Usa array vazio e registra warning para não mascarar silenciosamente dados corrompidos.
+    console.warn(`[RepositoryDatabase] modifiers JSON inválido no elemento ${row.id}. Usando [].`)
+  }
+
+  return {
+    id: row.id,
+    repositoryId: row.repository_id,
+    fileId: row.file_id,
+    kind: validateEnum(row.kind, ELEMENT_KINDS, 'kind'),
+    name: row.name,
+    parentElementId: row.parent_element_id ?? null,
+    location: {
+      start: {
+        line: row.start_line,
+        column: row.start_column,
+        byte: row.start_byte
+      },
+      end: {
+        line: row.end_line,
+        column: row.end_column,
+        byte: row.end_byte
+      }
+    },
+    sizeLines: row.size_lines,
+    sizeBytes: row.size_bytes,
+    visibility: row.visibility === null ? null : validateEnum(row.visibility, ELEMENT_VISIBILITIES, 'visibility'),
+    modifiers,
+    returnType: row.return_type ?? null,
+    baseClass: row.base_class ?? null,
+    hasDocumentation: row.has_documentation === 1,
+    parameterCount: row.parameter_count
+  }
+}
+
+/** Converte uma linha da tabela relationships para o tipo de domínio, validando o tipo. */
+function rowToRelationship(row: any): CodeMapRelationship {
+  return {
+    id: row.id,
+    repositoryId: row.repository_id,
+    sourceId: row.source_id,
+    targetId: row.target_id,
+    type: validateEnum(row.type, RELATIONSHIP_TYPES, 'type')
+  }
+}
+
+// ─── Implementação do Contrato ──────────────────────────────────────────────
+
+class RepositoryDatabase implements RepositoryRepository {
+  private readonly db: BetterSqlite3Database
+
+  constructor(db: BetterSqlite3Database) {
+    this.db = db
+  }
+
+  // ─── Repositórios ─────────────────────────────────────────────────────────
+
+  /** Insere ou atualiza (upsert) um repositório. Usa path como chave de unicidade. */
+  saveRepository(repository: CodeMapRepository): void {
+    const row = domainToRepositoryRow(repository)
+    this.db.prepare(`
+      INSERT OR REPLACE INTO repositories (id, path, name, model_version, last_indexed_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(row.id, row.path, row.name, row.model_version, row.last_indexed_at)
+  }
+
+  /** Busca um repositório pelo caminho absoluto. Retorna null se não encontrado. */
+  getRepositoryByPath(path: string): CodeMapRepository | null {
+    const row = this.db.prepare(`SELECT * FROM repositories WHERE path = ?`).get(path)
+    return row ? rowToRepository(row) : null
+  }
+
+  /** Atualiza exclusivamente o campo lastIndexedAt de um repositório. */
+  updateRepositoryLastIndexedAt(repositoryId: string, timestamp: string): void {
+    this.db.prepare(`UPDATE repositories SET last_indexed_at = ? WHERE id = ?`).run(timestamp, repositoryId)
+  }
+
+  /**
+   * Upsert do carimbo de última sincronização em repository_settings.
+   * INSERT OR IGNORE garante a linha existente antes do UPDATE, preservando as demais colunas.
+   */
+  updateLastSyncAt(repositoryId: string, timestamp: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO repository_settings (repository_id) VALUES (?)`).run(repositoryId)
+    this.db.prepare(`UPDATE repository_settings SET last_sync_at = ? WHERE repository_id = ?`).run(timestamp, repositoryId)
+  }
+
+  // ─── Arquivos ─────────────────────────────────────────────────────────────
+
+  /** Insere ou atualiza (upsert) um arquivo. Usa (repositoryId, relativePath) como chave de unicidade. */
+  saveFile(file: CodeMapFile): void {
+    const row = domainToFileRow(file)
+    this.db.prepare(`
+      INSERT OR REPLACE INTO files (id, repository_id, relative_path, language, extension, lines, size_bytes, mtime, content_hash, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(row.id, row.repository_id, row.relative_path, row.language, row.extension, row.lines, row.size_bytes, row.mtime, row.content_hash, row.status)
+  }
+
+  /** Lista todos os arquivos de um repositório, ordenados por relativePath. */
+  getFilesByRepository(repositoryId: string): CodeMapFile[] {
+    const rows = this.db.prepare(`SELECT * FROM files WHERE repository_id = ? ORDER BY relative_path`).all(repositoryId)
+    return rows.map(rowToFile)
+  }
+
+  /** Busca um arquivo pelo caminho relativo dentro do repositório. Retorna null se não encontrado. */
+  getFileByPath(repositoryId: string, relativePath: string): CodeMapFile | null {
+    const row = this.db.prepare(`SELECT * FROM files WHERE repository_id = ? AND relative_path = ?`).get(repositoryId, relativePath)
+    return row ? rowToFile(row) : null
+  }
+
+  /** Busca um arquivo pelo ID único. Retorna null se não encontrado. */
+  getFileById(fileId: string): CodeMapFile | null {
+    const row = this.db.prepare(`SELECT * FROM files WHERE id = ?`).get(fileId)
+    return row ? rowToFile(row) : null
+  }
+
+  /** Lista apenas os arquivos com status 'modified' de um repositório. */
+  getModifiedFilesByRepository(repositoryId: string): CodeMapFile[] {
+    const rows = this.db.prepare(`SELECT * FROM files WHERE repository_id = ? AND status = 'modified' ORDER BY relative_path`).all(repositoryId)
+    return rows.map(rowToFile)
+  }
+
+  /** Atualiza o status de sincronização de um arquivo. */
+  updateFileStatus(fileId: string, status: CodeMapFileStatus): void {
+    this.db.prepare(`UPDATE files SET status = ? WHERE id = ?`).run(status, fileId)
+  }
+
+  /** Remove um arquivo e, em cascata manual, todos os seus elementos, relacionamentos e registros das tabelas auxiliares. */
+  deleteFile(fileId: string): void {
+    const tx = this.db.transaction(() => {
+      // Remove registros das tabelas auxiliares antes dos elementos (integridade referencial manual).
+      this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_decorators WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_type_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM relationships WHERE source_id IN (SELECT id FROM elements WHERE file_id = ?) OR target_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId, fileId)
+      // Remove relacionamentos imports onde target_id é o fileId do arquivo deletado
+      // (imports usam target_id = file_id, não element_id, então não são cobertos pela query acima)
+      this.db.prepare(`DELETE FROM relationships WHERE type = 'imports' AND target_id = ?`).run(fileId)
+      this.db.prepare(`DELETE FROM elements WHERE file_id = ?`).run(fileId)
+      this.db.prepare(`DELETE FROM files WHERE id = ?`).run(fileId)
+    })
+    tx()
+  }
+
+  /** Remove todos os arquivos de um repositório e, em cascata manual, todos os elementos, relacionamentos e registros das tabelas auxiliares. */
+  deleteAllFiles(repositoryId: string): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE repository_id = ?)`).run(repositoryId)
+      this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE repository_id = ?)`).run(repositoryId)
+      this.db.prepare(`DELETE FROM element_decorators WHERE element_id IN (SELECT id FROM elements WHERE repository_id = ?)`).run(repositoryId)
+      this.db.prepare(`DELETE FROM element_type_parameters WHERE element_id IN (SELECT id FROM elements WHERE repository_id = ?)`).run(repositoryId)
+      this.db.prepare(`DELETE FROM relationships WHERE repository_id = ?`).run(repositoryId)
+      // Nota: a query acima já remove TODOS os relacionamentos do repositório,
+      // incluindo imports com target_id = file_id. Nenhuma ação adicional necessária.
+      this.db.prepare(`DELETE FROM elements WHERE repository_id = ?`).run(repositoryId)
+      this.db.prepare(`DELETE FROM files WHERE repository_id = ?`).run(repositoryId)
+    })
+    tx()
+  }
+
+  // ─── Elementos ────────────────────────────────────────────────────────────
+
+  /** Insere ou atualiza (upsert) um elemento. Usa id como chave de unicidade. */
+  saveElement(element: CodeMapElement): void {
+    const row = domainToElementRow(element)
+    this.db.prepare(`
+      INSERT OR REPLACE INTO elements (
+        id, repository_id, file_id, kind, name, parent_element_id,
+        start_line, start_column, start_byte, end_line, end_column, end_byte,
+        size_lines, size_bytes, visibility, modifiers, return_type, base_class,
+        has_documentation, parameter_count
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
+      row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
+      row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
+      row.has_documentation, row.parameter_count
+    )
+  }
+
+  /** Insere ou atualiza múltiplos elementos em uma única transação para performance. */
+  saveElements(elements: CodeMapElement[]): void {
+    const tx = this.db.transaction((items: CodeMapElement[]) => {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO elements (
+          id, repository_id, file_id, kind, name, parent_element_id,
+          start_line, start_column, start_byte, end_line, end_column, end_byte,
+          size_lines, size_bytes, visibility, modifiers, return_type, base_class,
+          has_documentation, parameter_count
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const element of items) {
+        const row = domainToElementRow(element)
+        stmt.run(
+          row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
+          row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
+          row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
+          row.has_documentation, row.parameter_count
+        )
+      }
+    })
+    tx(elements)
+  }
+
+  /** Lista todos os elementos de um arquivo, ordenados por start_line. */
+  getElementsByFile(fileId: string): CodeMapElement[] {
+    const rows = this.db.prepare(`SELECT * FROM elements WHERE file_id = ? ORDER BY start_line`).all(fileId)
+    return rows.map(rowToElement)
+  }
+
+  /** Lista todos os elementos de um repositório, ordenados por start_line. */
+  getElementsByRepository(repositoryId: string): CodeMapElement[] {
+    const rows = this.db.prepare(`SELECT * FROM elements WHERE repository_id = ? ORDER BY start_line`).all(repositoryId)
+    return rows.map(rowToElement)
+  }
+
+  /** Remove todos os elementos de um arquivo específico, incluindo registros das tabelas auxiliares e relacionamentos associados. */
+  deleteElementsByFile(fileId: string): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_decorators WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_type_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM relationships WHERE source_id IN (SELECT id FROM elements WHERE file_id = ?) OR target_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId, fileId)
+      this.db.prepare(`DELETE FROM elements WHERE file_id = ?`).run(fileId)
+    })
+    tx()
+  }
+
+  /** Salva ou substitui as interfaces implementadas por elementos em uma transação. */
+  saveElementInterfaces(entries: Array<{ elementId: string; interfaceNames: string[] }>): void {
+    if (entries.length === 0) return
+
+    const tx = this.db.transaction((items: Array<{ elementId: string; interfaceNames: string[] }>) => {
+      const deleteStmt = this.db.prepare(`DELETE FROM element_interfaces WHERE element_id = ?`)
+      const insertStmt = this.db.prepare(`INSERT OR REPLACE INTO element_interfaces (element_id, interface_name) VALUES (?, ?)`)
+
+      for (const entry of items) {
+        deleteStmt.run(entry.elementId)
+        for (const ifaceName of entry.interfaceNames) {
+          insertStmt.run(entry.elementId, ifaceName)
+        }
+      }
+    })
+    tx(entries)
+  }
+
+  /** Apaga as interfaces associadas a elementos de um arquivo específico. */
+  deleteElementInterfacesByFile(fileId: string): void {
+    this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+  }
+
+  /** Busca todas as interfaces associadas a elementos de um repositório. */
+  getElementInterfacesByRepository(repositoryId: string): Array<{ elementId: string; interfaceNames: string[] }> {
+    const rows = this.db.prepare(`
+      SELECT e.id as element_id, ei.interface_name
+      FROM element_interfaces ei
+      JOIN elements e ON e.id = ei.element_id
+      WHERE e.repository_id = ?
+      ORDER BY e.id
+    `).all(repositoryId) as Array<{ element_id: string; interface_name: string }>
+
+    const map = new Map<string, string[]>()
+    for (const row of rows) {
+      let list = map.get(row.element_id)
+      if (!list) {
+        list = []
+        map.set(row.element_id, list)
+      }
+      list.push(row.interface_name)
+    }
+
+    const result: Array<{ elementId: string; interfaceNames: string[] }> = []
+    for (const [elementId, interfaceNames] of map.entries()) {
+      result.push({ elementId, interfaceNames })
+    }
+    return result
+  }
+
+  // ─── Relacionamentos ──────────────────────────────────────────────────────
+
+  /** Insere ou atualiza (upsert) uma relação. Usa id como chave de unicidade. */
+  saveRelationship(relationship: CodeMapRelationship): void {
+    const row = domainToRelationshipRow(relationship)
+    this.db.prepare(`
+      INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(row.id, row.repository_id, row.source_id, row.target_id, row.type)
+  }
+
+  /** Insere ou atualiza múltiplas relações em uma única transação para performance. */
+  saveRelationships(relationships: CodeMapRelationship[]): void {
+    const tx = this.db.transaction((items: CodeMapRelationship[]) => {
+      const stmt = this.db.prepare(`
+        INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type)
+        VALUES (?, ?, ?, ?, ?)
+      `)
+      for (const rel of items) {
+        const row = domainToRelationshipRow(rel)
+        stmt.run(row.id, row.repository_id, row.source_id, row.target_id, row.type)
+      }
+    })
+    tx(relationships)
+  }
+
+  /** Lista todas as relações de um repositório. */
+  getRelationshipsByRepository(repositoryId: string): CodeMapRelationship[] {
+    const rows = this.db.prepare(`SELECT * FROM relationships WHERE repository_id = ?`).all(repositoryId)
+    return rows.map(rowToRelationship)
+  }
+
+  /** Busca relacionamentos onde o elemento é fonte (sourceId) ou destino (targetId). */
+  getRelationshipsByElement(elementId: string): CodeMapRelationship[] {
+    const rows = this.db.prepare(`SELECT * FROM relationships WHERE source_id = ? OR target_id = ?`).all(elementId, elementId)
+    return rows.map(rowToRelationship)
+  }
+
+  /** Remove todos os relacionamentos onde o arquivo é fonte ou destino (via sourceId do arquivo ou de seus elementos). */
+  deleteRelationshipsByFile(fileId: string): void {
+    this.db.prepare(`
+      DELETE FROM relationships
+      WHERE source_id = ?
+        OR target_id = ?
+        OR source_id IN (SELECT id FROM elements WHERE file_id = ?)
+        OR target_id IN (SELECT id FROM elements WHERE file_id = ?)
+    `).run(fileId, fileId, fileId, fileId)
+  }
+
+  // ─── Sincronização ────────────────────────────────────────────────────────
+
+  /** Retorna contagens agregadas do repositório usando queries COUNT do SQLite. */
+  getSyncStatus(repositoryId: string): CodeMapSyncStatus {
+    const filesRow = this.db.prepare(`
+      SELECT
+        COUNT(*) as totalFiles,
+        SUM(CASE WHEN status = 'indexed' THEN 1 ELSE 0 END) as indexedFiles,
+        SUM(CASE WHEN status = 'modified' THEN 1 ELSE 0 END) as modifiedFiles
+      FROM files WHERE repository_id = ?
+    `).get(repositoryId) as { totalFiles: number; indexedFiles: number | null; modifiedFiles: number | null }
+
+    const elementsRow = this.db.prepare(`SELECT COUNT(*) as totalElements FROM elements WHERE repository_id = ?`).get(repositoryId) as { totalElements: number }
+
+    const settingsRow = this.db.prepare(`SELECT last_sync_at FROM repository_settings WHERE repository_id = ?`).get(repositoryId) as { last_sync_at: string | null } | undefined
+
+    return {
+      totalFiles: filesRow.totalFiles,
+      indexedFiles: filesRow.indexedFiles ?? 0,
+      modifiedFiles: filesRow.modifiedFiles ?? 0,
+      totalElements: elementsRow.totalElements,
+      lastSyncAt: settingsRow?.last_sync_at ?? null
+    }
+  }
+}
+
+// ─── Fábrica e Ciclo de Vida ────────────────────────────────────────────────
+
+/** Cria uma instância de RepositoryRepository para um repositório, garantindo conexão e schema. */
+export function createRepositoryDatabase(repoPath: string): RepositoryRepository {
+  if (!repoPath || typeof repoPath !== 'string') {
+    throw new Error('repoPath é obrigatório e deve ser uma string')
+  }
+
+  const db = getOrCreateConnection(repoPath)
+  return new RepositoryDatabase(db)
+}
+
+/** Fecha a conexão de um repositório específico e remove do cache. */
+export function closeRepositoryDatabase(repoPath: string): void {
+  const conn = connections.get(repoPath)
+  if (conn) {
+    try {
+      conn.db.close()
+    } catch (error: any) {
+      console.error('[RepositoryDatabase] Erro ao fechar conexão:', error)
+    }
+    connections.delete(repoPath)
+  }
+}
+
+/** Fecha todas as conexões abertas. */
+export function closeAllRepositoryDatabases(): void {
+  for (const [repoPath] of connections) {
+    closeRepositoryDatabase(repoPath)
+  }
+}

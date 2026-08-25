@@ -6,12 +6,13 @@ Responsabilidades do Script
 1. Registrar handlers IPC para as operações de restauração orquestrada.
 2. Validar parâmetros recebidos antes de delegar ao RestoreService.
 3. Capturar erros e retornar respostas estruturadas ao renderer.
+4. Validar o RestorePlan congelado (opcional) e traduzir o resultado planStale.
 
 Mapa de Relacionamentos do Script
 
 1. restore-service.ts
    - Tipo: Dependência Direta
-   - Relação: Instancia e consome RestoreService para todas as operações de restauração.
+   - Relação: Recebe por parâmetro e consome RestoreService para todas as operações de restauração.
    - Criticidade: Alta
 
 2. ../../shared/types.ts
@@ -24,6 +25,7 @@ Invariantes do Script
 1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
 2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
 3. Toda resposta de handler deve conter o campo success.
+4. Não instancia serviços internamente — recebe RestoreService pronto no registro.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -31,8 +33,6 @@ Invariantes do Script
 import { ipcMain } from 'electron'
 import { RestoreService } from '../core/restore-service'
 import { RestoreExecuteOptions } from '../../shared/types'
-
-const restoreService = new RestoreService()
 
 // Valida se o valor recebido é uma string não vazia
 function isValidPath(value: unknown): value is string {
@@ -44,11 +44,13 @@ function isValidCheckpointId(value: unknown): value is string {
   return typeof value === 'string' && /^[a-zA-Z0-9_-]+$/.test(value)
 }
 
-export function registerRestoreHandlers(): void {
+export function registerRestoreHandlers(restoreService: RestoreService): void {
   /**
    * restore:preview — Preview da restauração (dry-run, não modifica nada).
    * Parâmetros: repoPath, checkpointId
    * Retorna: { success, data?: RestorePreviewResult, error?: string }
+   * O Retorno agora é { plan: RestorePlan } — os campos canRestore, orphanFiles,
+   * currentRestorePoint etc. vivem em data.plan.*
    */
   ipcMain.handle('restore:preview', async (_event, repoPath: string, checkpointId: string) => {
     try {
@@ -94,8 +96,30 @@ export function registerRestoreHandlers(): void {
       if (options.cleanupFiles.some(f => typeof f !== 'string')) {
         return { success: false, error: 'Cada elemento de cleanupFiles deve ser uma string' }
       }
+      // R3: Valida o plano congelado (opcional) se fornecido
+      if (options.plan !== undefined) {
+        if (typeof options.plan !== 'object' || options.plan === null) {
+          return { success: false, error: 'options.plan deve ser um objeto' }
+        }
+        if (typeof options.plan.targetCheckpointId !== 'string') {
+          return { success: false, error: 'options.plan.targetCheckpointId é obrigatório' }
+        }
+        if (typeof options.plan.stateHash !== 'string') {
+          return { success: false, error: 'options.plan.stateHash é obrigatório' }
+        }
+      }
 
       const data = await restoreService.execute(repoPath, checkpointId, options)
+
+      // Se o plano está obsoleto, aborta antes de qualquer execução
+      if (data.planStale) {
+        return {
+          success: false,
+          error: 'O estado do projeto mudou desde o preview. Gere um novo preview.',
+          data,
+          planStale: true
+        }
+      }
 
       // Se parcial, retorna success: false para forçar confirmação do usuário
       if (data.partial) {

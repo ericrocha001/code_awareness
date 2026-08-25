@@ -1,0 +1,381 @@
+/*
+ --- ARQUITETURA DO SCRIPT ---
+ Responsabilidades do Script
+ 1. Estilizar o painel de leitura do arquivo (identidade, dependências, informação estrutural).
+ 2. Garantir superfície e respiro entre seções — sem divisórias internas.
+ Mapa de Relacionamentos do Script
+ 1. CodeMapDetailPanel.tsx
+    - Tipo: Relação de UI
+    - Relação: Consome as classes CSS definidas neste arquivo (prefixo cmp-).
+    - Criticidade: Alta
+ 2. CodeSnippetBlock.css
+    - Tipo: Relação de UI
+    - Relação: O bloco de código estilo ChatGPT substitui os estilos antigos .cmp-snippet.
+    - Criticidade: Alta
+ Invariantes do Script
+ 1. O design deve respeitar estritamente as variáveis de cores globais.
+ 2. Todas as classes usam prefixo cmp- para evitar colisão com outras abas.
+ 3. Apenas --accent-color, o âmbar semântico (#f59e0b) e as cores por tipo de elemento são exceções de cor.
+ 4. Seções se separam apenas por respiro (sem border-top) — o painel tem fundo transparente/primário.
+ 5. Ícones de arquivo Devicon mantêm suas cores naturais — nunca sobrescritas.
+ --- FIM ARQUITETURA DO SCRIPT ---
+ */
+
+.cmp-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  padding: 20px;
+  border-radius: 12px;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+/* ─── Identidade ─────────────────────────────────────────────────────────── */
+
+.cmp-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.cmp-back-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  margin-top: 2px;
+  font-family: inherit;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cmp-back-btn:hover:not(:disabled) {
+  color: var(--accent-color, #3b82f6);
+  border-color: var(--accent-color, #3b82f6);
+}
+
+.cmp-back-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.cmp-file-icon {
+  font-size: 20px;
+  flex-shrink: 0;
+  /* Cor natural do Devicon preservada */
+}
+
+.cmp-identity-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cmp-file-name {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmp-file-path {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmp-scope-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.cmp-identity-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
+.cmp-meta-item {
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.cmp-meta-item--modified {
+  color: #f59e0b;
+}
+
+/* ─── Seções ─────────────────────────────────────────────────────────────── */
+
+.cmp-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.cmp-section-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.cmp-empty-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+/* ─── Dependências ───────────────────────────────────────────────────────── */
+
+.cmp-dep-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cmp-dep-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cmp-dep-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cmp-dep-chip {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.cmp-dep-chip:hover {
+  border-color: var(--accent-color, #3b82f6);
+  color: var(--accent-color, #3b82f6);
+}
+
+/* ─── Elementos ──────────────────────────────────────────────────────────── */
+
+.cmp-element-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cmp-element-group-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+/* Cores por tipo de elemento — exceção de cor semântica */
+.cmp-element-icon--class {
+  color: #f59e0b;
+}
+
+.cmp-element-icon--function,
+.cmp-element-icon--method {
+  color: #22c55e;
+}
+
+.cmp-element-icon--interface {
+  color: #a855f7;
+}
+
+.cmp-element-icon--enum {
+  color: #f97316;
+}
+
+.cmp-element-icon--typeAlias {
+  color: #06b6d4;
+}
+
+.cmp-element-icon--variable,
+.cmp-element-icon--constant {
+  color: #3b82f6;
+}
+
+.cmp-element-icon--import,
+.cmp-element-icon--export {
+  color: #64748b;
+}
+
+.cmp-element-group-label {
+  font-weight: 600;
+}
+
+.cmp-element-group-count {
+  color: var(--text-tertiary, #9ca3af);
+}
+
+.cmp-element {
+  display: flex;
+  flex-direction: column;
+}
+
+.cmp-element-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cmp-element-row:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.cmp-element-row--focused {
+  background: var(--accent-bg, rgba(59, 130, 246, 0.12));
+}
+
+.cmp-element-micro {
+  flex-shrink: 0;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  min-width: 24px;
+}
+
+.cmp-element-name {
+  font-size: 13px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Detalhe do elemento focado ─────────────────────────────────────────── */
+
+.cmp-element-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 8px 8px 40px;
+}
+
+.cmp-element-signature {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-primary);
+  word-break: break-word;
+}
+
+.cmp-element-doc {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cmp-class-rels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cmp-class-rel {
+  font-size: 11px;
+  color: var(--accent-color, #3b82f6);
+  background: var(--accent-bg, rgba(59, 130, 246, 0.1));
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.cmp-element-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.cmp-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cmp-action-btn:hover:not(:disabled) {
+  color: var(--accent-color, #3b82f6);
+  border-color: var(--accent-color, #3b82f6);
+}
+
+.cmp-action-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ─── Loading / Erro ─────────────────────────────────────────────────────── */
+
+/* Animação de rotação usada no ícone dos botões de escopo durante geração */
+@keyframes cmp-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.cmp-spin {
+  animation: cmp-spin 1s linear infinite;
+}
+
+.cmp-snippet-loading,
+.cmp-snippet-error {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cmp-snippet-error {
+  color: #f87171;
+}
+
+/* ─── Tags ──────────────────────────────────────────────────────────────── */
+
+.cmp-tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}

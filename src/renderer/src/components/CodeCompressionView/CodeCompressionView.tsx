@@ -3,9 +3,10 @@
 
 Responsabilidades do Script
 
-1. Renderizar a interface da aba Code Compression com layout ViewToolbar + ActionBar + FileGrid.
+1. Renderizar a interface da aba Code Compression com layout ViewToolbar + ActionBar + FileCollectionView.
 2. Gerenciar a seleção reativa de arquivos com sistema de Ignore.
-3. Fornecer ações de Copiar (prompt + markdown), Exportar (Normal e Nome personalizado) e prompt de auditoria customizável.
+3. Delegar a geração, preview, cópia e exportação da saída de compressão ao OutputModal
+   e expor uma ActionBar com dois botões: "Instruções do Prompt" e "Gerar Saída".
 4. Sincronizar tags e arquivos ignorados com outras abas via eventos globais e IPC.
 5. Exibir contador de selecionados no resumo do topo e toggle "Selecionados no topo" na ViewToolbar.
 6. O sistema de ignore opera exclusivamente com caminhos exatos de arquivos.
@@ -32,51 +33,36 @@ Mapa de Relacionamentos do Script
    - Relação: Renderiza o dropdown de filtro de tags coloridas.
    - Criticidade: Média
 
-5. FileGrid.tsx
+5. FileCollectionView.tsx
    - Tipo: Dependência Direta
-   - Relação: Renderiza grade de FileCards com seleção e estimativa de tokens.
+   - Relação: Renderiza a coleção de arquivos com seleção, alternância Grid/Dense e estimativa de tokens.
    - Criticidade: Alta
 
-6. ExportDropdown.tsx (shared)
+6. OutputModal.tsx
    - Tipo: Dependência Direta
-   - Relação: Renderiza o menu de exportação compartilhado.
+   - Relação: Gerencia visualmente a preview, cópia, exportação e a geração reativa da saída de compressão.
    - Criticidade: Alta
 
-7. ExportNameModal.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o modal de nome personalizado para exportação (formato fixo Markdown).
-   - Criticidade: Alta
-
-8. HiddenFilesModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Gerencia a lista de arquivos ignorados.
-   - Criticidade: Alta
-
-9. TagManagerModal.tsx
+7. TagManagerModal.tsx
    - Tipo: Dependência Direta
    - Relação: Gerencia criação, edição e associação de tags.
    - Criticidade: Alta
 
-10. PreviewModal.tsx
-    - Tipo: Dependência Direta
-    - Relação: Exibe preview do markdown gerado.
-    - Criticidade: Média
+8. PromptEditorModal.tsx
+   - Tipo: Dependência Direta
+   - Relação: Edita o prompt de auditoria customizável.
+   - Criticidade: Alta
 
-11. PromptEditorModal.tsx
-    - Tipo: Dependência Direta
-    - Relação: Edita o prompt de auditoria customizável.
-    - Criticidade: Alta
-
-12. ignore-patterns.ts
-    - Tipo: Dependência Direta
-    - Relação: Fornece padrões de ruído.
-    - Criticidade: Média
+9. ignore-patterns.ts
+   - Tipo: Dependência Direta
+   - Relação: Fornece padrões de ruído.
+   - Criticidade: Média
 
 Invariantes do Script
 
 1. O FileGrid deve ocupar 100% do espaço disponível no painel principal.
 2. O total de tokens selecionados deve ser calculado apenas com base nos arquivos checkados.
-3. A geração de markdown deve usar debounce de 200ms para evitar chamadas excessivas.
+3. A geração, cópia e exportação do markdown é exclusiva do OutputModal (com debounce e stale protection internos).
 4. O prompt de auditoria deve ser persistido no localStorage.
 5. Tags e arquivos ignorados devem ser sincronizados com outras abas via eventos globais.
 6. O listener de tags-changed deve ser removido quando o componente desmonta.
@@ -88,28 +74,23 @@ Invariantes do Script
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { DiffFileStatus, Tag } from '../../../../shared/types'
 import { FileText, PenLine, ArrowUpNarrowWide } from 'lucide-react'
 import { ViewToolbar } from '../shared/ViewToolbar/ViewToolbar'
 import { ActionBar } from '../shared/ActionBar/ActionBar'
 import { FilterPopover } from '../shared/FilterPopover/FilterPopover'
-import { FileGrid } from '../FileGrid/FileGrid'
-import { PreviewModal } from '../PreviewModal/PreviewModal'
+import { FileCollectionView } from '../FileCollection/FileCollectionView'
 import { TagManagerModal } from '../TagManagerModal/TagManagerModal'
 import { PromptEditorModal } from '../PromptEditorModal/PromptEditorModal'
-import { ProcessingStatusBar } from '../ProcessingStatusBar/ProcessingStatusBar'
-import { ExportDropdown } from '../shared/ExportDropdown/ExportDropdown'
-import { ExportNameModal, type FormatOption } from '../shared/ExportNameModal/ExportNameModal'
-import type { FileCardFile } from '../FileCard/FileCard'
+import { OutputModal } from './OutputModal'
+import type { FileCardFile } from '../FileCollection/types'
 import { estimateTokensFromSize } from '../../utils/token-utils'
 import { getContrastColor } from '../../utils/color-utils'
 import './CodeCompressionView.css'
 
 // Tipos para API de ignore simplificada
 type IgnoredResult = { ignoredDiffFiles: Record<string, string[]> } | null
-
-const EXPORT_FORMATS: FormatOption[] = [{ id: 'markdown', label: 'Markdown (.md)' }]
 
 // Prompt padrão para análise de estrutura de código
 const DEFAULT_COMPRESSION_PROMPT = `Analise a estrutura de código abaixo como um Arquiteto de Software Staff.
@@ -137,13 +118,8 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
 }) => {
   const [trackedFiles, setTrackedFiles] = useState<DiffFileStatus[]>([])
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
-  const [markdown, setMarkdown] = useState<string>('')
-  const [isGenerating, setIsGenerating] = useState<boolean>(false)
-  const [error, setError] = useState<string>('')
+  const [isOutputModalOpen, setIsOutputModalOpen] = useState(false)
   const [auditPromptTemplate, setAuditPromptTemplate] = useState('')
-  const [isCopied, setIsCopied] = useState(false)
-  const [isExporting, setIsExporting] = useState(false)
-  const [isExportNameModalOpen, setIsExportNameModalOpen] = useState(false)
   const [selectedOnTop, setSelectedOnTop] = useState(false)
 
   // Reseta o toggle ao trocar de projeto
@@ -162,13 +138,8 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
    // Ignore system (apenas caminhos exatos de arquivos)
    const [ignoredFiles, setIgnoredFiles] = useState<string[]>([])
 
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const requestIdRef = useRef(0)
-
   // Modais
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false)
   const [isTagManagerOpen, setIsTagManagerOpen] = useState(false)
-  const [isHiddenFilesModalOpen, setIsHiddenFilesModalOpen] = useState(false)
   const [isPromptModalOpen, setIsPromptModalOpen] = useState(false)
 
   // Tags
@@ -216,7 +187,7 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
     let isMounted = true
     const fetchFiles = async () => {
       if (!activeProject) {
-        if (isMounted) { setTrackedFiles([]); setSelectedFiles(new Set()); setMarkdown('') }
+        if (isMounted) { setTrackedFiles([]); setSelectedFiles(new Set()) }
         return
       }
       try {
@@ -263,49 +234,13 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
 
 
   // Lista visível: filtra arquivos ignorados e ordena alfabeticamente por caminho
+  const ignoredSet = useMemo(() => new Set(ignoredFiles), [ignoredFiles])
+
   const visibleFiles = useMemo(() => {
     return trackedFiles
-      .filter(f => !ignoredFiles.includes(f.relativePath))
+      .filter(f => !ignoredSet.has(f.relativePath))
       .sort((a, b) => a.relativePath.localeCompare(b.relativePath))
-  }, [trackedFiles, ignoredFiles])
-
-  // Geração reativa com debounce de 200ms observando selectedFiles
-  useEffect(() => {
-    if (!activeProject) return
-
-    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current)
-
-    if (selectedFiles.size === 0) {
-      setMarkdown('')
-      setError('')
-      setIsGenerating(false)
-      return
-    }
-
-    const thisRequestId = ++requestIdRef.current
-    setIsGenerating(true)
-    setError('')
-
-    debounceTimerRef.current = setTimeout(async () => {
-      try {
-        const selectedArray = Array.from(selectedFiles)
-        const generatedMarkdown = await window.codeAwareness.generateCompressionMarkdown(activeProject.path, selectedArray)
-        if (thisRequestId === requestIdRef.current) {
-          setMarkdown(generatedMarkdown)
-          setIsGenerating(false)
-        }
-      } catch (err: any) {
-        if (thisRequestId === requestIdRef.current) {
-          setError(err?.message || 'Falha ao gerar a compressão estrutural.')
-          setIsGenerating(false)
-        }
-      }
-    }, 200)
-
-    return () => {
-      if (debounceTimerRef.current) { clearTimeout(debounceTimerRef.current); debounceTimerRef.current = null }
-    }
-  }, [activeProject, selectedFiles])
+  }, [trackedFiles, ignoredSet])
 
   // Ignora arquivo e remove da seleção
   const ignoreFileTemporary = useCallback(async (relativePath: string) => {
@@ -334,58 +269,6 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
     await window.codeAwareness.revealInExplorer(activeProject.path, relativePath)
     onStatusMessage('Arquivo revelado no sistema!')
   }, [activeProject, onStatusMessage])
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(markdown)
-    setIsCopied(true)
-    onStatusMessage('Markdown copiado!')
-    setTimeout(() => setIsCopied(false), 2000)
-  }
-
-  const handleCopyWithPrompt = () => {
-    navigator.clipboard.writeText(fullPromptContent)
-    setIsCopied(true)
-    onStatusMessage('Prompt com compressão copiado!')
-    setTimeout(() => setIsCopied(false), 2000)
-  }
-
-  const handleExportDownloads = async () => {
-    if (!activeProject || !markdown) return
-    setIsExporting(true)
-    try {
-      const fileName = `${activeProject.name}-compression`
-      const result = await window.codeAwareness.saveToDownloads(markdown, fileName)
-      if (result.success) {
-        onStatusMessage('Exportado para Downloads!')
-      } else {
-        onStatusMessage('Erro ao exportar', true)
-      }
-    } catch (err) {
-      console.error('Falha ao exportar:', err)
-      onStatusMessage('Erro ao exportar', true)
-    } finally {
-      setIsExporting(false)
-    }
-  }
-
-  // formatId omitido: o Compression exporta apenas Markdown, sem branching de formato
-  const handleExportWithName = async (name: string) => {
-    if (!activeProject || !markdown) return
-    setIsExporting(true)
-    try {
-      const result = await window.codeAwareness.saveToDownloads(markdown, name)
-      if (result.success) {
-        onStatusMessage('Exportado para Downloads!')
-      } else {
-        onStatusMessage('Erro ao exportar', true)
-      }
-    } catch (err) {
-      console.error('Falha ao exportar com nome personalizado:', err)
-      onStatusMessage('Erro ao exportar', true)
-    } finally {
-      setIsExporting(false)
-    }
-  }
 
   // ─── Tags ────────────────────────────────────────────────────────────────
 
@@ -485,11 +368,6 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
     return mappedFiles
   }, [mappedFiles, selectedOnTop, selectedFiles])
 
-  // Conteúdo completo (prompt + markdown) para preview e cópia
-  const fullPromptContent = useMemo(() => {
-    return `${auditPromptTemplate}\n\n${markdown}`
-  }, [auditPromptTemplate, markdown])
-
   // ─── Contagem para a ViewToolbar ────────────────────────────────────────
   const summaryText = useMemo(() => {
     const base = filteredFiles.length === visibleFiles.length
@@ -508,6 +386,14 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
     setAuditPromptTemplate(newPrompt)
     localStorage.setItem('code_compression_prompt_template', newPrompt)
   }, [])
+// ─── Output Modal ───────────────────────────────────────────────────────
+  // Convierte el Set de selección a un array estable (useMemo preserva la referencia)
+  // para que el OutputModal no regenere el preview en re-renders sin relación.
+  const outputModalFiles = useMemo(() => Array.from(selectedFiles), [selectedFiles])
+
+  const handleOpenOutputModal = useCallback(() => setIsOutputModalOpen(true), [])
+  const handleCloseOutputModal = useCallback(() => setIsOutputModalOpen(false), [])
+  const handleOpenTagManager = useCallback(() => setIsTagManagerOpen(true), [])
 
   if (!activeProject) {
     return (
@@ -568,37 +454,20 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
       <ActionBar
         right={
           <>
-            <button className="app-pill-btn" onClick={() => setIsPromptModalOpen(true)}>
+            <button className="app-ghost-btn" onClick={() => setIsPromptModalOpen(true)}>
+              <PenLine size={14} strokeWidth={2} />
               Instruções do Prompt
             </button>
 
-            <button
-              className="app-pill-btn"
-              onClick={() => setIsPreviewOpen(true)}
-              disabled={!markdown || isGenerating}
-            >
-              Visualizar Preview
+            <button className="app-pill-btn" onClick={handleOpenOutputModal}>
+              <FileText size={14} strokeWidth={2} />
+              Gerar Saída
             </button>
-
-            <button className="app-pill-btn" onClick={handleCopy} disabled={!markdown || isGenerating}>
-              {isCopied ? 'Copiado!' : 'Copiar'}
-            </button>
-
-            <button className="app-pill-btn secondary" onClick={handleCopyWithPrompt} disabled={!markdown || isGenerating}>
-              Copiar com Prompt
-            </button>
-
-            <ExportDropdown label={isExporting ? 'Exportando...' : 'Exportar'} disabled={!markdown || isGenerating || isExporting}>
-              <button onClick={handleExportDownloads}><FileText size={14} strokeWidth={2} /> Exportar Normal</button>
-              <button onClick={() => setIsExportNameModalOpen(true)}><PenLine size={14} strokeWidth={2} /> Exportar com nome personalizado…</button>
-            </ExportDropdown>
           </>
         }
       />
 
-      <ProcessingStatusBar isVisible={isGenerating} />
-
-      <FileGrid
+      <FileCollectionView
         files={fileCardFiles}
         allTags={allTags}
         fileTagsMap={fileTagsMap}
@@ -610,17 +479,16 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
         onRevealInExplorer={handleRevealInExplorer}
         onCopyPath={handleCopyPath}
         onCopyName={handleCopyName}
-        onOpenTagManager={() => setIsTagManagerOpen(true)}
+        onOpenTagManager={handleOpenTagManager}
         onTagsChanged={refreshTagsData}
         repoPath={activeProject?.path}
       />
 
-      <PreviewModal
-        isOpen={isPreviewOpen}
-        onClose={() => setIsPreviewOpen(false)}
-        markdown={markdown}
-        title="Code Compression Preview"
-        onExportDownloads={handleExportDownloads}
+      <OutputModal
+        isOpen={isOutputModalOpen}
+        onClose={handleCloseOutputModal}
+        repoPath={activeProject.path}
+        selectedFiles={outputModalFiles}
         onStatusMessage={onStatusMessage}
       />
 
@@ -638,15 +506,6 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
           onTagsChanged={refreshTagsData}
         />
       )}
-
-      <ExportNameModal
-        isOpen={isExportNameModalOpen}
-        onClose={() => setIsExportNameModalOpen(false)}
-        onConfirm={handleExportWithName}
-        defaultName={`${activeProject.name}-compression`}
-        formats={EXPORT_FORMATS}
-        defaultFormat="markdown"
-      />
     </div>
   )
 }

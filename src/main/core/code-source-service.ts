@@ -1,11 +1,11 @@
 // Responsabilidades do Script
 //
-// 1. Orquestrar a geração do Markdown completo ou seletivo de um repositório via RepomixAdapter.
+// 1. Orquestrar a geração do Markdown completo ou seletivo de um repositório via RepomixOutputAdapter.
 // 2. Salvar o arquivo gerado dentro da pasta 'code_awareness' no próprio repositório.
 
 import { join, basename } from 'path'
 import { promises as fs } from 'fs'
-import { RepomixAdapter } from './repomix-adapter'
+import { RepomixOutputAdapter } from './repomix-output-adapter'
 import { CodefetchResult } from '../../shared/types'
 
 // Opções aceitas pelo generateCodeSource para controlar o comportamento da geração
@@ -20,7 +20,7 @@ export interface CodeSourceResult extends CodefetchResult {
 }
 
 export class CodeSourceService {
-  private repomix = new RepomixAdapter()
+  private repomix = new RepomixOutputAdapter()
 
   async generateCodeSource(repoPath: string, options?: CodeSourceOptions): Promise<CodeSourceResult> {
     try {

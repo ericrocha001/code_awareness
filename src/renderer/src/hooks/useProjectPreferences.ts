@@ -4,7 +4,7 @@
 Responsabilidades do Script
 
 1. Carregar preferências de UI por projeto a partir do settings.json.
-2. Expor setters tipados para sidebar e modo de visualização com salvamento automático.
+2. Expor setters tipados para sidebar e larguras de coluna da FileView com salvamento automático.
 3. Retornar estado atual consolidado para consumo dos componentes.
 
 Mapa de Relacionamentos do Script
@@ -76,9 +76,24 @@ export function useProjectPreferences(repoPath: string | null) {
     await savePreferences(repoPath, next)
   }
 
+  // Mescla sobre o valor atual e persiste — mesmo canal do updateSidebarOpen.
+  // Chamado apenas no dragEnd do redimensionamento (nunca por delta).
+  const updateFileViewColumnWidths = async (
+    widths: Partial<Record<'toggle' | 'identity' | 'path' | 'tags' | 'tokens' | 'actions', number>>
+  ) => {
+    if (!repoPath) return
+    const next = {
+      ...preferences,
+      fileViewColumnWidths: { ...preferences.fileViewColumnWidths, ...widths }
+    }
+    setPreferences(next)
+    await savePreferences(repoPath, next)
+  }
+
   return {
     preferences,
-    updateSidebarOpen
+    updateSidebarOpen,
+    updateFileViewColumnWidths
   }
 }
 

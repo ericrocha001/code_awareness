@@ -1,0 +1,53 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a superfície do menu de ações exibido sob demanda pelo ActivePopover.
+2. Garantir consistência visual com os itens de menu contextuais do sistema.
+
+Mapa de Relacionamentos do Script
+
+1. ActivePopover.tsx
+   - Tipo: Relação de UI
+   - Relação: Fornece as classes .active-popover-menu para o menu contextual.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O menu herda cores do tema via variáveis CSS (--bg-secondary, --border, --text-primary).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.active-popover-menu {
+  min-width: 180px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, var(--shadow-opacity));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.active-popover-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.active-popover-menu button:hover {
+  background: var(--bg-tertiary);
+}

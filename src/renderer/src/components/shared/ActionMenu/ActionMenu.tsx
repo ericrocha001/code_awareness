@@ -54,6 +54,7 @@ interface ActionMenuProps {
   placement?: PopoverPlacement
   closeOnSelect?: boolean
   className?: string
+  variant?: 'pill' | 'ghost'
 }
 
 export const ActionMenu: React.FC<ActionMenuProps> = ({
@@ -63,7 +64,8 @@ export const ActionMenu: React.FC<ActionMenuProps> = ({
   disabled = false,
   placement = 'auto-start',
   closeOnSelect = true,
-  className = ''
+  className = '',
+  variant = 'pill'
 }) => {
   const [open, setOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement>(null)
@@ -89,7 +91,7 @@ export const ActionMenu: React.FC<ActionMenuProps> = ({
     <>
       <Button
         ref={buttonRef}
-        variant="pill"
+        variant={variant}
         icon={icon}
         chevron
         open={open}

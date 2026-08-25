@@ -1,0 +1,162 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir os estilos estruturais do container da FileView com header sticky e superfície de scroll bidirecional única.
+2. Garantir alinhamento horizontal pixel-perfect entre as colunas do header e as linhas FileRow (ambos consumem a mesma custom property).
+
+Mapa de Relacionamentos do Script
+
+1. FileView.tsx
+   - Tipo: Relação de UI
+   - Relação: Fornece classes estruturais para o container, header e FileRows completas no DOM.
+   - Criticidade: Alta
+
+2. FileRow.css
+   - Tipo: Contrato / Interface
+   - Relação: Compartilha o template idêntico de 5 colunas em CSS Grid (Sprint 8 — coluna de ações removida; o botão de ações é absoluto na row, .fr-action-btn).
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O layout grid do header (.fv-header) é estruturalmente idêntico ao de .fr-row no FileRow.css.
+2. O header permanece sticky no topo (position: sticky + top: 0) dentro da superfície de scroll bidirecional (.fv-scroll-container) enquanto a rolagem vertical e horizontal ocorre no mesmo container.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.fv-container {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  /* Fonte única de verdade da geometria da grid (Sprint 1): declarada no
+     ancestral comum de .fv-header e .fr-row, consumida por ambos via var().
+     Em runtime, FileView atualiza esta custom property directamente no DOM
+     durante o drag de coluna, sem provocar re-render das FileRows. O default
+     DEVE permanecer byte-idéntico a FILE_VIEW_DEFAULT_TEMPLATE
+     (fileViewColumns.ts) — identidade congelada por fileViewColumns.test.ts. */
+  --fv-grid-template: 48px minmax(180px, 1.2fr) minmax(120px, 1fr) minmax(200px, 2fr) 120px;
+}
+
+.fv-header {
+  display: grid;
+  /* Template herdado da custom property --fv-grid-template declarada no
+     .fv-container (fonte única de geometría). Em runtime, FileView atualiza esta
+     custom property directamente no DOM durante o drag de coluna, o header (e as
+     FileRows) herdan a nova geometría sem re-render. O default da custom property
+     DEVE permanecer byte-idéntico a FILE_VIEW_DEFAULT_TEMPLATE (fileViewColumns.ts)
+     — identidade congelada por fileViewColumns.test.ts.
+     Sprint 4: o header é o primeiro filho da superfície de scroll bidirecional
+     (.fv-scroll-container), position sticky + top 0 mantém o header visível no
+     scroll vertical e sincroniza o horizontal com as rows. z-index 1 mantém o
+     header acima das rows durante o scroll. */
+  grid-template-columns: var(--fv-grid-template);
+  gap: 12px;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-subtle);
+  flex-shrink: 0;
+  background: var(--bg-primary, #1a1a1a);
+  box-sizing: border-box;
+  /* Sprint 9: width: max-content garante que o header se expanda para acomodar
+     todo o conteúdo horizontal e min-width: 100% assegura alinhamento horizontal
+     pixel-perfect com o scroll container mesmo sem overflow. */
+  width: max-content;
+  min-width: 100%;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+/* Células redimensionáveis: ancoram as alças absolutas (Sprint 3) */
+.fv-col-identity,
+.fv-col-path,
+.fv-col-tags,
+.fv-col-tokens {
+  position: relative;
+}
+
+/* Alça de redimensionamento: absoluta na borda direita da célula, centralizada sobre ela */
+.fv-resizer-slot {
+  position: absolute;
+  top: 0;
+  right: -10px;
+  bottom: 0;
+  display: flex;
+  align-items: stretch;
+}
+
+.fv-col-toggle {
+  display: flex;
+  align-items: center;
+  /* Sprint 4: redimensionável — ancora a alça absoluta (mesmo padrão das demais). */
+  position: relative;
+}
+
+.fv-col-identity {
+  min-width: 0;
+}
+
+.fv-col-path {
+  min-width: 0;
+}
+
+.fv-col-tags {
+  min-width: 0;
+}
+
+/* Segurança anti-amontoamento (BUGFIX B4): células do header truncam por ellipsis */
+.fv-header > div {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fv-col-tokens {
+  /* Sprint 4: alineado à esquerda, consistente com .fr-tokens (flex-start) — o
+     redimensionamento de Tokens afasta visualmente o TokenBadge do botón de
+     Actions (agora absoluto no final da row, .fr-action-btn) */
+  text-align: left;
+}
+
+.fv-scroll-container {
+  flex: 1;
+  /* Sprint 4: superfície de scroll bidirecional única — vertical e horizontal
+     no mesmo container. Em meia tela o conteúdo pode exceder a largura da
+     viewport e o scroll horizontal revela todas as colunas, com o header sticky
+     sincronizado.
+     Sprint 4.1: width: 100% dá ao scroll container unha largura definida (igual
+     ao pai). Sem essa largura, o container se expandiria para caber o conteúdo
+     das FileRows e o overflow horizontal não seria detectado — a
+     scrollbar horizontal não aparecería. */
+  overflow: auto;
+  position: relative;
+  min-height: 0;
+  width: 100%;
+}
+
+
+.fv-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+  color: var(--text-subtle);
+  font-size: 14px;
+}
+
+/* Sentinel do lazy mount — invisível, usado pelo IntersectionObserver para
+   disparar o carregamento do próximo lote de rows. Altura mínima de 1px
+   garante que o observer detecte a interseção. */
+.fv-sentinel {
+  height: 1px;
+  width: 100%;
+}

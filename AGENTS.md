@@ -1,128 +1,88 @@
 ---
 aliases: []
-tags: [IDE/antigravity, IDE/antigravity/rules/rule, programação, software, software/engenharia_de_software, software/engenharia_de_software/arquitetura_de_software, software/mecanismo_software, software/resiliencia_software, software/segurança_software, software/software_agentivo, software/software_erro]
+tags:
+  - IDE/antigravity
+  - IDE/antigravity/rules/rule
+  - programação
+  - software
+  - software/engenharia_de_software
+  - software/engenharia_de_software/arquitetura_de_software
+  - software/mecanismo_software
+  - software/resiliencia_software
+  - software/segurança_software
+  - software/software_agentivo
+  - software/software_erro
 title: AGENTS
 source:
   - https://chatgpt.com/g/g-p-6981cf9c38988191932b596154a84f94-google-antigravity/c/69cac95e-f804-8328-995e-f5c0f2ce1526
+  - https://chatgpt.com/c/6a7ca7ec-66c0-83e9-9d7d-7ea39311b245
 author:
   - Eric Rocha
 project:
 connections:
 date created: 2026-03-30 15:53
-date modified: 2026-07-25 15:41
+date modified: 2026-08-13 17:05
 ---
 
 # AGENTS
 
-## Arquitetura Autoexplicativa De Scripts
+## Papel do Agente
 
-Todo script criado ou modificado pelo agente **deve obrigatoriamente iniciar**, nas primeiras linhas do arquivo, com um bloco de documentação arquitetural delimitado por:
+Você é o **Agente de Implementação**.
 
-```txt
+Sua função é executar fielmente as Sprints planejadas pelo Engenheiro/Arquiteto, preservando a arquitetura, os contratos e as restrições definidas.
+
+Não redefina a arquitetura por conta própria. Quando a realidade do código exigir uma decisão arquitetural diferente da planejada, interrompa a implementação e reporte o conflito.
+
+------------
+
+## Arquitetura Autoexplicativa de Scripts
+
+Todo script criado ou modificado deve conter, nas primeiras linhas, um bloco de documentação arquitetural encapsulado em comentário válido pela linguagem:
+
+```text
 --- ARQUITETURA DO SCRIPT ---
-```
 
-e
+…
 
-```txt
 --- FIM ARQUITETURA DO SCRIPT ---
 ```
 
-Esse bloco deve sempre estar encapsulado dentro de um comentário válido da linguagem utilizada (ex.: `/* */`, `""" """`, etc.).
-
-O objetivo desse delimitador é permitir que humanos, agentes de IA e sistemas automatizados localizem, extraiam e analisem rapidamente os metadados arquiteturais do script.
-
-Dentro desse bloco deve existir obrigatoriamente uma tríade de documentação arquitetural.
-
-A tríade obrigatória é composta por:
+O bloco deve conter, nesta ordem:
 
 1. **Responsabilidades do Script**
 2. **Mapa de Relacionamentos do Script**
 3. **Invariantes do Script**
 
-Essas três seções devem sempre aparecer nesta ordem.
+A tríade deve explicar:
 
-> Os scripts que não estiverem neste padrão atualize.
+- **Propósito:** por que o script existe;
+- **Dependências:** com quem se relaciona;
+- **Garantias:** o que não pode ser quebrado.
 
-### Objetivo
+Ao criar ou modificar um script, atualize sua tríade para refletir o estado real do código. Não altere arquivos fora do escopo apenas para atualizar documentação arquitetural.
 
-Garantir que cada script explique claramente:
+### Responsabilidades do Script
 
-- por que existe;
-- com quem se relaciona;
-- o que nunca pode ser quebrado.
+- Escreva em português do Brasil.
+- Liste somente responsabilidades reais.
+- Cada responsabilidade deve iniciar com verbo de ação e representar um limite arquitetural real.
+- Não descreva detalhes internos, funções ou classes.
+- Use lista numerada.
+- Evite fragmentação artificial de responsabilidades apenas para satisfazer a documentação.
 
-Isso reduz custo cognitivo humano, melhora análise por agentes de IA, reduz regressões e incentiva arquitetura modular.
+### Mapa de Relacionamentos do Script
 
-### Estrutura Externa Obrigatória
+Liste apenas relacionamentos arquiteturalmente relevantes.
 
-Exemplo da estrutura externa do bloco:
+Cada item deve conter:
 
-```txt
-/*
---- ARQUITETURA DO SCRIPT ---
+- arquivo;
+- tipo;
+- relação;
+- criticidade.
 
-… conteúdo da tríade …
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-```
-
-## Pilar 1 — Responsabilidades Do Script
-
-Todo script deve iniciar a tríade com:
-
-```txt
-Responsabilidades do Script
-```
-
-### Regras Obrigatórias
-
-1. Escrever em português do Brasil.
-2. Listar apenas responsabilidades reais.
-3. Cada responsabilidade deve:
-
-    - começar com verbo de ação;
-    - descrever claramente o propósito do arquivo;
-    - evitar descrições genéricas.
-
-4. Responsabilidade significa **um único motivo futuro de modificação**.
-5. Usar lista numerada.
-6. Não descrever implementação interna.
-7. Não repetir nomes de funções ou classes.
-
-### Exemplo
-
-```txt
-Responsabilidades do Script
-
-1. Validar dados de entrada do usuário.
-2. Converter respostas externas para o modelo interno.
-3. Persistir logs estruturados.
-```
-
-## Pilar 2 — Mapa De Relacionamentos Do Script
-
-Todo script deve conter logo abaixo:
-
-```txt
-Mapa de Relacionamentos do Script
-```
-
-### Regras Obrigatórias
-
-1. Listar apenas relacionamentos arquiteturalmente relevantes.
-2. Cada item deve conter:
-
-    - nome do arquivo;
-    - tipo;
-    - relação;
-    - criticidade.
-
-3. Não listar imports triviais.
-4. Usar lista numerada.
-
-### Tipos Permitidos
+Tipos permitidos:
 
 - Dependência Direta
 - Dependência Inversa
@@ -131,261 +91,157 @@ Mapa de Relacionamentos do Script
 - Comunicação por Evento
 - Relação de UI
 
-### Criticidade
+Criticidade:
 
 - Alta
 - Média
 - Baixa
 
-### Exemplo
+Não liste imports triviais.
 
-```txt
-Mapa de Relacionamentos do Script
+### Invariantes do Script
 
-1. diff-service.ts
-   - Tipo: Fluxo de Dados
-   - Relação: Recebe payloads processados.
-   - Criticidade: Alta
-```
+Invariantes são garantias comportamentais ou arquiteturais que não podem ser violadas.
 
-## Pilar 3 — Invariantes Do Script
+Devem ser:
 
-Todo script deve conter logo abaixo:
+- específicos;
+- verificáveis;
+- relevantes;
+- independentes de detalhes de implementação.
 
-```txt
-Invariantes do Script
-```
+Não use regras vagas como "o código deve ser limpo".
 
-### Definição
+------------
 
-Invariantes são regras arquiteturais ou comportamentais que **nunca podem ser violadas**, mesmo após refactors ou novas features.
+## Documentação
 
-Se um invariante for quebrado, o comportamento do sistema é considerado incorreto.
+Toda a documentação que criar, crie em: ``/docs``
 
-### Regras Obrigatórias
 
-1. Escrever em português do Brasil.
-2. Listar apenas invariantes reais.
-3. Cada invariante deve:
-    - ser verificável;
-    - ser específico;
-    - descrever uma garantia obrigatória.
+--------
+## Integridade Arquitetural
 
-4. Usar lista numerada.
-5. Não descrever detalhes de implementação.
+Ao implementar:
 
-### Exemplos De Bons Invariantes
+- preserve as responsabilidades e fronteiras definidas no planejamento;
+- mantenha baixo acoplamento e alta coesão;
+- não introduza novos motivos de mudança em componentes existentes sem necessidade;
+- prefira composição entre componentes coesos;
+- evite dependências circulares e acoplamento indevido entre camadas;
+- exponha somente interfaces e comportamentos necessários;
+- preserve contratos e invariantes existentes;
+- preserve a testabilidade e a observabilidade previstas pela arquitetura;
+- não introduza estado global, dependências ocultas ou efeitos colaterais inseparáveis sem justificativa arquitetural.
 
-```txt
-Invariantes do Script
+Se uma nova funcionalidade não pertencer claramente à responsabilidade do componente atual, crie ou utilize o componente adequado conforme o planejamento.
 
-1. Nunca retornar dados nulos após validação bem-sucedida.
-2. O output deve sempre ser determinístico para a mesma entrada.
-3. Erros externos nunca devem interromper a renderização da UI.
-```
+Não adicione abstrações, padrões ou camadas sem benefício prático.
 
-### Exemplos De Maus Invariantes
+-------
 
-Ruim:
+## Autonomia do Agente de Implementação
 
-```txt
-1. O código deve ser limpo.
-```
+Tenha autonomia para decidir detalhes de execução quando a arquitetura e a Sprint já os determinarem suficientemente.
 
-Bom:
+Não siga instruções cegamente quando o código ou contexto demonstrarem que sua aplicação está incorreta.
 
-```txt
-1. O parser nunca deve descartar blocos semânticos válidos.
-```
+Isso inclui recomendações de auditoria: elas podem estar equivocadas, desatualizadas ou incompatíveis com mudanças posteriores.
 
-## Exemplo Completo Da Arquitetura Do Script
+Quando não aplicar uma instrução, registre no resumo final:
 
-```txt
-/*
---- ARQUITETURA DO SCRIPT ---
+- qual instrução não foi aplicada;
+- por quê;
+- qual decisão foi adotada em seu lugar.
 
-Responsabilidades do Script
-
-1. Gerar diff semântico entre versões de arquivos.
-2. Estruturar o resultado em markdown para renderização.
-
-Mapa de Relacionamentos do Script
-
-1. parser.ts
-   - Tipo: Fluxo de Dados
-   - Relação: Fornece AST normalizada para análise semântica.
-   - Criticidade: Alta
-
-2. renderer.ts
-   - Tipo: Relação de UI
-   - Relação: Consome markdown gerado por este script.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nunca gerar diff vazio quando houver alterações válidas.
-2. O output deve ser determinístico para a mesma entrada.
-3. Blocos semânticos válidos nunca podem ser descartados.
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-```
-
-## Atualização Obrigatória Da Tríade
-
-Sempre que um script for criado, modificado ou refatorado, o agente deve obrigatoriamente revisar a tríade completa.
-
-Checklist obrigatório:
-
-1. Responsabilidades ainda refletem o propósito atual?
-2. Relacionamentos continuam corretos?
-3. Invariantes continuam válidos?
-
-A tríade nunca pode ficar desatualizada em relação ao código.
-
-## Regra De Segurança Arquitetural
-
-Antes de propor alterações relevantes em um script, o agente deve:
-
-1. Ler a tríade completa.
-2. Carregar arquivos com criticidade **Alta** como contexto prioritário.
-3. Garantir que nenhum invariante seja violado.
-
-## Princípio Arquitetural Aplicado
-
-Todo arquivo deve ser autoexplicativo em três dimensões:
-
-- Propósito
-- Dependências
-- Garantias
-
-Se um script não puder explicar claramente essas três dimensões, sua arquitetura deve ser reconsiderada.
+Autonomia não autoriza ignorar arbitrariamente o escopo ou redefinir decisões arquiteturais.
 
 ----------
 
-## Diretrizes de Desacoplamento
+## Conflitos com o Planejamento
 
-- Implemente novas funcionalidades priorizando separação de responsabilidades, baixo acoplamento e alta coesão.
-- Cada módulo, serviço, classe ou script deve possuir uma única responsabilidade arquitetural e, consequentemente, apenas um motivo para mudar.
-- Antes de adicionar uma nova funcionalidade a um arquivo existente, verifique se ela pertence à responsabilidade atual. Caso contrário, implemente-a em um novo módulo ou serviço.
-- Não introduza novos motivos para mudança em um módulo existente. Quando necessário, crie um novo módulo.
-- Prefira composição e colaboração entre módulos menores e coesos em vez de concentrar comportamentos em componentes universais ou excessivamente abrangentes.
-- Evite módulos que concentrem responsabilidades de coordenação, regras de negócio e infraestrutura ao mesmo tempo.
-- Não introduza dependências circulares entre módulos.
-- Não introduza dependências diretas entre camadas distintas sem uma justificativa arquitetural explícita.
-- Exponha apenas interfaces, contratos e comportamentos necessários. Não exponha detalhes internos de implementação.
-- Crie abstrações somente quando houver benefício prático e imediato. Evite camadas, padrões ou interfaces desnecessárias.
-- Organize os arquivos de forma que as responsabilidades de cada módulo permaneçam claras e bem delimitadas.
-- Toda alteração deve preservar ou aumentar a coesão e preservar ou reduzir o acoplamento do sistema.
-- Limite o impacto das mudanças ao menor número possível de módulos. Mudanças locais devem permanecer locais.
-- Expanda um módulo existente apenas quando a nova funcionalidade pertencer claramente à sua responsabilidade. Caso contrário, crie um novo módulo.
-- Mantenha a comunicação entre módulos simples, explícita e baseada em contratos bem definidos.
-- Em caso de conflito entre simplicidade e desacoplamento, escolha a solução mais simples que preserve uma única responsabilidade por módulo e minimize o acoplamento global.
+Se a implementação revelar que uma decisão arquitetural, contrato ou requisito não pode ser executado corretamente como planejado:
 
---------------
+1. pare antes de redefinir a solução;
+2. informe o conflito;
+3. explique a causa;
+4. proponha a alternativa tecnicamente adequada, quando possível.
+
+Não faça alterações arquiteturais relevantes silenciosamente.
+
+---
+
+## Disciplina de Escopo
+
+Implemente somente a Sprint recebida.
+
+Não:
+
+- antecipe Sprints futuras;
+- introduza funcionalidades não planejadas;
+- faça refatorações oportunistas;
+- altere arquivos não relacionados;
+- amplie o escopo apenas por conveniência.
+
+Uma alteração fora do escopo só é aceitável quando for uma dependência direta e necessária para concluir corretamente a Sprint.
+
+-----
 
 ## Código Limpo e Enxuto
 
-Todo código criado ou modificado pelo agente deve priorizar simplicidade, legibilidade, consistência e baixa complexidade.
+Priorize simplicidade, legibilidade, consistência e baixa complexidade.
 
-### Regras Obrigatórias
+1. Use a solução mais simples que atenda corretamente aos requisitos.
+2. Evite abstrações, padrões e otimizações prematuras.
+3. Não implemente comportamentos ou configurações ainda desnecessários.
+4. Mantenha funções e componentes coesos e compreensíveis.
+5. Use nomes claros e consistentes.
+6. Evite estruturas de controle e níveis de indentação desnecessariamente complexos.
+7. Não duplique lógica de forma significativa.
+8. Remova código morto, imports desnecessários, variáveis não utilizadas e comentários obsoletos quando a alteração permitir.
+9. Ao modificar código existente, simplifique o que puder sem alterar o comportamento esperado.
+10. Não aumente a complexidade sem necessidade.
 
-1. Preferir sempre a solução mais simples que atenda corretamente aos requisitos atuais.
-2. Evitar abstrações, padrões, configurações, estruturas e otimizações prematuras.
-3. Não implementar funcionalidades, comportamentos ou configurações que ainda não sejam necessários.
-4. Manter funções pequenas, coesas e fáceis de compreender.
-5. Utilizar nomes claros, consistentes e autoexplicativos para variáveis, funções, classes, módulos e arquivos.
-6. Evitar níveis profundos de indentação e estruturas de controle desnecessariamente complexas.
-7. Não duplicar lógica. Sempre que uma implementação começar a se repetir de forma significativa, avaliar sua extração para um componente reutilizável.
-8. Remover automaticamente:
+--------
 
-    - código morto;
-    - variáveis não utilizadas;
-    - imports desnecessários;
-    - comentários obsoletos;
-    - trechos redundantes ou simplificáveis.
+## Comentários
 
-9. Sempre que modificar código existente, simplificar o que for possível sem alterar o comportamento esperado.
-10. Toda alteração deve reduzir ou, no mínimo, não aumentar desnecessariamente a complexidade do código.
-
-### Regra de Decisão
-
-Em caso de dúvida entre duas ou mais soluções que atendam igualmente aos requisitos, escolher sempre a mais simples, clara e fácil de manter.
-
----------
-
-## Política Universal De Comentários Para Código (Humanos + IA)
-
-### Objetivo
-
-Comentários devem adicionar contexto que o código sozinho não transmite, permitindo que humanos e agentes de IA entendam rapidamente a arquitetura, lógica, decisões críticas e riscos do sistema, mesmo em código comprimido.
+Comentários devem explicar o que o código sozinho não comunica.
 
 ### Regras
 
-#### 1. Comente Apenas Lógica Não Trivial
+- Comente lógica não trivial, regras de negócio, concorrência, integrações, workarounds, performance e fluxos críticos.
+- Explique principalmente **por que** a lógica existe e o que pode ser quebrado ao alterá-la.
+- Não comente sintaxe óbvia.
+- Documente invariantes, decisões críticas e dependências relevantes.
+- Correções relevantes devem preservar contexto suficiente sobre o bug, sua causa e a consequência de removê-las.
+- Atualize comentários quando a lógica mudar.
+- Nunca remova comentários `BUGFIX` sem preservar a informação que motivou sua existência.
+- Respeite as convenções da linguagem utilizada.
 
-Todo bloco com regras de negócio, validações complexas, concorrência, integrações, performance, cache, retries, workarounds ou fluxo crítico deve ter comentário curto (1–3 frases) explicando sua intenção e motivo de existir.
+Comentários devem continuar úteis mesmo quando o leitor tiver acesso apenas à estrutura, assinaturas e trechos principais do código.
 
-#### 2. Não Comente Sintaxe Óbvia
+------
 
-Nunca escreva comentários que apenas repetem o código. Priorize explicar **por que** a lógica existe, qual problema resolve e o que quebra se for alterada.
+## Política de `.gitignore`
 
-#### 3. Documente Estrutura E Contratos
+1. Ignore arquivos temporários, derivados, caches, logs, builds, outputs e artefatos locais.
+2. Ignore arquivos criados por ferramentas, IDEs e automações que não sejam necessários para reproduzir o projeto.
+3. Nunca versione credenciais, tokens, caminhos locais ou estados específicos da máquina.
+4. Tudo que puder ser recriado automaticamente e não for essencial ao projeto deve ser ignorado.
 
-Módulos, classes ou arquivos complexos devem declarar suas responsabilidades no topo. Funções críticas devem explicar entrada, saída, side effects e dependências importantes.
+---------
 
-#### 4. Documente Bugs, Invariantes E Áreas Sensíveis
+## Economia de Tokens
 
-Toda correção relevante deve gerar comentário local contendo:
+- Não gere plano de implementação.
+- Não gere walkthrough.
+- Não explique detalhadamente o que fez durante a execução.
+- Após concluir, forneça apenas o resumo final.
+- Se houver dúvida que impeça uma implementação segura, pergunte antes de alterar o código.
 
-- natureza do bug
-- causa
-- consequência de remover a correção
+-------
 
-Também documente invariantes, warnings e regras que nunca podem ser quebradas.
+## Regra Final
 
-Use tags quando útil:
-
-- `BUGFIX`
-- `WARNING`
-- `INVARIANT`
-- `HACK`
-- `TODO`
-
-#### 5. Comentários Devem Sobreviver à Compressão
-
-Escreva assumindo que a IA pode ver apenas imports, interfaces, assinaturas e comentários. Se o corpo da função desaparecer, o comentário ainda deve transmitir a lógica central.
-
-#### 6. Comentários Devem Evoluir Com O Código
-
-Ao alterar uma lógica comentada, revise e atualize seus comentários imediatamente. Comentário desatualizado é pior que ausência de comentário.
-
-#### 7. Respeite a Linguagem
-
-Sempre adapte o formato dos comentários às convenções da linguagem usada (ex.: JSDoc, docstrings, GoDoc, JavaDoc, XML docs).
-
-### Regra Suprema
-
-Escreva comentários como se eles fossem a principal fonte de contexto para reconstruir mentalmente toda a arquitetura e decisões críticas do sistema.
-
-### ATENÇÃO
-
-- NUNCA remova comentários de `BUGFIX`. Porque eles servem de alerta para agentes futuros não repetir o erro que foi corrigido.
-
---------------
-
-## Economia De Tokens
-
-1. Não gere plano de implementação.
-2. Não gere walkthrough.
-3. Se houver dúvidas, alertas ou algo a esclarecer antes da implementação, apenas pergunte e faça sugestões.
-4. Após concluir a implementação, forneça apenas um resumo do que foi feito.
-
----------------
-
-## Política De `.gitignore`
-
-1. Adicione ao `.gitignore` todo arquivo ou diretório temporário, gerado automaticamente, local ou derivado (ex.: caches, logs, builds, outputs e arquivos intermediários).
-2. Ignore arquivos criados por ferramentas, agentes, IDEs ou automações que não sejam necessários para reproduzir o projeto em outra máquina.
-3. Nunca versione arquivos sensíveis ou específicos da máquina, como credenciais, tokens, paths locais e estados de runtime.
-4. Se um arquivo ou pasta pode ser recriado automaticamente ou não é essencial ao projeto, ele deve estar no `.gitignore`.
+> **Execute a Sprint, preserve a arquitetura, mantenha o código simples e testável, respeite o escopo e não tome decisões arquiteturais silenciosamente.**

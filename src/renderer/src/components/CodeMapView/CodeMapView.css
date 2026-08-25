@@ -1,0 +1,521 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir o layout full-width do container principal da aba Code Map.
+2. Estilizar o conteúdo em três cartões arredondados com rolagem interna independente e cabeçalhos fixos.
+3. Estilizar a pele do resumo do repositório (prefixo cmv-overview-).
+4. Estilizar a pele da árvore (linhas-guia verticais, pílulas, badges tingidos).
+5. Estilizar os estados vazios distintos (nunca indexado / busca / filtro).
+6. Manter cabeçalhos fixos (barrinha do explorer e breadcrumb) fora do scroll dos miolos.
+
+Mapa de Relacionamentos do Script
+
+1. CodeMapView.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo (prefixo cmv-).
+   - Criticidade: Alta
+
+2. CodeMapOverview.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes cmv-overview-* definidas neste arquivo.
+   - Criticidade: Alta
+
+3. CodeMapTree.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes cmv-tree-* definidas neste arquivo.
+   - Criticidade: Alta
+
+4. CodeMapCodeView.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome o container cmv-code-scroll que envolve a coluna de código.
+   - Criticidade: Alta
+
+5. ColumnResizer.tsx
+   - Tipo: Relação de UI
+   - Relação: As alças ficam no gap entre os cartões, alinhadas pelo flex do cmv-content.
+   - Criticidade: Média
+
+Invariantes do Script
+
+1. O design deve respeitar estritamente as variáveis de cores globais.
+2. Todas as classes usam prefixo cmv- para evitar colisão com outras abas.
+3. As únicas cores hardcoded aceitas são o âmbar semântico (#f59e0b, status de modificação) e o par de azuis de relacionamento (#1d4ed8 no tema claro / #93c5fd no tema escuro).
+4. As três zonas e os três miolos usam min-height: 0 — sem isso o flexbox não deixa as colunas rolarem.
+5. O scroll é exclusivo dos miolos (cmv-*-scroll) — as zonas e cabeçalhos nunca rolam.
+6. A indentação da árvore é baseada em fonte única no container de filhos (cmv-tree-children), sem acúmulo duplo de padding.
+7. As zonas nunca têm largura fixa em CSS — as frações são controladas por flex-basis inline no TSX.
+8. Quando o bloco de código está virtualizado, o scroll externo do miolo cede lugar ao scroll interno da lista — nunca ambos rolam simultaneamente.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.cmv-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh; /* Sprint (Correção): .app-main sem padding — scrollbar na borda */
+  overflow: hidden;
+}
+
+.cmv-container > .vt-root {
+  flex-shrink: 0;
+}
+
+.cmv-container > .ab-root {
+  flex-shrink: 0;
+}
+
+.cmv-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.cmv-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  color: var(--text-secondary);
+}
+
+.cmv-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  gap: 8px; /* as alças de redimensionamento ficam no gap nativo do flex */
+  padding: 8px;
+}
+
+/* ─── Zona de Navegação (árvore) ────────────────────────────────────────── */
+
+.cmv-tree-zone {
+  /* flex-basis controlado por inline style no TSX; nenhuma largura fixa aqui */
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  /* Pele de cartão */
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  overflow: hidden;
+}
+
+/* ─── Barra do Explorer (botão inteligente) — fixa fora do scroll ────────── */
+
+.cmv-explorer-bar {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  padding: 4px 8px;
+  gap: 4px;
+  row-gap: 4px;
+  flex-wrap: wrap;
+  min-height: 36px;
+}
+
+/* ─── Miolo rolável da árvore ────────────────────────────────────────────── */
+
+.cmv-tree-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ─── Zona de Leitura (resumo) ──────────────────────────────────────── */
+
+.cmv-reading-zone {
+  /* flex-basis controlado por inline style no TSX; nenhuma largura fixa aqui */
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  /* Pele de cartão */
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  overflow: hidden;
+}
+
+/* ─── Miolo rolável da leitura ──────────────────────────────────────────── */
+
+.cmv-reading-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* ─── Zona de Código (coluna flexível) ──────────────────────────────────── */
+
+.cmv-code-zone {
+  /* Absorve o espaço restante após as outras duas colunas e as alças */
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Pele de cartão */
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  overflow: hidden;
+}
+
+/* ─── Miolo rolável do código ────────────────────────────────────────────── */
+
+.cmv-code-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+/* Quando o bloco de código está virtualizado (arquivos grandes), o scroll externo
+   cede lugar ao scroll interno da lista. O contêiner vira coluna flex sem rolagem
+   própria e o filho direto (.cmcv-root) estica para preencher todo o cartão. */
+.cmv-code-scroll:has(.csb-root--virtualized) {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.cmv-code-scroll:has(.csb-root--virtualized) > .cmcv-root {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* ─── Árvore ─────────────────────────────────────────────────────────────── */
+
+.cmv-tree {
+  overflow-y: visible;
+  padding: 8px;
+  min-width: 0;
+}
+
+.cmv-tree-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 0;
+  border-radius: 6px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  position: relative;
+}
+
+/* ─── Linhas-Guia (padrão VS Code) ────────────────────────────────────────── */
+
+/* Container de filhos — hospeda a linha-guia vertical absoluta */
+.cmv-tree-children {
+  position: relative;
+}
+
+/* Linha-guia vertical — atravessa o centro da setinha do pai.
+   Aparada em bottom: 15px (~metade da altura do nó: 6px top + 16px icon + 6px bottom = 28px / 2 ≈ 14-15px)
+   para terminar exatamente no centro vertical do último filho. */
+.cmv-tree-guide {
+  position: absolute;
+  top: 0;
+  bottom: 15px; /* 15px = metade da altura da linha para alinhar com o centro do último filho */
+  width: 1px;
+  background: var(--border-color, #e5e7eb);
+  opacity: 0.25;
+  pointer-events: none;
+}
+
+/* ─── Tipografia Hierárquica ───────────────────────────────────────────── */
+
+.cmv-tree-node[data-type="directory"] .cmv-tree-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cmv-tree-node[data-type="file"] .cmv-tree-name {
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.cmv-tree-node:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+  border-radius: 6px;
+}
+
+.cmv-tree-node--selected {
+  background: var(--accent-bg, rgba(59, 130, 246, 0.15));
+  border-radius: 6px;
+}
+
+.cmv-tree-chevron {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  transition: transform 0.15s ease;
+}
+
+.cmv-tree-chevron--open {
+  transform: rotate(90deg);
+}
+
+.cmv-tree-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  /* Cor natural do Devicon preservada */
+}
+
+.cmv-tree-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 14px;
+}
+
+.cmv-tree-status {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+
+.cmv-tree-status--modified {
+  color: #f59e0b;
+}
+
+.cmv-tree-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: var(--badge-bg, rgba(0, 0, 0, 0.06));
+  border-radius: 8px;
+  padding: 1px 6px;
+  margin-left: auto;
+}
+
+/* ─── Foco por Teclado ─────────────────────────────────────────────────── */
+
+.cmv-tree-node--focused {
+  outline: 2px solid var(--accent-color, #3b82f6);
+  outline-offset: -2px;
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+.cmv-tree-node--focused.cmv-tree-node--selected {
+  outline-color: var(--accent-color, #3b82f6);
+}
+
+/* ─── Destaque de Relacionamentos ──────────────────────────────────────── */
+/* Exceção de cor aceita: o par de azuis de relacionamento (escuro no tema claro,
+   claro no tema escuro) + o âmbar de modificação (#f59e0b). Nada além disso. */
+
+.cmv-tree-node.cmv-tree-node--related .cmv-tree-name {
+  color: #1d4ed8; /* azul escuro — legível no tema claro */
+}
+
+[data-theme="dark"] .cmv-tree-node.cmv-tree-node--related .cmv-tree-name {
+  color: #93c5fd; /* azul claro — legível no tema escuro */
+}
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="system"] .cmv-tree-node.cmv-tree-node--related .cmv-tree-name {
+    color: #93c5fd; /* azul claro — tema sistema com SO escuro */
+  }
+}
+
+/* ─── Estados Vazios ────────────────────────────────────────────────────── */
+
+.cmv-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 48px 24px;
+  color: var(--text-secondary);
+  text-align: center;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.cmv-empty-state-icon {
+  color: var(--text-secondary);
+  opacity: 0.6;
+}
+
+.cmv-empty-state-message {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.cmv-empty-state-action {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  background: transparent;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.cmv-empty-state-action:hover {
+  background: var(--accent);
+  color: #fff;
+}
+
+/* ─── Filtro de Extensões (FilterPopover) ───────────────────────────────── */
+
+.cmv-filter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 180px;
+}
+
+.cmv-filter-ext {
+  flex: 1;
+  text-align: left;
+}
+
+.cmv-filter-count {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.cmv-filter-footer {
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  padding-top: 6px;
+}
+
+.cmv-filter-clear {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  width: 100%;
+  text-align: center;
+}
+
+.cmv-filter-clear:hover {
+  color: var(--text-primary);
+  background: var(--hover-bg, rgba(0, 0, 0, 0.05));
+}
+
+/* ─── Filtro de Tags (FilterPopover) ────────────────────────────────────── */
+
+.cmv-filter-tag-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.cmv-filter-tag-name {
+  flex: 1;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ─── Resumo do Repositório (zona de leitura) ────────────────────────────── */
+
+.cmv-overview {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 24px;
+  padding: 48px 32px;
+  background: var(--bg-secondary);
+  border-radius: 12px;
+  min-height: 100%;
+  box-sizing: border-box;
+  text-align: center;
+}
+
+.cmv-overview-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.cmv-overview-stats {
+  display: flex;
+  gap: 32px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.cmv-overview-stat {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.cmv-overview-stat-value {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.cmv-overview-stat-value--modified {
+  color: #f59e0b;
+}
+
+.cmv-overview-stat-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cmv-overview-footer {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.cmv-overview-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-secondary);
+}
+
+.cmv-overview-value {
+  font-size: 13px;
+  color: var(--text-primary);
+}
+
+/* Giro do ícone de verificação de integridade em andamento */
+@keyframes cmv-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.cmv-spin {
+  animation: cmv-spin 1s linear infinite;
+}

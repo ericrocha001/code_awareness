@@ -3,7 +3,7 @@
 
 Responsabilidades do Script
 
-1. Renderizar a interface da aba Code Source com ViewToolbar + ActionBar + FileGrid como visualização exclusiva.
+1. Renderizar a interface da aba Code Source com ViewToolbar + ActionBar + FileCollectionView como visualização de arquivos.
 2. Gerenciar a seleção reativa de arquivos com sistema de Ignore.
 3. Monitorar alterações de arquivos em tempo real via WatcherService com debounce de 300ms.
 4. Fornecer ações contextuais (Copiar, Exportar Normal, Exportar para NotebookLM, Exportar com nome personalizado).
@@ -37,9 +37,9 @@ Mapa de Relacionamentos do Script
    - Relação: Renderiza o dropdown de filtro de tags coloridas.
    - Criticidade: Média
 
-6. FileGrid.tsx
+6. FileCollectionView.tsx
    - Tipo: Dependência Direta
-   - Relação: Renderiza grade de FileCards.
+   - Relação: Renderiza a coleção de arquivos com alternância Grid/Dense.
    - Criticidade: Alta
 
 7. ExportDropdown.tsx (shared)
@@ -64,7 +64,7 @@ Mapa de Relacionamentos do Script
 
 Invariantes do Script
 
-1. O FileGrid deve ocupar 100% do espaço disponível no painel principal.
+1. O FileCollectionView deve ocupar 100% do espaço disponível no painel principal.
 2. O total de tokens selecionados deve ser calculado apenas com base nos arquivos checkados.
 3. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
 4. O dropdown de exportação e o modal de nome são gerenciados pelos componentes compartilhados.
@@ -94,14 +94,14 @@ import { FileText, BookOpen, PenLine, ArrowUpNarrowWide } from "lucide-react";
 import { ViewToolbar } from "../shared/ViewToolbar/ViewToolbar";
 import { ActionBar } from "../shared/ActionBar/ActionBar";
 import { FilterPopover } from "../shared/FilterPopover/FilterPopover";
-import { FileGrid } from "../FileGrid/FileGrid";
+import { FileCollectionView } from "../FileCollection/FileCollectionView";
 import { PreviewModal } from "../PreviewModal/PreviewModal";
 import { TagManagerModal } from "../TagManagerModal/TagManagerModal";
 import { ProcessingStatusBar } from "../ProcessingStatusBar/ProcessingStatusBar";
 import { ExportDropdown } from "../shared/ExportDropdown/ExportDropdown";
 import { ExportNameModal, type FormatOption } from "../shared/ExportNameModal/ExportNameModal";
 import { useProjectPreferences } from "../../hooks/useProjectPreferences";
-import type { FileCardFile } from "../FileCard/FileCard";
+import type { FileCardFile } from "../FileCollection/types";
 import { estimateTokensFromSize } from "../../utils/token-utils";
 import { getContrastColor } from "../../utils/color-utils";
 import "./CodeSourceView.css";
@@ -274,10 +274,12 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
 
 
   // Lista visível: filtra apenas arquivos ignorados por caminho exato, ordenada alfabeticamente
+  const ignoredSet = useMemo(() => new Set(ignoredFiles), [ignoredFiles])
+
   const visibleFiles = useMemo(() => {
-    const filtered = trackedFiles.filter((f) => !ignoredFiles.includes(f.relativePath));
+    const filtered = trackedFiles.filter((f) => !ignoredSet.has(f.relativePath));
     return filtered.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
-  }, [trackedFiles, ignoredFiles]);
+  }, [trackedFiles, ignoredSet]);
 
   const totalSelectedTokens = useMemo(() => {
     let total = 0;
@@ -474,6 +476,8 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
     setSelectedFiles(next);
   }, []);
 
+  const handleOpenTagManager = useCallback(() => setIsTagManagerOpen(true), [])
+
   const handleExportNormal = async () => {
     if (!activeProject || !markdown) return;
     setIsExporting(true);
@@ -607,7 +611,7 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
 
       <ProcessingStatusBar isVisible={isGenerating} />
 
-      <FileGrid
+      <FileCollectionView
         files={fileCardFiles}
         allTags={allTags}
         fileTagsMap={fileTagsMap}
@@ -619,7 +623,7 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
         onRevealInExplorer={handleRevealInExplorer}
         onCopyPath={handleCopyPath}
         onCopyName={handleCopyName}
-        onOpenTagManager={() => setIsTagManagerOpen(true)}
+        onOpenTagManager={handleOpenTagManager}
         onTagsChanged={refreshTagsData}
         repoPath={activeProject?.path}
       />

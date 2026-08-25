@@ -29,6 +29,8 @@ Invariantes do Script
   overflow: hidden;
   background: none;
   position: relative;
+  /* Sprint (Correção): afastamento visual movido para cá — .app-main não tem mais padding */
+  padding: 30px 20px;
 }
 
 /* Encaixe da ViewToolbar no layout em coluna — paridade com a aba Code Audit */

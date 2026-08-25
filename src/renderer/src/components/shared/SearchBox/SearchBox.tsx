@@ -5,6 +5,7 @@ Responsabilidades do Script
 
 1. Renderizar campo de busca textual com ícone de lupa.
 2. Emitir mudanças de texto via callback onChange, sem gerenciar estado próprio.
+3. Expor o input via forwardRef para foco programático (atalho de teclado).
 
 Mapa de Relacionamentos do Script
 
@@ -23,11 +24,12 @@ Invariantes do Script
 1. Não gerenciar estado próprio — apenas repassar value/onChange.
 2. Não saber o que está sendo buscado.
 3. O input é controlado pelo pai via props.
+4. O ref exposto aponta para o elemento <input> interno.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-import React from 'react'
+import React, { forwardRef } from 'react'
 import { Search } from 'lucide-react'
 import './SearchBox.css'
 
@@ -38,18 +40,19 @@ interface SearchBoxProps {
   ariaLabel?: string
 }
 
-export const SearchBox: React.FC<SearchBoxProps> = ({
+export const SearchBox = forwardRef<HTMLInputElement, SearchBoxProps>(({
   value,
   onChange,
   placeholder = 'Buscar...',
   ariaLabel = 'Buscar'
-}) => {
+}, ref) => {
   return (
     <div className="sb-root">
       <span className="sb-icon" aria-hidden="true">
         <Search size={16} strokeWidth={2} />
       </span>
       <input
+        ref={ref}
         className="sb-input"
         type="text"
         value={value}
@@ -59,4 +62,6 @@ export const SearchBox: React.FC<SearchBoxProps> = ({
       />
     </div>
   )
-}
+})
+
+SearchBox.displayName = 'SearchBox'

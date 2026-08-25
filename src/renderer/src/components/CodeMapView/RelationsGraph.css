@@ -1,0 +1,24 @@
+/*
+ --- ARQUITETURA DO SCRIPT ---
+ Responsabilidades do Script
+ 1. Estilizar o container do grafo de relacionamentos Cytoscape (altura fixa, borda, cantos).
+ 2. Garantir fundo limpo por variável de tema e cursor de pan.
+ Mapa de Relacionamentos do Script
+ 1. RelationsGraph.tsx
+    - Tipo: Relação de UI
+    - Relação: Consome a classe rg-root do container da instância Cytoscape.
+    - Criticidade: Alta
+ Invariantes do Script
+ 1. A classe usa prefixo rg- para evitar colisão com outras abas.
+ 2. O container tem altura fixa (300px) para não quebrar o layout do painel.
+ 3. O fundo usa variável global do tema — nunca cor hardcoded.
+ --- FIM ARQUITETURA DO SCRIPT ---
+ */
+
+.rg-root {
+  height: 300px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-primary);
+}

@@ -24,9 +24,9 @@ Invariantes do Script
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-import { Home, Flag, FileText, Archive, GitBranch, Bookmark, type LucideIcon } from 'lucide-react'
+import { Home, Flag, FileText, Archive, GitBranch, Bookmark, Map, type LucideIcon } from 'lucide-react'
 
-export type NavId = 'home' | 'campaigns' | 'codebase' | 'compression' | 'diff' | 'journey'
+export type NavId = 'home' | 'campaigns' | 'codebase' | 'compression' | 'diff' | 'journey' | 'code-map'
 export type Tab = NavId
 
 export interface NavItem {
@@ -43,4 +43,5 @@ export const NAV_ITEMS: NavItem[] = [
   { id: 'compression', label: 'Code Compression', icon: '🗜', lucideIcon: Archive },
   { id: 'diff', label: 'Code Diff', icon: '🔀', lucideIcon: GitBranch },
   { id: 'journey', label: 'Code Journey', icon: '📋', lucideIcon: Bookmark },
+  { id: 'code-map', label: 'Code Map', icon: '🗺️', lucideIcon: Map }
 ]

@@ -1,0 +1,122 @@
+/* FormatPreview.css — estilos del preview consciente del formato (prefixo fp-).
+   La tipografia de `.preview-markdown` (PreviewModal.css) se adapta aquí localmente;
+   no se importa CSS de otras features. */
+
+.fp-markdown > * {
+  color: var(--text-primary);
+}
+
+.fp-markdown h1 {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 12px 0;
+}
+
+.fp-markdown h1:first-child {
+  margin-top: 0;
+}
+
+.fp-markdown h2 {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 24px 0 12px 0;
+}
+
+.fp-markdown h2:first-child {
+  margin-top: 0;
+}
+
+.fp-markdown h3 {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 18px 0 8px 0;
+}
+
+.fp-markdown h4 {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin: 14px 0 6px 0;
+}
+
+.fp-markdown p {
+  margin: 0 0 8px 0;
+  line-height: 1.6;
+  color: var(--text-primary);
+}
+
+.fp-markdown hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
+.fp-markdown pre {
+  background-color: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0 0 12px 0;
+}
+
+.fp-markdown pre code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  color: var(--text-primary);
+}
+
+.fp-markdown code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 0.92em;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: var(--text-primary);
+}
+
+.fp-markdown ul,
+.fp-markdown ol {
+  color: var(--text-primary);
+  margin: 0 0 8px 0;
+  padding-left: 24px;
+}
+
+.fp-markdown li {
+  margin: 0 0 4px 0;
+  line-height: 1.6;
+}
+
+.fp-markdown a {
+  color: var(--accent);
+}
+
+/* ─── Modo plain ──────────────────────────────────────────────────────── */
+.fp-plain {
+  margin: 0;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ─── Highlight Prism (json/xml) ──────────────────────────────────────── */
+.fp-code {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  overflow: auto;
+}
+
+.fp-code pre,
+.fp-code div {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--text-primary);
+}

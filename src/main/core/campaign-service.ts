@@ -10,9 +10,9 @@ Responsabilidades do Script
 
 Mapa de Relacionamentos do Script
 
-1. database-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome initializeDatabase, insertCampaign, getCampaigns, getCampaign, getCampaignBySlug, updateCampaign.
+1. database-ports.ts
+   - Tipo: Contrato / Interface
+   - Relação: Consome CampaignPort via injeção de dependência para operações de persistência.
    - Criticidade: Alta
 
 2. ../../shared/types
@@ -27,15 +27,22 @@ Invariantes do Script
 3. A unicidade do slug é validada por repositório antes de inserir ou atualizar o nome.
 4. O id é único — usa timestamp + sufixo aleatório.
 5. O serviço não depende de nenhum outro serviço de feature (checkpoint, diff, compression).
-6. Nenhuma lógica de UI — o serviço é puro backend.
+6. Nenhuma dependência direta de banco de dados ou SQLite — persiste exclusivamente via CampaignPort.
+7. Nenhuma lógica de UI — o serviço é puro backend.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-import { initializeDatabase, insertCampaign, getCampaigns, getCampaign, getCampaignBySlug, updateCampaign } from './database-service'
+import type { CampaignPort } from './database-ports'
 import { Campaign, CampaignStatus } from '../../shared/types'
 
 export class CampaignService {
+  private readonly campaignPort: CampaignPort
+
+  constructor(campaignPort: CampaignPort) {
+    this.campaignPort = campaignPort
+  }
+
   /**
    * Cria uma nova campanha.
    * Valida nome, gera slug e id, verifica unicidade de slug, persiste no banco.
@@ -46,14 +53,12 @@ export class CampaignService {
       throw new Error('O nome da campanha não pode estar vazio')
     }
 
-    initializeDatabase(repoPath)
-
     const id = `${Date.now()}-${Math.random().toString(36).substring(2, 10)}`
     const slug = this.slugify(name)
     const now = new Date().toISOString()
 
     // Valida unicidade do slug
-    const existing = getCampaignBySlug(repoPath, slug)
+    const existing = this.campaignPort.getCampaignBySlug(repoPath, slug)
     if (existing) {
       throw new Error(`Já existe uma campanha com o slug "${slug}" (derivado do nome "${name}")`)
     }
@@ -68,7 +73,7 @@ export class CampaignService {
       updatedAt: now
     }
 
-    insertCampaign(repoPath, campaign)
+    this.campaignPort.insertCampaign(repoPath, campaign)
     return campaign
   }
 
@@ -76,16 +81,14 @@ export class CampaignService {
    * Lista todas as campanhas de um repositório.
    */
   listCampaigns(repoPath: string): Campaign[] {
-    initializeDatabase(repoPath)
-    return getCampaigns(repoPath)
+    return this.campaignPort.getCampaigns(repoPath)
   }
 
   /**
    * Busca uma campanha por ID.
    */
   getCampaign(repoPath: string, campaignId: string): Campaign | null {
-    initializeDatabase(repoPath)
-    return getCampaign(repoPath, campaignId)
+    return this.campaignPort.getCampaign(repoPath, campaignId)
   }
 
   /**
@@ -93,9 +96,7 @@ export class CampaignService {
    * Se o nome mudar, regenera o slug e valida unicidade do novo slug.
    */
   updateCampaign(repoPath: string, campaignId: string, patch: { name?: string; description?: string; status?: CampaignStatus }): Campaign {
-    initializeDatabase(repoPath)
-
-    const existing = getCampaign(repoPath, campaignId)
+    const existing = this.campaignPort.getCampaign(repoPath, campaignId)
     if (!existing) {
       throw new Error(`Campanha não encontrada: ${campaignId}`)
     }
@@ -115,7 +116,7 @@ export class CampaignService {
 
       // Valida unicidade do novo slug, excluindo a própria campanha
       if (newSlug !== existing.slug) {
-        const slugExists = getCampaignBySlug(repoPath, newSlug)
+        const slugExists = this.campaignPort.getCampaignBySlug(repoPath, newSlug)
         if (slugExists && slugExists.id !== campaignId) {
           throw new Error(`Já existe uma campanha com o slug "${newSlug}" (derivado do nome "${name}")`)
         }
@@ -132,10 +133,10 @@ export class CampaignService {
 
     updatePatch.updatedAt = new Date().toISOString()
 
-    updateCampaign(repoPath, campaignId, updatePatch)
+    this.campaignPort.updateCampaign(repoPath, campaignId, updatePatch)
 
     // Retorna a campanha atualizada
-    const updated = getCampaign(repoPath, campaignId)
+    const updated = this.campaignPort.getCampaign(repoPath, campaignId)
     if (!updated) {
       throw new Error(`Erro ao recuperar campanha atualizada: ${campaignId}`)
     }

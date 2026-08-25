@@ -2,12 +2,12 @@
 .home-container {
   display: flex;
   flex-direction: column;
-  padding: 24px 32px;
+  /* Sprint (Correção): afastamento visual movido para cá — .app-main não tem mais padding */
+  padding: 30px 20px;
   height: 100%;
   box-sizing: border-box;
   overflow-y: auto;
 }
-
 /* Header */
 .home-header {
   display: flex;

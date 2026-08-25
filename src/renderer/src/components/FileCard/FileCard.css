@@ -5,20 +5,23 @@ Responsabilidades do Script
 
 1. Definir o layout visual do FileCard.
 2. Reforçar o destaque visual do card selecionado (borda inset, fundo tingido, glow).
+3. Estilizar as badges de tags com área clicável e teto determinístico de duas linhas com clip.
+4. Estilizar o indicador "+N" de tags ocultas, sobreposto à região clipada.
 
 Mapa de Relacionamentos do Script
 
 1. FileCard.tsx
    - Tipo: Relação de UI
-   - Relação: Usa essas classes para renderizar o card.
+   - Relação: Fornece classes visuais para a renderização do card em grade.
    - Criticidade: Alta
 
 Invariantes do Script
 
-1. O card deve permanecer legível em densidades baixas de informações.
-2. As tags devem ser exibidas como badges pequenas e consistentes.
-3. O menu de ações e o popover de tags são posicionados pelo Popover compartilhado (sem position: absolute próprio).
-4. O card selecionado usa border: 1px (mesmo que o normal) com box-shadow inset para a borda visual, evitando layout shift.
+1. O container de tags (.file-card-tags) declara position: relative, max-height: 40px (2 linhas de chip de 18px + gap de 4px) e overflow: hidden — contenção vertical ratificada na Sprint 2.2; a integralidade das tags permanece no DOM e é consultável via tooltip e TagPopover.
+2. O indicador ".file-card-tags-more" é absoluto e pointer-events: none — não consome slot de tag visível, não altera a geometria medida (sem loop de ResizeObserver) e o clique pertence à área de tags.
+3. O card selecionado usa border: 1px com box-shadow inset para a borda visual, evitando layout shift.
+4. Não contém regras de menu interno (.file-card-actions-menu), pois os popovers são montados externamente.
+5. .file-card nunca declara height em percentual (BUGFIX B1); o rodapé (.file-card-footer) ancora via margin-top: auto.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -76,25 +79,6 @@ Invariantes do Script
   color: var(--text-secondary);
 }
 
-/* Token badge premium */
-.file-card-token-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  background: rgba(120, 82, 238, 0.1);
-  color: var(--accent);
-  border-radius: 8px;
-  padding: 4px 8px;
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.file-card-token-badge svg {
-  width: 12px;
-  height: 12px;
-  flex-shrink: 0;
-}
-
 /* ─── Change Type Badge (M/A/D) ──────────────────────────────────────────── */
 
 .file-card-change-badge {
@@ -134,6 +118,7 @@ Invariantes do Script
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  margin-top: auto;
 }
 
 .file-card-tags {
@@ -143,27 +128,54 @@ Invariantes do Script
   flex-wrap: wrap;
   flex: 1;
   min-width: 0;
+  /* Sprint 2.2: teto determinístico de 2 linhas (18px chip + 4px gap). Tags além
+     do teto permanecem no DOM (consultáveis via tooltip/TagPopover) mas não
+     expandem o card — altura do card é invariante em relação à quantidade de tags. */
+  position: relative;
+  max-height: 40px;
+  overflow: hidden;
 }
 
-.file-card-tag {
+/* Indicador "+N" de tags ocultas: sobrepõe conteúdo já clipado, sem consumir slot. */
+.file-card-tags-more {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 6px;
+  pointer-events: none;
+}
+
+/* Gatilho universal de tags: posicionado imediatamente após as tags no fluxo flex */
+.file-card-tags-add {
   display: inline-flex;
   align-items: center;
-  padding: 4px 8px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--text-primary);
-  border: 1px solid;
-  background-clip: padding-box;
-  cursor: pointer;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
   background: transparent;
-  font-family: inherit;
-  transition: transform 0.15s ease;
-  line-height: 1.4;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 
-.file-card-tag:hover {
-  transform: scale(1.05);
+.file-card-tags-add:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.file-card-tags-clickable {
+  cursor: pointer;
 }
 
 .file-card-actions-right {
@@ -192,38 +204,6 @@ Invariantes do Script
   color: var(--text-primary);
 }
 
-.file-card-actions-menu {
-  min-width: 180px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, var(--shadow-opacity));
-  padding: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.file-card-actions-menu button {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 13px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.15s;
-}
-
-.file-card-actions-menu button:hover {
-  background: var(--bg-tertiary);
-}
-
 /* ─── Ícone de arquivo (Devicon) ────────────────────────────────────────── */
 
 .file-card-file-icon {
@@ -236,168 +216,4 @@ Invariantes do Script
 .file-card-icon {
   font-size: 16px;
   vertical-align: middle;
-}
-
-/* ─── Botão Adicionar Tag ───────────────────────────────────────────────── */
-
-.file-card-add-tag-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: 1px dashed var(--border);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition: all 0.15s ease;
-  flex-shrink: 0;
-}
-
-.file-card-add-tag-btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(120, 82, 238, 0.08);
-}
-
-/* ─── Tag Popover ───────────────────────────────────────────────────────── */
-
-.file-card-tag-popover {
-  min-width: 200px;
-  max-height: 250px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, var(--shadow-opacity));
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.file-card-tag-popover-list {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-height: 0;
-}
-
-.file-card-tag-popover-empty {
-  padding: 12px;
-  text-align: center;
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.file-card-tag-popover-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 13px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.15s;
-}
-
-.file-card-tag-popover-item:hover {
-  background: var(--hover-overlay);
-}
-
-.file-card-tag-popover-item.active {
-  font-weight: 600;
-}
-
-.file-card-tag-popover-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-
-.file-card-tag-popover-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-card-tag-popover-check {
-  color: var(--accent);
-  flex-shrink: 0;
-}
-
-.file-card-tag-popover-footer {
-  border-top: 1px solid var(--border);
-  padding-top: 6px;
-  margin-top: 4px;
-}
-
-.file-card-tag-popover-create {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--accent);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.15s;
-}
-
-.file-card-tag-popover-create:hover {
-  background: rgba(120, 82, 238, 0.1);
-}
-
-/* ─── Busca no popover de tags ──────────────────────────────────────────── */
-/* Input fixo no topo, não rola; a zona rolável é o .file-card-tag-popover-list */
-.fcp-search {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  margin-bottom: 4px;
-  flex-shrink: 0;
-}
-
-.fcp-search:focus-within {
-  border-color: var(--accent);
-}
-
-.fcp-search-icon {
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.fcp-search-input {
-  flex: 1;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  color: var(--text-primary);
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-}
-
-.fcp-search-input::placeholder {
-  color: var(--text-secondary);
-  opacity: 0.7;
 }

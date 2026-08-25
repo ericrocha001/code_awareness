@@ -59,7 +59,7 @@ interface PopoverProps {
 
 const MARGIN = 8
 
-type Coords = { top: number; left: number } | null
+const MANAGED_NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 
 export const Popover: React.FC<PopoverProps> = ({
   open,
@@ -131,7 +131,7 @@ export const Popover: React.FC<PopoverProps> = ({
     setMeasured(true)
   }, [open, placement, offset, anchorRef])
 
-  // --- Ouvintes de fechamento ---
+  // --- Ouvintes de fechamento e guarda de teclado ---
   useEffect(() => {
     if (!open) return
 
@@ -151,6 +151,19 @@ export const Popover: React.FC<PopoverProps> = ({
       }
     }
 
+    // Guarda de teclado em fase de captura: suprime rolagem nativa de navegação externa
+    const handleKeyDownCapture = (e: KeyboardEvent) => {
+      if (!MANAGED_NAV_KEYS.has(e.key)) return
+
+      const target = e.target as Node
+      const inBaloon = popoverRef.current?.contains(target)
+
+      if (!inBaloon) {
+        e.preventDefault()
+        e.stopPropagation()
+      }
+    }
+
     const handleScroll = (e: Event) => {
       // Ignorar scrolls originados dentro do próprio popover (ex.: lista rolável de tags)
       const target = e.target as Node
@@ -164,12 +177,14 @@ export const Popover: React.FC<PopoverProps> = ({
 
     document.addEventListener('mousedown', handleMouseDown)
     document.addEventListener('keydown', handleKeyDown)
+    document.addEventListener('keydown', handleKeyDownCapture, { capture: true })
     document.addEventListener('scroll', handleScroll, { capture: true })
     window.addEventListener('resize', handleResize)
 
     return () => {
       document.removeEventListener('mousedown', handleMouseDown)
       document.removeEventListener('keydown', handleKeyDown)
+      document.removeEventListener('keydown', handleKeyDownCapture, { capture: true })
       document.removeEventListener('scroll', handleScroll, { capture: true })
       window.removeEventListener('resize', handleResize)
     }

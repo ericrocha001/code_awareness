@@ -6,57 +6,72 @@ Responsabilidades do Script
 1. Orquestrar a restauração completa de um checkpoint com backup de segurança, marcação de ponto único, cálculo de arquivos remanescentes por evidência e limpeza guardada.
 2. Escrever arquivos de código no disco durante a restauração (não delega mais ao CheckpointService).
 3. Validar (dry-run) se uma restauração pode ser executada antes de modificar o disco.
-4. Garantir a invariante de no máximo um checkpoint com restoredAt definido a qualquer momento.
+4. Garantir a invariante de no máximo um checkpoint com restoredAt definido a qualquer momento (inclusive em estado corrompido).
 5. Calcular arquivos remanescentes por evidência (arquivos que existem em checkpoints mais novos, existem no disco e não existem no alvo), nunca por exclusão do disco.
 6. Registrar cada ação (backup, restauração, marcação, limpeza) no banco de dados.
+7. Validar a integridade do checkpoint (hash SHA-256 de cada arquivo) antes de qualquer escrita.
+8. Executar rollback automático via backup de segurança quando a escrita falhar parcialmente.
+9. Resolver e validar caminhos relativos dentro do repositório de forma centralizada, rejeitando paths maliciosos.
+10. Produzir um RestorePlan congelado no preview (com stateHash) que o execute valida antes de executar.
+11. Produzir um resumo detalhado de mudanças por arquivo (fileChanges) no preview (criados, modificados com diff de linhas, inalterados, bloqueados).
 
 Mapa de Relacionamentos do Script
 
-1. checkpoint-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome createCheckpoint, loadCheckpoint, listCheckpoints, updateCheckpointMetadata.
-   - Criticidade: Alta
+ 1. checkpoint-service.ts
+    - Tipo: Dependência Direta
+    - Relação: Consome createCheckpoint, loadCheckpoint, listCheckpoints, updateCheckpointMetadata.
+    - Criticidade: Alta
 
-2. database-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Usa insertAction para registrar eventos de restauração no banco.
-   - Criticidade: Alta
+ 2. database-ports.ts
+    - Tipo: Contrato / Interface
+    - Relação: Usa ActionLogPort via injeção de dependência para registrar eventos de restauração no banco.
+    - Criticidade: Alta
 
-3. ../../shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos OrphanFile, RestorePreviewResult, RestoreExecuteOptions, CleanupResult, RestoreExecuteResult.
-   - Criticidade: Alta
+ 3. ../../shared/types.ts
+    - Tipo: Contrato / Interface
+    - Relação: Fornece os tipos OrphanFile, RestorePlan, RestorePreviewResult, RestoreExecuteOptions, CleanupResult, RestoreExecuteResult, RestoreFileChange.
+    - Criticidade: Alta
 
 Invariantes do Script
 
-1. O RestoreService é o único escritor de arquivos de código durante restauração.
-2. No máximo um checkpoint com restoredAt definido a qualquer momento.
-3. Limpeza de arquivos remanescentes só executa com sucesso total (failed === 0).
-4. Backup de segurança é fail-safe: se createSafety=true e o backup falha, a restauração não acontece.
-5. Remanescentes calculados por evidência (snapshot de checkpoints mais novos), nunca por exclusão do disco.
-6. Path traversal em cleanupFiles validado fail-fast antes de qualquer operação.
-7. Falhas de pré-condição (alvo não encontrado, path traversal, falha do backup) lançam Error em vez de retornar resultado — o handler captura e retorna { success: false, error }.
-8. Arquivos que não existem no checkpoint mas existem no disco não devem ser deletados durante restauração.
+ 1. O RestoreService é o único escritor de arquivos de código durante restauração.
+ 2. No máximo um checkpoint com restoredAt definido a qualquer momento (markRestorePoint limpa todos os demais).
+ 3. Limpeza de arquivos remanescentes só executa com sucesso total (failed === 0).
+ 4. Backup de segurança é fail-safe: se createSafety=true e o backup falha, a restauração não acontece.
+ 5. Remanescentes calculados por evidência (snapshot de checkpoints mais novos), nunca por exclusão do disco.
+ 6. Path traversal em cleanupFiles e demais caminhos resolvidos via resolveSafePath (centralizado), validado fail-fast antes de qualquer operação.
+ 7. Falhas de pré-condição (alvo não encontrado, checkpoint corrompido, path traversal, falha do backup) lançam Error em vez de retornar resultado — o handler captura e retorna { success: false, error }.
+ 8. Arquivos que não existem no checkpoint mas existem no disco não devem ser deletados durante restauração.
+ 9. A integridade do checkpoint é validada antes do backup de segurança e de qualquer escrita.
+ 10. O rollback automático só é considerado sucesso se todos os arquivos do backup foram reescritos (failed === 0).
+ 11. computeStateHash é determinístico: ordena paths alfabeticamente e usa relativePath + mtimeMs (ou 'missing').
+ 12. A validação do Plano congelado (stateHash) acontece antes do backup de segurança — plano obsoleto aborta sem criar backup.
+ 13. computeFileChanges é operação de leitura pura e determinística (ordena alfabeticamente) com teto de segurança de 200.000 caracteres que nunca lança exceção; confere o tamanho via stat antes de ler o conteúdo e normaliza a contagem de linhas descartando um único segmento vazio final.
+ 14. Nenhuma dependência direta de SQLite — logs são gravados exclusivamente via ActionLogPort.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
 import { existsSync, constants } from 'fs'
-import { writeFile, mkdir, unlink, stat, access } from 'fs/promises'
-import { join, dirname } from 'path'
+import { writeFile, readFile, mkdir, unlink, stat, access } from 'fs/promises'
+import { join, dirname, resolve, isAbsolute } from 'path'
+import { createHash } from 'crypto'
+import { diffLines } from 'diff'
 import { CheckpointService } from './checkpoint-service'
-import { insertAction } from './database-service'
-import { CheckpointData, CheckpointSummary, OrphanFile, RestorePreviewResult, RestoreExecuteOptions, CleanupResult, RestoreExecuteResult } from '../../shared/types'
+import type { ActionLogPort } from './database-ports'
+import { CheckpointData, CheckpointSummary, OrphanFile, RestorePreviewResult, RestoreExecuteOptions, CleanupResult, RestoreExecuteResult, RestorePlan, RestoreFileChange } from '../../shared/types'
 
 export class RestoreService {
   private readonly checkpointService: CheckpointService
+  private readonly actionLogPort: ActionLogPort
+  private readonly activeRestores = new Map<string, Promise<RestoreExecuteResult>>()
 
   /**
-   * Permite injeção de dependência do CheckpointService para facilitar testes unitários.
-   * Se não for passado, cria uma instância padrão.
+   * Recebe CheckpointService e ActionLogPort via injeção de dependência.
    */
-  constructor(checkpointService?: CheckpointService) {
-    this.checkpointService = checkpointService ?? new CheckpointService()
+  constructor(checkpointService: CheckpointService, actionLogPort: ActionLogPort) {
+    this.checkpointService = checkpointService
+    this.actionLogPort = actionLogPort
   }
 
   /**
@@ -65,60 +80,121 @@ export class RestoreService {
    * Usa validateCheckpointFiles internamente em vez de delegar ao CheckpointService.
    */
   async preview(repoPath: string, targetCheckpointId: string): Promise<RestorePreviewResult> {
-    // Valida o checkpoint alvo existe
     const target = await this.checkpointService.loadCheckpoint(repoPath, targetCheckpointId)
     if (!target) {
-      return { canRestore: [], cannotRestore: [], orphanFiles: [], currentRestorePoint: null }
+      return {
+        plan: {
+          targetCheckpointId,
+          targetCheckpointName: '',
+          repoPath,
+          filesToWrite: [],
+          orphanFiles: [],
+          currentRestorePoint: null,
+          canRestore: [],
+          cannotRestore: [],
+          fileChanges: [],
+          stateHash: '',
+          createdAt: Date.now()
+        }
+      }
     }
 
-    // Obtém validação de restauração (agora interna)
     const validation = await this.validateCheckpointFiles(repoPath, target)
-
-    // Calcula arquivos remanescentes
     const orphanFiles = await this.calculateOrphanFiles(repoPath, target)
-
-    // Identifica o ponto de restauração atual
     const currentRestorePoint = await this.findCurrentRestorePoint(repoPath)
+    const stateHash = await this.computeStateHash(repoPath, target)
+    const fileChanges = await this.computeFileChanges(repoPath, target, validation)
 
-    return {
+    const plan: RestorePlan = {
+      targetCheckpointId,
+      targetCheckpointName: target.name,
+      repoPath,
+      filesToWrite: Object.keys(target.files),
+      orphanFiles,
+      currentRestorePoint,
       canRestore: validation.canRestore,
       cannotRestore: validation.cannotRestore,
-      orphanFiles,
-      currentRestorePoint
+      fileChanges,
+      stateHash,
+      createdAt: Date.now()
     }
+
+    return { plan }
   }
 
   /**
-   * Executa a restauração orquestrada:
-   * 1. Valida existência do alvo
-   * 2. Valida path traversal nos cleanupFiles (fail-fast)
-   * 3. Cria backup de segurança (se solicitado) — fail-safe
-   * 4. Escreve arquivos no disco via writeCheckpointFiles
-   * 5. Se falha parcial, retorna sem marcar/limpar
-   * 6. Se sucesso total, marca o ponto, limpa remanescentes (se houver), registra no banco
-   *
-   * Falhas de pré-condição (alvo não encontrado, path traversal, falha do backup)
-   * lançam Error para que o handler retorne { success: false, error }.
+   * Executa a restauração orquestrada garantindo a serialização por repositório.
+   * Rejeita chamadas concorrentes para o mesmo repoPath.
    */
   async execute(
     repoPath: string,
     targetCheckpointId: string,
     options: RestoreExecuteOptions
   ): Promise<RestoreExecuteResult> {
+    if (this.activeRestores.has(repoPath)) {
+      throw new Error('Já existe uma restauração em andamento para este repositório')
+    }
+
+    const promise = this._executeInternal(repoPath, targetCheckpointId, options)
+    this.activeRestores.set(repoPath, promise)
+
+    try {
+      return await promise
+    } finally {
+      this.activeRestores.delete(repoPath)
+    }
+  }
+
+  /**
+   * Execução interna da restauração orquestrada com operationId correlacionado:
+   * 1. Valida existência do alvo
+   * 2. Valida integridade do checkpoint (hash SHA-256) antes de qualquer operação
+   * 3. Valida path traversal nos cleanupFiles via resolveSafePath (fail-fast)
+   * 4. Se plano congelado foi fornecido, valida o estado atual (stateHash) antes do backup
+   * 5. Cria backup de segurança (se solicitado) — fail-safe
+   * 6. Escreve arquivos no disco via writeCheckpointFiles
+   * 7. Se falha parcial, tenta rollback automático via backup e retorna sem marcar/limpar
+   * 8. Se sucesso total, marca o ponto, limpa remanescentes (se houver), registra no banco
+   *
+   * Falhas de pré-condição (alvo não encontrado, checkpoint corrompido, path traversal,
+   * falha do backup) lançam Error para que o handler retorne { success: false, error }.
+   */
+  private async _executeInternal(
+    repoPath: string,
+    targetCheckpointId: string,
+    options: RestoreExecuteOptions
+  ): Promise<RestoreExecuteResult> {
+    const operationId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
     // 1. Valida que o checkpoint alvo existe — falha de pré-condição lança Error
     const target = await this.checkpointService.loadCheckpoint(repoPath, targetCheckpointId)
     if (!target) {
       throw new Error('Checkpoint alvo não encontrado')
     }
 
-    // 2. Valida path traversal nos cleanupFiles — falha de pré-condição lança Error
+    // 2. Valida integridade do checkpoint ANTES de qualquer operação (inclusive backup)
+    this.validateCheckpointIntegrity(target)
+
+    // 3. Valida path traversal nos cleanupFiles usando resolveSafePath (fail-fast)
     for (const filePath of options.cleanupFiles) {
-      if (this.isPathTraversal(filePath)) {
-        throw new Error(`Caminho inválido em cleanupFiles: ${filePath}`)
+      this.resolveSafePath(repoPath, filePath)
+    }
+
+    // 4. Se plano foi fornecido, valida que o estado ainda corresponde (antes do backup)
+    if (options.plan) {
+      const currentStateHash = await this.computeStateHash(repoPath, target)
+      if (currentStateHash !== options.plan.stateHash) {
+        return {
+          restored: 0,
+          failed: 0,
+          errors: ['O estado do projeto mudou desde o preview. Gere um novo preview.'],
+          partial: false,
+          planStale: true
+        }
       }
     }
 
-    // 3. Backup de segurança (fail-safe) — falha de pré-condição lança Error
+    // 5. Backup de segurança (fail-safe) — falha de pré-condição lança Error
     let safetyBackupId: string | undefined
     if (options.createSafety) {
       const now = new Date()
@@ -131,13 +207,14 @@ export class RestoreService {
 
         // Registra a criação do backup no banco
         try {
-          insertAction({
+          this.actionLogPort.insertAction({
             actionType: 'checkpoint_created',
             timestamp: Date.now(),
             checkpointId: backup.id,
             checkpointName: backupName,
             details: 'Backup de segurança pré-restauração',
-            repoPath
+            repoPath,
+            operationId
           })
         } catch (err) {
           console.error('[RestoreService] Falha ao logar criação do backup:', err)
@@ -148,39 +225,69 @@ export class RestoreService {
       }
     }
 
-    // 4. Escreve arquivos no disco (agora diretamente, sem delegar ao CheckpointService)
+    // 6. Escreve arquivos no disco
     const restoreResult = await this.writeCheckpointFiles(repoPath, target)
 
-    // 5. Se houve qualquer falha, retorna sem marcar e sem limpar
+    // 7. Se houve falha parcial, tenta rollback via backup de segurança
     if (restoreResult.failed > 0) {
+      let rollbackAttempted = false
+      let rollbackSuccess = false
+      if (safetyBackupId) {
+        rollbackAttempted = true
+        const rollbackResult = await this.attemptRollback(repoPath, safetyBackupId)
+        rollbackSuccess = rollbackResult.success
+
+        // Best-effort: registrar tentativa de rollback no banco
+        try {
+          this.actionLogPort.insertAction({
+            actionType: 'restore_rollback',
+            timestamp: Date.now(),
+            checkpointId: targetCheckpointId,
+            checkpointName: target.name,
+            details: `Rollback ${rollbackSuccess ? 'bem-sucedido' : 'falhou'} após falha parcial`,
+            repoPath,
+            operationId
+          })
+        } catch (err) {
+          console.error('[RestoreService] Falha ao logar rollback:', err)
+        }
+      }
       return {
         restored: restoreResult.restored,
         failed: restoreResult.failed,
         errors: restoreResult.errors,
         partial: true,
-        safetyBackupId
+        safetyBackupId,
+        rollbackAttempted,
+        rollbackSuccess
       }
     }
 
-    // 6. Sucesso total: marca o ponto, limpa remanescentes, registra no banco
-    // Marca o ponto de restauração
-    await this.markRestorePoint(repoPath, targetCheckpointId)
-
-    // Limpa remanescentes se solicitado
-    let cleanup: CleanupResult | undefined
-    if (options.cleanupFiles.length > 0) {
-      cleanup = await this.performCleanup(repoPath, targetCheckpointId, options.cleanupFiles)
+    // 8. Sucesso total: marca o ponto de restauração
+    let markFailed = false
+    try {
+      await this.markRestorePoint(repoPath, targetCheckpointId)
+    } catch (err) {
+      markFailed = true
+      console.error('[RestoreService] Falha ao marcar ponto de restauração:', err)
     }
 
-    // Registra a restauração no banco
+    // 9. Limpa remanescentes se solicitado
+    let cleanup: CleanupResult | undefined
+    if (options.cleanupFiles.length > 0) {
+      cleanup = await this.performCleanup(repoPath, targetCheckpointId, options.cleanupFiles, operationId)
+    }
+
+    // 10. Registra a restauração no banco
     try {
-      insertAction({
+      this.actionLogPort.insertAction({
         actionType: 'checkpoint_restored',
         timestamp: Date.now(),
         checkpointId: targetCheckpointId,
         checkpointName: target.name,
         details: `Restaurados: ${restoreResult.restored}, Falhas: ${restoreResult.failed}${cleanup ? `, Removidos: ${cleanup.removed}` : ''}`,
-        repoPath
+        repoPath,
+        operationId
       })
     } catch (err) {
       console.error('[RestoreService] Falha ao logar restauração:', err)
@@ -192,7 +299,8 @@ export class RestoreService {
       errors: restoreResult.errors,
       partial: false,
       safetyBackupId,
-      cleanup
+      cleanup,
+      markFailed
     }
   }
 
@@ -209,7 +317,7 @@ export class RestoreService {
 
     // Registra no banco
     try {
-      insertAction({
+      this.actionLogPort.insertAction({
         actionType: 'checkpoint_marked_restored',
         timestamp: Date.now(),
         checkpointId,
@@ -238,7 +346,7 @@ export class RestoreService {
 
     // Registra no banco
     try {
-      insertAction({
+      this.actionLogPort.insertAction({
         actionType: 'checkpoint_unmarked',
         timestamp: Date.now(),
         checkpointId,
@@ -336,21 +444,22 @@ export class RestoreService {
 
   /**
    * Marca o checkpoint alvo como ponto de restauração.
-   * Garante a invariante de no máximo um checkpoint com restoredAt.
-   * Limpa o restoredAt do ponto anterior (se existir e for diferente do alvo)
-   * antes de definir o novo.
+   * Garante a invariante de no máximo um checkpoint com restoredAt, inclusive em
+   * estado corrompido: limpa o restoredAt de TODOS os demais checkpoints com
+   * marcação antes de definir o novo.
    */
   private async markRestorePoint(repoPath: string, checkpointId: string): Promise<void> {
-    const current = await this.findCurrentRestorePoint(repoPath)
+    const all = await this.checkpointService.listCheckpoints(repoPath)
     const now = new Date().toISOString()
 
-    // Se já existe um ponto de restauração diferente do alvo, limpa o anterior
-    if (current && current.id !== checkpointId) {
-      await this.checkpointService.updateCheckpointMetadata(repoPath, current.id, { restoredAt: null })
+    // Limpa TODOS os checkpoints com restoredAt (não apenas o primeiro)
+    for (const cp of all) {
+      if (cp.restoredAt !== null && cp.id !== checkpointId) {
+        await this.checkpointService.updateCheckpointMetadata(repoPath, cp.id, { restoredAt: null })
+      }
     }
 
     // Define o restoredAt do alvo com o timestamp atual
-    // BUGFIX: Se o alvo já era o ponto de restauração, apenas atualiza o timestamp
     await this.checkpointService.updateCheckpointMetadata(repoPath, checkpointId, { restoredAt: now })
   }
 
@@ -417,13 +526,14 @@ export class RestoreService {
   private async performCleanup(
     repoPath: string,
     targetCheckpointId: string,
-    cleanupFiles: string[]
+    cleanupFiles: string[],
+    operationId?: string
   ): Promise<CleanupResult> {
     let removed = 0
     const errors: string[] = []
 
     for (const relativePath of cleanupFiles) {
-      const absolutePath = join(repoPath, relativePath)
+      const absolutePath = this.resolveSafePath(repoPath, relativePath)
 
       try {
         // Verifica se o arquivo existe antes de tentar remover
@@ -442,12 +552,13 @@ export class RestoreService {
     // Registra a limpeza no banco
     if (removed > 0 || errors.length > 0) {
       try {
-        insertAction({
+        this.actionLogPort.insertAction({
           actionType: 'checkpoint_cleanup',
           timestamp: Date.now(),
           checkpointId: targetCheckpointId,
           details: `Removidos: ${removed}, Erros: ${errors.length}${errors.length > 0 ? ` - ${errors.join('; ')}` : ''}`,
-          repoPath
+          repoPath,
+          operationId
         })
       } catch (err) {
         console.error('[RestoreService] Falha ao logar limpeza:', err)
@@ -458,16 +569,219 @@ export class RestoreService {
   }
 
   /**
-   * Detecta path traversal em um caminho relativo.
-   * Retorna true se o caminho contém '..' ou é absoluto.
-   * Usa path.isAbsolute para capturar caminhos absolutos em qualquer formato
-   * (Unix, Windows com barra invertida ou forward slash).
+   * Resolve e valida um caminho relativo dentro do repositório.
+   * Rejeita caminhos absolutos, path traversal e caminhos que escapam do repo.
+   * Lança Error se o caminho for inválido.
    */
-  private isPathTraversal(filePath: string): boolean {
-    if (filePath.includes('..')) return true
-    // R1: Usa path.isAbsolute para capturar caminhos absolutos em qualquer plataforma
-    // (C:\foo, C:/foo, /foo, etc.)
-    if (filePath.startsWith('/') || filePath.includes(':')) return true
-    return false
+  private resolveSafePath(repoPath: string, relativePath: string): string {
+    if (isAbsolute(relativePath)) {
+      throw new Error(`Caminho absoluto não permitido: ${relativePath}`)
+    }
+    if (relativePath.includes('..')) {
+      throw new Error(`Path traversal não permitido: ${relativePath}`)
+    }
+    const resolved = resolve(join(repoPath, relativePath))
+    const normalizedRepo = resolve(repoPath)
+    if (!resolved.startsWith(normalizedRepo)) {
+      throw new Error(`Caminho fora do repositório: ${relativePath}`)
+    }
+    return resolved
+  }
+
+  /**
+   * Valida a integridade do checkpoint verificando hashes de todos os arquivos.
+   * Lança Error se qualquer hash for inválido ou divergente.
+   */
+  private validateCheckpointIntegrity(checkpoint: CheckpointData): void {
+    for (const [relativePath, fileEntry] of Object.entries(checkpoint.files)) {
+      if (!fileEntry.hash || typeof fileEntry.hash !== 'string') {
+        throw new Error(`Checkpoint corrompido: hash inválido para ${relativePath}`)
+      }
+      const computedHash = createHash('sha256')
+        .update(fileEntry.content, 'utf-8')
+        .digest('hex')
+      if (computedHash !== fileEntry.hash) {
+        throw new Error(`Checkpoint corrompido: hash divergente para ${relativePath}`)
+      }
+    }
+  }
+
+  /**
+   * Tenta reverter a restauração usando o backup de segurança.
+   * Retorna sucesso apenas se todos os arquivos do backup forem escritos.
+   */
+  private async attemptRollback(
+    repoPath: string,
+    backupId: string
+  ): Promise<{ success: boolean }> {
+    const backup = await this.checkpointService.loadCheckpoint(repoPath, backupId)
+    if (!backup) return { success: false }
+    const result = await this.writeCheckpointFiles(repoPath, backup)
+    return { success: result.failed === 0 }
+  }
+
+  /**
+   * Calcula hash determinístico do estado atual dos arquivos do checkpoint no disco.
+   * Usa relativePath + mtime de cada arquivo. Arquivos inexistentes contribuem com 'missing'.
+   *
+   * LIMITAÇÃO: Depende da resolução de tempo do sistema de arquivos. Sistemas com
+   * resolução inferior a 1 segundo (ex: FAT32, alguns NFS) podem produzir mtimes
+   * idênticos para arquivos modificados em janelas curtas, causando falsos positivos
+   * de planStale. Em sistemas modernos (NTFS, APFS, ext4) isso não ocorre.
+   */
+  private async computeStateHash(
+    repoPath: string,
+    checkpoint: CheckpointData
+  ): Promise<string> {
+    const hash = createHash('sha256')
+    const files = Object.keys(checkpoint.files).sort()
+    for (const relativePath of files) {
+      hash.update(relativePath)
+      const fullPath = join(repoPath, relativePath)
+      try {
+        const statResult = await stat(fullPath)
+        hash.update(String(statResult.mtimeMs))
+      } catch {
+        hash.update('missing')
+      }
+    }
+    return hash.digest('hex')
+  }
+
+  /**
+   * Calcula o resumo de mudanças por arquivo (fileChanges) para o preview.
+   * Operação determinística de leitura pura que nunca lança erro.
+   */
+  private async computeFileChanges(
+    repoPath: string,
+    target: CheckpointData,
+    validation: { canRestore: string[]; cannotRestore: Array<{ path: string; reason: string }> }
+  ): Promise<RestoreFileChange[]> {
+    const fileChanges: RestoreFileChange[] = []
+    const relativePaths = Object.keys(target.files).sort()
+    const blockedMap = new Map(validation.cannotRestore.map(c => [c.path, c.reason]))
+    const MAX_DIFF_CHARS = 200_000
+
+    for (const relativePath of relativePaths) {
+      // 1. Arquivo bloqueado por validação de permissão / diretório
+      if (blockedMap.has(relativePath)) {
+        fileChanges.push({
+          relativePath,
+          status: 'blocked',
+          addedLines: null,
+          removedLines: null,
+          reason: blockedMap.get(relativePath)
+        })
+        continue
+      }
+
+      const fullPath = join(repoPath, relativePath)
+      const checkpointEntry = target.files[relativePath]
+      const checkpointContent = checkpointEntry.content ?? ''
+
+      // 2. Arquivo não existe no disco -> será criado
+      if (!existsSync(fullPath)) {
+        // Contagem de linhas normalizada: um único segmento vazio final (trailing
+        // newline) não conta linha extra; conteúdo vazio permanece 0.
+        let lineCount = 0
+        if (checkpointContent.length > 0) {
+          const segments = checkpointContent.split('\n')
+          if (segments[segments.length - 1] === '') {
+            segments.pop()
+          }
+          lineCount = segments.length
+        }
+        fileChanges.push({
+          relativePath,
+          status: 'created',
+          addedLines: lineCount,
+          removedLines: 0
+        })
+        continue
+      }
+
+      // 3. Arquivo existe no disco: confere o tamanho antes de ler — evita I/O
+      // integral quando o diff seria descartado pelo teto de segurança.
+      let diskStat
+      try {
+        diskStat = await stat(fullPath)
+      } catch {
+        fileChanges.push({
+          relativePath,
+          status: 'blocked',
+          addedLines: null,
+          removedLines: null,
+          reason: 'erro de leitura'
+        })
+        continue
+      }
+
+      if (diskStat.size > MAX_DIFF_CHARS || checkpointContent.length > MAX_DIFF_CHARS) {
+        fileChanges.push({
+          relativePath,
+          status: 'modified',
+          addedLines: null,
+          removedLines: null
+        })
+        continue
+      }
+
+      // 4. Lê o conteúdo (dentro do teto) e compara com o checkpoint
+      let diskContent: string
+      try {
+        diskContent = await readFile(fullPath, 'utf-8')
+      } catch {
+        fileChanges.push({
+          relativePath,
+          status: 'blocked',
+          addedLines: null,
+          removedLines: null,
+          reason: 'erro de leitura'
+        })
+        continue
+      }
+
+      // 5. Conteúdo idêntico -> sem alteração
+      if (diskContent === checkpointContent) {
+        fileChanges.push({
+          relativePath,
+          status: 'unchanged',
+          addedLines: 0,
+          removedLines: 0
+        })
+        continue
+      }
+
+      // 6. Calcula diffLines(disco, checkpoint):
+      // Linhas adicionadas no diff = entram no disco na restauração
+      // Linhas removidas no diff = saem do disco na restauração
+      try {
+        const changes = diffLines(diskContent, checkpointContent)
+        let addedLines = 0
+        let removedLines = 0
+        for (const part of changes) {
+          if (part.added) {
+            addedLines += part.count ?? 0
+          } else if (part.removed) {
+            removedLines += part.count ?? 0
+          }
+        }
+        fileChanges.push({
+          relativePath,
+          status: 'modified',
+          addedLines,
+          removedLines
+        })
+      } catch {
+        fileChanges.push({
+          relativePath,
+          status: 'modified',
+          addedLines: null,
+          removedLines: null
+        })
+      }
+    }
+
+    return fileChanges
   }
 }

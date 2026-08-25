@@ -5,7 +5,7 @@ Responsabilidades do Script
 
 1. Gerenciar o ciclo de vida do WatcherService e monitorar alterações de arquivos.
 2. Gerenciar seleção de arquivos e sistema de ignore.
-3. Renderizar interface de tela única com ViewToolbar + ActionBar + StatusStrip + FileGrid.
+3. Renderizar interface de tela única com ViewToolbar + ActionBar + StatusStrip + FileCollectionView.
 4. Fornecer ações de visualização de diff (PreviewModal), cópia com prompt e exportação.
 5. Ordenar arquivos por recência (mtime), com arquivos deleted no final.
 
@@ -36,9 +36,9 @@ Mapa de Relacionamentos do Script
    - Relação: Exibe faixa de feedback com status do watcher.
    - Criticidade: Média
 
-6. FileGrid.tsx
+6. FileCollectionView.tsx
    - Tipo: Dependência Direta
-   - Relação: Renderiza grade de FileCards com badges M/A/D.
+   - Relação: Renderiza a coleção de arquivos com seleção e alternância Grid/Dense.
    - Criticidade: Alta
 
 7. PreviewModal.tsx
@@ -46,12 +46,7 @@ Mapa de Relacionamentos do Script
    - Relação: Exibe diff semântico gerado sob demanda em modal.
    - Criticidade: Alta
 
-8. FileCard.tsx (via FileGrid)
-   - Tipo: Dependência Indireta
-   - Relação: Exibe cada arquivo com nome, caminho, tokens e tags.
-   - Criticidade: Alta
-
-9. shared/types.ts
+8. shared/types.ts
    - Tipo: Contrato / Interface
    - Relação: Define DiffFileStatus e Tag.
    - Criticidade: Alta
@@ -75,10 +70,10 @@ import { ViewToolbar } from '../shared/ViewToolbar/ViewToolbar'
 import { ActionBar } from '../shared/ActionBar/ActionBar'
 import { FilterPopover } from '../shared/FilterPopover/FilterPopover'
 import { StatusStrip } from '../shared/StatusStrip/StatusStrip'
-import { FileGrid } from '../FileGrid/FileGrid'
+import { FileCollectionView } from '../FileCollection/FileCollectionView'
 import { PreviewModal } from '../PreviewModal/PreviewModal'
 import { PromptEditorModal } from '../PromptEditorModal/PromptEditorModal'
-import type { FileCardFile } from '../FileCard/FileCard'
+import type { FileCardFile } from '../FileCollection/types'
 import { estimateTokensFromSize } from '../../utils/token-utils'
 import { getContrastColor } from '../../utils/color-utils'
 import './CodeDiffView.css'
@@ -219,9 +214,11 @@ export const CodeDiffView: React.FC<{
   // ── Computados ────────────────────────────────────────────────────────────
 
   // Etapa 1: lista após ignore (base para contagem do summaryText)
+  const ignoredSet = useMemo(() => new Set(ignoredFiles), [ignoredFiles])
+
   const afterIgnore = useMemo(() => {
-    return modifiedFiles.filter(f => !ignoredFiles.includes(f.relativePath))
-  }, [modifiedFiles, ignoredFiles])
+    return modifiedFiles.filter(f => !ignoredSet.has(f.relativePath))
+  }, [modifiedFiles, ignoredSet])
 
   // Etapa 2: lista após busca + tags + ordenação por recência
   const visibleFiles = useMemo(() => {
@@ -311,6 +308,8 @@ export const CodeDiffView: React.FC<{
     setSelectedFiles(next)
   }, [])
 
+  const handleOpenTagManager = useCallback(() => {}, [])
+
   const toggleTag = useCallback((tagId: string) => {
     setFilterTagIds(prev =>
       prev.includes(tagId) ? prev.filter(id => id !== tagId) : [...prev, tagId]
@@ -353,8 +352,9 @@ export const CodeDiffView: React.FC<{
     if (!activeProject || !diffMarkdown) return
     setIsExporting(true)
     try {
-      const fileName = `${activeProject.name}-diff.md`
-      const result = await window.codeAwareness.saveToDownloads(diffMarkdown, fileName)
+      // Envia o nome-base e o formato; o backend deriva a extensão (fonte única).
+      const fileName = `${activeProject.name}-diff`
+      const result = await window.codeAwareness.saveToDownloads(diffMarkdown, fileName, 'markdown')
       if (result.success) {
         onStatusMessage('Exportado para Downloads!')
       } else {
@@ -544,7 +544,7 @@ export const CodeDiffView: React.FC<{
       <StatusStrip status={watcherStatus} />
 
       {/* Grade de Arquivos */}
-      <FileGrid
+      <FileCollectionView
         files={gridFiles}
         allTags={allTags}
         fileTagsMap={fileTagsMap}
@@ -556,7 +556,7 @@ export const CodeDiffView: React.FC<{
         onRevealInExplorer={handleRevealInExplorer}
         onCopyPath={handleCopyPath}
         onCopyName={handleCopyName}
-        onOpenTagManager={() => {}}
+        onOpenTagManager={handleOpenTagManager}
         onTagsChanged={refreshTagsData}
         repoPath={activeProject?.path}
       />

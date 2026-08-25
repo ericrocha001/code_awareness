@@ -1,0 +1,142 @@
+// @vitest-environment jsdom
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Validar a transição de estados de interação (abertura de TagPopover, abertura de ActionMenu e fechamento).
+2. Garantir o comportamento de substituição mútua ("single active interaction") entre interações concorrentes.
+3. Comprovar a estabilidade referencial dos callbacks openTagPopover, openActionMenu e closeInteraction entre renders.
+
+Mapa de Relacionamentos do Script
+
+1. useFileCollectionInteraction.ts
+   - Tipo: Dependência Direta
+   - Relação: Hook sob teste.
+   - Criticidade: Alta
+
+2. @testing-library/react
+   - Tipo: Dependência Direta
+   - Relação: renderHook e act para manipulação de ciclo de vida e asserções.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Apenas uma única interação pode estar ativa em qualquer instante verificado.
+2. A estabilidade referencial dos 3 métodos retornados é estritamente garantida (toBe).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+import { describe, it, expect } from 'vitest'
+import { renderHook, act } from '@testing-library/react'
+import { useFileCollectionInteraction } from './useFileCollectionInteraction'
+
+describe('useFileCollectionInteraction', () => {
+  it('1. Estado inicial é null', () => {
+    const { result } = renderHook(() => useFileCollectionInteraction())
+    expect(result.current.activeInteraction).toBeNull()
+  })
+
+  it('2. openTagPopover abre interação do tipo tagPopover com anchor opcional', () => {
+    const { result } = renderHook(() => useFileCollectionInteraction())
+    const fakeAnchor = document.createElement('div')
+
+    act(() => {
+      result.current.openTagPopover('src/a.ts', fakeAnchor)
+    })
+
+    expect(result.current.activeInteraction).toEqual({
+      type: 'tagPopover',
+      relativePath: 'src/a.ts',
+      anchor: fakeAnchor
+    })
+  })
+
+  it('3. openActionMenu abre interação do tipo actionMenu com anchor opcional', () => {
+    const { result } = renderHook(() => useFileCollectionInteraction())
+    const fakeAnchor = document.createElement('button')
+
+    act(() => {
+      result.current.openActionMenu('src/b.ts', fakeAnchor)
+    })
+
+    expect(result.current.activeInteraction).toEqual({
+      type: 'actionMenu',
+      relativePath: 'src/b.ts',
+      anchor: fakeAnchor
+    })
+  })
+
+  it('4. closeInteraction fecha a interação', () => {
+    const { result } = renderHook(() => useFileCollectionInteraction())
+
+    act(() => {
+      result.current.openTagPopover('src/a.ts')
+    })
+    expect(result.current.activeInteraction).not.toBeNull()
+
+    act(() => {
+      result.current.closeInteraction()
+    })
+    expect(result.current.activeInteraction).toBeNull()
+  })
+
+  it('5. Abrir TagPopover substitui ActionMenu aberto', () => {
+    const { result } = renderHook(() => useFileCollectionInteraction())
+
+    act(() => {
+      result.current.openActionMenu('src/a.ts')
+    })
+    expect(result.current.activeInteraction?.type).toBe('actionMenu')
+
+    act(() => {
+      result.current.openTagPopover('src/b.ts')
+    })
+    expect(result.current.activeInteraction).toEqual({
+      type: 'tagPopover',
+      relativePath: 'src/b.ts'
+    })
+  })
+
+  it('6. Abrir ActionMenu substitui TagPopover aberto', () => {
+    const { result } = renderHook(() => useFileCollectionInteraction())
+
+    act(() => {
+      result.current.openTagPopover('src/a.ts')
+    })
+    expect(result.current.activeInteraction?.type).toBe('tagPopover')
+
+    act(() => {
+      result.current.openActionMenu('src/b.ts')
+    })
+    expect(result.current.activeInteraction).toEqual({
+      type: 'actionMenu',
+      relativePath: 'src/b.ts'
+    })
+  })
+
+  it('7. openTagPopover mantém referência estável entre renders', () => {
+    const { result, rerender } = renderHook(() => useFileCollectionInteraction())
+    const initialOpenTagPopover = result.current.openTagPopover
+
+    rerender()
+    expect(result.current.openTagPopover).toBe(initialOpenTagPopover)
+  })
+
+  it('8. openActionMenu mantém referência estável entre renders', () => {
+    const { result, rerender } = renderHook(() => useFileCollectionInteraction())
+    const initialOpenActionMenu = result.current.openActionMenu
+
+    rerender()
+    expect(result.current.openActionMenu).toBe(initialOpenActionMenu)
+  })
+
+  it('9. closeInteraction mantém referência estável entre renders', () => {
+    const { result, rerender } = renderHook(() => useFileCollectionInteraction())
+    const initialCloseInteraction = result.current.closeInteraction
+
+    rerender()
+    expect(result.current.closeInteraction).toBe(initialCloseInteraction)
+  })
+})

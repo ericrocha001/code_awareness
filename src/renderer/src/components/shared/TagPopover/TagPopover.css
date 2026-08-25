@@ -1,0 +1,188 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir a fonte única de verdade visual do popover de tags (gatilho, busca, lista, rodapé).
+2. Estilizar o item destacado por teclado com a mesma aparência do hover.
+
+Mapa de Relacionamentos do Script
+
+1. TagPopover.tsx
+   - Tipo: Relação de UI
+   - Relação: Usa essas classes com prefixo tp- para renderizar o balão.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Nenhuma regra usa !important.
+2. As cores usam variáveis de tema; a cor da tag vem inline da tag.color.
+3. O item destacado (.tp-item.highlighted) tem a mesma aparência do hover (.tp-item:hover).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+/* ─── Botão Adicionar Tag (gatilho) ─────────────────────────────────────── */
+
+.tp-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 1px dashed var(--border);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.tp-trigger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(120, 82, 238, 0.08);
+}
+
+/* ─── Balão do TagPopover ───────────────────────────────────────────────── */
+
+.tp-popover {
+  min-width: 200px;
+  max-height: 250px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, var(--shadow-opacity));
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.tp-popover-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
+.tp-popover-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.tp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.tp-item:hover,
+.tp-item.highlighted {
+  background: var(--hover-overlay);
+}
+
+.tp-item.active {
+  font-weight: 600;
+}
+
+.tp-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tp-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tp-check {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.tp-footer {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  margin-top: 4px;
+}
+
+.tp-create {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.tp-create:hover {
+  background: rgba(120, 82, 238, 0.1);
+}
+
+/* ─── Busca no balão de tags ────────────────────────────────────────────── */
+/* Input fixo no topo, não rola; a zona rolável é o .tp-popover-list */
+.tp-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 4px;
+  flex-shrink: 0;
+}
+
+.tp-search:focus-within {
+  border-color: var(--accent);
+}
+
+.tp-search-icon {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.tp-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.tp-search-input::placeholder {
+  color: var(--text-secondary);
+  opacity: 0.7;
+}

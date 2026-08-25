@@ -1,0 +1,161 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o bloco de código estilo ChatGPT (cabeçalho, corpo, avisos de truncamento e modo puro).
+2. Garantir cantos arredondados, fonte mono e fundo adaptado ao tema.
+3. Manter o cabeçalho fixo durante o scroll da coluna de código.
+4. Estilizar as linhas virtualizadas do modo realçado com altura fixa obrigatória para o react-window.
+
+Mapa de Relacionamentos do Script
+
+1. CodeSnippetBlock.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo (prefixo csb-).
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Todas as classes usam prefixo csb- para evitar colisão com outras abas.
+2. O aviso de truncamento usa âmbar semântico (#f59e0b) — única exceção de cor.
+3. O corpo do código herda o fundo do tema do prism (vsDark/vsLight).
+4. O cabeçalho usa position: sticky com z-index 1 para permanecer visível durante o scroll.
+5. O aviso do modo puro usa var(--text-secondary) — nenhuma cor hardcoded.
+6. As linhas virtualizadas (.csb-line) têm altura fixa de 19px — nunca alterar sem ajustar LINE_HEIGHT no TSX.
+7. O container virtualizado (.csb-virtual-container) herda o fundo do tema do prism — nunca cor hardcoded.
+8. No modo virtualizado, o bloco usa flex: 1 para esticar pelo `.cmcv-root` flex — sem isso a lista não recebe a altura real do cartão.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.csb-root {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+/* Modo virtualizado: o bloco preenche toda a altura disponível do container pai
+   e a lista (FixedSizeList) rola internamente abaixo do cabeçalho fixo. */
+.csb-root--virtualized {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.csb-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border);
+}
+
+.csb-header-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.csb-header-label {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.csb-copy-btn {
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 10px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.csb-copy-btn:hover {
+  color: var(--accent-color, #3b82f6);
+  border-color: var(--accent-color, #3b82f6);
+}
+
+.csb-pre {
+  margin: 0;
+  padding: 12px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+/* Modo puro (arquivos gigantes sem realce) — herda fundo do tema e avisa no rodapé */
+.csb-pre--plain {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+/* Container da lista virtualizada — herda o fundo do tema do prism.
+   flex: 1 + min-height: 0 permite que o FixedSizeList ocupe todo o espaço
+   abaixo do cabeçalho e role internamente. */
+.csb-virtual-container {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Linha virtualizada — altura fixa obrigatória para o react-window funcionar */
+.csb-line {
+  display: flex;
+  align-items: center;
+  height: 19px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  padding: 0 12px;
+}
+
+.csb-line-num {
+  display: inline-block;
+  width: 2.5em;
+  margin-right: 12px;
+  text-align: right;
+  color: var(--text-tertiary, #9ca3af);
+  user-select: none;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.csb-line-content {
+  flex: 1;
+  overflow: hidden;
+}
+
+.csb-truncated {
+  font-size: 11px;
+  color: #f59e0b;
+  padding: 6px 12px;
+  border-top: 1px solid rgba(245, 158, 11, 0.3);
+  background: var(--bg-secondary);
+}
+
+.csb-plain-notice {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+}

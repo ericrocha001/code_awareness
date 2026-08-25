@@ -39,7 +39,7 @@ Invariantes do Script
 2. Métodos de listagem de arquivos não devem expor caminhos pertencentes às pastas de infraestrutura interna (como code_awareness, codefetch, .sprintdiff, code_checkpoints).
 3. Todas as chamadas aos comandos nativos do Git devem possuir um limite de tempo máximo (timeout) para evitar travamentos de processos.
 4. Em caso de erro na execução dos comandos Git, os métodos públicos devem retornar estruturas vazias ou nulas ao invés de propagar exceções para o chamador.
-5. Arquivos que não existem mais no filesystem devem ser excluídos das listagens, mesmo que ainda estejam no índice do Git.
+5. `getAllFiles` continua excluindo arquivos ausentes do filesystem. `getModifiedFiles` expõe os arquivos deletados reportados pelo Git com `changeType: 'deleted'` e metadados zerados (mtime e size), para que o diff semântico possa representá-los.
 6. Em caso de falha ao ler o mtime de um arquivo existente (statSync), o método deve usar Date.now() como fallback para garantir ordenação por recência consistente.
 
 --- FIM ARQUITETURA DO SCRIPT ---
@@ -115,10 +115,10 @@ export class GitService {
     try {
       // Executa os dois comandos em paralelo para performance
       const [statusOutput, untrackedOutput] = await Promise.all([
-        this.runGit(['status', '--porcelain'], dirPath),
+        this.runGit(['-c', 'core.quotePath=false', 'status', '--porcelain'], dirPath),
         // ls-files lista cada arquivo untracked individualmente (nunca agrupa diretórios)
         // --exclude-standard respeita o .gitignore do projeto
-        this.runGit(['ls-files', '--others', '--exclude-standard'], dirPath)
+        this.runGit(['-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard'], dirPath)
       ])
 
       // Arquivos M/A/D do git status (modified, staged, deleted)
@@ -159,6 +159,12 @@ export class GitService {
         .map(f => {
           const fullPath = join(dirPath, f.relativePath)
           if (!existsSync(fullPath)) {
+            // Arquivos deletados reportados pelo Git são expostos com metadados
+            // zerados (mtime/size) para o diff semântico representar a deleção.
+            // Demais casos (corrida transitória) continuam descartados.
+            if (f.changeType === 'deleted') {
+              return { ...f, mtime: 0, size: 0 }
+            }
             console.debug(`[GitService] Arquivo deletado ignorado: ${f.relativePath}`)
             return null
           }
@@ -183,8 +189,8 @@ export class GitService {
     try {
       // Executa os dois comandos Git em paralelo (tracked + untracked)
       const [trackedOutput, untrackedOutput] = await Promise.all([
-        this.runGit(['ls-files'], dirPath),
-        this.runGit(['ls-files', '--others', '--exclude-standard'], dirPath)
+        this.runGit(['-c', 'core.quotePath=false', 'ls-files'], dirPath),
+        this.runGit(['-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard'], dirPath)
       ])
 
       // Filtra e normaliza os arquivos tracked

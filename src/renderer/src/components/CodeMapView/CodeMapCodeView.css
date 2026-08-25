@@ -1,0 +1,47 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a coluna de código integral da aba Code Map (prefixo cmcv-).
+2. Centralizar os estados vazio, loading e erro com respiro generoso.
+
+Mapa de Relacionamentos do Script
+
+1. CodeMapCodeView.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo (prefixo cmcv-).
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Todas as classes usam prefixo cmcv- para evitar colisão com outras abas (ccv- é do CodeCampaignView).
+2. A cor de erro (#f87171) é a única exceção hardcoded — consistente com o painel de detalhes.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.cmcv-root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  min-height: 100%;
+  box-sizing: border-box;
+}
+
+.cmcv-empty,
+.cmcv-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 48px 24px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  text-align: center;
+}
+
+.cmcv-state--error {
+  color: #f87171;
+}

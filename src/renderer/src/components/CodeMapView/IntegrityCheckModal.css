@@ -1,0 +1,303 @@
+﻿/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o modal de integrity check (prefixo icm-).
+2. Alinhar o modal ao design system global usando apenas variáveis CSS do tema.
+3. Reutilizar os componentes de botão do design system (app-pill-btn e app-ghost-btn) no rodapé.
+
+Mapa de Relacionamentos do Script
+
+1. IntegrityCheckModal.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. As classes devem usar o prefixo icm- para evitar colisão com outros componentes.
+2. Nenhuma cor hardcoded — apenas variáveis CSS globais (exceto as cores semânticas de severity error/warning).
+3. O overlay usa position: fixed e aplica backdrop-filter: blur().
+4. O botão de fechar do cabeçalho segue a pele dos demais modais (fundo transparente, hover com var(--bg-secondary)).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.icm-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  animation: icmFadeIn 0.2s ease-out;
+}
+
+.icm-modal {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  max-width: 680px;
+  width: 90vw;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.icm-header {
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.icm-header-title {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.icm-header-icon {
+  color: var(--accent);
+}
+
+.icm-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  flex-shrink: 0;
+}
+
+.icm-close-btn:hover:not(:disabled) {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.icm-close-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.icm-body {
+  padding: 1.25rem 1.5rem;
+  overflow-y: auto;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.icm-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.icm-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.icm-body::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 2px;
+}
+
+.icm-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+.icm-summary-bar {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 0.875rem;
+}
+
+.icm-summary-count {
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.icm-summary-subtext {
+  display: block;
+  font-size: 0.8rem;
+  margin-top: 0.2rem;
+  color: var(--text-secondary);
+}
+
+.icm-select-all-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.icm-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.icm-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.75rem 1rem;
+  background: var(--bg-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease;
+}
+
+.icm-group-header:hover {
+  background: var(--bg-tertiary, var(--bg-secondary));
+}
+
+.icm-group-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.icm-group-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.icm-badge {
+  border-radius: 999px;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+}
+
+.icm-badge.error {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+}
+
+.icm-badge.warning {
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+
+.icm-repair-error {
+  padding: 0.75rem;
+  border-radius: 6px;
+}
+
+.icm-issue-list {
+  padding: 0.5rem 0;
+}
+
+.icm-issue-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--border);
+  transition: background 0.15s ease;
+}
+
+.icm-issue-item:hover {
+  background: var(--bg-secondary);
+}
+
+.icm-checkbox {
+  cursor: pointer;
+  margin-top: 0.2rem;
+  accent-color: var(--accent);
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.icm-issue-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.85rem;
+}
+
+.icm-issue-target {
+  font-family: monospace;
+  font-weight: 600;
+  color: var(--text-primary);
+  word-break: break-all;
+}
+
+.icm-issue-desc {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+}
+
+.icm-info-icon {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 0.35rem;
+  color: var(--text-secondary);
+  cursor: help;
+}
+
+.icm-footer {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.icm-spin {
+  animation: icmSpin 1s linear infinite;
+}
+
+@keyframes icmSpin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes icmFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

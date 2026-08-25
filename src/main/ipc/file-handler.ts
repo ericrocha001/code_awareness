@@ -40,6 +40,8 @@ import { basename, join } from 'path'
 import { DocumentPropagator } from '../core/document-propagator'
 import { DocumentChunker } from '../core/document-chunker'
 import { DocxExporter } from '../core/docx-exporter'
+import type { OutputFormat } from '../../shared/types'
+import { outputFormatToExtension } from '../../shared/utils/format-utils'
 
 const documentPropagator = new DocumentPropagator()
 const documentChunker = new DocumentChunker()
@@ -84,10 +86,13 @@ export function registerFileHandlers(): void {
     }
   })
 
-  ipcMain.handle('save-to-downloads', async (_event, markdown: string, fileName: string) => {
+  ipcMain.handle('save-to-downloads', async (_event, markdown: string, baseFileName: string, outputFormat?: OutputFormat) => {
     try {
       const downloadsPath = app.getPath('downloads')
-      const filePath = join(downloadsPath, `${fileName}.md`)
+      // O backend é o único responsável por derivar a extensão a partir do formato.
+      // Ausência de formato (retrocompatibilidade) assume markdown (.md).
+      const format: OutputFormat = outputFormat ?? 'markdown'
+      const filePath = join(downloadsPath, `${baseFileName}${outputFormatToExtension(format)}`)
       writeFileSync(filePath, markdown, 'utf-8')
       return { success: true, filePath }
     } catch (err: unknown) {

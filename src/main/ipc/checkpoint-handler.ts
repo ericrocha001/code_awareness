@@ -16,15 +16,20 @@ Mapa de Relacionamentos do Script
 
 1. checkpoint-service.ts
    - Tipo: Dependência Direta
-   - Relação: Instancia e consome CheckpointService para todas as operações.
+   - Relação: Recebe por parâmetro e consome CheckpointService para todas as operações.
    - Criticidade: Alta
 
-2. ../../shared/types.ts
+2. ../core/database-ports.ts
+   - Tipo: Contrato / Interface
+   - Relação: Recebe ActionLogPort por parâmetro para registrar ações no banco.
+   - Criticidade: Alta
+
+3. ../../shared/types.ts
    - Tipo: Contrato / Interface
    - Relação: Fornece os tipos CheckpointData, CheckpointSummary, CheckpointDetails retornados pelos handlers.
    - Criticidade: Alta
 
-3. diff (biblioteca npm)
+4. diff (biblioteca npm)
    - Tipo: Dependência Indireta
    - Relação: Usada pelo CheckpointService para calcular hunks.
    - Criticidade: Média
@@ -37,16 +42,15 @@ Invariantes do Script
 4. A restauração e a exclusão em massa são tratadas exclusivamente pelo restore-handler.
 5. toCheckpointId é obrigatório nos handlers de diff — não existe mais comparação com disco.
 6. O handler checkpoint:set-campaigns valida que campaignIds é array de strings não vazias.
+7. Não instancia serviços internamente — recebe instâncias prontas no registro.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
 import { ipcMain } from 'electron'
 import { CheckpointService } from '../core/checkpoint-service'
-import { insertAction } from '../core/database-service'
+import type { ActionLogPort } from '../core/database-ports'
 import { CheckpointDetails } from '../../shared/types'
-
-const checkpointService = new CheckpointService()
 
 // Valida se o valor recebido é uma string não vazia
 function isValidPath(value: unknown): value is string {
@@ -75,7 +79,7 @@ function validateDetailsFields(details: unknown): string | null {
   return null
 }
 
-export function registerCheckpointHandlers(): void {
+export function registerCheckpointHandlers(checkpointService: CheckpointService, actionLogPort: ActionLogPort): void {
   /**
    * checkpoint:create — Cria um novo checkpoint do repositório.
    * Parâmetros: repoPath, name, details? (CheckpointDetails opcional)
@@ -99,7 +103,7 @@ export function registerCheckpointHandlers(): void {
       const data = await checkpointService.createCheckpoint(repoPath, name, details)
 
       try {
-        insertAction({
+        actionLogPort.insertAction({
           actionType: 'checkpoint_created',
           timestamp: Date.now(),
           checkpointId: data.id,
@@ -182,7 +186,7 @@ export function registerCheckpointHandlers(): void {
 
       if (deleted) {
         try {
-          insertAction({
+          actionLogPort.insertAction({
             actionType: 'checkpoint_deleted',
             timestamp: Date.now(),
             checkpointId,
@@ -355,7 +359,7 @@ export function registerCheckpointHandlers(): void {
 
       if (success) {
         try {
-          insertAction({
+          actionLogPort.insertAction({
             actionType: 'checkpoint_renamed',
             timestamp: Date.now(),
             checkpointId,

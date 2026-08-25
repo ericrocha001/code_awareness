@@ -6,6 +6,7 @@ Responsabilidades do Script
 1. Declarar a interface global do objeto codeAwareness no escopo do objeto Window do browser.
 2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
 3. Tipar as APIs de deep link (getPendingDeepLink e onDeepLink) expostas pelo preload.
+4. Tipar a API generateScope exposta pelo preload.
 
 Mapa de Relacionamentos do Script
 
@@ -23,14 +24,14 @@ Invariantes do Script
 
 /// <reference types="vite/client" />
 
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, OrphanFile, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../../shared/types'
 
 declare global {
   interface Window {
     codeAwareness: {
       saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveXml: (xml: string, repoName: string) => Promise<{ success: boolean; error?: string }>
-      saveToDownloads: (markdown: string, fileName: string) => Promise<{ success: boolean; filePath?: string; error?: string }>
+      saveToDownloads: (markdown: string, baseFileName: string, outputFormat?: OutputFormat) => Promise<{ success: boolean; filePath?: string; error?: string }>
       exportToNotebookLM: (markdown: string, fileName: string) => Promise<{ success: boolean; fileCount: number; filePaths?: string[]; error?: string }>
       exportToDocx: (markdown: string, fileName: string) => Promise<{ success: boolean; fileCount: number; filePaths?: string[]; error?: string }>
       loadSettings: () => Promise<AppSettings>
@@ -49,7 +50,7 @@ declare global {
       onFileChanged: (callback: (filePath: string) => void) => () => void
       generateSemanticDiff: (repoPath: string, selectedFiles?: string[]) => Promise<string>
       getAllFiles: (dirPath: string) => Promise<DiffFileStatus[]>
-      generateCompressionMarkdown: (repoPath: string, selectedFiles: string[]) => Promise<string>
+      generateCompressionMarkdown: (repoPath: string, selectedFiles: string[], settings?: CompressionSettingsPayload) => Promise<string>
       addRootFolder: () => Promise<ProjectInfo[]>
       addIndividualProject: () => Promise<ProjectInfo[]>
       getProjectsList: () => Promise<ProjectInfo[]>
@@ -195,6 +196,66 @@ declare global {
       // ─── Deep Link ──────────────────────────────────────────────────────
       getPendingDeepLink: () => Promise<string | null>
       onDeepLink: (callback: (url: string) => void) => () => void
+
+      // ─── Code Map ─────────────────────────────────────────────────────────────
+      openRepository: (repoPath: string) => Promise<{ success: boolean; error?: string }>
+      closeRepository: (repoPath: string) => Promise<{ success: boolean; error?: string }>
+      indexRepository: (repoPath: string) => Promise<{ success: boolean; data?: { filesIndexed: number; elementsExtracted: number }; error?: string }>
+      synchronizeModified: (repoPath: string) => Promise<{ success: boolean; data?: { filesUpdated: number; errors: string[] }; error?: string }>
+      getRepository: (repoPath: string) => Promise<{ success: boolean; data?: import('../../shared/types').CodeMapRepository | null; error?: string }>
+      getFiles: (repoPath: string) => Promise<{ success: boolean; data?: import('../../shared/types').CodeMapFile[]; error?: string }>
+      getElements: (repoPath: string) => Promise<{ success: boolean; data?: import('../../shared/types').CodeMapElement[]; error?: string }>
+      getRelationships: (repoPath: string) => Promise<{ success: boolean; data?: import('../../shared/types').CodeMapRelationship[]; error?: string }>
+      getSyncStatus: (repoPath: string) => Promise<{ success: boolean; data?: import('../../shared/types').CodeMapSyncStatus; error?: string }>
+      getModifiedFilesCount: (repoPath: string) => Promise<{ success: boolean; data?: number; error?: string }>
+      getElementSnippet: (repoPath: string, elementId: string) => Promise<{
+        success: boolean
+        data?: {
+          content: string
+          startLine: number
+          startColumn: number
+          endLine: number
+          truncated: boolean
+          relativePath: string
+        } | null
+        error?: string
+      }>
+      getFileContent: (repoPath: string, relativePath: string) => Promise<{
+        success: boolean
+        data?: {
+          content: string
+          relativePath: string
+          truncated: boolean
+          lines: number
+          sizeBytes: number
+        } | null
+        error?: string
+      }>
+      openInVSCode: (repoPath: string, elementId: string) => Promise<{
+        success: boolean
+        usedFallback?: boolean
+        error?: string
+      }>
+      verifyIntegrity: (repoPath: string, options?: { autoRepair?: boolean; selectedIssues?: string[]; issues?: import('../../shared/types').IntegrityIssue[] }) => Promise<{
+        success: boolean
+        data?: import('../../shared/types').IntegrityCheckResult
+        error?: string
+      }>
+      generateScope: (repoPath: string, anchorFileId: string) => Promise<{
+        success: boolean
+        markdown?: string
+        fileName?: string
+        error?: string
+      }>
+      generateCompressedScope: (repoPath: string, anchorFileId: string) => Promise<{
+        success: boolean
+        markdown?: string
+        fileName?: string
+        error?: string
+      }>
+      onCodeMapFileModified: (callback: (data: { repoPath: string; relativePath: string }) => void) => () => void
+      onCodeMapFileConfirmed: (callback: (data: { repoPath: string; relativePath: string }) => void) => () => void
+      onCodeMapFileIndexed: (callback: (data: { repoPath: string; relativePath: string }) => void) => () => void
 
     }
   }

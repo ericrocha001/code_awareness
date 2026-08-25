@@ -41,6 +41,7 @@ interface ViewToolbarProps {
   searchValue: string
   onSearchChange: (value: string) => void
   searchPlaceholder?: string
+  searchRef?: React.Ref<HTMLInputElement>
   summary?: React.ReactNode
   controlsSlot?: React.ReactNode
   filterSlot?: React.ReactNode
@@ -50,6 +51,7 @@ export const ViewToolbar: React.FC<ViewToolbarProps> = ({
   searchValue,
   onSearchChange,
   searchPlaceholder = 'Buscar...',
+  searchRef,
   summary,
   controlsSlot,
   filterSlot
@@ -58,6 +60,7 @@ export const ViewToolbar: React.FC<ViewToolbarProps> = ({
     <div className="vt-root">
       <div className="vt-search-slot">
         <SearchBox
+          ref={searchRef}
           value={searchValue}
           onChange={onSearchChange}
           placeholder={searchPlaceholder}

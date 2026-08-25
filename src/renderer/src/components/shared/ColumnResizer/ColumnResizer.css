@@ -1,0 +1,88 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar a alça vertical de redimensionamento entre colunas (compartilhada por Code Map e FileView).
+2. Fornecer feedback visual no hover e durante o arraste.
+3. Garantir área de clique confortável sem ocupar espaço visual relevante.
+
+Mapa de Relacionamentos do Script
+
+1. ColumnResizer.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes crs-* definidas neste arquivo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Todas as classes usam prefixo crs- para evitar colisão entre views.
+2. A alça nunca introduz scroll horizontal — largura total ≤ 20px.
+3. As cores usam apenas variáveis de tema — nenhuma cor hardcoded.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+/* Contêiner da alça — 20px de área de clique, centralizada sobre a borda */
+.crs-root {
+  flex-shrink: 0;
+  width: 20px;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  cursor: col-resize;
+  user-select: none;
+  position: relative;
+  z-index: 10;
+}
+
+/* Linha visual central — sempre visível em repouso (2px, opacidade alta) */
+.crs-line {
+  width: 2px;
+  background: var(--border);
+  opacity: 0.7;
+  transition: background 0.12s ease, opacity 0.12s ease;
+  border-radius: 2px;
+  pointer-events: none;
+  position: relative;
+}
+
+/*
+  Grip de pontos centrais — aparece no hover sinalizando "arraste aqui".
+  Gerado via ::before para não poluir o DOM.
+  Os três pontos são um padrão universal de handle arrastável.
+*/
+.crs-root:hover .crs-line::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 4px;
+  height: 24px;
+  background: radial-gradient(circle, var(--accent) 1.5px, transparent 1.5px) 50% 0 / 4px 8px repeat-y;
+  border-radius: 2px;
+  opacity: 0.9;
+}
+
+/* Hover: linha em accent */
+.crs-root:hover .crs-line {
+  background: var(--accent);
+  opacity: 0.7;
+}
+
+/* Durante arraste: destaque completo, sem grip (foco na linha) */
+.crs-root--dragging .crs-line {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.crs-root--dragging .crs-line::before {
+  display: none;
+}
+
+/* Previne seleção de texto no documento inteiro durante o arraste */
+body.crs-dragging {
+  cursor: col-resize !important;
+  user-select: none !important;
+}

@@ -3,8 +3,11 @@
 
 Responsabilidades do Script
 
-1. Definir estilos específicos do modal de restauração (prefixo rm-).
-2. Respeitar as variáveis CSS globais do tema.
+1. Definir estilos específicos do modal de confirmação de restauração (prefixo rm-).
+2. Estilizar a pele do design system do modal (cabeçalho com título + X, rodapé com botões pill/ghost).
+3. Estilizar a lista de mudanças por arquivo (criados e modificados com diff de linhas, bloqueados).
+4. Estilizar a lista de remanescentes e implementações revertidas, além do estado vazio.
+5. Respeitar as variáveis CSS globais do tema.
 
 Mapa de Relacionamentos do Script
 
@@ -18,14 +21,15 @@ Invariantes do Script
 1. Nenhuma classe deve conflitar com as classes existentes (.cc-modal-overlay, .cc-modal-content, etc).
 2. O overlay e estrutura do modal reutilizam as classes existentes — não duplicar esses estilos.
 3. O prefixo rm- garante isolamento semântico.
+4. Cores semânticas de status (verde/vermelho/âmbar) usam valores consistentes com o tema.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
 
-/* ─── Modal de restauração — largura maior para conteúdo educativo ──────── */
+/* ─── Modal de restauração — estrutura principal ────────────────────────── */
 
 .rm-modal {
-  width: 560px;
+  width: 580px;
   max-height: 85vh;
   display: flex;
   flex-direction: column;
@@ -34,10 +38,78 @@ Invariantes do Script
 }
 
 .rm-target-name {
-  margin: 4px 0 12px 0;
-  font-size: 14px;
+  margin: 4px 0 8px 0;
+  font-size: 13px;
   color: var(--text-secondary);
   line-height: 1.5;
+}
+
+.rm-guide-text {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  line-height: 1.4;
+}
+
+/* ─── Cabeçalho da referência do design system ─────────────────────────── */
+
+.rm-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.rm-header-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.rm-header-title h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-primary);
+}
+
+.rm-header-icon {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.rm-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: all 0.2s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.rm-close:hover:not(:disabled) {
+  background: var(--hover-overlay);
+  color: var(--text-primary);
+}
+
+.rm-close:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Estado vazio ──────────────────────────────────────────────────────── */
+
+.rm-empty-state {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-style: italic;
 }
 
 .rm-body {
@@ -45,7 +117,8 @@ Invariantes do Script
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
+  padding-right: 2px;
 }
 
 .rm-footer {
@@ -58,105 +131,175 @@ Invariantes do Script
   margin-top: 8px;
 }
 
-/* ─── Bloco educativo ───────────────────────────────────────────────────── */
+/* ─── Pílula de perigo contornada (sem preenchimento) ───────────────────── */
+/* Mantém o formato de pílula do design system, mas em vermelho contornado,
+   conforme solicitado para o botão "Restaurar". Aplica-se sobre o base
+   .app-pill-btn via className propagado pelo componente Button. */
 
-.rm-explanation {
-  display: flex;
-  gap: 12px;
-  background: var(--hover-overlay);
-  border-left: 3px solid var(--accent);
-  border-radius: 6px;
-  padding: 12px 14px;
+.app-pill-btn.danger-outline {
+  background: transparent;
+  color: var(--color-danger);
+  border-color: var(--color-danger);
 }
 
-.rm-explanation-icon {
-  font-size: 18px;
-  flex-shrink: 0;
-  line-height: 1.4;
+.app-pill-btn.danger-outline:hover:not(:disabled) {
+  background: rgba(239, 68, 68, 0.1);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  box-shadow: none;
 }
 
-.rm-explanation-text {
+.app-pill-btn.danger-outline:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Lista de mudanças por arquivo ─────────────────────────────────────── */
+
+.rm-changes-section {
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 
-.rm-explanation-text p {
-  margin: 0;
-  font-size: 13px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-}
-
-.rm-explanation-text strong {
-  color: var(--text-primary);
-}
-
-/* ─── Dry-run ────────────────────────────────────────────────────────────── */
-
-.rm-dry-run {
+.rm-changes-list {
+  max-height: 180px;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 3px;
+  padding: 6px 8px;
+  background: var(--hover-overlay);
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
-.rm-dry-run-stat {
+.rm-change-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  transition: background 0.15s ease;
+}
+
+.rm-change-row:hover {
+  background: var(--hover-overlay);
+}
+
+.rm-change-file-info {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 500;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
 }
 
-.rm-dry-run-stat.success {
-  background: rgba(68, 207, 110, 0.1);
-  border: 1px solid rgba(68, 207, 110, 0.3);
-  color: var(--color-green);
+.rm-file-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+  line-height: 1;
 }
 
-.rm-dry-run-stat.error {
-  background: rgba(239, 68, 68, 0.1);
-  border: 1px solid rgba(239, 68, 68, 0.3);
-  color: var(--color-danger);
+.rm-file-path {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
 }
 
-.rm-dry-run-icon {
-  font-size: 14px;
+.rm-change-diff-stat {
+  display: flex;
+  align-items: center;
   flex-shrink: 0;
 }
 
-/* ─── Não restauráveis ──────────────────────────────────────────────────── */
+/* Badges e contagens de diff */
 
-.rm-cannot-restore {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+.rm-badge-created {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
 }
 
-.rm-cannot-restore-list {
+.rm-label-modified {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.rm-diff-counts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.rm-diff-add {
+  color: #22c55e;
+}
+
+.rm-diff-remove {
+  color: #ef4444;
+}
+
+/* ─── Seção de arquivos bloqueados ──────────────────────────────────────── */
+
+.rm-blocked-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 6px;
+}
+
+.rm-blocked-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.rm-blocked-icon {
+  font-size: 13px;
+}
+
+.rm-blocked-list {
   margin: 0;
-  padding-left: 20px;
+  padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 3px;
 }
 
-.rm-cannot-restore-list li {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-  padding: 3px 8px;
-  background: rgba(239, 68, 68, 0.04);
-  border-radius: 4px;
-}
-
-.rm-cannot-restore-list code {
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+.rm-blocked-item {
   font-size: 11px;
-  color: var(--color-danger);
+  color: var(--text-secondary);
+  line-height: 1.4;
+  padding: 2px 4px;
+}
+
+.rm-blocked-item code {
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  color: #f59e0b;
+}
+
+.rm-blocked-reason {
+  color: var(--text-secondary);
 }
 
 /* ─── Checkpoints revertidos ────────────────────────────────────────────── */
@@ -168,7 +311,7 @@ Invariantes do Script
 }
 
 .rm-reverted-section > strong {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-primary);
 }
 
@@ -180,10 +323,10 @@ Invariantes do Script
 
 .rm-reverted-list {
   margin: 0;
-  padding-left: 20px;
+  padding-left: 18px;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .rm-reverted-list li {
@@ -248,17 +391,17 @@ Invariantes do Script
 }
 
 .rm-orphan-section > strong {
-  font-size: 13px;
+  font-size: 12px;
   color: var(--text-primary);
 }
 
 .rm-orphan-list {
-  max-height: 140px;
+  max-height: 130px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 3px;
-  padding: 8px 10px;
+  padding: 6px 8px;
   background: var(--hover-overlay);
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -267,14 +410,20 @@ Invariantes do Script
 .rm-orphan-item {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 8px;
   font-size: 12px;
-  padding: 3px 4px;
-  border-radius: 3px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
 }
 
-.rm-orphan-item:hover {
-  background: var(--hover-overlay);
+.rm-orphan-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .rm-orphan-item code {
@@ -291,31 +440,43 @@ Invariantes do Script
   white-space: nowrap;
 }
 
-/* ─── Scrollbar da lista de remanescentes ──────────────────────────────── */
-
-.rm-orphan-list::-webkit-scrollbar {
-  width: 4px;
+.rm-orphan-item--deleting {
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
 }
 
-.rm-orphan-list::-webkit-scrollbar-track {
-  background: transparent;
+.rm-orphan-item--deleting code {
+  text-decoration: line-through;
+  opacity: 0.85;
 }
 
-.rm-orphan-list::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 2px;
+.rm-badge-deleting {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  flex-shrink: 0;
 }
 
-/* ─── Scrollbar do body do modal ────────────────────────────────────────── */
+/* ─── Scrollbars ────────────────────────────────────────────────────────── */
 
+.rm-changes-list::-webkit-scrollbar,
+.rm-orphan-list::-webkit-scrollbar,
 .rm-body::-webkit-scrollbar {
   width: 4px;
 }
 
+.rm-changes-list::-webkit-scrollbar-track,
+.rm-orphan-list::-webkit-scrollbar-track,
 .rm-body::-webkit-scrollbar-track {
   background: transparent;
 }
 
+.rm-changes-list::-webkit-scrollbar-thumb,
+.rm-orphan-list::-webkit-scrollbar-thumb,
 .rm-body::-webkit-scrollbar-thumb {
   background: var(--border);
   border-radius: 2px;

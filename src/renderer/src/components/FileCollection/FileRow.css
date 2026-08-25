@@ -1,0 +1,246 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir o layout em CSS Grid responsivo para a linha de arquivo (FileRow) da File View.
+2. Estilizar a área de tags com contenção horizontal (clip), o indicador "+N" condicional e o gatilho universal "+".
+3. Garantir truncamento elegante por ellipsis nas colunas de nome e caminho.
+
+Mapa de Relacionamentos do Script
+
+1. FileRow.tsx
+   - Tipo: Relação de UI
+   - Relação: Fornece classes de estilização estrutural e visual para a linha da coleção.
+   - Criticidade: Alta
+
+2. fileViewColumns.ts / FileView.css
+   - Tipo: Contrato / Interface
+   - Relação: O template default (FILE_VIEW_DEFAULT_TEMPLATE) permanece token-idêntico entre builder e a custom property --fv-grid-template declarada no .fv-container — a geometría se hereda em runtime, não se transporta como valor React.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. O container de tags (.fr-tags) declara position: relative e overflow: hidden — evolução ratificada da Invariante D9 (Sprint 2.2): contenção visual com consultabilidade em três níveis (+N, tooltip, TagPopover). SEM fade permanente (::after removido na Sprint 3 — artefato visual).
+2. O grid tem 5 tracks (Sprint 8): toggle, identity, path, tags, tokens — a coluna de ações foi removida; o botão de ações passou a ser absoluto (.fr-action-btn) fora do fluxo do grid. .fr-row e .fv-header permanecem token-idênticos (R-B3.1) via a custom property --fv-grid-template.
+3. A linha mantém alinhamento vertical e altura estável de 36px em viewport padrão.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.fr-row {
+  display: grid;
+  /* Template herdado da custom property --fv-grid-template declarada no
+     .fv-container (ancestral comum). A identidade header↔rows se garante por
+     construção: ambos consumem a MESMA custom property. O default da custom
+     property DEBE permanecer byte-idéntico a FILE_VIEW_DEFAULT_TEMPLATE
+     (fileViewColumns.ts). */
+  grid-template-columns: var(--fv-grid-template);
+  gap: 12px;
+  align-items: center;
+  padding: 0 12px;
+  /* Sprint 8: padding-right de 44px acomoda o botão de ações absoluto
+     (.fr-action-btn) no final da row, sem sobrepor o conteúdo da última
+     coluna (tokens). position: relative ancora o botão absoluto à row. */
+  padding-right: 44px;
+  position: relative;
+  height: 36px;
+  border-bottom: 1px solid var(--border);
+  cursor: default;
+  box-sizing: border-box;
+  /* Sprint 9: width: max-content garante que a row se expanda para acomodar todo
+     o conteúdo horizontal e min-width: 100% assegura que a row nunca fique menor
+     que o scroll container, mantendo o alinhamento header↔rows ao scroll. */
+  width: max-content;
+  min-width: 100%;
+  /* Sprint 6 — contain: layout style paint isola os cálculos de layout/paint de
+     cada linha: a medição geométrica de uma FileRow não afeta as demais, evitando
+     que a formação da grilla (scroll com 1200+ arquivos) se degrade. */
+  contain: layout style paint;
+
+  /* Sprint 4 — content-visibility: browser-side optimization que permite ao
+     browser evitar trabalho de renderização (layout, paint, style) para rows
+     fora da viewport. O DOM continua existindo (seleção, tags, callbacks
+     funcionam normalmente), mas o browser pode pular o trabalho pesado de
+     renderização até que a row entre na viewport.
+     contain-intrinsic-size: 36px informa ao browser a altura esperada de cada
+     row, evitando saltos de layout quando rows entram/saem da viewport.
+     Valor derivado da height: 36px declarada acima. */
+  content-visibility: auto;
+  contain-intrinsic-size: 36px;
+}
+
+.fr-row:hover {
+  background: var(--hover-bg);
+}
+
+.fr-row.selected {
+  background: var(--selected-bg, rgba(120, 82, 238, 0.12));
+}
+
+.fr-col-toggle {
+  display: flex;
+  align-items: center;
+}
+
+/* Coluna 2: nome + ícone + badge de alteração */
+.fr-identity {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.fr-file-icon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.fr-icon {
+  font-size: 16px;
+  vertical-align: middle;
+}
+
+.fr-name {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.fr-change-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex-shrink: 0;
+  line-height: 1.2;
+}
+
+.fr-change-badge.modified {
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+  border: 1px solid rgba(234, 179, 8, 0.3);
+}
+
+.fr-change-badge.added {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.fr-change-badge.deleted {
+  background: rgba(239, 68, 68, 0.15);
+  color: #ef4444;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+}
+
+/* Coluna 3: caminho */
+.fr-path {
+  color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+/* Coluna 4: tags (PRIORIDADE) */
+.fr-tags {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  white-space: nowrap;
+  cursor: pointer;
+  min-width: 0;
+  /* Sprint 2.2 (evolução da D9): contenção horizontal ratificada — sem o clip,
+     chips estourados invadiriam a coluna de tokens (regressão B3). A
+     integralidade permanece no DOM (+N, tooltip e TagPopover garantem consulta). */
+  position: relative;
+  overflow: hidden;
+}
+
+/* Gatilho universal de tags: posicionado imediatamente após as tags no fluxo flex */
+.fr-tags-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.fr-tags-add:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+/* Indicador "+N": sobrepõe a região clipada à direita, sem consumir slot de tag. */
+.fr-tags-more {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  padding: 2px 6px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Coluna 5: tokens */
+.fr-tokens {
+  display: flex;
+  /* Sprint 4: alinhamento à esquerda para que o redimensionamento afaste
+     visualmente Tokens de Actions — o TokenBadge permanece na borda esquerda
+     da coluna enquanto o botón de Actions (agora absoluto, .fr-action-btn)
+     se desloca para a direita da row. */
+  justify-content: flex-start;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary, rgba(255, 255, 255, 0.6));
+  font-size: 12px;
+}
+
+/* Botão de ações — absoluto no final da row (Sprint 8), fora do fluxo do grid */
+.fr-action-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.fr-action-btn:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}

@@ -6,8 +6,9 @@ Responsabilidades do Script
 1. Expor APIs seguras e limitadas do processo principal para o renderer usando contextBridge.
 2. Garantir isolamento de contexto impedindo o acesso direto a módulos do Node.js pela interface.
 3. Mapear os canais IPC do fluxo de monitoramento Git, de arquivos modificados e de importância para o renderer.
-4. Expor listeners e APIs para permitir a sincronização em tempo real de importância entre abas.
+4. Expor listeners e APIs para permitir a sincronização em tempo real de importância entre abas e atualizações do Code Map.
 5. Expor ao renderer a URL de deep link pendente (getPendingDeepLink) e a escuta de novas URLs (onDeepLink).
+6. Expor a API generateScope do Code Map para o renderer.
 
 Mapa de Relacionamentos do Script
 
@@ -26,6 +27,11 @@ Mapa de Relacionamentos do Script
    - Relação: Registra os handlers correspondentes a salvamento, seleção e propagação de arquivos expostos por este preload.
    - Criticidade: Alta
 
+4. code-map-handler.ts
+   - Tipo: Dependência Inversa
+   - Relação: Registra os handlers e emite os eventos IPC do Code Map expostos por este preload.
+   - Criticidade: Alta
+
 Invariantes do Script
 
 1. O isolamento de contexto deve ser sempre mantido.
@@ -36,7 +42,7 @@ Invariantes do Script
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, DiffFileStatus, OrphanFile, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
@@ -45,8 +51,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   saveXml: (xml: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('save-xml', xml, repoName)
   },
-  saveToDownloads: (markdown: string, fileName: string): Promise<{ success: boolean; filePath?: string; error?: string }> => {
-    return ipcRenderer.invoke('save-to-downloads', markdown, fileName)
+  saveToDownloads: (markdown: string, baseFileName: string, outputFormat?: OutputFormat): Promise<{ success: boolean; filePath?: string; error?: string }> => {
+    return ipcRenderer.invoke('save-to-downloads', markdown, baseFileName, outputFormat)
   },
   exportToNotebookLM: (markdown: string, fileName: string): Promise<{ success: boolean; fileCount: number; filePaths?: string[]; error?: string }> => {
     return ipcRenderer.invoke('export-to-notebooklm', markdown, fileName)
@@ -98,8 +104,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getAllFiles: (dirPath: string): Promise<DiffFileStatus[]> => {
     return ipcRenderer.invoke('git:get-all-files', dirPath)
   },
-  generateCompressionMarkdown: (repoPath: string, selectedFiles: string[]): Promise<string> => {
-    return ipcRenderer.invoke('git:generate-compression-markdown', repoPath, selectedFiles)
+  generateCompressionMarkdown: (repoPath: string, selectedFiles: string[], settings?: CompressionSettingsPayload): Promise<string> => {
+    return ipcRenderer.invoke('git:generate-compression-markdown', repoPath, selectedFiles, settings)
   },
   addRootFolder: (): Promise<ProjectInfo[]> => {
     return ipcRenderer.invoke('workspace:add-root-folder')
@@ -327,6 +333,48 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     patch: { name?: string; description?: string; status?: CampaignStatus }
   ): Promise<{ success: boolean; data?: Campaign; error?: string }> => {
     return ipcRenderer.invoke('campaign:update', repoPath, campaignId, patch)
-  }
+  },
 
+  // ─── Code Map ─────────────────────────────────────────────────────────────
+  openRepository: (repoPath: string) => ipcRenderer.invoke('code-map:open-repository', repoPath),
+  closeRepository: (repoPath: string) => ipcRenderer.invoke('code-map:close-repository', repoPath),
+  indexRepository: (repoPath: string) => ipcRenderer.invoke('code-map:index-repository', repoPath),
+  synchronizeModified: (repoPath: string) => ipcRenderer.invoke('code-map:synchronize-modified', repoPath),
+  getRepository: (repoPath: string) => ipcRenderer.invoke('code-map:get-repository', repoPath),
+  getFiles: (repoPath: string) => ipcRenderer.invoke('code-map:get-files', repoPath),
+  getElements: (repoPath: string) => ipcRenderer.invoke('code-map:get-elements', repoPath),
+  getRelationships: (repoPath: string) => ipcRenderer.invoke('code-map:get-relationships', repoPath),
+  getSyncStatus: (repoPath: string) => ipcRenderer.invoke('code-map:get-sync-status', repoPath),
+  getModifiedFilesCount: (repoPath: string) => ipcRenderer.invoke('code-map:get-modified-files-count', repoPath),
+  getElementSnippet: (repoPath: string, elementId: string) =>
+    ipcRenderer.invoke('code-map:get-element-snippet', repoPath, elementId),
+  getFileContent: (repoPath: string, relativePath: string) =>
+    ipcRenderer.invoke('code-map:get-file-content', repoPath, relativePath),
+  openInVSCode: (repoPath: string, elementId: string) =>
+    ipcRenderer.invoke('code-map:open-in-vscode', repoPath, elementId),
+  verifyIntegrity: (repoPath: string, options?: { autoRepair?: boolean; selectedIssues?: string[]; issues?: import('../shared/types').IntegrityIssue[] }) =>
+    ipcRenderer.invoke('code-map:verify-integrity', repoPath, options) as Promise<{
+      success: boolean
+      data?: import('../../shared/types').IntegrityCheckResult
+      error?: string
+    }>,
+  generateScope: (repoPath: string, anchorFileId: string) =>
+    ipcRenderer.invoke('code-map:generate-scope', repoPath, anchorFileId),
+  generateCompressedScope: (repoPath: string, anchorFileId: string) =>
+    ipcRenderer.invoke('code-map:generate-compressed-scope', repoPath, anchorFileId),
+  onCodeMapFileModified: (callback: (data: { repoPath: string; relativePath: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { repoPath: string; relativePath: string }): void => callback(data)
+    ipcRenderer.on('code-map:file-modified', handler)
+    return () => ipcRenderer.removeListener('code-map:file-modified', handler)
+  },
+  onCodeMapFileConfirmed: (callback: (data: { repoPath: string; relativePath: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { repoPath: string; relativePath: string }): void => callback(data)
+    ipcRenderer.on('code-map:file-confirmed', handler)
+    return () => ipcRenderer.removeListener('code-map:file-confirmed', handler)
+  },
+  onCodeMapFileIndexed: (callback: (data: { repoPath: string; relativePath: string }) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { repoPath: string; relativePath: string }): void => callback(data)
+    ipcRenderer.on('code-map:file-indexed', handler)
+    return () => ipcRenderer.removeListener('code-map:file-indexed', handler)
+  }
 })

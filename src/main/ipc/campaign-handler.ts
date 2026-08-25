@@ -11,7 +11,7 @@ Mapa de Relacionamentos do Script
 
 1. campaign-service.ts
    - Tipo: Dependência Direta
-   - Relação: Instancia e consome CampaignService.
+   - Relação: Recebe por parâmetro e consome CampaignService.
    - Criticidade: Alta
 
 2. ../../shared/types
@@ -25,6 +25,7 @@ Invariantes do Script
 2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
 3. Toda resposta de handler deve conter o campo success.
 4. Nenhuma lógica de negócio — apenas validação de parâmetros e delegação ao serviço.
+5. Não instancia serviços internamente — recebe CampaignService pronto no registro.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -33,14 +34,12 @@ import { ipcMain } from 'electron'
 import { CampaignService } from '../core/campaign-service'
 import { CampaignStatus } from '../../shared/types'
 
-const campaignService = new CampaignService()
-
 // Valida se o valor recebido é uma string não vazia
 function isValidPath(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
-export function registerCampaignHandlers(): void {
+export function registerCampaignHandlers(campaignService: CampaignService): void {
   /**
    * campaign:create — Cria uma nova campanha.
    * Parâmetros: repoPath, data: { name, description? }

@@ -26,9 +26,9 @@ Mapa de Relacionamentos do Script
    - Relação: Fornece os tipos CheckpointData, CheckpointFileEntry e CheckpointSummary.
    - Criticidade: Alta
 
-3. database-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece funções para inicializar o banco e gerenciar o catálogo de checkpoints (fonte autoritativa de metadados).
+3. database-ports.ts
+   - Tipo: Contrato / Interface
+   - Relação: Consome CheckpointCatalogPort via injeção de dependência para gerenciar o catálogo de checkpoints (fonte autoritativa de metadados).
    - Criticidade: Alta
 
 4. diff (biblioteca npm)
@@ -58,6 +58,7 @@ Invariantes do Script
 12. A leitura do banco no loadCheckpoint é best-effort — se falhar, retorna os dados do JSON com metadados congelados.
 13. campaignIds vive na caderneta, nunca gravados no JSON (snapshot congelado).
 14. Todo método público que aceita lista de campanhas deduplica e rejeita strings vazias.
+15. Nenhuma dependência direta de banco de dados ou SQLite — persiste metadados exclusivamente via CheckpointCatalogPort.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -69,18 +70,7 @@ import { join, basename } from 'path'
 import { diffLines } from 'diff'
 import { CheckpointData, CheckpointDetails, CheckpointFileEntry, CheckpointSummary, CheckpointHunk, CheckpointDiffFile, CheckpointCatalogRecord } from '../../shared/types'
 import { GitService } from './git-service'
-import {
-  initializeDatabase,
-  insertCheckpointCatalog,
-  getCheckpointsCatalog,
-  getCheckpointCatalog,
-  getContentCheckpoints,
-  updateCheckpointCatalog,
-  deleteCheckpointCatalog,
-  archiveCheckpointCatalog,
-  setCheckpointCampaignLinks,
-  getCheckpointCampaignIdsMap
-} from './database-service'
+import type { CheckpointCatalogPort } from './database-ports'
 
 // Limite máximo de tamanho de arquivo para incluir no snapshot (2MB)
 const MAX_FILE_SIZE = 2 * 1024 * 1024
@@ -114,13 +104,14 @@ const CHANGE_TYPE_LABEL: Record<'modified' | 'added' | 'deleted', string> = {
 }
 
 export class CheckpointService {
+  private readonly catalogPort: CheckpointCatalogPort
   private readonly gitService: GitService
 
   /**
-   * Permite injeção de dependência do GitService para facilitar testes unitários.
-   * Se não for passado, cria uma instância padrão.
+   * Permite injeção de dependência da porta de catálogo e do GitService.
    */
-  constructor(gitService?: GitService) {
+  constructor(catalogPort: CheckpointCatalogPort, gitService?: GitService) {
+    this.catalogPort = catalogPort
     this.gitService = gitService ?? new GitService()
   }
 
@@ -146,8 +137,7 @@ export class CheckpointService {
    * Migração idempotente: se o banco já tiver registros, retorna imediatamente.
    */
   private async ensureCatalogMigrated(repoPath: string): Promise<void> {
-    initializeDatabase(repoPath)
-    const existingCatalog = getCheckpointsCatalog(repoPath)
+    const existingCatalog = this.catalogPort.getCheckpointsCatalog(repoPath)
 
     const dir = this.getCheckpointDir(repoPath)
     if (!existsSync(dir)) return
@@ -169,7 +159,7 @@ export class CheckpointService {
         try {
           const filePath = join(dir, jsonFile)
           const data = JSON.parse(await readFile(filePath, 'utf-8')) as CheckpointData
-          insertCheckpointCatalog(repoPath, {
+          this.catalogPort.insertCheckpointCatalog(repoPath, {
             id: data.id,
             name: data.name,
             createdAt: data.createdAt,
@@ -305,8 +295,7 @@ export class CheckpointService {
 
     // Dual-write: atualizar catálogo no banco (best-effort)
     try {
-      initializeDatabase(repoPath)
-      insertCheckpointCatalog(repoPath, {
+      this.catalogPort.insertCheckpointCatalog(repoPath, {
         id: checkpointData.id,
         name: checkpointData.name,
         createdAt: checkpointData.createdAt,
@@ -322,7 +311,7 @@ export class CheckpointService {
 
     // Aplica o limite de checkpoints com conteúdo (best-effort)
     try {
-      const contentCheckpoints = getContentCheckpoints(repoPath)
+      const contentCheckpoints = this.catalogPort.getContentCheckpoints(repoPath)
       if (contentCheckpoints.length > MAX_CONTENT_CHECKPOINTS) {
         const toArchiveCount = contentCheckpoints.length - MAX_CONTENT_CHECKPOINTS
         for (let i = 0; i < toArchiveCount; i++) {
@@ -335,7 +324,7 @@ export class CheckpointService {
             // ignora
           }
           // Marca como sem conteúdo no banco
-          archiveCheckpointCatalog(repoPath, cp.id)
+          this.catalogPort.archiveCheckpointCatalog(repoPath, cp.id)
           console.log(`[CheckpointService] Checkpoint "${cp.name}" arquivado (limite de ${MAX_CONTENT_CHECKPOINTS} atingido)`)
         }
       }
@@ -354,8 +343,8 @@ export class CheckpointService {
 
     try {
       // Lê do catálogo do banco, que já retorna ordenado
-      const catalog = getCheckpointsCatalog(repoPath)
-      const campaignIdsMap = getCheckpointCampaignIdsMap(repoPath)
+      const catalog = this.catalogPort.getCheckpointsCatalog(repoPath)
+      const campaignIdsMap = this.catalogPort.getCheckpointCampaignIdsMap(repoPath)
 
       return catalog.map(record => ({
         id: record.id,
@@ -398,8 +387,7 @@ export class CheckpointService {
 
     // União com metadados do banco (best-effort)
     try {
-      initializeDatabase(repoPath)
-      const dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+      const dbRecord = this.catalogPort.getCheckpointCatalog(repoPath, checkpointId)
       if (dbRecord) {
         // Sobrescreve metadados com os valores atuais do banco
         data.name = dbRecord.name
@@ -431,8 +419,7 @@ export class CheckpointService {
     // (checkpoint some da timeline, JSON órfão pode ser limpo manualmente).
     // Se o JSON já não existir (ENOENT), prossegue com a deleção do catálogo.
     try {
-      initializeDatabase(repoPath)
-      deleteCheckpointCatalog(repoPath, checkpointId)
+      this.catalogPort.deleteCheckpointCatalog(repoPath, checkpointId)
     } catch (e) {
       console.error('[CheckpointService] Falha ao deletar checkpoint do catálogo do banco (best-effort):', e)
     }
@@ -473,8 +460,7 @@ export class CheckpointService {
 
     // Valida existência no catálogo do banco (não lê o JSON)
     try {
-      initializeDatabase(repoPath)
-      const dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+      const dbRecord = this.catalogPort.getCheckpointCatalog(repoPath, checkpointId)
       if (!dbRecord) {
         return false
       }
@@ -485,8 +471,7 @@ export class CheckpointService {
 
     // Atualiza exclusivamente no banco — sem reescrita do JSON
     try {
-      initializeDatabase(repoPath)
-      updateCheckpointCatalog(repoPath, checkpointId, {
+      this.catalogPort.updateCheckpointCatalog(repoPath, checkpointId, {
         ...(patch.instructions !== undefined && { instructions: patch.instructions ?? null }),
         ...(patch.agentSummary !== undefined && { agentSummary: patch.agentSummary ?? null }),
         ...(patch.restoredAt !== undefined && { restoredAt: patch.restoredAt ?? null })
@@ -526,13 +511,10 @@ export class CheckpointService {
         .map(id => id.trim())
     ))
 
-    // Inicializa o banco uma única vez (idempotente — R1 da auditoria)
-    initializeDatabase(repoPath)
-
     // Valida existência no catálogo do banco (não lê o JSON)
     let dbRecord: CheckpointCatalogRecord | null = null
     try {
-      dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+      dbRecord = this.catalogPort.getCheckpointCatalog(repoPath, checkpointId)
     } catch (e) {
       console.error('[CheckpointService] Falha ao verificar existência do checkpoint no catálogo:', e)
       // R2 da auditoria: falha de banco lança Error (o handler traduz em mensagem específica)
@@ -545,7 +527,7 @@ export class CheckpointService {
 
     // Atualiza ligações na caderneta
     try {
-      setCheckpointCampaignLinks(repoPath, checkpointId, cleanedIds)
+      this.catalogPort.setCheckpointCampaignLinks(repoPath, checkpointId, cleanedIds)
     } catch (e) {
       console.error('[CheckpointService] Falha ao atualizar vínculo de campanha no catálogo:', e)
       // R2 da auditoria: falha de banco lança Error (o handler traduz em mensagem específica)
@@ -584,8 +566,7 @@ export class CheckpointService {
     // Valida existência no catálogo do banco (não lê o JSON)
     let dbRecord: CheckpointCatalogRecord | null = null
     try {
-      initializeDatabase(repoPath)
-      dbRecord = getCheckpointCatalog(repoPath, checkpointId)
+      dbRecord = this.catalogPort.getCheckpointCatalog(repoPath, checkpointId)
     } catch (e) {
       console.error('[CheckpointService] Falha ao verificar existência do checkpoint no catálogo:', e)
       return false
@@ -598,15 +579,14 @@ export class CheckpointService {
     // Valida unicidade do novo nome via catálogo do banco
     // BUGFIX: Sem try/catch — o throw intencional de nome duplicado deve propagar
     // ao caller (checkpoint-handler) para exibir a mensagem específica ao usuário.
-    const catalog = getCheckpointsCatalog(repoPath)
+    const catalog = this.catalogPort.getCheckpointsCatalog(repoPath)
     if (catalog.some(cp => cp.name === newName.trim() && cp.id !== checkpointId)) {
       throw new Error(`Já existe um checkpoint com o nome "${newName.trim()}"`)
     }
 
     // Atualiza exclusivamente no banco — sem reescrita do JSON
     try {
-      initializeDatabase(repoPath)
-      updateCheckpointCatalog(repoPath, checkpointId, { name: newName.trim() })
+      this.catalogPort.updateCheckpointCatalog(repoPath, checkpointId, { name: newName.trim() })
     } catch (e) {
       console.error('[CheckpointService] Falha ao atualizar nome do checkpoint no catálogo:', e)
       return false
