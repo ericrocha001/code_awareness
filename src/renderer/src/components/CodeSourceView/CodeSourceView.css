@@ -20,16 +20,22 @@
 .cs-container > .vt-root {
   flex-shrink: 0;
   margin-bottom: 16px;
+  /* Sprint 6.1: respiro da toolbar — .app-main não tem mais padding */
+  padding: 30px 20px 0;
 }
 
 .cs-container > .ab-root {
   /* Sprint 5: elemento fixo — não encolhe na cadeia flex da view. */
   flex-shrink: 0;
+  /* Sprint 6.1: respiro lateral da ActionBar — o FileView permanece full-bleed */
+  padding: 0 20px;
 }
 
 .cs-container > .processing-status-bar {
   /* Sprint 5: barra de progresso fixa — não encolhe na cadeia flex da view. */
   flex-shrink: 0;
+  /* Sprint 6.1: respiro lateral — a lista permanece full-bleed */
+  padding: 0 20px;
 }
 
 .cs-container > .fcv-container {

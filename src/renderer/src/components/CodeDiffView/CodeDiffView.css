@@ -37,16 +37,22 @@ Invariantes do Script
 .cdf-container > .vt-root {
   flex-shrink: 0;
   margin-bottom: 16px;
+  /* Sprint 6.1: respiro da toolbar — .app-main não tem mais padding */
+  padding: 30px 20px 0;
 }
 
 .cdf-container > .ab-root {
   /* Sprint 5: elemento fixo — não encolhe na cadeia flex da view. */
   flex-shrink: 0;
+  /* Sprint 6.1: respiro lateral da ActionBar — o FileView permanece full-bleed */
+  padding: 0 20px;
 }
 
 .cdf-container > .ss-root {
   /* Sprint 5: StatusStrip fixo — não encolhe na cadeia flex da view. */
   flex-shrink: 0;
+  /* Sprint 6.1: respiro lateral — a lista permanece full-bleed */
+  padding: 0 20px;
 }
 
 .cdf-container > .fcv-container {

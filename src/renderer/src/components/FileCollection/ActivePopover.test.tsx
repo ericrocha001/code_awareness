@@ -31,7 +31,7 @@ Invariantes do Script
 
 import React from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
 import { ActivePopover, ActivePopoverProps } from './ActivePopover'
 import { Tag } from '../../../../shared/types'
 
@@ -219,5 +219,57 @@ describe('ActivePopover', () => {
     )
 
     expect(onClose).toHaveBeenCalledTimes(1)
+  })
+
+  // PA-R01 — TagPopover permanece aberto ao alternar tag (contrato de multi-seleção).
+  // Regressão: o orquestrador fechava a interação em handleTagsChanged, encerrando
+  // o popover após a primeira tag selecionada.
+  it('10. mantém o popover aberto ao clicar em uma tag, permitindo multi-seleção', async () => {
+    const tags: Tag[] = [
+      { id: 'tag-1', name: 'Importante', color: '#ff0000' },
+      { id: 'tag-2', name: 'Revisar', color: '#00ff00' },
+      { id: 'tag-3', name: 'Bug', color: '#0000ff' }
+    ]
+    const fileTagsMap: Record<string, string[]> = { 'src/file.ts': [] }
+    const onClose = vi.fn()
+    const onTagsChanged = vi.fn()
+
+    const anchor = document.createElement('button')
+    Object.defineProperty(anchor, 'isConnected', { value: true })
+    document.body.appendChild(anchor)
+
+    const setFileTag = vi.fn().mockResolvedValue({ success: true })
+    ;(window as any).codeAwareness = {
+      ...(window as any).codeAwareness,
+      setFileTag,
+      removeFileTag: vi.fn().mockResolvedValue({ success: true })
+    }
+
+    render(
+      <ActivePopover
+        activeInteraction={{ type: 'tagPopover', relativePath: 'src/file.ts', anchor }}
+        onClose={onClose}
+        allTags={tags}
+        fileTagsMap={fileTagsMap}
+        onTagsChanged={onTagsChanged}
+        repoPath="/repo"
+      />
+    )
+
+    // Popover aberto antes da interação
+    expect(screen.getByPlaceholderText('Buscar tag...')).toBeTruthy()
+
+    // Clica na primeira tag — persiste via IPC e notifica, sem fechar
+    fireEvent.click(screen.getByText('Importante'))
+    await waitFor(() => {
+      expect(setFileTag).toHaveBeenCalledWith('/repo', 'src/file.ts', 'tag-1')
+    })
+    expect(onTagsChanged).toHaveBeenCalled()
+
+    // CONTRATO: onClose NÃO deve ser chamado após selecionar tag
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByPlaceholderText('Buscar tag...')).toBeTruthy()
+
+    document.body.removeChild(anchor)
   })
 })

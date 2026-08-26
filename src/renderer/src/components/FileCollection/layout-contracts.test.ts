@@ -75,6 +75,7 @@ const fileRowCss = () => read('./FileRow.css')
 const compressionViewCss = () => read('../CodeCompressionView/CodeCompressionView.css')
 const sourceViewCss = () => read('../CodeSourceView/CodeSourceView.css')
 const diffViewCss = () => read('../CodeDiffView/CodeDiffView.css')
+const codeMapViewCss = () => read('../CodeMapView/CodeMapView.css')
 const indexCss = () => read('../../index.css')
 
 /**
@@ -436,5 +437,59 @@ describe('Contratos de layout — regressões B2–B6', () => {
       const decls = declarationsOf(extractBlock(fileRowCss(), '.fr-row'))
       expect(has(decls, 'contain-intrinsic-size', '36px')).toBe(true)
     })
+  })
+})
+
+// Sprint 6.1: com o .app-main sem padding, as toolbars de cada view carregam o
+// próprio respiro (30px topo / 20px laterais) — enquanto o FileView permanece
+// full-bleed para a scrollbar grudar na borda da janela.
+describe('R-B15: respiro das toolbars e full-bleed do FileView (Sprint 6.1)', () => {
+  const viewToolbars: Array<[string, () => string, string]> = [
+    ['.cc-container', compressionViewCss, '.cc-container > .vt-root'],
+    ['.cs-container', sourceViewCss, '.cs-container > .vt-root'],
+    ['.cdf-container', diffViewCss, '.cdf-container > .vt-root'],
+    ['.cmv-container', codeMapViewCss, '.cmv-container > .vt-root']
+  ]
+
+  for (const [name, css, selector] of viewToolbars) {
+    it(`R-B15.${viewToolbars.findIndex((v) => v[0] === name) + 1}: ${name} > .vt-root declara padding: 30px 20px 0`, () => {
+      expect(has(compoundDecls(css(), selector), 'padding', '30px 20px 0')).toBe(true)
+    })
+  }
+
+  it('R-B15.5: .cc-container > .ab-root declara padding: 0 20px', () => {
+    expect(has(compoundDecls(compressionViewCss(), '.cc-container > .ab-root'), 'padding', '0 20px')).toBe(true)
+  })
+
+  it('R-B15.6: .cs-container > .ab-root declara padding: 0 20px', () => {
+    expect(has(compoundDecls(sourceViewCss(), '.cs-container > .ab-root'), 'padding', '0 20px')).toBe(true)
+  })
+
+  it('R-B15.7: .cdf-container > .ab-root declara padding: 0 20px', () => {
+    expect(has(compoundDecls(diffViewCss(), '.cdf-container > .ab-root'), 'padding', '0 20px')).toBe(true)
+  })
+
+  it('R-B15.8: .cmv-container > .ab-root declara padding: 0 20px', () => {
+    expect(has(compoundDecls(codeMapViewCss(), '.cmv-container > .ab-root'), 'padding', '0 20px')).toBe(true)
+  })
+
+  it('R-B15.9: .cs-container > .processing-status-bar declara padding: 0 20px', () => {
+    expect(has(compoundDecls(sourceViewCss(), '.cs-container > .processing-status-bar'), 'padding', '0 20px')).toBe(true)
+  })
+
+  it('R-B15.10: .cdf-container > .ss-root declara padding: 0 20px', () => {
+    expect(has(compoundDecls(diffViewCss(), '.cdf-container > .ss-root'), 'padding', '0 20px')).toBe(true)
+  })
+
+  it('R-B15.11: .cmv-content declara padding: 8px 20px 20px', () => {
+    expect(has(declarationsOf(extractBlock(codeMapViewCss(), '.cmv-content')), 'padding', '8px 20px 20px')).toBe(true)
+  })
+
+  it('R-B15.12 (guarda full-bleed): .fcv-container não declara padding', () => {
+    expect(declarationsOf(extractBlock(collectionViewCss(), '.fcv-container')).some((d) => d.startsWith('padding'))).toBe(false)
+  })
+
+  it('R-B15.13 (guarda full-bleed): .fv-scroll-container não declara padding', () => {
+    expect(declarationsOf(extractBlock(fileViewCss(), '.fv-scroll-container')).some((d) => d.startsWith('padding'))).toBe(false)
   })
 })

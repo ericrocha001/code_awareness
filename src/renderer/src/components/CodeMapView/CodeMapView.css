@@ -60,10 +60,14 @@ Invariantes do Script
 
 .cmv-container > .vt-root {
   flex-shrink: 0;
+  /* Sprint 6.1: respiro da toolbar — .app-main não tem mais padding */
+  padding: 30px 20px 0;
 }
 
 .cmv-container > .ab-root {
   flex-shrink: 0;
+  /* Sprint 6.1: respiro lateral da ActionBar — o conteúdo permanece full-bleed */
+  padding: 0 20px;
 }
 
 .cmv-empty {
@@ -88,7 +92,8 @@ Invariantes do Script
   min-height: 0;
   overflow: hidden;
   gap: 8px; /* as alças de redimensionamento ficam no gap nativo do flex */
-  padding: 8px;
+  /* Sprint 6.1: respiro lateral/inferior dos cartões — topo coberto pelo vt-root */
+  padding: 8px 20px 20px;
 }
 
 /* ─── Zona de Navegação (árvore) ────────────────────────────────────────── */

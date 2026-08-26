@@ -8,6 +8,7 @@ Responsabilidades do Script
 3. Declarar os tipos do sistema de diff de checkpoints (CheckpointHunk, CheckpointDiffFile).
 4. Declarar os tipos de restauração, incluindo o RestorePlan congelado trocado entre preview e execute.
 5. Declarar os tipos do Compression Profile (CompressionProfile, OutputFormat, CompressionSettings) que representam a configuração efetiva de compressão.
+6. Declarar os tipos do Code Source (SourceProfile, SourceOutputFormat, SourceSettings) que representam a configuração própria da geração seletiva sem compressão.
 
 
 Mapa de Relacionamentos do Script
@@ -62,6 +63,8 @@ export interface AppSettings {
   projectPreferences: Record<string, ProjectPreferences>
   // Compression Profile persistido (opcional — ausente usa defaults)
   compressionSettings?: CompressionSettings
+  // Code Source persistido (opcional — ausente usa defaults)
+  sourceSettings?: SourceSettings
 }
 
 // ─── Projetos e Diff ────────────────────────────────────────────────────────
@@ -504,6 +507,52 @@ export interface ContextEnrichment {
   /** Se true, inclui logs do Git na montagem final. */
   includeLogs?: boolean
   /** Número máximo de commits nos logs (≥1 e ≤100, default 10). */
+
+// ─── Code Source ─────────────────────────────────────────────────────────────
+
+/**
+ * Formato de entrega do Code Source. Contrato próprio, semanticamente separado
+ * de OutputFormat (Code Compression): o Code Source suporta apenas Markdown e XML.
+ */
+export type SourceOutputFormat = 'markdown' | 'xml'
+
+/**
+ * Perfil do Code Source — contrato próprio, independente de CompressionProfile.
+ * Representa as opções passadas à CLI do Repomix; NUNCA inclui compressão estrutural.
+ */
+export interface SourceProfile {
+  // Limpeza
+  removeComments: boolean
+  removeEmptyLines: boolean
+  truncateBase64: boolean
+  // Apresentação
+  showLineNumbers: boolean
+  parsableStyle: boolean
+  // Estrutura
+  includeFileSummary: boolean
+  includeDirectoryStructure: boolean
+  includeEmptyDirectories: boolean
+  includeFullDirectoryStructure: boolean
+  // Metadata
+  version: number
+}
+
+/** Unidade semântica persistida em settings.json para o Code Source: perfil + formato. */
+export interface SourceSettings {
+  profile: SourceProfile
+  outputFormat: SourceOutputFormat
+}
+
+/**
+ * Payload transitável via IPC para o Code Source. Todos os campos são opcionais:
+ * o renderer pode enviar configurações parciais ou omitir o campo inteiro,
+ * fazendo o serviço usar seus defaults (retrocompatibilidade).
+ */
+export interface SourceSettingsPayload {
+  profile?: SourceProfile
+  outputFormat?: SourceOutputFormat
+}
+
   includeLogsCount?: number
 }
 

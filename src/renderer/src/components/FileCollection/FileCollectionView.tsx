@@ -180,10 +180,12 @@ export const FileCollectionViewInner: React.FC<FileCollectionViewProps> = ({
   )
 
   // ─── Handler de TagPopover sincronizado ────────────────────────────────
+  // Sprint 6.2 (PA-R01): apenas sincroniza dados — NÃO fecha a interação.
+  // O contrato do TagPopover (invariante 6) exige o balão aberto para
+  // multi-seleção; fechamento legítimo é só clique-fora/ESC/item removido.
   const handleTagsChanged = useCallback(() => {
     onTagsChanged?.()
-    closeInteraction()
-  }, [onTagsChanged, closeInteraction])
+  }, [onTagsChanged])
 
   return (
     <div className="fcv-container">
