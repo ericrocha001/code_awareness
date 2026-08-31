@@ -10,6 +10,7 @@ Responsabilidades do Script
 5. Delegar a montagem do documento Markdown final ao assembleCompressionDocument, incorporando seções de Context Enrichment.
 6. Aceitar injeção opcional de RepomixAdapter, ContentIdentityPort, CompressionCache, CompressionExecutor e CompressionServiceOptions para viabilizar testes determinísticos sem CLI real.
 7. Decidir o caminho arquitetural via resolveCompressionPath e, para markdown/xml, delegar ao Direct Output (sem cache por arquivo).
+8. Expor método compressFilesStructured para fornecer os resultados individuais de compressão antes da montagem de Markdown.
 
 Mapa de Relacionamentos do Script
 
@@ -88,6 +89,11 @@ Mapa de Relacionamentos do Script
     - Relação: Consome COMPRESSION_VERSION e COMPRESSION_TOTAL_FAILURE_MARKER para composição da chave de cache e validação de entrada vazia.
     - Criticidade: Alta
 
+14. structured-compression-port.ts
+    - Tipo: Contrato / Interface
+    - Relação: CompressionService implementa StructuredCompressionPort e retorna StructuredCompressionResult.
+    - Criticidade: Alta
+
 Invariantes do Script
 
 1. O serviço é um orquestrador puro sem lógica inline de batch, inFlight, fallback ou formatação de Markdown.
@@ -97,6 +103,7 @@ Invariantes do Script
 5. Invalidação automática de cache é garantida pelo COMPRESSION_VERSION e pelo profileHash na cacheKey.
 6. markdown/xml/json (Direct Output) não usam cache por arquivo nem o inFlight do Core; falha total retorna COMPRESSION_TOTAL_FAILURE_MARKER. O envelope do Direct Output é consciente do formato: markdown recebe envelope completo (com enrichment); xml/json são passthrough puro do Repomix (sem envelope, sem enrichment). plain é documento-esqueleto do Core (code map).
 7. Um OutputFormat inválido em runtime é sanitizado para 'plain' (Compression Core) como defesa em profundidade.
+8. O método compressFilesStructured opera exclusivamente no caminho compression-core e rejeita formatos direct-output.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -122,6 +129,7 @@ import { assembleCompressionDocument } from './compression-document-assembler'
 import type { CompressionProfile, OutputFormat, ContextEnrichment } from '../../shared/types'
 import type { CompressionPort } from './compression-port'
 import type { ContentIdentityPort } from './content-identity-port'
+import type { StructuredCompressionPort, StructuredCompressionResult } from './structured-compression-port'
 
 // Re-exportação para contratos externos e retrocompatibilidade
 export type { CacheEntry }
@@ -149,7 +157,8 @@ interface CacheAnalysisResult {
   errorReasons: Record<string, string>
 }
 
-export class CompressionService implements CompressionPort {
+export class CompressionService implements CompressionPort, StructuredCompressionPort {
+
   private readonly cache: CompressionCache
   private readonly executor: CompressionExecutor
   private readonly hashProvider?: ContentIdentityPort
@@ -353,6 +362,70 @@ export class CompressionService implements CompressionPort {
   }
 
   /**
+   * Executa a pipeline de compressão estruturada retornando os resultados individuais por arquivo
+   * antes da consolidação em documento Markdown.
+   * Suporta exclusivamente o caminho compression-core (formatos como 'plain').
+   */
+  async compressFilesStructured(
+    repoPath: string,
+    selectedFiles: string[],
+    profile?: CompressionProfile,
+    outputFormat: OutputFormat = 'plain'
+  ): Promise<StructuredCompressionResult> {
+    // 1. Se selectedFiles estiver vazio, retornar objeto de resultado vazio
+    if (selectedFiles.length === 0) {
+      return { results: {}, errors: [], errorReasons: {} }
+    }
+
+    // 2. Normalização de profile (com sanitização defensiva do formato de transporte)
+    const safeOutputFormat: OutputFormat =
+      (VALID_OUTPUT_FORMATS as readonly string[]).includes(outputFormat) ? outputFormat : 'plain'
+    const normalizedProfile = normalizeCompressionProfile(profile ?? DEFAULT_PROFILE)
+    const effectiveProfile = resolveEffectiveProfile(normalizedProfile, safeOutputFormat)
+    const profileHash = computeProfileHash(effectiveProfile)
+    const request = buildRepomixRequest(repoPath, selectedFiles, effectiveProfile, safeOutputFormat)
+
+    // 2b. Verificar o caminho de compressão: direct-output não é suportado
+    if (resolveCompressionPath(safeOutputFormat) === 'direct-output') {
+      throw new Error(
+        `compressFilesStructured não suporta o caminho direct-output (formato "${safeOutputFormat}"). Este método é exclusivamente para o caminho compression-core.`
+      )
+    }
+
+    // 3. Análise de cache (Etapa 1)
+    const { results, uncachedFiles, fileHashes, fileStats, finalErrors, errorReasons } =
+      await this.analyzeCache(repoPath, selectedFiles, profileHash)
+
+    // 4. Execução de arquivos uncached (Etapa 2 — delegada ao CompressionExecutor)
+    if (uncachedFiles.length > 0) {
+      const executionResult = await this.executor.execute(
+        repoPath,
+        uncachedFiles,
+        fileHashes,
+        fileStats,
+        request,
+        profileHash
+      )
+
+      // Atualiza o cache com as novas compressões
+      this.updateCacheWithResults(repoPath, executionResult, fileHashes, fileStats, profileHash)
+
+      // Consolida resultados e erros
+      Object.assign(results, executionResult.results)
+      finalErrors.push(...executionResult.errors)
+      Object.assign(errorReasons, executionResult.errorReasons)
+    }
+
+    // 5. Retorna o resultado estruturado consolidado
+    return {
+      results,
+      errors: finalErrors,
+      errorReasons
+    }
+  }
+
+  /**
+
    * Monta o documento do Direct Output de forma consciente do formato:
    * - markdown: envelope completo (cabeçalho, blockquote, enrichment pré-conteúdo,
    *   conteúdo do Repomix, enrichment pós-conteúdo).

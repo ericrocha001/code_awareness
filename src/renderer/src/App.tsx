@@ -40,6 +40,11 @@ Mapa de Relacionamentos do Script
    - Relação: Consome estilos CSS globais, incluindo o toast de status.
    - Criticidade: Alta
 
+7. CodeDashView.tsx
+   - Tipo: Dependência Direta
+   - Relação: Renderiza a aba Code Dash quando ativa.
+   - Criticidade: Alta
+
 Invariantes do Script
 
 1. Apenas uma aba deve estar ativa por vez.
@@ -61,7 +66,10 @@ import { CodeSourceView } from "./components/CodeSourceView/CodeSourceView";
 import { CodeCampaignView } from "./components/CodeCampaignView/CodeCampaignView";
 import { CodeJourneyView } from "./components/CodeJourneyView/CodeJourneyView";
 import { CodeMapView } from "./components/CodeMapView/CodeMapView";
+import { CodeDashView } from "./components/CodeDashView/CodeDashView";
 import { HomeView } from "./components/HomeView/HomeView";
+
+
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
 import { TagManagerModal } from "./components/TagManagerModal/TagManagerModal";
 import { CodeAwarenessIgnoreModal } from "./components/CodeAwarenessIgnoreModal/CodeAwarenessIgnoreModal";
@@ -193,7 +201,15 @@ export const App: React.FC = () => {
             onStatusMessage={handleStatusMessage}
           />
         )}
+        {activeTab === "dash" && (
+          <CodeDashView
+            activeProject={activeProject}
+            onSelectProject={setActiveProject}
+            onStatusMessage={handleStatusMessage}
+          />
+        )}
         {activeTab === "diff" && (
+
           <CodeDiffView
             activeProject={activeProject}
             onSelectProject={setActiveProject}

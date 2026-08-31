@@ -9,6 +9,7 @@ Responsabilidades do Script
 4. Declarar os tipos de restauração, incluindo o RestorePlan congelado trocado entre preview e execute.
 5. Declarar os tipos do Compression Profile (CompressionProfile, OutputFormat, CompressionSettings) que representam a configuração efetiva de compressão.
 6. Declarar os tipos do Code Source (SourceProfile, SourceOutputFormat, SourceSettings) que representam a configuração própria da geração seletiva sem compressão.
+7. Reexportar os tipos e contratos do protocolo Code Dash.
 
 
 Mapa de Relacionamentos do Script
@@ -21,6 +22,11 @@ Mapa de Relacionamentos do Script
 2. checkpoint-service.ts
    - Tipo: Dependência Direta
    - Relação: Consome os tipos CheckpointData, CheckpointFileEntry e CheckpointSummary para persistir checkpoints.
+   - Criticidade: Alta
+
+3. types/dash-types.ts
+   - Tipo: Contrato / Interface
+   - Relação: Reexporta tipos do protocolo Code Dash para o restante da aplicação.
    - Criticidade: Alta
 
 Invariantes do Script
@@ -553,6 +559,30 @@ export interface SourceSettingsPayload {
   outputFormat?: SourceOutputFormat
 }
 
+/** Documento gerado pelo Code Source, encapsulando conteúdo, tokens e id da geração. */
+export interface GeneratedDocument {
+  content: string
+  tokenCount: number
+  generationId: number
+}
+
+/**
+ * Requisição de geração identificada pelo Renderer, com sessionKey para coordenação
+ * de auto-cancelamento e generationId para proteção contra race conditions.
+ */
+export interface SourceGenerationRequest {
+  repoPath: string
+  selectedFiles: string[]
+  format?: SourceOutputFormat
+  profile?: SourceProfile
+  generationId: number
+  sessionKey: string
+}
+
   includeLogsCount?: number
 }
+
+// ─── Code Dash ───────────────────────────────────────────────────────────────
+
+export * from './types/dash-types'
 

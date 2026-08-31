@@ -7,8 +7,9 @@ Responsabilidades do Script
 2. Registrar todos os manipuladores de IPC (Inter-Process Communication).
 3. Normalizar as variáveis de ambiente PATH para compatibilidade com CLI.
 4. Registrar o protocolo codeawareness:// no SO e capturar deep links em cold start e warm start, garantindo single instance.
-5. Compor a injeção de dependência no bootstrap como único Composition Root: instancia BetterSqlite3DatabaseAdapter, CheckpointService, CampaignService, RestoreService e CompressionService, injetando as dependências prontas nos handlers IPC.
+5. Compor a injeção de dependência no bootstrap como único Composition Root: instancia BetterSqlite3DatabaseAdapter, CheckpointService, CampaignService, RestoreService, CompressionService, CodeSourceService e DashService, injetando as dependências prontas nos handlers IPC.
 6. Aplicar guarda defensiva com log de warning em desenvolvimento no ContentIdentityProvider, antes de chamadas ao codeMapService não inicializado.
+7. Compor e registrar o DashService e seus handlers IPC (registerDashHandlers) com injeção de dependências reais.
 
 Mapa de Relacionamentos do Script
 
@@ -49,7 +50,7 @@ Mapa de Relacionamentos do Script
 
 8. core/compression-service.ts
    - Tipo: Dependência Direta
-   - Relação: Instancia um único CompressionService, injetado na porta CompressionPort do CodeMapService (com ContentIdentityPort composta) e repassado ao git-handler.
+   - Relação: Instancia um único CompressionService, injetado na porta CompressionPort do CodeMapService (com ContentIdentityPort composta) e repassado ao git-handler e DashService.
    - Criticidade: Alta
 
 9. core/content-identity-port.ts
@@ -61,6 +62,17 @@ Mapa de Relacionamentos do Script
     - Tipo: Dependência Direta
     - Relação: Instancia o adaptador SQLite e injeta como porta de persistência nos serviços e handlers.
     - Criticidade: Alta
+
+11. ipc/dash-handler.ts
+    - Tipo: Dependência Direta
+    - Relação: Registra manipuladores do Code Dash e One-Click XML via IPC; recebe instâncias de DashService e OneClickXmlService por parâmetro.
+    - Criticidade: Alta
+
+12. core/one-click-xml-service.ts
+    - Tipo: Dependência Direta
+    - Relação: Instancia o serviço OneClickXmlService com IgnorePolicy e RepomixAdapter para geração nativa de XML.
+    - Criticidade: Alta
+
 
 Invariantes do Script
 
@@ -87,6 +99,7 @@ import { registerDatabaseHandlers } from './ipc/database-handler'
 import { registerCampaignHandlers } from './ipc/campaign-handler'
 import { registerDevToolsHandlers } from './ipc/devtools-handler'
 import { registerDeepLinkHandlers } from './ipc/deeplink-handler'
+import { registerDashHandlers } from './ipc/dash-handler'
 import { setPendingDeepLink, emitDeepLinkToRenderer } from './core/deeplink-manager'
 import { DevToolsManager } from './core/devtools-manager'
 import { settingsService } from './core/settings-service'
@@ -101,6 +114,18 @@ import { BetterSqlite3DatabaseAdapter } from './core/better-sqlite3-database-ada
 import { CheckpointService } from './core/checkpoint-service'
 import { CampaignService } from './core/campaign-service'
 import { RestoreService } from './core/restore-service'
+import { GitService } from './core/git-service'
+import { CodeSourceService } from './core/code-source-service'
+import { DashService } from './core/dash/dash-service'
+import { DashFileResolver } from './core/dash/dash-file-resolver'
+import { SourceContextProvider } from './core/dash/providers/source-context-provider'
+import { CompressionContextProvider } from './core/dash/providers/compression-context-provider'
+import { IgnorePolicy } from './core/ignore-policy'
+import { OneClickXmlService } from './core/one-click-xml-service'
+import { RepomixAdapter } from './core/repomix-adapter'
+
+
+
 
 // Handlers globais de crash para evitar quedas silenciosas
 process.on('uncaughtException', (error) => {
@@ -247,6 +272,22 @@ app.whenReady().then(() => {
   const campaignService = new CampaignService(dbAdapter)
   const restoreService = new RestoreService(checkpointService, dbAdapter)
 
+  // Composição do Code Dash com injeção de dependências reais
+  const codeSourceService = new CodeSourceService()
+  const sourceContextProvider = new SourceContextProvider(codeSourceService)
+  const compressionContextProvider = new CompressionContextProvider(compressionService)
+  const dashService = new DashService(
+    (repoPath: string) => new DashFileResolver(repoPath),
+    sourceContextProvider,
+    compressionContextProvider
+  )
+
+  // Composição do One-Click XML com política de escopo e adapter de Direct Output
+  const repomixAdapterForOneClick = new RepomixAdapter()
+  const gitService = new GitService()
+  const ignorePolicy = new IgnorePolicy(gitService, settingsService)
+  const oneClickXmlService = new OneClickXmlService(ignorePolicy, repomixAdapterForOneClick)
+
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
@@ -258,6 +299,8 @@ app.whenReady().then(() => {
   registerDatabaseHandlers(dbAdapter)
   registerCampaignHandlers(campaignService)
   registerCodeMapHandlers(codeMapService)
+  registerDashHandlers(dashService, oneClickXmlService)
+
 
   createWindow()
 

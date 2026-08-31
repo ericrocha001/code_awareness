@@ -1,13 +1,46 @@
-// Responsabilidades do Script
-//
-// 1. Orquestrar a geração do Markdown completo ou seletivo de um repositório via RepomixOutputAdapter.
-// 2. Salvar o arquivo gerado dentro da pasta 'code_awareness' no próprio repositório (apenas no fluxo antigo, mantido por compatibilidade).
-// 3. Orquestrar a geração seletiva com perfil do Code Source (generateWithProfile), normalizando entrada, delegando ao adapter e calculando tokens sobre a saída final — sem escrever artefato.
+/*
+--- ARQUITETURA DO SCRIPT ---
 
-import { join, basename } from 'path'
-import { promises as fs } from 'fs'
+Responsabilidades do Script
+
+1. Orquestrar a geração seletiva com perfil do Code Source (generateWithProfile), normalizando entrada, delegando ao adapter com suporte opcional a AbortSignal, calculando tokens sobre a saída final e preservando erros tipados de cancelamento.
+
+Mapa de Relacionamentos do Script
+
+1. repomix-output-adapter.ts
+   - Tipo: Dependência Direta
+   - Relação: Delega a execução da CLI do Repomix.
+   - Criticidade: Alta
+
+2. generation-errors.ts
+   - Tipo: Dependência Direta
+   - Relação: Importa isGenerationCancelledError para preservar erros de cancelamento sem mascarar como falha genérica.
+   - Criticidade: Alta
+
+3. shared/utils/source-profile.ts
+   - Tipo: Dependência Direta
+   - Relação: Normaliza defensivamente SourceProfile e SourceOutputFormat.
+   - Criticidade: Alta
+
+4. shared/types.ts
+   - Tipo: Contrato / Interface
+   - Relação: Fornece SourceProfile e SourceOutputFormat.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. generateWithProfile nunca escreve artefato no disco.
+2. Erros de cancelamento (GenerationCancelledError) são preservados e relançados, permitindo que coordenadores distingam cancelamento de falha real.
+3. Falhas reais de execução retornam resultado estruturado com { success: false, error }.
+4. A contagem de tokens é calculada sobre a saída final gerada.
+5. O parâmetro signal é estritamente opcional em GenerateWithProfileInput.
+6. O serviço possui generateWithProfile como único método público de geração.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
 import { RepomixOutputAdapter } from './repomix-output-adapter'
-import { CodefetchResult } from '../../shared/types'
+import { isGenerationCancelledError } from './generation-errors'
 import type { SourceOutputFormat, SourceProfile } from '../../shared/types'
 import {
   normalizeSourceProfile,
@@ -16,23 +49,13 @@ import {
   DEFAULT_SOURCE_OUTPUT_FORMAT
 } from '../../shared/utils/source-profile'
 
-// Opções aceitas pelo generateCodeSource para controlar o comportamento da geração
-interface CodeSourceOptions {
-  selectedFiles?: string[]
-  format?: 'markdown' | 'xml'
-}
-
-// Resultado estendido com contagem de tokens (opcional — ausente no modo completo)
-export interface CodeSourceResult extends CodefetchResult {
-  tokenCount?: number
-}
-
-/** Entrada opcional da geração seletiva com perfil: dados possivelmente não confiáveis vindos do renderer. */
+/** Entrada da geração seletiva com perfil: dados possivelmente não confiáveis vindos do renderer. */
 export interface GenerateWithProfileInput {
   repoPath: string
   selectedFiles: string[]
   format?: unknown
   profile?: unknown
+  signal?: AbortSignal
 }
 
 /** Resultado estruturado da geração seletiva com perfil. */
@@ -52,8 +75,9 @@ export class CodeSourceService {
   }
 
   /**
-   * Fluxo principal de geração seletiva do Code Source.
+   * Fluxo principal e único de geração seletiva do Code Source.
    * Normaliza defensivamente perfil e formato, valida entrada e delega ao adapter.
+   * Suporta cancelamento via AbortSignal.
    * NÃO escreve artefato no repositório — o conteúdo é retornado para cópia/exportação.
    */
   async generateWithProfile(input: GenerateWithProfileInput): Promise<GenerateWithProfileResult> {
@@ -75,61 +99,32 @@ export class CodeSourceService {
         input.format ?? DEFAULT_SOURCE_OUTPUT_FORMAT
       )
 
-      const content = await this.repomix.generateSelectiveSource(input.repoPath, input.selectedFiles, format, profile)
+      const content = input.signal
+        ? await this.repomix.generateSelectiveSource(
+            input.repoPath,
+            input.selectedFiles,
+            format,
+            profile,
+            input.signal
+          )
+        : await this.repomix.generateSelectiveSource(
+            input.repoPath,
+            input.selectedFiles,
+            format,
+            profile
+          )
 
       // Tokens calculados sobre a SAÍDA FINAL (o documento que será copiado/exportado).
       const tokenCount = Math.ceil(content.length / 4)
 
       return { success: true, content, tokenCount }
     } catch (error: any) {
+      if (isGenerationCancelledError(error)) {
+        throw error
+      }
       return {
         success: false,
         error: error?.message || 'Erro desconhecido ao gerar Code Source via Repomix.'
-      }
-    }
-  }
-
-  async generateCodeSource(repoPath: string, options?: CodeSourceOptions): Promise<CodeSourceResult> {
-    try {
-      let markdown: string
-      let tokenCount: number | undefined
-
-      // Modo seletivo: gera apenas os arquivos escolhidos e obtém contagem de tokens
-      if (options?.selectedFiles && options.selectedFiles.length > 0) {
-        const result = await this.repomix.generateSelectiveMarkdown(
-          repoPath,
-          options.selectedFiles,
-          options.format ?? 'markdown'
-        )
-        markdown = result.content
-        tokenCount = result.tokenCount
-      } else {
-        // Modo completo: comportamento da Sprint 1 — repositório inteiro, sem contagem
-        markdown = await this.repomix.generateFullRepositoryMarkdown(repoPath)
-      }
-
-      const repoName = basename(repoPath)
-      const codeAwarenessDir = join(repoPath, 'code_awareness')
-
-      // Cria o diretório de destino se ainda não existir
-      try {
-        await fs.access(codeAwarenessDir)
-      } catch {
-        await fs.mkdir(codeAwarenessDir, { recursive: true })
-      }
-
-      const filePath = join(codeAwarenessDir, `${repoName}.md`)
-      await fs.writeFile(filePath, markdown, 'utf-8')
-
-      return {
-        success: true,
-        markdown,
-        ...(tokenCount !== undefined && { tokenCount })
-      }
-    } catch (error: any) {
-      return {
-        success: false,
-        error: error.message || 'Erro desconhecido ao gerar Code Source via Repomix.'
       }
     }
   }

@@ -9,6 +9,8 @@ Responsabilidades do Script
 4. Expor listeners e APIs para permitir a sincronização em tempo real de importância entre abas e atualizações do Code Map.
 5. Expor ao renderer a URL de deep link pendente (getPendingDeepLink) e a escuta de novas URLs (onDeepLink).
 6. Expor a API generateScope do Code Map para o renderer.
+7. Expor a API generateCodeSourceWithProfile do Code Source para o renderer.
+8. Expor as APIs do Code Dash (dashParseAndResolve, dashGenerate e dashOneClickXml) para o renderer.
 
 Mapa de Relacionamentos do Script
 
@@ -30,6 +32,11 @@ Mapa de Relacionamentos do Script
 4. code-map-handler.ts
    - Tipo: Dependência Inversa
    - Relação: Registra os handlers e emite os eventos IPC do Code Map expostos por este preload.
+   - Criticidade: Alta
+
+5. dash-handler.ts
+   - Tipo: Dependência Inversa
+   - Relação: Registra os handlers correspondentes aos métodos do Code Dash invocados por este preload.
    - Criticidade: Alta
 
 Invariantes do Script
@@ -134,11 +141,30 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   checkCodeSourceInstallation: (): Promise<boolean> => {
     return ipcRenderer.invoke('code-source:check-installation')
   },
-  generateCodeSource: (
+  generateCodeSourceWithProfile: (
     repoPath: string,
-    options?: { selectedFiles?: string[]; format?: 'markdown' | 'xml' }
-  ): Promise<CodefetchResult & { tokenCount?: number }> => {
-    return ipcRenderer.invoke('code-source:generate', repoPath, options)
+    selectedFiles: string[],
+    format?: 'markdown' | 'xml',
+    profile?: unknown,
+    generationId?: number,
+    sessionKey?: string
+  ): Promise<{
+    success: boolean
+    content?: string
+    tokenCount?: number
+    error?: string
+    generationId?: number
+  }> => {
+    return ipcRenderer.invoke(
+      'code-source:generate-with-profile',
+      repoPath,
+      selectedFiles,
+      format,
+      profile,
+      generationId !== undefined && sessionKey !== undefined
+        ? { generationId, sessionKey }
+        : undefined
+    )
   },
 
 
@@ -376,5 +402,49 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     const handler = (_event: Electron.IpcRendererEvent, data: { repoPath: string; relativePath: string }): void => callback(data)
     ipcRenderer.on('code-map:file-indexed', handler)
     return () => ipcRenderer.removeListener('code-map:file-indexed', handler)
+  },
+
+  // ─── Code Dash ─────────────────────────────────────────────────────────────
+  dashParseAndResolve: (
+    input: string,
+    repoPath: string
+  ): Promise<{
+    success: boolean
+    data?: unknown
+    error?: string
+  }> => {
+    return ipcRenderer.invoke('dash:parse-and-resolve', input, repoPath)
+  },
+  dashGenerate: (
+    input: string,
+    repoPath: string
+  ): Promise<{
+    success: boolean
+    data?: unknown
+    error?: string
+  }> => {
+    return ipcRenderer.invoke('dash:generate', input, repoPath)
+  },
+  dashOneClickXml: (
+    repoPath: string,
+    options?: {
+      removeComments?: boolean
+      removeEmptyLines?: boolean
+      truncateBase64?: boolean
+    }
+  ): Promise<{
+    success: boolean
+    xml?: string
+    error?: string
+    timings?: {
+      listFilesMs: number
+      generateMs: number
+      totalMs: number
+    }
+    metadata?: {
+      fileCount: number
+    }
+  }> => {
+    return ipcRenderer.invoke('dash:one-click-xml', repoPath, options)
   }
 })

@@ -1,0 +1,93 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Estilizar o componente de preview virtualizado do Code Source (SourcePreviewVirtualized).
+2. Garantir altura fixa de linhas compatível com o cálculo de virtualização do react-window (19px).
+3. Fornecer classes e variáveis semânticas adaptadas aos temas claro e escuro.
+
+Mapa de Relacionamentos do Script
+
+1. SourcePreviewVirtualized.tsx
+   - Tipo: Relação de UI
+   - Relação: Consome as classes CSS com prefixo spv-.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Todas as classes usam o prefixo spv- para isolamento de escopo.
+2. A altura das linhas (.spv-line) é estritamente 19px — coincidente com a constante LINE_HEIGHT no componente TypeScript.
+3. O container virtualizado preenche a altura disponível do container pai (flex: 1, min-height: 0).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.spv-root {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  position: relative;
+  width: 100%;
+}
+
+.spv-virtual-container {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.spv-virtual-container--plain {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.spv-line {
+  display: flex;
+  align-items: center;
+  height: 19px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  padding: 0 12px;
+  box-sizing: border-box;
+}
+
+.spv-line-num {
+  display: inline-block;
+  width: 3.5em;
+  margin-right: 12px;
+  text-align: right;
+  color: var(--text-tertiary, #9ca3af);
+  user-select: none;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.spv-line-content {
+  flex: 1;
+  overflow: hidden;
+}
+
+.spv-empty {
+  padding: 16px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  margin: 0;
+}
+
+.spv-plain-notice {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 6px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}

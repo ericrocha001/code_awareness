@@ -5,12 +5,13 @@ Responsabilidades do Script
 
 1. Compartilhar a infraestrutura de processo do Repomix CLI (getCommand, runProcess e checkInstallation) entre os adapters de compressão e de output.
 2. Manter a verificação de instalação do Repomix única e acessível a ambos os adapters.
+3. Propagar opcionalmente o AbortSignal para o RepomixProcessRunner.
 
 Mapa de Relacionamentos do Script
 
 1. repomix-process-runner.ts
    - Tipo: Dependência Direta
-   - Relação: Consome run para executar o spawn da CLI com timeout e captura de stdout/stderr.
+   - Relação: Consome run para executar o spawn da CLI com timeout, cancelamento e captura de stdout/stderr.
    - Criticidade: Alta
 
 2. repomix-adapter.ts
@@ -29,6 +30,7 @@ Invariantes do Script
 2. runProcess delega ao RepomixProcessRunner e nunca decide rejeitar por exitCode != 0 — o chamador decide.
 3. checkInstallation usa timeout de 10s e nunca lança: retorna false em falha de instalação.
 4. Nenhuma lógica de compressão ou output reside nesta classe — apenas infraestrutura de processo.
+5. O AbortSignal é estritamente opcional em RunProcessOptions.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -44,6 +46,7 @@ export interface RunProcessResult {
 export interface RunProcessOptions {
   cwd: string
   timeoutMs?: number
+  signal?: AbortSignal
 }
 
 export abstract class BaseRepomixAdapter {
@@ -68,7 +71,11 @@ export abstract class BaseRepomixAdapter {
    * para exitCode != 0, complicando o tratamento de erros parciais em batch.
    */
   protected runProcess(command: string, args: string[], options: RunProcessOptions): Promise<RunProcessResult> {
-    return this.runner.run(command, args, { cwd: options.cwd, timeoutMs: options.timeoutMs })
+    return this.runner.run(command, args, {
+      cwd: options.cwd,
+      timeoutMs: options.timeoutMs,
+      signal: options.signal
+    })
   }
 
   /** Verifica se o Repomix está instalado e acessível no sistema. */

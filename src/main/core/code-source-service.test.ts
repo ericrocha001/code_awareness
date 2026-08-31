@@ -7,6 +7,7 @@ Responsabilidades do Script
 2. Validar a normalização defensiva de perfil e formato antes da delegação.
 3. Validar o retorno estruturado e o cálculo de tokens sobre a saída final.
 4. Garantir a ausência de escrita automática de artefato no fluxo novo.
+5. Validar a preservação de erros tipados de cancelamento e a propagação opcional do AbortSignal.
 
 Mapa de Relacionamentos do Script
 
@@ -15,7 +16,12 @@ Mapa de Relacionamentos do Script
    - Relação: Testa generateWithProfile com adaptador falsificado injetado.
    - Criticidade: Alta
 
-2. shared/utils/source-profile.ts
+2. generation-errors.ts
+   - Tipo: Dependência Direta
+   - Relação: Importa GenerationCancelledError para validar preservação de erro de cancelamento.
+   - Criticidade: Alta
+
+3. shared/utils/source-profile.ts
    - Tipo: Dependência Direta
    - Relação: Usa DEFAULT_SOURCE_PROFILE como referência de defaults.
    - Criticidade: Média
@@ -24,7 +30,8 @@ Invariantes do Script
 
 1. Nenhum teste executa Repomix real, acessa filesystem real, Electron ou IPC.
 2. Nenhuma escrita em arquivo ocorre durante o fluxo novo (fs.writeFile espionado).
-3. Erros do adapter nunca propagam — o serviço sempre retorna objeto estruturado.
+3. Falhas reais do adapter nunca propagam — o serviço retorna objeto estruturado com success: false.
+4. Erros de cancelamento (GenerationCancelledError) sempre propagam como rejeição para o chamador.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -32,6 +39,7 @@ Invariantes do Script
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { promises as fs } from 'fs'
 import { CodeSourceService } from './code-source-service'
+import { GenerationCancelledError } from './generation-errors'
 import type { RepomixOutputAdapter } from './repomix-output-adapter'
 import { DEFAULT_SOURCE_PROFILE } from '../../shared/utils/source-profile'
 import type { SourceProfile, SourceOutputFormat } from '../../shared/types'
@@ -39,9 +47,7 @@ import type { SourceProfile, SourceOutputFormat } from '../../shared/types'
 /** Adaptador falsificado com comportamento configurável por teste. */
 function makeFakeAdapter(overrides: Partial<RepomixOutputAdapter> = {}): RepomixOutputAdapter {
   const base = {
-    generateSelectiveSource: vi.fn(async (): Promise<string> => 'conteúdo gerado'),
-    generateSelectiveMarkdown: vi.fn(),
-    generateFullRepositoryMarkdown: vi.fn()
+    generateSelectiveSource: vi.fn(async (): Promise<string> => 'conteúdo gerado')
   }
   return Object.assign(base, overrides) as unknown as RepomixOutputAdapter
 }
@@ -192,7 +198,7 @@ describe('CodeSourceService.generateWithProfile', () => {
   })
 
   describe('Tratamento de erro do adapter', () => {
-    it('adapter lançando exceção resulta em success false com mensagem — sem propagar', async () => {
+    it('adapter lançando exceção comum resulta em success false com mensagem — sem propagar', async () => {
       const adapter = makeFakeAdapter({
         generateSelectiveSource: vi.fn(async () => {
           throw new Error('Repomix explodiu')
@@ -205,6 +211,17 @@ describe('CodeSourceService.generateWithProfile', () => {
       expect(result.success).toBe(false)
       expect(result.error).toContain('Repomix explodiu')
       expect(result.content).toBeUndefined()
+    })
+
+    it('adapter lançando GenerationCancelledError relança o erro sem mascarar como falha genérica', async () => {
+      const adapter = makeFakeAdapter({
+        generateSelectiveSource: vi.fn(async () => {
+          throw new GenerationCancelledError('Cancelado explicitamente')
+        })
+      })
+      const service = new CodeSourceService(adapter)
+
+      await expect(service.generateWithProfile({ ...INPUT })).rejects.toThrow(GenerationCancelledError)
     })
   })
 
@@ -246,6 +263,24 @@ describe('CodeSourceService.generateWithProfile', () => {
       // Campo inválido foi normalizado ao default, não repassado cru.
       expect(profile.parsableStyle).toBe(DEFAULT_SOURCE_PROFILE.parsableStyle)
     })
+
+    it('propaga signal opcional para o adapter quando fornecido', async () => {
+      const adapter = makeFakeAdapter()
+      const service = new CodeSourceService(adapter)
+      const controller = new AbortController()
+
+      await service.generateWithProfile({
+        ...INPUT,
+        signal: controller.signal
+      })
+
+      expect(adapter.generateSelectiveSource).toHaveBeenCalledWith(
+        INPUT.repoPath,
+        INPUT.selectedFiles,
+        'markdown',
+        DEFAULT_SOURCE_PROFILE,
+        controller.signal
+      )
+    })
   })
 })
-

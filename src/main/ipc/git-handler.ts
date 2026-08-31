@@ -10,6 +10,7 @@ Responsabilidades do Script
 5. Registrar handlers IPC para gerenciamento de arquivos ignorados no diff.
 6. Validar array vazio no handler git:generate-compression-markdown antes de delegar ao CompressionService.
 7. Reconciliar ignores removendo entradas cujo arquivo não existe mais no disco.
+8. Registrar os handlers IPC para geração coordenada com perfil e verificação de instalação do Code Source.
 
 Mapa de Relacionamentos do Script
 
@@ -38,6 +39,16 @@ Mapa de Relacionamentos do Script
    - Relação: Instância injetada via parâmetro no registerGitHandlers para gerar o Markdown de compressão.
    - Criticidade: Alta
 
+6. code-source-service.ts
+   - Tipo: Dependência Direta
+   - Relação: Instancia e consome CodeSourceService para geração de Code Source completa e com perfil.
+   - Criticidade: Alta
+
+7. repomix-output-adapter.ts
+   - Tipo: Dependência Direta
+   - Relação: Instancia e consome RepomixOutputAdapter para checar instalação do Repomix.
+   - Criticidade: Média
+
 Invariantes do Script
 
 1. Handlers IPC nunca devem lançar exceções não tratadas para o renderer; erros devem ser capturados e retornados de forma estruturada.
@@ -58,11 +69,13 @@ import type { CompressionService } from '../core/compression-service'
 import type { CompressionSettingsPayload } from '../../shared/types'
 import { CodeSourceService } from '../core/code-source-service'
 import { RepomixOutputAdapter } from '../core/repomix-output-adapter'
+import { SourceGenerationCoordinator } from '../core/source-generation-coordinator'
 
 const gitService = new GitService()
 const diffService = new DiffService()
 const codeSourceService = new CodeSourceService()
 const repomixOutputAdapter = new RepomixOutputAdapter()
+const sourceGenerationCoordinator = new SourceGenerationCoordinator(codeSourceService)
 
 const watcherUnsubscribers = new Map<string, () => void>()
 
@@ -133,13 +146,41 @@ export function registerGitHandlers(
     return compressionService.generateCompressionMarkdown(repoPath, selectedFiles, profile, outputFormat, enrichment)
   })
 
-  ipcMain.handle('code-source:generate', async (_event, repoPath: string, options?: {
-    selectedFiles?: string[]
-    format?: 'markdown' | 'xml'
-  }) => {
-    if (!isValidPath(repoPath)) return { success: false, error: 'Invalid path' }
-    return codeSourceService.generateCodeSource(repoPath, options)
-  })
+  ipcMain.handle(
+    'code-source:generate-with-profile',
+    async (
+      _event,
+      repoPath: string,
+      selectedFiles: string[],
+      format?: unknown,
+      profile?: unknown,
+      meta?: { generationId?: number; sessionKey?: string }
+    ) => {
+      if (!isValidPath(repoPath)) {
+        return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia.' }
+      }
+      if (!Array.isArray(selectedFiles)) {
+        return { success: false, error: 'selectedFiles deve ser um array de caminhos.' }
+      }
+
+      // Fluxo coordenado: delega ao coordenador quando generationId e sessionKey estão presentes.
+      if (meta && typeof meta.generationId === 'number' && typeof meta.sessionKey === 'string') {
+        try {
+          return await sourceGenerationCoordinator.generate(
+            meta.sessionKey,
+            meta.generationId,
+            { repoPath, selectedFiles, format, profile }
+          )
+        } catch {
+          // GenerationCancelledError relançado pelo coordenador — descarta silenciosamente.
+          return { success: false, error: 'Generation cancelled', generationId: meta.generationId }
+        }
+      }
+
+      // Fluxo legado: sem coordenação, retrocompatibilidade com chamadores antigos.
+      return codeSourceService.generateWithProfile({ repoPath, selectedFiles, format, profile })
+    }
+  )
 
   ipcMain.handle('code-source:check-installation', async () => {
     return repomixOutputAdapter.checkInstallation()

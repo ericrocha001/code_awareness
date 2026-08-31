@@ -1,0 +1,253 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Fornecer os estilos CSS para o layout principal, painéis de entrada, formulários e botões de ação do CodeDashView.
+2. Garantir adaptação responsiva com altura ajustada ao viewport e estados visuais consistentes.
+
+Mapa de Relacionamentos do Script
+
+1. CodeDashView.tsx
+   - Tipo: Relação de UI
+   - Relação: Fornece classes CSS estruturais para o container principal da aba Code Dash.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Utilizar as variáveis CSS de tema (--bg-secondary, --accent, --border-color, etc.) da aplicação.
+2. Manter scroll interno e layout vertical limpo em todas as resoluções.
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.dash-view-container {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
+  padding: 30px 40px;
+  background-color: var(--bg-primary, #121212);
+  color: var(--text-primary, #ffffff);
+}
+
+.dash-view-header {
+  margin-bottom: 24px;
+}
+
+.dash-view-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 6px;
+}
+
+.dash-view-icon {
+  color: var(--accent, #7852ee);
+}
+
+.dash-view-title {
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+  letter-spacing: -0.5px;
+}
+
+.dash-view-subtitle {
+  font-size: 14px;
+  color: var(--text-secondary, #888888);
+  margin: 0;
+}
+
+.dash-input-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.dash-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 160px;
+  padding: 14px;
+  background-color: var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-color, #333333);
+  border-radius: 8px;
+  color: var(--text-primary, #ffffff);
+  font-family: var(--font-mono, 'Fira Code', Consolas, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color 0.2s ease;
+}
+
+.dash-textarea:focus {
+  outline: none;
+  border-color: var(--accent, #7852ee);
+  box-shadow: 0 0 0 2px rgba(120, 82, 238, 0.2);
+}
+
+.dash-textarea:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.dash-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.dash-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  border: none;
+  transition: filter 0.15s ease, opacity 0.15s ease, background-color 0.15s ease;
+}
+
+.dash-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dash-btn.primary {
+  background-color: var(--accent, #7852ee);
+  color: #ffffff;
+}
+
+.dash-btn.primary:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.dash-btn.secondary {
+  background-color: var(--btn-secondary-bg, #2a2a2a);
+  color: var(--text-primary, #ffffff);
+  border: 1px solid var(--border-color, #444444);
+}
+
+.dash-btn.secondary:hover:not(:disabled) {
+  background-color: var(--btn-secondary-hover-bg, #383838);
+}
+
+.dash-error-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 8px;
+  background-color: rgba(248, 81, 73, 0.1);
+  border: 1px solid #f85149;
+  color: #f85149;
+  margin-bottom: 20px;
+}
+
+.dash-error-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dash-error-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.dash-error-msg {
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.dash-no-project-msg {
+  padding: 30px;
+  background-color: var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-color, #333333);
+  border-radius: 8px;
+  text-align: center;
+  color: var(--text-secondary, #aaaaaa);
+  font-size: 14px;
+}
+
+/* Quick Action: One-Click XML */
+.dash-quick-action-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  background-color: var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-color, #333333);
+  border-radius: 8px;
+  margin-bottom: 20px;
+}
+
+.dash-quick-action-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.dash-quick-action-icon {
+  color: var(--accent, #7852ee);
+}
+
+.dash-quick-action-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--text-primary, #ffffff);
+}
+
+.dash-quick-action-description {
+  font-size: 12px;
+  color: var(--text-secondary, #888888);
+}
+
+.dash-quick-action-controls {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.dash-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary, #cccccc);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dash-toggle-label input[type='checkbox'] {
+  cursor: pointer;
+  accent-color: var(--accent, #7852ee);
+}
+
+.dash-quick-action-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.dash-quick-action-error {
+  margin-top: 10px;
+  margin-bottom: 0;
+  padding: 10px 14px;
+  font-size: 12px;
+}
+
+.dash-section-divider {
+  height: 1px;
+  background-color: var(--border-color, #333333);
+  margin-bottom: 24px;
+}

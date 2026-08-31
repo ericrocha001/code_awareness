@@ -7,6 +7,8 @@ Responsabilidades do Script
 2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
 3. Tipar as APIs de deep link (getPendingDeepLink e onDeepLink) expostas pelo preload.
 4. Tipar a API generateScope exposta pelo preload.
+5. Tipar a API generateCodeSourceWithProfile exposta pelo preload.
+6. Tipar as APIs do Code Dash (dashParseAndResolve, dashGenerate e dashOneClickXml) expostas pelo preload.
 
 Mapa de Relacionamentos do Script
 
@@ -24,7 +26,7 @@ Invariantes do Script
 
 /// <reference types="vite/client" />
 
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag, DashResolutionReport, DashExecutionResult } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -59,10 +61,20 @@ declare global {
       removeIgnoredFile: (repoPath: string, relativePath: string) => Promise<AppSettings | null>
       reconcileIgnoredFiles: (repoPath: string, currentModifiedFiles: string[]) => Promise<AppSettings | null>
       checkCodeSourceInstallation: () => Promise<boolean>
-      generateCodeSource: (
+      generateCodeSourceWithProfile: (
         repoPath: string,
-        options?: { selectedFiles?: string[]; format?: 'markdown' | 'xml' }
-      ) => Promise<CodefetchResult & { tokenCount?: number }>
+        selectedFiles: string[],
+        format?: 'markdown' | 'xml',
+        profile?: unknown,
+        generationId?: number,
+        sessionKey?: string
+      ) => Promise<{
+        success: boolean
+        content?: string
+        tokenCount?: number
+        error?: string
+        generationId?: number
+      }>
 
 
       revealInExplorer: (repoPath: string, relativePath: string) => Promise<boolean>
@@ -257,6 +269,45 @@ declare global {
       onCodeMapFileConfirmed: (callback: (data: { repoPath: string; relativePath: string }) => void) => () => void
       onCodeMapFileIndexed: (callback: (data: { repoPath: string; relativePath: string }) => void) => () => void
 
+      // ─── Code Dash ───────────────────────────────────────────────────
+      dashParseAndResolve: (
+        input: string,
+        repoPath: string
+      ) => Promise<{
+        success: boolean
+        data?: DashResolutionReport
+        error?: string
+      }>
+
+      dashGenerate: (
+        input: string,
+        repoPath: string
+      ) => Promise<{
+        success: boolean
+        data?: DashExecutionResult
+        error?: string
+      }>
+
+      dashOneClickXml: (
+        repoPath: string,
+        options?: {
+          removeComments?: boolean
+          removeEmptyLines?: boolean
+          truncateBase64?: boolean
+        }
+      ) => Promise<{
+        success: boolean
+        xml?: string
+        error?: string
+        timings?: {
+          listFilesMs: number
+          generateMs: number
+          totalMs: number
+        }
+        metadata?: {
+          fileCount: number
+        }
+      }>
     }
   }
 }

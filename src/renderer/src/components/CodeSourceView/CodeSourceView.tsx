@@ -4,17 +4,17 @@
 Responsabilidades do Script
 
 1. Renderizar a interface da aba Code Source com ViewToolbar + ActionBar + FileCollectionView como visualização de arquivos.
-2. Gerenciar a seleção reativa de arquivos com sistema de Ignore.
+2. Gerenciar a seleção reativa de arquivos com sistema de Ignore e ordenação ("Selecionados no topo").
 3. Monitorar alterações de arquivos em tempo real via WatcherService com debounce de 300ms.
-4. Fornecer ações contextuais (Copiar, Exportar Normal, Exportar para NotebookLM, Exportar com nome personalizado).
+4. Acionar a abertura do SourceOutputModal para configuração, preview e exportação do Code Source.
 5. Manter sincronizados os estados de tags (allTags e fileTagsMap) após alterações no TagManagerModal.
 6. Exibir contador de selecionados no resumo do topo e toggle "Selecionados no topo" na ViewToolbar.
 
 Mapa de Relacionamentos do Script
 
-1. useProjectPreferences.ts
+1. SourceOutputModal.tsx
    - Tipo: Dependência Direta
-   - Relação: Fornece preferências de UI do projeto (ex: sidebarOpen).
+   - Relação: Modal de configuração, preview reativo e exportação do Code Source.
    - Criticidade: Alta
 
 2. CodeSourceView.css
@@ -29,7 +29,7 @@ Mapa de Relacionamentos do Script
 
 4. ActionBar.tsx (shared)
    - Tipo: Dependência Direta
-   - Relação: Renderiza a Camada 2 com botões de ação à direita.
+   - Relação: Renderiza a Camada 2 com o botão "Gerar Saída".
    - Criticidade: Alta
 
 5. FilterPopover.tsx (shared)
@@ -42,36 +42,26 @@ Mapa de Relacionamentos do Script
    - Relação: Renderiza a coleção de arquivos com alternância Grid/Dense.
    - Criticidade: Alta
 
-7. ExportDropdown.tsx (shared)
+7. TagManagerModal.tsx
    - Tipo: Dependência Direta
-   - Relação: Renderiza o menu de exportação compartilhado.
-   - Criticidade: Alta
+   - Relação: Modal de gerenciamento de tags manuais.
+   - Criticidade: Média
 
-8. ExportNameModal.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o modal de nome personalizado para exportação.
-   - Criticidade: Alta
-
-9. ignore-patterns.ts
+8. ignore-patterns.ts
    - Tipo: Dependência Direta
    - Relação: Fornece padrões de ruído.
    - Criticidade: Média
 
-10. window.codeAwareness.exportToNotebookLM
-    - Tipo: Dependência Inversa
-    - Relação: Consome API IPC para exportação no formato NotebookLM.
-    - Criticidade: Alta
-
 Invariantes do Script
 
 1. O FileCollectionView deve ocupar 100% do espaço disponível no painel principal.
-2. O total de tokens selecionados deve ser calculado apenas com base nos arquivos checkados.
-3. O listener deve ser removido quando o componente desmonta para evitar memory leaks.
-4. O dropdown de exportação e o modal de nome são gerenciados pelos componentes compartilhados.
+2. O total de tokens selecionados preliminares deve ser calculado apenas com base nos arquivos checkados.
+3. O listener do watcher deve ser removido quando o componente desmonta para evitar memory leaks.
+4. O botão "Gerar Saída" deve ser desabilitado quando selectedFiles.size === 0.
 5. O sistema de ignore opera exclusivamente com caminhos exatos de arquivos.
 6. A ViewToolbar substitui a CommandBar — nenhuma referência a command-bar no JSX.
 7. O toggle "Selecionados no topo" é estado local (não persiste ao trocar de projeto).
-8. A reordenação por seleção é puramente visual e não afeta a geração de markdown.
+8. A reordenação por seleção é puramente visual e não afeta a geração de saída.
 
 --- FIM ARQUITETURA DO SCRIPT ---
 */
@@ -90,17 +80,13 @@ import {
 import {
   NOISE_FILES,
 } from "../../constants/ignore-patterns";
-import { FileText, BookOpen, PenLine, ArrowUpNarrowWide } from "lucide-react";
+import { ArrowUpNarrowWide } from "lucide-react";
 import { ViewToolbar } from "../shared/ViewToolbar/ViewToolbar";
 import { ActionBar } from "../shared/ActionBar/ActionBar";
 import { FilterPopover } from "../shared/FilterPopover/FilterPopover";
 import { FileCollectionView } from "../FileCollection/FileCollectionView";
-import { PreviewModal } from "../PreviewModal/PreviewModal";
 import { TagManagerModal } from "../TagManagerModal/TagManagerModal";
-import { ProcessingStatusBar } from "../ProcessingStatusBar/ProcessingStatusBar";
-import { ExportDropdown } from "../shared/ExportDropdown/ExportDropdown";
-import { ExportNameModal, type FormatOption } from "../shared/ExportNameModal/ExportNameModal";
-import { useProjectPreferences } from "../../hooks/useProjectPreferences";
+import { SourceOutputModal } from "./SourceOutputModal";
 import type { FileCardFile } from "../FileCollection/types";
 import { estimateTokensFromSize } from "../../utils/token-utils";
 import { getContrastColor } from "../../utils/color-utils";
@@ -108,11 +94,6 @@ import "./CodeSourceView.css";
 
 // Tipos para API de ignore simplificada
 type IgnoredResult = { ignoredDiffFiles: Record<string, string[]> } | null;
-
-const EXPORT_FORMATS: FormatOption[] = [
-  { id: 'markdown', label: 'Markdown (.md)' },
-  { id: 'notebooklm', label: 'NotebookLM (.docx)' },
-]
 
 interface CodeSourceViewProps {
   activeProject: { path: string; name: string } | null;
@@ -127,19 +108,13 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
 }) => {
   const [trackedFiles, setTrackedFiles] = useState<DiffFileStatus[]>([]);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
-  const [markdown, setMarkdown] = useState<string>("");
-  const [tokenCount, setTokenCount] = useState<number>(0);
-  const [isGenerating, setIsGenerating] = useState<boolean>(false);
-  const [error, setError] = useState<string>("");
-  const [isCopied, setIsCopied] = useState(false);
-  const [isExporting, setIsExporting] = useState(false);
-  const [isExportNameModalOpen, setIsExportNameModalOpen] = useState(false);
+  const [isSourceModalOpen, setIsSourceModalOpen] = useState(false);
   const [selectedOnTop, setSelectedOnTop] = useState(false);
 
   // Reseta o toggle ao trocar de projeto
   useEffect(() => {
-    setSelectedOnTop(false)
-  }, [activeProject?.path])
+    setSelectedOnTop(false);
+  }, [activeProject?.path]);
 
   const tokenEstimates = useMemo(() => {
     const estimates: Record<string, number> = {};
@@ -151,12 +126,8 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
 
   // Sistema de Ignore (apenas caminhos exatos de arquivos individuais)
   const [ignoredFiles, setIgnoredFiles] = useState<string[]>([]);
-  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const requestIdRef = useRef(0);
   const watcherDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { preferences: viewPrefs } = useProjectPreferences(activeProject?.path ?? null);
-  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
   const [isTagManagerOpen, setIsTagManagerOpen] = useState(false);
   const [fileTagsMap, setFileTagsMap] = useState<Record<string, string[]>>({});
 
@@ -219,8 +190,6 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
         if (isMounted) {
           setTrackedFiles([]);
           setSelectedFiles(new Set());
-          setMarkdown("");
-          setTokenCount(0);
         }
         await window.codeAwareness.stopWatcher();
         return;
@@ -271,70 +240,15 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
     };
   }, [activeProject, loadIgnoredFiles]);
 
-
-
   // Lista visível: filtra apenas arquivos ignorados por caminho exato, ordenada alfabeticamente
-  const ignoredSet = useMemo(() => new Set(ignoredFiles), [ignoredFiles])
+  const ignoredSet = useMemo(() => new Set(ignoredFiles), [ignoredFiles]);
 
   const visibleFiles = useMemo(() => {
     const filtered = trackedFiles.filter((f) => !ignoredSet.has(f.relativePath));
     return filtered.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   }, [trackedFiles, ignoredSet]);
 
-  const totalSelectedTokens = useMemo(() => {
-    let total = 0;
-    for (const path of selectedFiles) total += tokenEstimates[path] || 0;
-    return total;
-  }, [selectedFiles, tokenEstimates]);
-
   const hasNoiseFiles = useMemo(() => visibleFiles.some((f) => NOISE_FILES.has(f.name)), [visibleFiles]);
-
-  // Geração reativa do markdown
-  useEffect(() => {
-    if (!activeProject) return;
-    if (debounceTimerRef.current) clearTimeout(debounceTimerRef.current);
-    if (selectedFiles.size === 0) {
-      setMarkdown("");
-      setTokenCount(0);
-      setError("");
-      setIsGenerating(false);
-      return;
-    }
-    const thisRequestId = ++requestIdRef.current;
-    setIsGenerating(true);
-    setError("");
-    debounceTimerRef.current = setTimeout(async () => {
-      try {
-        const selectedArray = Array.from(selectedFiles);
-        const result = await window.codeAwareness.generateCodeSource(activeProject.path, {
-          selectedFiles: selectedArray,
-          format: "markdown",
-        });
-        if (thisRequestId === requestIdRef.current) {
-          if (result.success && result.markdown) {
-            setMarkdown(result.markdown);
-            setTokenCount(result.tokenCount || 0);
-          } else {
-            setError(result.error || "Falha ao gerar Code Source.");
-            setMarkdown("");
-            setTokenCount(0);
-          }
-          setIsGenerating(false);
-        }
-      } catch (err: any) {
-        if (thisRequestId === requestIdRef.current) {
-          setError(err?.message || "Falha ao gerar Code Source.");
-          setIsGenerating(false);
-        }
-      }
-    }, 300);
-    return () => {
-      if (debounceTimerRef.current) {
-        clearTimeout(debounceTimerRef.current);
-        debounceTimerRef.current = null;
-      }
-    };
-  }, [activeProject, selectedFiles]);
 
   const ignoreFileTemporary = useCallback(async (relativePath: string) => {
     if (!activeProject) return;
@@ -365,15 +279,6 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
     await window.codeAwareness.revealInExplorer(activeProject.path, relativePath);
     onStatusMessage("Arquivo revelado no sistema!");
   }, [activeProject, onStatusMessage]);
-
-
-
-  const handleCopy = () => {
-    navigator.clipboard.writeText(markdown);
-    setIsCopied(true);
-    onStatusMessage("Markdown copiado!");
-    setTimeout(() => setIsCopied(false), 2000);
-  };
 
   const [searchQuery, setSearchQuery] = useState("");
   const [filterTagIds, setFilterTagIds] = useState<string[]>([]);
@@ -434,110 +339,49 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
   const toggleTag = useCallback((tagId: string) => {
     setFilterTagIds(prev =>
       prev.includes(tagId) ? prev.filter(id => id !== tagId) : [...prev, tagId]
-    )
-  }, [])
+    );
+  }, []);
 
   const summaryText = useMemo(() => {
     const base = filteredFiles.length === visibleFiles.length
       ? `${visibleFiles.length} arquivo${visibleFiles.length !== 1 ? 's' : ''}`
-      : `${filteredFiles.length} de ${visibleFiles.length} arquivo${visibleFiles.length !== 1 ? 's' : ''}`
+      : `${filteredFiles.length} de ${visibleFiles.length} arquivo${visibleFiles.length !== 1 ? 's' : ''}`;
     if (selectedFiles.size > 0) {
-      return `✓ ${selectedFiles.size} selecionado${selectedFiles.size !== 1 ? 's' : ''} · ${base}`
+      return `✓ ${selectedFiles.size} selecionado${selectedFiles.size !== 1 ? 's' : ''} · ${base}`;
     }
-    return base
-  }, [visibleFiles, filteredFiles, selectedFiles])
+    return base;
+  }, [visibleFiles, filteredFiles, selectedFiles]);
 
   // Memo 1 — mapeamento (só recalcula quando arquivos ou estimativas mudam)
   const mappedFiles: FileCardFile[] = useMemo(() => {
     return filteredFiles.map((f) => ({
       ...f,
       tokenEstimate: tokenEstimates[f.relativePath] || 0,
-    }))
-  }, [filteredFiles, tokenEstimates])
+    }));
+  }, [filteredFiles, tokenEstimates]);
 
   // Memo 2 — reordenação por seleção (só recalcula quando seleção ou toggle muda)
   const fileCardFiles: FileCardFile[] = useMemo(() => {
     if (selectedOnTop) {
-      const selected: FileCardFile[] = []
-      const notSelected: FileCardFile[] = []
+      const selected: FileCardFile[] = [];
+      const notSelected: FileCardFile[] = [];
       for (const f of mappedFiles) {
         if (selectedFiles.has(f.relativePath)) {
-          selected.push(f)
+          selected.push(f);
         } else {
-          notSelected.push(f)
+          notSelected.push(f);
         }
       }
-      return [...selected, ...notSelected]
+      return [...selected, ...notSelected];
     }
-    return mappedFiles
+    return mappedFiles;
   }, [mappedFiles, selectedOnTop, selectedFiles]);
 
   const handleSelectionChange = useCallback((next: Set<string>) => {
     setSelectedFiles(next);
   }, []);
 
-  const handleOpenTagManager = useCallback(() => setIsTagManagerOpen(true), [])
-
-  const handleExportNormal = async () => {
-    if (!activeProject || !markdown) return;
-    setIsExporting(true);
-    try {
-      const fileName = `${activeProject.name}-source`;
-      const result = await window.codeAwareness.saveToDownloads(markdown, fileName);
-      if (result.success) onStatusMessage("Exportado para Downloads!");
-      else onStatusMessage("Erro ao exportar", true);
-    } catch (err) {
-      console.error("Falha ao exportar:", err);
-      onStatusMessage("Erro ao exportar", true);
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
-  const handleExportNotebookLM = async () => {
-    if (!activeProject || !markdown) return;
-    setIsExporting(true);
-    try {
-      const fileName = `${activeProject.name}-notebooklm`;
-      const result = await window.codeAwareness.exportToNotebookLM(markdown, fileName);
-      if (result.success) {
-        const message = result.fileCount === 1 ? "Exportado para Downloads (.docx)!" : `Exportado ${result.fileCount} arquivo(s) .docx para Downloads!`;
-        onStatusMessage(message);
-      } else {
-        onStatusMessage(result.error || "Erro ao exportar para NotebookLM", true);
-      }
-    } catch (err) {
-      console.error("Falha ao exportar para NotebookLM:", err);
-      onStatusMessage("Erro ao exportar para NotebookLM", true);
-    } finally {
-      setIsExporting(false);
-    }
-  };
-
-  const handleExportWithName = async (name: string, formatId: string) => {
-    if (!activeProject || !markdown) return
-    setIsExporting(true)
-    try {
-      if (formatId === 'markdown') {
-        const result = await window.codeAwareness.saveToDownloads(markdown, name)
-        if (result.success) onStatusMessage("Exportado para Downloads!")
-        else onStatusMessage("Erro ao exportar", true)
-      } else if (formatId === 'notebooklm') {
-        const result = await window.codeAwareness.exportToNotebookLM(markdown, name)
-        if (result.success) {
-          const message = result.fileCount === 1 ? "Exportado para Downloads (.docx)!" : `Exportado ${result.fileCount} arquivo(s) .docx para Downloads!`
-          onStatusMessage(message)
-        } else {
-          onStatusMessage(result.error || "Erro ao exportar para NotebookLM", true)
-        }
-      }
-    } catch (err) {
-      console.error("Falha ao exportar com nome personalizado:", err)
-      onStatusMessage("Erro ao exportar", true)
-    } finally {
-      setIsExporting(false)
-    }
-  }
+  const handleOpenTagManager = useCallback(() => setIsTagManagerOpen(true), []);
 
   if (!activeProject) {
     return (
@@ -572,7 +416,7 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
         filterSlot={
           <FilterPopover activeCount={filterTagIds.length}>
             {allTags.map(tag => {
-              const isActive = filterTagIds.includes(tag.id)
+              const isActive = filterTagIds.includes(tag.id);
               return (
                 <button
                   key={tag.id}
@@ -588,28 +432,24 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
                 >
                   {tag.name}
                 </button>
-              )
+              );
             })}
           </FilterPopover>
         }
       />
 
-      {/* Camada 2: ActionBar com botões à direita */}
+      {/* Camada 2: ActionBar com botão Gerar Saída à direita */}
       <ActionBar
         right={
-          <>
-            <button className="app-pill-btn" onClick={() => setIsPreviewOpen(true)} disabled={!markdown || isGenerating}>Visualizar Preview</button>
-            <button className="app-pill-btn" onClick={handleCopy} disabled={!markdown || isGenerating}>{isCopied ? "Copiado!" : "Copiar"}</button>
-            <ExportDropdown label={isExporting ? 'Exportando...' : 'Exportar'} disabled={!markdown || isGenerating || isExporting}>
-              <button onClick={handleExportNormal}><FileText size={14} strokeWidth={2} /> Exportar Normal</button>
-              <button onClick={handleExportNotebookLM}><BookOpen size={14} strokeWidth={2} /> Exportar para NotebookLM (.docx)</button>
-              <button onClick={() => setIsExportNameModalOpen(true)}><PenLine size={14} strokeWidth={2} /> Exportar com nome personalizado…</button>
-            </ExportDropdown>
-          </>
+          <button
+            className="app-pill-btn"
+            onClick={() => setIsSourceModalOpen(true)}
+            disabled={selectedFiles.size === 0}
+          >
+            Gerar Saída
+          </button>
         }
       />
-
-      <ProcessingStatusBar isVisible={isGenerating} />
 
       <FileCollectionView
         files={fileCardFiles}
@@ -627,18 +467,22 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
         onTagsChanged={refreshTagsData}
         repoPath={activeProject?.path}
       />
-      <PreviewModal isOpen={isPreviewOpen} onClose={() => setIsPreviewOpen(false)} markdown={markdown} title="Code Source Preview" onExportDownloads={handleExportNormal} onStatusMessage={onStatusMessage} />
-      {isTagManagerOpen && activeProject && (
-        <TagManagerModal repoPath={activeProject.path} onClose={() => setIsTagManagerOpen(false)} onTagsChanged={refreshTagsData} />
-      )}
-      <ExportNameModal
-        isOpen={isExportNameModalOpen}
-        onClose={() => setIsExportNameModalOpen(false)}
-        onConfirm={handleExportWithName}
-        defaultName={`${activeProject.name}-source`}
-        formats={EXPORT_FORMATS}
-        defaultFormat="markdown"
+
+      <SourceOutputModal
+        isOpen={isSourceModalOpen}
+        onClose={() => setIsSourceModalOpen(false)}
+        repoPath={activeProject.path}
+        selectedFiles={Array.from(selectedFiles)}
+        onStatusMessage={onStatusMessage}
       />
+
+      {isTagManagerOpen && activeProject && (
+        <TagManagerModal
+          repoPath={activeProject.path}
+          onClose={() => setIsTagManagerOpen(false)}
+          onTagsChanged={refreshTagsData}
+        />
+      )}
     </div>
   );
 };

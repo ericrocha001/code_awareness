@@ -10,6 +10,7 @@ Responsabilidades do Script
 5. Extrair os hunks de alteração (intervalos de linhas modificadas) de um arquivo específico.
 6. Recuperar o conteúdo de um arquivo no estado do commit HEAD.
 7. Obter o hash do commit HEAD atual do repositório.
+8. Listar caminhos relativos de todos os arquivos para a interface segregada FileListingPort.
 
 Mapa de Relacionamentos do Script
 
@@ -33,6 +34,11 @@ Mapa de Relacionamentos do Script
    - Relação: Retorna estruturas de dados que devem obedecer às interfaces declaradas nos tipos do projeto.
    - Criticidade: Alta
 
+5. src/main/core/file-listing-port.ts
+   - Tipo: Contrato / Interface
+   - Relação: GitService implementa FileListingPort como contrato mínimo de listagem.
+   - Criticidade: Alta
+
 Invariantes do Script
 
 1. O método de listagem de arquivos rastreados deve retornar a propriedade changeType sempre definida como 'tracked'.
@@ -49,6 +55,8 @@ import { spawn } from 'child_process'
 import { existsSync, statSync } from 'fs'
 import { join } from 'path'
 import { DiffFileStatus } from '../../shared/types'
+import { FileListingPort } from './file-listing-port'
+
 
 const GIT_TIMEOUT_MS = 10_000
 
@@ -80,7 +88,7 @@ const GIT_STATUS_CODE_MAP: Record<string, DiffFileStatus['changeType']> = {
   '?': 'added'
 }
 
-export class GitService {
+export class GitService implements FileListingPort {
   async isGitRepository(dirPath: string): Promise<boolean> {
     return existsSync(join(dirPath, '.git'))
   }
@@ -246,6 +254,11 @@ export class GitService {
     } catch {
       return []
     }
+  }
+
+  async listAllFiles(repoPath: string): Promise<Array<{ relativePath: string }>> {
+    const files = await this.getAllFiles(repoPath)
+    return files.map(f => ({ relativePath: f.relativePath }))
   }
 
   async getModifiedHunks(dirPath: string, relativePath: string): Promise<DiffHunk[]> {

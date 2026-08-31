@@ -1,0 +1,149 @@
+/*
+--- ARQUITETURA DO SCRIPT ---
+
+Responsabilidades do Script
+
+1. Definir os estilos visuais para o componente de apresentação DashResolutionSummary.
+2. Formatar contadores, status de integridade e listas categorizadas de itens resolvidos e não resolvidos.
+
+Mapa de Relacionamentos do Script
+
+1. DashResolutionSummary.tsx
+   - Tipo: Relação de UI
+   - Relação: Fornece classes CSS para estruturação e estilização do resumo.
+   - Criticidade: Alta
+
+Invariantes do Script
+
+1. Seguir as diretrizes de cores e tipografia do design system da aplicação.
+2. Apresentar diferenciação clara entre itens válidos (verde), atenção parcial (amarelo/laranja) e erros (vermelho).
+
+--- FIM ARQUITETURA DO SCRIPT ---
+*/
+
+.dash-summary-container {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background-color: var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.dash-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border-color, #333);
+  padding-bottom: 12px;
+}
+
+.dash-summary-title-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.dash-summary-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary, #fff);
+  margin: 0;
+}
+
+.dash-summary-counts {
+  font-size: 13px;
+  color: var(--text-secondary, #aaa);
+}
+
+.dash-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dash-status-badge.success {
+  background-color: rgba(46, 160, 67, 0.15);
+  color: #3fb950;
+  border: 1px solid rgba(46, 160, 67, 0.4);
+}
+
+.dash-status-badge.warning {
+  background-color: rgba(210, 153, 34, 0.15);
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
+.dash-summary-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dash-section-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dash-section-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-secondary, #aaa);
+}
+
+.dash-section-header.source {
+  color: #58a6ff;
+}
+
+.dash-section-header.compression {
+  color: #bc8cff;
+}
+
+.dash-section-header.unresolved {
+  color: #f85149;
+}
+
+.dash-item-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dash-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 10px;
+  background-color: rgba(255, 255, 255, 0.03);
+  border-radius: 4px;
+  font-size: 13px;
+  font-family: var(--font-mono, monospace);
+  color: var(--text-primary, #e6edf3);
+}
+
+.dash-item-path {
+  word-break: break-all;
+}
+
+.dash-item-reason {
+  font-size: 12px;
+  color: #f85149;
+  font-family: system-ui, -apple-system, sans-serif;
+  margin-left: 12px;
+  flex-shrink: 0;
+}
