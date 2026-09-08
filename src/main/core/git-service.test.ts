@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar os contratos públicos do GitService via Provas de Aceitação usando repositórios Git temporários reais.
-2. Evidenciar a invariante da Sprint 1 (getModifiedFiles expõe deletados) e a invariante nº 5 diferenciada por método.
-3. Cobrir parser de status, exclusão de pastas internas, ordenação por mtime e robustez frente a caminhos inválidos.
-
-Mapa de Relacionamentos do Script
-
-1. git-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e valida o comportamento público do GitService.
-   - Criticidade: Alta
-
-2. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria, manipula e limpa repositórios Git temporários reais.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os repositórios temporários são limpos após cada teste via cleanupTempRepo.
-2. Nenhum teste depende de configuração global do Git — identidade e quotePath são locais ao repo.
-3. O mecanismo de timeout (runGit) está fora do escopo automatizado (Limitação Explícita).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'

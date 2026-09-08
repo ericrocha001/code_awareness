@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir os estilos estruturais do container da FileView com header sticky e superfície de scroll bidirecional única.
-2. Garantir alinhamento horizontal pixel-perfect entre as colunas do header e as linhas FileRow (ambos consumem a mesma custom property).
-
-Mapa de Relacionamentos do Script
-
-1. FileView.tsx
-   - Tipo: Relação de UI
-   - Relação: Fornece classes estruturais para o container, header e FileRows completas no DOM.
-   - Criticidade: Alta
-
-2. FileRow.css
-   - Tipo: Contrato / Interface
-   - Relação: Compartilha o template idêntico de 5 colunas em CSS Grid (Sprint 8 — coluna de ações removida; o botão de ações é absoluto na row, .fr-action-btn).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O layout grid do header (.fv-header) é estruturalmente idêntico ao de .fr-row no FileRow.css.
-2. O header permanece sticky no topo (position: sticky + top: 0) dentro da superfície de scroll bidirecional (.fv-scroll-container) enquanto a rolagem vertical e horizontal ocorre no mesmo container.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .fv-container {

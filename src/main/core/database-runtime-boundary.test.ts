@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Garantir contratualmente que nenhum teste de domínio importe better-sqlite3 ou BetterSqlite3DatabaseAdapter diretamente.
-2. Descobrir automaticamente todos os arquivos de teste (*.test.ts) em src/, excluindo testes de infraestrutura (*.e2e.test.ts) e a si mesmo.
-3. Proteger o runtime do Vitest / Node contra carregamento indevido de bindings nativos do Electron.
-4. Falhar com erro explícito caso nenhum arquivo de teste seja encontrado (proteção contra falso-positivo por regressão de path).
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/*.test.ts
-   - Tipo: Contrato / Interface
-   - Relação: Valida dinamicamente que nenhum arquivo de teste de domínio importa bibliotecas nativas de SQLite.
-   - Criticidade: Alta
-
-2. src/main/ipc/*.test.ts
-   - Tipo: Contrato / Interface
-   - Relação: Valida dinamicamente handlers de teste contra acoplamento direto de banco nativo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum arquivo .test.ts de domínio pode importar better-sqlite3 ou better-sqlite3-database-adapter.
-2. Apenas suítes .e2e.test.ts têm permissão para importar implementações SQLite nativas.
-3. A descoberta de arquivos é 100% dinâmica (sem listas hardcoded).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

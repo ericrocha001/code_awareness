@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer ao renderer o perfil padrão de compressão (DEFAULT_PROFILE) e a normalização
-   defensiva de perfis (normalizeCompressionProfile) para a UI de configuração.
-2. Espelhar a semântica do módulo de domínio do processo main (compression-profile.ts)
-   sem depender de módulos Node, preservando a fronteira renderer ↔ main (IPC).
-
-Mapa de Relacionamentos do Script
-
-1. OutputModal.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome DEFAULT_PROFILE e normalizeCompressionProfile para popular os defaults
-     e sanear perfis persistidos vindos de settings.
-   - Criticidade: Alta
-
-2. main/core/compression-profile.ts
-   - Tipo: Contrato / Interface
-   - Relação: Este módulo espelha as constantes e regras de normalização daquele módulo; qualquer
-     divergência de comportamento pode produzir perfis de UI distintos do backend.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é de domínio puro — sem acesso a filesystem, Node ou IPC.
-2. normalizeCompressionProfile nunca lança; sempre produz um CompressionProfile válido.
-3. Os valores de DEFAULT_PROFILE devem refletir exatamente os do processo main (compression-profile.ts).
-4. O renderer só conversa com o processo main via IPC — nunca importa módulos de src/main.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { CompressionProfile } from '../../../shared/types'

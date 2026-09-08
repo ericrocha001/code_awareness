@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a seção de documentação com os campos amplos Instrução e Resultado.
-2. Exibir o selo de status do autosave (Salvando…, Salvo ✓, Tentar de novo) ao lado do título.
-
-Mapa de Relacionamentos do Script
-
-1. CheckpointDrawer.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Instancia DocumentationSection no miolo rolável do modo detalhes.
-   - Criticidade: Alta
-
-2. DocumentationSection.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos definidos neste arquivo.
-   - Criticidade: Alta
-
-3. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa SaveStatus para tipar a prop saveStatus.
-   - Criticidade: Alta
-
-4. Button (shared)
-   - Tipo: Dependência Direta
-   - Relação: Usa Button variant="ghost" para o botão de retry.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Componente puramente apresentacional — sem estado, sem IPC, sem lógica de negócio.
-2. A prop agentSummary não é renomeada — só o rótulo visível muda para "Resultado".
-3. Os campos ficam sempre abertos — sem acordeão, sem colapso.
-4. O selo de status só renderiza algo quando saveStatus não é 'idle'.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

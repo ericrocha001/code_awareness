@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir estilos específicos do modal de confirmação de restauração (prefixo rm-).
-2. Estilizar a pele do design system do modal (cabeçalho com título + X, rodapé com botões pill/ghost).
-3. Estilizar a lista de mudanças por arquivo (criados e modificados com diff de linhas, bloqueados).
-4. Estilizar a lista de remanescentes e implementações revertidas, além do estado vazio.
-5. Respeitar as variáveis CSS globais do tema.
-
-Mapa de Relacionamentos do Script
-
-1. RestoreModal.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS com prefixo rm-.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhuma classe deve conflitar com as classes existentes (.cc-modal-overlay, .cc-modal-content, etc).
-2. O overlay e estrutura do modal reutilizam as classes existentes — não duplicar esses estilos.
-3. O prefixo rm- garante isolamento semântico.
-4. Cores semânticas de status (verde/vermelho/âmbar) usam valores consistentes com o tema.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* ─── Modal de restauração — estrutura principal ────────────────────────── */

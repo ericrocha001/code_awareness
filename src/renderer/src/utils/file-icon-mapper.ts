@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Mapear extensões de arquivo para classes CSS do Devicon automaticamente.
-2. Fornecer fallback genérico para extensões não reconhecidas.
-3. Tratar casos especiais como Dockerfile e package.json.
-
-Mapa de Relacionamentos do Script
-
-1. FileCard.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome a função getFileIconClass para renderizar ícones.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Toda extensão conhecida deve retornar uma classe CSS válida do Devicon.
-2. Extensões não reconhecidas devem sempre retornar a classe de fallback.
-3. O mapeamento deve ser determinístico: mesma entrada sempre produz mesma saída.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 const EXTENSION_TO_DEVICON: Record<string, string> = {

@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a contagem de tokens em formato de badge com ícone temático de raio (TokenBadge).
-2. Ocultar automaticamente a renderização quando a contagem de tokens for menor ou igual a zero.
-3. Formatar os valores numéricos com separadores de milhar via pt-BR ou formatador customizado.
-
-Mapa de Relacionamentos do Script
-
-1. TokenBadge.css
-   - Tipo: Relação de UI
-   - Relação: Fornece classes de estilo com fundo fit-content.
-   - Criticidade: Alta
-
-2. FileCard.tsx / FileRow.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Componentes de visualização de arquivos que consomem TokenBadge.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Se tokens <= 0 ou valor inválido, retorna null sem gerar nós DOM.
-2. O badge encerra seu background estritamente no término do seu conteúdo textual (fit-content).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar um dropdown para seleção de projetos a partir da lista do backend.
-2. Exibir o projeto ativo e permitir alternar para outro projeto disponível.
-3. Fechar automaticamente ao clicar fora do componente ou ao selecionar uma opção.
-
-Mapa de Relacionamentos do Script
-
-1. App.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Recebe o projeto ativo e o callback `onSelectProject`.
-   - Criticidade: Alta
-
-2. window.codeAwareness.getProjectsList()
-   - Tipo: Fluxo de Dados
-   - Relação: Fornece a lista de projetos disponíveis no backend.
-   - Criticidade: Alta
-
-3. ProjectDropdown.css
-   - Tipo: Relação de UI
-   - Relação: Aparência e comportamento visual do dropdown.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O dropdown deve sempre fechar ao clicar fora do componente.
-2. O projeto atualmente selecionado não deve aparecer duplicado na lista.
-3. Se `getProjectsList` falhar, o componente não deve crashar a aplicação.
-4. Ao selecionar um projeto, o callback do componente pai deve ser chamado exatamente uma vez.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useState, useRef } from 'react'

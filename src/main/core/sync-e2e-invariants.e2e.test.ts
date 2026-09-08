@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar que sequências complexas criar/modificar/deletar/recriar convergem para banco = disco.
-2. Provar que o debounce absorve tempestades de eventos sem perda do estado final.
-3. Provar que relacionamentos cross-file em cadeia de 3 níveis são mantidos em reindexações seletivas.
-4. Provar que reconciliação entre sessões detecta e cura divergências acumuladas offline.
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa indexRepository, updateFileContent, reconcileWithDisk, verifyIntegrity, close.
-   - Criticidade: Alta
-
-2. repository-synchronizer.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa debounce, sincronização em lote e deduplicação de eventos.
-   - Criticidade: Alta
-
-3. test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece createAndIndexRepo, createTempRepo, writeTestFile, deleteTestFile,
-              cleanupTestDir, verifyInvariant e simulateOrphanCorruption.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Cada teste usa repositório temporário isolado com cleanupTestDir no afterEach.
-2. verifyInvariant é chamado após cada etapa relevante como oráculo de integridade.
-3. Assertivas de elementos filtram sempre por kind para evitar ambiguidade com export elements.
-4. Timeouts são generosos (>= 15000ms) para acomodar debounce + estabilização em CI.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'
@@ -48,7 +14,7 @@ import {
   verifyInvariant,
   simulateOrphanCorruption
 } from './test-helpers'
-import { RepositoryModel } from './repository-model'
+import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { RepositorySynchronizer } from './repository-synchronizer'
 import { closeRepositoryDatabase } from './repository-database'
 import { repositoryEventBus } from './repository-events'
@@ -66,7 +32,7 @@ describe('Sprint 6 — Invariantes End-to-End', () => {
 
   it('Teste 1 — Sequência criar/modificar/deletar/recriar converge para banco = disco', async () => {
     repoPath = createTempRepo()
-    model = new RepositoryModel(repoPath)
+    model = createRepositoryModel(repoPath)
 
     // Etapa 1: cria a.ts e indexa
     writeTestFile(repoPath, 'src/a.ts', 'export class A {}\n')
@@ -143,19 +109,25 @@ describe('Sprint 6 — Invariantes End-to-End', () => {
     // Aguarda debounce (500ms) + estabilização (100ms) + processamento + margem
     await new Promise((resolve) => setTimeout(resolve, 1500))
 
-    // O debounce deve ter deduplicado: exatamente 1 arquivo na fila de modified
-    expect(synchronizer.getModifiedFilesCount()).toBe(1)
-    // A fila de pendentes foi drenada pelo processQueue após o debounce
+    // O debounce deve ter deduplicado: exatamente 1 arquivo processado (reindexado automaticamente)
+    // NOTA (Sprint 6): com auto-sync, o arquivo é reindexado automaticamente após o debounce,
+    // então modifiedFiles fica vazio (não há pendência). O critério congelado #2 exige
+    // "após debounce, elementos novos indexados, status indexed".
+    expect(synchronizer.getModifiedFilesCount()).toBe(0) // auto-sync reindexou → sem pendentes
     expect(synchronizer.getPendingFilesCount()).toBe(0)
-
-    const result = await synchronizer.synchronizeModified()
-    expect(result.filesUpdated).toBe(1)
 
     // O conteúdo final indexado deve corresponder à última escrita (V5)
     const sampleFile = model.getFileByRelativePath('src/sample.ts')!
+    expect(sampleFile.status).toBe('indexed')
     const elements = model.getElementsByFile(sampleFile.id)
     expect(elements.find((e) => e.name === 'V5' && e.kind === 'class')).toBeDefined()
     expect(elements.find((e) => e.name === 'V1' && e.kind === 'class')).toBeUndefined()
+
+    // Recuperação exata retorna o novo conteúdo
+    const v5 = elements.find((e) => e.name === 'V5' && e.kind === 'class')!
+    const source = await model.getElementExactSource(v5.id)
+    expect(source).not.toBeNull()
+    expect(source!.content).toContain('V5')
 
     const inv = await verifyInvariant(model, repoPath)
     expect(inv.passed).toBe(true)
@@ -249,7 +221,7 @@ describe('Sprint 6 — Invariantes End-to-End', () => {
     closeRepositoryDatabase(repoPath)
 
     // ── Fase 2: Sessão 2 ─────────────────────────────────────────────────
-    model = new RepositoryModel(repoPath)
+    model = createRepositoryModel(repoPath)
 
     // reconcileWithDisk deve detectar: a.ts (divergente), b.ts (ausente)
     // Nota: c.ts foi removido do banco; seus elementos órfãos são limpos pelo verifyIntegrity

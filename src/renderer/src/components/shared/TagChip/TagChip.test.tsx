@@ -1,31 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar que TagChip renderiza o nome da tag com background e cor de texto fornecidos pela paleta.
-2. Garantir que o clique opcional chama o handler quando fornecido.
-3. Verificar ausência de borda sólida no chip (estilo preenchido).
-
-Mapa de Relacionamentos do Script
-
-1. TagChip.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. color-utils.ts
-   - Tipo: Dependência Direta
-   - Relação: Provê a paleta via resolveTagPalette.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O chip sempre renderiza o nome integral da tag sem truncamento.
-2. As cores são aplicadas como inline style — não como classe CSS estática.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

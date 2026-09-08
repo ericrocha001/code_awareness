@@ -1,52 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar a geração seletiva do Code Source (generateSelectiveSource): decidir transporte, preparar config temporário quando necessário, construir argumentos via builder, executar e limpar.
-
-Mapa de Relacionamentos do Script
-
-1. base-repomix-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Estende BaseRepomixAdapter para herdar getCommand, runProcess e checkInstallation.
-   - Criticidade: Alta
-
-2. code-source-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome buildSourceCliArguments para derivar argumentos CLI do Code Source.
-   - Criticidade: Alta
-
-3. source-include-transport-resolver.ts
-   - Tipo: Dependência Direta
-   - Relação: Delega decisão de transporte, criação e remoção do config temporário.
-   - Criticidade: Alta
-
-4. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome SourceOutputFormat e SourceProfile como contratos do método de geração.
-   - Criticidade: Alta
-
-5. code-source-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome generateSelectiveSource para geração seletiva do Code Source.
-   - Criticidade: Alta
-
-6. git-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Instancia e usa checkInstallation para o Code Source.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. checkInstallation usa timeout de 10s e nunca lança (herdado da base).
-2. Falha do Repomix (exitCode != 0) lança Error com stderr ou código.
-3. Não contém lógica de compressão (cache, batch, fallback, parsing) — limita-se ao output de documentos.
-4. generateSelectiveSource JAMAIS emite compressão estrutural — o builder do Code Source é a única fonte de argumentos.
-5. O arquivo de configuração temporário é criado e removido pelo resolver; a remoção ocorre no finally mesmo sob erro ou cancelamento.
-6. O adapter não importa nenhum módulo do Code Compression.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { BaseRepomixAdapter } from './base-repomix-adapter'

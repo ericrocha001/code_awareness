@@ -1,23 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a navegação principal da sidebar.
-2. Aplicar estados visuais de aba ativa e tooltips no modo colapsado.
-
-Mapa de Relacionamentos do Script
-
-1. GlobalSidebar.tsx
-   - Tipo: Dependência Direta
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A aba ativa deve sempre estar visualmente destacada.
-2. Os tooltips devem aparecer apenas quando a sidebar está fechada.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

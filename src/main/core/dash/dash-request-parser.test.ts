@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente o comportamento do parser tolerante de requisições Code Dash.
-2. Garantir a correta extração e deserialização de JSONs puros, em blocos markdown e tratamento de erros sintáticos.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/dash/dash-request-parser.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa e testa a função parseDashRequest sob diversos cenários de entrada.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Executar testes puramente em memória sem criar arquivos nem realizar chamadas de I/O.
-2. Cobrir todos os cenários obrigatórios de parsing previstos na especificação da Sprint 1.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

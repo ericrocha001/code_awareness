@@ -1,88 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Inicializar o ciclo de vida e a janela principal do aplicativo Electron.
-2. Registrar todos os manipuladores de IPC (Inter-Process Communication).
-3. Normalizar as variáveis de ambiente PATH para compatibilidade com CLI.
-4. Registrar o protocolo codeawareness:// no SO e capturar deep links em cold start e warm start, garantindo single instance.
-5. Compor a injeção de dependência no bootstrap como único Composition Root: instancia BetterSqlite3DatabaseAdapter, CheckpointService, CampaignService, RestoreService, CompressionService, CodeSourceService e DashService, injetando as dependências prontas nos handlers IPC.
-6. Aplicar guarda defensiva com log de warning em desenvolvimento no ContentIdentityProvider, antes de chamadas ao codeMapService não inicializado.
-7. Compor e registrar o DashService e seus handlers IPC (registerDashHandlers) com injeção de dependências reais.
-
-Mapa de Relacionamentos do Script
-
-1. ipc/file-handler.ts
-   - Tipo: Dependência Direta
-   - Relação: Registra manipuladores de arquivos via IPC.
-   - Criticidade: Alta
-
-2. ipc/settings-handler.ts
-   - Tipo: Dependência Direta
-   - Relação: Registra manipuladores de configurações via IPC.
-   - Criticidade: Alta
-
-3. ipc/git-handler.ts
-   - Tipo: Dependência Direta
-   - Relação: Registra manipuladores de operações Git via IPC; recebe a instância do CompressionService por parâmetro.
-   - Criticidade: Alta
-
-4. core/workspace-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece serviço de workspace para manipuladores.
-   - Criticidade: Alta
-
-5. core/watcher-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Monitora mudanças no sistema de arquivos.
-   - Criticidade: Alta
-
-6. utils/env-sanitizer.ts
-   - Tipo: Dependência Direta
-   - Relação: Normaliza variáveis de ambiente PATH.
-   - Criticidade: Média
-
-7. assets/app-icon-1024x1024.png
-   - Tipo: Relação de UI
-   - Relação: Ícone único e colorido da janela principal, resolvido via getWindowIconPath().
-   - Criticidade: Baixa
-
-8. core/compression-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia um único CompressionService, injetado na porta CompressionPort do CodeMapService (com ContentIdentityPort composta) e repassado ao git-handler e DashService.
-   - Criticidade: Alta
-
-9. core/content-identity-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa a porta delegando ao CodeMapService.getFileContentHash para reuso de hashes SHA-256.
-   - Criticidade: Alta
-
-10. core/better-sqlite3-database-adapter.ts
-    - Tipo: Dependência Direta
-    - Relação: Instancia o adaptador SQLite e injeta como porta de persistência nos serviços e handlers.
-    - Criticidade: Alta
-
-11. ipc/dash-handler.ts
-    - Tipo: Dependência Direta
-    - Relação: Registra manipuladores do Code Dash e One-Click XML via IPC; recebe instâncias de DashService e OneClickXmlService por parâmetro.
-    - Criticidade: Alta
-
-12. core/one-click-xml-service.ts
-    - Tipo: Dependência Direta
-    - Relação: Instancia o serviço OneClickXmlService com IgnorePolicy e RepomixAdapter para geração nativa de XML.
-    - Criticidade: Alta
-
-
-Invariantes do Script
-
-1. A janela principal nunca deve ser instanciada mais de uma vez enquanto estiver ativa.
-2. Handlers IPC devem ser registrados antes de criar a janela principal.
-3. O serviço de watcher deve ser interrompido antes do encerramento do aplicativo.
-4. O app garante single instance via requestSingleInstanceLock e captura a URL de deep link em cold start (argv) e warm start (second-instance/open-url), sem nunca abrir uma segunda janela.
-5. main.ts é o único Composition Root do app — instancia adaptadores e serviços e injeta-os nos handlers.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
@@ -123,6 +40,9 @@ import { CompressionContextProvider } from './core/dash/providers/compression-co
 import { IgnorePolicy } from './core/ignore-policy'
 import { OneClickXmlService } from './core/one-click-xml-service'
 import { RepomixAdapter } from './core/repomix-adapter'
+import { CodeAwarenessIgnoreService } from './core/code-awareness-ignore-service'
+import { ContextEngine } from './core/context/context-engine'
+import { DashDiscoveryService } from './core/dash/dash-discovery-service'
 
 
 
@@ -281,17 +201,19 @@ app.whenReady().then(() => {
     sourceContextProvider,
     compressionContextProvider
   )
+  const dashDiscoveryService = new DashDiscoveryService(new ContextEngine(codeMapService))
 
   // Composição do One-Click XML com política de escopo e adapter de Direct Output
   const repomixAdapterForOneClick = new RepomixAdapter()
   const gitService = new GitService()
-  const ignorePolicy = new IgnorePolicy(gitService, settingsService)
+  const codeAwarenessIgnoreService = new CodeAwarenessIgnoreService(settingsService)
+  const ignorePolicy = new IgnorePolicy(gitService, settingsService, codeAwarenessIgnoreService)
   const oneClickXmlService = new OneClickXmlService(ignorePolicy, repomixAdapterForOneClick)
 
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
-  registerGitHandlers(watcherService, settingsService, compressionService)
+  registerGitHandlers(watcherService, settingsService, compressionService, codeAwarenessIgnoreService)
   registerWorkspaceHandlers(settingsService, workspaceService)
   registerCheckpointHandlers(checkpointService, dbAdapter)
   registerRestoreHandlers(restoreService)
@@ -299,7 +221,7 @@ app.whenReady().then(() => {
   registerDatabaseHandlers(dbAdapter)
   registerCampaignHandlers(campaignService)
   registerCodeMapHandlers(codeMapService)
-  registerDashHandlers(dashService, oneClickXmlService)
+  registerDashHandlers(dashService, oneClickXmlService, dashDiscoveryService)
 
 
   createWindow()

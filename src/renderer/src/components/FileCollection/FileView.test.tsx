@@ -1,33 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a renderização da lista compacta FileView e seu cabeçalho fixo.
-2. Validar o disparo de onRowAction para toggle, tagInteraction e actionInteraction.
-3. Validar o comportamento de estado vazio (mantendo o cabeçalho visível).
-4. Validar colunas redimensionáveis com persistência por projeto.
-
-Mapa de Relacionamentos do Script
-
-1. FileView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, screen, fireEvent e cleanup para asserções de DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Os mocks de requestAnimationFrame e cancelAnimationFrame são restaurados em afterAll.
-2. O cabeçalho fixo mantém seus rótulos mesmo quando a lista estiver vazia.
-3. Testes de anchorRefs (registro/limpeza) removidos: funcionalidade eliminada na Sprint 2.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

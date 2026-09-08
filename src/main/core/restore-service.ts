@@ -1,55 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar a restauração completa de um checkpoint com backup de segurança, marcação de ponto único, cálculo de arquivos remanescentes por evidência e limpeza guardada.
-2. Escrever arquivos de código no disco durante a restauração (não delega mais ao CheckpointService).
-3. Validar (dry-run) se uma restauração pode ser executada antes de modificar o disco.
-4. Garantir a invariante de no máximo um checkpoint com restoredAt definido a qualquer momento (inclusive em estado corrompido).
-5. Calcular arquivos remanescentes por evidência (arquivos que existem em checkpoints mais novos, existem no disco e não existem no alvo), nunca por exclusão do disco.
-6. Registrar cada ação (backup, restauração, marcação, limpeza) no banco de dados.
-7. Validar a integridade do checkpoint (hash SHA-256 de cada arquivo) antes de qualquer escrita.
-8. Executar rollback automático via backup de segurança quando a escrita falhar parcialmente.
-9. Resolver e validar caminhos relativos dentro do repositório de forma centralizada, rejeitando paths maliciosos.
-10. Produzir um RestorePlan congelado no preview (com stateHash) que o execute valida antes de executar.
-11. Produzir um resumo detalhado de mudanças por arquivo (fileChanges) no preview (criados, modificados com diff de linhas, inalterados, bloqueados).
-
-Mapa de Relacionamentos do Script
-
- 1. checkpoint-service.ts
-    - Tipo: Dependência Direta
-    - Relação: Consome createCheckpoint, loadCheckpoint, listCheckpoints, updateCheckpointMetadata.
-    - Criticidade: Alta
-
- 2. database-ports.ts
-    - Tipo: Contrato / Interface
-    - Relação: Usa ActionLogPort via injeção de dependência para registrar eventos de restauração no banco.
-    - Criticidade: Alta
-
- 3. ../../shared/types.ts
-    - Tipo: Contrato / Interface
-    - Relação: Fornece os tipos OrphanFile, RestorePlan, RestorePreviewResult, RestoreExecuteOptions, CleanupResult, RestoreExecuteResult, RestoreFileChange.
-    - Criticidade: Alta
-
-Invariantes do Script
-
- 1. O RestoreService é o único escritor de arquivos de código durante restauração.
- 2. No máximo um checkpoint com restoredAt definido a qualquer momento (markRestorePoint limpa todos os demais).
- 3. Limpeza de arquivos remanescentes só executa com sucesso total (failed === 0).
- 4. Backup de segurança é fail-safe: se createSafety=true e o backup falha, a restauração não acontece.
- 5. Remanescentes calculados por evidência (snapshot de checkpoints mais novos), nunca por exclusão do disco.
- 6. Path traversal em cleanupFiles e demais caminhos resolvidos via resolveSafePath (centralizado), validado fail-fast antes de qualquer operação.
- 7. Falhas de pré-condição (alvo não encontrado, checkpoint corrompido, path traversal, falha do backup) lançam Error em vez de retornar resultado — o handler captura e retorna { success: false, error }.
- 8. Arquivos que não existem no checkpoint mas existem no disco não devem ser deletados durante restauração.
- 9. A integridade do checkpoint é validada antes do backup de segurança e de qualquer escrita.
- 10. O rollback automático só é considerado sucesso se todos os arquivos do backup foram reescritos (failed === 0).
- 11. computeStateHash é determinístico: ordena paths alfabeticamente e usa relativePath + mtimeMs (ou 'missing').
- 12. A validação do Plano congelado (stateHash) acontece antes do backup de segurança — plano obsoleto aborta sem criar backup.
- 13. computeFileChanges é operação de leitura pura e determinística (ordena alfabeticamente) com teto de segurança de 200.000 caracteres que nunca lança exceção; confere o tamanho via stat antes de ler o conteúdo e normaliza a contagem de linhas descartando um único segmento vazio final.
- 14. Nenhuma dependência direta de SQLite — logs são gravados exclusivamente via ActionLogPort.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { existsSync, constants } from 'fs'

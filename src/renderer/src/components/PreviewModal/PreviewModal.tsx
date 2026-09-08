@@ -1,47 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar overlay com blur e modal centralizado em 80% da tela.
-2. Exibir conteúdo Markdown com syntax highlighting.
-3. Fornecer barra de ações com feedback visual: Copiar, Exportar Downloads, Fechar.
-4. Gerenciar fechamento via ESC, clique no overlay ou botão X.
-
-Mapa de Relacionamentos do Script
-
-1. CodeSourceView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Invoca o modal para preview do markdown.
-   - Criticidade: Alta
-
-2. CodeCompressionView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Invoca o modal para preview do markdown.
-   - Criticidade: Alta
-
-3. markdown-to-jsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza Markdown no conteúdo do modal.
-   - Criticidade: Alta
-
-4. PreviewModal.css
-   - Tipo: Relação de UI
-   - Relação: Define estilos do modal e overlay.
-   - Criticidade: Alta
-
-5. App.tsx ou componente pai
-   - Tipo: Dependência Inversa
-   - Relação: Fornece callback onStatusMessage para toast notifications.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O modal nunca deve travar a aplicação ao abrir/fechar.
-2. O fechamento por ESC deve prevalecer sobre ações internas.
-3. O markdown renderizado deve manter paridade visual com CodeSourceView.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useRef, useState } from 'react'

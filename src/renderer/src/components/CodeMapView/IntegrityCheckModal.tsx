@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar modal com lista de inconsistências do integrity check.
-2. Agrupar inconsistências por tipo (hash_mismatch, file_missing, etc).
-3. Permitir seleção granular de problemas via checkboxes.
-4. Executar reparação cirúrgica apenas nos problemas selecionados.
-5. Exibir feedback visual durante reparação.
-6. Exportar relatório de integridade em Markdown.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: É instanciado pelo CodeMapView quando usuário clica em "Ver detalhes".
-   - Criticidade: Alta
-
-2. IntegrityCheckModal.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos do modal (prefixo icm-).
-   - Criticidade: Alta
-
-3. window.codeAwareness.verifyIntegrity
-   - Tipo: Dependência Inversa
-   - Relação: API IPC para executar reparação cirúrgica.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O modal nunca modifica os dados recebidos via props — apenas emite intenções via callbacks.
-2. A seleção de problemas é estado local do modal — não persiste entre aberturas.
-3. O botão "Corrigir selecionados" fica desabilitado quando nenhum problema está selecionado.
-4. Durante reparação, todos os controles ficam desabilitados e spinner é exibido.
-5. O modal fecha automaticamente após reparação bem-sucedida.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useMemo, useEffect } from 'react'

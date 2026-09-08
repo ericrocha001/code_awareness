@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Construir a string grid-template-columns da FileView a partir de overrides de largura por coluna sem impor limites mínimos artificiais.
-2. Sanitizar larguras persistidas (unknown) em overrides seguros para o builder.
-
-Mapa de Relacionamentos do Script
-
-1. ../FileCollection/FileView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome buildFileViewTemplate/sanitizeColumnWidths para header e rows compartilharem o mesmo template.
-   - Criticidade: Alta
-
-2. ../../../hooks/useProjectPreferences.ts
-   - Tipo: Dependência Inversa
-   - Relação: Usa FileViewColumnKey na assinatura de updateFileViewColumnWidths.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Função pura: sem React, sem DOM — identidade header↔rows por construção (uma única string consumida pelos dois).
-2. O default de buildFileViewTemplate() é byte-idêntico ao template declarado em FileView.css (.fv-header); o teste fileViewColumns.test.ts congela essa identidade.
-3. Sem restrições mínimas artificiais de redimensionamento (mínimo 0px); números finitos não-negativos são preservados livremente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 export type FileViewColumnKey = 'toggle' | 'identity' | 'path' | 'tags' | 'tokens'

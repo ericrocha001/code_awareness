@@ -1,23 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Função pura utilitária para filtrar seções de arquivo em markdown baseando-se nos caminhos selecionados.
-
-Mapa de Relacionamentos do Script
-
-1. ../components/CodeJourneyView/hooks/useJourneyPreview.ts
-   - Tipo: Dependência Inversa
-   - Relação: Importa filterMarkdownBySelection para filtrar markdown do diff.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A função é pura e determinística.
-2. Se o markdown não contiver seções divididas por cabeçalho de arquivo, retorna o markdown original intacto.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /**

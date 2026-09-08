@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Exportar funções puras de cálculo e formatação reutilizadas pelos componentes da aba Code Checkpoints.
-2. Exportar a lógica de determinação dos IDs de comparação (getCompareIds).
-3. Exportar a função de formatação de data relativa (getRelativeDate).
-
-Mapa de Relacionamentos do Script
-
-1. CheckpointDrawer.tsx
-   - Tipo: Dependência Direta
-   - Relação: Consome estimateDiffTokens, formatTokens e calculateTokens.
-   - Criticidade: Alta
-
-2. CodeJourneyView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Consome getCompareIds, estimateDiffTokens e formatTokens.
-   - Criticidade: Alta
-
-3. CheckpointTimeline.tsx
-   - Tipo: Dependência Direta
-   - Relação: Consome getRelativeDate para exibir datas relativas na timeline.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Todas as funções exportadas são puras — sem side effects nem estado global.
-2. estimateDiffTokens nunca deve retornar valor negativo.
-3. getRelativeDate nunca deve retornar string vazia.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { CheckpointDiffFile, CheckpointSummary, CampaignStatus } from '../../../../shared/types'

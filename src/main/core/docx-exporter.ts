@@ -1,34 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Converter markdown estruturado em documento DOCX com formatação adequada para o NotebookLM.
-2. Aplicar estilos de heading (Heading1, Heading2) para criar hierarquia navegável.
-3. Renderizar blocos de código com fonte monoespaçada e indentação preservada.
-4. Integrar com DocumentChunker para processar documentos grandes em múltiplos arquivos.
-
-Mapa de Relacionamentos do Script
-
-1. document-chunker.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome chunks de markdown para conversão.
-   - Criticidade: Alta
-
-2. src/main/ipc/file-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Será consumido pelo handler IPC de exportação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O documento DOCX gerado deve ter estrutura de headings navegável pelo NotebookLM.
-2. Blocos de código devem usar fonte monoespaçada (Courier New).
-3. Indentação do código deve ser preservada exatamente como no markdown original.
-4. O método exportToDocx deve retornar array de caminhos dos arquivos gerados.
-5. Em caso de erro durante a escrita, arquivos já gravados devem ser removidos (cleanup).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { Document, Packer, Paragraph, TextRun, HeadingLevel } from 'docx'

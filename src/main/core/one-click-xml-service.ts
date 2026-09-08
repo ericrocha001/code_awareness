@@ -1,48 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar a geração do One-Click XML utilizando Repomix Direct Output nativo.
-2. Delegar a resolução da lista de arquivos permitidos à IgnorePolicy.
-3. Construir o contrato tipado RepomixRequest para o formato XML com as opções de limpeza solicitadas.
-4. Chamar a porta RepomixDirectOutputPort e retornar o documento nativo sem parsing, sem envelope e sem reassembly.
-5. Capturar e estruturar métricas de tempo (timings) e metadados de execução.
-
-Mapa de Relacionamentos do Script
-
-1. ignore-policy.ts
-   - Tipo: Dependência Direta
-   - Relação: Resolve a allowlist final de arquivos a serem incluídos no documento.
-   - Criticidade: Alta
-
-2. repomix-request.ts
-   - Tipo: Contrato / Interface
-   - Relação: Constrói e repassa o RepomixRequest para a porta de Direct Output.
-   - Criticidade: Alta
-
-3. repomix-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Utiliza buildRepomixRequest para compor o contrato tipado.
-   - Criticidade: Alta
-
-4. effective-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Resolve o EffectiveProfile canônico para saída no formato XML.
-   - Criticidade: Alta
-
-5. compression-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Utiliza DEFAULT_PROFILE como base para opções de perfil.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Em caso de sucesso, o XML retornado é rigorosamente idêntico ao stdout recebido da porta de Direct Output (fidelidade pura, zero envelope/transformação).
-2. O serviço não faz cache por arquivo, não utiliza DashService nem pipeline de blocos.
-3. Se a allowlist estiver vazia, o serviço encerra com erro estruturado sem invocar a porta de Direct Output.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { CompressionProfile } from '../../shared/types'
@@ -51,6 +8,7 @@ import { resolveEffectiveProfile } from './effective-profile'
 import { IgnorePolicy } from './ignore-policy'
 import { buildRepomixRequest } from './repomix-arguments-builder'
 import type { RepomixRequest } from './repomix-request'
+import { estimateTokenCount } from '../../shared/utils/token-utils'
 
 export interface RepomixDirectOutputPort {
   generateDirectOutput(
@@ -67,6 +25,7 @@ export interface OneClickXmlOptions {
 export interface OneClickXmlResult {
   success: boolean
   xml?: string
+  tokenCount?: number
   error?: string
   timings?: {
     listFilesMs: number
@@ -170,6 +129,7 @@ export class OneClickXmlService {
     return {
       success: true,
       xml: directOutputResult.content,
+      tokenCount: estimateTokenCount(directOutputResult.content),
       timings: { listFilesMs, generateMs, totalMs },
       metadata: { fileCount: allowlist.length }
     }

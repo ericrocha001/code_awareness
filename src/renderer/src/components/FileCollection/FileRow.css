@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout em CSS Grid responsivo para a linha de arquivo (FileRow) da File View.
-2. Estilizar a área de tags com contenção horizontal (clip), o indicador "+N" condicional e o gatilho universal "+".
-3. Garantir truncamento elegante por ellipsis nas colunas de nome e caminho.
-
-Mapa de Relacionamentos do Script
-
-1. FileRow.tsx
-   - Tipo: Relação de UI
-   - Relação: Fornece classes de estilização estrutural e visual para a linha da coleção.
-   - Criticidade: Alta
-
-2. fileViewColumns.ts / FileView.css
-   - Tipo: Contrato / Interface
-   - Relação: O template default (FILE_VIEW_DEFAULT_TEMPLATE) permanece token-idêntico entre builder e a custom property --fv-grid-template declarada no .fv-container — a geometría se hereda em runtime, não se transporta como valor React.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O container de tags (.fr-tags) declara position: relative e overflow: hidden — evolução ratificada da Invariante D9 (Sprint 2.2): contenção visual com consultabilidade em três níveis (+N, tooltip, TagPopover). SEM fade permanente (::after removido na Sprint 3 — artefato visual).
-2. O grid tem 5 tracks (Sprint 8): toggle, identity, path, tags, tokens — a coluna de ações foi removida; o botão de ações passou a ser absoluto (.fr-action-btn) fora do fluxo do grid. .fr-row e .fv-header permanecem token-idênticos (R-B3.1) via a custom property --fv-grid-template.
-3. A linha mantém alinhamento vertical e altura estável de 36px em viewport padrão.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .fr-row {

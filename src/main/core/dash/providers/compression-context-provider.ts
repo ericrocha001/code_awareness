@@ -1,42 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Adaptar a porta StructuredCompressionPort para a interface ContextProvider do protocolo Code Dash.
-2. Agrupar itens por perfil de compressão e delegar a compressão estruturada em lote ao serviço subjacente.
-3. Mapear resultados individuais (sucessos e falhas) diretamente para os índices originais dos itens sem parsing de texto.
-4. Fornecer compatibilidade defensiva caso mocks legados com generateCompressionMarkdown sejam injetados em testes.
-
-Mapa de Relacionamentos do Script
-
-1. context-provider.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa a interface ContextProvider.
-   - Criticidade: Alta
-
-2. src/main/core/structured-compression-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome a porta StructuredCompressionPort para execução estruturada da compressão.
-   - Criticidade: Alta
-
-3. src/main/core/compression-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Utiliza DEFAULT_PROFILE como configuração padrão de compressão.
-   - Criticidade: Média
-
-4. src/shared/types/dash-types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome o tipo DashPlannedItem para tipagem dos itens a processar.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O provider consome prioritariamente a API estruturada de compressão sem parsing textual frágil.
-2. Cada resultado de sucesso ou falha é indexado estritamente pela propriedade index original do DashPlannedItem.
-3. Itens com o mesmo perfil de compressão são agrupados para execução em lote único (batch).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { DashPlannedItem } from '../../../../shared/types/dash-types'
@@ -80,21 +43,30 @@ export class CompressionContextProvider implements ContextProvider {
 
     for (const item of items) {
       let parsedProfile: CompressionProfile = DEFAULT_PROFILE
-      let profileKey = 'default'
 
       if (typeof item.profile === 'string') {
         try {
           parsedProfile = JSON.parse(item.profile)
-          profileKey = item.profile
         } catch {
           parsedProfile = DEFAULT_PROFILE
-          profileKey = 'default'
         }
       } else if (item.profile && typeof item.profile === 'object') {
         parsedProfile = item.profile as CompressionProfile
-        profileKey = JSON.stringify(parsedProfile)
       }
 
+      // Aplica o merge das configurações globais de economia ANTES do cálculo da profileKey,
+      // garantindo que o agrupamento reflita o perfil efetivo real de cada item.
+      // O merge sobrescreve apenas os três campos econômicos; os demais campos do profile base são preservados.
+      if (options.settings) {
+        parsedProfile = {
+          ...parsedProfile,
+          removeComments: options.settings.removeComments,
+          removeEmptyLines: options.settings.removeEmptyLines,
+          truncateBase64: options.settings.truncateBase64
+        }
+      }
+
+      const profileKey = JSON.stringify(parsedProfile)
       const group = profileGroups.get(profileKey) ?? { profile: parsedProfile, items: [] }
       group.items.push(item)
       profileGroups.set(profileKey, group)

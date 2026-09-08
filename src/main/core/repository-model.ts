@@ -1,79 +1,3 @@
-/*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
- 1. Representar o estado estrutural do repositório em memória.
- 2. Coordenar Scanner, Language Adapter, Structure Reader e Repository Database.
- 3. Gerar IDs estáveis para arquivos e substituir o fileId placeholder do Structure Reader.
- 4. Resolver relacionamentos cross-file (extends, implements, imports) usando dados brutos coletados pelo Structure Reader e re-resolver relacionamentos cross-file completos após reindexação seletiva.
- 5. Expor operações de alto nível para o Code Map Service.
- 6. Ser a única fonte de verdade estrutural — nenhum outro componente deve ler o banco diretamente.
- 7. Recortar trechos de código de elementos por coordenadas já armazenadas, com limite de segurança.
- 8. Ler arquivos inteiros com defesa em profundidade (path traversal, binário e teto de segurança).
- 9. Reconciliar o estado dos arquivos cadastrados no banco de dados com o disco ao abrir o repositório, devolvendo resumo numérico.
-10. Gravar o carimbo de última sincronização (updateLastSyncAt) delegando ao banco.
-11. Preencher hashes ausentes de arquivos legados via backfillContentHashes.
-12. Curar status 'modified' obsoleto de volta para 'indexed' quando o conteúdo do disco corresponde ao hash indexado (markFileIndexed).
-
-Mapa de Relacionamentos do Script
-
-1. repository-scanner.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome scanRepository para descobrir arquivos.
-   - Criticidade: Alta
-
-2. structure-reader.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome readStructure para extrair elementos.
-   - Criticidade: Alta
-
-3. repository-database.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome operações CRUD do contrato RepositoryRepository.
-   - Criticidade: Alta
-
-4. code-map-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consumirá as operações de alto nível expostas por este módulo.
-   - Criticidade: Alta
-
-5. telemetry-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Registra indexação completa e reindexação seletiva (CODE_MAP).
-   - Criticidade: Alta
-
- Invariantes do Script
-
- 1. O Repository Model nunca parseia código diretamente — delega ao Structure Reader.
- 2. O Repository Model nunca acessa SQLite diretamente — delega ao Repository Database.
- 3. O fileId do CodeMapFile é gerado deterministicamente: hash(repositoryId + relativePath).
- 4. Relacionamentos cross-file são resolvidos apenas quando o target existe no repositório.
- 5. Referências não resolvidas (classe base inexistente, interface inexistente, import externo) são descartadas silenciosamente.
- 6. O modelo em memória é reconstruído a cada indexação completa — não há cache de estado entre indexações.
- 7. O Repository Model não emite eventos — isso é responsabilidade do Synchronizer.
- 8. O registro do repositório é sempre persistido antes de qualquer arquivo ou relacionamento — a chave estrangeira files.repository_id → repositories.id exige essa ordem.
- 9. O recorte de trecho nunca excede 300 linhas — elementos maiores são truncados com flag `truncated`.
- 10. A leitura de arquivo inteiro nunca escapa do repoPath — path traversal é rejeitada.
- 11. Conteúdo binário nunca é retornado como texto — arquivos binários retornam null.
- 12. Arquivos acima de 2 MB são truncados com flag `truncated` — nunca retornados integralmente.
- 13. O `mtime` gravado em `updateFileContent` deve ser o tempo real de modificação do arquivo no disco em milissegundos (`Math.floor(stat.mtimeMs)`).
- 14. A reconciliação com o disco (reconcileWithDisk) deve tratar exceções individualmente por arquivo para que falhas em um arquivo não abortem o processo.
- 15. A reindexação seletiva (updateFileContent) deve carregar os dados de todo o repositório para re-resolver as conexões cross-file mantendo o grafo íntegro.
- 16. A indexação completa (indexRepository) grava tanto lastIndexedAt quanto lastSyncAt ao concluir com sucesso.
- 17. A telemetria é puramente aditiva — logs e contadores nunca alteram o resultado nem o fluxo de indexação/reindexação.
- 18. O hash SHA-256 (contentHash) é calculado sobre o conteúdo UTF-8 exato do arquivo no disco durante a indexação e reindexação.
- 19. updateFileMetadata nunca muda o status do arquivo — preserva o status existente para não interferir com a fila de reindexação.
- 20. A reconciliação de abertura (reconcileWithDisk) usa hash SHA-256 como prova de conteúdo, executando autocura de metadados quando o hash for igual e marcando arquivos legados (sem hash) como 'modified'.
- 21. Verificar integridade do Code Map com descoberta, reparação e revalidação.
- 22. O verifyIntegrity nunca modifica o estado do Code Map a menos que autoRepair seja true.
- 23. Um arquivo só pode permanecer 'modified' enquanto existir divergência de conteúdo confirmada ou alteração ainda não verificada; a reconciliação cura o status quando o conteúdo corresponde ao índice.
-
-24. Quando o verifyIntegrity recebe issues pré-descobertas válidas com autoRepair, ele pula a autocura (Fase 0) e a descoberta (Fase 1) e executa diretamente a reparação cirúrgica sobre essas issues.
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-
 import { createHash } from 'crypto'
 import { open, readFile, stat } from 'fs/promises'
 import { existsSync } from 'fs'
@@ -92,12 +16,17 @@ import type {
   IntegrityRepair,
   IntegrityCheckOptions
 } from '../../shared/types'
-import { scanRepository } from './repository-scanner'
-import { readStructure } from './structure-reader'
+import { isEligibleTextFile, isKnownBinaryExtension, scanRepository } from './repository-scanner'
 import { getLanguageForExtension } from './language-adapter'
 import { createRepositoryDatabase, closeRepositoryDatabase } from './repository-database'
 import type { RepositoryRepository } from './repository-repository'
 import { telemetryService } from './telemetry-service'
+import type { StructureExtractionPort } from './extraction/structure-extraction-port'
+import { TypeScriptStructureExtractor } from './extraction/typescript-extractor'
+import { JavaScriptStructureExtractor } from './extraction/javascript-extractor'
+import { CssStructureExtractor } from './extraction/css-extractor'
+import { RelationshipResolver } from './relationship-resolver'
+import { getCanonicalTokenizer, type TokenizerPort } from './tokenizer'
 
 export interface ImportSourceEntry {
   elementId: string
@@ -113,6 +42,14 @@ export interface ElementSnippet {
   endLine: number
   truncated: boolean
   relativePath: string
+}
+
+/** Resultado da recuperação espacial precisa de um elemento Level A. */
+export interface ExactElementSource {
+  content: string
+  relativePath: string
+  startByte: number
+  endByte: number
 }
 
 /** Conteúdo integral de um arquivo, com flag de truncamento por teto de segurança. */
@@ -131,11 +68,15 @@ export class RepositoryModel {
   private readonly repoPath: string
   private readonly repositoryId: string
   private readonly db: RepositoryRepository
+  private readonly extractors: ReadonlyArray<StructureExtractionPort>
+  private readonly tokenizer: TokenizerPort
 
-  constructor(repoPath: string) {
+  constructor(repoPath: string, extractors: StructureExtractionPort[] = [], tokenizer: TokenizerPort = getCanonicalTokenizer()) {
     this.repoPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
     this.repositoryId = this.generateRepositoryId(this.repoPath)
     this.db = createRepositoryDatabase(this.repoPath)
+    this.extractors = extractors
+    this.tokenizer = tokenizer
   }
 
   getRepositoryId(): string {
@@ -158,12 +99,96 @@ export class RepositoryModel {
     return createHash('sha256').update(`${sourceId}:${targetId}:${type}`).digest('hex').substring(0, 16)
   }
 
+  private ensureRepositoryRecord(): void {
+    if (this.db.getRepositoryByPath(this.repoPath)) return
+
+    this.db.saveRepository({
+      id: this.repositoryId,
+      path: this.repoPath,
+      name: basename(this.repoPath),
+      modelVersion: 1,
+      lastIndexedAt: null
+    })
+  }
+
+  /**
+   * Percorre o array de portas em ordem e retorna a primeira que suporta a extensão.
+   * Retorna null se nenhuma porta suportar — arquivo tratado como "sem extração estrutural".
+   */
+  private findExtractorForExtension(extension: string): StructureExtractionPort | null {
+    for (const extractor of this.extractors) {
+      if (extractor.supports(extension)) return extractor
+    }
+    return null
+  }
+
   /**
    * Calcula o SHA-256 do conteúdo do arquivo.
    * Retorna hash hexadecimal de 64 caracteres.
    */
   private calculateContentHash(content: string): string {
     return createHash('sha256').update(content, 'utf-8').digest('hex')
+  }
+
+  private tokenIdentity(content: string, contentHash: string, existing?: CodeMapFile | null): Pick<CodeMapFile, 'tokenCount' | 'tokenizerId' | 'tokenizerEncoding' | 'tokenizedContentHash'> {
+    if (
+      existing?.tokenizedContentHash === contentHash &&
+      existing.tokenizerId === this.tokenizer.id &&
+      existing.tokenizerEncoding === this.tokenizer.encoding &&
+      typeof existing.tokenCount === 'number'
+    ) {
+      return {
+        tokenCount: existing.tokenCount,
+        tokenizerId: existing.tokenizerId,
+        tokenizerEncoding: existing.tokenizerEncoding,
+        tokenizedContentHash: existing.tokenizedContentHash
+      }
+    }
+    return {
+      tokenCount: this.tokenizer.count(content),
+      tokenizerId: this.tokenizer.id,
+      tokenizerEncoding: this.tokenizer.encoding,
+      tokenizedContentHash: contentHash
+    }
+  }
+
+  async backfillTokenMetadata(): Promise<number> {
+    let updated = 0
+    let processed = 0
+    for (const file of this.db.getFilesByRepository(this.repositoryId)) {
+      processed++
+      if (processed % 50 === 0) {
+        await new Promise((resolve) => setImmediate(resolve))
+      }
+      if (
+        file.contentHash &&
+        file.tokenizedContentHash === file.contentHash &&
+        file.tokenizerId === this.tokenizer.id &&
+        file.tokenizerEncoding === this.tokenizer.encoding &&
+        typeof file.tokenCount === 'number'
+      ) continue
+
+      try {
+        const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+        const contentHash = file.contentHash ?? this.calculateContentHash(content)
+        this.db.saveFile({ ...file, contentHash, ...this.tokenIdentity(content, contentHash, file) })
+        updated++
+      } catch {
+        continue
+      }
+    }
+    return updated
+  }
+
+  async backfillContextReferences(): Promise<number> {
+    return this.db.backfillContextReferences(this.repositoryId)
+  }
+
+  pruneKnownBinaryFiles(): number {
+    const binaryFiles = this.db.getFilesByRepository(this.repositoryId)
+      .filter((file) => isKnownBinaryExtension(file.relativePath))
+    for (const file of binaryFiles) this.db.deleteFile(file.id)
+    return binaryFiles.length
   }
 
   /**
@@ -184,33 +209,14 @@ export class RepositoryModel {
     }
   }
 
-  /**
-   * Reconcilia os arquivos armazenados no banco de dados com o estado atual no disco.
-   * Usa o hash SHA-256 como prova de conteúdo para evitar falsos positivos por mtime/size.
-   * Marca arquivos alterados como 'modified' e remove do banco os que foram deletados.
-   * Executa autocura de mtime/size quando o hash é idêntico.
-   * Devolve um resumo: { checked, markedModified, removed }.
-   */
-  /**
-   * Reconcilia os arquivos cadastrados no banco de dados com o disco ao abrir o repositório.
-   *
-   * Algoritmo autocurativo:
-   * 1. Arquivo não existe no disco -> exclui do banco.
-   * 2. Arquivo sem hash (legado) -> marca como 'modified' para reindexação.
-   * 3. Arquivo com status 'indexed':
-   *    - Caminho rápido: se mtime e size forem iguais ao índice, NÃO lê o disco.
-   *    - Se diferirem, lê e compara SHA-256. Se igual -> autocura mtime/size. Se diferente -> marca 'modified'.
-   * 4. Arquivo com status 'modified':
-   *    - Hash obrigatório (sem atalho de stat). Lê e compara SHA-256 com o índice.
-   *    - Se igual -> cura o status para 'indexed', atualiza mtime/size, e incrementa healed.
-   *    - Se diferente ou erro de leitura -> permanece 'modified'.
-   *
-   * @returns Resumo numérico: { checked, markedModified, removed, healed }.
-   */
+
   async reconcileWithDisk(
-    correlationId?: string
-  ): Promise<{ checked: number; markedModified: number; removed: number; healed: number }> {
-    const cid = correlationId ?? telemetryService.startOperation('RECONCILE_DISK')
+    correlationIdOrOptions?: string | { correlationId?: string; indexUnexpected?: boolean }
+  ): Promise<{ checked: number; markedModified: number; removed: number; healed: number; indexedUnexpected?: number }> {
+    const options = typeof correlationIdOrOptions === 'string'
+      ? { correlationId: correlationIdOrOptions }
+      : (correlationIdOrOptions ?? {})
+    const cid = options.correlationId ?? telemetryService.startOperation('RECONCILE_DISK')
     const startedAt = Date.now()
     try {
       const dbFiles = this.db.getFilesByRepository(this.repositoryId)
@@ -218,8 +224,52 @@ export class RepositoryModel {
       let markedModified = 0
       let removed = 0
       let healed = 0
+      let processed = 0
+      let scannedFiles: Awaited<ReturnType<typeof scanRepository>> | null = null
+      const movedFileIds = new Set<string>()
+
+      if (options.indexUnexpected === true && dbFiles.length > 0) {
+        scannedFiles = await scanRepository(this.repoPath)
+        const diskPaths = new Set(scannedFiles.map((file) => file.relativePath))
+        const indexedPaths = new Set(dbFiles.map((file) => file.relativePath))
+        const missingByHash = new Map<string, CodeMapFile[]>()
+        const unexpectedByHash = new Map<string, string[]>()
+
+        for (const file of dbFiles) {
+          if (diskPaths.has(file.relativePath) || !file.contentHash) continue
+          const entries = missingByHash.get(file.contentHash) ?? []
+          entries.push(file)
+          missingByHash.set(file.contentHash, entries)
+        }
+        for (const file of scannedFiles) {
+          if (indexedPaths.has(file.relativePath)) continue
+          try {
+            const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+            const hash = this.calculateContentHash(content)
+            const entries = unexpectedByHash.get(hash) ?? []
+            entries.push(file.relativePath)
+            unexpectedByHash.set(hash, entries)
+          } catch {
+            continue
+          }
+        }
+        for (const [hash, missing] of missingByHash) {
+          const unexpected = unexpectedByHash.get(hash) ?? []
+          if (missing.length !== 1 || unexpected.length !== 1) continue
+          const [file] = missing
+          const [relativePath] = unexpected
+          this.db.moveFile(file.id, relativePath)
+          await this.updateFileContent(relativePath, cid)
+          movedFileIds.add(file.id)
+        }
+      }
 
       for (const file of dbFiles) {
+        if (movedFileIds.has(file.id)) continue
+        processed++
+        if (processed % 50 === 0) {
+          await new Promise((resolve) => setImmediate(resolve))
+        }
         try {
           const fullPath = join(this.repoPath, file.relativePath)
           if (!existsSync(fullPath)) {
@@ -240,7 +290,6 @@ export class RepositoryModel {
           const diskMtime = Math.floor(fileStat.mtimeMs)
           const diskSize = fileStat.size
 
-          // Arquivo legado sem hash → marca como modified para forçar reindexação
           if (!file.contentHash) {
             this.db.updateFileStatus(file.id, 'modified')
             markedModified++
@@ -249,7 +298,6 @@ export class RepositoryModel {
           }
 
           if (file.status === 'indexed') {
-            // Caminho rápido: se mtime e size coincidem, não lê o arquivo do disco
             if (file.mtime === diskMtime && file.sizeBytes === diskSize) {
               continue
             }
@@ -261,40 +309,19 @@ export class RepositoryModel {
               }
               telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_HASH_MATCH', { relativePath: file.relativePath })
             } else {
-              // Conteúdo divergiu (ou erro de leitura) -> indexed → modified
               this.db.updateFileStatus(file.id, 'modified')
               markedModified++
               telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_INDEXED_DIVERGED', { relativePath: file.relativePath })
             }
           } else if (file.status === 'modified') {
-            // Hash obrigatório para arquivos com status 'modified' (sem caminho rápido de stat)
             const check = await this.verifyContentMatches(fullPath, file.contentHash)
             if (check.matches) {
-              // Conteúdo idêntico ao índice -> cura o status para 'indexed' e atualiza mtime/size
               this.updateFileMetadata(file.id, { mtime: diskMtime, sizeBytes: diskSize })
               this.db.updateFileStatus(file.id, 'indexed')
               healed++
               telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_STALE_HEALED', { relativePath: file.relativePath })
             } else {
-              // Conteúdo continua divergente (ou erro de leitura) -> permanece 'modified'
               telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_MODIFIED_STILL_DIVERGED', { relativePath: file.relativePath })
-            }
-          } else {
-            try {
-              const diskContent = await readFile(fullPath, 'utf-8')
-              const diskHash = this.calculateContentHash(diskContent)
-
-              if (diskHash === file.contentHash) {
-                if (file.mtime !== diskMtime || file.sizeBytes !== diskSize) {
-                  this.updateFileMetadata(file.id, { mtime: diskMtime, sizeBytes: diskSize })
-                }
-              } else {
-                this.db.updateFileStatus(file.id, 'modified')
-                markedModified++
-              }
-            } catch {
-              this.db.updateFileStatus(file.id, 'modified')
-              markedModified++
             }
           }
         } catch (err) {
@@ -302,17 +329,41 @@ export class RepositoryModel {
         }
       }
 
-      telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_COMPLETED', {
+      let indexedUnexpected = 0
+      if (options.indexUnexpected === true && dbFiles.length > 0) {
+        this.ensureRepositoryRecord()
+        const scanned = scannedFiles ?? await scanRepository(this.repoPath)
+        const dbPaths = new Set(this.db.getFilesByRepository(this.repositoryId).map((file) => file.relativePath))
+        let scannedProcessed = 0
+        for (const scannedFile of scanned) {
+          scannedProcessed++
+          if (scannedProcessed % 25 === 0) {
+            await new Promise((resolve) => setImmediate(resolve))
+          }
+          if (!dbPaths.has(scannedFile.relativePath)) {
+            try {
+              const ok = await this.updateFileContent(scannedFile.relativePath, cid)
+              if (ok) indexedUnexpected++
+            } catch (err) {
+              console.error(`[RepositoryModel] Falha ao indexar arquivo novo "${scannedFile.relativePath}":`, err)
+            }
+          }
+        }
+        telemetryService.log(cid, "CODE_MAP", "RECONCILE_UNEXPECTED_INDEXED", { indexedUnexpected })
+      }
+
+      telemetryService.log(cid, "CODE_MAP", "RECONCILE_COMPLETED", {
         checked: dbFiles.length,
         markedModified,
         removed,
         healed,
+        indexedUnexpected,
         durationMs: Date.now() - startedAt
       })
 
-      return { checked: dbFiles.length, markedModified, removed, healed }
+      return { checked: dbFiles.length, markedModified, removed, healed, indexedUnexpected }
     } catch (err) {
-      telemetryService.logError(cid, 'CODE_MAP', 'RECONCILE_FAILED', {
+      telemetryService.logError(cid, "CODE_MAP", "RECONCILE_FAILED", {
         error: err instanceof Error ? err.message : String(err),
         durationMs: Date.now() - startedAt
       })
@@ -331,16 +382,16 @@ export class RepositoryModel {
    * @returns Número de arquivos atualizados com hash.
    */
   async backfillContentHashes(correlationId?: string): Promise<number> {
-    const cid = correlationId ?? telemetryService.startOperation('BACKFILL_HASHES')
+    const cid = correlationId ?? telemetryService.startOperation("BACKFILL_HASHES")
     const startedAt = Date.now()
 
-    telemetryService.log(cid, 'CODE_MAP', 'BACKFILL_STARTED')
+    telemetryService.log(cid, "CODE_MAP", "BACKFILL_STARTED")
 
     const dbFiles = this.db.getFilesByRepository(this.repositoryId)
     const legacyFiles = dbFiles.filter((f) => !f.contentHash)
 
     if (legacyFiles.length === 0) {
-      telemetryService.log(cid, 'CODE_MAP', 'BACKFILL_COMPLETED', {
+      telemetryService.log(cid, "CODE_MAP", "BACKFILL_COMPLETED", {
         updated: 0,
         failed: 0,
         durationMs: Date.now() - startedAt
@@ -415,23 +466,24 @@ export class RepositoryModel {
     const scannedFiles = await scanRepository(this.repoPath)
     telemetryService.log(cid, 'CODE_MAP', 'INDEX_SCANNED', { fileCount: scannedFiles.length })
 
-    // BUGFIX: o registro do repositório é persistido ANTES de qualquer arquivo, pois a tabela
-    // `files` (e, por extensão, `elements` e `relationships`) possui chave estrangeira para
-    // `repositories.id` e o SQLite roda com foreign-key enforcement ativo. Persistir arquivos
-    // primeiro faz o banco rejeitá-los com "FOREIGN KEY constraint failed" na primeira
-    // indexação, já que o repositório ainda não estava cadastrado.
-    // O lastIndexedAt é deixado como null aqui e preenchido apenas ao final da indexação,
-    // garantindo que falhas parciais não marquem o repositório como "indexado".
-    const repoName = basename(this.repoPath)
-    const repositoryRecord: CodeMapRepository = {
+    this.db.saveRepository({
       id: this.repositoryId,
       path: this.repoPath,
-      name: repoName,
+      name: basename(this.repoPath),
       modelVersion: 1,
       lastIndexedAt: null
-    }
+    })
 
-    this.db.saveRepository(repositoryRecord)
+    const previousFiles = new Map(
+      this.db.getFilesByRepository(this.repositoryId).map((file) => [file.relativePath, file])
+    )
+
+    const scannedPaths = new Set(scannedFiles.map((file) => file.relativePath))
+    for (const previous of previousFiles.values()) {
+      if (!scannedPaths.has(previous.relativePath) && previous.contextReference) {
+        this.db.retireContextReference(this.repositoryId, previous.contextReference)
+      }
+    }
 
     // Limpa dados anteriores do repositório para indexação completa limpa
     this.db.deleteAllFiles(this.repositoryId)
@@ -443,7 +495,8 @@ export class RepositoryModel {
     let elementsExtractedCount = 0
 
     for (const scanned of scannedFiles) {
-      const fileId = this.generateFileId(scanned.relativePath)
+      const previousFile = previousFiles.get(scanned.relativePath)
+      const fileId = previousFile?.id ?? this.generateFileId(scanned.relativePath)
       const fullPath = join(this.repoPath, scanned.relativePath)
       let content = ''
       try {
@@ -463,6 +516,7 @@ export class RepositoryModel {
       const fileRecord: CodeMapFile = {
         id: fileId,
         repositoryId: this.repositoryId,
+        contextReference: previousFile?.contextReference ?? this.db.allocateContextReference(this.repositoryId),
         relativePath: scanned.relativePath,
         language: scanned.language,
         extension: scanned.extension,
@@ -470,15 +524,14 @@ export class RepositoryModel {
         sizeBytes: scanned.sizeBytes,
         mtime: scanned.mtime,
         contentHash,
+        ...this.tokenIdentity(content, contentHash, previousFile),
         status: 'indexed'
       }
 
-      const structureResult = readStructure(
-        this.repositoryId,
-        scanned.relativePath,
-        scanned.extension,
-        content
-      )
+      const extractor = this.findExtractorForExtension(scanned.extension)
+      const structureResult = extractor
+        ? extractor.extract({ repositoryId: this.repositoryId, relativePath: scanned.relativePath, extension: scanned.extension, content })
+        : { elements: [], relationships: [], elementInterfaces: [] }
 
       // Substitui o fileId placeholder (que era o relativePath) pelo fileId real gerado
       for (const element of structureResult.elements) {
@@ -550,7 +603,8 @@ export class RepositoryModel {
 
   /**
    * Resolve relacionamentos cross-file (extends, implements, imports).
-   * Referências não encontradas são ignoradas silenciosamente.
+   * Referências não encontradas são ignoradas silenciosamente (não fabrica arestas).
+   * Delega a construção do grafo ao RelationshipResolver.
    */
   private resolveRelationships(
     elements: CodeMapElement[],
@@ -558,121 +612,8 @@ export class RepositoryModel {
     importSources: ImportSourceEntry[],
     files: CodeMapFile[]
   ): CodeMapRelationship[] {
-    const relationships: CodeMapRelationship[] = []
-
-    // Indexa classes por nome simples (primeira ocorrência)
-    const classesByName = new Map<string, CodeMapElement>()
-    for (const elem of elements) {
-      if (elem.kind === 'class' && elem.name && elem.name !== '(anonymous)') {
-        if (!classesByName.has(elem.name)) {
-          classesByName.set(elem.name, elem)
-        }
-      }
-    }
-
-    // Indexa interfaces por nome simples (primeira ocorrência)
-    const interfacesByName = new Map<string, CodeMapElement>()
-    for (const elem of elements) {
-      if (elem.kind === 'interface' && elem.name && elem.name !== '(anonymous)') {
-        if (!interfacesByName.has(elem.name)) {
-          interfacesByName.set(elem.name, elem)
-        }
-      }
-    }
-
-    // Indexa arquivos por relativePath
-    const filesByPath = new Map<string, CodeMapFile>()
-    for (const f of files) {
-      filesByPath.set(f.relativePath, f)
-    }
-
-    // i) Resolução de baseClass (extends)
-    for (const elem of elements) {
-      if (elem.kind === 'class' && elem.baseClass) {
-        const targetClass = classesByName.get(elem.baseClass)
-        if (targetClass && targetClass.id !== elem.id) {
-          relationships.push({
-            id: this.generateRelationshipId(elem.id, targetClass.id, 'extends'),
-            repositoryId: this.repositoryId,
-            sourceId: elem.id,
-            targetId: targetClass.id,
-            type: 'extends'
-          })
-        }
-      }
-    }
-
-    // ii) Resolução de interfaceNames (implements)
-    for (const entry of elementInterfaces) {
-      for (const ifaceName of entry.interfaceNames) {
-        const targetIface = interfacesByName.get(ifaceName)
-        if (targetIface) {
-          relationships.push({
-            id: this.generateRelationshipId(entry.elementId, targetIface.id, 'implements'),
-            repositoryId: this.repositoryId,
-            sourceId: entry.elementId,
-            targetId: targetIface.id,
-            type: 'implements'
-          })
-        }
-      }
-    }
-
-    // iii) Resolução de importSources (imports)
-    for (const entry of importSources) {
-      const targetRelativePath = this.resolveImportPath(
-        entry.source,
-        entry.importerRelativePath,
-        filesByPath
-      )
-      if (targetRelativePath) {
-        const targetFile = filesByPath.get(targetRelativePath)
-        if (targetFile) {
-          relationships.push({
-            id: this.generateRelationshipId(entry.elementId, targetFile.id, 'imports'),
-            repositoryId: this.repositoryId,
-            sourceId: entry.elementId,
-            targetId: targetFile.id,
-            type: 'imports'
-          })
-        }
-      }
-    }
-
-    return relationships
-  }
-
-  /**
-   * Tenta resolver um import source relativo para o relativePath de um arquivo existente.
-   * Retorna null para imports de pacotes externos ou caminhos não encontrados.
-   */
-  private resolveImportPath(
-    source: string,
-    importerRelativePath: string,
-    filesByPath: Map<string, CodeMapFile>
-  ): string | null {
-    // Ignora imports de pacotes externos (não começam com . ou /)
-    if (!source.startsWith('.') && !source.startsWith('/')) {
-      return null
-    }
-
-    const importerDir = dirname(importerRelativePath)
-    const resolvedBase = normalize(join(importerDir, source)).replace(/\\/g, '/')
-
-    const candidates = [
-      resolvedBase + '.ts',
-      resolvedBase + '.tsx',
-      resolvedBase + '/index.ts',
-      resolvedBase + '/index.tsx'
-    ]
-
-    for (const candidate of candidates) {
-      if (filesByPath.has(candidate)) {
-        return candidate
-      }
-    }
-
-    return null
+    const resolver = new RelationshipResolver(this.repositoryId, this.repoPath)
+    return resolver.resolve(elements, elementInterfaces, importSources, files)
   }
 
   /**
@@ -684,13 +625,23 @@ export class RepositoryModel {
     telemetryService.log(cid, 'CODE_MAP', 'REINDEX_STARTED', { relativePath })
     try {
     const fullPath = join(this.repoPath, relativePath)
-    const fileId = this.generateFileId(relativePath)
+    const existingFile = this.db.getFileByPath(this.repositoryId, relativePath)
+    const fileId = existingFile?.id ?? this.generateFileId(relativePath)
 
     if (!existsSync(fullPath)) {
-      const existingFile = this.db.getFileByPath(this.repositoryId, relativePath)
       if (existingFile) {
         this.db.deleteFile(existingFile.id)
       }
+      telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', {
+        relativePath,
+        durationMs: Date.now() - startedAt,
+        removed: true
+      })
+      return true
+    }
+
+    if (!(await isEligibleTextFile(fullPath))) {
+      if (existingFile) this.db.deleteFile(existingFile.id)
       telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', {
         relativePath,
         durationMs: Date.now() - startedAt,
@@ -734,6 +685,7 @@ export class RepositoryModel {
     const fileRecord: CodeMapFile = {
       id: fileId,
       repositoryId: this.repositoryId,
+      contextReference: existingFile?.contextReference ?? this.db.allocateContextReference(this.repositoryId),
       relativePath,
       language,
       extension,
@@ -741,23 +693,21 @@ export class RepositoryModel {
       sizeBytes,
       mtime,
       contentHash,
+      ...this.tokenIdentity(content, contentHash, existingFile),
       status: 'indexed'
     }
 
-    const structureResult = readStructure(this.repositoryId, relativePath, extension, content)
+    const extractor = this.findExtractorForExtension(extension)
+    const structureResult = extractor
+      ? extractor.extract({ repositoryId: this.repositoryId, relativePath, extension, content })
+      : { elements: [], relationships: [], elementInterfaces: [] }
 
     for (const element of structureResult.elements) {
       element.fileId = fileId
     }
 
-    // Remove elementos e relacionamentos antigos desse arquivo
-    this.db.deleteElementsByFile(fileId)
-    this.db.deleteRelationshipsByFile(fileId)
-
-    this.db.saveFile(fileRecord)
-    this.db.saveElements(structureResult.elements)
-    this.db.saveRelationships(structureResult.relationships) // contains
-    this.db.saveElementInterfaces(structureResult.elementInterfaces)
+    // Substituição atômica: tudo dentro de UMA transação (rollback em entrada envenenada)
+    this.db.replaceIndexedFileState(fileRecord, structureResult.elements, structureResult.relationships, structureResult.elementInterfaces)
 
     // Re-resolve relacionamentos cross-file para todo o repositório
     const allElements = this.db.getElementsByRepository(this.repositoryId)
@@ -930,6 +880,104 @@ export class RepositoryModel {
   }
 
   /**
+   * Recupera o código fonte exato de um elemento Level A a partir de seu ID (Exact Retrieval).
+   * Valida a integridade do conteúdo via contentHash (recusa conteúdo stale)
+   * e extrai apenas o range de bytes persistido no banco via slice em Buffer.
+   * Retorna null se o elemento não for encontrado, não for Level A, o arquivo estiver
+   * inacessível ou o hash do disco divergir do hash persistido.
+   */
+  async getElementExactSource(elementId: string): Promise<ExactElementSource | null> {
+    try {
+      const element = this.db.getElementsByRepository(this.repositoryId).find((e) => e.id === elementId)
+      if (!element) return null
+
+      // Apenas elementos recuperáveis são elegíveis para Exact Retrieval
+      if (element.retrievable !== true) {
+        return null
+      }
+
+      const file = this.db.getFileById(element.fileId)
+      if (!file) return null
+
+      // Se o arquivo não possuir contentHash no banco, não é possível validar integridade
+      if (!file.contentHash) {
+        return null
+      }
+
+      const fullPath = join(this.repoPath, file.relativePath)
+      if (!existsSync(fullPath)) {
+        return null
+      }
+
+      // Lê como Buffer binário (sem encoding) para preservar offsets de bytes exatos
+      const buffer = await readFile(fullPath)
+
+      // Validação de integridade: compara hash SHA-256 do disco com o hash persistido
+      const diskHash = createHash('sha256').update(buffer).digest('hex')
+      if (diskHash !== file.contentHash) {
+        return null
+      }
+
+      const startByte = element.location.start.byte
+      const endByte = element.location.end.byte
+
+      // Garante que os limites estão dentro do tamanho do buffer
+      if (startByte < 0 || endByte > buffer.length || startByte > endByte) {
+        return null
+      }
+
+      const slice = buffer.subarray(startByte, endByte)
+      const content = slice.toString('utf-8')
+
+      return {
+        content,
+        relativePath: file.relativePath,
+        startByte,
+        endByte
+      }
+    } catch {
+      return null
+    }
+  }
+
+  async getElementExactSources(elementIds: string[]): Promise<Map<string, ExactElementSource>> {
+    const requested = new Set(elementIds)
+    const elements = this.db.getElementsByRepository(this.repositoryId)
+      .filter((element) => requested.has(element.id) && element.retrievable === true)
+    const filesById = new Map(this.db.getFilesByRepository(this.repositoryId).map((file) => [file.id, file]))
+    const elementsByFile = new Map<string, CodeMapElement[]>()
+    for (const element of elements) {
+      const entries = elementsByFile.get(element.fileId) ?? []
+      entries.push(element)
+      elementsByFile.set(element.fileId, entries)
+    }
+
+    const results = new Map<string, ExactElementSource>()
+    await Promise.all([...elementsByFile].map(async ([fileId, fileElements]) => {
+      const file = filesById.get(fileId)
+      if (!file?.contentHash) return
+      try {
+        const buffer = await readFile(join(this.repoPath, file.relativePath))
+        if (createHash('sha256').update(buffer).digest('hex') !== file.contentHash) return
+        for (const element of fileElements) {
+          const startByte = element.location.start.byte
+          const endByte = element.location.end.byte
+          if (startByte < 0 || endByte > buffer.length || startByte > endByte) continue
+          results.set(element.id, {
+            content: buffer.subarray(startByte, endByte).toString('utf-8'),
+            relativePath: file.relativePath,
+            startByte,
+            endByte
+          })
+        }
+      } catch {
+        return
+      }
+    }))
+    return results
+  }
+
+  /**
    * Lê o conteúdo integral de um arquivo com defesa em profundidade:
    * rejeita path traversal, recusa binário e trunca arquivos acima do teto de segurança.
    * Retorna null em qualquer caso de rejeição ou erro de leitura.
@@ -1054,7 +1102,7 @@ export class RepositoryModel {
       staleHealed = reconcileRes.healed
 
       // ─── Fase 1: Descoberta ───────────────────────────────────────────
-      discovery = await this.discoverIntegrityIssues(cid, options.scanForUnexpectedFiles ?? true)
+      discovery = await this.discoverIntegrityIssues(cid, options.scanForUnexpectedFiles ?? true, options.deep === true)
     }
     
     const totalIssues = 
@@ -1083,6 +1131,7 @@ export class RepositoryModel {
     }
     
     telemetryService.log(cid, 'INTEGRITY', 'CHECK_COMPLETED', {
+      deep: options.deep === true,
       status,
       totalIssues,
       durationMs: result.durationMs
@@ -1097,8 +1146,30 @@ export class RepositoryModel {
         options.selectedIssues
       )
       result.repairResult = repairResult
+
+      // Revalidação pós-repair: nova descoberta reflete o estado atual
+      // (o repair pode curar hashes divergentes, remover órfãos e reindexar arquivos).
+      if (repairResult.status !== 'failed') {
+        const revalidation = await this.discoverIntegrityIssues(cid, options.scanForUnexpectedFiles ?? true, options.deep === true)
+        const revalidatedIssues =
+          revalidation.hashesMismatched +
+          revalidation.filesMissing +
+          revalidation.filesUnexpected +
+          revalidation.orphanElements +
+          revalidation.invalidRelationships +
+          revalidation.databaseInconsistencies
+        result.status = revalidatedIssues === 0 ? 'healthy' : 'inconsistent'
+        result.hashesMismatched = revalidation.hashesMismatched
+        result.filesMissing = revalidation.filesMissing
+        result.filesUnexpected = revalidation.filesUnexpected
+        result.orphanElements = revalidation.orphanElements
+        result.invalidRelationships = revalidation.invalidRelationships
+        result.databaseInconsistencies = revalidation.databaseInconsistencies
+        result.details = revalidation.details.slice(0, 100)
+        telemetryService.log(cid, 'INTEGRITY', 'REVALIDATION_COMPLETED', { revalidatedIssues })
+      }
     }
-    
+
     return result
   }
 
@@ -1153,7 +1224,7 @@ export class RepositoryModel {
     }
   }
 
-  private async discoverIntegrityIssues(correlationId: string, scanForUnexpectedFiles = true): Promise<{
+  private async discoverIntegrityIssues(correlationId: string, scanForUnexpectedFiles = true, deep = false): Promise<{
     filesChecked: number
     hashesChecked: number
     hashesMismatched: number
@@ -1211,8 +1282,10 @@ export class RepositoryModel {
           const diskMtime = Math.floor(fileStat.mtimeMs)
           const diskSize = fileStat.size
           
-          // Se mtime e size não mudaram, o hash provavelmente não mudou — pula leitura completa
-          if (dbFile.mtime === diskMtime && dbFile.sizeBytes === diskSize) {
+          // Se mtime e size não mudaram, o hash provavelmente não mudou — pula leitura completa.
+          // INVARIANT (Deep Integrity): em modo deep o atalho é IGNORADO — todo arquivo é hasheado,
+          // tornando a auditoria autoritativa mesmo quando mtime/size são restaurados artificialmente.
+          if (!deep && dbFile.mtime === diskMtime && dbFile.sizeBytes === diskSize) {
             continue
           }
           
@@ -1304,10 +1377,15 @@ export class RepositoryModel {
     const allElementIds = new Set(allElements.map(e => e.id))
     
     for (const rel of allRelationships) {
-      // Relacionamentos 'contains' são intra-arquivo (source=element, target=element)
-      // Relacionamentos cross-file (extends, implements, imports) usam element→element ou element→file
-      const sourceValid = allElementIds.has(rel.sourceId)
-      const targetValid = allElementIds.has(rel.targetId) || allFileIds.has(rel.targetId)
+      // Valida os endpoints POR KIND (sourceKind/targetKind):
+      // - element → deve existir em allElementIds
+      // - file → deve existir em allFileIds
+      const sourceValid = rel.sourceKind === 'element'
+        ? allElementIds.has(rel.sourceId)
+        : allFileIds.has(rel.sourceId)
+      const targetValid = rel.targetKind === 'element'
+        ? allElementIds.has(rel.targetId)
+        : allFileIds.has(rel.targetId)
       
       if (!sourceValid || !targetValid) {
         invalidRelationships++
@@ -1517,7 +1595,11 @@ export class RepositoryModel {
   }
 }
 
-/** Fábrica conveniente para criar instâncias de RepositoryModel. */
-export function createRepositoryModel(repoPath: string): RepositoryModel {
-  return new RepositoryModel(repoPath)
+/** Fábrica conveniente para criar instâncias de RepositoryModel com o conjunto padrão de extratores. */
+export function createRepositoryModel(repoPath: string, tokenizer: TokenizerPort = getCanonicalTokenizer()): RepositoryModel {
+  return new RepositoryModel(repoPath, [
+    new TypeScriptStructureExtractor(),
+    new JavaScriptStructureExtractor(),
+    new CssStructureExtractor()
+  ], tokenizer)
 }

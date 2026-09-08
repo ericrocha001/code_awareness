@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Reconciliar caminhos solicitados pelo protocolo Code Dash com o sistema de arquivos real do repositório.
-2. Executar resolução determinística com fallback seguro por basename e detecção de ambiguidades.
-3. Prevenir violações de segurança de path traversal contra o diretório raiz do repositório.
-
-Mapa de Relacionamentos do Script
-
-1. src/shared/types/dash-types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome DashItem, DashRequest, DashResolutionReport e DashFailureReason.
-   - Criticidade: Alta
-
-2. src/shared/utils/dash-protocol.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa DASH_PROTOCOL_VERSION para montar o objeto de requisição resolvido.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nenhum arquivo fora dos limites de repoPath pode ser resolvido com sucesso (proteção rigorosa contra traversal).
-2. A ordem original dos itens do request deve ser estritamente preservada no relatório e requisição gerada.
-3. Se um basename existir em múltiplos locais no repositório e nenhum caminho exato corresponder, a resolução deve falhar com 'ambiguous'.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import fs from 'fs'

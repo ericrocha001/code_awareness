@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o componente StatusStrip com prefixo ss-.
-2. Garantir aparência visual consistente com o design system global.
-
-Mapa de Relacionamentos do Script
-
-1. StatusStrip.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo ss- para evitar colisões com outros componentes.
-2. O design deve respeitar as variáveis CSS globais (--bg-primary, --bg-secondary, --border, --accent).
-3. Nenhuma cor hardcoded — apenas variáveis CSS ou cores específicas de status.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .ss-root {

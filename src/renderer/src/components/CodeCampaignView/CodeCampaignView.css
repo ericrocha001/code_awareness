@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout full-width do container principal da aba Code Campaign.
-2. Garantir paridade visual com as demais abas sem conflito de classes CSS.
-
-Mapa de Relacionamentos do Script
-
-1. CodeCampaignView.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo (prefixo ccv-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O design deve respeitar estritamente as variáveis de cores globais (--bg-primary, --bg-secondary, --border, --accent).
-2. Todas as classes usam prefixo ccv- para evitar colisão com outras abas.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .ccv-container {

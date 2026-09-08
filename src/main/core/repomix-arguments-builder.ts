@@ -1,51 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Traduzir o EffectiveProfile, o OutputFormat e a lista de arquivos em argumentos CLI válidos para o Repomix.
-2. Aplicar regras de dependência entre opções da CLI (ex.: subopções de diretório dependem de includeDirectoryStructure).
-3. Emitir avisos estruturados ao detectar combinações de flags incompatíveis.
-4. Produzir o contrato tipado RepomixRequest a partir do repositório, arquivos, perfil efetivo e formato de transporte.
-
-Mapa de Relacionamentos do Script
-
-1. effective-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome o tipo EffectiveProfile para guiar a construção dos argumentos CLI e do RepomixRequest.
-   - Criticidade: Alta
-
-2. repomix-request.ts
-   - Tipo: Dependência Direta
-   - Relação: buildRepomixRequest produz uma RepomixRequest (Contrato / Interface).
-   - Criticidade: Alta
-
-3. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome OutputFormat.
-   - Criticidade: Alta
-
-4. repomix-adapter.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome buildRepomixCliArguments para derivar os argumentos CLI a partir do RepomixRequest.
-   - Criticidade: Alta
-
-5. compression-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome buildRepomixRequest para construir o contrato enviado ao adapter.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é de domínio puro — sem acesso a filesystem, spawn de processos ou estado global.
-2. Argumentos de saída sempre começam com o transporte de inclusão: `--include <files>` (inline-include) ou `--config <path>` (config-file), seguidos de --compress, flags opcionais do perfil, --style e --stdout.
-3. --compress e --stdout são sempre incluídos em todas as construções.
-4. --output-show-line-numbers nunca é emitido em nenhum caminho — é no-op sob --compress, sempre presente na combinação.
-5. outputFilePathStyle nunca é emitido na CLI (inexistente no Repomix 1.15.0).
-6. Warnings estruturados são emitidos via console.warn para configurações conflituosas.
-7. O builder não conhece filesystem nem paths absolutos — a decisão do modo de transporte (inline vs config) pertence ao adapter; quando `transport === 'config-file'` e `configPath` é omitido, o módulo lança Error (contrato violado pelo chamador).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { OutputFormat } from '../../shared/types'

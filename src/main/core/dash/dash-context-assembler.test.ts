@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente a composição do documento XML canônico gerado pelo Code Dash.
-2. Garantir conformidade com schema XML, ordenação de itens, inclusão de falhas e escape seguro em CDATA.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/dash/dash-context-assembler.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa assembleContext e valida o XML gerado.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes devem rodar puramente em memória sem qualquer I/O.
-2. O XML produzido deve ser parseável sem erros sintáticos por parsers XML padrão.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { JSDOM } from 'jsdom'

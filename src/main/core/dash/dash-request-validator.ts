@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a conformidade estrutural, campos permitidos e regras de segurança de requisições Code Dash.
-
-Mapa de Relacionamentos do Script
-
-1. src/shared/types/dash-types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa DashRequest, DashItem, DashRepresentation e DashFailureReason.
-   - Criticidade: Alta
-
-2. src/shared/utils/dash-protocol.ts
-   - Tipo: Dependência Direta
-   - Relação: Utiliza DASH_PROTOCOL_VERSION e isDashRepresentation para validação de versão e tipos.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Operar puramente em memória sem realizar qualquer operação de I/O em disco ou rede.
-2. Rejeitar estritamente qualquer campo desconhecido no payload raiz, no objeto output ou nos itens.
-3. Bloquear qualquer caminho que contenha path traversal (..) ou que represente um caminho absoluto.
-4. Garantir que apenas requisições em conformidade total com o contrato code-dash/v1 sejam aprovadas.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type {

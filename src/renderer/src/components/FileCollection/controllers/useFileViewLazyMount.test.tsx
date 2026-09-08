@@ -1,31 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a lógica do hook useFileViewLazyMount em isolamento (estado inicial, reset por totalCount, disparo do IntersectionObserver).
-2. Validar invariantes de contagem: mountedCount nunca excede totalCount e lotes acumulam corretamente.
-3. Validar o cleanup do IntersectionObserver no unmount.
-
-Mapa de Relacionamentos do Script
-
-1. controllers/useFileViewLazyMount.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, act e cleanup; um componente Harness monta o sentinel no DOM para exercitar o hook em ambiente jsdom.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. IntersectionObserver é mockado (jsdom não o implementa) por uma classe controlável que permite simular isIntersecting.
-2. mudanças de mountedCount e disparos do observer sempre ocorrem dentro de act() para refletir atualizações de estado síncronas.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'

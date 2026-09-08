@@ -1,62 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar o estado global da aplicação (aba ativa, projeto ativo e mensagens de status).
-2. Gerenciar preferências de UI por projeto via hook useProjectPreferences (sidebar e viewMode).
-3. Renderizar o layout principal com GlobalSidebar, conteúdo da aba ativa e toast de status.
-4. Orquestrar a resolução de deep links de campanha (pedir URL pendente no mount, ouvir novas URLs) e navegar para a aba Code Campaign.
-
-Mapa de Relacionamentos do Script
-
-1. useProjectPreferences.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece preferências de UI (sidebarOpen, viewMode) persistentes por projeto.
-   - Criticidade: Alta
-
-2. HomeView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a tela inicial de seleção de projetos.
-   - Criticidade: Alta
-
-3. CodeSourceView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a aba Code Source quando ativa.
-   - Criticidade: Alta
-
-4. CodeCompressionView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a aba Code Compression quando ativa.
-   - Criticidade: Alta
-
-5. CodeDiffView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a aba Code Diff quando ativa.
-   - Criticidade: Alta
-
-6. App.css
-   - Tipo: Relação de UI
-   - Relação: Consome estilos CSS globais, incluindo o toast de status.
-   - Criticidade: Alta
-
-7. CodeDashView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a aba Code Dash quando ativa.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Apenas uma aba deve estar ativa por vez.
-2. Preferências de sidebar devem persistir por projeto e sincronizar estado da UI com o settings.json.
-3. Mensagens de erro devem persistir até descarte manual; mensagens de sucesso devem desaparecer após 5 segundos.
-4. O estado statusMessage nunca deve referenciar memória liberada após o timeout.
-5. Deep links inválidos, de projeto não aberto ou de campanha inexistente sempre produzem erro e nunca navegam.
-6. A URL pendente é consumida exatamente uma vez (limpa após a resolução).
-7. O resolvedCampaignId é limpo após o CodeCampaignView consumir (via onResolvedCampaignConsumed), impedindo reabertura automática do painel.
-8. handleStatusMessage é estável (useCallback com dependências vazias) — nunca recriada a cada render, evitando reexecuções redundantes de effects dependentes.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useCallback, useEffect, useState } from "react";
@@ -150,6 +93,14 @@ export const App: React.FC = () => {
     };
     run();
   }, [pendingDeepLink, activeProject, handleStatusMessage]);
+
+  // Inicialização antecipada e desacoplada do CodeMap no ciclo de vida do projeto ativo
+  useEffect(() => {
+    if (!activeProject?.path) return;
+    window.codeAwareness.openRepository(activeProject.path).catch((err) => {
+      console.warn('[App] Falha ao inicializar CodeMap para o projeto ativo:', err);
+    });
+  }, [activeProject?.path]);
 
   return (
     <div

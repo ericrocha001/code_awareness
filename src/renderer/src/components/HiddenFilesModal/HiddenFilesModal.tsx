@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar modal com lista de arquivos ocultos (temporários e persistentes).
-2. Permitir seleção múltipla com checkboxes.
-3. Fornecer ação de restaurar arquivos selecionados via IPC.
-
-Mapa de Relacionamentos do Script
-
-1. CodeSourceView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Invoca o modal e recebe callback onFilesRestored.
-   - Criticidade: Alta
-
-2. ToggleSwitch.tsx
-   - Tipo: Dependência Direta
-   - Relação: Usa ToggleSwitch para checkboxes.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O modal deve fechar ao clicar no overlay ou ESC.
-2. Arquivos persistentes e temporários devem ser listados separadamente.
-3. A restauração deve remover arquivos da lista de ignorados.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useState, useRef } from 'react'

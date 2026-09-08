@@ -1,42 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Testar o cálculo e persistência do SHA-256 (contentHash) no RepositoryModel e RepositoryDatabase.
-2. Testar a migração idempotente da coluna content_hash no SQLite.
-3. Testar a tolerância a valores contentHash nulos em arquivos legados.
-4. Garantir determinismo do hash (mesmo conteúdo sempre produz mesmo hash).
-5. Verificar explicitamente que o hash é substituído (não apenas adicionado) em reindexação.
-6. Testar a reconciliação de abertura com hash em reconcileWithDisk (autocura quando hash igual, modified quando hash difere e quando é arquivo legado).
-7. Testar verificação de integridade (Sprint 6), detectando problemas e corrigindo com autoRepair.
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa os métodos indexRepository, updateFileContent, reconcileWithDisk e verifyIntegrity para verificar consistência.
-   - Criticidade: Alta
-
-2. repository-database.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa a criação de schema e verificações da tabela files no SQLite.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O hash retornado deve ser uma string hexadecimal SHA-256 de 64 caracteres.
-2. O hash nulo (null) deve ser retornado sem erros para arquivos legados sem content_hash.
-3. A inicialização de bancos de dados legados deve migrar a coluna content_hash de forma idempotente.
-4. O mesmo conteúdo sempre produz o mesmo hash (determinismo obrigatório).
-5. O hash antigo deve ser substituído pelo novo após reindexação — nunca ambos coexistem.
-6. reconcileWithDisk deve autocurar metadados mtime/size se o hash for igual e manter status 'indexed'.
-7. reconcileWithDisk deve marcar status como 'modified' se o hash diferir ou se for arquivo legado sem hash.
-8. verifyIntegrity deve retornar status 'healthy' apenas se nenhuma inconsistência for encontrada.
-9. O afterEach de cada describe deve ser async com loop de retry para contornar lock do WAL do SQLite no Windows.
-10. Simulação de corrupção que viola FK do SQLite exige pragma foreign_keys = OFF antes do DELETE direto.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
@@ -45,7 +8,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
 import Database from 'better-sqlite3'
-import { RepositoryModel } from './repository-model'
+import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { createRepositoryDatabase, closeRepositoryDatabase } from './repository-database'
 
 describe('Sprint 2 — SHA-256 no Índice e Contrato de Persistência', () => {
@@ -76,7 +39,7 @@ describe('Sprint 2 — SHA-256 no Índice e Contrato de Persistência', () => {
 
     const expectedHash = createHash('sha256').update(sampleContent, 'utf-8').digest('hex')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     const files = model.getFiles()
@@ -91,7 +54,7 @@ describe('Sprint 2 — SHA-256 no Índice e Contrato de Persistência', () => {
     const initialContent = 'console.log("v1")\n'
     writeFileSync(filePath, initialContent, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Captura o hash antes da atualização (Recomendação 3 da auditoria)
@@ -117,7 +80,7 @@ describe('Sprint 2 — SHA-256 no Índice e Contrato de Persistência', () => {
     const content = 'export const x = 42\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     const filesFirstIndex = model.getFiles()
@@ -221,7 +184,7 @@ describe('Sprint 4 — Reconciliação de Abertura com Hash', () => {
     const content = 'export const x = 42\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model1 = new RepositoryModel(testDir)
+    const model1 = createRepositoryModel(testDir)
     await model1.indexRepository()
     model1.close()
 
@@ -231,7 +194,7 @@ describe('Sprint 4 — Reconciliação de Abertura com Hash', () => {
     utimesSync(filePath, newMtime, newMtime)
 
     // Reabre e reconcilia
-    const model2 = new RepositoryModel(testDir)
+    const model2 = createRepositoryModel(testDir)
     await model2.reconcileWithDisk()
 
     const files = model2.getFiles()
@@ -243,14 +206,14 @@ describe('Sprint 4 — Reconciliação de Abertura com Hash', () => {
     const filePath = join(testDir, 'sample.ts')
     writeFileSync(filePath, 'const a = 1\n', 'utf-8')
 
-    const model1 = new RepositoryModel(testDir)
+    const model1 = createRepositoryModel(testDir)
     await model1.indexRepository()
     model1.close()
 
     // Altera conteúdo
     writeFileSync(filePath, 'const a = 999\n', 'utf-8')
 
-    const model2 = new RepositoryModel(testDir)
+    const model2 = createRepositoryModel(testDir)
     await model2.reconcileWithDisk()
 
     const files = model2.getFiles()
@@ -261,7 +224,7 @@ describe('Sprint 4 — Reconciliação de Abertura com Hash', () => {
     const filePath = join(testDir, 'legacy.ts')
     writeFileSync(filePath, 'const legacy = true\n', 'utf-8')
 
-    const model1 = new RepositoryModel(testDir)
+    const model1 = createRepositoryModel(testDir)
     await model1.indexRepository()
 
     // Simula arquivo legado: zera o hash no banco
@@ -271,7 +234,7 @@ describe('Sprint 4 — Reconciliação de Abertura com Hash', () => {
     model1['db'].saveFile(legacyFile)
     model1.close()
 
-    const model2 = new RepositoryModel(testDir)
+    const model2 = createRepositoryModel(testDir)
     await model2.reconcileWithDisk()
 
     const filesAfter = model2.getFiles()
@@ -304,7 +267,7 @@ describe('Sprint 6 — Integrity Check Profundo', () => {
     const filePath = join(testDir, 'sample.ts')
     writeFileSync(filePath, 'export const x = 1\n', 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     const result = await model.verifyIntegrity()
@@ -319,7 +282,7 @@ describe('Sprint 6 — Integrity Check Profundo', () => {
     const originalContent = 'export const x = 1\n'
     writeFileSync(filePath, originalContent, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Altera o conteúdo do arquivo sem reindexar
@@ -342,7 +305,7 @@ describe('Sprint 6 — Integrity Check Profundo', () => {
   it('deve autocurar arquivo ausente no disco via reconcileWithDisk na Fase 0', async () => {
     const filePath = join(testDir, 'sample.ts')
     writeFileSync(filePath, 'export class Foo {}\n', 'utf-8')
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Deleta o arquivo do disco mas mantém no banco (simula corrupção)
@@ -359,7 +322,7 @@ describe('Sprint 6 — Integrity Check Profundo', () => {
   it('deve detectar elemento órfão quando elemento existe sem arquivo pai no banco', async () => {
     const filePath = join(testDir, 'sample.ts')
     writeFileSync(filePath, 'export class Foo {}\n', 'utf-8')
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Simula corrupção: remove o arquivo do banco MAS mantém os elementos
@@ -407,7 +370,7 @@ describe('Sprint 5 — Migração de Hashes Ausentes (Backfill)', () => {
     const content = 'const legacy = true\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Simula arquivo legado: zera o hash no banco
@@ -439,7 +402,7 @@ describe('Sprint 5 — Migração de Hashes Ausentes (Backfill)', () => {
     const content = 'export const x = 1\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Simula legado
@@ -490,7 +453,7 @@ describe('Sprint 15 — Autocura de Status Obsoleto e Reconciliação', () => {
     const content = 'export const a = 123\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Força status 'modified' no banco sem alterar o arquivo no disco
@@ -515,7 +478,7 @@ describe('Sprint 15 — Autocura de Status Obsoleto e Reconciliação', () => {
     const content = 'export const a = 123\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Altera o arquivo no disco e força status 'modified'

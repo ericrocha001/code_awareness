@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Resolver uma URL de deep link de campanha contra o projeto ativo e a lista de campanhas.
-2. Retornar uma decisão tipada (navegar ou erro) sem realizar side effects.
-
-Mapa de Relacionamentos do Script
-
-1. campaign-reference.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece parseCampaignReference para interpretar a URL.
-   - Criticidade: Alta
-
-2. shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo Campaign.
-   - Criticidade: Alta
-
-3. App.tsx / CodeCampaignView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consumidores planejados da decisão de navegação do deep link.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A função é pura — sem side effects, sem IPC, sem acesso a DOM/Electron/estado global.
-2. Nunca lança — qualquer entrada inválida produz uma decisão de erro.
-3. A validade da campanha é determinada pelo campaignId (âncora de estabilidade), nunca pelo nome.
-4. A comparação de projeto usa igualdade exata de caminho (activeProject.path === reference.repoPath).
-5. A decisão de erro sempre traz uma mensagem legível para exibição ao usuário.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { Campaign } from '../../../shared/types'

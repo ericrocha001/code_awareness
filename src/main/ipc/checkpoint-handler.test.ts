@@ -1,45 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o contrato IPC do CheckpointHandler isoladamente sem instanciar o Electron.
-2. Provar o registro de todos os 9 canais IPC de checkpoint no ipcMain.
-3. Provar validações de parâmetros de entrada (repoPath, name, checkpointId, campaignIds, details, newName).
-4. Provar rejeição de tentativas de path traversal nos IDs de checkpoint em canais IPC.
-5. Provar a captura de exceções do CheckpointService e sua tradução em respostas estruturadas { success: false, error }.
-6. Provar o retorno de respostas bem-sucedidas estruturadas { success: true, data }.
-
-Mapa de Relacionamentos do Script
-
-1. checkpoint-handler.ts
-   - Tipo: Dependência Direta
-   - Relação: Módulo sob teste — valida a função registerCheckpointHandlers.
-   - Criticidade: Alta
-
-2. electron
-   - Tipo: Contrato / Interface
-   - Relação: Mockado via vi.mock para capturar os handlers do ipcMain.handle.
-   - Criticidade: Alta
-
-3. ../core/checkpoint-service
-   - Tipo: Contrato / Interface
-   - Relação: Objeto mockado injetado no handler para controlar sucessos e falhas do serviço sem tocar no filesystem/Git.
-   - Criticidade: Alta
-
-4. ../core/fake-ports
-   - Tipo: Dependência Direta
-   - Relação: Fornece FakeActionLogPort injetado no handler para evitar escrita real no SQLite.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Handlers IPC nunca lançam exceções não tratadas para o caller — todas as falhas retornam { success: false, error }.
-2. O mapa de handlers capturados é limpo no beforeEach de cada teste.
-3. Nenhuma operação executa comandos Git, filesystem real ou SQLite durante os testes do handler.
-4. Nenhuma dependência direta de better-sqlite3 ou database-service.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'

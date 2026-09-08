@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Executar os testes de persistência do BetterSqlite3DatabaseAdapter diretamente no runtime Electron.
-2. Provar o funcionamento real do better-sqlite3 contra o SQLite nativo do Electron (ABI 123).
-3. Validar a criação do schema, migrações, isolamento de diretórios, contratos das 3 portas (ActionLogPort, CheckpointCatalogPort, CampaignPort) e ciclo de vida de persistência.
-4. Fornecer feedback claro (PASS/FAIL) e código de saída adequado (0 para sucesso, 1 para falha).
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/better-sqlite3-database-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Adaptador concreto compilado e testado ponta a ponta no runtime Electron.
-   - Criticidade: Alta
-
-2. package.json
-   - Tipo: Contrato / Interface
-   - Relação: Invocado pelo script npm run test:db sem toggle de ABI.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Execução exclusiva em diretórios temporários isolados via mkdtempSync com cleanup garantido.
-2. Nunca alterar ou tocar em arquivos reais do usuário.
-3. Não depender de Vitest — script puro Node/Electron com asserções estritas e saída por código de processo.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 const assert = require('assert')

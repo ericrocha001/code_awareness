@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o preview do diff Markdown dentro do drawer, harmonizado com a pele do drawer (Sprint 4).
-2. Suportar dropdowns via Popover (portal) — sem posicionamento inline nos menus.
-3. Garantir tipografia de contraste no markdown e respiro generoso.
-
-Mapa de Relacionamentos do Script
-
-1. CheckpointPreview.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo cp- para evitar colisões.
-2. O design deve respeitar as variáveis CSS globais — nenhuma cor hardcoded.
-3. Os menus não têm posicionamento próprio (position/top/left/z-index) — a responsabilidade é do Popover.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* ─── Root ──────────────────────────────────────────────────────────────── */

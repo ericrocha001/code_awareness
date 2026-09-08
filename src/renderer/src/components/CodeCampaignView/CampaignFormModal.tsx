@@ -1,34 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar modal de criar/editar campanha com campos: nome, descrição e status.
-2. Validar nome não vazio antes de confirmar.
-3. Gerenciar fechamento via ESC, clique no overlay e botão X.
-4. Reinicializar o estado interno a cada abertura.
-
-Mapa de Relacionamentos do Script
-
-1. CampaignFormModal.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos do modal (prefixo cfm-).
-   - Criticidade: Alta
-
-2. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos Campaign e CampaignStatus.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O modal nunca confirma com nome vazio — o botão de confirmar fica desabilitado.
-2. O estado interno é reinicializado a cada abertura (isOpen true).
-3. Fecha com ESC, clique no overlay, botão X e botão Cancelar.
-4. O campo de status usa select com duas opções: "Em andamento" (active) e "Concluída" (completed).
-5. Em modo criação, o status default é "Em andamento" e o campo de status fica oculto.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useState } from 'react'

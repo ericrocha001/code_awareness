@@ -1,61 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar os handlers IPC para verificação de repositório Git e listagem de arquivos modificados.
-2. Registrar os handlers IPC para controle do ciclo de vida das assinaturas de observação do WatcherService.
-3. Emitir eventos push ao renderer via webContents.send quando arquivos forem detectados pelo watcher.
-4. Registrar o handler IPC que dispara a geração do Semantic Diff via DiffService.
-5. Registrar handlers IPC para gerenciamento de arquivos ignorados no diff.
-6. Validar array vazio no handler git:generate-compression-markdown antes de delegar ao CompressionService.
-7. Reconciliar ignores removendo entradas cujo arquivo não existe mais no disco.
-8. Registrar os handlers IPC para geração coordenada com perfil e verificação de instalação do Code Source.
-
-Mapa de Relacionamentos do Script
-
-1. git-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e consome GitService para operações Git.
-   - Criticidade: Alta
-
-2. watcher-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Registra assinaturas de alteração de arquivo do WatcherService por raiz.
-   - Criticidade: Alta
-
-3. diff-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome DiffService para gerar diffs semânticos.
-   - Criticidade: Alta
-
-4. settings-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome SettingsService para ler/gravar configurações globais.
-   - Criticidade: Alta
-
-5. compression-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Instância injetada via parâmetro no registerGitHandlers para gerar o Markdown de compressão.
-   - Criticidade: Alta
-
-6. code-source-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e consome CodeSourceService para geração de Code Source completa e com perfil.
-   - Criticidade: Alta
-
-7. repomix-output-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e consome RepomixOutputAdapter para checar instalação do Repomix.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Handlers IPC nunca devem lançar exceções não tratadas para o renderer; erros devem ser capturados e retornados de forma estruturada.
-2. Caminhos de repositório recebidos devem sempre ser validados antes de qualquer operação no disco.
-3. O encerramento do watcher via IPC (watcher:stop) desassina apenas os ouvintes registrados via IPC, sem afetar outras raízes ou serviços como o Code Map.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain, shell, BrowserWindow } from 'electron'
@@ -70,6 +14,7 @@ import type { CompressionSettingsPayload } from '../../shared/types'
 import { CodeSourceService } from '../core/code-source-service'
 import { RepomixOutputAdapter } from '../core/repomix-output-adapter'
 import { SourceGenerationCoordinator } from '../core/source-generation-coordinator'
+import { CodeAwarenessIgnoreService } from '../core/code-awareness-ignore-service'
 
 const gitService = new GitService()
 const diffService = new DiffService()
@@ -87,8 +32,10 @@ function isValidPath(value: unknown): value is string {
 export function registerGitHandlers(
   watcherService: WatcherService,
   settingsService: SettingsService,
-  compressionService: CompressionService
+  compressionService: CompressionService,
+  ignoreService?: CodeAwarenessIgnoreService
 ): void {
+  const codeAwarenessIgnoreService = ignoreService ?? new CodeAwarenessIgnoreService(settingsService)
   ipcMain.handle('git:check-repository', async (_event, dirPath: string) => {
     if (!isValidPath(dirPath)) return false
     return gitService.isGitRepository(dirPath)
@@ -189,48 +136,20 @@ export function registerGitHandlers(
   // Adiciona um arquivo/padrão à lista de ignorados para o repositório informado
   ipcMain.handle('git:add-ignored-file', async (_event, repoPath: string, relativePath: string) => {
     if (!isValidPath(repoPath) || !isValidPath(relativePath)) return null
-    const settings = settingsService.loadSettings()
-    if (!settings.ignoredDiffFiles[repoPath]) {
-      settings.ignoredDiffFiles[repoPath] = []
-    }
-    const list = settings.ignoredDiffFiles[repoPath]
-    if (!list.includes(relativePath)) {
-      list.push(relativePath)
-    }
-    settingsService.saveSettings(settings)
-    return settings
+    return codeAwarenessIgnoreService.add(repoPath, relativePath)
   })
 
   // Remove um arquivo/padrão da lista de ignorados para o repositório informado
   ipcMain.handle('git:remove-ignored-file', async (_event, repoPath: string, relativePath: string) => {
     if (!isValidPath(repoPath) || !isValidPath(relativePath)) return null
-    const settings = settingsService.loadSettings()
-    const repoIgnores = settings.ignoredDiffFiles[repoPath]
-    if (repoIgnores) {
-      settings.ignoredDiffFiles[repoPath] = repoIgnores.filter(p => p !== relativePath)
-    }
-    settingsService.saveSettings(settings)
-    return settings
+    return codeAwarenessIgnoreService.remove(repoPath, relativePath)
   })
-
-
 
   // Reconciliador: remove da lista de ignorados apenas padrões/arquivos que representam arquivos
   // deletados fisicamente do disco, evitando entradas fantasma.
-  ipcMain.handle('git:reconcile-ignored-files', async (_event, repoPath: string, _currentModifiedFiles: string[]) => {
+  ipcMain.handle('git:reconcile-ignored-files', async (_event, repoPath: string, _currentModifiedFiles?: string[]) => {
     if (!isValidPath(repoPath)) return null
-    const settings = settingsService.loadSettings()
-    const repoIgnores = settings.ignoredDiffFiles[repoPath]
-    if (repoIgnores) {
-      settings.ignoredDiffFiles[repoPath] = repoIgnores.filter(p => {
-        // Se for um padrão (ex: *.css), mantém.
-        if (p.includes('*')) return true
-        // Caso contrário, valida existência no disco.
-        return existsSync(join(repoPath, p))
-      })
-    }
-    settingsService.saveSettings(settings)
-    return settings
+    return codeAwarenessIgnoreService.reconcile(repoPath)
   })
 
   // Revela um arquivo no Explorer/Finder nativo do sistema operacional

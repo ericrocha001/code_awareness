@@ -1,40 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar uma alça vertical de arraste entre duas colunas de qualquer view com colunas redimensionáveis.
-2. Emitir o deslocamento horizontal em pixels via callback onDrag durante o arraste.
-3. Avisar o fim do arraste via callback onDragEnd.
-4. Registrar e remover listeners de mousemove/mouseup no document durante o arraste.
-
-Mapa de Relacionamentos do Script
-
-1. ../../CodeMapView/CodeMapView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Instancia este componente duas vezes, entre as três zonas de coluna.
-   - Criticidade: Alta
-
-2. ../FileCollection/FileView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Instancia este componente por célula redimensionável do header da FileView.
-   - Criticidade: Alta
-
-3. ColumnResizer.css
-   - Tipo: Relação de UI
-   - Relação: Fornece os estilos da alça (prefixo crs-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nunca guarda larguras internamente — apenas emite deltas via onDrag.
-2. Os listeners de document são sempre removidos ao soltar o mouse ou ao desmontar o componente.
-3. O foco do teclado nunca é capturado por este componente.
-4. Componente compartilhado (shared/): nenhuma dependência de domínio específico de uma view consumidora.
-5. O onDrag é coalescido por rAF — no máximo uma chamada por frame durante o arraste. O delta é acumulado entre frames e enviado em batch.
-6. No drag end, o delta acumulado é aplicado via onDrag antes de onDragEnd ser chamado (flush explícito), garantindo que o último deslocamento não seja perdido.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'

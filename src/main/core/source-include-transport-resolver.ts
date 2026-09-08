@@ -1,34 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Decidir o transporte de inclusão (inline-include vs config-file) com base na estimativa de tamanho da linha de comando.
-2. Calcular a estimativa em bytes UTF-8 da linha de comando no modo inline.
-3. Criar o arquivo de configuração temporário JSON com a lista de arquivos selecionados.
-4. Remover o arquivo de configuração temporário tolerando falha sem lançar.
-
-Mapa de Relacionamentos do Script
-
-1. code-source-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa o tipo SourceIncludeTransport como contrato de retorno do método decide.
-   - Criticidade: Alta
-
-2. repomix-output-adapter.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome decide, estimateInlineBytes, createTempConfigFile e removeTempConfigFile.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. decide retorna 'config-file' estritamente quando a estimativa excede o orçamento (comparação com >).
-2. A fórmula de estimateInlineBytes preserva exatamente os mesmos operandos do adapter original, incluindo o literal 'repomix.cmd'.
-3. createTempConfigFile escreve o arquivo no diretório temporário do SO, nunca no repositório.
-4. removeTempConfigFile nunca lança — registra aviso em falha e encerra silenciosamente.
-5. O limiar de orçamento e o overhead de flags são idênticos aos valores originais do adapter.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { writeFileSync, unlinkSync } from 'fs'

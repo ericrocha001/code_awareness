@@ -1,31 +1,13 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o componente DashXmlPreview para exibição de código XML, contadores e barra de ações (Copiar e Exportar).
-
-Mapa de Relacionamentos do Script
-
-1. DashXmlPreview.tsx
-   - Tipo: Relação de UI
-   - Relação: Fornece classes CSS para o bloco de visualização XML.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A área de código deve suportar scroll horizontal e vertical sem vazar da tela.
-2. Os botões de ação devem manter estados visuais de feedback e foco consistentes com o tema.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .dash-preview-container {
   display: flex;
   flex-direction: column;
-  background-color: var(--bg-secondary, #1e1e1e);
-  border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
   overflow: hidden;
   margin-bottom: 16px;
 }
@@ -35,13 +17,13 @@ Invariantes do Script
   align-items: center;
   justify-content: space-between;
   padding: 10px 16px;
-  background-color: rgba(255, 255, 255, 0.02);
-  border-bottom: 1px solid var(--border-color, #333);
+  background-color: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-subtle);
 }
 
 .dash-preview-meta {
   font-size: 12px;
-  color: var(--text-secondary, #aaa);
+  color: var(--text-secondary);
 }
 
 .dash-preview-actions {
@@ -50,56 +32,25 @@ Invariantes do Script
   gap: 8px;
 }
 
-.dash-action-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  background-color: var(--btn-bg, #2a2a2a);
-  color: var(--text-primary, #fff);
-  border: 1px solid var(--border-color, #444);
-  transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-
-.dash-action-btn:hover {
-  background-color: var(--btn-hover-bg, #383838);
-  border-color: var(--border-hover-color, #666);
-}
-
-.dash-action-btn.primary {
-  background-color: var(--accent, #7852ee);
-  border-color: var(--accent, #7852ee);
-  color: #fff;
-}
-
-.dash-action-btn.primary:hover {
-  filter: brightness(1.1);
-}
-
 .dash-action-feedback {
   font-size: 12px;
   font-weight: 500;
-  color: #3fb950;
+  color: var(--color-green);
   margin-right: 8px;
 }
 
 .dash-action-feedback.error {
-  color: #f85149;
+  color: var(--color-danger);
 }
 
 .dash-code-block {
   margin: 0;
   padding: 16px;
-  background-color: var(--bg-code, #141414);
-  max-height: 450px;
+  background-color: var(--bg-primary);
   overflow: auto;
-  font-family: var(--font-mono, 'Fira Code', Consolas, monospace);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
-  color: var(--text-code, #d4d4d4);
+  color: var(--text-primary);
   white-space: pre;
 }

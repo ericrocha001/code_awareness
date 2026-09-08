@@ -1,27 +1,5 @@
 ﻿/*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o modal de integrity check (prefixo icm-).
-2. Alinhar o modal ao design system global usando apenas variáveis CSS do tema.
-3. Reutilizar os componentes de botão do design system (app-pill-btn e app-ghost-btn) no rodapé.
-
-Mapa de Relacionamentos do Script
-
-1. IntegrityCheckModal.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo icm- para evitar colisão com outros componentes.
-2. Nenhuma cor hardcoded — apenas variáveis CSS globais (exceto as cores semânticas de severity error/warning).
-3. O overlay usa position: fixed e aplica backdrop-filter: blur().
-4. O botão de fechar do cabeçalho segue a pele dos demais modais (fundo transparente, hover com var(--bg-secondary)).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .icm-overlay {

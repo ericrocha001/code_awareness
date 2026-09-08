@@ -1,27 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout full-width do container principal.
-2. Estilizar os modais compartilhados (criação, restauração, exclusão, limpeza, parcial).
-3. Garantir paridade visual com as demais abas sem conflito de classes CSS.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo (prefixo ccp-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O design deve respeitar estritamente as variáveis de cores globais (--bg-primary, --bg-secondary, --border, --accent).
-2. O modal deve ter z-index elevado (999) para sobrepor outros elementos.
-3. Todas as classes usam prefixo ccp- para evitar colisão com CodeCompressionView (que usa cc-).
-4. Estilos de CommandBar e ActionsBar removidos — agora usam ViewToolbar e ActionBar compartilhadas.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* 

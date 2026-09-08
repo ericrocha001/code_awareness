@@ -1,40 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer infraestrutura compartilhada da bateria E2E do Code Dash: provedores espiões com contagem de chamadas, builder de requisições e verificador estrutural de XML.
-2. Padronizar a montagem do DashService real (parser, validator, resolver, planner e assembler reais) com provedores controlados.
-
-Mapa de Relacionamentos do Script
-
-1. dash-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instanciado com dependências reais e provedores espiões nos testes E2E.
-   - Criticidade: Alta
-
-2. dash-file-resolver.ts
-   - Tipo: Dependência Direta
-   - Relação: Instanciado real por repoPath em cada execução (nunca mockado).
-   - Criticidade: Alta
-
-3. providers/context-provider.ts
-   - Tipo: Contrato / Interface
-   - Relação: SpyContextProvider implementa o contrato para controle determinístico e contagem.
-   - Criticidade: Alta
-
-4. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Reexporta primitivas de repositório temporário para a bateria.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nenhum helper mocka Parser, Validator, Resolver, Planner ou Assembler — o coração do contrato sempre roda real.
-2. SpyContextProvider registra toda invocação (itens, profiles) antes de produzir qualquer efeito.
-3. A validação estrutural de XML é sintática (balanceamento de tags e CDATA), sem dependência externa de parser XML.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type {

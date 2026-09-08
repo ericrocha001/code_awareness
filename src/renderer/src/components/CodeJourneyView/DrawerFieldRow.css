@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar a linha de ficha (DrawerFieldRow) com layout flex, rótulo cinza e valor branco.
-2. Definir a variante de destaque cromático (df-value--accent).
-
-Mapa de Relacionamentos do Script
-
-1. DrawerFieldRow.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo df- para evitar colisões.
-2. A linha não define sua própria divisória inferior — isso é responsabilidade do container.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .df-row {

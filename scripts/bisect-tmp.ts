@@ -1,44 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o OneClickXmlService contra o Repomix real em cenários de aceitação end-to-end.
-2. Provar o passthrough fiel (PA-00) comparando byte a byte o XML do serviço com a chamada direta ao RepomixAdapter.
-3. Provar as três flags de limpeza (removeComments, removeEmptyLines, truncateBase64) sobre conteúdo real.
-4. Provar as políticas de ignore (Git Ignore e Code Awareness Ignore) e sua composição.
-5. Documentar por teste o comportamento real de untracked files e arquivos binários no Repomix 1.15.0.
-
-Mapa de Relacionamentos do Script
-
-1. one-click-xml-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Sujeito dos testes de aceitação (gera o One-Click XML real).
-   - Criticidade: Alta
-
-2. ignore-policy.ts
-   - Tipo: Dependência Direta
-   - Relação: Instanciado com GitService real e SettingsReader fake para resolver a allowlist.
-   - Criticidade: Alta
-
-3. repomix-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Porta real de Direct Output usada tanto no passthrough (PA-00) quanto nos demais cenários.
-   - Criticidade: Alta
-
-4. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria repositórios Git temporários reais e limpa após cada teste.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum mock substitui o Repomix — todos os cenários executam a CLI real (npx repomix).
-2. O teste não enfraquece assertions para acomodar comportamento defeituoso; comportamento observado do Repomix é documentado via console.log.
-3. Comportamento documentado do Repomix 1.15.0 (sondagem prévia): arquivos binários explicitamente incluídos são silenciosamente excluídos de <files> sem falhar; arquivos untracked são incluídos; arquivos git-ignored são excluídos mesmo com include explícito.
-4. Cada teste cria e limpa seu próprio repositório temporário (isolamento total).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { writeFileSync } from 'fs'

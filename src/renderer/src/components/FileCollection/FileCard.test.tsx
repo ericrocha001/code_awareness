@@ -1,33 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a renderização dos metadados no componente FileCard (nome, caminho, tokens, badges).
-2. Validar o disparo de callbacks de interação delegadas (onToggle, onTagInteraction, onActionInteraction).
-3. Garantir a ausência de componentes de popover pesados (.pop-root, .tp-popover) no DOM interno do card.
-4. Validar o suporte à API dupla de tags (legada vs nova).
-5. Comprovar a estabilidade do React.memo com comparador customizado frente a mudanças de props.
-
-Mapa de Relacionamentos do Script
-
-1. ../FileCard/FileCard.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, screen, fireEvent e cleanup para asserções de DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O FileCard sob teste nunca monta instâncias internas de Popover ou TagPopover.
-2. O comparador do React.memo é estritamente validado para não re-renderizar quando as props são estáveis e re-renderizar quando propriedades funcionais mudam.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

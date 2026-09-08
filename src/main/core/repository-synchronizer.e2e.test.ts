@@ -1,43 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Testar a deduplicação de eventos na fila do RepositorySynchronizer.
-2. Testar o debounce de 500ms para absorção de tempestades de eventos.
-3. Testar a autocura de metadados quando o hash do disco é igual ao indexado.
-4. Testar a marcação como modified quando o hash diferir.
-5. Testar o tratamento de arquivos legados (contentHash nulo).
-6. Testar a detecção de arquivos deletados.
-7. Testar o re-enfileiramento de arquivos instáveis durante estabilização.
-8. Testar que reconcileMemoryWithDatabase remove caminhos obsoletos sem tocar pendingFiles.
-
-Mapa de Relacionamentos do Script
-
-1. repository-synchronizer.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e executa o RepositorySynchronizer para verificar comportamento de detecção.
-   - Criticidade: Alta
-
-2. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria instância real de RepositoryModel para integração com banco de dados.
-   - Criticidade: Alta
-
-3. repository-events.ts
-   - Tipo: Dependência Direta
-   - Relação: Emite eventos no repositoryEventBus para acionar o Synchronizer nos testes.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes não devem alterar dados globais do repositoryEventBus após o teste (limpeza via dispose).
-2. Cada teste usa diretório temporário isolado para evitar interferência entre cenários.
-3. Os testes validam apenas comportamento do Synchronizer, não do Model ou do banco.
-4. reconcileMemoryWithDatabase nunca remove entradas de pendingFiles, apenas de modifiedFiles.
-5. O afterEach deve ser async com loop de retry para contornar lock do WAL do SQLite no Windows.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -46,7 +8,7 @@ import { statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
-import { RepositoryModel } from './repository-model'
+import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { RepositorySynchronizer } from './repository-synchronizer'
 import { repositoryEventBus } from './repository-events'
 import { closeRepositoryDatabase } from './repository-database'
@@ -83,7 +45,7 @@ describe('Sprint 3 — Detecção Verificada', () => {
   }> {
     const filePath = join(testDir, filename)
     writeFileSync(filePath, content, 'utf-8')
-    model = new RepositoryModel(testDir)
+    model = createRepositoryModel(testDir)
     await model.indexRepository()
     const repositoryId = model.getRepositoryId()
     synchronizer = new RepositorySynchronizer(model, repositoryId)
@@ -109,20 +71,31 @@ describe('Sprint 3 — Detecção Verificada', () => {
     expect(synchronizer.getPendingFilesCount()).toBe(0)
   })
 
-  it('deve marcar arquivo como modified quando hash do disco difere do indexado', async () => {
+  it('deve marcar arquivo como modified E reindexar automaticamente (auto-sync) quando hash difere', async () => {
     const { filePath, repositoryId } = await setupWithFile('sample.ts', 'const a = 1\n')
 
     // Altera conteúdo do arquivo no disco
-    writeFileSync(filePath, 'const a = 999\n', 'utf-8')
+    const newContent = 'const a = 999\n'
+    writeFileSync(filePath, newContent, 'utf-8')
 
     repositoryEventBus.emitFileModified(repositoryId, 'sample.ts')
     expect(synchronizer.getPendingFilesCount()).toBe(1)
 
-    // Aguarda o debounce (500ms) + estabilização (100ms) + I/O assíncrono
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    // Aguarda debounce (500ms) + estabilização + auto-reindex atômico
+    await new Promise(resolve => setTimeout(resolve, 1500))
 
+    // Auto-sync: arquivo é reindexado automaticamente (status indexed, não modified)
     const files = model.getFiles()
-    expect(files[0].status).toBe('modified')
+    expect(files[0].status).toBe('indexed')
+    expect(files[0].contentHash).toBe(createHash('sha256').update(newContent, 'utf-8').digest('hex'))
+
+    // Recuperação exata retorna o NOVO conteúdo
+    const elements = model.getElementsByFile(files[0].id)
+    const constA = elements.find(e => e.name === 'a' && e.kind === 'constant')
+    expect(constA).toBeDefined()
+    const source = await model.getElementExactSource(constA!.id)
+    expect(source).not.toBeNull()
+    expect(source!.content).toContain('999')
   })
 
   it('deve autocurar metadados e NÃO marcar como modified quando hash é igual', async () => {
@@ -170,7 +143,7 @@ describe('Sprint 3 — Detecção Verificada', () => {
     legacyDb.close()
 
     // Reabre model e synchronizer com o ID da nova instância (pode diferir da sessão anterior)
-    model = new RepositoryModel(testDir)
+    model = createRepositoryModel(testDir)
     synchronizer = new RepositorySynchronizer(model, model.getRepositoryId())
 
     const filesWithNullHash = model.getFiles()
@@ -184,7 +157,7 @@ describe('Sprint 3 — Detecção Verificada', () => {
     expect(filesAfter[0].status).toBe('modified')
   })
 
-  it('deve marcar arquivo deletado como modified', async () => {
+  it('deve remover arquivo deletado automaticamente (auto-sync) e limpar o índice', async () => {
     const { filePath, repositoryId } = await setupWithFile('sample.ts', 'const a = 1\n')
 
     // Remove o arquivo do disco
@@ -193,10 +166,16 @@ describe('Sprint 3 — Detecção Verificada', () => {
 
     repositoryEventBus.emitFileModified(repositoryId, 'sample.ts')
 
-    await new Promise(resolve => setTimeout(resolve, 1000))
+    // Aguarda debounce + estabilização + auto-reindex (que detecta deleção e remove do banco)
+    await new Promise(resolve => setTimeout(resolve, 1500))
 
-    // Arquivo deletado deve estar marcado como modified para o Model remover na reindexação
-    expect(synchronizer.getModifiedFilesCount()).toBe(1)
+    // Auto-sync: arquivo deletado é removido do índice (file + elements + relationships)
+    const files = model.getFiles()
+    expect(files.length).toBe(0)
+    expect(synchronizer.getModifiedFilesCount()).toBe(0)
+
+    // Não existe mais nenhum elemento no repositório
+    expect(model.getElementsByRepository()).toHaveLength(0)
   })
 
   it('deve calcular hash SHA-256 correto para confirmação de mudança', async () => {
@@ -250,7 +229,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
   })
 
   it('não deve executar varredura quando timer está desabilitado', async () => {
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId(), {
       periodicScanIntervalMs: 0 // desabilitado
     })
@@ -269,7 +248,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     const filePath = join(testDir, 'sample.ts')
     writeFileSync(filePath, 'export const x = 1\n', 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId(), {
@@ -294,7 +273,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     const filePath = join(testDir, 'sample.ts')
     writeFileSync(filePath, 'export const x = 1\n', 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Marca como modified no banco sem alterar o conteúdo (status obsoleto)
@@ -322,7 +301,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     const filePath = join(testDir, 'sample.ts')
     writeFileSync(filePath, 'export const x = 1\n', 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
     // Altera o conteúdo no disco e marca como modified no banco
@@ -373,7 +352,7 @@ describe('Sprint 15 — reconcileMemoryWithDatabase', () => {
     const content = 'export const x = 1\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
     const repositoryId = model.getRepositoryId()
     const synchronizer = new RepositorySynchronizer(model, repositoryId)
@@ -399,7 +378,7 @@ describe('Sprint 15 — reconcileMemoryWithDatabase', () => {
     const content = 'export const x = 1\n'
     writeFileSync(filePath, content, 'utf-8')
 
-    const model = new RepositoryModel(testDir)
+    const model = createRepositoryModel(testDir)
     await model.indexRepository()
     const repositoryId = model.getRepositoryId()
     const synchronizer = new RepositorySynchronizer(model, repositoryId)

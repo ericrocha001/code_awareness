@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Avaliar a identidade de conteúdo de arquivos com suporte a fast path O(1) baseado em mtime e tamanho.
-2. Resolver o hash SHA-256 do conteúdo utilizando provider customizado injetado ou leitura direta em disco.
-3. Determinar o status de cache hit (por metadata ou por hash) em relação à entrada em cache informada.
-
-Mapa de Relacionamentos do Script
-
-1. compression-cache.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome o tipo CacheEntry para inspecionar os metadados e o hash cacheados.
-   - Criticidade: Alta
-
-2. compression-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome resolveContentIdentity para decidir se utiliza conteúdo cacheado ou se enfileira o arquivo para compressão.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O Fast Path de mtime+tamanho é avaliado antes de qualquer operação de I/O de conteúdo ou cálculo de hash.
-2. Falhas no provider injetado nunca abortam a execução, acionando fallback transparente para leitura de disco.
-3. Falhas na leitura do arquivo em disco retornam hash nulo sem lançar exceções para o chamador.
-4. O módulo não armazena estado interno e não realiza mutações no cache.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { readFile } from 'fs/promises'

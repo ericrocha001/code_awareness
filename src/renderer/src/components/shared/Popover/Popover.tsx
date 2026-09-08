@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar conteúdo flutuante via portal no document.body, fora do fluxo DOM do container pai.
-2. Posicionar o balão dinamicamente a partir da âncora, escolhendo lado vertical (acima/abaixo) conforme o espaço livre na janela.
-3. Gerenciar o ciclo de vida de fechamento: clique fora (excluindo âncora e balão), tecla ESC, rolagem externa ao popover e redimensionamento da janela.
-4. Aplicar clamp nas quatro bordas da janela para garantir que o balão nunca ultrapasse a área visível.
-
-Mapa de Relacionamentos do Script
-
-1. Popover.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos com prefixo pop-.
-   - Criticidade: Alta
-
-2. createPortal (react-dom)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o conteúdo no document.body.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nunca renderiza no DOM normal — a saída é sempre via portal para document.body.
-2. Quando open é false, retorna null e não registra ouvintes de evento.
-3. Todo ouvinte de evento registrado (mousedown, keydown, scroll, resize) é removido na limpeza do efeito.
-4. O posicionamento nunca deixa o balão sair da janela: clamp com margem mínima de 8px nas quatro bordas.
-5. O componente não conhece o conteúdo do children — apenas posiciona o que recebe.
-6. Clique na âncora não dispara onClose.
-7. Clique dentro do balão não dispara onClose.
-8. A medição de geometria usa useLayoutEffect (síncrono, antes da pintura) para evitar flash visual.
-9. Todos os hooks ficam no topo, incondicionais — o return null é apenas no JSX.
-10. A posição é calculada uma única vez por abertura; conteúdo de tamanho variável enquanto aberto não é reposicionado automaticamente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useRef, useEffect, useLayoutEffect } from 'react'

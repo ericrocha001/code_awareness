@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar a seleção de arquivos da coleção via operações unitária (toggleFile), global (toggleMaster) e de limpeza (clearSelection).
-2. Fornecer callbacks estáveis via useRef para evitar re-renderizações desnecessárias em componentes filhos memoizados.
-3. Derivar métricas de seleção (contagem total e seleção completa).
-
-Mapa de Relacionamentos do Script
-
-1. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa FileCardFile e FileCollectionSelectionResult.
-   - Criticidade: Alta
-
-2. FileCollectionView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome o hook para coordenar o estado de seleção da coleção.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Os callbacks toggleFile, toggleMaster e clearSelection dependem exclusivamente de onSelectionChange, mantendo referências estáveis independente de mutações em selectedFiles ou files.
-2. A criação de novos conjuntos de seleção utiliza new Set(ref.current) em vez de spread operator.
-3. isAllSelected é false quando a lista de arquivos estiver vazia, mesmo com selectedFiles vazio.
-4. O hook contém EXCLUSIVAMENTE lógica de seleção — preparação de dados (tags, tokens) pertence ao useFileCollectionData.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useCallback, useEffect, useRef } from 'react'

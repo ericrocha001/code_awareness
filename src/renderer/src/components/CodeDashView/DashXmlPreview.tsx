@@ -1,42 +1,23 @@
-/*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Exibir o XML canônico gerado pelo Code Dash com contagem de linhas/caracteres.
-2. Fornecer ações diretas de cópia para a área de transferência e exportação via diálogo nativo saveXml.
-3. Gerenciar o feedback visual temporário das ações de cópia e exportação.
-
-Mapa de Relacionamentos do Script
-
-1. DashXmlPreview.css
-   - Tipo: Relação de UI
-   - Relação: Fornece estilos para o visualizador de código e barra de ferramentas.
-   - Criticidade: Alta
-
-2. CodeDashView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Componente filho embutido na visualização principal quando no estado 'done'.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As ações de cópia e exportação apenas consomem o XML pronto sem disparar nova geração.
-2. Feedbacks temporários de interação devem ser limpos automaticamente após o timeout.
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-
 import React, { useMemo, useState } from 'react'
-import { Check, Copy, Download } from 'lucide-react'
+import { Check, Copy, Download, RotateCcw } from 'lucide-react'
+import { TokenBadge } from '../shared/TokenBadge/TokenBadge'
 import './DashXmlPreview.css'
 
 export interface DashXmlPreviewProps {
   xml: string
   name?: string
+  tokenCount?: number
+  onReset?: () => void
 }
 
-export const DashXmlPreview: React.FC<DashXmlPreviewProps> = ({ xml, name }) => {
+function formatTokens(count: number): string {
+  if (count >= 1000) {
+    return `${(count / 1000).toFixed(1)}k`
+  }
+  return String(count)
+}
+
+export const DashXmlPreview: React.FC<DashXmlPreviewProps> = ({ xml, name, tokenCount, onReset }) => {
   const [feedback, setFeedback] = useState<{
     text: string
     isError?: boolean
@@ -82,6 +63,12 @@ export const DashXmlPreview: React.FC<DashXmlPreviewProps> = ({ xml, name }) => 
     <div className="dash-preview-container">
       <div className="dash-preview-toolbar">
         <span className="dash-preview-meta">
+          {typeof tokenCount === 'number' && tokenCount > 0 && (
+            <>
+              <TokenBadge tokens={tokenCount} formatTokenCount={formatTokens} />
+              {' · '}
+            </>
+          )}
           {lineCount} {lineCount === 1 ? 'linha' : 'linhas'} · {charCount.toLocaleString('pt-BR')} caracteres
         </span>
 
@@ -96,7 +83,7 @@ export const DashXmlPreview: React.FC<DashXmlPreviewProps> = ({ xml, name }) => 
 
           <button
             type="button"
-            className="dash-action-btn primary"
+            className="app-pill-btn primary"
             onClick={handleCopy}
             title="Copiar XML para a área de transferência"
           >
@@ -110,13 +97,25 @@ export const DashXmlPreview: React.FC<DashXmlPreviewProps> = ({ xml, name }) => 
 
           <button
             type="button"
-            className="dash-action-btn"
+            className="app-ghost-btn"
             onClick={handleExport}
             title="Salvar arquivo XML no disco"
           >
             <Download size={14} />
             <span>Exportar XML</span>
           </button>
+
+          {onReset && (
+            <button
+              type="button"
+              className="app-ghost-btn"
+              onClick={onReset}
+              title="Iniciar nova solicitação"
+            >
+              <RotateCcw size={14} />
+              <span>Nova Solicitação</span>
+            </button>
+          )}
         </div>
       </div>
 

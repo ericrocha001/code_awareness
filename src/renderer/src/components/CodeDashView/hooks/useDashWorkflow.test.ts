@@ -1,26 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-
-Responsabilidades do Script
-
-1. Validar unitariamente a máquina de estados e as transições do hook useDashWorkflow.
-2. Garantir que as chamadas IPC e tratamento de respostas de sucesso e erro funcionem conforme especificado.
-
-Mapa de Relacionamentos do Script
-
-1. useDashWorkflow.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa e testa as transições do hook.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes devem rodar de forma isolada em memória com window.codeAwareness mockado.
-2. Cobrir todos os casos obrigatórios da Sprint 5 para useDashWorkflow.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { act, renderHook } from '@testing-library/react'
@@ -45,6 +25,7 @@ describe('useDashWorkflow', () => {
     expect(result.current.input).toBe('')
     expect(result.current.resolutionReport).toBeNull()
     expect(result.current.xml).toBeNull()
+    expect(result.current.tokenCount).toBeNull()
     expect(result.current.error).toBeNull()
   })
 
@@ -112,7 +93,7 @@ describe('useDashWorkflow', () => {
     expect(result.current.resolutionReport).toBeNull()
   })
 
-  it('deve transicionar para "done" quando generate for chamado no estado "resolved" e obtiver sucesso', async () => {
+  it('deve transicionar para "done" quando generate for chamado no estado "resolved", repassar settings e capturar tokenCount', async () => {
     vi.mocked(window.codeAwareness.dashParseAndResolve).mockResolvedValue({
       success: true,
       data: { valid: true, request: { items: [] }, failures: [] }
@@ -122,7 +103,8 @@ describe('useDashWorkflow', () => {
       success: true,
       data: {
         success: true,
-        xml: '<code-dash-context />'
+        xml: '<code-dash-context />',
+        tokenCount: 420
       }
     } as any)
 
@@ -138,12 +120,20 @@ describe('useDashWorkflow', () => {
 
     expect(result.current.state).toBe('resolved')
 
+    const settings = {
+      removeComments: true,
+      removeEmptyLines: true,
+      truncateBase64: true
+    }
+
     await act(async () => {
-      await result.current.generate()
+      await result.current.generate(settings)
     })
 
+    expect(window.codeAwareness.dashGenerate).toHaveBeenCalledWith('{}', repoPath, settings)
     expect(result.current.state).toBe('done')
     expect(result.current.xml).toBe('<code-dash-context />')
+    expect(result.current.tokenCount).toBe(420)
     expect(result.current.error).toBeNull()
   })
 
@@ -175,6 +165,7 @@ describe('useDashWorkflow', () => {
     expect(result.current.state).toBe('error')
     expect(result.current.error).toBe('Falha no Repomix')
     expect(result.current.xml).toBeNull()
+    expect(result.current.tokenCount).toBeNull()
   })
 
   it('deve ignorar generate se chamado fora do estado "resolved"', async () => {
@@ -194,6 +185,15 @@ describe('useDashWorkflow', () => {
       data: { valid: true, request: { items: [] }, failures: [] }
     } as any)
 
+    vi.mocked(window.codeAwareness.dashGenerate).mockResolvedValue({
+      success: true,
+      data: {
+        success: true,
+        xml: '<code-dash-context />',
+        tokenCount: 150
+      }
+    } as any)
+
     const { result } = renderHook(() => useDashWorkflow(repoPath))
 
     act(() => {
@@ -206,6 +206,13 @@ describe('useDashWorkflow', () => {
 
     expect(result.current.state).toBe('resolved')
 
+    await act(async () => {
+      await result.current.generate()
+    })
+
+    expect(result.current.state).toBe('done')
+    expect(result.current.tokenCount).toBe(150)
+
     act(() => {
       result.current.reset()
     })
@@ -214,6 +221,7 @@ describe('useDashWorkflow', () => {
     expect(result.current.input).toBe('')
     expect(result.current.resolutionReport).toBeNull()
     expect(result.current.xml).toBeNull()
+    expect(result.current.tokenCount).toBeNull()
     expect(result.current.error).toBeNull()
   })
 })

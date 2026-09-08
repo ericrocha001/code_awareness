@@ -1,27 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar que resolveTagPalette retorna paletas determinísticas e contrastantes por tema.
-2. Garantir que entradas inválidas retornam a paleta neutra legível e nunca lançam exceção.
-3. Verificar a invariante de delta de luminosidade mínimo entre background e text.
-
-Mapa de Relacionamentos do Script
-
-1. color-utils.ts
-   - Tipo: Dependência Direta
-   - Relação: Módulo sob teste.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Para qualquer entrada válida e tema, a diferença de luminância entre background e text é superior a 0.55.
-2. Entradas inválidas nunca lançam exceção — retornam paleta neutra.
-3. A função é determinística: mesma entrada → mesma saída.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

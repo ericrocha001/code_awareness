@@ -1,55 +1,10 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Expor APIs seguras e limitadas do processo principal para o renderer usando contextBridge.
-2. Garantir isolamento de contexto impedindo o acesso direto a módulos do Node.js pela interface.
-3. Mapear os canais IPC do fluxo de monitoramento Git, de arquivos modificados e de importância para o renderer.
-4. Expor listeners e APIs para permitir a sincronização em tempo real de importância entre abas e atualizações do Code Map.
-5. Expor ao renderer a URL de deep link pendente (getPendingDeepLink) e a escuta de novas URLs (onDeepLink).
-6. Expor a API generateScope do Code Map para o renderer.
-7. Expor a API generateCodeSourceWithProfile do Code Source para o renderer.
-8. Expor as APIs do Code Dash (dashParseAndResolve, dashGenerate e dashOneClickXml) para o renderer.
-
-Mapa de Relacionamentos do Script
-
-1. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece as definições de tipo compartilhadas expostas às APIs do preload.
-   - Criticidade: Alta
-
-2. git-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Registra os handlers correspondentes aos métodos invocados pelo preload.
-   - Criticidade: Alta
-
-3. file-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Registra os handlers correspondentes a salvamento, seleção e propagação de arquivos expostos por este preload.
-   - Criticidade: Alta
-
-4. code-map-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Registra os handlers e emite os eventos IPC do Code Map expostos por este preload.
-   - Criticidade: Alta
-
-5. dash-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Registra os handlers correspondentes aos métodos do Code Dash invocados por este preload.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O isolamento de contexto deve ser sempre mantido.
-2. Módulos Node.js nunca devem ser expostos diretamente ao renderer.
-3. Todos os métodos expostos pelo contextBridge devem fazer uso estrito de IPC seguro.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
+import type { RepoDiscoveryRequest, RepoDiscoveryResult } from '../shared/types/repo-discovery-types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
@@ -378,7 +333,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     ipcRenderer.invoke('code-map:get-file-content', repoPath, relativePath),
   openInVSCode: (repoPath: string, elementId: string) =>
     ipcRenderer.invoke('code-map:open-in-vscode', repoPath, elementId),
-  verifyIntegrity: (repoPath: string, options?: { autoRepair?: boolean; selectedIssues?: string[]; issues?: import('../shared/types').IntegrityIssue[] }) =>
+  verifyIntegrity: (repoPath: string, options?: { autoRepair?: boolean; deep?: boolean; selectedIssues?: string[]; issues?: import('../shared/types').IntegrityIssue[] }) =>
     ipcRenderer.invoke('code-map:verify-integrity', repoPath, options) as Promise<{
       success: boolean
       data?: import('../../shared/types').IntegrityCheckResult
@@ -415,15 +370,22 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   }> => {
     return ipcRenderer.invoke('dash:parse-and-resolve', input, repoPath)
   },
+  dashDiscover: (
+    request: RepoDiscoveryRequest,
+    repoPath: string
+  ): Promise<{ success: boolean; data?: RepoDiscoveryResult; error?: string }> => {
+    return ipcRenderer.invoke('dash:discover', request, repoPath)
+  },
   dashGenerate: (
     input: string,
-    repoPath: string
+    repoPath: string,
+    settings?: DashSettings
   ): Promise<{
     success: boolean
     data?: unknown
     error?: string
   }> => {
-    return ipcRenderer.invoke('dash:generate', input, repoPath)
+    return ipcRenderer.invoke('dash:generate', input, repoPath, settings)
   },
   dashOneClickXml: (
     repoPath: string,
@@ -431,10 +393,12 @@ contextBridge.exposeInMainWorld('codeAwareness', {
       removeComments?: boolean
       removeEmptyLines?: boolean
       truncateBase64?: boolean
+      persistedSettings?: DashSettings
     }
   ): Promise<{
     success: boolean
     xml?: string
+    tokenCount?: number
     error?: string
     timings?: {
       listFilesMs: number
@@ -445,6 +409,6 @@ contextBridge.exposeInMainWorld('codeAwareness', {
       fileCount: number
     }
   }> => {
-    return ipcRenderer.invoke('dash:one-click-xml', repoPath, options)
+    return ipcRenderer.invoke('dash:one-click-xml', repoPath, options, options?.persistedSettings)
   }
 })

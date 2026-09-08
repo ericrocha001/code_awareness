@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o contrato do SourceGenerationCoordinator: geração única, auto-cancelamento por sessão, descarte de resultado cancelado, isolamento entre sessões distintas e limpeza do mapa de sessões.
-
-Mapa de Relacionamentos do Script
-
-1. source-generation-coordinator.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa o método generate com CodeSourceService falsificado injetado.
-   - Criticidade: Alta
-
-2. generation-errors.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa GenerationCancelledError para simular cancelamento no service falsificado.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum teste executa Repomix real nem acessa filesystem real.
-2. O service falsificado controla resolução e rejeição para simular todos os fluxos.
-3. Auto-cancelamento é verificado pela ausência de resultado da primeira geração.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi } from 'vitest'

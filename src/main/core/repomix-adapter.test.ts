@@ -1,46 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o RepomixAdapter com um RepomixProcessRunner injetado (mock que registra command, args e cwd), sem invocar a CLI real.
-2. Provar a decisão de transporte no Direct Output (inline `--include` vs arquivo `--config`) a partir do orçamento da linha de comando inteira.
-3. Garantir o ciclo de vida do arquivo de configuração temporário: existe durante a execução e é removido em finally mesmo sob erro ou exitCode != 0.
-4. Provar que o arquivo temporário vive em os.tmpdir() (fora do repoPath).
-5. Validar que o batch do Compression Core respeita o orçamento da linha inteira.
-6. Provar que alteração de perfil gera argumentos distintos e que os dois transportes produzem saída equivalente.
-
-Mapa de Relacionamentos do Script
-
-1. repomix-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Injeta RecordingRunner no construtor e chama generateDirectOutput e compressMultipleFiles.
-   - Criticidade: Alta
-
-2. repomix-process-runner.ts
-   - Tipo: Contrato / Interface
-   - Relação: RecordingRunner estende RepomixProcessRunner, substituindo run por um stub controlável.
-   - Criticidade: Alta
-
-3. repomix-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Usa buildRepomixRequest para montar requests tipados.
-   - Criticidade: Alta
-
-4. effective-profile.ts / compression-profile.ts / shared/types.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornecem perfis efetivos e tipos para montar os requests de teste.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nenhum teste invoca a CLI real do Repomix — o runner é sempre mockado.
-2. A verificação do config temporário ocorre dentro de run (durante a execução do processo).
-3. Após generateDirectOutput resolver OU rejeitar, o arquivo temporário nunca mais existe.
-4. O caminho absoluto do config nunca começa com repoPath.
-5. Diretórios temporários dos testes são criados em os.tmpdir() e removidos em afterEach.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'

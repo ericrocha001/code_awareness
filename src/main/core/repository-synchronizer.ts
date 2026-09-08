@@ -82,6 +82,8 @@ export class RepositorySynchronizer {
   private readonly modifiedFiles: Set<string> = new Set()
   private readonly pendingFiles = new Map<string, PendingFileEntry>()
   private debounceTimer: NodeJS.Timeout | null = null
+  private isProcessingQueue = false
+  private isDisposed = false
   private readonly periodicScanIntervalMs: number
   private periodicScanTimer: NodeJS.Timeout | null = null
   private isPeriodicScanRunning = false
@@ -118,6 +120,27 @@ export class RepositorySynchronizer {
     const dbModifiedFiles = this.model.getModifiedFiles()
     for (const file of dbModifiedFiles) {
       this.modifiedFiles.add(file.relativePath)
+    }
+  }
+
+  /**
+   * Auto-reindex: após confirmação (modified/new/deleted), reindexa o arquivo imediatamente
+   * via substituição atômica. Em sucesso remove o path de modifiedFiles; em falha mantém
+   * como modified (caminho de recovery via synchronizeModified).
+   * INVARIANT: nunca lança — falha é registrada e o path permanece pendente.
+   */
+  private async autoReindex(relativePath: string, correlationId: string): Promise<void> {
+    if (this.isDisposed) return
+    try {
+      const ok = await this.model.updateFileContent(relativePath, correlationId)
+      if (ok) {
+        this.modifiedFiles.delete(relativePath)
+        telemetryService.log(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_COMPLETED', { relativePath })
+      } else {
+        telemetryService.log(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_SKIPPED', { relativePath })
+      }
+    } catch (err) {
+      // Falha → mantém como modified (recovery via synchronizeModified)
     }
   }
 
@@ -159,6 +182,8 @@ export class RepositorySynchronizer {
    */
   private async processQueue(): Promise<void> {
     this.debounceTimer = null
+    if (this.isDisposed) return
+    this.isProcessingQueue = true
 
     const correlationId = telemetryService.startOperation('PROCESS_QUEUE')
     const filesToProcess = Array.from(this.pendingFiles.entries())
@@ -168,18 +193,24 @@ export class RepositorySynchronizer {
       fileCount: filesToProcess.length
     })
 
-    for (const [relativePath, metadata] of filesToProcess) {
-      try {
-        await this.verifyAndMarkIfChanged(relativePath, metadata, correlationId)
-      } catch (err) {
-        telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'VERIFY_FAILED', {
-          relativePath,
-          error: err instanceof Error ? err.message : String(err)
-        })
-        // Em caso de erro não antecipado, marca como modified por segurança
-        this.modifiedFiles.add(relativePath)
-        this.model.markFileModified(relativePath)
+    try {
+      for (const [relativePath, metadata] of filesToProcess) {
+        if (this.isDisposed) break
+        try {
+          await this.verifyAndMarkIfChanged(relativePath, metadata, correlationId)
+        } catch (err) {
+          if (this.isDisposed) break
+          telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'VERIFY_FAILED', {
+            relativePath,
+            error: err instanceof Error ? err.message : String(err)
+          })
+          // Em caso de erro não antecipado, marca como modified por segurança
+          this.modifiedFiles.add(relativePath)
+          this.model.markFileModified(relativePath)
+        }
       }
+    } finally {
+      this.isProcessingQueue = false
     }
 
     telemetryService.log(correlationId, 'CHANGE_DETECTION', 'QUEUE_PROCESSED', {
@@ -204,6 +235,7 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_DELETED', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
+      await this.autoReindex(relativePath, correlationId)
       return
     }
 
@@ -241,6 +273,7 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_NEW', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
+      await this.autoReindex(relativePath, correlationId)
       return
     }
 
@@ -250,6 +283,7 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'LEGACY_FILE_MODIFIED', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
+      await this.autoReindex(relativePath, correlationId)
       return
     }
 
@@ -273,6 +307,7 @@ export class RepositorySynchronizer {
     this.model.markFileModified(relativePath)
     telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_MODIFIED', { relativePath })
     repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
+    await this.autoReindex(relativePath, correlationId)
   }
 
   /**
@@ -369,6 +404,14 @@ export class RepositorySynchronizer {
   /** Expõe o tamanho da fila de pendentes para testes e debugging. */
   getPendingFilesCount(): number {
     return this.pendingFiles.size
+  }
+
+  async waitForIdle(timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    while (this.debounceTimer || this.isProcessingQueue || this.pendingFiles.size > 0) {
+      if (Date.now() >= deadline) throw new Error('Timed out waiting for the CodeMap event queue.')
+      await new Promise<void>((resolve) => setTimeout(resolve, 10))
+    }
   }
 
   async synchronizeModified(): Promise<{ filesUpdated: number; errors: string[] }> {
@@ -562,6 +605,8 @@ export class RepositorySynchronizer {
   }
 
   dispose(): void {
+    this.isDisposed = true
+
     if (this.periodicScanTimer) {
       clearInterval(this.periodicScanTimer)
       this.periodicScanTimer = null

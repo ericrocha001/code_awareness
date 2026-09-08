@@ -1,33 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a hidratação assíncrona de sourceSettings em useSourceSettings ao abrir o modal.
-2. Validar que a hidratação inicial não dispara gravação automática em disco (skipSave).
-3. Validar a persistência automática com debounce de 500ms após modificação de configuração.
-4. Validar o flush imediato de configurações pendentes no fechamento do modal (isOpen = false).
-5. Validar o cancelamento de timer no cleanup do hook.
-
-Mapa de Relacionamentos do Script
-
-1. useSourceSettings.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: renderHook e act para execução de hooks React em jsdom.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O hook nunca executa saveSettings durante a hidratação inicial de leitura.
-2. O fechamento do modal salva imediatamente qualquer alteração pendente sem aguardar o timer de debounce.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'

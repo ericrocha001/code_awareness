@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir os estilos visuais elegantes e interativos para o seletor de projetos (ProjectSwitcher).
-2. Garantir transições suaves e animações para a abertura, fechamento e interações do dropdown.
-3. Estabelecer o layout responsivo e o posicionamento absoluto da lista suspensa de projetos.
-
-Mapa de Relacionamentos do Script
-
-1. ProjectSwitcher.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo para estilizar a interface.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A lista suspensa do dropdown deve sempre possuir um z-index elevado (ex: 150) para sobrepor outros elementos de tela sem quebras.
-2. O design deve respeitar estritamente as variáveis de cores globais (--bg-primary, --bg-secondary, --border, --accent, etc.).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .project-switcher-container {

@@ -1,57 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar o painel lateral deslizante como compositor de duas zonas: topo fixo (ImplementationHeader) e miolo rolável (quatro seções de auditoria).
-2. Manter o overlay, o botão de fechar, o listener de ESC com cleanup e o retorno de foco ao elemento anterior.
-3. Renderizar o modo criação (com a pele das seções existentes) e o preview (CheckpointPreview) como ramificações mutuamente exclusivas ao modo detalhes.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: É instanciado pelo orquestrador quando selectedCheckpointId não é nulo.
-   - Criticidade: Alta
-
-2. ImplementationHeader.tsx
-   - Tipo: Dependência Direta
-   - Relação: Reusa as classes .ih-* para o topo do modo criação e instancia o cabeçalho no modo detalhes.
-   - Criticidade: Alta
-
-3. DocumentationSection.tsx
-   - Tipo: Dependência Direta
-   - Relação: Reusa as classes .ds-* para os campos do modo criação.
-   - Criticidade: Alta
-
-4. ChangesSection.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza as mudanças agrupadas por tipo no miolo rolável.
-   - Criticidade: Alta
-
-5. AuditSection.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o volume de tokens e os dropdowns Copiar/Exportar no miolo rolável.
-   - Criticidade: Alta
-
-6. CheckpointPreview.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a visualização do diff quando previewMarkdown está preenchido.
-   - Criticidade: Alta
-
-7. CheckpointDrawer.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos do drawer, overlay, animações e modo criação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O listener de ESC deve ser removido na desmontagem (cleanup no useEffect).
-2. O drawer nunca gerencia estado de dados — apenas recebe via props.
-3. O overlay escurecido nunca deve bloquear o fechamento por ESC.
-4. As props do drawer não mudam — o orquestrador (CodeJourneyView.tsx) nunca é tocado (permanece verdadeira, mas as props agora usam arrays).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useRef } from 'react'

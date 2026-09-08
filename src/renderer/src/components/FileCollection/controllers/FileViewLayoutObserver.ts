@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Observar mudanças de tamanho do scroll container via ResizeObserver através da superfície de medição.
-2. Escutar o evento `fv-columns-changed` no alvo de eventos fornecido pela superfície de medição.
-3. Coalescer todos os triggers em um único rAF duplo para garantir geometria estável após o paint.
-4. Medir overflow de tags das rows visíveis fornecidas pela superfície de medição e reportar via callback.
-5. Re-medir via listener de scroll no scroll container quando novas rows entram na viewport.
-
-Mapa de Relacionamentos do Script
-
-1. ../../../utils/tag-overflow.ts
-   - Tipo: Dependência Direta
-   - Relação: Helper puro que converte geometrias medidas em contagem de tags ocultas.
-   - Criticidade: Alta
-
-2. FileView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Instancia o observer com uma FileViewMeasurementSurface concreta; chama mount/dispose/remeasure.
-   - Criticidade: Alta
-
-3. FileRow.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: As rows entregues pela surface são derivadas dos .fr-row renderizados pelo FileRow.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Esta classe não manipula React state nem DOM do contador — apenas calcula e reporta medições.
-2. O controller NÃO conhece a estrutura DOM da FileView: toda leitura passa pela FileViewMeasurementSurface — testável com surface mock e reutilizável em outros contextos.
-3. scheduleMeasure cancela o rAF pendente antes de agendar um novo, coalescendo múltiplos triggers em uma única medição por frame.
-4. dispose() garante remoção completa de todos os observers e timers — sem leaks após desmontagem.
-5. rAF duplo: o primeiro aguarda o próximo frame, o segundo garante que o paint anterior foi concluído antes de ler geometrias.
-6. getVisibleRows() entrega apenas rows visíveis na viewport — com content-visibility: auto, medir rows fora dela produziria geometria inválida (offsetLeft/offsetWidth = 0).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { computeTagOverflow, type ChipGeometry } from '../../../utils/tag-overflow'

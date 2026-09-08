@@ -1,36 +1,36 @@
+/*
+-T ---
+*/
+
 import { resolve } from 'path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   main: {
-    build: {
-      rollupOptions: {
-        external: ['better-sqlite3']
-      },
-      lib: {
-        entry: resolve(__dirname, 'src/main/main.ts'),
-        formats: ['cjs']
+    plugins: [externalizeDepsPlugin()],
+    resolve: {
+      alias: {
+        '@shared': resolve('src/shared'),
+        '@main': resolve('src/main')
       }
-    },
-    plugins: [externalizeDepsPlugin()]
+    }
   },
   preload: {
-    build: {
-      lib: {
-        entry: resolve(__dirname, 'src/main/preload.ts'),
-        formats: ['cjs']
-      }
-    },
-    plugins: [externalizeDepsPlugin()]
-  },
-  renderer: {
-    root: resolve(__dirname, 'src/renderer'),
+    plugins: [externalizeDepsPlugin()],
     build: {
       rollupOptions: {
-        input: resolve(__dirname, 'src/renderer/index.html')
+        input: resolve('src/main/preload.ts')
       }
-    },
-    plugins: [react()]
+    }
+  },
+  renderer: {
+    plugins: [react()],
+    resolve: {
+      alias: {
+        '@shared': resolve('src/shared'),
+        '@renderer': resolve('src/renderer/src')
+      }
+    }
   }
 })

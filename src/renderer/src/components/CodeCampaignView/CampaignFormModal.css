@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir os estilos do modal de criar/editar campanha.
-2. Seguir o padrão dos modais existentes (TagManagerModal, PromptEditorModal).
-
-Mapa de Relacionamentos do Script
-
-1. CampaignFormModal.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo (prefixo cfm-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O overlay deve permanecer por trás do conteúdo modal e evitar vazamento visual.
-2. Todas as classes usam prefixo cfm- para evitar colisão com outros modais.
-3. Nenhuma cor hardcoded — usar variáveis CSS globais.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .cfm-overlay {

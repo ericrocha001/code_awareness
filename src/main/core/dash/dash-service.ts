@@ -1,56 +1,9 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar a pipeline completa de execução do Code Dash: Parsing, Validação, Resolução, Planejamento, Provedores e Montagem XML.
-2. Coordenar a execução concorrente dos provedores de conteúdo mantendo integridade e tratamento de falhas parciais.
-3. Retornar o documento canônico final com metadados e relatório estruturado de erros.
-4. Instrumentar a pipeline com timings de observabilidade para diagnóstico no processo principal.
-
-Mapa de Relacionamentos do Script
-
-1. dash-request-parser.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa o parsing inicial do texto de entrada.
-   - Criticidade: Alta
-
-2. dash-request-validator.ts
-   - Tipo: Dependência Direta
-   - Relação: Valida a conformidade de schema e segurança do protocolo.
-   - Criticidade: Alta
-
-3. dash-file-resolver.ts
-   - Tipo: Dependência Direta
-   - Relação: Reconcilia caminhos com o sistema de arquivos.
-   - Criticidade: Alta
-
-4. dash-execution-planner.ts
-   - Tipo: Dependência Direta
-   - Relação: Estrutura o plano determinístico de execução.
-   - Criticidade: Alta
-
-5. providers/context-provider.ts
-   - Tipo: Contrato / Interface
-   - Relação: Interage com os provedores Source e Compression via interface comum.
-   - Criticidade: Alta
-
-6. dash-context-assembler.ts
-   - Tipo: Dependência Direta
-   - Relação: Compõe o XML canônico com nós de conteúdo e falhas.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O serviço é um orquestrador puro, sem implementar lógica inline de parsing, cache, resolução ou formatação XML.
-2. Falhas parciais em arquivos ou provedores não interrompem a geração dos arquivos bem-sucedidos.
-3. A ordem original dos itens declarada no pedido é preservada em todos os estágios do pipeline.
-4. Timings são apenas informativos — nunca governam decisões de abortar ou escalar.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { DashContextPlan } from '../../../shared/types/dash-types'
+import { estimateTokenCount } from '../../../shared/utils/token-utils'
 import { assembleContext } from './dash-context-assembler'
 import { planExecution } from './dash-execution-planner'
 import { DashFileResolver } from './dash-file-resolver'
@@ -64,6 +17,7 @@ import type {
 export interface DashExecutionResult {
   success: boolean
   xml?: string
+  tokenCount?: number
   metadata?: {
     requested: number
     resolved: number
@@ -152,7 +106,8 @@ export class DashService {
     // 6. Execução paralela dos provedores apropriados
     const execOptions: DashExecutionOptions = {
       repoPath,
-      signal: options?.signal
+      signal: options?.signal,
+      settings: options?.settings
     }
 
     const generateStart = performance.now()
@@ -232,6 +187,8 @@ export class DashService {
     const assembleMs = performance.now() - assembleStart
     const totalMs = performance.now() - totalStart
 
+    const tokenCount = estimateTokenCount(xml)
+
     const timings = {
       parseMs: Math.round(parseMs),
       validateMs: Math.round(validateMs),
@@ -253,6 +210,7 @@ export class DashService {
     return {
       success: true,
       xml,
+      tokenCount,
       metadata: {
         requested: validRequest.items.length,
         resolved: plan.plannedItems.length,

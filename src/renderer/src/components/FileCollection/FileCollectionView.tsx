@@ -1,53 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Atuar como orquestrador público da coleção de arquivos (FileCollectionView).
-2. Coordenar os hooks de dados (useFileCollectionData), seleção (useFileCollectionSelection) e interação ativa (useFileCollectionInteraction).
-3. Renderizar exclusivamente a FileView, única visualização canônica da coleção.
-4. Hospedar a renderização centralizada sob demanda do ActivePopover com suporte a auto-fechamento.
-5. Consolidar as interações da row (toggle/tag/action) em um único callback onRowAction repassado ao FileView.
-
-Mapa de Relacionamentos do Script
-
-1. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa FileCardFile.
-   - Criticidade: Alta
-
-2. useFileCollectionData.ts
-   - Tipo: Dependência Direta
-   - Relação: Prepara tagsByFile e tokenEstimateMap consumidos aqui.
-   - Criticidade: Alta
-
-3. useFileCollectionSelection.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook de gerenciamento de seleção de arquivos.
-   - Criticidade: Alta
-
-4. useFileCollectionInteraction.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook de controle da interação contextual ativa (TagPopover / ActionMenu).
-   - Criticidade: Alta
-
-5. FileView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a visualização em lista compacta (view única).
-   - Criticidade: Alta
-
-6. ActivePopover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob demanda posicionado via portal.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Renderiza apenas FileView — não existe switcher de modo nem renderização condicional (a arquitetura de grid/dense foi eliminada).
-2. totalSelectedTokens é derivado localmente via tokenEstimateMap do useFileCollectionData — o selection hook não contém lógica de dados.
-3. Se o arquivo ativo for removido da lista de arquivos visíveis, a interação é encerrada automaticamente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useCallback, useMemo } from 'react'

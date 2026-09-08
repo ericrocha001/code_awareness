@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o componente de preview virtualizado do Code Source (SourcePreviewVirtualized).
-2. Garantir altura fixa de linhas compatível com o cálculo de virtualização do react-window (19px).
-3. Fornecer classes e variáveis semânticas adaptadas aos temas claro e escuro.
-
-Mapa de Relacionamentos do Script
-
-1. SourcePreviewVirtualized.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS com prefixo spv-.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todas as classes usam o prefixo spv- para isolamento de escopo.
-2. A altura das linhas (.spv-line) é estritamente 19px — coincidente com a constante LINE_HEIGHT no componente TypeScript.
-3. O container virtualizado preenche a altura disponível do container pai (flex: 1, min-height: 0).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .spv-root {

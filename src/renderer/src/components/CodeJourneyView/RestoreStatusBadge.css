@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o selo compacto de status de checkpoint (RestoreStatusBadge).
-2. Definir variantes de cor por status: restaurado (azul), revertido (cinza), ativo (neutro).
-
-Mapa de Relacionamentos do Script
-
-1. RestoreStatusBadge.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo rsb- para evitar colisões com outros componentes.
-2. O selo deve ser compacto e não quebrar o layout do card.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .rsb-badge {

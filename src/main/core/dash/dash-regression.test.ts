@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Garantir que o pipeline contextual do Code Dash (DashService) não regrediu com a introdução do One-Click XML.
-2. Validar que o XML contextual preserva o envelope canônico code-dash-context com itens indexados.
-
-Mapa de Relacionamentos do Script
-
-1. dash-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Sujeito do teste de regressão (orquestração via mocks de provedores).
-   - Criticidade: Alta
-
-2. providers/context-provider.ts
-   - Tipo: Contrato / Interface
-   - Relação: Provedores mockados para gerar conteúdo sem I/O real.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O XML do Code Dash contextual SEMPRE contém <code-dash-context> e <item index=.
-2. O teste não invoca o OneClickXmlService — valida exclusivamente o DashService.
-3. Nenhum I/O real (filesystem/Repomix): resolução e provedores são mockados.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, expect, it, vi } from 'vitest'

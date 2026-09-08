@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar um dropdown de ações para arquivos da sidebar (ocultar, copiar, revelar no sistema).
-2. Gerenciar o estado de abertura/fechamento do dropdown, fechando ao clicar fora.
-
-Mapa de Relacionamentos do Script
-
-1. CodeCompressionView.tsx
-   - Tipo: Relação de UI
-   - Relação: Renderizado como botão de controle para cada arquivo listado na sidebar.
-   - Criticidade: Alta
-
-2. CodeSourceView.tsx
-   - Tipo: Relação de UI
-   - Relação: Renderizado como botão de controle para cada arquivo listado na sidebar.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O dropdown deve fechar automaticamente quando o usuário clicar fora dele ou selecionar uma ação.
-2. O posicionamento do dropdown deve ser fixo ou absoluto ancorado ao botão "Ações".
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useRef, useEffect } from 'react'

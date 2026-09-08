@@ -1,35 +1,5 @@
 <!--
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a interface raiz da aplicação Electron via React.
-2. Carregar estilos e fontes necessários para a UI.
-3. Definir favicon e metadados de compatibilidade entre plataformas.
-
-Mapa de Relacionamentos do Script
-
-1. src/main.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: Ponto de entrada React renderizado dentro de #root.
-   - Criticidade: Alta
-
-2. public/favicon.ico
-   - Tipo: Relação de UI
-   - Relação: Favicon servido via Vite (caminho absoluto /favicon.ico).
-   - Criticidade: Baixa
-
-3. public/apple-touch-icon.png
-   - Tipo: Relação de UI
-   - Relação: Ícone Apple servido via Vite (caminho absoluto /apple-touch-icon.png).
-   - Criticidade: Baixa
-
-Invariantes do Script
-
-1. O CSP nunca deve bloquear recursos offline-first do bundle.
-2. A tag #root deve sempre estar presente para montagem do React.
-
---- FIM ARQUITETURA DO SCRIPT ---
+T ---
 -->
 
 <!DOCTYPE html>

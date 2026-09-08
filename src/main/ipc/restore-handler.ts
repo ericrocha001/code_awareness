@@ -1,33 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar handlers IPC para as operações de restauração orquestrada.
-2. Validar parâmetros recebidos antes de delegar ao RestoreService.
-3. Capturar erros e retornar respostas estruturadas ao renderer.
-4. Validar o RestorePlan congelado (opcional) e traduzir o resultado planStale.
-
-Mapa de Relacionamentos do Script
-
-1. restore-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Recebe por parâmetro e consome RestoreService para todas as operações de restauração.
-   - Criticidade: Alta
-
-2. ../../shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos RestorePreviewResult, RestoreExecuteResult, RestoreExecuteOptions.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
-2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
-3. Toda resposta de handler deve conter o campo success.
-4. Não instancia serviços internamente — recebe RestoreService pronto no registro.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain } from 'electron'

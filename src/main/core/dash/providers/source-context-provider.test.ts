@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente o adapter SourceContextProvider utilizando mocks de CodeSourceService.
-2. Garantir o fluxo sequencial, preservação de índices, tratamento de erros parciais e suporte a cancelamento.
-
-Mapa de Relacionamentos do Script
-
-1. source-context-provider.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa o SourceContextProvider.
-   - Criticidade: Alta
-
-2. src/main/core/code-source-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Mockado para simular respostas e erros de geração.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes devem rodar de forma isolada em memória sem invocar a CLI real do Repomix.
-2. Cobrir todos os casos obrigatórios da especificação da Sprint 3 para SourceContextProvider.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, expect, it, vi } from 'vitest'
@@ -162,5 +138,62 @@ describe('SourceContextProvider', () => {
     ).rejects.toThrow(/cancelada/)
 
     expect(mockService.generateWithProfile).not.toHaveBeenCalled()
+  })
+
+  it('merge de settings: campos econômicos do profile base são substituídos pelos do settings global', async () => {
+    const mockService = {
+      generateWithProfile: vi.fn().mockResolvedValue({ success: true, content: 'ok' })
+    } as unknown as CodeSourceService
+
+    const provider = new SourceContextProvider(mockService)
+    const baseProfile: any = {
+      removeComments: false,
+      removeEmptyLines: false,
+      truncateBase64: false,
+      showLineNumbers: true,
+      parsableStyle: false,
+      version: 1
+    }
+    const items: DashPlannedItem[] = [
+      { index: 0, path: 'src/a.ts', representation: 'source', profile: baseProfile }
+    ]
+
+    await provider.provide(items, {
+      repoPath,
+      settings: { removeComments: true, removeEmptyLines: true, truncateBase64: true }
+    })
+
+    const calledProfile = (mockService.generateWithProfile as ReturnType<typeof vi.fn>).mock.calls[0][0].profile
+    // Campos econômicos sobrescritos pelo settings
+    expect(calledProfile.removeComments).toBe(true)
+    expect(calledProfile.removeEmptyLines).toBe(true)
+    expect(calledProfile.truncateBase64).toBe(true)
+    // Demais campos do profile base preservados
+    expect(calledProfile.showLineNumbers).toBe(true)
+    expect(calledProfile.version).toBe(1)
+  })
+
+  it('sem settings: profile base é repassado sem alteração', async () => {
+    const mockService = {
+      generateWithProfile: vi.fn().mockResolvedValue({ success: true, content: 'ok' })
+    } as unknown as CodeSourceService
+
+    const provider = new SourceContextProvider(mockService)
+    const baseProfile: any = {
+      removeComments: true,
+      removeEmptyLines: false,
+      truncateBase64: false,
+      showLineNumbers: false,
+      parsableStyle: false,
+      version: 1
+    }
+    const items: DashPlannedItem[] = [
+      { index: 0, path: 'src/a.ts', representation: 'source', profile: baseProfile }
+    ]
+
+    await provider.provide(items, { repoPath })
+
+    const calledProfile = (mockService.generateWithProfile as ReturnType<typeof vi.fn>).mock.calls[0][0].profile
+    expect(calledProfile).toEqual(baseProfile)
   })
 })

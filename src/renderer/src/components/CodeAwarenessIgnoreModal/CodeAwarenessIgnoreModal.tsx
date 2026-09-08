@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar modal com lista de arquivos ignorados pelo usuário.
-2. Permitir seleção múltipla e restauração de itens via IPC.
-3. Exibir arquivos ignorados como itens individuais (caminhos exatos).
-
-Mapa de Relacionamentos do Script
-
-1. App.tsx
-   - Tipo: Dependência Direta
-   - Relação: Gerencia estado de abertura e callback de restauração.
-   - Criticidade: Alta
-
-2. ToggleSwitch.tsx
-   - Tipo: Dependência Direta
-   - Criticidade: Média
-
-3. window.codeAwareness.removeIgnoredFile
-   - Tipo: Dependência Inversa
-   - Relação: API IPC para remover ignorações.
-   - Criticidade: Alta
-
-4. window.codeAwareness.loadSettings
-   - Tipo: Dependência Inversa
-   - Relação: API IPC para carregar configurações e lista de ignorados.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O modal deve fechar ao clicar no overlay ou pressionar ESC.
-2. A restauração deve remover apenas os itens selecionados da lista de ignorados.
-3. Cada item listado corresponde a um caminho de arquivo real que foi ignorado.
-4. Ítens já restaurados não podem permanecer selecionados após recarregamento.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useState, useRef } from 'react'

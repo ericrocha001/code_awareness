@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar E2E os contratos de segurança e integridade do Code Dash (E2E-11 a E2E-16): rejeição de requests malformados, bloqueio de path traversal, respeito a ignores, validade estrutural do XML e fidelidade de conteúdo.
-2. Usar o pipeline central real e filesystem temporário real, com secret externo ao repo para provas de traversal.
-
-Mapa de Relacionamentos do Script
-
-1. dash-e2e-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome DashService real, SpyContextProvider e utilidades de XML.
-   - Criticidade: Alta
-
-2. dash-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Exercitado de ponta a ponta com entrada bruta inválida e válida.
-   - Criticidade: Alta
-
-3. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria e limpa repositórios e arquivos temporários reais.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nenhuma variante de request inválido pode chegar a providers ou filesystem.
-2. Nenhum conteúdo fora do repoPath pode aparecer no XML gerado (defesa em profundidade).
-3. Conteúdo entregue por provider deve chegar idêntico ao CDATA do XML, sem transformação.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'

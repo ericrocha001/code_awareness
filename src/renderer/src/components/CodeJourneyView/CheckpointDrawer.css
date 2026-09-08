@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o painel drawer lateral (cd-panel) com animação de entrada/saída via translateX.
-2. Estilizar o overlay escurecido com backdrop-filter blur.
-3. Estilizar o miolo rolável (cd-body) com respiro generoso e vão entre seções.
-4. Estilizar o input de nome do modo criação (cd-create-input) com a mesma pele do ds-textarea.
-5. Estilizar as ações do modo criação (cd-create-actions) como wrapper flex-end.
-
-Mapa de Relacionamentos do Script
-
-1. CheckpointDrawer.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes do painel/overlay usam o prefixo cd- para evitar colisões.
-2. O z-index do drawer deve ser superior ao overlay (500 > 400).
-3. O topo fixo (ImplementationHeader) nunca rola — apenas o cd-body rola.
-4. O cd-create-input replica os valores do ds-textarea, mas sem resize nem min-height (é input).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* ─── Overlay escurecido ────────────────────────────────────────────────── */

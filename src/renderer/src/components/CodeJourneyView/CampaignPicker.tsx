@@ -1,50 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a badge de campanha (bandeira + nome + cor de status, ou "Vincular campanha" neutra).
-2. Gerenciar o dropdown autocontido (Popover único, abertura/fechamento interno, stopPropagation).
-3. Emitir a troca via callback onChange(ids: string[]).
-4. Filtrar a lista de campanhas por nome dentro do popover, com estado vazio de busca e autofocus no input.
-
-Mapa de Relacionamentos do Script
-
-1. CheckpointTimeline.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome o picker em variant compact.
-   - Criticidade: Alta
-
-2. ImplementationHeader.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome o picker em variant field.
-   - Criticidade: Alta
-
-3. CheckpointDrawer.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome o picker no modo criação.
-   - Criticidade: Alta
-
-4. Popover.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o dropdown flutuante.
-   - Criticidade: Alta
-
-5. checkpointUtils.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome getCampaignColor.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O componente é autocontido — gerencia seu estado de UI (isOpen) internamente.
-2. O clique na badge usa stopPropagation para não abrir o drawer ou submeter form.
-3. Se selectedCampaignIds contiver IDs órfãos (não encontrados em campaigns), eles são ignorados na badge (não mostram 'Sem campanha' — o fallback é no builder, não no picker).
-4. A cor da badge deriva do status da campanha, nunca do checkpoint.
-5. Na badge, a cor de status vem de classe (--active/--completed), nunca de inline style — assim o hover vence por cascata, sem !important. Nas opções do dropdown a cor pode vir de getCampaignColor via inline, pois o hover da opção não altera a cor do texto/ícone.
-6. A busca é local (estado interno), não persiste, zera ao fechar o popover e não interfere no multi-select.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useRef, useMemo, useEffect } from 'react'

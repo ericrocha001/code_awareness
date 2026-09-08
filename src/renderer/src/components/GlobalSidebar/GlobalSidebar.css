@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout visual da GlobalSidebar e comportamentos relacionados.
-
-Mapa de Relacionamentos do Script
-
-1. GlobalSidebar.tsx
-   - Tipo: Relação de UI
-   - Relação: Usa essas classes para renderizar a sidebar.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A largura alterna entre 280px e 64px com transição suave.
-2. A sidebar não deve sobrepor indevidamente o conteúdo principal.
-3. Os tokens de tema locais devem ser respeitados mantendo legibilidade.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 :root {

@@ -1,50 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar handlers IPC para operações de checkpoint.
-2. Validar parâmetros recebidos antes de delegar ao CheckpointService.
-3. Capturar erros e retornar respostas estruturadas ao renderer.
-4. Registrar handler IPC para geração de diff semântico entre checkpoints.
-5. Registrar handler IPC para renomear checkpoints.
-6. Registrar handler IPC para obter lista de arquivos alterados entre checkpoints.
-7. Registrar handler IPC para atualização de metadados editáveis do checkpoint.
-8. Registrar handler IPC para definir/limpar vínculos de checkpoint com campanhas (plural).
-
-Mapa de Relacionamentos do Script
-
-1. checkpoint-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Recebe por parâmetro e consome CheckpointService para todas as operações.
-   - Criticidade: Alta
-
-2. ../core/database-ports.ts
-   - Tipo: Contrato / Interface
-   - Relação: Recebe ActionLogPort por parâmetro para registrar ações no banco.
-   - Criticidade: Alta
-
-3. ../../shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos CheckpointData, CheckpointSummary, CheckpointDetails retornados pelos handlers.
-   - Criticidade: Alta
-
-4. diff (biblioteca npm)
-   - Tipo: Dependência Indireta
-   - Relação: Usada pelo CheckpointService para calcular hunks.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
-2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
-3. Toda resposta de handler deve conter o campo success.
-4. A restauração e a exclusão em massa são tratadas exclusivamente pelo restore-handler.
-5. toCheckpointId é obrigatório nos handlers de diff — não existe mais comparação com disco.
-6. O handler checkpoint:set-campaigns valida que campaignIds é array de strings não vazias.
-7. Não instancia serviços internamente — recebe instâncias prontas no registro.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain } from 'electron'

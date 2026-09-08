@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o CRUD de tags por repositório.
-2. Persistir alterações no settings.json com validação mínima de dados.
-3. Garantir unicidade de ID para novas tags.
-
-Mapa de Relacionamentos do Script
-
-1. settings-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Usa a instância singleton para ler/salvar configurações.
-   - Criticidade: Alta
-
-2. tag-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Expõe operações do serviço para o renderer via IPC.
-   - Criticidade: Alta
-
-3. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Define os tipos Tag e AppSettings.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nunca modificar o repoPath salvo em outras chaves durante uma operação.
-2. Nunca retornar dados parcialmente escritos em caso de falha de escrita.
-3. Nunca duplicar IDs dentro do mesmo repoPath.
-4. O serviço não deve depender de código de UI.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { randomUUID } from 'crypto'

@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente o método compressFilesStructured do CompressionService com mock do RepomixAdapter.
-2. Garantir o funcionamento de cache hit e invalidação incremental por arquivo modificado no retorno estruturado.
-3. Validar a captura de falhas individuais com retorno de errors e errorReasons sem quebrar a execução.
-4. Validar que caminhos direct-output são expressamente rejeitados com erro descritivo.
-
-Mapa de Relacionamentos do Script
-
-1. compression-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa a execução de compressFilesStructured.
-   - Criticidade: Alta
-
-2. structured-compression-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Valida a conformidade da resposta contra StructuredCompressionResult.
-   - Criticidade: Alta
-
-3. repomix-adapter.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa MockRepomixAdapter para simular execuções do Repomix de forma isolada.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os testes utilizam diretórios temporários isolados com remoção segura no afterEach.
-2. Nenhum teste executa comandos reais de CLI do Repomix.
-3. Os testes de cache validam o reaproveitamento com base na contagem de chamadas ao adapter.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'

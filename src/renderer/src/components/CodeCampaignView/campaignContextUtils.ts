@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o tipo CampaignContextMode.
-2. Exportar a função pura buildCampaignContextDocument para gerar contexto em texto.
-3. Encaixotar instruções e resultados em blocos de código à prova de colisão.
-
-Mapa de Relacionamentos do Script
-
-1. CodeCampaignView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Invoca a geração do documento.
-   - Criticidade: Alta
-
-2. shared/types
-   - Tipo: Dependência Direta
-   - Relação: Fornece os tipos de Campaign e CheckpointSummary.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O builder é uma função pura; não deve conhecer módulos do Code Audit.
-2. A ordenação deve ser estritamente cronológica (mais antigo primeiro).
-3. Órfãos são tratados por id individual (um `campaignId` em `campaignIds` que não está em `campaigns`), e o checkpoint vai para 'Sem campanha' uma vez (mesmo com múltiplos órfãos).
-4. Campos ausentes de instrução/resultado geram mensagens explícitas.
-5. Datas inválidas nunca quebram a ordenação — o comparador trata NaN como 0 (fallback defensivo).
-6. Campanhas sem nenhuma implementação são omitidas no contexto geral (decisão de design: o contexto serve para a IA saber o que foi feito).
-7. Instruções e resultados são sempre envolvidos num bloco de código cuja cerca tem uma crase a mais que o maior bloco de crases do próprio conteúdo, isolando títulos e formatação internos da hierarquia do documento.
-8. Um checkpoint pode pertencer a múltiplas campanhas (`campaignIds`). No contexto geral, ele aparece em cada campanha a que pertence (duplicação intencional). No bucket 'Sem campanha', ele aparece uma vez (mesmo se tiver múltiplos órfãos).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { Campaign, CheckpointSummary } from '../../../../shared/types'

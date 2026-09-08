@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout visual do CodeDiffView em tela única, espelhando exatamente o padrão do CodeSourceView.
-
-Mapa de Relacionamentos do Script
-
-1. CodeDiffView.tsx
-   - Tipo: Relação de UI
-   - Relação: Usa essas classes para renderizar a tela de diff.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O container deve usar flex:1 com overflow hidden, sem heights absolutas.
-2. A actions bar deve ter apenas gap margin-bottom sem backgrounds ou borders.
-3. O layout deve ser idêntico ao .cs-container do CodeSourceView.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .cdf-container {

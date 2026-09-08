@@ -1,54 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Verificar se um diretório representa um repositório Git válido.
-2. Executar comandos nativos do Git e capturar suas saídas de forma assíncrona.
-3. Obter a lista de todos os arquivos rastreados (tracked) e não rastreados (untracked) do repositório (getAllFiles).
-4. Obter a lista de arquivos modificados (staged, unstaged e untracked individuais) do repositório.
-5. Extrair os hunks de alteração (intervalos de linhas modificadas) de um arquivo específico.
-6. Recuperar o conteúdo de um arquivo no estado do commit HEAD.
-7. Obter o hash do commit HEAD atual do repositório.
-8. Listar caminhos relativos de todos os arquivos para a interface segregada FileListingPort.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/ipc/git-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Expõe as funcionalidades de Git por meio de handlers IPC para a interface gráfica.
-   - Criticidade: Alta
-
-2. src/main/core/diff-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Fornece informações de arquivos modificados e hunks para a lógica de diff semântico.
-   - Criticidade: Alta
-
-3. src/main/core/checkpoint-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Fornece o hash do commit HEAD para validação de integridade nos checkpoints.
-   - Criticidade: Média
-
-4. src/shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Retorna estruturas de dados que devem obedecer às interfaces declaradas nos tipos do projeto.
-   - Criticidade: Alta
-
-5. src/main/core/file-listing-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: GitService implementa FileListingPort como contrato mínimo de listagem.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O método de listagem de arquivos rastreados deve retornar a propriedade changeType sempre definida como 'tracked'.
-2. Métodos de listagem de arquivos não devem expor caminhos pertencentes às pastas de infraestrutura interna (como code_awareness, codefetch, .sprintdiff, code_checkpoints).
-3. Todas as chamadas aos comandos nativos do Git devem possuir um limite de tempo máximo (timeout) para evitar travamentos de processos.
-4. Em caso de erro na execução dos comandos Git, os métodos públicos devem retornar estruturas vazias ou nulas ao invés de propagar exceções para o chamador.
-5. `getAllFiles` continua excluindo arquivos ausentes do filesystem. `getModifiedFiles` expõe os arquivos deletados reportados pelo Git com `changeType: 'deleted'` e metadados zerados (mtime e size), para que o diff semântico possa representá-los.
-6. Em caso de falha ao ler o mtime de um arquivo existente (statSync), o método deve usar Date.now() como fallback para garantir ordenação por recência consistente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { spawn } from 'child_process'

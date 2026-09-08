@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a Camada 1: faixa horizontal com SearchBox, summary, controlsSlot e filterSlot.
-2. Organizar os slots de busca, sumário, controles e filtro sem gerenciar estado próprio.
-
-Mapa de Relacionamentos do Script
-
-1. ViewToolbar.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos com prefixo vt-.
-   - Criticidade: Alta
-
-2. SearchBox.tsx
-   - Tipo: Dependência Direta
-   - Relação: Instancia o SearchBox com as props de busca.
-   - Criticidade: Alta
-
-3. FilterPopover.tsx
-   - Tipo: Dependência Direta (opcional)
-   - Relação: Aceita FilterPopover como filterSlot, mas não o instancia.
-   - Criticidade: Baixa
-
-Invariantes do Script
-
-1. Não gerenciar estado de busca nem de filtro — apenas repassar props.
-2. O summary é um ReactNode opcional — não calcular contagem internamente.
-3. O controlsSlot é opcional e renderizado apenas quando fornecido, entre summary e filterSlot.
-4. Quando controlsSlot não é fornecido, o layout é idêntico ao anterior.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

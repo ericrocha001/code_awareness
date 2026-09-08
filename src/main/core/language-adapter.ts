@@ -1,53 +1,33 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Carregar e configurar o parser Tree-sitter para cada linguagem suportada.
-2. Retornar uma instância do parser pronta para uso pelo Structure Reader.
-3. Isolar o Tree-sitter do resto do sistema — o núcleo nunca importa tree-sitter diretamente.
-
-Mapa de Relacionamentos do Script
-
-1. structure-reader.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome o parser configurado para parsear arquivos.
-   - Criticidade: Alta
-
-2. tree-sitter (npm)
-   - Tipo: Dependência Direta
-   - Relação: Runtime principal do parser.
-   - Criticidade: Alta
-
-3. tree-sitter-typescript (npm)
-   - Tipo: Dependência Direta
-   - Relação: Gramática TypeScript/TSX.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O Language Adapter nunca parseia código — apenas retorna o parser configurado.
-2. Cada linguagem tem sua própria gramática carregada sob demanda.
-3. O parser é cacheado por linguagem para evitar reloads repetidos.
-4. Linguagens não suportadas lançam erro claro, não retornam null.
-5. O Structure Reader nunca importa tree-sitter — sempre via Language Adapter.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import Parser from 'tree-sitter'
 // @ts-ignore — tree-sitter-typescript não possui types declarados no pacote
 import TSLanguages from 'tree-sitter-typescript'
+// @ts-ignore — tree-sitter-javascript não possui types declarados no pacote
+import JSLanguage from 'tree-sitter-javascript'
 
-// Linguagens suportadas no MVP
-export type SupportedLanguage = 'typescript' | 'typescript-react'
+// Linguagens suportadas
+export type SupportedLanguage = 'typescript' | 'typescript-react' | 'javascript' | 'javascript-react' | 'css'
 
-const SUPPORTED_LANGUAGES = new Set<SupportedLanguage>(['typescript', 'typescript-react'])
+const SUPPORTED_LANGUAGES = new Set<SupportedLanguage>([
+  'typescript',
+  'typescript-react',
+  'javascript',
+  'javascript-react',
+  'css'
+])
 
 // Mapeamento de extensão de arquivo para linguagem suportada
 const EXTENSION_TO_LANGUAGE: Record<string, SupportedLanguage> = {
   '.ts': 'typescript',
-  '.tsx': 'typescript-react'
+  '.tsx': 'typescript-react',
+  '.js': 'javascript',
+  '.jsx': 'javascript-react',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
+  '.css': 'css'
 }
 
 // Cache de parsers por linguagem — evita recriar instâncias a cada chamada
@@ -56,21 +36,36 @@ const parserCache = new Map<SupportedLanguage, Parser>()
 /**
  * Retorna um parser Tree-sitter configurado para a linguagem especificada.
  * Cacheado por linguagem para evitar reloads repetidos.
- * Lança erro para linguagens não suportadas.
+ * Retorna null para linguagens que não utilizam Tree-sitter (ex: 'css').
+ * Lança erro para linguagens desconhecidas ou quando a gramática não puder ser carregada.
  */
-export function getParser(language: string): Parser {
+export function getParser(language: string): Parser | null {
   if (!isLanguageSupported(language)) {
     throw new Error(`Language Adapter: linguagem não suportada: "${language}". Suportadas: ${getSupportedLanguages().join(', ')}`)
   }
 
   const lang = language as SupportedLanguage
 
+  // CSS não usa parser Tree-sitter — retorna null
+  if (lang === 'css') {
+    return null
+  }
+
   const cached = parserCache.get(lang)
   if (cached) return cached
 
-  // Carrega a gramática correta: typescript para .ts, tsx para .tsx
-  // INVARIANT: usar a gramática errada pode causar falhas de parse silenciosas
-  const grammar = lang === 'typescript-react' ? TSLanguages.tsx : TSLanguages.typescript
+  let grammar: any
+  if (lang === 'typescript') {
+    grammar = TSLanguages.typescript
+  } else if (lang === 'typescript-react') {
+    grammar = TSLanguages.tsx
+  } else if (lang === 'javascript' || lang === 'javascript-react') {
+    grammar = JSLanguage
+  }
+
+  if (!grammar) {
+    throw new Error(`Language Adapter: gramática Tree-sitter indisponível para "${language}"`)
+  }
 
   const parser = new Parser()
   parser.setLanguage(grammar)
@@ -79,7 +74,7 @@ export function getParser(language: string): Parser {
   return parser
 }
 
-/** Retorna true se a linguagem possui suporte nativo neste adapter. */
+/** Retorna true se a linguagem possui suporte neste adapter. */
 export function isLanguageSupported(language: string): boolean {
   return SUPPORTED_LANGUAGES.has(language as SupportedLanguage)
 }

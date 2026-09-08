@@ -1,45 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar o balão de edição de tags via Popover compartilhado (com ou sem gatilho "+" nativo em modo controlado).
-2. Gerenciar busca local de tags por nome, zerada sempre que o balão fecha.
-3. Oferecer navegação por teclado (↑/↓ movem o destaque visual, Enter alterna a tag destacada).
-4. Persistir a associação arquivo ↔ tag via IPC e sincronizar via evento global e callback.
-
-Mapa de Relacionamentos do Script
-
-1. TagPopover.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos com prefixo tp-.
-   - Criticidade: Alta
-
-2. Popover.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Posiciona o balão via portal e gerencia clique-fora, ESC, scroll e resize.
-   - Criticidade: Alta
-
-3. ActivePopover.tsx (FileCollection)
-   - Tipo: Dependência Inversa
-   - Relação: Consome o TagPopover em modo controlado sob demanda.
-   - Criticidade: Alta
-
-4. TagManagerModal.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: É aberto via onOpenTagManager ao clicar em "Criar nova tag".
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. A alternância de tag sempre persiste via IPC (setFileTag/removeFileTag) e dispara o evento global tags-changed.
-2. O destaque por teclado é puramente visual — a seleção real é o conjunto activeTagIds recebido do pai.
-3. A busca é local, não persiste e zera ao fechar o balão.
-4. Quando anchorRef é fornecido externamente (modo controlado), o gatilho '+' interno não é renderizado.
-5. Nenhum hook é condicional — todos ficam no topo, incondicionais.
-6. O balão permanece aberto ao alternar tags para permitir multi-seleção.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 import React, { useState, useRef, useCallback, useEffect, useLayoutEffect, useMemo } from 'react'
 import { Plus, Check, Search } from 'lucide-react'

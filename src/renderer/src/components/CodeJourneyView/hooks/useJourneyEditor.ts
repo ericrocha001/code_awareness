@@ -1,54 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o estado dos dados do detalhe da implementação selecionada (checkpointData).
-2. Gerenciar os campos de edição (instruções e resultado do agente) e seu preenchimento/reset.
-3. Controlar o selo de status do salvamento (idle, saving, saved, error).
-4. Executar o mecanismo completo de salvamento automático (autosave): debounce, flush no fechamento/troca, snapshot de sujeira e retry.
-5. Fornecer os handlers encapsulados de mudança dos campos para o drawer.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome dados do detalhe, campos de edição, selo de status e handlers de autosave.
-   - Criticidade: Alta
-
-2. ../types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa SaveStatus.
-   - Criticidade: Alta
-
-3. ../../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome CheckpointData e CheckpointSummary.
-   - Criticidade: Alta
-
-4. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relação: Invoca loadCheckpoint e updateCheckpointDetails via IPC.
-   - Criticidade: Alta
-
-5. ../../../constants/editor-constants.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece AUTOSAVE_DEBOUNCE_MS e SAVED_STATUS_DISPLAY_MS para o mecanismo de autosave.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O preenchimento programático dos campos ao carregar ou trocar de implementação reseta a sujeira (dirtyRef = false e dirtySnapshotRef = null).
-2. O efeito de debounce agenda o salvamento automático (~0,7s) e nunca faz flush no cleanup.
-3. O efeito de flush dispara no fechamento do drawer ou troca de implementação e faz o flush do snapshot sujo no cleanup se houver sujeira pendente.
-4. Para checkpoints arquivados (onde checkpointData é null), o fallback usa o sumário da lista de checkpoints.
-5. A atualização local do estado e da lista evita releitura desnecessária do JSON inteiro no disco.
-6. Os dados do detalhe (checkpointData) só alimentam os campos de edição quando pertencem à implementação selecionada (id correspondente).
-7. Os dados do detalhe são limpos a cada troca de seleção, nunca permanecendo obsoletos da implementação anterior.
-8. O carregamento do detalhe usa token de invalidação: apenas a resposta da requisição mais recente é aplicada ao estado, descartando respostas obsoletas fora de ordem.
-9. O efeito de carregamento do detalhe nunca depende de checkpoints — atualizações da lista (renomear, autosave, campanha) não exigem recarregamento do detalhe; apenas troca de implementação ou projeto dispara o carregamento.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useState, useEffect, useCallback, useRef } from 'react'

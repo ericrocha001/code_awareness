@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Pré-resolver a paleta de cores das tags da coleção (tagRenderMap) uma vez por tema/coleção.
-2. Pré-resolver as tags de cada arquivo (tagsByFile), mapeando relativePath → TagRenderData[].
-3. Pré-computar o mapa de tokens por arquivo (tokenEstimateMap).
-
-Mapa de Relacionamentos do Script
-
-1. FileCollectionView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome o hook e repassa tagsByFile ao FileView e tokenEstimateMap para métricas.
-   - Criticidade: Alta
-
-2. models/FileRowModel.ts
-   - Tipo: Contrato / Interface
-   - Relação: Produz TagRenderData[] consumido pelo FileRow via prop tags.
-   - Criticidade: Alta
-
-3. ../../utils/color-utils.ts
-   - Tipo: Dependência Direta
-   - Relação: resolveTagPalette resolve background/text por tema.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. tagsByFile.get(path) retorna referência estável entre renders para o mesmo conteúdo — arquivos sem tags retornam EMPTY_TAGS (referência constante), preservando o comparador do FileRow.
-2. tagRenderMap é memoizado por [allTags, effectiveTheme]; tagsByFile por [files, fileTagsMap, tagRenderMap]; tokenEstimateMap por [files].
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useMemo } from 'react'

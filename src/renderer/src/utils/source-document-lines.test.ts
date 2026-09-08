@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a divisão de strings em linhas através de splitDocumentLines.
-2. Validar a normalização de quebras de linha CRLF (\r\n) e CR (\r) para LF (\n).
-3. Validar a robustez com entradas vazias, nulas e indefinidas.
-4. Validar a preservação de linhas vazias intermediárias.
-
-Mapa de Relacionamentos do Script
-
-1. source-document-lines.ts
-   - Tipo: Dependência Direta
-   - Relação: Função pura sob teste.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes são determinísticos, síncronos e sem efeitos colaterais.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

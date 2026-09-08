@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer o perfil padrão do Code Source com defaults seguros.
-2. Fornecer o formato padrão do Code Source.
-3. Normalizar defensivamente perfis do Code Source recebidos de fontes não confiáveis.
-4. Normalizar defensivamente o formato de saída do Code Source.
-
-Mapa de Relacionamentos do Script
-
-1. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome SourceProfile e SourceOutputFormat como contratos normalizados.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é puro — sem filesystem, IPC, processos ou dependências do main/renderer.
-2. A normalização nunca lança erro: entrada inválida, incompleta ou desconhecida produz sempre um perfil válido.
-3. Campos desconhecidos são descartados; cada campo booleano inválido assume o default do perfil padrão.
-4. O formato normalizado é sempre 'markdown' ou 'xml'; qualquer outro valor vira 'markdown'.
-5. O módulo não conhece o Code Compression (nem tipos, nem defaults).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { SourceOutputFormat, SourceProfile } from '../types'

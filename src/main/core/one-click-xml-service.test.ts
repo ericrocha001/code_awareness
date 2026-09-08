@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente o comportamento do OneClickXmlService com dublês de IgnorePolicy e RepomixDirectOutputPort.
-2. Garantir fidelidade estrita do XML retornado (sem envelopes artificiais do Code Dash).
-3. Garantir o bloqueio imediato com erro claro quando a allowlist estiver vazia.
-4. Validar o correto repasse de opções de limpeza (removeComments, removeEmptyLines, truncateBase64) e formato XML no RepomixRequest.
-5. Validar o tratamento de falhas e exceções da porta de Direct Output.
-
-Mapa de Relacionamentos do Script
-
-1. one-click-xml-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa a classe OneClickXmlService.
-   - Criticidade: Alta
-
-2. ignore-policy.ts
-   - Tipo: Dependência Direta
-   - Relação: Mockado para simular resolução de allowlists.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes não devem chamar o Repomix CLI real nem depender de Electron real.
-2. Testes operam em memória com isolamento completo.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, expect, it, vi } from 'vitest'
@@ -64,6 +37,8 @@ describe('OneClickXmlService', () => {
 
     expect(result.success).toBe(true)
     expect(result.xml).toBe(nativeRepomixXml)
+    expect(typeof result.tokenCount).toBe('number')
+    expect(result.tokenCount).toBe(Math.ceil(nativeRepomixXml.length / 4))
     expect(result.metadata?.fileCount).toBe(1)
     expect(result.timings).toBeDefined()
     expect(result.timings?.totalMs).toBeGreaterThanOrEqual(0)

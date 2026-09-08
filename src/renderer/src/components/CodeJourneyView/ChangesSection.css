@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar a seção de mudanças (ChangesSection) com cabeçalho, subgrupos e erro de preview.
-2. Garantir vão entre cards (gap) em vez de divisórias — produz o respiro da referência.
-
-Mapa de Relacionamentos do Script
-
-1. ChangesSection.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo cs- para evitar colisões.
-2. Os cards de arquivo são separados por gap — nunca por border-bottom.
-3. O botão de visualizar diff deve ter aparência de ação secundária, não primária.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .cs-section {

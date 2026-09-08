@@ -1,47 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar que o Synchronizer mantém o banco espelhado ao disco em sincronizações por evento e scan periódico.
-2. Validar a reconciliação de abertura (modificação e deleção offline).
-3. Validar a autocura de metadados (touch) e a convergência do Invariante Central após cada operação.
-
-Mapa de Relacionamentos do Script
-
-1. repository-synchronizer.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia o Synchronizer para processar eventos, scan periódico e reindexação.
-   - Criticidade: Alta
-
-2. test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Isola repositórios temporários e fornece a Função-Oráculo verifyInvariant.
-   - Criticidade: Alta
-
-3. repository-events.ts
-   - Tipo: Dependência Direta
-   - Relação: Emite eventos file:created / file:modified / file:deleted para acionar o Synchronizer.
-   - Criticidade: Alta
-
-4. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Consulta estado (getFiles/reconcileWithDisk/close) do banco.
-   - Criticidade: Alta
-
-5. repository-database.ts
-   - Tipo: Dependência Direta
-   - Relação: Fecha conexões de banco no teardown.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Cada teste cria repositório temporário isolado e o remove no afterEach.
-2. Todo Synchronizer criado é descartado via dispose() no afterEach para limpar timers e listeners.
-3. Reindexação real ocorre via synchronizeModified(); o debounce apenas marca o arquivo como modified.
-4. O scan periódico só percorre arquivos já indexados — arquivos novos no disco não são descobertos por ele.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
@@ -57,7 +15,7 @@ import {
   verifyInvariant,
   FIXTURE_SIMPLE_FUNCTION
 } from './test-helpers'
-import { RepositoryModel } from './repository-model'
+import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { RepositorySynchronizer } from './repository-synchronizer'
 import { repositoryEventBus } from './repository-events'
 import { closeRepositoryDatabase } from './repository-database'
@@ -180,7 +138,7 @@ describe('Sprint 3 — Convergência Disco ↔ Banco', () => {
     model.close()
     modifyFileOnDisk(repoPath, 'src/sample.ts', 'export const x = 999\n')
 
-    model = new RepositoryModel(repoPath)
+    model = createRepositoryModel(repoPath)
     await model.reconcileWithDisk()
 
     expect(model.getFiles()[0].status).toBe('modified')
@@ -199,7 +157,7 @@ describe('Sprint 3 — Convergência Disco ↔ Banco', () => {
     model.close()
     deleteTestFile(repoPath, 'src/sample.ts')
 
-    model = new RepositoryModel(repoPath)
+    model = createRepositoryModel(repoPath)
     await model.reconcileWithDisk()
 
     expect(model.getFiles()).toHaveLength(0)

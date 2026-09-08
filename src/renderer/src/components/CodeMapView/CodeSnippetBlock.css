@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o bloco de código estilo ChatGPT (cabeçalho, corpo, avisos de truncamento e modo puro).
-2. Garantir cantos arredondados, fonte mono e fundo adaptado ao tema.
-3. Manter o cabeçalho fixo durante o scroll da coluna de código.
-4. Estilizar as linhas virtualizadas do modo realçado com altura fixa obrigatória para o react-window.
-
-Mapa de Relacionamentos do Script
-
-1. CodeSnippetBlock.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo (prefixo csb-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todas as classes usam prefixo csb- para evitar colisão com outras abas.
-2. O aviso de truncamento usa âmbar semântico (#f59e0b) — única exceção de cor.
-3. O corpo do código herda o fundo do tema do prism (vsDark/vsLight).
-4. O cabeçalho usa position: sticky com z-index 1 para permanecer visível durante o scroll.
-5. O aviso do modo puro usa var(--text-secondary) — nenhuma cor hardcoded.
-6. As linhas virtualizadas (.csb-line) têm altura fixa de 19px — nunca alterar sem ajustar LINE_HEIGHT no TSX.
-7. O container virtualizado (.csb-virtual-container) herda o fundo do tema do prism — nunca cor hardcoded.
-8. No modo virtualizado, o bloco usa flex: 1 para esticar pelo `.cmcv-root` flex — sem isso a lista não recebe a altura real do cartão.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .csb-root {

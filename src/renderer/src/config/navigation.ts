@@ -1,27 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir centralizadamente o array de itens de navegação principal da aplicação e exportar os tipos NavId e Tab.
-
-Mapa de Relacionamentos do Script
-
-1. ../components/GlobalSidebar/GlobalSidebar.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Importa NAV_ITEMS e Tab.
-   - Criticidade: Alta
-
-2. ../components/GlobalSidebar/GlobalSidebarNav.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Importa NavId e NavItem.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A lista de navegação contém apenas abas válidas do sistema.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { Home, Flag, FileText, Archive, Zap, GitBranch, Bookmark, Map, type LucideIcon } from 'lucide-react'

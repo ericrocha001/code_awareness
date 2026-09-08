@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Computar um identificador determinístico (hash/string) dos parâmetros de geração do Code Source para deduplicação e controle de ciclo de vida.
-2. Normalizar a lista de arquivos selecionados e as propriedades do perfil para garantir estabilidade semântica independentemente de ordem ou referências de objetos.
-
-Mapa de Relacionamentos do Script
-
-1. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece SourceOutputFormat e SourceProfile.
-   - Criticidade: Alta
-
-2. hooks/useSourceGeneration.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome computeSourceGenerationIdentity para deduplicar requisições em voo e reutilizar o último resultado válido.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A função computeSourceGenerationIdentity é pura, determinística e livre de efeitos colaterais.
-2. Duas entradas com os mesmos arquivos em ordens diferentes geram a mesma identidade.
-3. Mudanças de formato, perfil, arquivos ou repoPath alteram a identidade de forma determinística.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { SourceOutputFormat, SourceProfile } from '../../../../../shared/types'

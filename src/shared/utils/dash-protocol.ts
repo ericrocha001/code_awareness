@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Centralizar constantes de versão e representações suportadas do protocolo Code Dash.
-2. Fornecer guardas de tipo e funções de normalização para dados do protocolo Code Dash.
-
-Mapa de Relacionamentos do Script
-
-1. src/shared/types/dash-types.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa DashRepresentation para tipar constantes e type guards.
-   - Criticidade: Alta
-
-2. src/main/core/dash/dash-request-validator.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consumido pelo validador para verificar versão do protocolo e tipos de representação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. DASH_PROTOCOL_VERSION deve permanecer como 'code-dash/v1' de forma imutável.
-2. normalizeDashProtocol nunca deve lançar exceção ao receber entradas inválidas ou de tipos arbitrários.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { DashRepresentation } from '../types/dash-types'

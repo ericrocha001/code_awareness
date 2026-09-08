@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o cálculo determinístico de identidade em computeSourceGenerationIdentity.
-2. Validar estabilidade da identidade com ordenação de arquivos e normalização do perfil.
-
-Mapa de Relacionamentos do Script
-
-1. source-generation-identity.ts
-   - Tipo: Dependência Direta
-   - Relação: Função pura sob teste.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes são puramente síncronos e sem efeitos colaterais.
-2. Comutação na ordem do array de arquivos selecionados preserva estritamente a mesma identidade.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

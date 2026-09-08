@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o contrato estável de compressão (CompressionPort) consumido pelos orquestradores de alto nível (CodeMapService).
-2. Re-exportar a constante COMPRESSION_TOTAL_FAILURE_MARKER a partir de compression-constants.ts, fonte única de verdade.
-
-Mapa de Relacionamentos do Script
-
-1. compression-constants.ts
-   - Tipo: Dependência Direta
-   - Relação: Re-exporta COMPRESSION_TOTAL_FAILURE_MARKER para consumidores da porta.
-   - Criticidade: Alta
-
-2. code-map-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome CompressionPort como única dependência de compressão; a implementação concreta (CompressionService) é injetada pelo bootstrap.
-   - Criticidade: Alta
-
-3. compression-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa CompressionPort formalizando o contrato em tempo de compilação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A porta é uma interface pura — não importa nem referencia CompressionService.
-2. A assinatura de generateCompressionMarkdown espelha exatamente o que os orquestradores consomem, sem métodos adicionais.
-3. COMPRESSION_TOTAL_FAILURE_MARKER é re-exportada, nunca redeclarada — compression-constants.ts permanece a fonte única de verdade.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { CompressionProfile, OutputFormat, ContextEnrichment } from '../../shared/types'

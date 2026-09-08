@@ -1,27 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Encapsular a lógica de lazy mount acumulativo da FileView, controlando quantas rows existem montadas no DOM.
-2. Disparar a montagem do próximo lote quando o sentinel entra na viewport via IntersectionObserver com rootMargin de 800px.
-3. Resetar o montante inicial de rows quando a quantidade total de arquivos muda (novo projeto, filtro, busca).
-
-Mapa de Relacionamentos do Script
-
-1. FileView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome o hook, obtendo mountedCount, sentinelRef e hasMore para renderizar o slice de rows e o sentinel.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O lazy mount é cumulativo — lotes anteriores nunca desmontam; a rolagem rápida permanece suave.
-2. O mountedCount nunca excede totalCount e reseta para min(INITIAL_BATCH, totalCount) quando totalCount muda.
-3. O IntersectionObserver é desconectado no cleanup do efeito e nunca observa quando hasMore é falso.
-4. O observer é criado uma única vez por ciclo de hasMore — handleLoadMore é estável (deps vazias) e lê totalCount via ref, então mudanças de totalCount sem alteração de hasMore não recriam o observer.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useState, useEffect, useRef, useCallback } from 'react'

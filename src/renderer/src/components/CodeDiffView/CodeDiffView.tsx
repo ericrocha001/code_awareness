@@ -1,68 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o ciclo de vida do WatcherService e monitorar alterações de arquivos.
-2. Gerenciar seleção de arquivos e sistema de ignore.
-3. Renderizar interface de tela única com ViewToolbar + ActionBar + StatusStrip + FileCollectionView.
-4. Fornecer ações de visualização de diff (PreviewModal), cópia com prompt e exportação.
-5. Ordenar arquivos por recência (mtime), com arquivos deleted no final.
-
-Mapa de Relacionamentos do Script
-
-1. CodeDiffView.css
-   - Tipo: Relação de UI
-   - Relação: Consome estilos CSS do componente.
-   - Criticidade: Alta
-
-2. ViewToolbar.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a Camada 1 com SearchBox, contagem e FilterPopover de tags.
-   - Criticidade: Alta
-
-3. ActionBar.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a Camada 2 com botões de ação à direita.
-   - Criticidade: Alta
-
-4. FilterPopover.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o dropdown de filtro de tags coloridas.
-   - Criticidade: Média
-
-5. StatusStrip.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Exibe faixa de feedback com status do watcher.
-   - Criticidade: Média
-
-6. FileCollectionView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a coleção de arquivos com seleção e alternância Grid/Dense.
-   - Criticidade: Alta
-
-7. PreviewModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Exibe diff semântico gerado sob demanda em modal.
-   - Criticidade: Alta
-
-8. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Define DiffFileStatus e Tag.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A ordenação dos arquivos é sempre por recência (mtime descendente, com arquivos deleted no final).
-   Filtros de busca e tags apenas filtram a lista — nunca alteram a ordenação.
-   Esta é uma invariante de negócio.
-2. Arquivos deleted devem aparecer sempre no final da lista.
-3. O diff só é gerado sob demanda, via handleOpenPreview.
-4. As tags devem estar sincronizadas com as outras abas via evento global tags-changed.
-5. O badge de tipo de alteração só deve ser renderizado quando changeType não for undefined nem 'tracked'.
-6. O botão "Visualizar Diff" deve estar desabilitado quando selectedFiles.size === 0.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import { DiffFileStatus, Tag } from '../../../../shared/types'
@@ -229,12 +166,12 @@ export const CodeDiffView: React.FC<{
         )
       : afterIgnore
 
-    // Aplica filtro de tags
+    // Aplica filtro de tags (AND): arquivo precisa ter TODAS as tags selecionadas
     const tagFiltered = filterTagIds.length === 0
       ? searchFiltered
       : searchFiltered.filter(file => {
           const fileTagIds = fileTagsMap[file.relativePath] || []
-          return filterTagIds.some(tagId => fileTagIds.includes(tagId))
+          return filterTagIds.every(tagId => fileTagIds.includes(tagId))
         })
 
     // INVARIANTE: Ordenação por recência — active (não-deleted) primeiro, depois deleted

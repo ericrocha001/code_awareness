@@ -1,43 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Executar a pipeline de resolução semântica que transforma um Stored Profile em Effective Profile canônico.
-2. Eliminar configurações sem efeito prático ou sem suporte na CLI do Repomix para o caminho ativo (Compression Core vs Direct Output).
-3. Produzir a representação semântica mínima e determinística necessária para a execução e cálculo de hash.
-
-Mapa de Relacionamentos do Script
-
-1. compression-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome normalizeCompressionProfile e resolveCompressionPath para normalizar a entrada e identificar o caminho arquitetural.
-   - Criticidade: Alta
-
-2. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome CompressionProfile e OutputFormat para tipagem de entrada da resolução.
-   - Criticidade: Alta
-
-3. repomix-arguments-builder.ts
-   - Tipo: Dependência Inversa
-   - Relação: Fornece o tipo EffectiveProfile e a representação semântica consumida para geração de flags CLI.
-   - Criticidade: Alta
-
-4. compression-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome resolveEffectiveProfile para obtenção do perfil efetivo na compressão e no cálculo de hash de cache.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é puramente determinístico e sem efeitos colaterais — sem filesystem, processos ou estado global.
-2. No caminho compression-core, apenas removeComments, removeEmptyLines e truncateBase64 são preservados.
-3. outputFilePathStyle é eliminado em todos os caminhos arquiteturais (flag inexistente no Repomix 1.15.0).
-4. A resolução de perfil nunca lança erro para entradas nulas, incompletas ou corrompidas, delegando a higienização a normalizeCompressionProfile.
-5. Um OutputFormat desconhecido em runtime é tratado de forma pura — cai para 'plain' sem warning ou efeito colateral, preservando o determinismo.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { CompressionProfile, OutputFormat } from '../../shared/types'

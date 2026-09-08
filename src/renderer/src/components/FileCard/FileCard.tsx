@@ -1,50 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar os metadados do arquivo em card com nome, caminho, tokens e ícone representativo.
-2. Renderizar chips de tags e badge de tipo de alteração (M/A/D) quando aplicável.
-3. Medir por contenção o overflow vertical de tags (teto de 2 linhas) e sinalizar o excesso com contador "+N" sobre a região clipada, mantendo consultabilidade via tooltip (title) com a lista integral.
-4. Delegar interações contextuais (abertura de TagPopover e ActionMenu) para o pai via callbacks onTagInteraction e onActionInteraction.
-5. Otimizar re-renderizações através de React.memo com comparador estrito customizado.
-
-Mapa de Relacionamentos do Script
-
-1. ../FileCollection/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa e reexporta FileCardFile como fonte única de tipos.
-   - Criticidade: Alta
-
-2. ../../utils/tag-overflow.ts
-   - Tipo: Dependência Direta
-   - Relação: Helper puro que converte geometrias medidas em contagem de tags ocultas.
-   - Criticidade: Alta
-
-3. ../../CodeJourneyView/ChangesSection.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome FileCard na seção de mudanças do Code Journey (único consumidor desde a eliminação do FileGridView na Sprint 2.3).
-   - Criticidade: Alta
-
-4. ../ToggleSwitch/ToggleSwitch.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente de controle de seleção.
-   - Criticidade: Alta
-
-5. ../../../../shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Interface de Tag.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Não instancia nem renderiza Popover, TagPopover ou ActionMenu no DOM interno do card.
-2. Suporta tanto a API legada (tags: Tag[]) quanto a nova API (fileTagIds: string[] + allTags: Tag[]).
-3. React.memo realiza comparação campo a campo das props relevantes, prevenindo re-renderizações quando os valores não mudam.
-4. hiddenTagCount é estado de APRESENTAÇÃO (não de negócio): não altera o contrato de props do memo e só assume valor > 0 após medição geométrica válida; ambiente sem medição (jsdom/primeiro paint) produz zero ocultas — nunca um "+N" falso.
-5. A medição de overflow é local ao item montado (nunca movida para o orquestrador); o "+N" é absoluto e pointer-events: none, portanto o setState pós-medida não altera geometria (sem loop de ResizeObserver).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useMemo, useRef, useState, useLayoutEffect } from 'react'

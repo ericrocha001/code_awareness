@@ -1,51 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar o preview de conteúdo conforme o OutputFormat (markdown, json, xml, plain) — componente puro de apresentación, sin chrome.
-2. Markdown: interpretar via markdown-to-jsx, com tipografía ancorada nas reglas de `.preview-markdown` adaptadas à classe local.
-3. JSON: pretty-print (parse + serialização indentada) com highlight Prism; se o parse falhar, exibir o texto cru en modo plain.
-4. XML: highlight Prism.
-5. Degradação de tamaño: json/xml acima do límite degradan a texto monospaced plain (guarda de performance).
-
-Mapa de Relacionamientos do Script
-
-1. OutputModal.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consume este componente para renderizar o preview do documento gerado (markdown/json/xml/plain).
-   - Criticidade: Alta
-
-2. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consume OutputFormat para tipar a entrada.
-   - Criticid: Alta
-
-3. prism-react-renderer / markdown-to-jsx / useTheme
-   - Tipo: Dependência Direta
-   - Relação: Highlight/temas, interpretação Markdown y effectiveTheme.
-   - Criticidade: Alta
-
-4. CodeSnippetBlock.tsx (espelho técnico, sin dependncia)
-   - Tipo: Relação de espelho
-   - Relação: No se importa nada de CodeSnippetBlock; la selección de tema (useTheme → vsDark/vsLight) y la normalización de lenguaj se espelan deliberadamente para mantenerse autosuficiente.
-   - Criticidad: Media
-
-5. PreviewModal.css (ancla tipográfica)
-   - Tipo: Referencia visual
-   - Relação: A tipografia de `.preview-markdown` en PreviewModalCSS se adapta localmente com prefixo próprio deste componente (no importar CSS de otras features).
-   - Criticidad: Media
-
-Invariantes del Script
-
-1. Componente puro de presentación — sin cabecera, sin acciones, sin estado de negocio.
-2. Nunca importa nada de CodeMapView/PreviewModal (espelho, no dependencia — evita acoplamiento entre features).
-3. JSON inválido nunca lança — mostra el texto crudo (preview é instrumento de inspeção).
-4. json/xml por encima de MAX_HIGHLIGHT_CHARS degradam a término plain.
-5. El tema del highlight siempre se deriva de effectiveTheme — nunca hardcod.
-6. Modo pre sempre con quebra de palavra e pre-wrap, como el preview actual.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

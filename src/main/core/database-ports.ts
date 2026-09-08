@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir os contratos de persistência segregados por domínio (ActionLogPort, CheckpointCatalogPort, CampaignPort).
-
-Mapa de Relacionamentos do Script
-
-1. better-sqlite3-database-adapter.ts
-   - Tipo: Dependência Inversa
-   - Relação: Implementa os três contratos definidos aqui.
-   - Criticidade: Alta
-
-2. checkpoint-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome CheckpointCatalogPort via injeção de dependência.
-   - Criticidade: Alta
-
-3. campaign-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome CampaignPort via injeção de dependência.
-   - Criticidade: Alta
-
-4. restore-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome ActionLogPort via injeção de dependência.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Os contratos são segregados por responsabilidade de domínio — nenhuma porta deve expor operações fora do seu domínio.
-2. Nenhuma implementação concreta (SQLite, Fake, etc.) é referenciada aqui.
-3. As assinaturas dos métodos espelham exatamente as funções do database-service.ts original para compatibilidade de implementação.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { ActionLog, CheckpointCatalogRecord, Campaign } from '../../shared/types'

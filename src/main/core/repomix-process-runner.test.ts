@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar isoladamente o contrato do RepomixProcessRunner: resultado estruturado, não-lançamento por exitCode != 0, captura de stdout, timeout obrigatório e cancelamento via AbortSignal.
-2. Validar a distinção entre erro de timeout e GenerationCancelledError.
-3. Validar a função utilitária isGenerationCancelledError em diversos cenários de erro.
-
-Mapa de Relacionamentos do Script
-
-1. repomix-process-runner.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa o método run usando um comando trivial (node) — sem dependência da CLI do Repomix.
-   - Criticidade: Alta
-
-2. generation-errors.ts
-   - Tipo: Dependência Direta
-   - Relação: Valida o lançamento e reconhecimento de GenerationCancelledError.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum teste depende da CLI do Repomix — usa apenas o binário node.
-2. O runner nunca lança exceção por exitCode != 0; sempre resolve com { stdout, stderr, exitCode }.
-3. Timeout e cancelamento produzem tipos e mensagens de erro distintos.
-4. O signal abortado antes da execução impede a criação do processo filho.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

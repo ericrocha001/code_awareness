@@ -1,46 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a construção de argumentos CLI a partir de EffectiveProfile e OutputFormat.
-2. Validar a aplicação das flags padrão no caminho compression-core e no caminho direct-output.
-3. Validar regras de dependência estrutural (includeEmptyDirectories e includeFullDirectoryStructure requerem includeDirectoryStructure).
-4. Validar restrição de parsableStyle exclusivamente para os formatos xml e markdown.
-5. Validar a inclusão obrigatória das flags --include, --compress e --stdout em qualquer formato.
-6. Validar a construção do contrato tipado RepomixRequest e a derivação dos argumentos CLI a partir dele.
-
-Mapa de Relacionamentos do Script
-
-1. repomix-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa buildRepomixCliArguments, buildRepomixRequest e outputFormatToStyle.
-   - Criticidade: Alta
-
-2. effective-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome resolveEffectiveProfile para gerar perfis efetivos de teste.
-   - Criticidade: Alta
-
-3. compression-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome DEFAULT_PROFILE para os cenários de teste.
-   - Criticidade: Alta
-
-4. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome CompressionProfile e OutputFormat para tipagem de entrada dos testes.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum teste acessa filesystem, invoca a CLI real do Repomix ou depende de estado externo — 100% determinístico em memória.
-2. Warnings estruturados gerados pelo builder são verificados e restaurados após cada teste.
-3. Argumentos CLI para compression-core nunca contêm --output-show-line-numbers, --no-file-summary ou --no-directory-structure.
-4. Argumentos CLI para direct-output preservam a estrutura completa do documento.
-5. O contrato RepomixRequest preserva fielmente os campos fornecidos (repoPath, selectedFiles, profile, outputFormat).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'

@@ -1,77 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a interface da aba Code Compression com layout ViewToolbar + ActionBar + FileCollectionView.
-2. Gerenciar a seleção reativa de arquivos com sistema de Ignore.
-3. Delegar a geração, preview, cópia e exportação da saída de compressão ao OutputModal
-   e expor uma ActionBar com dois botões: "Instruções do Prompt" e "Gerar Saída".
-4. Sincronizar tags e arquivos ignorados com outras abas via eventos globais e IPC.
-5. Exibir contador de selecionados no resumo do topo e toggle "Selecionados no topo" na ViewToolbar.
-6. O sistema de ignore opera exclusivamente com caminhos exatos de arquivos.
-
-Mapa de Relacionamentos do Script
-
-1. CodeCompressionView.css
-   - Tipo: Relação de UI
-   - Relação: Consome estilos CSS do componente.
-   - Criticidade: Alta
-
-2. ViewToolbar.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a Camada 1 com SearchBox, contagem, controlsSlot e FilterPopover de tags.
-   - Criticidade: Alta
-
-3. ActionBar.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a Camada 2 com botões de ação à direita.
-   - Criticidade: Alta
-
-4. FilterPopover.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o dropdown de filtro de tags coloridas.
-   - Criticidade: Média
-
-5. FileCollectionView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a coleção de arquivos com seleção, alternância Grid/Dense e estimativa de tokens.
-   - Criticidade: Alta
-
-6. OutputModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Gerencia visualmente a preview, cópia, exportação e a geração reativa da saída de compressão.
-   - Criticidade: Alta
-
-7. TagManagerModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Gerencia criação, edição e associação de tags.
-   - Criticidade: Alta
-
-8. PromptEditorModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Edita o prompt de auditoria customizável.
-   - Criticidade: Alta
-
-9. ignore-patterns.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece padrões de ruído.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O FileGrid deve ocupar 100% do espaço disponível no painel principal.
-2. O total de tokens selecionados deve ser calculado apenas com base nos arquivos checkados.
-3. A geração, cópia e exportação do markdown é exclusiva do OutputModal (com debounce e stale protection internos).
-4. O prompt de auditoria deve ser persistido no localStorage.
-5. Tags e arquivos ignorados devem ser sincronizados com outras abas via eventos globais.
-6. O listener de tags-changed deve ser removido quando o componente desmonta.
-7. O sistema de ignore opera exclusivamente com caminhos exatos de arquivos.
-8. A ViewToolbar substitui a CommandBar — nenhuma referência a command-bar no JSX.
-9. O toggle "Selecionados no topo" é estado local (não persiste ao trocar de projeto).
-10. A reordenação por seleção é puramente visual e não afeta a geração de markdown.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react'
@@ -334,7 +262,7 @@ export const CodeCompressionView: React.FC<CodeCompressionViewProps> = ({
 
       const matchesTags =
         filterTagIds.length === 0 ||
-        filterTagIds.some((tagId) => {
+        filterTagIds.every((tagId) => {
           const fileTagIds = fileTagsMap[file.relativePath] || []
           return fileTagIds.includes(tagId)
         })

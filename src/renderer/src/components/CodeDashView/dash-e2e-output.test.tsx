@@ -1,36 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar E2E os contratos de saída do Code Dash (E2E-17 a E2E-19): Copy, Export e ausência de regeneração.
-2. Exercitar CodeDashView real com window.codeAwareness mockado e contadores de invocação IPC.
-
-Mapa de Relacionamentos do Script
-
-1. CodeDashView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente renderizado no fluxo completo até o estado done.
-   - Criticidade: Alta
-
-2. hooks/useDashWorkflow.ts
-   - Tipo: Dependência Direta
-   - Relação: Máquina de estados real da UI consumida pela view.
-   - Criticidade: Alta
-
-3. dash-e2e-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome builder de requisição e utilidades de XML.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Copy e Export consomem apenas o XML já presente no estado — dashGenerate nunca é chamado por elas.
-2. window.codeAwareness é mockado por teste e reinicializado no beforeEach.
-3. O clipboard é espiado via Object.defineProperty sem dependência de implementação nativa.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
@@ -93,6 +63,8 @@ describe('Suite C — Output e Integração', () => {
       dashParseAndResolve,
       dashGenerate,
       saveXml,
+      loadSettings: vi.fn().mockResolvedValue({}),
+      saveSettings: vi.fn().mockResolvedValue({ success: true }),
       dashOneClickXml: vi.fn()
     }
   })

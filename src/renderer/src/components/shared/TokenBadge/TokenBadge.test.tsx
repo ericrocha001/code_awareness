@@ -1,26 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar que TokenBadge renderiza a contagem formatada quando há tokens positivos.
-2. Garantir que TokenBadge não renderiza nenhum nó DOM quando tokens <= 0.
-3. Verificar que o container possui a classe .token-badge com comportamento fit-content.
-
-Mapa de Relacionamentos do Script
-
-1. TokenBadge.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. tokens <= 0 deve retornar null (sem nós DOM).
-2. formatTokenCount customizado é utilizado quando fornecido.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

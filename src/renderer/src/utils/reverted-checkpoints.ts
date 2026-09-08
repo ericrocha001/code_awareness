@@ -1,23 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Função pura utilitária para calcular o nome das implementações que serão revertidas por um ponto de restauração.
-
-Mapa de Relacionamentos do Script
-
-1. ../components/CodeJourneyView/hooks/useJourneyRestore.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome getRevertedCheckpointNames no memo de restauração.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Função pura e determinística.
-2. Retorna array ordenado de forma ascendente por data de criação das implementações mais recentes que o alvo.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { CheckpointSummary } from '../../../shared/types'

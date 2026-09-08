@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir os tipos compartilhados entre o processo principal e o renderer do Electron.
-2. Declarar os tipos do sistema de checkpoints para persistência de snapshots de código.
-3. Declarar os tipos do sistema de diff de checkpoints (CheckpointHunk, CheckpointDiffFile).
-4. Declarar os tipos de restauração, incluindo o RestorePlan congelado trocado entre preview e execute.
-5. Declarar os tipos do Compression Profile (CompressionProfile, OutputFormat, CompressionSettings) que representam a configuração efetiva de compressão.
-6. Declarar os tipos do Code Source (SourceProfile, SourceOutputFormat, SourceSettings) que representam a configuração própria da geração seletiva sem compressão.
-7. Reexportar os tipos e contratos do protocolo Code Dash.
-
-
-Mapa de Relacionamentos do Script
-
-1. settings-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome o tipo AppSettings para persistir configurações.
-   - Criticidade: Alta
-
-2. checkpoint-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome os tipos CheckpointData, CheckpointFileEntry e CheckpointSummary para persistir checkpoints.
-   - Criticidade: Alta
-
-3. types/dash-types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Reexporta tipos do protocolo Code Dash para o restante da aplicação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Novos campos opcionais em AppSettings nunca devem quebrar a leitura de settings.json existentes.
-2. Todos os tipos de checkpoint devem ser exportados para uso em preload.ts e vite-env.d.ts.
-3. O campo contentHash em CodeMapFile é opcional para garantir compatibilidade retroativa com arquivos indexados anteriormente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 // ─── Tags Manuais ───────────────────────────────────────────────────────────
@@ -71,6 +35,8 @@ export interface AppSettings {
   compressionSettings?: CompressionSettings
   // Code Source persistido (opcional — ausente usa defaults)
   sourceSettings?: SourceSettings
+  // Configurações do Code Dash persistidas (opcional — ausente usa defaults)
+  dashSettings?: DashSettings
 }
 
 // ─── Projetos e Diff ────────────────────────────────────────────────────────
@@ -264,9 +230,20 @@ export interface CheckpointDiffFile {
 
 export type CodeMapFileStatus = 'indexed' | 'modified'
 
-export type CodeMapElementKind = 'class' | 'function' | 'method' | 'interface' | 'enum' | 'typeAlias' | 'variable' | 'constant' | 'import' | 'export'
+export type CodeMapElementKind = 'class' | 'function' | 'method' | 'interface' | 'enum' | 'typeAlias' | 'variable' | 'constant' | 'import' | 'export' | 'property' | 'parameter' | 'enumMember' | 'cssRule' | 'cssAtRule' | 'cssCustomProperty'
 
 export type CodeMapElementVisibility = 'public' | 'private' | 'protected' | null
+
+/**
+ * Granularidade semântica do elemento.
+ * - 'structural': unidades atômicas recuperáveis (classes, funções, métodos, etc.)
+ * - 'member': membros de classe (propriedades, campos) - Sprint 3
+ * - 'syntax': elementos de navegação/relação (imports, exports) - não recuperáveis
+ */
+export type CodeMapGranularity = 'structural' | 'member' | 'syntax'
+
+/** @deprecated Use 'CodeMapGranularity' em vez deste tipo */
+export type CodeMapRetrievalKind = 'A' | 'B' | 'C' | null
 
 export type CodeMapRelationshipType = 'contains' | 'extends' | 'implements' | 'imports' | 'exports'
 
@@ -297,11 +274,18 @@ export interface CodeMapElement {
   baseClass: string | null
   hasDocumentation: boolean
   parameterCount: number
+  /** @deprecated Use 'granularity' e 'retrievable' em vez deste campo */
+  retrievalKind?: CodeMapRetrievalKind
+  /** Granularidade semântica do elemento */
+  granularity: CodeMapGranularity
+  /** Se true, o elemento pode ser recuperado exatamente via getElementExactSource */
+  retrievable: boolean
 }
 
 export interface CodeMapFile {
   id: string
   repositoryId: string
+  contextReference?: string | null
   relativePath: string
   language: string
   extension: string
@@ -309,6 +293,10 @@ export interface CodeMapFile {
   sizeBytes: number
   mtime: number
   contentHash?: string | null
+  tokenCount?: number | null
+  tokenizerId?: string | null
+  tokenizerEncoding?: string | null
+  tokenizedContentHash?: string | null
   status: CodeMapFileStatus
 }
 
@@ -320,12 +308,28 @@ export interface CodeMapRepository {
   lastIndexedAt: string | null
 }
 
+/**
+ * Kind de endpoint de uma relação.
+ * - 'element': o ID refere-se a um elemento estrutural (CodeMapElement).
+ * - 'file': o ID refere-se a um arquivo (CodeMapFile).
+ *
+ * Tabela de endpoints por tipo (contrato congelado):
+ * - contains / extends / implements / exports → element → element
+ * - imports TS/JS → element → file
+ * - imports CSS → file → file
+ */
+export type CodeMapEndpointKind = 'element' | 'file'
+
 export interface CodeMapRelationship {
   id: string
   repositoryId: string
   sourceId: string
   targetId: string
   type: CodeMapRelationshipType
+  /** Kind do endpoint source — 'element' ou 'file' */
+  sourceKind: CodeMapEndpointKind
+  /** Kind do endpoint target — 'element' ou 'file' */
+  targetKind: CodeMapEndpointKind
 }
 
 export interface CodeMapSyncStatus {
@@ -399,6 +403,8 @@ export interface IntegrityCheckOptions {
   selectedIssues?: string[]
   /** Se false, pula a varredura do disco para arquivos inesperados. */
   scanForUnexpectedFiles?: boolean
+  /** Se true, auditoria profunda/autoritativa: hasheia todo arquivo indexado, ignorando o atalho mtime/size. */
+  deep?: boolean
   /** Correlation ID opcional de uma operação já iniciada. */
   correlationId?: string
 }
@@ -513,6 +519,8 @@ export interface ContextEnrichment {
   /** Se true, inclui logs do Git na montagem final. */
   includeLogs?: boolean
   /** Número máximo de commits nos logs (≥1 e ≤100, default 10). */
+  includeLogsCount?: number
+}
 
 // ─── Code Source ─────────────────────────────────────────────────────────────
 
@@ -579,10 +587,18 @@ export interface SourceGenerationRequest {
   sessionKey: string
 }
 
-  includeLogsCount?: number
-}
-
 // ─── Code Dash ───────────────────────────────────────────────────────────────
+
+/**
+ * Configurações de economia do Code Dash, persistidas em settings.json.
+ * Aplicadas como merge global nos providers Source e Compression, sobrescrevendo
+ * apenas os três campos econômicos do profile efetivo de cada item.
+ */
+export interface DashSettings {
+  removeComments: boolean
+  removeEmptyLines: boolean
+  truncateBase64: boolean
+}
 
 export * from './types/dash-types'
 

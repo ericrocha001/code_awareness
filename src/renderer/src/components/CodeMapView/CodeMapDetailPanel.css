@@ -1,24 +1,5 @@
 /*
- --- ARQUITETURA DO SCRIPT ---
- Responsabilidades do Script
- 1. Estilizar o painel de leitura do arquivo (identidade, dependências, informação estrutural).
- 2. Garantir superfície e respiro entre seções — sem divisórias internas.
- Mapa de Relacionamentos do Script
- 1. CodeMapDetailPanel.tsx
-    - Tipo: Relação de UI
-    - Relação: Consome as classes CSS definidas neste arquivo (prefixo cmp-).
-    - Criticidade: Alta
- 2. CodeSnippetBlock.css
-    - Tipo: Relação de UI
-    - Relação: O bloco de código estilo ChatGPT substitui os estilos antigos .cmp-snippet.
-    - Criticidade: Alta
- Invariantes do Script
- 1. O design deve respeitar estritamente as variáveis de cores globais.
- 2. Todas as classes usam prefixo cmp- para evitar colisão com outras abas.
- 3. Apenas --accent-color, o âmbar semântico (#f59e0b) e as cores por tipo de elemento são exceções de cor.
- 4. Seções se separam apenas por respiro (sem border-top) — o painel tem fundo transparente/primário.
- 5. Ícones de arquivo Devicon mantêm suas cores naturais — nunca sobrescritas.
- --- FIM ARQUITETURA DO SCRIPT ---
+ -T ---
  */
 
 .cmp-panel {

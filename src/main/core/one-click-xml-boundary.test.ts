@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Proteger a fronteira arquitetural do OneClickXmlService contra dependência do pipeline contextual do Code Dash.
-2. Validar estaticamente o código-fonte do serviço contra imports e símbolos proibidos.
-
-Mapa de Relacionamentos do Script
-
-1. one-click-xml-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Código-fonte analisado estaticamente pelo teste de fronteira.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. OneClickXmlService não pode importar dash-service, compression-context-provider, structured-compression-port, dash-context-assembler ou dash-types.
-2. OneClickXmlService não pode referenciar DashContextPlan, DashPlannedItem nem assembleContext.
-3. O teste é estático (leitura de source) e não executa o serviço.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { readFileSync } from 'fs'

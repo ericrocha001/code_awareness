@@ -1,38 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar que elementos estruturais (classes, funções, métodos) são extraídos corretamente com IDs estáveis.
-2. Provar que adição, remoção e renomeação de elementos são refletidas após reindexação.
-3. Provar que relacionamentos cross-file (extends, implements) são mantidos em reindexação seletiva.
-4. Provar que falha de parse em um arquivo não interrompe a indexação dos demais.
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa indexRepository, updateFileContent, getElementsByFile, getRelationships.
-   - Criticidade: Alta
-
-2. test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece createAndIndexRepo, cleanupTempRepo e verifyInvariant como oráculo de integridade.
-   - Criticidade: Alta
-
-3. repository-database.ts
-   - Tipo: Dependência Direta
-   - Relação: Fecha conexões de banco no teardown.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Cada teste cria repositório temporário isolado e o remove no afterEach.
-2. Todos os cenários usam instâncias reais de RepositoryModel — nada é mockado.
-3. verifyInvariant é chamado como oráculo final em todos os testes.
-4. O afterEach deve ser async para permitir limpeza com retry (BUGFIX Windows — lock do WAL do SQLite).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'

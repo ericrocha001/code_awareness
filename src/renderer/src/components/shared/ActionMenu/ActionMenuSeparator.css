@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o separador visual (am-separator) com altura 1px, cor da borda, margem vertical generosa e largura total.
-
-Mapa de Relacionamentos do Script
-
-1. ActionMenuSeparator.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A margem vertical é ≥ 8px (respiro generoso).
-2. A largura é 100% (full-bleed).
-3. A cor usa var(--border) para consistência com o tema.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .am-separator {

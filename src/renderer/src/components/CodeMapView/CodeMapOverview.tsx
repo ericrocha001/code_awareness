@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar o resumo do repositório na zona de leitura (nome, contagens, última indexação e última sincronização).
-2. Exibir a contagem de arquivos modificados em âmbar quando maior que zero.
-3. Exibir o carimbo de última sincronização com fallback para a data de indexação em repositórios antigos.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: É instanciado pelo orquestrador com as props de resumo do repositório.
-   - Criticidade: Alta
-
-2. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo CodeMapRepository.
-   - Criticidade: Alta
-
-3. CodeMapView.css
-   - Tipo: Relação de UI
-   - Relação: Consome as classes com prefixo cmv-overview-.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O componente é puramente apresentacional — não possui estado, efeitos ou IPC.
-2. A última indexação é formatada em pt-BR; repositório sem timestamp exibe "Nunca indexado".
-3. A contagem de modificados usa âmbar semântico (#f59e0b) apenas quando maior que zero.
-4. A data de última sincronização nunca renderiza "Invalid Date" — fallback para a data de indexação quando ausente ou inválida.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o modo de criação de nova implementação (campos, loading, abertura, confirmação).
-2. Persistir a última campanha usada no armazenamento local.
-3. Notificar o orquestrador sobre abertura do modo criação e criação bem-sucedida via callbacks.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome os estados e funções de criação fornecidos por este hook.
-   - Criticidade: Alta
-
-2. ../../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome CheckpointSummary.
-   - Criticidade: Alta
-
-3. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relação: Invoca createCheckpoint, setCheckpointCampaigns e listCheckpoints.
-   - Criticidade: Alta
-
-4. lastCampaignStorage.ts
-   - Tipo: Dependência Direta
-   - Relação: Persiste e recupera a última campanha usada na criação via getLastCampaigns e setLastCampaigns.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A chave do armazenamento local da última campanha nunca deve mudar (codeAwareness:lastCampaign:*).
-2. A seleção da nova implementação só ocorre se o recarregamento da lista tiver sucesso.
-3. O reset do modo criação deve limpar todos os campos (nome, instrução, resultado, campanhas).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useCallback, useState } from 'react'

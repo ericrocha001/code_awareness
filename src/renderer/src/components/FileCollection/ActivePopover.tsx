@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Centralizar a montagem sob demanda de TagPopover e ActionMenu para toda a coleção de arquivos.
-2. Posicionar o balão ativo utilizando o elemento âncora registrado no mapa de refs.
-3. Executar o auto-fechamento da interação quando o item associado sair do viewport ou não possuir nó DOM válido.
-
-Mapa de Relacionamentos do Script
-
-1. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa a interface ActiveInteraction.
-   - Criticidade: Alta
-
-2. ../shared/Popover/Popover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Utilizado para posicionamento em portal do menu de ações sob demanda.
-   - Criticidade: Alta
-
-3. ../shared/TagPopover/TagPopover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderizado em modo controlado quando activeInteraction for do tipo 'tagPopover'.
-   - Criticidade: Alta
-
-4. ActivePopover.css
-   - Tipo: Relação de UI
-   - Relação: Fornece estilização para o menu de ações do popover.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Quando activeInteraction for null, nada é renderizado no DOM (retorna null).
-2. Apenas uma única interação (TagPopover ou ActionMenu) é montada por vez.
-3. Se o elemento âncora do item ativo não existir no mapa de refs, onClose é disparado automaticamente para evitar popovers órfãos.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect } from 'react'

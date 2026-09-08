@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Armazenar em memória as entradas de compressão indexadas por chave estável.
-2. Gerenciar a política de evicção LRU real com base em limites de bytes totais e contagem máxima de entradas.
-3. Atualizar a posição de recenticidade de uso (touch) para preservar entradas ativamente acessadas.
-4. Expor métricas de consumo de memória e quantidade de itens mantidos no cache.
-
-Mapa de Relacionamentos do Script
-
-1. compression-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome CompressionCache para gerenciar o armazenamento e recuperação de arquivos comprimidos.
-   - Criticidade: Alta
-
-2. compression-content-identity.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo CacheEntry para a política de resolução de identidade e fast path.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O cache opera exclusivamente em memória, sem persistência em disco ou SQLite.
-2. O consumo total de memória nunca deve exceder maxCacheBytes quando novas entradas forem inseridas.
-3. A quantidade total de entradas nunca deve exceder maxCacheEntries após qualquer operação set.
-4. Operações de touch movem a entrada para o fim do Map, garantindo ordem de evicção LRU real.
-5. Inserir ou atualizar uma chave existente recalcula o saldo de bytes sem duplicar chaves no Map.
-6. Uma entrada individual cujo sizeBytes exceda maxCacheBytes é rejeitada na inserção, mesmo com cache vazio.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 export interface CacheEntry {

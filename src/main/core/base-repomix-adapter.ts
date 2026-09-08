@@ -1,38 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Compartilhar a infraestrutura de processo do Repomix CLI (getCommand, runProcess e checkInstallation) entre os adapters de compressão e de output.
-2. Manter a verificação de instalação do Repomix única e acessível a ambos os adapters.
-3. Propagar opcionalmente o AbortSignal para o RepomixProcessRunner.
-
-Mapa de Relacionamentos do Script
-
-1. repomix-process-runner.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome run para executar o spawn da CLI com timeout, cancelamento e captura de stdout/stderr.
-   - Criticidade: Alta
-
-2. repomix-adapter.ts
-   - Tipo: Dependência Inversa
-   - Relação: Estende BaseRepomixAdapter para herdar getCommand, runProcess e checkInstallation.
-   - Criticidade: Alta
-
-3. repomix-output-adapter.ts
-   - Tipo: Dependência Inversa
-   - Relação: Estende BaseRepomixAdapter para herdar getCommand, runProcess e checkInstallation.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A classe é abstrata — nunca é instanciada diretamente; apenas herdada pelos adapters.
-2. runProcess delega ao RepomixProcessRunner e nunca decide rejeitar por exitCode != 0 — o chamador decide.
-3. checkInstallation usa timeout de 10s e nunca lança: retorna false em falha de instalação.
-4. Nenhuma lógica de compressão ou output reside nesta classe — apenas infraestrutura de processo.
-5. O AbortSignal é estritamente opcional em RunProcessOptions.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { RepomixProcessRunner } from './repomix-process-runner'

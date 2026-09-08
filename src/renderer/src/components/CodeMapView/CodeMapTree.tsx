@@ -1,50 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar árvore de navegação de pastas e arquivos do repositório.
-2. Implementar lazy loading (expandir sob demanda).
-3. Exibir indicador de estado por arquivo (apenas Modified).
-4. Exibir chip com contagem de elementos por arquivo.
-5. Navegar por teclado: ↑/↓ movem foco, → expande, ← colapsa, Enter seleciona, / foca busca.
-6. Destacar arquivos relacionados ao arquivo selecionado (derivados fora do componente).
-7. Persistir estado de expansão via props controladas (persistedExpanded/onToggle).
-8. Alinhar a geometria ao padrão VS Code: fonte única de indentação por container aninhado, linha-guia centralizada na setinha.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: É instanciado pelo orquestrador, que fornece persistedExpanded, onToggle, relatedFileIds e elementCounts.
-   - Criticidade: Alta
-
-2. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo CodeMapFile.
-   - Criticidade: Alta
-
-3. file-icon-mapper.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece getFileIconClass para o ícone do arquivo.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. A árvore é construída em memória apenas a partir de files.
-2. Diretórios são nós virtuais (não existem como entidades no banco).
-3. Arquivos são sempre folhas — nunca possuem filhos.
-4. O lazy loading é implementado via estado de nós expandidos.
-5. O indicador de estado exibe ● apenas para Modified; indexed não renderiza nada.
-6. A navegação por teclado só opera em nós visíveis (ramos expandidos).
-7. O listener global de teclado ignora eventos quando o foco está em input/textarea.
-8. O destaque de relacionados usa nome em azul adaptado ao tema (escuro no claro, claro no escuro), sem opacidade e sem fundo.
-9. A expansão é controlada pelo pai (persistedExpanded) — nunca estado interno.
-10. O componente não calcula o grafo de relacionamentos — recebe relatedFileIds pronto.
-11. A linha-guia é desenhada pelo container de filhos (cmv-tree-children), não pelo nó — atravessa a altura do bloco do pai até o centro do último filho.
-12. As constantes de geometria (INDENT_PER_LEVEL, CHEVRON_SIZE, ICON_SIZE, LINE_OFFSET_FROM_LEFT) definem o alinhamento VS Code (indentação exclusiva via container).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useMemo, useState, useEffect, useRef, useCallback } from 'react'

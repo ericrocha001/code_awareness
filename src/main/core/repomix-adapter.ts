@@ -1,54 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Detectar e executar o Repomix CLI no sistema operacional do usuário.
-2. Comprimir um único arquivo a partir de um RepomixRequest via --include, retornando apenas o bloco de código comprimido limpo, com retry para falhas transitórias.
-3. Comprimir múltiplos arquivos em batches a partir de um RepomixRequest, retornando um dicionário relativePath -> conteúdo comprimido com preservação de resultados parciais.
-4. Registrar logs estruturados de batches (tamanho, código de saída, stderr, duração) e de falhas individuais para diagnóstico acionável.
-5. Converter o RepomixRequest em argumentos CLI via buildRepomixCliArguments e delegar a execução do processo ao RepomixProcessRunner.
-6. Extrair conteúdo comprimido de saída JSON (transporte json do Compression Core) via parseJsonOutput.
-7. Gerar o documento final de Direct Output (markdown/xml) a partir do RepomixRequest, sem cache por arquivo e sem parse em blocos, decidindo entre transporte inline (`--include`) e via arquivo de configuração (`--config`) com base no orçamento da linha de comando inteira.
-8. Estender BaseRepomixAdapter para compartilhar a infraestrutura de processo (getCommand, runProcess e checkInstallation).
-9. Orquestrar o ciclo de vida do arquivo de configuração temporário no Direct Output: criação em os.tmpdir() (nunca em repoPath) e remoção garantida em finally (mesmo sob erro, exceção ou timeout).
-
-Mapa de Relacionamentos do Script
-
-1. repomix-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome buildRepomixCliArguments para derivar argumentos CLI a partir do RepomixRequest.
-   - Criticidade: Alta
-
-2. base-repomix-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Estende BaseRepomixAdapter, herdando getCommand, runProcess e checkInstallation (que consomem RepomixProcessRunner).
-   - Criticidade: Alta
-
-3. repomix-request.ts
-   - Tipo: Contrato / Interface
-   - Relação: Recebe RepomixRequest em compressSingleFile e compressMultipleFiles.
-   - Criticidade: Alta
-
-4. CompressionService
-   - Tipo: Dependência Inversa
-   - Relação: Consome compressSingleFile e compressMultipleFiles (Compression Core) e generateDirectOutput (Direct Output markdown/xml).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A assinatura pública compressSingleFile(request, relativePath) é estável — o CompressionService depende dela.
-2. O parse de blocos deve corresponder exatamente ao relativePath solicitado (não substring).
-3. Quebras de linha mistas (\r\n e \n) devem ser normalizadas antes do parse.
-4. Falhas em arquivos individuais no lote nunca devem quebrar o lote inteiro.
-5. O chunking de batch respeita o orçamento da LINHA DE COMANDO INTEIRA (MAX_COMMAND_LINE_BUDGET), com MAX_BATCH_FILE_COUNT e MAX_FILES_PER_BATCH como limites defensivos secundários.
-6. Resultados parciais do batch são preservados — apenas arquivos ausentes entram no fallback individual do CompressionService.
-7. O retry em compressSingleFile é limitado a MAX_SINGLE_RETRY_COUNT tentativas com backoff de RETRY_DELAY_MS.
-8. O parser tolerante aceita apenas variações conhecidas do formato Repomix — formato irreconhecível retorna string vazia com log.
-9. A execução de processo é delegada exclusivamente ao RepomixProcessRunner (que retorna exitCode sem lançar; o adapter decide).
-10. No Direct Output, o arquivo de configuração temporário é sempre criado em os.tmpdir() (fora de repoPath), com nome único por execução, e removido em finally — nunca fica órfão em erro/timeout, nem vaza dentro do repositório.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { buildRepomixCliArguments } from './repomix-arguments-builder'

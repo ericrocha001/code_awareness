@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Coordenar sessões de geração do Code Source com auto-cancelamento, garantindo que apenas uma geração ativa por sessionKey exista em qualquer momento.
-2. Propagar AbortSignal ao CodeSourceService para cancelamento real do processo Repomix.
-3. Descartar resultados de gerações canceladas relançando GenerationCancelledError para o handler IPC.
-4. Manter o mapa de sessões limpo após cada geração concluída (sucesso, erro ou cancelamento).
-
-Mapa de Relacionamentos do Script
-
-1. code-source-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Invoca generateWithProfile com AbortSignal propagado para cada geração.
-   - Criticidade: Alta
-
-2. generation-errors.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa isGenerationCancelledError para identificar cancelamentos e relançar.
-   - Criticidade: Alta
-
-3. git-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Instancia e invoca generate para coordenar gerações vindas do handler IPC.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Apenas uma geração ativa por sessionKey em qualquer momento.
-2. Geração anterior com generationId menor é abortada antes de iniciar nova geração na mesma sessão.
-3. GenerationCancelledError é sempre relançado — nunca engolido como resultado de erro genérico.
-4. O mapa de sessões é limpo após toda geração (sucesso, erro ou cancelamento).
-5. O coordenador não gera generationId — ecoa o id recebido do Renderer.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { CodeSourceService } from './code-source-service'

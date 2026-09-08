@@ -1,38 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Testar o comportamento do caminho Direct Output (markdown/xml) sob concorrência e verificar deduplicação via directInFlight.
-2. Validar o tratamento de falhas, timeouts e respostas degeneradas (stdout vazio) no Direct Output.
-3. Garantir o repasse correto de opções de transformação do CompressionProfile para a CLI.
-4. Testar o comportamento do Direct Output sob diferentes volumes de arquivos selecionados (1, 10 e 50 arquivos).
-5. Validar o comportamento de defesa em profundidade quando um OutputFormat inválido for fornecido em runtime.
-
-Mapa de Relacionamentos do Script
-
-1. compression-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa o CompressionService no caminho Direct Output.
-   - Criticidade: Alta
-
-2. repomix-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece o mock do RepomixAdapter e os tipos de execução para os testes.
-   - Criticidade: Alta
-
-3. compression-constants.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome COMPRESSION_TOTAL_FAILURE_MARKER para asserções de falha total.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os diretórios temporários criados nos testes são limpos no hook afterEach.
-2. O mock do adapter não invoca a CLI real do sistema durante os testes unitários.
-3. Falhas no Direct Output devem sempre retornar uma mensagem iniciando com COMPRESSION_TOTAL_FAILURE_MARKER.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'

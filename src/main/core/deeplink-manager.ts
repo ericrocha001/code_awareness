@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Guardar a URL de deep link pendente de consumo pelo renderer.
-2. Expor a URL pendente e permitir limpá-la após o consumo.
-3. Emitir a URL de deep link recebida para o renderer via webContents.
-
-Mapa de Relacionamentos do Script
-
-1. deeplink-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome getPendingDeepLink e clearPendingDeepLink para expor via IPC.
-   - Criticidade: Alta
-
-2. main.ts
-   - Tipo: Dependência Inversa
-   - Relação: Usa setPendingDeepLink e emitDeepLinkToRenderer na captura de deep link.
-   - Criticidade: Alta
-
-3. renderer (App.tsx)
-   - Tipo: Fluxo de Dados
-   - Relação: Recebe a URL pendente via IPC e o evento deeplink:received.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A URL pendente é consumida exatamente uma vez — o handler IPC limpa após retornar.
-2. A emissão para o renderer só ocorre quando a janela principal existe e não está destruída.
-3. O módulo não acessa DOM, IPC ou renderer diretamente — apenas recebe/chama BrowserWindow e funções puras.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { BrowserWindow } from 'electron'

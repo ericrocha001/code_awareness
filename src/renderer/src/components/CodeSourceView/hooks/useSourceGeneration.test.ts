@@ -1,33 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o comportamento do hook useSourceGeneration com debounce de 300ms.
-2. Validar deduplicação por identidade (reutilização do último resultado e proteção contra chamadas em voo).
-3. Validar a preservação do último documento válido durante novas gerações.
-4. Validar o descarte de resultados com generationId obsoleto (stale protection).
-5. Validar o cancelamento do timer de debounce no cleanup.
-
-Mapa de Relacionamentos do Script
-
-1. useSourceGeneration.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: renderHook e act para execução de hooks React em jsdom.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O hook nunca dispara IPC antes de completar o tempo de debounce (300ms).
-2. Respostas com generationId defasado nunca sobrescrevem o lastCompletedDocument.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'

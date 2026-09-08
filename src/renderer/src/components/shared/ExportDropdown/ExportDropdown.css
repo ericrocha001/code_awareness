@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o menu ExportDropdown com prefixo ed-.
-2. Garantir que o botão use a classe global .app-pill-btn e o ícone ChevronDown gire 180° quando aberto.
-3. Posicionar o menu abaixo do botão, alinhado à borda direita.
-4. Estilizar os itens do menu com visual premium e consistente com o design system.
-
-Mapa de Relacionamentos do Script
-
-1. ExportDropdown.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo ed- para evitar colisões com outros componentes.
-2. Nenhuma cor hardcoded — apenas variáveis CSS globais.
-3. O menu usa position: absolute para flutuar abaixo do botão.
-4. Os itens do menu são estilizados por seletor de descendente (.ed-menu button), sem exigir classe extra nos consumidores.
-5. O estado disabled suprime o hover nos itens.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .ed-wrapper {

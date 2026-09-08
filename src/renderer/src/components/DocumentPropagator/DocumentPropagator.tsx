@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar o modal de propagação de documentos com zona de drop/seleção de arquivo.
-2. Gerenciar a seleção de repositórios de destino com master toggle e toggles individuais.
-3. Invocar a bridge IPC para selecionar arquivo e propagar para os destinos escolhidos.
-
-Mapa de Relacionamentos do Script
-
-1. DocumentPropagator.css
-   - Tipo: Relação de UI
-   - Relação: Consome estilos CSS do componente.
-   - Criticidade: Alta
-
-2. ToggleSwitch.tsx
-   - Tipo: Dependência Direta
-   - Relação: Usado como controle de seleção para master toggle e toggles individuais.
-   - Criticidade: Média
-
-3. HomeView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Renderizado como modal quando o usuário clica no botão de propagar.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O modal deve fechar ao clicar no overlay ou no botão cancelar.
-2. O botão "Propagar" deve estar desabilitado até que haja um arquivo selecionado e pelo menos um repositório marcado.
-3. Todos os repositórios devem iniciar selecionados por padrão (propagação para todos).
-4. Após propagação bem-sucedida, o modal deve fechar automaticamente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useCallback, DragEvent } from 'react'

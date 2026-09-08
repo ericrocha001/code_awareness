@@ -1,46 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar o modal data-driven de recursos da campanha (Instruções, Resultados, Ambos).
-2. Emitir as intenções de copiar/exportar contexto via callbacks, sem executar as ações.
-
-Mapa de Relacionamentos do Script
-
-1. campaignResources.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece a lista CAMPAIGN_RESOURCES que dirige a renderização.
-   - Criticidade: Alta
-
-2. CodeCampaignView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Fornece a campanha e os handlers de copiar/exportar contexto.
-   - Criticidade: Alta
-
-3. CampaignResourcePanel.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos do modal (prefixo crp-).
-   - Criticidade: Alta
-
-4. campaignContextUtils.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo CampaignContextMode dos modos suportados.
-   - Criticidade: Alta
-
-5. lucide-react
-   - Tipo: Dependência Direta
-   - Relação: Fornece os ícones dos botões e do cabeçalho.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O painel é puramente apresentacional — nunca executa copiar/exportar, apenas emite via onCopyContext/onExportContext.
-2. A renderização é data-driven pela lista CAMPAIGN_RESOURCES — o painel não define recursos manualmente.
-3. Quando isOpen é false, o painel retorna null (não renderiza nada).
-4. O painel nunca renderiza uma campanha sem nome — o cabeçalho sempre exibe campaign.name.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar os elementos internos do Button — ícone e seta.
-2. Não definir padding, raio, borda, cor ou fundo — isso é responsabilidade das classes globais de variante.
-
-Mapa de Relacionamentos do Script
-
-1. Button.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes com prefixo btn-.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A classe .btn-icon alinha o ícone verticalmente com inline-flex e flex-shrink: 0.
-2. A classe .btn-chevron tem transição de rotação .18s ease.
-3. A classe .btn-chevron--open rotaciona 180°.
-4. Nenhum seletor define padding, raio, borda, cor ou fundo — isso é do design system global.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .btn-icon {

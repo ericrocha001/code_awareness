@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir a fonte única de verdade visual do popover de tags (gatilho, busca, lista, rodapé).
-2. Estilizar o item destacado por teclado com a mesma aparência do hover.
-
-Mapa de Relacionamentos do Script
-
-1. TagPopover.tsx
-   - Tipo: Relação de UI
-   - Relação: Usa essas classes com prefixo tp- para renderizar o balão.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhuma regra usa !important.
-2. As cores usam variáveis de tema; a cor da tag vem inline da tag.color.
-3. O item destacado (.tp-item.highlighted) tem a mesma aparência do hover (.tp-item:hover).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* ─── Botão Adicionar Tag (gatilho) ─────────────────────────────────────── */

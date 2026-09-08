@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o CompressionService via injeção de RepomixAdapter mockado em Provas de Aceitação rigorosas.
-2. Contar chamadas ao adapter para provar cache hit, invalidação por conteúdo, fast path e fallback.
-3. Validar deduplicação de chamadas concorrentes via inFlight manager em batch e em fallback individual.
-4. Validar política de evicção LRU real por bytes e por quantidade de entradas via limites configuráveis.
-5. Manipular arquivos reais em diretórios temporários para exercitar stat, mtime, size e caminhos.
-6. Verificar contratos de saída: ordem do Markdown, seção de falhas e marcador de falha total.
-7. Usar apenas adapter mockado — nenhum teste depende da CLI real do Repomix.
-
-Mapa de Relacionamentos do Script
-
-1. compression-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia CompressionService com adapter mockado, hashProvider opcional e CompressionServiceOptions injetados.
-   - Criticidade: Alta
-
-2. test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome cleanupTestDir para remoção segura de diretórios temporários no Windows.
-   - Criticidade: Baixa
-
-Invariantes do Script
-
-1. Cada teste cria seu próprio diretório temporário e o remove no afterEach.
-2. Nenhum teste depende da CLI real do Repomix — adapter sempre mockado.
-3. O mock do adapter é injetado via construtor do CompressionService.
-4. Todos os testes usam selectedFiles com caminhos relativos válidos.
-5. Nenhum teste adapta o comportamento para acomodar defeitos da implementação.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'

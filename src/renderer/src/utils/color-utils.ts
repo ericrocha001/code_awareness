@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Calcular cor de texto contrastante (getContrastColor) com base na luminância de uma cor hexadecimal.
-2. Resolver paleta normalizada e segura de tag (resolveTagPalette) com fundo e texto de contraste garantido por tema (claro/escuro).
-3. Fornecer funções puras, determinísticas e defensivas para uso em chips e componentes visuais.
-
-Mapa de Relacionamentos do Script
-
-1. TagChip.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome resolveTagPalette para colorir background e text do chip de tag.
-   - Criticidade: Alta
-
-2. CodeSourceView.tsx / CodeCompressionView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consomem getContrastColor para badges legados.
-   - Criticidade: Baixa
-
-Invariantes do Script
-
-1. As funções são estritamente puras — para a mesma entrada e tema, produzem exatamente a mesma saída.
-2. Nunca lançam exceção para entradas inválidas ou nulas — retornam paletas neutras seguras com contraste preservado.
-3. A diferença de luminosidade entre background e text em resolveTagPalette é sempre superior a 0.60.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 export interface TagPalette {

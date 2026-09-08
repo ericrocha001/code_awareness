@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar E2E a robustez do Code Dash (E2E-26 a E2E-30): determinismo, cancelamento, isolamento entre providers e resiliência com contexto grande.
-2. Usar o pipeline central real com providers espiões controláveis (delay, falha injetada) e filesystem temporário real.
-
-Mapa de Relacionamentos do Script
-
-1. dash-e2e-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome DashService real, SpyContextProvider (delay/falha) e utilidades de XML.
-   - Criticidade: Alta
-
-2. dash-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Exercitado com AbortSignal e falhas de provider.
-   - Criticidade: Alta
-
-3. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria e limpa repositórios temporários reais.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Mesmo input produz mesmo XML (exceto timestamp) entre execuções repetidas.
-2. Cancelamento rejeita a execução e nenhum provider completa em background exposto como resultado.
-3. Falha de um provider nunca contamina o resultado do outro provider.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { afterEach, describe, expect, it } from 'vitest'

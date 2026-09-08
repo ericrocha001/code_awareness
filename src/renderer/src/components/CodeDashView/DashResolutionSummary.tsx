@@ -1,41 +1,7 @@
-/*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar de forma puramente apresentacional o resumo estruturado de resolução de caminhos do Code Dash.
-2. Agrupar e exibir itens resolvidos por tipo de representação (SOURCE e COMPRESSION) e destacar itens não resolvidos com suas razões.
-
-Mapa de Relacionamentos do Script
-
-1. ../../../../shared/types/dash-types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome DashResolutionReport, DashItem e DashResolutionFailure.
-   - Criticidade: Alta
-
-2. DashResolutionSummary.css
-   - Tipo: Relação de UI
-   - Relação: Importa estilos CSS dedicados ao resumo de resolução.
-   - Criticidade: Alta
-
-3. CodeDashView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Componente filho embutido na visualização principal do Code Dash.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Componente estritamente puro: sem chamadas IPC, sem efeitos colaterais e sem estado mutável interno.
-2. Todas as contagens e agrupamentos devem ser derivados deterministicamente das propriedades recebidas.
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-
 import React, { useMemo } from 'react'
 import {
   AlertTriangle,
   Archive,
-  CheckCircle2,
   FileCode,
   XCircle
 } from 'lucide-react'
@@ -100,28 +66,21 @@ export const DashResolutionSummary: React.FC<DashResolutionSummaryProps> = ({
           </span>
         </div>
 
-        <div
-          className={`dash-status-badge ${isAllResolved ? 'success' : 'warning'}`}
-        >
-          {isAllResolved ? (
-            <>
-              <CheckCircle2 size={14} />
-              <span>Todos Resolvidos</span>
-            </>
-          ) : (
-            <>
-              <AlertTriangle size={14} />
-              <span>Resolução Parcial</span>
-            </>
-          )}
-        </div>
+        {isAllResolved ? (
+          <span className="dash-status-ok">Todos Resolvidos</span>
+        ) : (
+          <div className="dash-status-badge warning">
+            <AlertTriangle size={14} />
+            <span>Resolução Parcial</span>
+          </div>
+        )}
       </div>
 
       <div className="dash-summary-sections">
         {/* Seção SOURCE */}
         {sourceItems.length > 0 && (
           <div className="dash-section-block">
-            <div className="dash-section-header source">
+            <div className="dash-section-header">
               <FileCode size={14} />
               <span>
                 Source ({sourceItems.length})
@@ -140,7 +99,7 @@ export const DashResolutionSummary: React.FC<DashResolutionSummaryProps> = ({
         {/* Seção COMPRESSION */}
         {compressionItems.length > 0 && (
           <div className="dash-section-block">
-            <div className="dash-section-header compression">
+            <div className="dash-section-header">
               <Archive size={14} />
               <span>
                 Compression ({compressionItems.length})

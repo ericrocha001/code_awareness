@@ -1,49 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o prompt de auditoria (carregamento por projeto, salvamento e abertura do editor).
-2. Gerar o markdown do diff para o documento (usando o preview já gerado ou sob demanda via IPC).
-3. Montar a entrada do documento de auditoria com os textos de edição e o status derivado.
-4. Executar a cópia e a exportação do documento de auditoria em quatro níveis.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome todos os estados e funções expostos por este hook.
-   - Criticidade: Alta
-
-2. ../restoreUtils.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome AuditCopyLevel, COPY_LEVELS, CheckpointStatusInfo, buildAuditDocument, AuditDocumentInput e getRestoreAwareCompareIds.
-   - Criticidade: Alta
-
-3. ../../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome CheckpointSummary.
-   - Criticidade: Alta
-
-4. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relação: Invoca generateCheckpointDiff e saveToDownloads via IPC.
-   - Criticidade: Alta
-
-4. audit-prompt.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece DEFAULT_AUDIT_PROMPT, o texto do prompt padrão gravado na primeira abertura do projeto.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A chave do armazenamento local do prompt nunca pode mudar — é um contrato de persistência com dados do usuário.
-2. O texto do prompt padrão é gravado no armazenamento local na primeira vez que o projeto é aberto.
-3. Se o preview já foi gerado, a cópia/exportação o utiliza sem gerar diff novo.
-4. A geração do diff sob demanda usa IDs de comparação com ciência de restauração.
-5. O estado de exportando é sempre desativado no bloco finally.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'

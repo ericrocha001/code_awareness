@@ -1,48 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Implementar a persistência SQLite do Repository Model.
-2. Criar e manter o schema do banco repository_model.db.
-3. Converter entre tipos Row (flat) e tipos de domínio (estruturados).
-4. Gerenciar conexões com cache por repoPath (mesmo padrão do database-service.ts).
-5. Validar a integridade dos dados na conversão Row → Domain.
-
-Mapa de Relacionamentos do Script
-
-1. repository-repository.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa a interface RepositoryRepository e consome os tipos Row.
-   - Criticidade: Alta
-
-2. ../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome os tipos de domínio para retorno das operações.
-   - Criticidade: Alta
-
-3. better-sqlite3
-   - Tipo: Dependência Direta
-   - Relação: Biblioteca SQLite para persistência síncrona.
-   - Criticidade: Alta
-
-4. repository-model.ts (Sprint 5)
-   - Tipo: Dependência Inversa
-   - Relação: Consumirá esta implementação via injeção de dependência no bootstrap.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O banco é criado dentro de code_awareness/repository_model.db no repositório.
-2. O schema é criado idempotentemente (CREATE TABLE IF NOT EXISTS).
-3. Os mappers Row→Domain validam integridade dos dados.
-4. Operações em lote (saveElements, saveRelationships) usam transações.
-5. Conexões são cacheadas por repoPath e fechadas quando o repositório é fechado.
-6. Nenhuma lógica de parsing, análise ou sincronização neste arquivo.
-7. A migração de schema (content_hash) é idempotente e usa PRAGMA table_info antes de ALTER TABLE.
-8. getFileById nunca lança exceção — retorna null para ids inexistentes.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import Database from 'better-sqlite3'
@@ -53,8 +10,10 @@ import type {
   CodeMapElement,
   CodeMapElementKind,
   CodeMapElementVisibility,
+  CodeMapEndpointKind,
   CodeMapFile,
   CodeMapFileStatus,
+  CodeMapGranularity,
   CodeMapRelationship,
   CodeMapRelationshipType,
   CodeMapRepository,
@@ -77,9 +36,10 @@ interface DatabaseConnection {
 const connections = new Map<string, DatabaseConnection>()
 
 const FILE_STATUSES: readonly CodeMapFileStatus[] = ['indexed', 'modified'] as const
-const ELEMENT_KINDS: readonly CodeMapElementKind[] = ['class', 'function', 'method', 'interface', 'enum', 'typeAlias', 'variable', 'constant', 'import', 'export'] as const
+const ELEMENT_KINDS: readonly CodeMapElementKind[] = ['class', 'function', 'method', 'interface', 'enum', 'typeAlias', 'variable', 'constant', 'import', 'export', 'property', 'parameter', 'enumMember', 'cssRule', 'cssAtRule', 'cssCustomProperty'] as const
 const ELEMENT_VISIBILITIES: readonly Exclude<CodeMapElementVisibility, null>[] = ['public', 'private', 'protected'] as const
 const RELATIONSHIP_TYPES: readonly CodeMapRelationshipType[] = ['contains', 'extends', 'implements', 'imports', 'exports'] as const
+const ENDPOINT_KINDS: readonly CodeMapEndpointKind[] = ['element', 'file'] as const
 
 // ─── Gestão de Conexões ─────────────────────────────────────────────────────
 
@@ -110,6 +70,7 @@ function ensureSchema(db: BetterSqlite3Database): void {
     CREATE TABLE IF NOT EXISTS files (
       id TEXT PRIMARY KEY,
       repository_id TEXT NOT NULL,
+      context_reference TEXT,
       relative_path TEXT NOT NULL,
       language TEXT NOT NULL,
       extension TEXT NOT NULL,
@@ -117,6 +78,10 @@ function ensureSchema(db: BetterSqlite3Database): void {
       size_bytes INTEGER NOT NULL,
       mtime INTEGER NOT NULL,
       content_hash TEXT,
+      token_count INTEGER,
+      tokenizer_id TEXT,
+      tokenizer_encoding TEXT,
+      tokenized_content_hash TEXT,
       status TEXT NOT NULL DEFAULT 'modified',
       FOREIGN KEY (repository_id) REFERENCES repositories(id),
       UNIQUE(repository_id, relative_path)
@@ -143,6 +108,9 @@ function ensureSchema(db: BetterSqlite3Database): void {
       base_class TEXT,
       has_documentation INTEGER NOT NULL DEFAULT 0,
       parameter_count INTEGER NOT NULL DEFAULT 0,
+      retrieval_kind TEXT,
+      granularity TEXT NOT NULL DEFAULT 'structural',
+      retrievable INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (repository_id) REFERENCES repositories(id),
       FOREIGN KEY (file_id) REFERENCES files(id),
       FOREIGN KEY (parent_element_id) REFERENCES elements(id)
@@ -174,6 +142,18 @@ function ensureSchema(db: BetterSqlite3Database): void {
       parser_version TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS retired_context_references (
+      repository_id TEXT NOT NULL,
+      context_reference TEXT NOT NULL,
+      retired_at TEXT NOT NULL,
+      PRIMARY KEY (repository_id, context_reference)
+    );
+
+    CREATE TABLE IF NOT EXISTS context_reference_counters (
+      repository_id TEXT PRIMARY KEY,
+      next_value INTEGER NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS element_parameters (
@@ -222,10 +202,68 @@ function ensureSchema(db: BetterSqlite3Database): void {
 
   // Migração idempotente: adicionar content_hash apenas se a coluna ainda não existir.
   // PRAGMA table_info é preferível a try/catch pois evita o overhead de tentar ALTER e capturar erro.
-  const columns = db.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>
-  const hasContentHash = columns.some(col => col.name === 'content_hash')
+  const fileColumns = db.prepare('PRAGMA table_info(files)').all() as Array<{ name: string }>
+  const hasContentHash = fileColumns.some(col => col.name === 'content_hash')
   if (!hasContentHash) {
     db.exec('ALTER TABLE files ADD COLUMN content_hash TEXT')
+  }
+  if (!fileColumns.some((column) => column.name === 'context_reference')) {
+    db.exec('ALTER TABLE files ADD COLUMN context_reference TEXT')
+  }
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_files_context_reference ON files(repository_id, context_reference) WHERE context_reference IS NOT NULL')
+  const tokenColumns: Array<[string, string]> = [
+    ['token_count', 'INTEGER'],
+    ['tokenizer_id', 'TEXT'],
+    ['tokenizer_encoding', 'TEXT'],
+    ['tokenized_content_hash', 'TEXT']
+  ]
+  for (const [name, type] of tokenColumns) {
+    if (!fileColumns.some((column) => column.name === name)) {
+      db.exec(`ALTER TABLE files ADD COLUMN ${name} ${type}`)
+    }
+  }
+
+  // Migração idempotente: adicionar retrieval_kind na tabela elements apenas se ainda não existir.
+  const elementColumns = db.prepare('PRAGMA table_info(elements)').all() as Array<{ name: string }>
+  const hasRetrievalKind = elementColumns.some(col => col.name === 'retrieval_kind')
+  if (!hasRetrievalKind) {
+    db.exec('ALTER TABLE elements ADD COLUMN retrieval_kind TEXT')
+  }
+
+  // Migração idempotente: adicionar granularity e retrievable na tabela elements.
+  const hasGranularity = elementColumns.some(col => col.name === 'granularity')
+  if (!hasGranularity) {
+    db.exec('ALTER TABLE elements ADD COLUMN granularity TEXT NOT NULL DEFAULT \'structural\'')
+  }
+  const hasRetrievable = elementColumns.some(col => col.name === 'retrievable')
+  if (!hasRetrievable) {
+    db.exec('ALTER TABLE elements ADD COLUMN retrievable INTEGER NOT NULL DEFAULT 0')
+  }
+
+  if (!hasGranularity || !hasRetrievable) {
+    db.exec('UPDATE elements SET granularity=\'structural\', retrievable=1 WHERE retrieval_kind=\'A\'')
+  }
+
+  // Migração idempotente: adicionar source_kind e target_kind na tabela relationships.
+  const relationshipColumns = db.prepare('PRAGMA table_info(relationships)').all() as Array<{ name: string }>
+  const hasSourceKind = relationshipColumns.some(col => col.name === 'source_kind')
+  if (!hasSourceKind) {
+    db.exec('ALTER TABLE relationships ADD COLUMN source_kind TEXT NOT NULL DEFAULT \'element\'')
+  }
+  const hasTargetKind = relationshipColumns.some(col => col.name === 'target_kind')
+  if (!hasTargetKind) {
+    db.exec('ALTER TABLE relationships ADD COLUMN target_kind TEXT NOT NULL DEFAULT \'element\'')
+  }
+
+  if (!hasSourceKind || !hasTargetKind) {
+    db.exec(`UPDATE relationships SET source_kind = CASE
+      WHEN source_id IN (SELECT id FROM elements WHERE repository_id = relationships.repository_id) THEN 'element'
+      ELSE 'file'
+    END`)
+    db.exec(`UPDATE relationships SET target_kind = CASE
+      WHEN target_id IN (SELECT id FROM elements WHERE repository_id = relationships.repository_id) THEN 'element'
+      ELSE 'file'
+    END`)
   }
 }
 
@@ -265,6 +303,7 @@ function domainToFileRow(file: CodeMapFile): CodeMapFileRow {
   return {
     id: file.id,
     repository_id: file.repositoryId,
+    context_reference: file.contextReference ?? null,
     relative_path: file.relativePath,
     language: file.language,
     extension: file.extension,
@@ -272,6 +311,10 @@ function domainToFileRow(file: CodeMapFile): CodeMapFileRow {
     size_bytes: file.sizeBytes,
     mtime: file.mtime,
     content_hash: file.contentHash ?? null,
+    token_count: file.tokenCount ?? null,
+    tokenizer_id: file.tokenizerId ?? null,
+    tokenizer_encoding: file.tokenizerEncoding ?? null,
+    tokenized_content_hash: file.tokenizedContentHash ?? null,
     status: file.status
   }
 }
@@ -282,7 +325,7 @@ function domainToElementRow(element: CodeMapElement): CodeMapElementRow {
     id: element.id,
     repository_id: element.repositoryId,
     file_id: element.fileId,
-    kind: element.kind,
+    kind: validateEnum(element.kind, ELEMENT_KINDS, 'kind'),
     name: element.name,
     parent_element_id: element.parentElementId,
     start_line: element.location.start.line,
@@ -298,7 +341,10 @@ function domainToElementRow(element: CodeMapElement): CodeMapElementRow {
     return_type: element.returnType,
     base_class: element.baseClass,
     has_documentation: element.hasDocumentation ? 1 : 0,
-    parameter_count: element.parameterCount
+    parameter_count: element.parameterCount,
+    retrieval_kind: element.retrievalKind ?? null,
+    granularity: element.granularity,
+    retrievable: element.retrievable ? 1 : 0
   }
 }
 
@@ -309,7 +355,9 @@ function domainToRelationshipRow(rel: CodeMapRelationship): CodeMapRelationshipR
     repository_id: rel.repositoryId,
     source_id: rel.sourceId,
     target_id: rel.targetId,
-    type: rel.type
+    type: rel.type,
+    source_kind: rel.sourceKind,
+    target_kind: rel.targetKind
   }
 }
 
@@ -340,6 +388,7 @@ function rowToFile(row: any): CodeMapFile {
   return {
     id: row.id,
     repositoryId: row.repository_id,
+    contextReference: row.context_reference ?? null,
     relativePath: row.relative_path,
     language: row.language,
     extension: row.extension,
@@ -347,6 +396,10 @@ function rowToFile(row: any): CodeMapFile {
     sizeBytes: row.size_bytes,
     mtime: row.mtime,
     contentHash: row.content_hash ?? null,
+    tokenCount: row.token_count ?? null,
+    tokenizerId: row.tokenizer_id ?? null,
+    tokenizerEncoding: row.tokenizer_encoding ?? null,
+    tokenizedContentHash: row.tokenized_content_hash ?? null,
     status: validateEnum(row.status, FILE_STATUSES, 'status')
   }
 }
@@ -391,18 +444,23 @@ function rowToElement(row: any): CodeMapElement {
     returnType: row.return_type ?? null,
     baseClass: row.base_class ?? null,
     hasDocumentation: row.has_documentation === 1,
-    parameterCount: row.parameter_count
+    parameterCount: row.parameter_count,
+    retrievalKind: row.retrieval_kind ?? null,
+    granularity: (row.granularity as CodeMapGranularity) ?? 'structural',
+    retrievable: (row.retrievable ?? 0) === 1 || row.retrievable === true
   }
 }
 
-/** Converte uma linha da tabela relationships para o tipo de domínio, validando o tipo. */
+/** Converte uma linha da tabela relationships para o tipo de domínio, validando o tipo e os endpoint kinds. */
 function rowToRelationship(row: any): CodeMapRelationship {
   return {
     id: row.id,
     repositoryId: row.repository_id,
     sourceId: row.source_id,
     targetId: row.target_id,
-    type: validateEnum(row.type, RELATIONSHIP_TYPES, 'type')
+    type: validateEnum(row.type, RELATIONSHIP_TYPES, 'type'),
+    sourceKind: validateEnum(row.source_kind ?? 'element', ENDPOINT_KINDS, 'source_kind'),
+    targetKind: validateEnum(row.target_kind ?? 'element', ENDPOINT_KINDS, 'target_kind')
   }
 }
 
@@ -452,9 +510,54 @@ class RepositoryDatabase implements RepositoryRepository {
   saveFile(file: CodeMapFile): void {
     const row = domainToFileRow(file)
     this.db.prepare(`
-      INSERT OR REPLACE INTO files (id, repository_id, relative_path, language, extension, lines, size_bytes, mtime, content_hash, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(row.id, row.repository_id, row.relative_path, row.language, row.extension, row.lines, row.size_bytes, row.mtime, row.content_hash, row.status)
+      INSERT OR REPLACE INTO files (id, repository_id, context_reference, relative_path, language, extension, lines, size_bytes, mtime, content_hash, token_count, tokenizer_id, tokenizer_encoding, tokenized_content_hash, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(row.id, row.repository_id, row.context_reference, row.relative_path, row.language, row.extension, row.lines, row.size_bytes, row.mtime, row.content_hash, row.token_count, row.tokenizer_id, row.tokenizer_encoding, row.tokenized_content_hash, row.status)
+  }
+
+  allocateContextReference(repositoryId: string): string {
+    return this.db.transaction(() => {
+      this.ensureContextReferenceCounter(repositoryId)
+      const row = this.db.prepare('SELECT next_value FROM context_reference_counters WHERE repository_id = ?').get(repositoryId) as { next_value: number }
+      this.db.prepare('UPDATE context_reference_counters SET next_value = ? WHERE repository_id = ?').run(row.next_value + 1, repositoryId)
+      return row.next_value.toString(36)
+    })()
+  }
+
+  backfillContextReferences(repositoryId: string): number {
+    return this.db.transaction(() => {
+      this.ensureContextReferenceCounter(repositoryId)
+      const rows = this.db.prepare('SELECT id FROM files WHERE repository_id = ? AND context_reference IS NULL ORDER BY relative_path').all(repositoryId) as Array<{ id: string }>
+      for (const row of rows) {
+        const contextReference = this.allocateContextReference(repositoryId)
+        this.db.prepare('UPDATE files SET context_reference = ? WHERE id = ?').run(contextReference, row.id)
+      }
+      return rows.length
+    })()
+  }
+
+  retireContextReference(repositoryId: string, contextReference: string): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO retired_context_references (repository_id, context_reference, retired_at)
+      VALUES (?, ?, datetime('now'))
+    `).run(repositoryId, contextReference)
+  }
+
+  moveFile(fileId: string, relativePath: string): void {
+    this.db.prepare('UPDATE files SET relative_path = ? WHERE id = ?').run(relativePath, fileId)
+  }
+
+  private ensureContextReferenceCounter(repositoryId: string): void {
+    const refs = this.db.prepare(`
+      SELECT context_reference FROM files WHERE repository_id = ? AND context_reference IS NOT NULL
+      UNION ALL
+      SELECT context_reference FROM retired_context_references WHERE repository_id = ?
+    `).all(repositoryId, repositoryId) as Array<{ context_reference: string }>
+    const nextValue = refs.reduce((max, row) => {
+      const value = Number.parseInt(row.context_reference, 36)
+      return Number.isFinite(value) ? Math.max(max, value + 1) : max
+    }, 0)
+    this.db.prepare('INSERT OR IGNORE INTO context_reference_counters (repository_id, next_value) VALUES (?, ?)').run(repositoryId, nextValue)
   }
 
   /** Lista todos os arquivos de um repositório, ordenados por relativePath. */
@@ -489,6 +592,8 @@ class RepositoryDatabase implements RepositoryRepository {
   /** Remove um arquivo e, em cascata manual, todos os seus elementos, relacionamentos e registros das tabelas auxiliares. */
   deleteFile(fileId: string): void {
     const tx = this.db.transaction(() => {
+      const file = this.db.prepare('SELECT repository_id, context_reference FROM files WHERE id = ?').get(fileId) as { repository_id: string; context_reference: string | null } | undefined
+      if (file?.context_reference) this.retireContextReference(file.repository_id, file.context_reference)
       // Remove registros das tabelas auxiliares antes dos elementos (integridade referencial manual).
       this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
       this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
@@ -530,14 +635,14 @@ class RepositoryDatabase implements RepositoryRepository {
         id, repository_id, file_id, kind, name, parent_element_id,
         start_line, start_column, start_byte, end_line, end_column, end_byte,
         size_lines, size_bytes, visibility, modifiers, return_type, base_class,
-        has_documentation, parameter_count
+        has_documentation, parameter_count, retrieval_kind, granularity, retrievable
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
       row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
       row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
-      row.has_documentation, row.parameter_count
+      row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable
     )
   }
 
@@ -549,9 +654,9 @@ class RepositoryDatabase implements RepositoryRepository {
           id, repository_id, file_id, kind, name, parent_element_id,
           start_line, start_column, start_byte, end_line, end_column, end_byte,
           size_lines, size_bytes, visibility, modifiers, return_type, base_class,
-          has_documentation, parameter_count
+          has_documentation, parameter_count, retrieval_kind, granularity, retrievable
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       for (const element of items) {
         const row = domainToElementRow(element)
@@ -559,7 +664,7 @@ class RepositoryDatabase implements RepositoryRepository {
           row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
           row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
           row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
-          row.has_documentation, row.parameter_count
+          row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable
         )
       }
     })
@@ -589,6 +694,89 @@ class RepositoryDatabase implements RepositoryRepository {
       this.db.prepare(`DELETE FROM elements WHERE file_id = ?`).run(fileId)
     })
     tx()
+  }
+
+  /**
+   * Substitui atomicamente o estado indexado de um arquivo (tudo ou nada).
+   * Tudo roda em UMA transação melhor-sqlite3; os mappers (que incluem validateEnum)
+   * executam dentro da transação, portanto entrada envenenada (kind inválido) dispara ROLLBACK total.
+   */
+  replaceIndexedFileState(
+    file: CodeMapFile,
+    elements: CodeMapElement[],
+    relationships: CodeMapRelationship[],
+    elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>
+  ): void {
+    const tx = this.db.transaction((
+      _file: CodeMapFile,
+      _elements: CodeMapElement[],
+      _relationships: CodeMapRelationship[],
+      _elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>
+    ) => {
+      const fileId = _file.id
+
+      // 1) Deleta tabelas-filha e relações que tocam os elementos do arquivo
+      this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_decorators WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+      this.db.prepare(`DELETE FROM element_type_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
+
+      // 2) Deleta relações de nível ARQUIVO (source_id/target_id = fileId) e as que tocam elementos do arquivo
+      this.db.prepare(`DELETE FROM relationships WHERE source_id = ? OR target_id = ?`).run(fileId, fileId)
+      this.db.prepare(`DELETE FROM relationships WHERE source_id IN (SELECT id FROM elements WHERE file_id = ?) OR target_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId, fileId)
+
+      // 3) Deleta os elementos antigos
+      this.db.prepare(`DELETE FROM elements WHERE file_id = ?`).run(fileId)
+
+      // 4) Grava o file
+      const fileRow = domainToFileRow(_file)
+      this.db.prepare(`
+        INSERT OR REPLACE INTO files (id, repository_id, context_reference, relative_path, language, extension, lines, size_bytes, mtime, content_hash, token_count, tokenizer_id, tokenizer_encoding, tokenized_content_hash, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(fileRow.id, fileRow.repository_id, fileRow.context_reference, fileRow.relative_path, fileRow.language, fileRow.extension, fileRow.lines, fileRow.size_bytes, fileRow.mtime, fileRow.content_hash, fileRow.token_count, fileRow.tokenizer_id, fileRow.tokenizer_encoding, fileRow.tokenized_content_hash, fileRow.status)
+
+      // 5) Grava os novos elements (mappers com validateEnum DENTRO da transação)
+      const elementInsert = this.db.prepare(`
+        INSERT OR REPLACE INTO elements (
+          id, repository_id, file_id, kind, name, parent_element_id,
+          start_line, start_column, start_byte, end_line, end_column, end_byte,
+          size_lines, size_bytes, visibility, modifiers, return_type, base_class,
+          has_documentation, parameter_count, retrieval_kind, granularity, retrievable
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const element of _elements) {
+        const row = domainToElementRow(element) // lança em kind inválido → rollback
+        elementInsert.run(
+          row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
+          row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
+          row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
+          row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable
+        )
+      }
+
+      // 6) Grava as relações locais do arquivo
+      const relInsert = this.db.prepare(`
+        INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type, source_kind, target_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const rel of _relationships) {
+        const row = domainToRelationshipRow(rel)
+        relInsert.run(row.id, row.repository_id, row.source_id, row.target_id, row.type, row.source_kind, row.target_kind)
+      }
+
+      // 7) Grava as elementInterfaces dos elementos do arquivo
+      const deleteIface = this.db.prepare(`DELETE FROM element_interfaces WHERE element_id = ?`)
+      const insertIface = this.db.prepare(`INSERT OR REPLACE INTO element_interfaces (element_id, interface_name) VALUES (?, ?)`)
+      for (const entry of _elementInterfaces) {
+        deleteIface.run(entry.elementId)
+        for (const ifaceName of entry.interfaceNames) {
+          insertIface.run(entry.elementId, ifaceName)
+        }
+      }
+    })
+
+    tx(file, elements, relationships, elementInterfaces)
   }
 
   /** Salva ou substitui as interfaces implementadas por elementos em uma transação. */
@@ -647,21 +835,21 @@ class RepositoryDatabase implements RepositoryRepository {
   saveRelationship(relationship: CodeMapRelationship): void {
     const row = domainToRelationshipRow(relationship)
     this.db.prepare(`
-      INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(row.id, row.repository_id, row.source_id, row.target_id, row.type)
+      INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type, source_kind, target_kind)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(row.id, row.repository_id, row.source_id, row.target_id, row.type, row.source_kind, row.target_kind)
   }
 
   /** Insere ou atualiza múltiplas relações em uma única transação para performance. */
   saveRelationships(relationships: CodeMapRelationship[]): void {
     const tx = this.db.transaction((items: CodeMapRelationship[]) => {
       const stmt = this.db.prepare(`
-        INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type, source_kind, target_kind)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
       `)
       for (const rel of items) {
         const row = domainToRelationshipRow(rel)
-        stmt.run(row.id, row.repository_id, row.source_id, row.target_id, row.type)
+        stmt.run(row.id, row.repository_id, row.source_id, row.target_id, row.type, row.source_kind, row.target_kind)
       }
     })
     tx(relationships)

@@ -1,44 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Exibir modal de confirmação de restauração com resumo de mudanças por arquivo (fileChanges).
-2. Renderizar apenas arquivos a serem criados ou modificados (com contagens de diff), além de bloqueados e remanescentes.
-3. Exibir lista de implementações revertidas, opção de backup de segurança e limpeza de remanescentes.
-4. Renderizar a pele do design system (cabeçalho com X, rodapé com Button pill/ghost, ícones lucide no lugar de emojis).
-5. Proteger contra fechamento acidental durante execução (ESC/overlay bloqueados).
-6. Delegar confirmação ao orquestrador repassando o RestorePlan congelado do preview.
-
-Mapa de Relacionamentos do Script
-
-1. RestoreModal.css
-   - Tipo: Relação de UI
-   - Relação: Consome estilos específicos do modal (prefixo rm-).
-   - Criticidade: Alta
-
-2. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Orquestrador invoca este modal com dados do preview e recebe confirmação.
-   - Criticidade: Alta
-
-3. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome RestorePreviewResult, RestorePlan, RestoreFileChange, OrphanFile.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Lê dados exclusivamente de preview.plan.*, nunca campos top-level de preview.
-2. O modal nunca deve fechar com ESC ou clique no overlay durante a execução (isExecuting).
-3. O checkbox de backup deve iniciar marcado (true) sempre que o modal abrir.
-4. O checkbox de limpeza deve iniciar desmarcado (false) sempre que o modal abrir.
-5. Os botões "Restaurar" e "Cancelar" devem ficar desabilitados durante a execução.
-6. Permanece estritamente apresentacional: sem chamadas diretas de IPC ou lógica de escrita.
-7. A lista principal renderiza apenas status modified e created — unchanged nunca é exibido.
-8. Chaves de renderização usam relativePath, nunca índice.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useState } from 'react'

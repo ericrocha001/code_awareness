@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o topo fixo do drawer (ImplementationHeader) com avatar, nome e ficha de identidade.
-2. Definir a moldura única da ficha com fio entre linhas.
-
-Mapa de Relacionamentos do Script
-
-1. ImplementationHeader.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo ih- para evitar colisões.
-2. A ficha usa uma única borda/fundo — as divisórias são fios internos, não bordas separadas.
-3. O nome (ih-name) nunca quebra linha — truncar com ellipsis.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .ih-header {

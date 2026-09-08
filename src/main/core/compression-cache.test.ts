@@ -1,27 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a política de evicção LRU por consumo de memória em bytes no CompressionCache.
-2. Validar a política de evicção LRU por contagem máxima de entradas no CompressionCache.
-3. Validar a atualização de recenticidade através do método touch no CompressionCache.
-4. Validar o recálculo do saldo de memória em atualizações de chaves existentes.
-5. Validar a rejeição de entradas individuais que excedam o limite de bytes, mesmo com cache vazio.
-
-Mapa de Relacionamentos do Script
-
-1. compression-cache.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa a classe CompressionCache e a conformidade da interface CacheEntry.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes puramente determinísticos em memória, sem acesso ao filesystem, spawn de processos ou estado externo.
-2. O cálculo de sizeBytes é verificado fielmente através de Buffer.byteLength.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

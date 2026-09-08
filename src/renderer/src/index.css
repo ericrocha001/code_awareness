@@ -1,3 +1,6 @@
+/*
+-T --- */
+
 :root {
   --bg-primary: #FFFFFF;
   --bg-secondary: #F9FAFB;
@@ -26,6 +29,8 @@
   --hover-bg: rgba(0, 0, 0, 0.04);
   --selected-bg: rgba(120, 82, 238, 0.12);
   --bg-tertiary: #F3F4F6;
+  --color-warning: #D97706;
+  --font-mono: 'Fira Code', Consolas, monospace;
 }
 
 [data-theme="dark"] {
@@ -56,6 +61,7 @@
   --hover-bg: rgba(255, 255, 255, 0.04);
   --selected-bg: rgba(120, 82, 238, 0.12);
   --bg-tertiary: rgba(255, 255, 255, 0.08);
+  --color-warning: #FBBF24;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -87,6 +93,7 @@
     --hover-bg: rgba(255, 255, 255, 0.04);
     --selected-bg: rgba(120, 82, 238, 0.12);
     --bg-tertiary: rgba(255, 255, 255, 0.08);
+    --color-warning: #FBBF24;
   }
 }
 
@@ -140,7 +147,9 @@ body {
   background: var(--text-secondary);
 }
 
-/* Global Pill Button - Design System Unificado */
+/* Global Pill Button - Design System Unificado
+   Padrão: vazado no repouso → preenche no hover (sem glow).
+   Hierarquia semântica preservada por cor de borda/texto no repouso. */
 .app-pill-btn {
   border-radius: 9999px;
   height: 38px;
@@ -148,7 +157,7 @@ body {
   font-size: 13px;
   font-weight: 600;
   border: 1px solid var(--accent);
-  background: var(--bg-secondary);
+  background: transparent;
   color: var(--text-primary);
   cursor: pointer;
   transition: all 0.2s ease;
@@ -161,8 +170,7 @@ body {
 
 .app-pill-btn:hover {
   background: var(--accent);
-  color: #ffffff;
-  box-shadow: 0 0 12px rgba(120, 82, 238, 0.4);
+  color: var(--accent-contrast);
 }
 
 .app-pill-btn:disabled {
@@ -178,28 +186,29 @@ body {
   gap: 6px;
 }
 
-/* ─── Variante primária (preenchida) ──────────────────────────────────── */
+/* ─── Variante primária (vazada com acento → preenche no hover) ────────── */
+/* Hierarquia no repouso: borda + texto em acento (diferencia da default). */
 .app-pill-btn.primary {
-  background: var(--accent);
-  color: #fff;
+  background: transparent;
+  color: var(--accent);
   border-color: var(--accent);
 }
 
 .app-pill-btn.primary:hover {
-  background: var(--accent-hover);
-  border-color: var(--accent-hover);
-  box-shadow: 0 0 12px rgba(120, 82, 238, 0.4);
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: var(--accent);
 }
 
 .app-pill-btn.primary:disabled {
   opacity: 0.5;
   cursor: not-allowed;
-  background: var(--accent);
+  background: transparent;
   border-color: var(--accent);
 }
 
 .app-pill-btn.primary:disabled:hover {
-  box-shadow: none;
+  background: transparent;
 }
 
 /* ─── Variante fantasma (ação secundária) ──────────────────────────────── */
@@ -229,6 +238,13 @@ body {
 .app-ghost-btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Acessibilidade aditiva: foco visível para os botões globais (D12) */
+.app-pill-btn:focus-visible,
+.app-ghost-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ─── Variante compacta do ghost ────────────────────────────────────────── */

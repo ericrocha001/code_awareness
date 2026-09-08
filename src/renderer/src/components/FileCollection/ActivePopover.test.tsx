@@ -1,32 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a renderização condicional sob demanda de TagPopover e ActionMenu pelo ActivePopover.
-2. Validar que quando activeInteraction for null, nenhum elemento é renderizado no DOM.
-3. Validar o auto-fechamento (disparo de onClose) quando o anchor é null ou está desconectado do DOM.
-4. Validar os disparos de ações contextuais (onHideFile, onRevealInExplorer, onCopyPath, onCopyName).
-
-Mapa de Relacionamentos do Script
-
-1. ActivePopover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, screen, fireEvent e cleanup para asserções de DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. anchorRefs foi eliminado (Sprint 2) — o anchor vem exclusivamente de activeInteraction.anchor.
-2. Cada ação do menu dispara o respectivo callback e em seguida invoca onClose.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

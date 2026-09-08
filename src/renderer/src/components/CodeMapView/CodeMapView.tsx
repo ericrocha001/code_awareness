@@ -1,117 +1,3 @@
-/*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar o estado da aba Code Map (seleção de arquivo, loading, sincronização, indexação, verificação de integridade).
-2. Carregar a estrutura e o registro do repositório via IPC ao montar ou trocar de projeto.
-3. Gerenciar a indexação inicial quando o repositório nunca foi indexado.
-4. Derivar o grafo de arquivos e os relacionados da seleção em módulo puro.
-5. Delegar renderização para CodeMapTree, CodeMapDetailPanel, CodeMapBreadcrumb, CodeMapOverview e CodeMapCodeView.
-6. Renderizar ViewToolbar e ActionBar no topo.
-7. Gerenciar filtros aditivos de extensão com persistência por projeto.
-8. Gerenciar filtro aditivo de tags (OR) com persistência por projeto, em cascata com o filtro de extensões.
-9. Carregar e manter sincronizadas as tags do projeto (allTags e fileTagsMap) via IPC e evento tags-changed.
-10. Manter a pilha de histórico de navegação com botão Voltar no painel.
-11. Controlar a barra do explorer com botão inteligente expandir/colapsar.
-12. Estruturar o layout em três cartões arredondados com rolagem interna independente e cabeçalhos fixos.
-13. Gerenciar larguras das três colunas via frações, com arraste e persistência por projeto.
-14. Controlar a visibilidade das colunas Explorer e Código via botões alternadores na ActionBar, com persistência por projeto.
-15. Redistribuir o espaço do painel de Detalhes quando uma coluna está oculta.
-16. Ouvir eventos de modificação e indexação para atualizar a UI em tempo real.
-17. Expor botão "Verificar integridade" na ActionBar que reconcilia disco vs. banco e atualiza o contador.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapTree.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a árvore de pastas/arquivos com seleção e relacionados.
-   - Criticidade: Alta
-
-2. CodeMapDetailPanel.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o painel de leitura do arquivo selecionado (identidade, dependências, elementos).
-   - Criticidade: Alta
-
-3. CodeMapBreadcrumb.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o caminho do arquivo › elemento focado dentro do painel.
-   - Criticidade: Média
-
-4. CodeMapOverview.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o resumo do repositório quando não há arquivo selecionado.
-   - Criticidade: Alta
-
-5. CodeMapCodeView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a coluna de código integral do arquivo selecionado.
-   - Criticidade: Alta
-
-6. ColumnResizer.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza as duas alças de arraste entre as colunas.
-   - Criticidade: Média
-
-7. fileRelationships.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece buildFileGraph e getRelatedFileIds para derivar o grafo de arquivos.
-   - Criticidade: Alta
-
-8. constants.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece EXTENSION_FILTER_KEY_PREFIX, NO_EXTENSION_LABEL e extensionLabel.
-   - Criticidade: Alta
-
-9. FilterPopover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o funil de filtros de extensão na ViewToolbar.
-   - Criticidade: Média
-
-10. window.codeAwareness.*
-    - Tipo: Dependência Inversa
-    - Relação: Invoca as APIs IPC do Code Map e escuta eventos de alteração/indexação em tempo real.
-    - Criticidade: Alta
-
-11. ../../../../shared/types
-    - Tipo: Contrato / Interface
-    - Relação: Fornece os tipos CodeMapFile, CodeMapElement, CodeMapRelationship e CodeMapRepository.
-    - Criticidade: Alta
-
-12. CodeMapView.css
-    - Tipo: Relação de UI
-    - Relação: Consome os estilos do container (prefixo cmv-).
-    - Criticidade: Alta
-
-Invariantes do Script
-
-1. A estrutura deve ser recarregada ao trocar de projeto.
-2. O estado de loading deve ser exibido enquanto os dados são carregados.
-3. A seleção de arquivo deve ser limpa ao trocar de projeto.
-4. Após sincronizar, a estrutura deve ser recarregada.
-5. Após indexar, a estrutura e o registro do repositório devem ser recarregados.
-6. O botão de indexação só é exibido quando o repositório nunca foi indexado.
-7. O orquestrador não renderiza elementos visuais próprios — apenas compõe os subcomponentes.
-8. Todos os hooks devem ser declarados antes do early return de projeto nulo (Rules of Hooks).
-9. Lookups por Map (O(1)) — nunca find() linear em listas grandes.
-10. A seleção, o histórico e o elemento focado são limpos ao trocar de projeto.
-11. A busca age dentro do conjunto filtrado por extensões e tags (cascata extensões → tags → busca).
-12. Os três estados vazios são mutuamente exclusivos.
-13. A pilha de histórico tem teto de 50 entradas — a mais antiga é descartada.
-14. Voltar nunca empilha o arquivo atual; ids inexistentes são pulados.
-15. Navegar para o arquivo já selecionado é no-op (não cria histórico).
-16. Nenhuma coluna pode ter largura abaixo de MIN_COLUMN_PX — a trava é aplicada em cada arraste.
-17. As frações das três colunas somam sempre 1.0 (tree + reading + code = 1).
-18. A persistência de larguras usa chave isolada por projeto, sem interferir com outras chaves.
-19. Cada alça de arraste é renderizada quando a coluna adjacente externa está visível (Alça 1 quando Explorer visível, Alça 2 quando Código visível). A coluna Detalhes é sempre visível e serve como âncora. As frações salvas permanecem consistentes pois sempre somam 1.0.
-20. As frações das três colunas nunca são modificadas pelo recurso de ocultar — o ocultar só deriva larguras visíveis em tempo de render.
-21. Eventos de mudança confirmada e de indexação de arquivos para o projeto ativo recarregam a estrutura com debounce de 300ms e comparação de caminho normalizada.
-22. O botão "Verificar integridade" nunca aparece para repositórios nunca indexados.
-23. Todos os hooks devem ser declarados antes do early return de projeto nulo (Rules of Hooks).
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { CodeMapElement, CodeMapFile, CodeMapRelationship, CodeMapRepository, Tag, IntegrityIssue, IntegrityCheckResult } from '../../../../shared/types'
 import { CodeMapTree } from './CodeMapTree'
@@ -128,7 +14,8 @@ import { FilterPopover } from '../shared/FilterPopover/FilterPopover'
 import { ViewToolbar } from '../shared/ViewToolbar/ViewToolbar'
 import { ActionBar } from '../shared/ActionBar/ActionBar'
 import { Button } from '../shared/Button/Button'
-import { RefreshCw, SearchX, FilterX, DatabaseZap, ChevronsDownUp, ChevronsUpDown, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, ShieldCheck, Loader2, AlertCircle } from 'lucide-react'
+import { CodeMapHealth, type CodeMapIntegrityState } from './CodeMapHealth'
+import { RefreshCw, SearchX, FilterX, DatabaseZap, ChevronsDownUp, ChevronsUpDown, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import './CodeMapView.css'
 import { normalizeProjectPath } from '../../../../shared/utils/path-utils'
 
@@ -164,9 +51,9 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
   const [selectedFileId, setSelectedFileId] = useState<string | null>(null)
   const [focusedElementId, setFocusedElementId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(false)
-  const [isSyncing, setIsSyncing] = useState(false)
   const [isIndexing, setIsIndexing] = useState(false)
   const [isVerifying, setIsVerifying] = useState(false)
+  const [integrityState, setIntegrityState] = useState<CodeMapIntegrityState>('unknown')
   const [integrityModalState, setIntegrityModalState] = useState<{
     isOpen: boolean
     issues: IntegrityIssue[]
@@ -194,6 +81,8 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
   const contentRef = useRef<HTMLDivElement>(null)
   // Flag para pular a primeira persistência redundante no mount
   const isFirstLoadRef = useRef(true)
+  // Guard de corrida para carregamento de dados (cancela respostas obsoletas)
+  const activeLoadRef = useRef(0)
 
   /** Teto da pilha de histórico — descarta o mais antigo quando excedido. */
   const MAX_FILE_HISTORY = 50
@@ -203,15 +92,29 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
   const neverIndexed = repository === null || repository.lastIndexedAt === null
 
   const loadData = useCallback(async (repoPath: string) => {
+    const currentLoadId = ++activeLoadRef.current
     setIsLoading(true)
     try {
       await window.codeAwareness.openRepository(repoPath)
-      const filesResult = await window.codeAwareness.getFiles(repoPath)
-      const elementsResult = await window.codeAwareness.getElements(repoPath)
-      const relationshipsResult = await window.codeAwareness.getRelationships(repoPath)
-      const countResult = await window.codeAwareness.getModifiedFilesCount(repoPath)
-      const repositoryResult = await window.codeAwareness.getRepository(repoPath)
-      const syncStatusResult = await window.codeAwareness.getSyncStatus(repoPath)
+      if (activeLoadRef.current !== currentLoadId) return
+
+      const [
+        filesResult,
+        elementsResult,
+        relationshipsResult,
+        countResult,
+        repositoryResult,
+        syncStatusResult
+      ] = await Promise.all([
+        window.codeAwareness.getFiles(repoPath),
+        window.codeAwareness.getElements(repoPath),
+        window.codeAwareness.getRelationships(repoPath),
+        window.codeAwareness.getModifiedFilesCount(repoPath),
+        window.codeAwareness.getRepository(repoPath),
+        window.codeAwareness.getSyncStatus(repoPath)
+      ])
+
+      if (activeLoadRef.current !== currentLoadId) return
 
       if (filesResult.success && filesResult.data) {
         setFiles(filesResult.data)
@@ -232,9 +135,13 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
         setLastSyncAt(syncStatusResult.data.lastSyncAt ?? null)
       }
     } catch (err) {
-      onStatusMessage(`Erro ao carregar Code Map: ${err instanceof Error ? err.message : String(err)}`, true)
+      if (activeLoadRef.current === currentLoadId) {
+        onStatusMessage(`Erro ao carregar Code Map: ${err instanceof Error ? err.message : String(err)}`, true)
+      }
     } finally {
-      setIsLoading(false)
+      if (activeLoadRef.current === currentLoadId) {
+        setIsLoading(false)
+      }
     }
   }, [onStatusMessage])
 
@@ -250,12 +157,13 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
       setModifiedCount(0)
       setLastSyncAt(null)
       setRepository(null)
+      setIntegrityState('unknown')
       setSearchQuery('')
       return
     }
 
     loadData(activeProject.path)
-  }, [activeProject, loadData])
+  }, [activeProject?.path, loadData])
 
   // Escuta eventos em tempo real de mudança confirmada e indexação com debounce de 300ms
   useEffect(() => {
@@ -543,13 +451,13 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
     return files.filter((f) => selectedExtensions.has(f.extension))
   }, [files, selectedExtensions])
 
-  // Filtragem aditiva de tags (OR): o arquivo passa se possuir pelo menos uma das tags
-  // selecionadas. Sem seleção, não filtra. Age dentro do conjunto filtrado por extensão.
+  // Filtragem de tags (AND): o arquivo passa se possuir TODAS as tags selecionadas.
+  // Sem seleção, não filtra. Age dentro do conjunto filtrado por extensão.
   const filteredByTags = useMemo(() => {
     if (selectedTags.size === 0) return filteredByExtensions
     return filteredByExtensions.filter((f) => {
       const tags = fileTagsMap[f.relativePath] ?? []
-      return tags.some((tagId) => selectedTags.has(tagId))
+      return Array.from(selectedTags).every((tagId) => tags.includes(tagId))
     })
   }, [filteredByExtensions, selectedTags, fileTagsMap])
 
@@ -866,26 +774,6 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
     })
   }, [])
 
-  const handleSync = async () => {
-    if (!activeProject || isSyncing) return
-
-    setIsSyncing(true)
-    try {
-      const result = await window.codeAwareness.synchronizeModified(activeProject.path)
-      if (result.success && result.data) {
-        onStatusMessage(`${result.data.filesUpdated} arquivo(s) sincronizado(s)`)
-        // Recarrega dados após sincronização
-        await loadData(activeProject.path)
-      } else {
-        onStatusMessage(`Erro ao sincronizar: ${result.error}`, true)
-      }
-    } catch (err) {
-      onStatusMessage(`Erro ao sincronizar: ${err instanceof Error ? err.message : String(err)}`, true)
-    } finally {
-      setIsSyncing(false)
-    }
-  }
-
   const handleVerifyIntegrity = async () => {
     if (!activeProject || isVerifying) return
 
@@ -910,12 +798,14 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
       const data = result1.data!
 
       if (data.status === 'healthy' || !data.details || data.details.length === 0) {
+        setIntegrityState('healthy')
         setIntegrityModalState({ isOpen: false, issues: [], checkResult: null })
         onStatusMessage('✓ Code Map íntegro — nenhuma inconsistência encontrada', false)
         return
       }
 
       const issues = data.details
+      setIntegrityState('issue')
       setIntegrityModalState({
         isOpen: true,
         issues,
@@ -1005,27 +895,6 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
               aria-label={isCodeHidden ? 'Exibir Código' : 'Ocultar Código'}
               title={isCodeHidden ? 'Exibir Código' : 'Ocultar Código'}
             />
-            {!neverIndexed && (
-              <>
-                <Button
-                  variant="ghost"
-                  icon={isVerifying ? <Loader2 size={16} className="cmv-spin" /> : <ShieldCheck size={16} />}
-                  onClick={handleVerifyIntegrity}
-                  disabled={isVerifying || !repository}
-                  aria-label="Verificar integridade do índice"
-                  title="Verifica a integridade profunda do índice, com opção de revisão e autocorreção detalhada"
-                />
-                {integrityModalState.issues.length > 0 && (
-                  <Button
-                    variant="secondary"
-                    icon={<AlertCircle size={16} />}
-                    onClick={() => setIntegrityModalState(prev => ({ ...prev, isOpen: true }))}
-                  >
-                    Ver detalhes ({integrityModalState.issues.length})
-                  </Button>
-                )}
-              </>
-            )}
           </>
         }
         right={
@@ -1036,17 +905,22 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
               onClick={handleIndex}
               disabled={isIndexing}
             >
-              {isIndexing ? 'Indexando...' : 'Indexar Repositório'}
+              {isIndexing ? 'Indexando...' : 'Index CodeMap'}
             </Button>
           ) : (
-            <Button
-              variant="pill"
-              icon={<RefreshCw size={16} />}
-              onClick={handleSync}
-              disabled={isSyncing || modifiedCount === 0}
-            >
-              {isSyncing ? 'Sincronizando...' : `Sincronizar Alterações (${modifiedCount})`}
-            </Button>
+            <CodeMapHealth
+              state={integrityState === 'issue' ? 'issue' : isLoading || isIndexing || modifiedCount > 0 ? 'updating' : 'healthy'}
+              indexedAt={repository?.lastIndexedAt ?? null}
+              lastSyncAt={lastSyncAt}
+              modifiedCount={modifiedCount}
+              integrityState={integrityState}
+              integrityIssueCount={integrityModalState.issues.length}
+              isVerifying={isVerifying}
+              isRebuilding={isIndexing}
+              onVerifyIntegrity={handleVerifyIntegrity}
+              onShowIntegrityIssues={() => setIntegrityModalState((previous) => ({ ...previous, isOpen: true }))}
+              onRebuild={handleIndex}
+            />
           )
         }
       />
@@ -1264,9 +1138,10 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
         checkResult={integrityModalState.checkResult}
         onRepairComplete={(repairResult) => {
           setIntegrityModalState({ isOpen: false, issues: [], checkResult: null })
+          setIntegrityState('unknown')
           const fixed = repairResult?.issuesFixed ?? 0
           onStatusMessage(`✓ Reparação concluída — ${fixed} problema(s) corrigido(s)`, false)
-          handleSync()
+          void loadData(activeProject.path)
         }}
       />
     </div>

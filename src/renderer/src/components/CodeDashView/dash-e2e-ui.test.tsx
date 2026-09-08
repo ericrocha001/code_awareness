@@ -1,36 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar E2E a máquina de estados e integração da UI do Code Dash (UI-01 a UI-10).
-2. Renderizar CodeDashView real com window.codeAwareness mockado e validar transições, One-Click XML, Copy, Export e erros.
-
-Mapa de Relacionamentos do Script
-
-1. CodeDashView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente raiz renderizado em todos os cenários.
-   - Criticidade: Alta
-
-2. hooks/useDashWorkflow.ts
-   - Tipo: Dependência Direta
-   - Relação: Máquina de estados real (idle/parsing/resolved/generating/done/error).
-   - Criticidade: Alta
-
-3. DashXmlPreview.tsx
-   - Tipo: Dependência Direta
-   - Relação: Preview e ações Copy/Export validadas nos cenários UI-02, UI-09 e UI-10.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. window.codeAwareness é reconstruído com vi.fn() no beforeEach de cada teste.
-2. Nenhuma chamada IPC automática ocorre em idle — apenas ações do usuário disparam IPC.
-3. Erros de Copy/Export nunca derrubam o XML já exibido.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react'
@@ -106,6 +76,8 @@ describe('Suite UI — Estado e Integração', () => {
       dashParseAndResolve: vi.fn(),
       dashGenerate: vi.fn(),
       dashOneClickXml: vi.fn(),
+      loadSettings: vi.fn().mockResolvedValue({}),
+      saveSettings: vi.fn().mockResolvedValue({ success: true }),
       saveXml: vi.fn().mockResolvedValue({ success: true })
     }
     ;(window as any).codeAwareness = codeAwareness
@@ -211,6 +183,7 @@ describe('Suite UI — Estado e Integração', () => {
     })
     render(<CodeDashView repoPath={'C:\\repo'} projectName="proj" />)
 
+    fireEvent.click(screen.getByText('XML Rápido'))
     fireEvent.click(screen.getByText('Gerar XML do Repositório'))
     await waitFor(() => expect(screen.getAllByText('Exportar XML').length).toBeGreaterThan(0))
     expect(codeAwareness.dashOneClickXml).toHaveBeenCalledTimes(1)
@@ -218,21 +191,24 @@ describe('Suite UI — Estado e Integração', () => {
   })
 
   // UI-08
-  it('UI-08: toggles do One-Click XML são transmitidos corretamente ao IPC', async () => {
+  it('UI-08: toggles de economia são transmitidos corretamente ao IPC do One-Click XML', async () => {
     codeAwareness.dashOneClickXml.mockResolvedValue({ success: true, xml: XML_OK })
     render(<CodeDashView repoPath={'C:\\repo'} projectName="proj" />)
 
-    const labels = screen.getAllByRole('checkbox')
+    fireEvent.click(screen.getByText('XML Rápido'))
+    const switches = screen.getAllByRole('switch')
     // [removeComments, removeEmptyLines, truncateBase64]
-    fireEvent.click(labels[0])
-    fireEvent.click(labels[2])
+    fireEvent.click(switches[0])
+    fireEvent.click(switches[2])
     fireEvent.click(screen.getByText('Gerar XML do Repositório'))
 
     await waitFor(() => expect(codeAwareness.dashOneClickXml).toHaveBeenCalled())
     expect(codeAwareness.dashOneClickXml).toHaveBeenCalledWith('C:\\repo', {
-      removeComments: true,
-      removeEmptyLines: false,
-      truncateBase64: true
+      persistedSettings: {
+        removeComments: true,
+        removeEmptyLines: false,
+        truncateBase64: true
+      }
     })
   })
 

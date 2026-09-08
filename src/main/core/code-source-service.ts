@@ -1,42 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar a geração seletiva com perfil do Code Source (generateWithProfile), normalizando entrada, delegando ao adapter com suporte opcional a AbortSignal, calculando tokens sobre a saída final e preservando erros tipados de cancelamento.
-
-Mapa de Relacionamentos do Script
-
-1. repomix-output-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Delega a execução da CLI do Repomix.
-   - Criticidade: Alta
-
-2. generation-errors.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa isGenerationCancelledError para preservar erros de cancelamento sem mascarar como falha genérica.
-   - Criticidade: Alta
-
-3. shared/utils/source-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Normaliza defensivamente SourceProfile e SourceOutputFormat.
-   - Criticidade: Alta
-
-4. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece SourceProfile e SourceOutputFormat.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. generateWithProfile nunca escreve artefato no disco.
-2. Erros de cancelamento (GenerationCancelledError) são preservados e relançados, permitindo que coordenadores distingam cancelamento de falha real.
-3. Falhas reais de execução retornam resultado estruturado com { success: false, error }.
-4. A contagem de tokens é calculada sobre a saída final gerada.
-5. O parâmetro signal é estritamente opcional em GenerateWithProfileInput.
-6. O serviço possui generateWithProfile como único método público de geração.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { RepomixOutputAdapter } from './repomix-output-adapter'

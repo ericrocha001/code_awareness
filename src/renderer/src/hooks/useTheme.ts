@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o estado do tema ativo (light/dark/system) com persistência em localStorage.
-2. Aplicar o atributo data-theme no <body> para ativar os tokens CSS definidos no index.css.
-3. Calcular o tema efetivo (light/dark) baseado na preferência do usuário e na media query do sistema.
-4. Sincronizar com o tema do sistema operacional via listener IPC quando configurado como "system".
-
-Mapa de Relacionamentos do Script
-
-1. index.css
-   - Tipo: Dependência Direta
-   - Relação: Consome os tokens CSS via data-theme no <body>.
-   - Criticidade: Alta
-
-2. window.codeAwareness.onThemeChanged (preload, Sprint 3)
-   - Tipo: Comunicação por Evento
-   - Relação: Escuta mudanças de tema do sistema operacional via IPC.
-   - Criticidade: Média
-
-3. App.tsx (Sprint 4)
-   - Tipo: Fluxo de Dados
-   - Relação: Consome { theme, setTheme, effectiveTheme } para controlar o tema da aplicação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O atributo data-theme no <body> deve sempre refletir o valor atual de theme (light/dark/system).
-2. O effectiveTheme deve sempre ser um valor resolvido (light ou dark), nunca "system".
-3. A preferência do usuário deve ser persistida no localStorage a cada mudança de tema.
-4. Todos os listeners (media query e IPC) devem ser removidos no cleanup para evitar memory leaks.
-5. Nunca lançar erros não tratados para o componente consumidor.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useState, useEffect, useCallback } from 'react'

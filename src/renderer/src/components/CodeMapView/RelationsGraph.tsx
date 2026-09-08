@@ -1,58 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar o grafo de relacionamentos do arquivo selecionado com Cytoscape.
-2. Consumir o adaptador puro (buildCytoscapeElements) para alimentar a instância.
-3. Renderizar nós circulares com tamanho proporcional ao grau de conexões.
-4. Exibir setas visíveis na direção do import (importador → importado).
-5. Navegar entre arquivos ao clicar em nós periféricos.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapDetailPanel.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome este componente na seção "Grafo de Relacionamentos".
-   - Criticidade: Alta
-
-2. relationsGraphAdapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece buildCytoscapeElements com nós/arestas deduplicados.
-   - Criticidade: Alta
-
-3. fileRelationships.ts
-   - Tipo: Fluxo de Dados
-   - Relação: Fornece FileGraph com imports/importedBy já derivados.
-   - Criticidade: Alta
-
-4. useTheme.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece effectiveTheme para escolher cores concretas do grafo (canvas não resolve variáveis CSS).
-   - Criticidade: Alta
-
-5. cytoscape
-   - Tipo: Dependência Direta
-   - Relação: Renderiza nós, arestas, layout, zoom e pan.
-   - Criticidade: Alta
-
-6. RelationsGraph.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos do container (prefixo rg-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O componente nunca faz chamadas IPC — apenas deriva do FileGraph via adaptador.
-2. A instância Cytoscape é destruída no cleanup (cy.destroy()) — sem vazamento.
-3. Arestas apontam na direção do import (importador → importado).
-4. O arquivo selecionado é sempre o nó central com borda accent.
-5. Clique no nó periférico navega; clique no nó central é ignorado.
-6. O container tem altura fixa para não quebrar o layout do painel.
-7. As cores são concretas por tema (não variáveis CSS) porque o Cytoscape desenha num canvas que não resolve var(--nome).
-8. O grafo redesenha automaticamente ao trocar de tema — effectiveTheme está nas dependências do useEffect.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useRef, useEffect } from 'react'

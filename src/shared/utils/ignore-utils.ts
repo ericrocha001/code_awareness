@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer funções puras e compartilhadas para normalização e manipulação de padrões de ignore.
-2. Centralizar regras de formato de extensões/padrões para evitar duplicação e inconsistências.
-
-Mapa de Relacionamentos do Script
-
-1. CodeCompressionView.tsx
-   - Tipo: Contrato / Interface
-   - Relação: Consome normalizeIgnorePattern para garantir formato *.ext.
-   - Criticidade: Alta
-
-2. CodeSourceView.tsx
-   - Tipo: Contrato / Interface
-   - Relação: Consome normalizeIgnorePattern para garantir formato *.ext.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todo padrão de extensão persistente deve ser normalizado para o formato *.ext.
-2. A normalização nunca deve remover o asterisco ou o ponto do formato final esperado.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /**

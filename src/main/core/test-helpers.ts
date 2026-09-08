@@ -1,46 +1,12 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Materializar o Invariante Central como uma função-verificável comparando banco e disco.
-2. Isolar o ciclo de vida de repositórios temporários para testes (criação, escrita, indexação e limpeza).
-3. Fornecer fixtures TypeScript reutilizáveis para as Sprints de teste subsequentes.
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome a API pública para consultar arquivos, elementos, relacionamentos e status.
-   - Criticidade: Alta
-
-2. repository-scanner.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome scanRepository para descobrir arquivos elegíveis no disco.
-   - Criticidade: Alta
-
-3. repository-database.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome closeRepositoryDatabase para fechar conexões na limpeza.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. A Função-Oráculo nunca lança exceção — erros internos viram violações do tipo internal_error.
-2. Uma falha de leitura de um arquivo gera violação hash_unreadable local e nunca interrompe as demais dimensões.
-3. O hash é sempre calculado com createHash('sha256') sobre o conteúdo em utf-8 e saída em hex.
-4. contentHash nulo nunca é tratado como erro de leitura, apenas como violação hash_missing.
-5. Arquivos com status modified nunca geram hash_mismatch; hash divergente é o estado esperado e hash coincidente é violação stale_modified.
-6. Diretórios temporários são sempre únicos via mkdtempSync com prefixo codemap_test_.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { createHash } from 'crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { tmpdir } from 'os'
-import { RepositoryModel } from './repository-model'
+import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { scanRepository } from './repository-scanner'
 import { closeRepositoryDatabase } from './repository-database'
 
@@ -270,7 +236,7 @@ export async function createAndIndexRepo(files: Record<string, string>): Promise
   for (const [relativePath, content] of Object.entries(files)) {
     writeTestFile(repoPath, relativePath, content)
   }
-  const model = new RepositoryModel(repoPath)
+  const model = createRepositoryModel(repoPath)
   await model.indexRepository()
   return { model, repoPath, repositoryId: model.getRepositoryId() }
 }

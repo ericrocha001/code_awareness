@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o badge numérico do gatilho (fp-badge) e o item ativo do filtro (fp-item.active).
-2. A pele do gatilho (app-ghost-btn) e do balão/itens (am-menu/am-item) vem dos componentes compartilhados.
-3. O véu de hover sobre o item ativo com cor de tag é aplicado via box-shadow inset.
-
-Mapa de Relacionamentos do Script
-
-1. FilterPopover.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo fp- para evitar colisões com outros componentes.
-2. Nenhuma cor hardcoded — apenas variáveis CSS.
-3. O véu de hover no ativo (box-shadow inset) nunca usa !important.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* ─── Badge numérico no gatilho ──────────────────────────────────────────── */

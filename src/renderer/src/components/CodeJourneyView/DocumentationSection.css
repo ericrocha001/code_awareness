@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar a seção de documentação (DocumentationSection) com campos amplos e selo de status do autosave.
-2. Garantir respiro generoso e textareas com min-height protagonista.
-
-Mapa de Relacionamentos do Script
-
-1. DocumentationSection.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo ds- para evitar colisões.
-2. Os textareas têm min-height generoso — nunca abaixo de 100px.
-3. O selo de status nunca aparece quando o estado é idle (não renderizado).
-4. O botão de retry herda a pele do app-ghost-btn via componente Button.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .ds-section {

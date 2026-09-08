@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente a conformidade estrutural, regras de segurança e detecção de anomalias no validador de requisições Code Dash.
-2. Garantir cobertura de todos os cenários obrigatórios de validação de protocolo, paths, formatos e campos desconhecidos.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/dash/dash-request-validator.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa a função validateDashRequest sobre diferentes payloads e validações.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Executar testes estritamente em memória sem qualquer acesso ao sistema de arquivos.
-2. Cobrir integralmente todos os casos de teste obrigatórios descritos na Sprint 1.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Isolar a execução de processo em módulo puro com responsabilidade única de spawn, timeout, cancelamento e captura de stdout/stderr.
-2. Retornar resultado estruturado (stdout, stderr, exitCode) sem lançar exceção para exitCode != 0 — o chamador decide.
-3. Implementar timeout obrigatório com default de 120000ms e encerramento forçado do processo filho.
-4. Suportar cancelamento via AbortSignal com encerramento forçado do processo filho e rejeição com GenerationCancelledError.
-5. Tratar falhas de criação do processo (ex.: comando não encontrado) como erro relançado.
-
-Mapa de Relacionamentos do Script
-
-1. generation-errors.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa GenerationCancelledError para rejeitar quando o AbortSignal é disparado.
-   - Criticidade: Alta
-
-2. base-repomix-adapter.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome run para executar o spawn da CLI com timeout, cancelamento e captura de stdout/stderr.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nunca lança exceção por exitCode != 0 — sempre resolve com { stdout, stderr, exitCode }.
-2. Lança apenas para falhas de criação do processo (command not found, ENOENT), timeout e cancelamento via AbortSignal.
-3. stdout e stderr são sempre retornados (mesmo que vazios) em resoluções bem-sucedidas.
-4. Timeout e cancelamento produzem erros distintos (Error com mensagem de timeout vs GenerationCancelledError).
-5. Nenhum listener no AbortSignal permanece registrado após a conclusão da promise (sucesso, erro, timeout ou cancelamento).
-6. Se o signal já estiver abortado antes do spawn, a promise rejeita imediatamente com GenerationCancelledError sem iniciar processo.
-7. Em win32 usa shell (necessário para resolução de repomix.cmd); nas demais plataformas spawn direto.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { spawn } from 'child_process'
@@ -75,9 +43,25 @@ export class RepomixProcessRunner {
     return new Promise((resolve, reject) => {
       let isSettled = false
 
-      const proc = spawn(command, args, {
+      // BUGFIX Windows: com shell:true (necessário para resolver repomix.cmd), os
+      // argumentos são concatenados em uma única linha de comando pelo cmd.exe.
+      // Sem aspas, espaços e metacaracteres do cmd (`&`, `^`, `(`, `)`) em nomes de
+      // arquivo corrompem o comando (ex.: "weird & file.ts" virava dois comandos).
+      // A solução é construir a linha de comando completa com cada argumento
+      // perigosamente entre aspas duplas — dentro de aspas o cmd trata os
+      // metacaracteres como literais. Aspas duplas em si são inválidas em nomes de
+      // arquivo no Windows, então não há necessidade de escaping interno.
+      const shellRequired = process.platform === 'win32'
+      const quoteIfNeeded = (arg: string): string =>
+        /[\s&()^|<>"=;,!%]/.test(arg) ? `"${arg}"` : arg
+
+      const spawnCommand = shellRequired
+        ? [command, ...args.map(quoteIfNeeded)].join(' ')
+        : command
+
+      const proc = spawn(spawnCommand, shellRequired ? [] : args, {
         cwd: options.cwd,
-        shell: process.platform === 'win32'
+        shell: shellRequired
       })
 
       let stdout = ''

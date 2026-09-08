@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o balão do menu (am-menu) com cantos arredondados, sombra, animação de entrada e moldura.
-
-Mapa de Relacionamentos do Script
-
-1. ActionMenu.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-2. ActionMenuItem.css
-   - Tipo: Dependência Direta
-   - Relação: Compartilha o mesmo namespace de classes am-.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O balão nunca ultrapassa a janela — o Popover aplica clamp nas quatro bordas.
-2. A animação de entrada usa fade + translateY(-6px → 0) em .14s ease-out.
-3. A sombra do balão é mais sutil no tema claro (rgba(0,0,0,.14)) e mais forte no escuro (rgba(0,0,0,.45)).
-4. Nenhum seletor usa !important.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* ─── Balão ────────────────────────────────────────────────────────────── */

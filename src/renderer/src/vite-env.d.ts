@@ -1,32 +1,10 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Declarar a interface global do objeto codeAwareness no escopo do objeto Window do browser.
-2. Prover suporte a tipos adicionais do ambiente do Vite para o processo renderer.
-3. Tipar as APIs de deep link (getPendingDeepLink e onDeepLink) expostas pelo preload.
-4. Tipar a API generateScope exposta pelo preload.
-5. Tipar a API generateCodeSourceWithProfile exposta pelo preload.
-6. Tipar as APIs do Code Dash (dashParseAndResolve, dashGenerate e dashOneClickXml) expostas pelo preload.
-
-Mapa de Relacionamentos do Script
-
-1. preload.ts
-   - Tipo: Contrato / Interface
-   - Relação: Define a tipagem do objeto codeAwareness injetado por preload.ts.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Os métodos declarados em Window.codeAwareness devem corresponder exatamente à interface exposta em preload.ts.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /// <reference types="vite/client" />
 
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag, DashResolutionReport, DashExecutionResult } from '../../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag, DashResolutionReport, DashExecutionResult } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -279,9 +257,19 @@ declare global {
         error?: string
       }>
 
+      dashDiscover: (
+        request: import('../../shared/types/repo-discovery-types').RepoDiscoveryRequest,
+        repoPath: string
+      ) => Promise<{
+        success: boolean
+        data?: import('../../shared/types/repo-discovery-types').RepoDiscoveryResult
+        error?: string
+      }>
+
       dashGenerate: (
         input: string,
-        repoPath: string
+        repoPath: string,
+        settings?: DashSettings
       ) => Promise<{
         success: boolean
         data?: DashExecutionResult
@@ -294,10 +282,12 @@ declare global {
           removeComments?: boolean
           removeEmptyLines?: boolean
           truncateBase64?: boolean
+          persistedSettings?: DashSettings
         }
       ) => Promise<{
         success: boolean
         xml?: string
+        tokenCount?: number
         error?: string
         timings?: {
           listFilesMs: number

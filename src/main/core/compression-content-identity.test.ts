@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a avaliação do Fast Path O(1) com mtime e tamanho idênticos.
-2. Validar a resolução de hash via provider injetado sem leitura de arquivo em disco.
-3. Validar o acionamento de fallback transparente para readFile quando o provider falhar.
-4. Validar o retorno de cache hit por contentHash quando o mtime diferir mas o hash coincidir.
-
-Mapa de Relacionamentos do Script
-
-1. compression-content-identity.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa a função resolveContentIdentity e a interface ContentIdentityResult.
-   - Criticidade: Alta
-
-2. compression-cache.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo CacheEntry para os cenários de teste.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Diretórios temporários são limpos no afterEach para garantir isolamento.
-2. Testes validam o comportamento real da função resolveContentIdentity com e sem provider.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, afterEach } from 'vitest'

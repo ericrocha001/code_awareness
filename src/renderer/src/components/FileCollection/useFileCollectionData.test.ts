@@ -1,30 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a preparação de dados do hook useFileCollectionData (tagRenderMap, tagsByFile, tokenEstimateMap).
-2. Validar a resolução de paleta por tema e o fallback EMPTY_TAGS (referência estável) para arquivos sem tags.
-3. Validar memoização: mudanças em allTags/tema reconstroem a paleta; arquivos não afetados mantêm referência.
-
-Mapa de Relacionamentos do Script
-
-1. useFileCollectionData.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: renderHook e cleanup para exercitar o hook em ambiente jsdom.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. tagsByFile.get(path) retorna a MESMA referência entre renders quando as dependências não mudam — preserva o comparador do FileRow.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir estilos visuais universais para o componente TagChip (tamanho único, arredondamento e padding).
-2. Fornecer interatividade visual (cursor e hover) quando utilizado com papel interativo.
-
-Mapa de Relacionamentos do Script
-
-1. TagChip.tsx
-   - Tipo: Relação de UI
-   - Relação: Folha de estilos consumida pelo componente.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O chip não possui borda sólida customizada (renderização preenchida limpa).
-2. O tamanho de fonte e espaçamento são estritamente universais para todas as visualizações (Grid, Dense, Painéis).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .tag-chip {

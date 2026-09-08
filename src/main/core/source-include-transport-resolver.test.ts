@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o contrato do SourceIncludeTransportResolver: decisão de transporte, estimativa de bytes, criação e remoção do config temporário.
-
-Mapa de Relacionamentos do Script
-
-1. source-include-transport-resolver.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa todos os métodos públicos do resolver.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum teste depende do Repomix real nem do adapter.
-2. decide e estimateInlineBytes são puros em relação ao filesystem.
-3. createTempConfigFile e removeTempConfigFile tocam o diretório temporário do SO — os testes limpam os artefatos criados.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

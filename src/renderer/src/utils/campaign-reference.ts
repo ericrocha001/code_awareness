@@ -1,40 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o tipo CampaignReference e as constantes internas de protocolo, host e versão.
-2. Construir o endereço de uma campanha a partir de repoPath e campaignId.
-3. Interpretar um endereço de campanha, devolvendo a referência ou null.
-4. Montar o cartão Markdown clicável a partir do nome, repoPath e campaignId.
-
-Mapa de Relacionamentos do Script
-
-1. CodeCampaignView.tsx / CampaignList.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consumidor planejado na Sprint 2 — "A Boca".
-   - Criticidade: Alta
-
-2. deep-link-resolver.ts / App.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consumidor planejado na Sprint 4 — "O Cérebro".
-   - Criticidade: Alta
-
-3. (Nenhuma dependência direta — o módulo é uma folha pura; não importa de shared/types nem de electron.)
-
-Invariantes do Script
-
-1. Todas as funções são puras — sem side effects, sem IPC, sem acesso a DOM/Electron/localStorage/banco.
-2. O formato do endereço é path-based: codeawareness://campanha/<versão>/<repoPath encodado>/<campaignId encodado>; o host é sempre campanha e o protocolo sempre codeawareness:.
-3. parseCampaignReference nunca lança — qualquer entrada inválida retorna null.
-4. Apenas a versão 1 é aceita no parse; versão ausente ou diferente retorna null (forward-safety).
-5. A construção usa encodeURIComponent nos segmentos do path. O parse faz leitura direta da string (sem new URL(), que não reconhece o protocolo customizado) e usa decodeURIComponent nos segmentos.
-6. repoPath e campaignId são retornados pelo parse sem trim (preservando fidelidade do caminho); a rejeição de "vazio" é feita verificando se, após trim, o comprimento é zero.
-7. O label do cartão Markdown escapa \, [ e ] e substitui quebras de linha por espaço, para não quebrar a sintaxe do link.
-8. O campaignId é a âncora de estabilidade da referência (não o slug); o nome entra apenas no label visível.
-9. O parseCampaignReference faz leitura direta da string, sem usar new URL() — o protocolo customizado codeawareness:// não é reconhecido pela API URL, que devolve hostname vazio.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 // Constantes internas — detalhes de implementação, não exportar.

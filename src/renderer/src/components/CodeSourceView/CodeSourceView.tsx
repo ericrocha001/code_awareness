@@ -1,69 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a interface da aba Code Source com ViewToolbar + ActionBar + FileCollectionView como visualização de arquivos.
-2. Gerenciar a seleção reativa de arquivos com sistema de Ignore e ordenação ("Selecionados no topo").
-3. Monitorar alterações de arquivos em tempo real via WatcherService com debounce de 300ms.
-4. Acionar a abertura do SourceOutputModal para configuração, preview e exportação do Code Source.
-5. Manter sincronizados os estados de tags (allTags e fileTagsMap) após alterações no TagManagerModal.
-6. Exibir contador de selecionados no resumo do topo e toggle "Selecionados no topo" na ViewToolbar.
-
-Mapa de Relacionamentos do Script
-
-1. SourceOutputModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Modal de configuração, preview reativo e exportação do Code Source.
-   - Criticidade: Alta
-
-2. CodeSourceView.css
-   - Tipo: Relação de UI
-   - Relação: Consome estilos CSS do componente.
-   - Criticidade: Alta
-
-3. ViewToolbar.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a Camada 1 com SearchBox, contagem, controlsSlot e FilterPopover de tags.
-   - Criticidade: Alta
-
-4. ActionBar.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a Camada 2 com o botão "Gerar Saída".
-   - Criticidade: Alta
-
-5. FilterPopover.tsx (shared)
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o dropdown de filtro de tags coloridas.
-   - Criticidade: Média
-
-6. FileCollectionView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a coleção de arquivos com alternância Grid/Dense.
-   - Criticidade: Alta
-
-7. TagManagerModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Modal de gerenciamento de tags manuais.
-   - Criticidade: Média
-
-8. ignore-patterns.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece padrões de ruído.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O FileCollectionView deve ocupar 100% do espaço disponível no painel principal.
-2. O total de tokens selecionados preliminares deve ser calculado apenas com base nos arquivos checkados.
-3. O listener do watcher deve ser removido quando o componente desmonta para evitar memory leaks.
-4. O botão "Gerar Saída" deve ser desabilitado quando selectedFiles.size === 0.
-5. O sistema de ignore opera exclusivamente com caminhos exatos de arquivos.
-6. A ViewToolbar substitui a CommandBar — nenhuma referência a command-bar no JSX.
-7. O toggle "Selecionados no topo" é estado local (não persiste ao trocar de projeto).
-8. A reordenação por seleção é puramente visual e não afeta a geração de saída.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, {
@@ -328,7 +264,7 @@ export const CodeSourceView: React.FC<CodeSourceViewProps> = ({
         file.relativePath.toLowerCase().includes(q);
       const matchesTags =
         filterTagIds.length === 0 ||
-        filterTagIds.some((tagId) => {
+        filterTagIds.every((tagId) => {
           const fileTagIds = fileTagsMap[file.relativePath] || [];
           return fileTagIds.includes(tagId);
         });

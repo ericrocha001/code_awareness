@@ -1,30 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Congelar a identidade entre o default de buildFileViewTemplate e o template declarado no FileView.css.
-2. Validar overrides de coluna, sanitização de preferências corrompidas e os limites de clamp.
-
-Mapa de Relacionamentos do Script
-
-1. ./fileViewColumns.ts
-   - Tipo: Dependência Direta
-   - Relação: Módulo puro sob teste.
-   - Criticidade: Alta
-
-2. ./FileView.css
-   - Tipo: Contrato / Interface
-   - Relação: Fonte da verdade do template default em CSS — lido como texto e comparado ao builder.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O default do builder e o CSS devem permanecer byte-idênticos (normalizando apenas whitespace); divergir quebra este teste E R-B3.1 — intencional.
-2. Sanitização nunca lança: qualquer unknown produz um override válido ou vazio.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

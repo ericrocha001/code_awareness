@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar que verifyIntegrity atua como juiz da integridade do Code Map.
-2. Validar a detecção de inconsistências (hash divergente e arquivo inesperado no disco).
-3. Validar a reparação automática com autoRepair e a convergência para estado íntegro.
-4. Validar a detecção de arquivo deletado via Função-Oráculo do Invariante Central.
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Exercita verifyIntegrity e getFiles como juiz real sobre banco SQLite.
-   - Criticidade: Alta
-
-2. test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece isolamento de repositórios temporários e a Função-Oráculo verifyInvariant.
-   - Criticidade: Alta
-
-3. repository-database.ts
-   - Tipo: Dependência Direta
-   - Relação: Fecha conexões de banco no teardown.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Cada teste cria repositório temporário isolado e o remove no afterEach.
-2. Todos os cenários usam instâncias reais de RepositoryModel — nada é mockado.
-3. O cenário de arquivo deletado usa verifyInvariant, pois a reconciliação de verifyIntegrity removê-la-ia do índice antes da detecção.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'

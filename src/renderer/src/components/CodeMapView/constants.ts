@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Centralizar constantes compartilhadas entre os componentes da CodeMapView.
-2. Evitar duplicação de rótulos e chaves de persistência entre módulos.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapDetailPanel.tsx
-   - Tipo: Dependência Direta
-   - Relação: Consome ELEMENT_GROUP_LABELS e ELEMENT_MICRO_LABELS.
-   - Criticidade: Alta
-
-2. CodeMapView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Consome EXTENSION_FILTER_KEY_PREFIX e TAG_FILTER_KEY_PREFIX para persistir filtros por projeto.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é folha — não importa nada além de tipos.
-2. A chave EXTENSION_FILTER_KEY_PREFIX deve ser exatamente `codeMap:filesView:extensions:` para preservar filtros salvos da FilesView.
-3. A chave TAG_FILTER_KEY_PREFIX deve ser exatamente `codeMap:filesView:tags:` para persistir o filtro de tags por projeto.
-4. Os rótulos são em português do Brasil.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /** Rótulos em português por tipo de elemento. */
@@ -39,7 +13,13 @@ export const ELEMENT_GROUP_LABELS: Record<string, string> = {
   variable: 'Variáveis',
   constant: 'Constantes',
   import: 'Imports',
-  export: 'Exports'
+  export: 'Exports',
+  property: 'Propriedades',
+  parameter: 'Parâmetros',
+  enumMember: 'Membros de Enum',
+  cssRule: 'Regras CSS',
+  cssAtRule: 'At-Rules CSS',
+  cssCustomProperty: 'Custom Properties CSS'
 }
 
 /** Micro-rótulos uppercase por tipo de elemento. */
@@ -53,7 +33,13 @@ export const ELEMENT_MICRO_LABELS: Record<string, string> = {
   variable: 'VR',
   constant: 'CT',
   import: 'IM',
-  export: 'EX'
+  export: 'EX',
+  property: 'PR',
+  parameter: 'PA',
+  enumMember: 'EM',
+  cssRule: 'CR',
+  cssAtRule: 'AR',
+  cssCustomProperty: 'CP'
 }
 
 /** Cores semânticas por tipo de elemento para os ícones Codicon no painel. */
@@ -67,7 +53,13 @@ export const ELEMENT_ICON_COLORS: Record<string, string> = {
   variable: '#3b82f6',
   constant: '#3b82f6',
   import: '#64748b',
-  export: '#64748b'
+  export: '#64748b',
+  property: '#8b5cf6',
+  parameter: '#94a3b8',
+  enumMember: '#fb923c',
+  cssRule: '#38bdf8',
+  cssAtRule: '#0ea5e9',
+  cssCustomProperty: '#2dd4bf'
 }
 
 /** Chave de localStorage usada pela FilesView para persistir extensões selecionadas.

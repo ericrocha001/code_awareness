@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar uma faixa de menu (role="menuitem") com ícone opcional e label.
-2. Suportar estado de perigo (danger) com cor vermelha no texto e ícone.
-3. Suportar estado desabilitado.
-
-Mapa de Relacionamentos do Script
-
-1. ActionMenuItem.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos com prefixo am-item.
-   - Criticidade: Alta
-
-2. ActionMenu.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Renderizado como filho dentro do balão am-menu.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O ícone é opcional — se não fornecido, o span am-item-icon não é renderizado.
-2. O onClick é passado diretamente ao button — a ordem de execução é: onClick do item → bubbling até .am-menu (que fecha o menu se closeOnSelect).
-3. O ícone usa currentColor via lucide — a cor é controlada pelo CSS do .am-item-icon.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

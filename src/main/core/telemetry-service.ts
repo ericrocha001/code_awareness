@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerar correlation IDs de 8 caracteres hexadecimais para rastrear operações ponta a ponta.
-2. Emitir logs estruturados no console do main process com formato correlacionado.
-
-Mapa de Relacionamentos do Script
-
-1. watcher-bridge.ts
-   - Tipo: Dependência Inversa
-   - Relação: Inicia operações e registra a entrada da cadeia (WATCHER).
-   - Criticidade: Alta
-
-2. repository-synchronizer.ts
-   - Tipo: Dependência Inversa
-   - Relação: Registra recepção de eventos e lotes de reindexação (CHANGE_DETECTION).
-   - Criticidade: Alta
-
-3. repository-model.ts
-   - Tipo: Dependência Inversa
-   - Relação: Registra indexação completa e reindexação seletiva (CODE_MAP).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum método deste módulo jamais lança exceção — falhas internas de telemetria nunca podem afetar o sistema observado.
-2. A serialização de payload é à prova de referência circular, com fallback textual seguro.
-3. O módulo é um singleton do main process, exportado diretamente como instância única.
-4. O módulo não conhece Watcher, Synchronizer, Model, banco ou IPC — depende apenas de 'crypto' do Node.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { randomBytes } from 'crypto'

@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerar Markdown estruturado do relatório de integridade.
-2. Incluir resumo executivo, lista de inconsistências e resultado da reparação.
-3. Ser função pura: recebe dados, retorna string Markdown, sem side effects.
-
-Mapa de Relacionamentos do Script
-
-1. IntegrityCheckModal.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome buildIntegrityReportMarkdown para gerar o relatório exportado.
-   - Criticidade: Alta
-
-2. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece IntegrityReportInput e os tipos de integridade relacionados.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A função é pura — sem side effects, sem IPC, sem acesso a DOM.
-2. O Markdown é gerado em português do Brasil.
-3. Inconsistências são agrupadas por tipo com contagens.
-4. Se repairResult não for fornecido, a seção de reparação é omitida.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { IntegrityReportInput, IntegrityIssue } from '../../../shared/types'

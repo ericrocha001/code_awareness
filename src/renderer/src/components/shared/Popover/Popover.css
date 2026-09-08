@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o envelope de posicionamento do Popover com prefixo pop-.
-2. Garantir que o envelope seja apenas geometria — sem cores, fundo, borda ou sombra.
-
-Mapa de Relacionamentos do Script
-
-1. Popover.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo pop- para evitar colisões com outros componentes.
-2. Nenhuma cor hardcoded — o envelope é transparente e sem estilo visual.
-3. O z-index (1000) é alto o bastante para ficar acima da grade e das barras, sem colidir com modais futuros.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .pop-root {

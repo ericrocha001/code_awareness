@@ -1,68 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o ciclo de vida do Repository Model e do Synchronizer por repositório.
-2. Expor operações de alto nível para os handlers IPC (indexar, sincronizar, consultar, verificar integridade, gerar escopo).
-3. Manter cache de instâncias ativas por repoPath e serializar aberturas concorrentes.
-4. Coordenar a reconciliação disco-vs-banco e o Watcher Bridge com o Synchronizer ao abrir um repositório.
-5. Ser o único ponto de entrada para o Code Map — handlers IPC nunca acessam o Model ou Synchronizer diretamente.
-6. Delegar recorte de trechos de código, leitura de arquivo integral e abertura no VS Code para o Model do repositório.
-7. Gerar markdown do escopo (completo ou comprimido com o esqueleto do Repomix) para o arquivo âncora e seus relacionados, dependendo exclusivamente das portas CompressionPort (compressão) e ContentIdentityPort (hash SHA-256), composta no bootstrap.
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria e gerencia instâncias do Repository Model e executa a reconciliação com o disco.
-   - Criticidade: Alta
-
-2. repository-synchronizer.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria e gerencia instâncias do Synchronizer.
-   - Criticidade: Alta
-
-3. watcher-bridge.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria o bridge entre WatcherService e Event Bus e obtém a função de desassinatura.
-   - Criticidade: Alta
-
-4. watcher-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instância existente injetada no bootstrap.
-   - Criticidade: Alta
-
-5. code-map-handler.ts (Sprint 6)
-   - Tipo: Dependência Inversa
-   - Relação: Consumirá as operações expostas por este serviço.
-   - Criticidade: Alta
-
-6. compression-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Porta de compressão injetada via construtor; gera o esqueleto comprimido e detecta a falha total via COMPRESSION_TOTAL_FAILURE_MARKER (re-exportado).
-   - Criticidade: Alta
-
-7. content-identity-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Porta de identidade de conteúdo; o CodeMapService expõe getFileContentHash para que o bootstrap componha a implementação concreta.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Apenas uma instância de Repository Model por repoPath pode existir simultaneamente.
-2. O Synchronizer é criado junto com o Model e destruído junto com ele.
-3. O Watcher Bridge é assinado junto com o Model e sua desassinatura executada ao fechar o repositório.
-4. Operações de consulta nunca modificam o estado do modelo.
-5. O serviço não conhece SQLite, Tree-sitter ou IPC — apenas orquestra componentes.
-6. Handlers IPC nunca acessam o Model diretamente — toda operação passa por este serviço.
-7. Aberturas concorrentes do mesmo repositório são serializadas usando um mapa de promessas pendentes limpo ao concluir.
-8. Ao abrir um repositório, o backfill de hashes (backfillContentHashes) e a reconciliação com o disco (reconcileWithDisk) devem ser concluídos antes da liberação do repositório.
-9. O markdown do escopo comprimido nunca pode ser retornado com success: true quando todos os arquivos falharam ou conteúdo vazio.
-10. O cabeçalho do markdown de escopo (completo ou comprimido) é sempre construído pelo mesmo método privado — nunca duplicado.
-11. O timer de varredura periódica é opcional e configurável por repositório.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { basename, extname } from 'path'
@@ -74,12 +11,13 @@ import type {
   CodeMapSyncStatus,
   IntegrityCheckOptions
 } from '../../shared/types'
-import { RepositoryModel, type ElementSnippet, type FileContent } from './repository-model'
+import { RepositoryModel, createRepositoryModel, type ElementSnippet, type ExactElementSource, type FileContent } from './repository-model'
 import { RepositorySynchronizer } from './repository-synchronizer'
 import { createWatcherBridge } from './watcher-bridge'
 import { WatcherService } from './watcher-service'
 import { COMPRESSION_TOTAL_FAILURE_MARKER, type CompressionPort } from './compression-port'
 import type { ContentIdentityPort } from './content-identity-port'
+import { telemetryService } from './telemetry-service'
 
 function formatTimestampForFilename(date: Date = new Date()): string {
   const pad = (num: number) => String(num).padStart(2, '0')
@@ -99,6 +37,8 @@ interface CodeMapInstance {
   model: RepositoryModel
   synchronizer: RepositorySynchronizer
   unsubscribeWatcherBridge: () => void
+  /** Promise for the background maintenance task (backfill + reconcile). Resolves when done. */
+  backgroundMaintenance: Promise<void>
 }
 
 const instances = new Map<string, CodeMapInstance>()
@@ -136,31 +76,75 @@ export class CodeMapService {
     const pending = this.pendingOpenRequests.get(normalizedPath)
     if (pending) return pending
 
-    const openPromise = (async () => {
-      try {
-        const model = new RepositoryModel(normalizedPath)
-        // Backfill de hashes ausentes (arquivos legados indexados antes da Sprint 2)
-        // Deve rodar ANTES da reconciliação para que arquivos legados já tenham hash
-        // quando reconcileWithDisk comparar disco vs. índice.
-        await model.backfillContentHashes()
-        await model.reconcileWithDisk()
-        const repositoryId = model.getRepositoryId()
-        const synchronizer = new RepositorySynchronizer(model, repositoryId, {
-          periodicScanIntervalMs: options?.periodicScanIntervalMs
-        })
-        const unsubscribeWatcherBridge = createWatcherBridge(normalizedPath, this.watcherService)
-
-        instances.set(normalizedPath, {
-          model,
-          synchronizer,
-          unsubscribeWatcherBridge
-        })
-      } finally {
-        this.pendingOpenRequests.delete(normalizedPath)
-      }
-    })()
-
+    let resolveOpen!: () => void
+    let rejectOpen!: (error: unknown) => void
+    const openPromise = new Promise<void>((resolve, reject) => {
+      resolveOpen = resolve
+      rejectOpen = reject
+    })
     this.pendingOpenRequests.set(normalizedPath, openPromise)
+
+    try {
+      const model = createRepositoryModel(normalizedPath)
+      model.pruneKnownBinaryFiles()
+
+      const repositoryId = model.getRepositoryId()
+      const synchronizer = new RepositorySynchronizer(model, repositoryId, {
+        periodicScanIntervalMs: options?.periodicScanIntervalMs
+      })
+      const unsubscribeWatcherBridge = createWatcherBridge(normalizedPath, this.watcherService)
+
+      // Background maintenance: backfill + offline reconcile run without blocking openRepository.
+      // For warm repos (already indexed) the snapshot is available immediately for reading;
+      // the reconcile will mark changed files as modified and auto-sync will handle them.
+      // For never-indexed repos the snapshot is empty — the renderer shows "Not indexed" state
+      // exactly as before. The reconcile still runs but there is nothing to heal.
+      const backgroundMaintenance = (async () => {
+        // Cede o controle ao event loop para que a resposta do openRepository e queries iniciais
+        // da UI sejam despachadas antes do processamento pesado em background.
+        await new Promise((resolve) => setImmediate(resolve))
+
+        const cid = telemetryService.startOperation('OPEN_REPO_MAINTENANCE')
+        telemetryService.log(cid, 'CODE_MAP', 'BACKGROUND_MAINTENANCE_STARTED', { repoPath: normalizedPath })
+        const startedAt = Date.now()
+        try {
+          // Backfill runs first so reconcile can compare hashes for legacy files.
+          await model.backfillContentHashes()
+          await new Promise((resolve) => setImmediate(resolve))
+          await model.backfillContextReferences()
+          await new Promise((resolve) => setImmediate(resolve))
+          await model.backfillTokenMetadata?.()
+          await new Promise((resolve) => setImmediate(resolve))
+          // Offline reconcile: detects files created/deleted/changed while app was closed.
+          await model.reconcileWithDisk({ indexUnexpected: true })
+          // Sync in-memory modified set with the updated DB state.
+          synchronizer.reconcileMemoryWithDatabase()
+          telemetryService.log(cid, 'CODE_MAP', 'BACKGROUND_MAINTENANCE_COMPLETED', {
+            repoPath: normalizedPath,
+            durationMs: Date.now() - startedAt
+          })
+        } catch (err) {
+          telemetryService.logError(cid, 'CODE_MAP', 'BACKGROUND_MAINTENANCE_FAILED', {
+            repoPath: normalizedPath,
+            error: err instanceof Error ? err.message : String(err),
+            durationMs: Date.now() - startedAt
+          })
+        }
+      })()
+
+      instances.set(normalizedPath, {
+        model,
+        synchronizer,
+        unsubscribeWatcherBridge,
+        backgroundMaintenance
+      })
+      resolveOpen()
+    } catch (error) {
+      rejectOpen(error)
+    } finally {
+      this.pendingOpenRequests.delete(normalizedPath)
+    }
+
     return openPromise
   }
 
@@ -184,6 +168,32 @@ export class CodeMapService {
   async synchronizeModified(repoPath: string): Promise<{ filesUpdated: number; errors: string[] }> {
     const instance = this.ensureInstance(repoPath)
     return instance.synchronizer.synchronizeModified()
+  }
+
+  async refreshIndex(repoPath: string): Promise<void> {
+    await this.openRepository(repoPath)
+    const instance = this.ensureInstance(repoPath)
+    // Wait for background maintenance first, then run a fresh reconcile + sync.
+    await instance.backgroundMaintenance
+    await instance.model.reconcileWithDisk({ indexUnexpected: true })
+    await instance.synchronizer.synchronizeModified()
+    await instance.model.backfillTokenMetadata()
+  }
+
+  /** Awaits the background maintenance (backfill + offline reconcile) that runs after openRepository. */
+  awaitMaintenance(repoPath: string): Promise<void> {
+    const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
+    const instance = instances.get(normalizedPath)
+    if (!instance) return Promise.resolve()
+    return instance.backgroundMaintenance
+  }
+
+  async awaitSnapshot(repoPath: string): Promise<void> {
+    const instance = this.ensureInstance(repoPath)
+    // Wait for both: any in-flight background maintenance (backfill+reconcile) AND
+    // the synchronizer queue to drain. This gives callers a fully-reconciled snapshot.
+    await instance.backgroundMaintenance
+    await instance.synchronizer.waitForIdle()
   }
 
   getRepository(repoPath: string): CodeMapRepository | null {
@@ -445,6 +455,16 @@ export class CodeMapService {
   getElementCodeSnippet(repoPath: string, elementId: string): Promise<ElementSnippet | null> {
     const instance = this.ensureInstance(repoPath)
     return instance.model.getElementCodeSnippet(elementId)
+  }
+
+  getElementExactSource(repoPath: string, elementId: string): Promise<ExactElementSource | null> {
+    const instance = this.ensureInstance(repoPath)
+    return instance.model.getElementExactSource(elementId)
+  }
+
+  getElementExactSources(repoPath: string, elementIds: string[]): Promise<Map<string, ExactElementSource>> {
+    const instance = this.ensureInstance(repoPath)
+    return instance.model.getElementExactSources(elementIds)
   }
 
   getFileContent(repoPath: string, relativePath: string): Promise<FileContent | null> {

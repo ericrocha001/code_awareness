@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o CampaignService isoladamente via Provas de Aceitação usando FakeCampaignPort em memória.
-2. Provar a criação de campanhas, geração de slug, validação de unicidade e persistência.
-3. Provar a listagem e busca por ID de campanhas.
-4. Provar a atualização de metadados e renomeação com regeneração e validação de unicidade de slug.
-5. Provar o isolamento por repositório: campanhas de repoPath distintos não se contaminam.
-
-Mapa de Relacionamentos do Script
-
-1. campaign-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e valida o contrato público do CampaignService.
-   - Criticidade: Alta
-
-2. fake-ports.ts
-   - Tipo: Dependência Direta
-   - Relação: Injeta FakeCampaignPort no CampaignService para testes sem SQLite.
-   - Criticidade: Alta
-
-3. ../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos Campaign e CampaignStatus.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nenhuma dependência direta de better-sqlite3 ou SQLite nativo — isolamento total.
-2. Cada teste instancia seu próprio FakeCampaignPort para isolamento de estado.
-3. Validação rigorosa de nomes vazios e unicidade de slugs.
-4. Campanhas de repoPath distintos nunca se misturam — isolamento garantido pelo FakeCampaignPort.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, beforeEach } from 'vitest'

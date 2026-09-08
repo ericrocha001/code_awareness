@@ -1,46 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Receber o conteúdo de um arquivo e sua linguagem.
-2. Parsear o conteúdo via Tree-sitter (através do Language Adapter).
-3. Percorrer a AST e extrair elementos estruturais padronizados.
-4. Gerar identificadores estáveis determinísticos para cada elemento.
-5. Gerar apenas relacionamentos contains (intra-arquivo).
-6. Coletar dados brutos de herança e imports para resolução cross-file pelo Repository Model.
-7. Retornar elementos, relacionamentos e dados brutos de interfaces sem análise arquitetural.
-
-Mapa de Relacionamentos do Script
-
-1. language-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome getParser para obter o parser configurado.
-   - Criticidade: Alta
-
-2. repository-model.ts (Sprint 5)
-   - Tipo: Dependência Inversa
-   - Relação: Consumirá os elementos, relacionamentos e elementInterfaces extraídos.
-   - Criticidade: Alta
-
-3. ../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece CodeMapElement, CodeMapRelationship, CodeMapElementKind, etc.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O Structure Reader nunca persiste dados — apenas retorna elementos e relacionamentos.
-2. O Structure Reader nunca faz análise arquitetural — apenas extração estrutural.
-3. Cada elemento possui ID estável determinístico (hash de repositoryId + path + kind + name + parentId).
-4. Cada elemento possui localização completa (start/end com line, column, byte).
-5. Elementos aninhados (métodos dentro de classes) possuem parentElementId correto.
-6. Apenas relacionamentos contains são gerados — são sempre intra-arquivo e nunca quebram.
-7. Relacionamentos extends, implements e imports NÃO são gerados aqui — dependem de resolução cross-file.
-8. Nomes de classes base, interfaces e imports são coletados como dados brutos para o Repository Model.
-9. Falhas de parse nunca interrompem o pipeline — retornam arrays e objetos vazios.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { createHash } from 'crypto'
@@ -49,7 +8,9 @@ import type {
   CodeMapRelationship,
   CodeMapElementKind,
   CodeMapElementVisibility,
-  CodeMapRelationshipType
+  CodeMapGranularity,
+  CodeMapRelationshipType,
+  CodeMapRetrievalKind
 } from '../../shared/types'
 import { getParser, getLanguageForExtension } from './language-adapter'
 
@@ -68,7 +29,37 @@ export interface StructureReaderResult {
 // ─── Geração de IDs ─────────────────────────────────────────────────────────
 
 /**
+ * Gera a assinatura discriminadora por kind.
+ * - function/method/constructor: texto do nó de parâmetros + texto do retorno
+ * - demais kinds: '' (variable/constant usam generateDeclaratorSignature via override)
+ */
+function generateSignature(kind: CodeMapElementKind, node: any): string {
+  switch (kind) {
+    case 'function':
+    case 'method':
+    case 'constructor': {
+      // Busca parâmetros e tipo de retorno
+      let params = ''
+      let returnType = ''
+      for (let i = 0; i < node.childCount; i++) {
+        const child = node.child(i)
+        if (!child) continue
+        if (child.type === 'formal_parameters' || child.type === 'parameters') {
+          params = child.text
+        } else if (child.type === 'type_annotation') {
+          returnType = child.text
+        }
+      }
+      return `(${params})${returnType}`
+    }
+    default:
+      return ''
+  }
+}
+
+/**
  * Gera ID estável determinístico de 16 caracteres via SHA-256.
+ * Fórmula: sha256(repo : relativePath : kind : name : parentElementId : signature : twinIndex)[0:16]
  * INVARIANT: o algoritmo nunca deve mudar — mudanças quebram IDs entre indexações.
  */
 function generateElementId(
@@ -76,10 +67,35 @@ function generateElementId(
   relativePath: string,
   kind: CodeMapElementKind,
   name: string,
-  parentElementId: string | null
+  parentElementId: string | null,
+  signature: string,
+  twinIndex: number
 ): string {
-  const input = `${repositoryId}:${relativePath}:${kind}:${name}:${parentElementId ?? ''}`
+  const input = `${repositoryId}:${relativePath}:${kind}:${name}:${parentElementId ?? ''}:${signature}:${twinIndex}`
   return createHash('sha256').update(input).digest('hex').substring(0, 16)
+}
+
+/**
+ * Gera a assinatura discriminadora de um variable_declarator individual.
+ *
+ * FÓRMULA (Deliberação 1 da Sprint 4): texto normalizado do nó de VALOR do
+ * inicializador (child imediatamente após o token '='; verificação empírica:
+ * tipos variam — number, call_expression, object, etc.). Normalização:
+ * whitespace colapsado para espaço único, truncado a 200 caracteres.
+ * Sem inicializador → ''. O inicializador é o discriminador estrutural que
+ * mantém o invariante 3 da identidade (inserção de homônimo com inicializador
+ * diferente antes não desloca o twinIndex dos posteriores).
+ */
+function generateDeclaratorSignature(declarator: any): string {
+  for (let k = 0; k < declarator.childCount; k++) {
+    const child = declarator.child(k)
+    if (child && child.type === '=') {
+      const value = declarator.child(k + 1)
+      if (!value) return ''
+      return value.text.replace(/\s+/g, ' ').trim().substring(0, 200)
+    }
+  }
+  return ''
 }
 
 /** Gera ID de relacionamento baseado nos IDs dos elementos envolvidos e no tipo. */
@@ -218,6 +234,27 @@ function extractInterfaces(node: any): string[] {
   return interfaces
 }
 
+/** Extrai o nome de um membro de enum (enum_assignment, property_identifier ou string). */
+function extractMemberName(node: any): string | null {
+  if (node.type === 'property_identifier') return node.text.trim() || null
+  if (node.type === 'string') {
+    // Remove aspas do string literal
+    const text = node.text.replace(/^['"]|['"]$/g, '').trim()
+    return text || null
+  }
+  // enum_assignment: o primeiro filho com nome é o membro
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i)
+    if (child && (child.type === 'property_identifier' || child.type === 'identifier')) {
+      return child.text.trim() || null
+    }
+  }
+  // fallback: texto do nó antes do '=' (Red = 1 → 'Red')
+  const eq = node.text.indexOf('=')
+  const candidate = (eq >= 0 ? node.text.slice(0, eq) : node.text).trim()
+  return candidate || null
+}
+
 /** Extrai o nome de um nó, procurando pelo filho do tipo 'identifier' ou 'type_identifier'. */
 function extractName(node: any): string {
   for (let i = 0; i < node.childCount; i++) {
@@ -270,24 +307,53 @@ export function readStructure(
   // Usa relativePath como fileId placeholder — será substituído pelo Repository Model (Sprint 5)
   const fileId = relativePath
 
+  // Contador de gêmeos: chave = "parentElementId:kind:name:signature", valor = próximo índice
+  const twinCounter = new Map<string, number>()
+
+  /**
+   * Gera o ID do elemento com base na fórmula congelada.
+   * Gerencia automaticamente o twinIndex para elementos com mesma assinatura.
+   */
+  function generateIdWithTwinIndex(
+    kind: CodeMapElementKind,
+    name: string,
+    parentElementId: string | null,
+    node: any,
+    signatureOverride?: string
+  ): string {
+    const signature = signatureOverride ?? generateSignature(kind, node)
+    const groupKey = `${parentElementId ?? ''}:${kind}:${name}:${signature}`
+    const twinIndex = twinCounter.get(groupKey) ?? 0
+    twinCounter.set(groupKey, twinIndex + 1)
+    return generateElementId(repositoryId, relativePath, kind, name, parentElementId, signature, twinIndex)
+  }
+
   /**
    * Percorre a AST recursivamente extraindo elementos estruturais.
    * @param node            - Nó atual da AST
    * @param parentElementId - ID do elemento pai (null para o nível de arquivo)
+   * @param isTopLevel      - true se `node` é declaração de nível de módulo (direto sob program,
+   *                          ou embutida em export_statement). Granularidade contextual das lexical_declaration.
+   * @param parentKind      - Kind do elemento pai (null no nível de arquivo) — usado para method_signature
    */
-  function visitNode(node: any, parentElementId: string | null): void {
+  function visitNode(node: any, parentElementId: string | null, isTopLevel = false, parentKind: CodeMapElementKind | null = null): void {
     let element: CodeMapElement | null = null
+    let skipRecursion = false
+    // Override: filhos de export_statement embutido preservam o escopo top-level do módulo
+    let childIsTopLevel: boolean | null = null
+    // Escopo top-level só se propaga através de containers transparentes do módulo
+    const childrenTopLevel = isTopLevel && (node.type === 'program' || node.type === 'export_statement')
 
     switch (node.type) {
       case 'class_declaration':
       case 'abstract_class_declaration': {
         const name = extractName(node)
-        const id = generateElementId(repositoryId, relativePath, 'class', name, parentElementId)
+        const id = generateIdWithTwinIndex('class', name, parentElementId, node)
         const baseClass = extractBaseClass(node)
         const interfaces = extractInterfaces(node)
         const modifiers = extractModifiers(node)
 
-        element = buildElement(id, repositoryId, fileId, 'class', name, parentElementId, node, modifiers, null, extractVisibility(node), baseClass, hasJSDoc(node), 0)
+        element = buildElement(id, repositoryId, fileId, 'class', name, parentElementId, node, modifiers, null, extractVisibility(node), baseClass, hasJSDoc(node), 0, content)
 
         // Coleta interfaces implementadas como dados brutos — resolução cross-file é responsabilidade do Repository Model
         if (interfaces.length > 0) {
@@ -299,50 +365,119 @@ export function readStructure(
         break
       }
 
-      case 'function_declaration': {
+      case 'function_declaration':
+      case 'function_signature': {
         const name = extractName(node)
-        const id = generateElementId(repositoryId, relativePath, 'function', name, parentElementId)
+        const id = generateIdWithTwinIndex('function', name, parentElementId, node)
         const modifiers = extractModifiers(node)
         const returnType = extractReturnType(node)
         const paramCount = extractParameterCount(node)
 
-        element = buildElement(id, repositoryId, fileId, 'function', name, parentElementId, node, modifiers, returnType, null, null, hasJSDoc(node), paramCount)
+        element = buildElement(id, repositoryId, fileId, 'function', name, parentElementId, node, modifiers, returnType, null, null, hasJSDoc(node), paramCount, content)
         break
       }
 
-      case 'method_definition':
-      case 'method_signature': {
+      case 'method_definition': {
         const name = extractName(node)
-        const id = generateElementId(repositoryId, relativePath, 'method', name, parentElementId)
+        const id = generateIdWithTwinIndex('method', name, parentElementId, node)
         const modifiers = extractModifiers(node)
         const returnType = extractReturnType(node)
         const visibility = extractVisibility(node)
         const paramCount = extractParameterCount(node)
 
-        element = buildElement(id, repositoryId, fileId, 'method', name, parentElementId, node, modifiers, returnType, visibility, null, hasJSDoc(node), paramCount)
+        element = buildElement(id, repositoryId, fileId, 'method', name, parentElementId, node, modifiers, returnType, visibility, null, hasJSDoc(node), paramCount, content)
+        break
+      }
+
+      case 'method_signature': {
+        // Sob classe = structural; sob interface/type = member (granularidade contextual)
+        const name = extractName(node)
+        const id = generateIdWithTwinIndex('method', name, parentElementId, node)
+        const modifiers = extractModifiers(node)
+        const returnType = extractReturnType(node)
+        const paramCount = extractParameterCount(node)
+
+        const base = buildElement(id, repositoryId, fileId, 'method', name, parentElementId, node, modifiers, returnType, null, null, hasJSDoc(node), paramCount, content)
+        // Sob interface/type = member; sob classe = structural (contrato congelado)
+        element = { ...base, granularity: parentKind === 'interface' ? 'member' : 'structural' }
+        break
+      }
+
+      case 'property_signature': {
+        const name = extractName(node)
+        if (name !== '(anonymous)') {
+          const id = generateIdWithTwinIndex('property', name, parentElementId, node)
+          element = buildElement(id, repositoryId, fileId, 'property', name, parentElementId, node, [], null, null, null, false, 0, content)
+        }
+        break
+      }
+
+      case 'public_field_definition': {
+        const name = extractName(node)
+        if (name !== '(anonymous)') {
+          const id = generateIdWithTwinIndex('property', name, parentElementId, node)
+          const modifiers = extractModifiers(node)
+          const visibility = extractVisibility(node)
+          element = buildElement(id, repositoryId, fileId, 'property', name, parentElementId, node, modifiers, null, visibility, null, hasJSDoc(node), 0, content)
+        }
+        break
+      }
+
+      case 'required_parameter':
+      case 'optional_parameter': {
+        const name = extractName(node)
+        if (name !== '(anonymous)') {
+          const id = generateIdWithTwinIndex('parameter', name, parentElementId, node)
+          element = buildElement(id, repositoryId, fileId, 'parameter', name, parentElementId, node, [], null, null, null, false, 0, content)
+        }
+        break
+      }
+
+      case 'enum_body': {
+        // Membros de enum são elementos do tipo 'enumMember' sob o elemento enum pai.
+        // A identidade vem do próprio nó membro (enum_assignment, property_identifier, string).
+        for (let i = 0; i < node.childCount; i++) {
+          const member = node.child(i)
+          if (!member) continue
+          const memberType = member.type
+          if (memberType === 'enum_assignment' || memberType === 'property_identifier' || memberType === 'string') {
+            // nome específico por nó
+            const memberNameStr = extractMemberName(member)
+            if (!memberNameStr) continue
+            const id = generateIdWithTwinIndex('enumMember', memberNameStr, parentElementId, member)
+            const mem = buildElement(id, repositoryId, fileId, 'enumMember', memberNameStr, parentElementId, member, [], null, null, null, false, 0, content)
+            elements.push(mem)
+            if (parentElementId) {
+              relationships.push(buildRelationship(repositoryId, parentElementId, id, 'contains'))
+            }
+          }
+        }
+        // Não desce nos membros — já tratados aqui (evita property_identifier/enum_assignment virarem membros duplicados)
+        element = null
+        skipRecursion = true
         break
       }
 
       case 'interface_declaration': {
         const name = extractName(node)
-        const id = generateElementId(repositoryId, relativePath, 'interface', name, parentElementId)
-        element = buildElement(id, repositoryId, fileId, 'interface', name, parentElementId, node, [], null, null, null, hasJSDoc(node), 0)
+        const id = generateIdWithTwinIndex('interface', name, parentElementId, node)
+        element = buildElement(id, repositoryId, fileId, 'interface', name, parentElementId, node, [], null, null, null, hasJSDoc(node), 0, content)
         break
       }
 
       case 'enum_declaration': {
         const name = extractName(node)
-        const id = generateElementId(repositoryId, relativePath, 'enum', name, parentElementId)
+        const id = generateIdWithTwinIndex('enum', name, parentElementId, node)
         const modifiers = extractModifiers(node)
-        element = buildElement(id, repositoryId, fileId, 'enum', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0)
+        element = buildElement(id, repositoryId, fileId, 'enum', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0, content)
         break
       }
 
       case 'type_alias_declaration': {
         const name = extractName(node)
-        const id = generateElementId(repositoryId, relativePath, 'typeAlias', name, parentElementId)
+        const id = generateIdWithTwinIndex('typeAlias', name, parentElementId, node)
         const modifiers = extractModifiers(node)
-        element = buildElement(id, repositoryId, fileId, 'typeAlias', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0)
+        element = buildElement(id, repositoryId, fileId, 'typeAlias', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0, content)
         break
       }
 
@@ -350,13 +485,43 @@ export function readStructure(
         // Distingue const de let/var para mapear para 'constant' ou 'variable'
         const isConst = node.child(0)?.type === 'const'
         const kind: CodeMapElementKind = isConst ? 'constant' : 'variable'
-        // Extrai o nome do primeiro declarator
-        const declarator = findChildByType(node, 'variable_declarator')
-        if (!declarator) break
-        const name = extractName(declarator)
-        const id = generateElementId(repositoryId, relativePath, kind, name, parentElementId)
         const modifiers = extractModifiers(node)
-        element = buildElement(id, repositoryId, fileId, kind, name, parentElementId, node, modifiers, null, null, null, false, 0)
+        // Granularidade contextual por ancestralidade: structural somente em escopo de módulo
+        const isMember = !isTopLevel
+
+        // Regra do primeiro declarator: N declarators → N elementos.
+        // O elemento 0 estende o início ao keyword (const/let); os demais iniciam no próprio declarator.
+        // Isso preserva exatamente os ranges single-declarator existentes (Cenário 8 é o guardião).
+        let declaratorIndex = 0
+        for (let i = 0; i < node.childCount; i++) {
+          const declarator = node.child(i)
+          if (!declarator || declarator.type !== 'variable_declarator') continue
+
+          const name = extractName(declarator)
+          const signature = generateDeclaratorSignature(declarator)
+          const id = generateIdWithTwinIndex(kind, name, parentElementId, node, signature)
+
+          const nodeForRange = declaratorIndex === 0 ? node : declarator
+          const baseElem = buildElement(id, repositoryId, fileId, kind, name, parentElementId, nodeForRange, modifiers, null, null, null, false, 0, content)
+          const declarationElement: CodeMapElement = { ...baseElem, granularity: isMember ? 'member' : 'structural' }
+          elements.push(declarationElement)
+
+          // Relacionamento contains: pai → filho
+          if (parentElementId) {
+            relationships.push(buildRelationship(repositoryId, parentElementId, id, 'contains'))
+          }
+
+          // Percorre filhos do declarator com o elemento como pai (ex.: arrow function aninhada)
+          // Filhos de declarator nunca são top-level
+          for (let k = 0; k < declarator.childCount; k++) {
+            const dchild = declarator.child(k)
+            if (dchild) visitNode(dchild, id, false, kind)
+          }
+          declaratorIndex++
+        }
+        // Elementos já empurrados manualmente — não usar a via genérica (element = null)
+        element = null
+        skipRecursion = true
         break
       }
 
@@ -364,11 +529,29 @@ export function readStructure(
         // Extrai o caminho do módulo importado (string_fragment ou string)
         const source = extractImportSource(node)
         const name = source ?? '(unknown-import)'
-        const id = generateElementId(repositoryId, relativePath, 'import', name, parentElementId)
-        element = buildElement(id, repositoryId, fileId, 'import', name, parentElementId, node, [], null, null, null, false, 0)
+        const id = generateIdWithTwinIndex('import', name, parentElementId, node)
+        element = buildElement(id, repositoryId, fileId, 'import', name, parentElementId, node, [], null, null, null, false, 0, content)
 
         // NOTA: relacionamento imports NÃO é gerado aqui.
         // O Repository Model (Sprint 5) resolverá o caminho do módulo para um fileId real.
+        break
+      }
+
+      case 'call_expression': {
+        const source = extractRequireSource(node)
+        if (source) {
+          const id = generateIdWithTwinIndex('import', source, parentElementId, node)
+          element = buildElement(id, repositoryId, fileId, 'import', source, parentElementId, node, [], null, null, null, false, 0, content)
+        }
+        break
+      }
+
+      case 'assignment_expression': {
+        const name = extractCommonJsExportName(node)
+        if (name) {
+          const id = generateIdWithTwinIndex('export', name, parentElementId, node)
+          element = buildElement(id, repositoryId, fileId, 'export', name, parentElementId, node, [], null, null, null, false, 0, content)
+        }
         break
       }
 
@@ -376,11 +559,18 @@ export function readStructure(
         // Extrai nome exportado — pode ser uma declaração embutida
         const name = extractExportName(node)
         if (name) {
-          const id = generateElementId(repositoryId, relativePath, 'export', name, parentElementId)
-          element = buildElement(id, repositoryId, fileId, 'export', name, parentElementId, node, [], null, null, null, false, 0)
+          const id = generateIdWithTwinIndex('export', name, parentElementId, node)
+          element = buildElement(id, repositoryId, fileId, 'export', name, parentElementId, node, [], null, null, null, false, 0, content)
+          // Declaração embutida (`export const x = 1`) continua sendo top-level
+          childIsTopLevel = isTopLevel
         }
         break
       }
+    }
+
+    if (skipRecursion) {
+      // Casos que tratam os filhos manualmente (lexical_declaration, enum_body)
+      return
     }
 
     if (element) {
@@ -391,22 +581,23 @@ export function readStructure(
         relationships.push(buildRelationship(repositoryId, parentElementId, element.id, 'contains'))
       }
 
-      // Continua percorrendo filhos com o elemento atual como pai
+      // Continua percorrendo filhos com o elemento atual como pai.
+      // Filhos de elemento nunca são top-level, exceto export_statement embutido (override).
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i)
-        if (child) visitNode(child, element.id)
+        if (child) visitNode(child, element.id, childIsTopLevel ?? false, element.kind)
       }
     } else {
       // Nó sem mapeamento — continua percorrendo filhos mantendo o pai atual
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i)
-        if (child) visitNode(child, parentElementId)
+        if (child) visitNode(child, parentElementId, childrenTopLevel, parentKind)
       }
     }
   }
 
   try {
-    visitNode(tree.rootNode, null)
+    visitNode(tree.rootNode, null, true)
   } catch (err) {
     // INVARIANT: erros de percurso da AST nunca quebram o pipeline
     console.warn(`[StructureReader] Erro ao percorrer AST de "${relativePath}":`, err)
@@ -417,6 +608,42 @@ export function readStructure(
 }
 
 // ─── Construtores internos ───────────────────────────────────────────────────
+
+/**
+ * Classifica um elemento na taxonomia semântica.
+ * Retorna granularidade e se é recuperável.
+ */
+export function classifyElement(kind: CodeMapElementKind): { granularity: CodeMapGranularity; retrievable: boolean } {
+  switch (kind) {
+    case 'class':
+    case 'function':
+    case 'method':
+    case 'interface':
+    case 'typeAlias':
+    case 'enum':
+    case 'variable':
+    case 'constant':
+    case 'cssAtRule':
+      return { granularity: 'structural', retrievable: true }
+    case 'property':
+    case 'parameter':
+    case 'enumMember':
+    case 'cssRule':
+    case 'cssCustomProperty':
+      return { granularity: 'member', retrievable: true }
+    case 'import':
+    case 'export':
+      return { granularity: 'syntax', retrievable: false }
+    default:
+      return { granularity: 'structural', retrievable: false }
+  }
+}
+
+/** @deprecated Use 'classifyElement' em vez desta função */
+export function classifyRetrievalKind(kind: CodeMapElementKind): CodeMapRetrievalKind {
+  const { retrievable } = classifyElement(kind)
+  return retrievable ? 'A' : null
+}
 
 /** Constrói um CodeMapElement a partir dos dados extraídos do nó. */
 function buildElement(
@@ -432,15 +659,19 @@ function buildElement(
   visibility: CodeMapElementVisibility,
   baseClass: string | null,
   hasDocumentation: boolean,
-  parameterCount: number
+  parameterCount: number,
+  content: string
 ): CodeMapElement {
   // Tree-sitter usa 0-indexed para linhas; nosso modelo usa 1-indexed
   const startLine = node.startPosition.row + 1
   const startColumn = node.startPosition.column
-  const startByte = node.startIndex
+  // Converte índices de caracteres do Tree-sitter em offsets reais de bytes UTF-8
+  const startByte = Buffer.byteLength(content.slice(0, node.startIndex), 'utf-8')
   const endLine = node.endPosition.row + 1
   const endColumn = node.endPosition.column
-  const endByte = node.endIndex
+  const endByte = Buffer.byteLength(content.slice(0, node.endIndex), 'utf-8')
+
+  const classification = classifyElement(kind)
 
   return {
     id,
@@ -460,11 +691,14 @@ function buildElement(
     returnType,
     baseClass,
     hasDocumentation,
-    parameterCount
+    parameterCount,
+    retrievalKind: classification.retrievable ? 'A' : null,
+    granularity: classification.granularity,
+    retrievable: classification.retrievable
   }
 }
 
-/** Constrói um CodeMapRelationship entre dois elementos. */
+/** Constrói um CodeMapRelationship entre dois elementos (element → element). */
 function buildRelationship(
   repositoryId: string,
   sourceId: string,
@@ -476,7 +710,9 @@ function buildRelationship(
     repositoryId,
     sourceId,
     targetId,
-    type
+    type,
+    sourceKind: 'element',
+    targetKind: 'element'
   }
 }
 
@@ -501,6 +737,18 @@ function extractImportSource(node: any): string | null {
     }
   }
   return null
+}
+
+function extractRequireSource(node: any): string | null {
+  const match = node.text.match(/^require\s*\(\s*(['"])([^'"]+)\1\s*\)$/)
+  return match?.[2]?.trim() || null
+}
+
+function extractCommonJsExportName(node: any): string | null {
+  const left = node.childForFieldName?.('left')?.text ?? node.child(0)?.text ?? ''
+  if (left === 'module.exports') return 'default'
+  const match = left.match(/^(?:module\.)?exports\.([A-Za-z_$][\w$]*)$/)
+  return match?.[1] ?? null
 }
 
 /** Extrai o nome principal de um export_statement. */

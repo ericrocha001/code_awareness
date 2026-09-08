@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar um componente ToggleSwitch acessível e reutilizável.
-2. Gerenciar interações de teclado (Espaço/Enter) e cliques para alternar o estado do switch.
-
-Mapa de Relacionamentos do Script
-
-1. CodeCompressionView.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: Usado como controle de seleção no lugar de checkboxes tradicionais.
-   - Criticidade: Média
-
-2. CodeSourceView.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: Usado como controle de seleção no lugar de checkboxes tradicionais.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O componente deve suportar navegação por teclado (foco por Tab, alteração por Space/Enter).
-2. Transições visuais de ativação/desativação devem ser fluidas.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

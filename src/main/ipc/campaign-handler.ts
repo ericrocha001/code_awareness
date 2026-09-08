@@ -1,33 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar handlers IPC para operações de campanha.
-2. Validar parâmetros recebidos antes de delegar ao CampaignService.
-3. Capturar erros e retornar respostas estruturadas ao renderer.
-
-Mapa de Relacionamentos do Script
-
-1. campaign-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Recebe por parâmetro e consome CampaignService.
-   - Criticidade: Alta
-
-2. ../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos Campaign e CampaignStatus.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
-2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
-3. Toda resposta de handler deve conter o campo success.
-4. Nenhuma lógica de negócio — apenas validação de parâmetros e delegação ao serviço.
-5. Não instancia serviços internamente — recebe CampaignService pronto no registro.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain } from 'electron'

@@ -1,40 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Implementar os contratos ActionLogPort, CheckpointCatalogPort e CampaignPort usando better-sqlite3.
-2. Gerenciar o ciclo de vida das conexões internamente (abrir, fechar, reutilizar via Map privado).
-3. Garantir que o schema e as migrações sejam aplicados automaticamente antes de qualquer operação (ensureConnection).
-4. Prover closeAll() para encerramento gracioso das conexões ao fechar o aplicativo.
-
-Mapa de Relacionamentos do Script
-
-1. database-ports.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa ActionLogPort, CheckpointCatalogPort e CampaignPort.
-   - Criticidade: Alta
-
-2. better-sqlite3
-   - Tipo: Dependência Direta
-   - Relação: Biblioteca SQLite síncrona usada para persistência.
-   - Criticidade: Alta
-
-3. main.ts
-   - Tipo: Dependência Inversa
-   - Relação: Instancia o adapter como único Composition Root e injeta nas dependências.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O Map de conexões é privado da instância — sem estado global exportado.
-2. Toda operação chama ensureConnection(repoPath) antes de acessar o banco.
-3. Schema, migrações, WAL e caminho do banco (<repoPath>/code_awareness/code_checkpoints.db) permanecem idênticos ao database-service.ts original.
-4. Nenhuma operação de banco falha silenciosamente por falta de inicialização — a inicialização é transparente para os chamadores.
-5. A migração campaign_id é idempotente: erro de coluna duplicada é ignorado, qualquer outro erro é relançado.
-6. A migração repo_path em campaigns (Sprint 11) usa PRAGMA table_info para verificar existência antes do ALTER TABLE, seguindo o padrão existente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import Database from 'better-sqlite3'

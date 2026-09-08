@@ -1,31 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a transição de estados de interação (abertura de TagPopover, abertura de ActionMenu e fechamento).
-2. Garantir o comportamento de substituição mútua ("single active interaction") entre interações concorrentes.
-3. Comprovar a estabilidade referencial dos callbacks openTagPopover, openActionMenu e closeInteraction entre renders.
-
-Mapa de Relacionamentos do Script
-
-1. useFileCollectionInteraction.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: renderHook e act para manipulação de ciclo de vida e asserções.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Apenas uma única interação pode estar ativa em qualquer instante verificado.
-2. A estabilidade referencial dos 3 métodos retornados é estritamente garantida (toBe).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

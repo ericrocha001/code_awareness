@@ -1,54 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Apresentar o preview do documento gerado (Markdown ou XML) utilizando virtualização por linhas com FixedSizeList.
-2. Aplicar syntax highlighting com prism-react-renderer materializando no DOM apenas a faixa de linhas visíveis.
-3. Proteger a performance degradando automaticamente para texto puro virtualizado quando o documento exceder o teto de caracteres.
-4. Manter o conteúdo integral preservado e inalterado na memória para operações de cópia e exportação.
-
-Mapa de Relacionamentos do Script
-
-1. utils/source-document-lines.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome splitDocumentLines para segmentação normalizada de linhas.
-   - Criticidade: Alta
-
-2. hooks/useTheme.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece effectiveTheme para seleção do tema claro/escuro de syntax highlighting.
-   - Criticidade: Alta
-
-3. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo SourceOutputFormat.
-   - Criticidade: Alta
-
-4. prism-react-renderer
-   - Tipo: Dependência Direta
-   - Relação: Fornece Highlight e temas vsDark/vsLight para realce de sintaxe.
-   - Criticidade: Alta
-
-5. react-window
-   - Tipo: Dependência Direta
-   - Relação: Fornece FixedSizeList para virtualização de linhas com altura fixa.
-   - Criticidade: Alta
-
-6. SourcePreviewVirtualized.css
-   - Tipo: Relação de UI
-   - Relação: Estiliza o container e as linhas virtualizadas com prefixo spv-.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Apenas as linhas contidas na viewport do contêiner (com overscan fixo) são instanciadas no DOM.
-2. A altura de cada linha virtualizada (.spv-line) é estritamente 19px (LINE_HEIGHT).
-3. Documentos cujo tamanho exceda MAX_HIGHLIGHT_CHARS nunca são processados pelo parser do Prism (fallback imediato para texto puro virtualizado).
-4. O tema do realce acompanha reativamente effectiveTheme.
-5. O componente não modifica nem trunca o documento original.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'

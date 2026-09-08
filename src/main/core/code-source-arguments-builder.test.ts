@@ -1,33 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o contrato do builder de argumentos do Code Source (buildSourceCliArguments).
-2. Proteger a invariante central de que nenhum perfil emite compressão estrutural.
-3. Validar as dependências entre flags estruturais e a emissão de avisos.
-4. Validar os modos de transporte (inline-include e config-file) e suas violações de contrato.
-5. Validar a normalização defensiva do perfil e do formato (source-profile).
-
-Mapa de Relacionamentos do Script
-
-1. code-source-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa buildSourceCliArguments e SourceIncludeTransport.
-   - Criticidade: Alta
-
-2. shared/utils/source-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa normalizeSourceProfile, normalizeSourceOutputFormat e DEFAULT_SOURCE_PROFILE.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum teste executa Repomix real, acessa filesystem, Git, Electron ou IPC — 100% determinístico.
-2. A flag --compress nunca aparece no resultado de nenhuma combinação testada.
-3. A ordem dos argumentos emitidos é determinística.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi } from 'vitest'

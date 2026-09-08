@@ -1,34 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a renderização do FileRow (nome, caminho, tokens, badges de alteração).
-2. Validar a exibição de tags via prop tags:TagRenderData[] e hiddenCount.
-3. Validar disparo do callback consolidado onRowAction para toggle, tagInteraction e actionInteraction.
-4. Garantir ausência de popovers no DOM interno.
-5. Comprovar o comportamento do React.memo frente a re-renderizações com props estáveis e mutações.
-
-Mapa de Relacionamentos do Script
-
-1. FileRow.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, screen, fireEvent e cleanup para asserções de DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. FileRow não contém hooks, estado local nem forwardRef — é componente visual puro.
-2. Nenhum elemento de popover é instanciado na árvore do componente.
-3. Testes de overflow (+N) removidos: lógica movida para TagOverflowController (Sprint 3).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

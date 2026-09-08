@@ -1,49 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o RestoreService via 8 Provas de Aceitação usando repositórios Git temporários reais.
-2. Provar a restauração completa com backup fail-safe e rollback automático em falha parcial.
-3. Provar o cálculo de arquivos remanescentes por evidência (checkpoints mais novos + disco).
-4. Provar a garantia estrutural de único restoredAt (incluindo estado corrompido).
-5. Provar a segurança de paths via resolveSafePath (path traversal, absoluto, Windows UNC).
-6. Provar que o preview é operação de leitura pura (sem efeitos colaterais).
-7. Provar a validação de integridade do checkpoint antes da escrita.
-8. Provar o contrato IPC do restore-handler (único grupo com mocks).
-9. Provar a detecção de falhas de consistência pós-escrita (marcação, cleanup, logs).
-
-Mapa de Relacionamentos do Script
-
-1. restore-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e valida o contrato público do RestoreService.
-   - Criticidade: Alta
-
-2. checkpoint-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instância real com FakeCheckpointCatalogPort injetada no RestoreService.
-   - Criticidade: Alta
-
-3. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria, manipula e limpa repositórios Git temporários reais.
-   - Criticidade: Alta
-
-4. fake-ports.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece FakeCheckpointCatalogPort e FakeActionLogPort para persistência em memória sem SQLite.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todo repositório temporário é limpo após cada teste via cleanupTempRepo.
-2. Nenhum teste usa mocks para PA-R01 a PA-R06 — usa Git real e filesystem real com Fakes em memória para banco.
-3. Mock apenas para PA-R07 (handler IPC do Electron via vi.mock).
-4. O oráculo de integridade (hash SHA-256) é verificado em cenários de restauração.
-5. Nenhuma dependência direta de better-sqlite3 ou database-service.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'

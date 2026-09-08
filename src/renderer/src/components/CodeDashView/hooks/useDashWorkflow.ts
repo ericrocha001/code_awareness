@@ -1,34 +1,6 @@
-/*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar a máquina de estados do fluxo Code Dash (idle, parsing, resolved, generating, done, error).
-2. Gerenciar a comunicação com os canais IPC dashParseAndResolve e dashGenerate sem efeitos colaterais automáticos.
-
-Mapa de Relacionamentos do Script
-
-1. ../../../../shared/types/dash-types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome DashResolutionReport e DashExecutionResult para tipagem de estado.
-   - Criticidade: Alta
-
-2. ../CodeDashView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Provê o estado e ações para o container principal da UI.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A geração via generate() só pode ser disparada no estado 'resolved'.
-2. Transições de erro devem preservar ou limpar dados conforme a fase em que ocorrem.
-3. Não executar chamadas IPC automáticas em useEffect.
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-
 import { useCallback, useState } from 'react'
 import type { DashResolutionReport } from '../../../../shared/types/dash-types'
+import type { DashSettings } from '../../../../shared/types'
 
 export type DashWorkflowState =
   | 'idle'
@@ -44,9 +16,10 @@ export interface UseDashWorkflowReturn {
   setInput: (input: string) => void
   resolutionReport: DashResolutionReport | null
   xml: string | null
+  tokenCount: number | null
   error: string | null
   pasteAndResolve: () => Promise<void>
-  generate: () => Promise<void>
+  generate: (settings?: DashSettings) => Promise<void>
   reset: () => void
 }
 
@@ -55,6 +28,7 @@ export function useDashWorkflow(repoPath: string): UseDashWorkflowReturn {
   const [input, setInput] = useState<string>('')
   const [resolutionReport, setResolutionReport] = useState<DashResolutionReport | null>(null)
   const [xml, setXml] = useState<string | null>(null)
+  const [tokenCount, setTokenCount] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const pasteAndResolve = useCallback(async () => {
@@ -66,6 +40,7 @@ export function useDashWorkflow(repoPath: string): UseDashWorkflowReturn {
 
     setState('parsing')
     setError(null)
+    setTokenCount(null)
 
     try {
       const response = await window.codeAwareness.dashParseAndResolve(input, repoPath)
@@ -85,7 +60,7 @@ export function useDashWorkflow(repoPath: string): UseDashWorkflowReturn {
     }
   }, [input, repoPath])
 
-  const generate = useCallback(async () => {
+  const generate = useCallback(async (settings?: DashSettings) => {
     if (state !== 'resolved') {
       return
     }
@@ -94,10 +69,11 @@ export function useDashWorkflow(repoPath: string): UseDashWorkflowReturn {
     setError(null)
 
     try {
-      const response = await window.codeAwareness.dashGenerate(input, repoPath)
+      const response = await window.codeAwareness.dashGenerate(input, repoPath, settings)
 
       if (response.success && response.data?.xml) {
         setXml(response.data.xml)
+        setTokenCount(response.data.tokenCount ?? null)
         setState('done')
       } else {
         setState('error')
@@ -116,6 +92,7 @@ export function useDashWorkflow(repoPath: string): UseDashWorkflowReturn {
     setInput('')
     setResolutionReport(null)
     setXml(null)
+    setTokenCount(null)
     setError(null)
   }, [])
 
@@ -125,6 +102,7 @@ export function useDashWorkflow(repoPath: string): UseDashWorkflowReturn {
     setInput,
     resolutionReport,
     xml,
+    tokenCount,
     error,
     pasteAndResolve,
     generate,

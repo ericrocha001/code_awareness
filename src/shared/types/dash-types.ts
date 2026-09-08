@@ -1,28 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Declarar os tipos puros e contratos estruturais do protocolo Code Dash compartilhados entre processos.
-
-Mapa de Relacionamentos do Script
-
-1. src/shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Reexporta as interfaces e uniões literais do protocolo Code Dash para o projeto.
-   - Criticidade: Alta
-
-2. src/shared/utils/dash-protocol.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos DashRepresentation e DashRequest para guardas e utilitários.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Conter estritamente declarações de tipo e interfaces TypeScript sem lógica executável, constantes ou efeitos colaterais.
-2. O formato de saída em DashRequest é estritamente fixado na união literal 'xml'.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 export type DashRepresentation = 'source' | 'compression'

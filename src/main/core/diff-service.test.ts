@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o DiffService via injeção de dependência do GitService (Sprint 2) em repositórios Git temporários reais.
-2. Cobrir as fronteiras do diff semântico: caso vazio, seleção de arquivos, formatos de seção e limite de 2 MB.
-3. Evidenciar a deleção (Sprint 1) renderizada pelo DiffService no bloco negativo.
-
-Mapa de Relacionamentos do Script
-
-1. diff-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia DiffService com GitService injetado e valida seu contrato.
-   - Criticidade: Alta
-
-2. git-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instância real injetada no DiffService para exercitar os fluxos sem mock.
-   - Criticidade: Alta
-
-3. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria, manipula e limpa repositórios Git temporários reais.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todo repositório temporário é limpo após cada teste via cleanupTempRepo.
-2. O DiffService recebe o GitService explicitamente no construtor (validação da injeção da Sprint 2).
-3. A fronteira de 2 MB usa a constante MAX_FILE_SIZE importada de diff-service.ts (fonte única de verdade).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach } from 'vitest'

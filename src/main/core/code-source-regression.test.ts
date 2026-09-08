@@ -1,48 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar as invariantes arquiteturais do subsistema Code Source em testes de regressão protegidos.
-2. Garantir que o Code Source nunca emite a flag --compress em nenhuma combinação de opções.
-3. Garantir a existência de um único caminho público de geração no serviço e no adapter.
-4. Garantir que as configurações de Source e Compression permanecem estritamente isoladas em AppSettings.
-5. Validar a propagação de AbortSignal, descarte de cancelamento e integridade do transporte.
-
-Mapa de Relacionamentos do Script
-
-1. code-source-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Valida métodos públicos e contrato de generateWithProfile.
-   - Criticidade: Alta
-
-2. repomix-output-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Valida métodos públicos do adapter.
-   - Criticidade: Alta
-
-3. code-source-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Valida que buildSourceCliArguments nunca emite --compress.
-   - Criticidade: Alta
-
-4. source-include-transport-resolver.ts
-   - Tipo: Dependência Direta
-   - Relação: Valida a decisão entre inline-include e config-file.
-   - Criticidade: Alta
-
-5. generation-errors.ts
-   - Tipo: Dependência Direta
-   - Relação: Valida que GenerationCancelledError é relançado.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O Code Source nunca deve emitir a flag --compress sob qualquer configuração.
-2. CodeSourceService não deve expor nenhum método de geração além de generateWithProfile.
-3. RepomixOutputAdapter não deve expor nenhum método de geração além de generateSelectiveSource.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi } from 'vitest'

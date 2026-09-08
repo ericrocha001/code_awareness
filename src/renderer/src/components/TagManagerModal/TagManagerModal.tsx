@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Apresentar um modal para gerenciar as tags do projeto ativo.
-2. Carregar, criar, editar e excluir tags via APIs seguras do preload.
-3. Manter estado local e oferecer feedback visual imediato enquanto persiste no backend.
-
-Mapa de Relacionamentos do Script
-
-1. App.tsx ou componentes de chamada
-   - Tipo: Dependência Inversa
-   - Criticidade: Alta
-
-2. Window.codeAwareness
-   - Tipo: Fluxo de Dados
-   - Relação: Usa getTags, upsertTag, deleteTag.
-   - Criticidade: Alta
-
-3. TagManagerModal.css
-   - Tipo: Relação de UI
-   - Relação: Estilos do modal e lista de tags.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O modal nunca deve modificar tags sem antes atualizar o estado local.
-2. O path do repositório deve ser validado antes de qualquer chamada.
-3. Em caso de erro na API, o modal não deve fechar automaticamente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useState, type CSSProperties } from 'react'

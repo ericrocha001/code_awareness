@@ -1,34 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Prover implementações em memória das portas de persistência para uso exclusivo em testes de domínio (Node/Vitest).
-
-Mapa de Relacionamentos do Script
-
-1. database-ports.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa ActionLogPort, CheckpointCatalogPort e CampaignPort.
-   - Criticidade: Alta
-
-2. checkpoint-service.test.ts
-   - Tipo: Dependência Inversa
-   - Relação: Injeta FakeCheckpointCatalogPort no CheckpointService para testes sem SQLite.
-   - Criticidade: Alta
-
-3. restore-service.test.ts
-   - Tipo: Dependência Inversa
-   - Relação: Injeta FakeActionLogPort no RestoreService para testes sem SQLite.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhuma dependência de better-sqlite3 — este arquivo deve poder ser importado pelo runner Node/Vitest sem ABI nativo.
-2. O estado em memória é por instância — cada teste deve criar sua própria instância para isolamento.
-3. As implementações são fiéis ao contrato: filtram por repoPath onde aplicável, ordenam como o banco SQLite real.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { ActionLogPort, CheckpointCatalogPort, CampaignPort } from './database-ports'

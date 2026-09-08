@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Extrair e deserializar payloads JSON brutos ou encapsulados em markdown code fences a partir de texto de entrada.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/dash/dash-request-validator.ts
-   - Tipo: Fluxo de Dados
-   - Relação: Fornece o objeto desconhecido (unknown) para validação estrutural estrita.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Operar como função pura sem dependências de I/O, sistema de arquivos ou estado mutável externo.
-2. Nunca validar schema, versão ou regras de negócio do payload, restringindo-se à extração e parsing sintático de JSON.
-3. Em caso de múltiplos blocos de código markdown, selecionar o primeiro bloco contendo JSON sintaticamente válido.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 export type DashParseResult =

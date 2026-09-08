@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Ler o conteúdo de um arquivo fonte a partir do caminho absoluto.
-2. Escrever o conteúdo em múltiplos repositórios de destino, sobrescrevendo se já existir.
-3. Retornar relatório de sucesso/falha por repositório.
-
-Mapa de Relacionamentos do Script
-
-1. file-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consumido pelo handler IPC de propagação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O nome do arquivo no destino é sempre o mesmo do arquivo fonte (basename).
-2. Cada repositório é processado independentemente — falha em um não aborta os outros.
-3. O conteúdo do arquivo fonte nunca é validado ou transformado — apenas copiado.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { readFileSync, writeFileSync, existsSync } from 'fs'

@@ -1,40 +1,12 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar os manipuladores IPC para o protocolo Code Dash: parsing, validação, resolução e geração de contexto XML.
-2. Validar defensivamente os parâmetros de entrada dos canais IPC antes de delegar aos serviços de domínio.
-3. Implementar a funcionalidade One-Click XML (dash:one-click-xml) delegando ao OneClickXmlService.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/dash/dash-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Delega a execução das operações Code Dash seletivas ao DashService.
-   - Criticidade: Alta
-
-2. src/main/core/one-click-xml-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Delega a geração do One-Click XML ao OneClickXmlService.
-   - Criticidade: Alta
-
-3. src/main/preload.ts
-   - Tipo: Dependência Inversa
-   - Relação: Expõe os canais IPC declarados neste handler para o processo renderer.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Handlers IPC nunca devem lançar exceções não capturadas para o renderer; todas as falhas devem ser retornadas em formato estruturado { success, data, error }.
-2. Nenhum processamento é iniciado se repoPath ou input forem inválidos ou vazios.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain } from 'electron'
 import type { DashService } from '../core/dash/dash-service'
 import type { OneClickXmlService } from '../core/one-click-xml-service'
+import type { DashSettings } from '../../shared/types'
+import type { DashDiscoveryService } from '../core/dash/dash-discovery-service'
 
 function isValidString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
@@ -42,8 +14,19 @@ function isValidString(value: unknown): value is string {
 
 export function registerDashHandlers(
   dashService: DashService,
-  oneClickXmlService: OneClickXmlService
+  oneClickXmlService: OneClickXmlService,
+  discoveryService?: DashDiscoveryService
 ): void {
+  ipcMain.handle('dash:discover', async (_event, request: unknown, repoPath: string) => {
+    try {
+      if (!discoveryService) throw new Error('Repo Discovery is unavailable.')
+      if (!isValidString(repoPath)) throw new Error('repoPath is required.')
+      return { success: true, data: await discoveryService.execute(request, repoPath) }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : 'Repo Discovery failed.' }
+    }
+  })
+
   ipcMain.handle(
     'dash:parse-and-resolve',
     async (_event, input: string, repoPath: string) => {
@@ -77,7 +60,7 @@ export function registerDashHandlers(
 
   ipcMain.handle(
     'dash:generate',
-    async (_event, input: string, repoPath: string) => {
+    async (_event, input: string, repoPath: string, settings?: DashSettings) => {
       try {
         if (!isValidString(repoPath)) {
           return {
@@ -92,7 +75,10 @@ export function registerDashHandlers(
           }
         }
 
-        const result = await dashService.execute(input, repoPath)
+        const result = await dashService.execute(input, repoPath, {
+          repoPath,
+          settings
+        })
         if (result.success) {
           return {
             success: true,
@@ -124,7 +110,9 @@ export function registerDashHandlers(
         removeComments?: boolean
         removeEmptyLines?: boolean
         truncateBase64?: boolean
-      }
+        persistedSettings?: DashSettings
+      },
+      persistedSettingsFallback?: DashSettings
     ) => {
       try {
         if (!isValidString(repoPath)) {
@@ -134,7 +122,26 @@ export function registerDashHandlers(
           }
         }
 
-        const result = await oneClickXmlService.generateOneClickXml(repoPath, options)
+        const fallback = options?.persistedSettings ?? persistedSettingsFallback
+        const effectiveOptions = {
+          removeComments:
+            typeof options?.removeComments === 'boolean'
+              ? options.removeComments
+              : fallback?.removeComments,
+          removeEmptyLines:
+            typeof options?.removeEmptyLines === 'boolean'
+              ? options.removeEmptyLines
+              : fallback?.removeEmptyLines,
+          truncateBase64:
+            typeof options?.truncateBase64 === 'boolean'
+              ? options.truncateBase64
+              : fallback?.truncateBase64
+        }
+
+        const result = await oneClickXmlService.generateOneClickXml(
+          repoPath,
+          effectiveOptions
+        )
         return result
       } catch (error) {
         return {

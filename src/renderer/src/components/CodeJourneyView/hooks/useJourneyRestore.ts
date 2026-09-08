@@ -1,48 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o estado do fluxo de restauração de implementações (preview, modal educativo, modal de restauração parcial e execução).
-2. Fornecer os handlers para abrir preview da restauração via timeline, confirmar restauração, fechar modal e tentar restauração parcial.
-3. Calcular a lista de nomes de implementações que serão revertidas pela operação de restauração.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome estados, handlers e implementações revertidas para controlar a UI da aba Code Journey.
-   - Criticidade: Alta
-
-2. ../../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome CheckpointSummary e RestorePreviewResult.
-   - Criticidade: Alta
-
-3. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relação: Invoca restorePreview e restoreExecute via IPC.
-   - Criticidade: Alta
-
-4. reloadCheckpoints.ts
-   - Tipo: Dependência Direta
-   - Relação: Utilitário compartilhado para recarregar a lista de checkpoints após restauração.
-   - Criticidade: Alta
-
-5. ../utils/reverted-checkpoints.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece getRevertedCheckpointNames para cálculo das implementações que serão revertidas.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A restauração total recarrega a lista de checkpoints e os dados do checkpoint selecionado sem limpar o preview do diff.
-2. A restauração parcial bem-sucedida limpa o preview do diff via callback clearPreview.
-3. O id do alvo da restauração (restoreTargetId) é mantido exclusivamente interno ao módulo.
-4. O alvo de ação (actionTargetId) é atualizado via callback setActionTargetId para sincronia com o orquestrador.
-5. handleConfirmPartialRestore é uma função assíncrona comum (não memoizada com useCallback).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useState, useCallback, useMemo } from 'react'

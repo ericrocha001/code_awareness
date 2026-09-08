@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer rotinas utilitárias e snippet de benchmarking para execução e medição no Chrome DevTools Console.
-2. Medir nós DOM ativos, tempo de resposta a interações (toggle) e cadência de quadros (FPS de rolagem).
-3. Exportar resultados comparativos em formato tabular para documentação de performance.
-
-Mapa de Relacionamentos do Script
-
-1. docs/performance/filecollection-benchmark.md
-   - Tipo: Fluxo de Dados
-   - Relação: Fornece dados brutos e metodologia para o relatório consolidado de benchmark.
-   - Criticidade: Alta
-
-2. FileCollectionView.tsx
-   - Tipo: Dependência Indireta
-   - Relação: Alvo de medição no ambiente de execução Electron.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Não modifica o estado do DOM ou variáveis globais da aplicação.
-2. É seguro para execução tanto em ambiente de desenvolvimento quanto em build de produção via DevTools.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /**

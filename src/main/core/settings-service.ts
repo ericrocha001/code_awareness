@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Persistir e recuperar as configurações locais do aplicativo (ex: caminho do vault Obsidian).
-2. Prover instância singleton do serviço de configurações para outros módulos.
-3. Persistir e restaurar o CompressionSettings (perfil + outputFormat), aplicando o default quando o campo estiver ausente ou corrompido.
-
-Mapa de Relacionamentos do Script
-
-1. git-handler.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome a instância para gerenciar arquivos ignorados no diff.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A instância singleton nunca deve ser recriada após inicialização.
-2. Settings antigos sem campos novos devem ser carregados sem erro (compatibilidade retroativa).
-3. CompressionSettings ausente ou corrompido é sempre normalizado para um valor válido — nunca lança.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { app } from 'electron'
@@ -28,6 +7,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { AppSettings, OutputFormat, ContextEnrichment } from '../../shared/types'
 import { DEFAULT_COMPRESSION_SETTINGS, normalizeCompressionProfile } from './compression-profile'
+import { DEFAULT_DASH_SETTINGS, normalizeDashSettings } from '../../shared/utils/dash-settings'
 
 const DEFAULT_SETTINGS = {
   rootFolders: [],
@@ -37,7 +17,8 @@ const DEFAULT_SETTINGS = {
   tags: {},
   fileTags: {},
   projectPreferences: {},
-  compressionSettings: DEFAULT_COMPRESSION_SETTINGS
+  compressionSettings: DEFAULT_COMPRESSION_SETTINGS,
+  dashSettings: DEFAULT_DASH_SETTINGS
 } as AppSettings
 
 export class SettingsService {
@@ -113,6 +94,13 @@ export class SettingsService {
         }
       } else {
         merged.compressionSettings = { ...DEFAULT_COMPRESSION_SETTINGS }
+      }
+
+      // DashSettings: ausente/corrompido → default; presente → normaliza defensivamente
+      if (rest.dashSettings && typeof rest.dashSettings === 'object') {
+        merged.dashSettings = normalizeDashSettings(rest.dashSettings)
+      } else {
+        merged.dashSettings = { ...DEFAULT_DASH_SETTINGS }
       }
 
       return merged as AppSettings

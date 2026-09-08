@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar o rodapé da GlobalSidebar com ações secundárias.
-2. Oferecer acesso rápido ao gerenciamento de tags do projeto ativo.
-3. Fornecer botão de toggle para recolher/expandir a sidebar.
-
-Mapa de Relacionamentos do Script
-
-1. GlobalSidebar.tsx
-   - Tipo: Dependência Direta
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Botões do rodapé não devem conflitar visualmente com a navegação principal.
-2. Acessibilidade mínima com aria-label nos botões.
-3. O toggle deve respeitar o estado atual da sidebar imediatamente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

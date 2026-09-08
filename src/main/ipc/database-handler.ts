@@ -1,38 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar handlers IPC para operações de log de ações e inicialização de banco de dados.
-2. Validar parâmetros recebidos do renderer.
-3. Delegar chamadas à porta ActionLogPort e retornar resultados estruturados.
-
-Mapa de Relacionamentos do Script
-
-1. ../core/database-ports.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome ActionLogPort via injeção de dependência para operações de log de ações.
-   - Criticidade: Alta
-
-2. ../../shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo ActionLog para tipagem das respostas.
-   - Criticidade: Alta
-
-3. preload.ts
-   - Tipo: Dependência Inversa
-   - Relação: Os métodos expostos no preload invocam estes handlers via ipcRenderer.invoke.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
-2. Toda resposta de handler deve conter o campo success.
-3. repoPath deve ser validado como string não vazia antes de processar qualquer operação.
-4. Nenhuma lógica de negócio deve ser implementada aqui — apenas delegação à porta ActionLogPort.
-5. Não instancia dependências internamente — recebe ActionLogPort pronta no registro.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain } from 'electron'

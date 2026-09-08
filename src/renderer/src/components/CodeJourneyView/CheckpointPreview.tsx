@@ -1,53 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a visualização do preview do diff Markdown dentro do drawer.
-2. Exibir contagem de tokens e menus ActionMenu de copiar e exportar em quatro níveis.
-3. Fornecer botão de retorno aos detalhes do checkpoint.
-
-Mapa de Relacionamentos do Script
-
-1. CheckpointDrawer.tsx
-   - Tipo: Dependência Inversa
-   - Relação: É instanciado pelo drawer quando previewMarkdown está preenchido.
-   - Criticidade: Alta
-
-2. checkpointUtils.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome formatTokens para exibir a contagem de tokens.
-   - Criticidade: Média
-
-3. ActionMenu.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza os menus Copiar e Exportar com balão via Popover (portal).
-   - Criticidade: Alta
-
-4. ActionMenuItem.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza as faixas de formato dentro dos menus.
-   - Criticidade: Alta
-
-5. auditFormatIcons.tsx
-   - Tipo: Dependência Direta
-   - Relação: Importa FORMAT_ICONS para os ícones dos formatos.
-   - Criticidade: Alta
-
-6. restoreUtils.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa COPY_LEVELS para os rótulos dos formatos de cópia e exportação.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nunca gerenciar geração do markdown — apenas receber e renderizar.
-2. O botão de voltar sempre deve chamar onBack, sem lógica própria.
-3. Os menus usam ActionMenu (autocontido) — sem estado externo de abertura.
-4. ESC dos menus nunca fecha o drawer — o ActionMenu registra listener na fase de captura.
-5. Os dois menus são independentes — abrir um fecha o outro (clique-fora do Popover).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

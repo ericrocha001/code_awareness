@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Congelar em CI os contratos de layout (CSS e estrutura) derivados das regressões B2–B6 da Sprint 2.
-2. Ler os arquivos CSS do projeto como texto e asserir declarações determinísticas por seletor.
-
-Mapa de Relacionamentos do Script
-
-1. FileCard.css / FileCollectionView.css / FileView.css / FileRow.css
-   - Tipo: Contrato / Interface
-   - Relação: Superfície congelada — cada regra testada mapeia 1:1 uma regressão corrigida.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. jsdom não mede geometria; este teste protege DECLARAÇÕES, não pixels — a evidência geométrica é o checklist visual em docs/layout-acceptance-checklist.md.
-2. O auxiliar de parse assume CSS PLANO (sem aninhamento). Se aninhamento for introduzido no futuro, o auxiliar deve ser atualizado com justificativa técnica documentada — nunca para acomodar violação de contrato.
-3. As asserções são nomeadas R-B*.1/2/3 mapeando cada regressão; renomeá-las ou enfraquecê-las exige justificativa documentada. O bloco R-B1 (Grid virtualizado) foi removido na Sprint 2.3 junto com a eliminação do FileGridView (ver docs/architecture/filegridview-removal.md); R-B1.2 (.file-card-footer margin-top: auto) permanece garantido pelo próprio CSS e pelo teste do FileCard.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

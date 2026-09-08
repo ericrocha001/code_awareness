@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o modal data-driven de recursos da campanha com prefixo crp-.
-
-Mapa de Relacionamentos do Script
-
-1. CampaignResourcePanel.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome os estilos deste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os seletores usam o prefixo crp- para evitar colisão com outros componentes.
-2. O overlay cobre toda a tela e o modal fica centralizado acima dele.
-3. O clique no overlay fecha o modal; o clique no modal não propaga para o overlay.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .crp-overlay {

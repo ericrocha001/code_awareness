@@ -1,49 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerar o relatório Markdown estruturado de diff semântico para arquivos selecionados do repositório Git.
-2. Construir a seção Markdown individual de cada arquivo, com blocos negativos (🟥) e positivos (🟩) por hunk.
-3. Executar o comando nativo `git diff HEAD` e parsear os hunks via gitdiff-parser.
-4. Ler o conteúdo atual de um arquivo em disco para compará-lo com o estado do HEAD.
-
-Mapa de Relacionamentos do Script
-
-1. git-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome getModifiedFiles para obter a lista de arquivos alterados (incluindo deletados).
-   - Criticidade: Alta
-
-2. ../../shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Depende do tipo DiffFileStatus e do contrato changeType (modified | added | deleted).
-   - Criticidade: Alta
-
-3. gitdiff-parser (biblioteca npm)
-   - Tipo: Dependência Direta
-   - Relação: Extrai os hunks precisos da saída raw do git diff.
-   - Criticidade: Alta
-
-4. fs/promises (readFile)
-   - Tipo: Dependência Direta
-   - Relação: Lê o conteúdo atual dos arquivos para montagem dos blocos de diff.
-   - Criticidade: Média
-
-5. checkpoint-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Reimplementa o mesmo formato Markdown para manter consistência visual entre diffs.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O campo git deve permanecer privado e é injetável apenas via construtor; `new DiffService()` deve continuar válido e criar o GitService internamente por padrão.
-2. A injeção opcional de GitService não pode alterar o comportamento observável quando nenhuma instância é fornecida.
-3. Arquivos cujo size ultrapassa o limite MAX_FILE_SIZE não entram na montagem de diff (proteção contra arquivos gigantes), avaliado antes do ramo de deleção.
-4. Os métodos nunca propagam exceções para o chamador: fallbacks retornam strings vazias ou nulas (ex.: readFileContent null em falha de leitura).
-5. O runGitDiff aceita os códigos de saída 0 e 1 do git diff como sucesso.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { spawn } from 'child_process'

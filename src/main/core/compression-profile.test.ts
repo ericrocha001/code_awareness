@@ -1,38 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a normalização do CompressionProfile em perfis canônicos determinísticos.
-2. Validar o Effective Hash (determinismo, sensibilidade a mudanças de campos efetivos e imunidade a campos sem efeito).
-3. Validar a determinação do caminho arquitetural (Compression Core vs Direct Output).
-4. Validar os defaults de persistência em DEFAULT_COMPRESSION_SETTINGS.
-
-Mapa de Relacionamentos do Script
-
-1. compression-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa normalizeCompressionProfile, computeProfileHash, resolveCompressionPath e constantes do módulo.
-   - Criticidade: Alta
-
-2. effective-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome resolveEffectiveProfile para gerar os EffectiveProfiles avaliados por computeProfileHash.
-   - Criticidade: Alta
-
-3. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome CompressionProfile e OutputFormat para tipar os casos de teste.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum teste depende da CLI real do Repomix, de Git real, de filesystem temporário ou de CompressionService — teste puramente determinístico do domínio do profile.
-2. computeProfileHash opera exclusivamente sobre o EffectiveProfile canônico.
-3. Mudança em campos sem efeito no caminho ativo nunca altera o Effective Hash.
-4. Mudança em campos efetivos no caminho ativo sempre altera o Effective Hash.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

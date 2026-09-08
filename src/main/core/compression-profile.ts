@@ -1,43 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o perfil padrão de compressão que reproduz o comportamento atual da aplicação.
-2. Normalizar perfis potencialmente incompletos ou corrompidos em um perfil canônico determinístico.
-3. Calcular o Effective Hash (SHA-256) sobre o Effective Profile canônico.
-4. Determinar o caminho arquitetural (Compression Core vs Direct Output) a partir do formato.
-
-Mapa de Relacionamentos do Script
-
-1. compression-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome DEFAULT_PROFILE, normalizeCompressionProfile e computeProfileHash para compor a cacheKey.
-   - Criticidade: Alta
-
-2. effective-profile.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo EffectiveProfile para a função computeProfileHash.
-   - Criticidade: Alta
-
-3. settings-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Persiste CompressionSettings (perfil + outputFormat) em settings.json.
-   - Criticidade: Alta
-
-4. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome os tipos CompressionProfile, OutputFormat e CompressionSettings.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é de domínio puro — sem acesso a filesystem, spawn de processos, path traversal ou formatação de documento final.
-2. computeProfileHash opera exclusivamente sobre o EffectiveProfile canônico.
-3. A normalização nunca lança exceção; sempre produz um CompressionProfile válido.
-4. A serialização para o hash usa ordem fixa (alfabética) dos campos do Effective Profile para garantir determinismo.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { createHash } from 'crypto'

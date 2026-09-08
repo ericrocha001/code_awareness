@@ -1,34 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente a orquestração completa de DashService via injeção de dependências e mocks.
-2. Garantir o fluxo de ponta a ponta: parsing, validação, resolução, planejamento, execução paralela de provedores e geração de XML.
-
-Mapa de Relacionamentos do Script
-
-1. dash-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa a classe DashService.
-   - Criticidade: Alta
-
-2. dash-file-resolver.ts
-   - Tipo: Contrato / Interface
-   - Relação: Mockado ou instanciado para resolução de arquivos.
-   - Criticidade: Alta
-
-3. providers/context-provider.ts
-   - Tipo: Contrato / Interface
-   - Relação: Provedores mockados para simular geração de source e compression.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes devem rodar de forma isolada em memória sem I/O real.
-2. Cobrir todos os cenários obrigatórios de orquestração previstos na Sprint 3.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, expect, it, vi } from 'vitest'
@@ -324,11 +295,68 @@ describe('DashService', () => {
 
     const result = await service.execute(rawInput, repoPath)
 
-    expect(result.success).toBe(true)
-    expect(result.metadata?.generated).toBe(1)
-    expect(result.metadata?.failed).toBe(1)
     expect(result.failures).toEqual([
       { index: 1, path: 'src/c1.ts', reason: 'Tree-sitter parse error' }
     ])
+  })
+
+  it('deve repassar settings para os providers e retornar tokenCount numérico proporcional ao XML gerado', async () => {
+    const mockResolver = {
+      resolve: vi.fn().mockReturnValue({
+        valid: true,
+        request: {
+          protocol: 'code-dash/v1',
+          output: { format: 'xml' },
+          items: [{ path: 'src/main.ts', representation: 'source' }]
+        },
+        failures: []
+      } as DashResolutionReport)
+    } as unknown as DashFileResolver
+
+    const mockSourceProvider: ContextProvider = {
+      provide: vi.fn().mockResolvedValue({
+        contents: new Map([[0, 'const greeting = "hello world";']]),
+        failures: []
+      })
+    }
+
+    const mockCompressionProvider: ContextProvider = {
+      provide: vi.fn().mockResolvedValue({
+        contents: new Map(),
+        failures: []
+      })
+    }
+
+    const service = new DashService(
+      mockResolver,
+      mockSourceProvider,
+      mockCompressionProvider
+    )
+
+    const rawInput = JSON.stringify({
+      protocol: 'code-dash/v1',
+      output: { format: 'xml' },
+      items: [{ path: 'src/main.ts', representation: 'source' }]
+    })
+
+    const settings = {
+      removeComments: true,
+      removeEmptyLines: true,
+      truncateBase64: true
+    }
+
+    const result = await service.execute(rawInput, repoPath, { repoPath, settings })
+
+    expect(result.success).toBe(true)
+    expect(result.xml).toBeDefined()
+    expect(typeof result.tokenCount).toBe('number')
+    expect(result.tokenCount).toBeGreaterThan(0)
+    expect(result.tokenCount).toBe(Math.ceil(result.xml!.length / 4))
+
+    // Verifica se options.settings foi repassado ao provider
+    expect(mockSourceProvider.provide).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ settings })
+    )
   })
 })

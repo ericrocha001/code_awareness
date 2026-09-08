@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o CRUD de campanhas por repositório.
-2. Gerar slug automaticamente a partir do nome.
-3. Validar unicidade de slug por repositório.
-4. Gerar id único (timestamp + sufixo aleatório, mesmo padrão dos checkpoints).
-
-Mapa de Relacionamentos do Script
-
-1. database-ports.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome CampaignPort via injeção de dependência para operações de persistência.
-   - Criticidade: Alta
-
-2. ../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos Campaign e CampaignStatus.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O slug é sempre derivado do nome — nunca fornecido pelo usuário.
-2. O slug é regenerado quando o nome muda.
-3. A unicidade do slug é validada por repositório antes de inserir ou atualizar o nome.
-4. O id é único — usa timestamp + sufixo aleatório.
-5. O serviço não depende de nenhum outro serviço de feature (checkpoint, diff, compression).
-6. Nenhuma dependência direta de banco de dados ou SQLite — persiste exclusivamente via CampaignPort.
-7. Nenhuma lógica de UI — o serviço é puro backend.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { CampaignPort } from './database-ports'

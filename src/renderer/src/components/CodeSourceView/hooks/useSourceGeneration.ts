@@ -1,38 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o ciclo de vida de geração de Code Source no Renderer com debounce de 300ms e máquina de estados.
-2. Implementar deduplicação de requisições por identidade calculada (evitando chamadas redundantes ou em voo).
-3. Controlar generationId incremental e descartar respostas obsoletas para proteção contra race conditions.
-4. Preservar o último documento gerado com sucesso durante novas gerações.
-
-Mapa de Relacionamentos do Script
-
-1. utils/source-generation-identity.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome computeSourceGenerationIdentity para identificar semanticamente cada requisição.
-   - Criticidade: Alta
-
-2. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece GeneratedDocument, SourceOutputFormat e SourceProfile.
-   - Criticidade: Alta
-
-3. window.codeAwareness.generateCodeSourceWithProfile
-   - Tipo: Dependência Inversa
-   - Relação: Invoca a geração coordenada no processo Main.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Respostas com generationId defasado em relação ao generationId atual são sempre descartadas.
-2. Entradas com identidade igual à última completada não disparam chamada IPC.
-3. lastCompletedDocument é preservado durante novas gerações até a conclusão bem-sucedida da nova requisição.
-4. Timers pendentes de debounce são sempre cancelados no cleanup do hook.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useEffect, useRef, useState } from 'react'

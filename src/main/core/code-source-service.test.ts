@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o contrato do novo fluxo de geração seletiva com perfil do CodeSourceService.
-2. Validar a normalização defensiva de perfil e formato antes da delegação.
-3. Validar o retorno estruturado e o cálculo de tokens sobre a saída final.
-4. Garantir a ausência de escrita automática de artefato no fluxo novo.
-5. Validar a preservação de erros tipados de cancelamento e a propagação opcional do AbortSignal.
-
-Mapa de Relacionamentos do Script
-
-1. code-source-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa generateWithProfile com adaptador falsificado injetado.
-   - Criticidade: Alta
-
-2. generation-errors.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa GenerationCancelledError para validar preservação de erro de cancelamento.
-   - Criticidade: Alta
-
-3. shared/utils/source-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Usa DEFAULT_SOURCE_PROFILE como referência de defaults.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nenhum teste executa Repomix real, acessa filesystem real, Electron ou IPC.
-2. Nenhuma escrita em arquivo ocorre durante o fluxo novo (fs.writeFile espionado).
-3. Falhas reais do adapter nunca propagam — o serviço retorna objeto estruturado com success: false.
-4. Erros de cancelamento (GenerationCancelledError) sempre propagam como rejeição para o chamador.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'

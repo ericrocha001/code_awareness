@@ -1,57 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar o estado da aba Code Campaign (lista de campanhas, modal de criar/editar, loading).
-2. Carregar campanhas via IPC ao montar ou trocar de projeto.
-3. Gerenciar a abertura do modal de criar/editar com os dados da campanha selecionada.
-4. Delegar a renderização para CampaignList e CampaignFormModal.
-5. Orquestrar dois caminhos de contexto por campanha e para o geral — copiar (área de transferência) e exportar (Downloads) — ambos montados pelo mesmo builder puro.
-6. Filtrar as campanhas por nome no topo da aba, com contagem ao vivo, repassando ao CampaignList a lista já filtrada mais o total real.
-7. Orquestrar a ação de copiar o link da campanha, montando o cartão Markdown via buildCampaignLinkMarkdown e copiando para a área de transferência.
-8. Abrir o painel de recursos da campanha resolvida por deep link (via prop resolvedCampaignId).
-
-Mapa de Relacionamentos do Script
-
-1. CampaignList.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza a listagem de campanhas.
-   - Criticidade: Alta
-
-2. CampaignFormModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o modal de criar/editar.
-   - Criticidade: Alta
-
-3. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relação: Invoca as APIs IPC de campaign e saveToDownloads.
-   - Criticidade: Alta
-
-4. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos Campaign e CampaignStatus.
-   - Criticidade: Alta
-
-5. CodeCampaignView.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos do container (prefixo ccv-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A lista de campanhas deve ser recarregada ao trocar de projeto.
-2. O estado de loading deve ser exibido enquanto as campanhas são carregadas.
-3. O modal de criar/editar deve ser fechado ao trocar de projeto.
-4. Após criar ou editar uma campanha, a lista deve ser recarregada.
-5. O orquestrador não renderiza elementos visuais próprios — apenas compõe CampaignList, CampaignFormModal e CampaignResourcePanel.
-6. handleCopyContext copia para a área de transferência; handleExportContext salva um arquivo via saveToDownloads; os nomes nunca se cruzam.
-7. A busca filtra apenas por nome, sem ligar para maiúsculas, sem disparar IPC e sem mutar os dados; o CampaignList recebe a lista já filtrada mais o total real para distinguir o vazio real do vazio por filtro.
-8. handleCopyLink copia o cartão Markdown para a área de transferência (não salva arquivo); se activeProject for null ou a campanha não for encontrada, retorna sem fazer nada.
-9. Se resolvedCampaignId for fornecido e a campanha não existir na lista, o painel não abre e um erro é exibido.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react'

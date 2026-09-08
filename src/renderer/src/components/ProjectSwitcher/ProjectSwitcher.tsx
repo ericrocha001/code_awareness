@@ -1,33 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar um dropdown interativo e elegante para a troca de projetos ativos na aplicação.
-2. Buscar a lista de projetos disponíveis chamando a API do backend ao inicializar o componente.
-3. Propagar a seleção do novo projeto ativo para o componente pai.
-4. Fechar o menu suspenso de projetos automaticamente quando o usuário clicar fora do componente.
-
-Mapa de Relacionamentos do Script
-
-1. CodeSourceView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Renderiza este componente como parte do cabeçalho da visualização de arquivos.
-   - Criticidade: Alta
-
-2. ProjectSwitcher.css
-   - Tipo: Relação de UI
-   - Relação: Define os estilos visuais, animações, transições e comportamento visual do dropdown.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O menu do dropdown deve fechar se houver um clique fora do componente.
-2. O botão principal deve sempre refletir o nome do projeto ativo atual.
-3. A lista suspensa deve exibir apenas os outros projetos disponíveis, ocultando o projeto atualmente ativo para evitar redundância.
-4. Deve remover todos os event listeners de clique global no desmonte para evitar memory leaks.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useEffect, useState, useRef } from 'react'

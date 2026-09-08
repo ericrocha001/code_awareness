@@ -1,55 +1,11 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar os contratos de confirmação do RestoreModal (fidelidade da lista, segurança de execução, delegação com plano congelado, pele do design system e reset de defaults) por Provas de Aceitação em DOM simulado.
-2. Provar, como regressão permanente, os três defeitos históricos: crash com preview legado, listagem de arquivos inalterados e botões fora do design system.
-3. Testar comportamento observável (entradas -> renderização/delegação -> efeitos), nunca detalhes de implementação.
-4. Provar, de forma unitária (sem DOM), o cálculo puro getRevertedCheckpointNames.
-
-Mapa de Relacionamentos do Script
-
-1. RestoreModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob prova; o modal é estritamente apresentacional e não chama IPC.
-   - Criticidade: Alta
-
-2. ../shared/Button/Button.tsx
-   - Tipo: Dependência Direta
-   - Relação: Classes de variante (app-pill-btn / app-ghost-btn) são o ponto de integração do design system.
-   - Criticidade: Alta
-
-3. src/renderer/src/utils/reverted-checkpoints.ts
-   - Tipo: Dependência Direta
-   - Relação: getRevertedCheckpointNames é provado de forma unitária na PA-M09.
-   - Criticidade: Média
-
-4. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: RestorePreviewResult, RestorePlan, RestoreFileChange, OrphanFile, CheckpointSummary.
-   - Criticidade: Alta
-
-5. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: render/screen/fireEvent para interações e queries por papel/rótulo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum mock de backend: o componente não chama IPC; espiões apenas em onConfirm/onClose.
-2. Queries por papel/rótulo, nunca por índice de Array ou seletor posicional.
-3. O pragma @vitest-environment jsdom é obrigatório no topo do arquivo.
-4. O backend continua sendo fonte das contagens (coberto por PA-R10) — aqui valida-se apenas a renderização fiel.
-5. jsdom não aplica CSS importado: asserções de design system usam classes de variante (único ponto observável) e ausência de emojis.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { cleanup, render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { afterEach, describe, it, expect, vi } from 'vitest'
 import { RestoreModal } from './RestoreModal'
 import { getRevertedCheckpointNames } from '../../utils/reverted-checkpoints'
 import type {
@@ -59,6 +15,8 @@ import type {
   OrphanFile,
   CheckpointSummary
 } from '../../../../shared/types'
+
+afterEach(cleanup)
 
 // ─── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -143,7 +101,9 @@ describe('PA-M01 — Renderização condicional e resistência a crash', () => {
   it('aberto com preview válido: título, checkpoint e frase-guia', () => {
     setup()
     expect(screen.getByRole('heading', { name: 'Confirmar Restauração' })).not.toBeNull()
-    expect(screen.getByText('CP Alvo')).not.toBeNull()
+    expect(screen.getByText((_, element) => (
+      element?.tagName === 'STRONG' && element.textContent === '"CP Alvo"'
+    ))).not.toBeNull()
     expect(screen.getByText('A restauração fará as seguintes alterações:')).not.toBeNull()
   })
 })

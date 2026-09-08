@@ -1,32 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a renderização do SourcePreviewVirtualized com documentos pequenos e grandes.
-2. Validar o estado de documento vazio sem falhas ou exceções.
-3. Validar a decisão entre modo realçado (Highlight) e modo puro (Plain) com base no teto de caracteres.
-4. Validar a renderização para formatos Markdown e XML.
-
-Mapa de Relacionamentos do Script
-
-1. SourcePreviewVirtualized.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render e screen para validação de nós no DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Documentos vazios sempre exibem a mensagem segura sem lançar exceções.
-2. Documentos cujo tamanho exceda MAX_HIGHLIGHT_CHARS renderizam o aviso de texto puro (.spv-plain-notice).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

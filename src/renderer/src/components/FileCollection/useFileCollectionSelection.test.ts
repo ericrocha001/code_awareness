@@ -1,36 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o comportamento de seleção individual, seleção global e limpeza de seleção do hook useFileCollectionSelection.
-2. Validar o cálculo das métricas derivadas (isAllSelected, selectedCount).
-3. Garantir, por testes de regressão de identidade referencial, a estabilidade permanente dos callbacks retornados.
-
-Mapa de Relacionamentos do Script
-
-1. useFileCollectionSelection.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook sob teste.
-   - Criticidade: Alta
-
-2. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo FileCardFile.
-   - Criticidade: Alta
-
-3. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: renderHook e act para execução e asserção do ciclo de vida do hook.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A invariante central de estabilidade referencial (toBe) entre renders é comprovada para toggleFile, toggleMaster e clearSelection.
-2. Todos os testes são determinísticos e isolados sem efeitos colaterais compartilhados.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi } from 'vitest'

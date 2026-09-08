@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar a faixa do menu (am-item) com padding generoso, gap entre ícone e texto, e tipo definido.
-2. Aplicar zebrado nas faixas ímpares (nth-of-type) para dar ritmo sem grade.
-3. Aplicar hover roxo com precedência sobre o zebrado (sem !important).
-4. Aplicar estilo de perigo (am-item--danger) com cor vermelha no texto e ícone.
-
-Mapa de Relacionamentos do Script
-
-1. ActionMenuItem.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-2. ActionMenu.css
-   - Tipo: Dependência Direta
-   - Relação: Compartilha o namespace am- com o balão e gatilho.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O padding vertical do item é ≥ 13px (respiro generoso).
-2. O gap entre ícone e texto é ≥ 12px.
-3. O zebrado usa nth-of-type (conta só botões) — o separador (div) não desalinha a alternância.
-4. O hover vence o zebrado por precedência: hover (0,3,0) vence zebrado (0,2,0); perigo com :hover (0,3,0) vence hover normal por ordem no arquivo.
-5. O perigo com :hover soma uma pseudo-classe e vence sozinho.
-6. Nenhum seletor usa !important.
-7. Os seletores não dependem do .am-menu — podem ser usados em qualquer container (incluindo Popover avulso).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* ─── Faixa do menu ────────────────────────────────────────────────────── */

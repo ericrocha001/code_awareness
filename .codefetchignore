@@ -1,7 +1,0 @@
-# Code Awareness Default Ignores
-AGENTS.md
-.codefetchignore
-code_awareness/
-node_modules/
-dist/
-out/

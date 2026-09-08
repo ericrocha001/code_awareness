@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente o CompressionContextProvider utilizando mocks da porta StructuredCompressionPort.
-2. Garantir o agrupamento por perfil de compressão, mapeamento de índices para conteúdos e conversão de erros.
-3. Validar a resiliência frente a exceções lançadas pela porta de compressão.
-
-Mapa de Relacionamentos do Script
-
-1. compression-context-provider.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa o CompressionContextProvider.
-   - Criticidade: Alta
-
-2. src/main/core/structured-compression-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Mockado para simular respostas estruturadas de compressão.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes devem rodar de forma isolada em memória sem I/O real.
-2. O provider deve preservar os índices originais dos itens em todos os cenários.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, expect, it, vi } from 'vitest'
@@ -184,5 +159,100 @@ describe('CompressionContextProvider', () => {
         { repoPath, signal: abortController.signal }
       )
     ).rejects.toThrow(/cancelada pelo usuário/)
+  })
+
+  it('merge de settings: campos econômicos do profile são substituídos e profileKey agrupa por profile efetivo', async () => {
+    // Ambos os itens têm o mesmo profile base; com settings iguais → 1 única chamada em batch
+    const mockPort: StructuredCompressionPort = {
+      compressFilesStructured: vi.fn().mockResolvedValue({
+        results: { 'src/a.ts': 'c-a', 'src/b.ts': 'c-b' },
+        errors: [],
+        errorReasons: {}
+      })
+    }
+
+    const provider = new CompressionContextProvider(mockPort)
+    const items: DashPlannedItem[] = [
+      { index: 0, path: 'src/a.ts', representation: 'compression' },
+      { index: 1, path: 'src/b.ts', representation: 'compression' }
+    ]
+
+    const result = await provider.provide(items, {
+      repoPath,
+      settings: { removeComments: true, removeEmptyLines: false, truncateBase64: false }
+    })
+
+    // Uma única chamada porque ambos resultam no mesmo profile efetivo após o merge
+    expect(mockPort.compressFilesStructured).toHaveBeenCalledTimes(1)
+    const calledProfile = (mockPort.compressFilesStructured as ReturnType<typeof vi.fn>).mock.calls[0][2]
+    expect(calledProfile.removeComments).toBe(true)
+    expect(result.contents.get(0)).toBe('c-a')
+    expect(result.contents.get(1)).toBe('c-b')
+  })
+
+  it('merge de settings: demais campos do profile base são preservados', async () => {
+    const mockPort: StructuredCompressionPort = {
+      compressFilesStructured: vi.fn().mockResolvedValue({
+        results: { 'src/a.ts': 'ok' },
+        errors: [],
+        errorReasons: {}
+      })
+    }
+
+    const provider = new CompressionContextProvider(mockPort)
+    const baseProfile = {
+      removeComments: false,
+      removeEmptyLines: false,
+      truncateBase64: false,
+      showLineNumbers: true,
+      parsableStyle: true,
+      outputFilePathStyle: 'target-relative',
+      includeFileSummary: false,
+      includeDirectoryStructure: true,
+      includeEmptyDirectories: false,
+      includeFullDirectoryStructure: false,
+      version: 2
+    }
+    const items: DashPlannedItem[] = [
+      { index: 0, path: 'src/a.ts', representation: 'compression', profile: baseProfile as any }
+    ]
+
+    await provider.provide(items, {
+      repoPath,
+      settings: { removeComments: true, removeEmptyLines: true, truncateBase64: true }
+    })
+
+    const calledProfile = (mockPort.compressFilesStructured as ReturnType<typeof vi.fn>).mock.calls[0][2]
+    // Campos econômicos sobrescritos
+    expect(calledProfile.removeComments).toBe(true)
+    expect(calledProfile.removeEmptyLines).toBe(true)
+    expect(calledProfile.truncateBase64).toBe(true)
+    // Demais campos do profile base preservados
+    expect(calledProfile.showLineNumbers).toBe(true)
+    expect(calledProfile.parsableStyle).toBe(true)
+    expect(calledProfile.version).toBe(2)
+  })
+
+  it('sem settings: comportamento atual permanece inalterado', async () => {
+    const mockPort: StructuredCompressionPort = {
+      compressFilesStructured: vi.fn().mockResolvedValue({
+        results: { 'src/a.ts': 'ok' },
+        errors: [],
+        errorReasons: {}
+      })
+    }
+
+    const provider = new CompressionContextProvider(mockPort)
+    const items: DashPlannedItem[] = [
+      { index: 0, path: 'src/a.ts', representation: 'compression' }
+    ]
+
+    await provider.provide(items, { repoPath })
+
+    const calledProfile = (mockPort.compressFilesStructured as ReturnType<typeof vi.fn>).mock.calls[0][2]
+    // Sem settings, deve usar DEFAULT_PROFILE cujos campos econômicos são false
+    expect(calledProfile.removeComments).toBe(false)
+    expect(calledProfile.removeEmptyLines).toBe(false)
+    expect(calledProfile.truncateBase64).toBe(false)
   })
 })

@@ -1,40 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar modal para coleta de nome personalizado e formato de exportação.
-2. Validar nome não vazio e sanitizar caracteres inválidos antes de confirmar.
-3. Gerenciar fechamento via ESC, clique no overlay, botão Cancelar e botão X.
-4. Exportar o tipo FormatOption para reuso pelas abas consumidoras.
-
-Mapa de Relacionamentos do Script
-
-1. ExportNameModal.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos com prefixo enm-.
-   - Criticidade: Alta
-
-2. Consumidores futuros (CodeSourceView, CodeCompressionView)
-   - Tipo: Dependência Inversa
-   - Relação: Fornecem isOpen, onClose, onConfirm, defaultName, formats.
-   - Criticidade: Alta
-
-3. X (lucide-react)
-   - Tipo: Dependência Direta
-   - Relação: Ícone do botão de fechar no cabeçalho.
-   - Criticidade: Baixa
-
-Invariantes do Script
-
-1. Nunca confirmar com nome vazio — o botão de confirmar fica desabilitado enquanto o nome sanitizado estiver vazio.
-2. O nome é sempre sanitizado (trim + remoção de /\:*?"<>|) antes de onConfirm.
-3. O estado interno (nome, formato) é reinicializado a cada abertura (isOpen true).
-4. Fecha com ESC, clique no overlay, botão X e botão Cancelar.
-5. Se houver apenas um formato, exibe como texto fixo sem escolha.
-6. Prefixo CSS enm-.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react'

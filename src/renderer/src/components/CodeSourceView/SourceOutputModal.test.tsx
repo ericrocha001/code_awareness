@@ -1,34 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a renderização do SourceOutputModal quando aberto e fechado.
-2. Validar a integração com useSourceSettings e useSourceGeneration.
-3. Validar as dependências de UI entre os toggles de estrutura de diretórios.
-4. Validar o acionamento das ações de cópia, exportação para download e exportação para NotebookLM.
-5. Validar a exibição e preservação do preview virtualizado e indicador de estado.
-
-Mapa de Relacionamentos do Script
-
-1. SourceOutputModal.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, fireEvent, screen e act para testes no jsdom.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O modal fechado (isOpen = false) não renderiza nós no DOM (retorna null).
-2. Toggles filhos de estrutura ficam desabilitados quando includeDirectoryStructure for false.
-3. Ações de cópia e exportação acessam o conteúdo integral gerado.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

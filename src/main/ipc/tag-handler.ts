@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar handlers IPC para operações de tags.
-2. Validar entrada básica e retornar respostas padronizadas.
-3. Encaminhar chamadas ao TagService.
-
-Mapa de Relacionamentos do Script
-
-1. TagService
-   - Tipo: Dependência Direta
-   - Relação: Executa o CRUD de tags solicitado pelo renderer.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nunca repassar caminhos inválidos ao TagService.
-2. Nunca lançar exceções não tratadas para o renderer.
-3. Sempre retornar objetos no formato { success, data?, error? }.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain } from 'electron'

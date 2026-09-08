@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Carregar implementações e campanhas via IPC ao montar ou trocar de projeto.
-2. Manter o estado da lista de implementações, campanhas, loading, busca e filtro de período.
-3. Filtrar a lista de implementações por busca textual e período.
-4. Notificar o orquestrador sobre troca de projeto e carregamento inicial via callbacks.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome os estados e a lista filtrada fornecidos por este hook.
-   - Criticidade: Alta
-
-2. ../../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome Campaign e CheckpointSummary.
-   - Criticidade: Alta
-
-3. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relação: Invoca initializeDatabase, listCheckpoints e listCampaigns.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A lista de campanhas nunca deve ser limpa quando não há projeto ativo (preservar comportamento).
-2. A guarda de desmontagem (isMounted) deve impedir atualizações de estado após desmontar.
-3. O callback onProjectChange deve ser chamado no início de todo carregamento, antes de qualquer branch.
-4. O callback onCheckpointsLoaded deve ser chamado apenas quando a lista carregada é não vazia.
-5. Os callbacks são armazenados em refs atualizadas a cada render para que o efeito sempre use as versões mais recentes sem precisar reiniciar.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useEffect, useMemo, useRef, useState } from 'react'

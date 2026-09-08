@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar a timeline full-width com grupos por data e cards conectados por linha vertical.
-2. Garantir aparência visual consistente com o design system global e tema claro/escuro.
-3. Estilizar a badge de campanha de cada card e o dropdown de troca rápida (Popover).
-4. Posicionar a linha do nome do card com o indicador BlueprintBar (layout flex com ellipsis).
-5. Estilizar os campos do card com rótulos nomeados discretos (ctl-field-label) e valores (ctl-field-value), com respiro generoso entre informações.
-
-Mapa de Relacionamentos do Script
-
-1. CheckpointTimeline.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo ctl- para evitar colisões com outros componentes.
-2. O design deve respeitar as variáveis CSS globais (--bg-primary, --bg-secondary, --border, --accent).
-3. As etiquetas (badge de campanha, RestoreStatusBadge) têm a largura do conteúdo (não esticam) — garantido via `align-self: flex-start` nos CSS dos respectivos componentes.
-4. O recuo esquerdo da trilha é aplicado via `margin-left` no `.ctl-card`, NUNCA via `padding` no `.ctl-timeline-container`. Os elementos `.ctl-date-column` e `.ctl-timeline-dot` são `position: absolute` orientados pelo `.ctl-timeline-item` (que possui `transform` da animação e, por isso, vira a referência de posicionamento). Logo, o `.ctl-timeline-item` deve ocupar a largura total do container para que `left: 0` coincida com a margem esquerda da trilha.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .ctl-root {

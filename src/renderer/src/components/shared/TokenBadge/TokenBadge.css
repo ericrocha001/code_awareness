@@ -1,23 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir estilos visuais para o componente TokenBadge (fundo fit-content, tipografia tabular e cores de contraste).
-2. Garantir que o container encerre seu preenchimento na largura do conteúdo sem se expandir desnecessariamente.
-
-Mapa de Relacionamentos do Script
-
-1. TokenBadge.tsx
-   - Tipo: Relação de UI
-   - Relação: Folha de estilos consumida pelo componente.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O container utiliza width: fit-content para não expandir além do conteúdo textual e do ícone.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .token-badge {

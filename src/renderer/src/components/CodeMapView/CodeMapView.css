@@ -1,54 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout full-width do container principal da aba Code Map.
-2. Estilizar o conteúdo em três cartões arredondados com rolagem interna independente e cabeçalhos fixos.
-3. Estilizar a pele do resumo do repositório (prefixo cmv-overview-).
-4. Estilizar a pele da árvore (linhas-guia verticais, pílulas, badges tingidos).
-5. Estilizar os estados vazios distintos (nunca indexado / busca / filtro).
-6. Manter cabeçalhos fixos (barrinha do explorer e breadcrumb) fora do scroll dos miolos.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapView.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo (prefixo cmv-).
-   - Criticidade: Alta
-
-2. CodeMapOverview.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes cmv-overview-* definidas neste arquivo.
-   - Criticidade: Alta
-
-3. CodeMapTree.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes cmv-tree-* definidas neste arquivo.
-   - Criticidade: Alta
-
-4. CodeMapCodeView.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome o container cmv-code-scroll que envolve a coluna de código.
-   - Criticidade: Alta
-
-5. ColumnResizer.tsx
-   - Tipo: Relação de UI
-   - Relação: As alças ficam no gap entre os cartões, alinhadas pelo flex do cmv-content.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O design deve respeitar estritamente as variáveis de cores globais.
-2. Todas as classes usam prefixo cmv- para evitar colisão com outras abas.
-3. As únicas cores hardcoded aceitas são o âmbar semântico (#f59e0b, status de modificação) e o par de azuis de relacionamento (#1d4ed8 no tema claro / #93c5fd no tema escuro).
-4. As três zonas e os três miolos usam min-height: 0 — sem isso o flexbox não deixa as colunas rolarem.
-5. O scroll é exclusivo dos miolos (cmv-*-scroll) — as zonas e cabeçalhos nunca rolam.
-6. A indentação da árvore é baseada em fonte única no container de filhos (cmv-tree-children), sem acúmulo duplo de padding.
-7. As zonas nunca têm largura fixa em CSS — as frações são controladas por flex-basis inline no TSX.
-8. Quando o bloco de código está virtualizado, o scroll externo do miolo cede lugar ao scroll interno da lista — nunca ambos rolam simultaneamente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .cmv-container {

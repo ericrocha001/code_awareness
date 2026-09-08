@@ -1,27 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o indicador Blueprint Bar com prefixo bpb- para evitar colisões.
-2. Definir a aparência azul dos segmentos preenchidos e do ícone de documento (identidade de blueprint).
-3. Manter o componente compacto para os cards da timeline.
-
-Mapa de Relacionamentos do Script
-
-1. BlueprintBar.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome as classes bpb- definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O azul `#3b82f6` é a cor fixa de status da Blueprint Bar, exceção aceita com semântica de status fixa (mesmo padrão do CampaignList.css).
-2. Nunca usar outras cores fixas — o restante vem das variáveis globais do tema (--border, --bg-secondary).
-3. Os segmentos vazios e preenchidos devem ser visivelmente distintos em temas claro e escuro.
-4. O ícone nunca deve ser interativo nem capturar eventos de clique.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .bpb-bar {

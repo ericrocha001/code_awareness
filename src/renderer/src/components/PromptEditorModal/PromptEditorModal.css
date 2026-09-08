@@ -1,23 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout visual do modal de edição de prompt.
-
-Mapa de Relacionamentos do Script
-
-1. PromptEditorModal.tsx
-   - Tipo: Relação de UI
-   - Relação: Usa essas classes para renderizar o modal.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O overlay deve permanecer por trás do conteúdo modal e evitar vazamento visual.
-2. O textarea deve expandir para ocupar a maior parte do espaço disponível.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* Reutiliza o padrão do TagManagerModal com ajustes específicos */

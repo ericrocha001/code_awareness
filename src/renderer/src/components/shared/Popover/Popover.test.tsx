@@ -1,32 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar o comportamento de guarda de teclado em fase de captura do componente Popover compartilhado.
-2. Comprovar que teclas de navegação originadas fora do balão têm seu comportamento padrão e propagação suprimidos.
-3. Comprovar que eventos originados dentro do balão são preservados e chegam aos handlers internos.
-4. Garantir a regressão de fechamento via tecla Escape e a limpeza correta de ouvintes ao desmontar/fechar.
-
-Mapa de Relacionamentos do Script
-
-1. Popover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece utilitários de renderização e disparo de eventos de DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Quando aberto, nenhuma tecla do conjunto gerenciado originada fora do balão propaga ou executa ação padrão.
-2. Ao fechar, todos os listeners no document/window são desregistrados.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useRef } from 'react'

@@ -1,44 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar um menu suspenso autocontido com gatilho em estilo pílula e balão via Popover (portal, imune a corte).
-2. Gerenciar estado interno de abertura/fechamento (useState) — sem prop open externa.
-3. Impedir que o ESC feche o drawer pai registrando listener na fase de captura com stopImmediatePropagation.
-
-Mapa de Relacionamentos do Script
-
-1. Popover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o balão do menu via portal em document.body.
-   - Criticidade: Alta
-
-2. ChevronDown (lucide-react)
-   - Tipo: Dependência Direta
-   - Relação: Ícone de seta que gira 180° quando o menu está aberto.
-   - Criticidade: Baixa
-
-3. ActionMenu.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos com prefixo am-.
-   - Criticidade: Alta
-
-4. ActionMenuItem.tsx, ActionMenuSeparator.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Filhos renderizados dentro do balão am-menu.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O componente é autocontido — estado open é interno, sem prop externa.
-2. O ESC registrado na fase de captura (addEventListener com true) executa stopImmediatePropagation, impedindo que o drawer pai também feche.
-3. closeOnSelect (default true) fecha o menu ao clicar em qualquer filho via onClick no .am-menu.
-4. Clicar no gatilho com o menu aberto alterna o estado — não causa "pisca" de fechar-e-reabrir (o Popover não fecha ao clicar na âncora).
-5. Abrir um menu irmão fecha este de graça — o Popover fecha ao clicar fora (e a âncora do irmão está "fora").
-6. Nenhum hook é condicional — apenas o retorno JSX é condicional.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useState, useRef, useEffect } from 'react'

@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout do orquestrador FileCollectionView (container, cabeçalho superior e área de visualização).
-2. Estilizar a barra de ferramentas superior com contador de seleção e botão de limpar.
-
-Mapa de Relacionamentos do Script
-
-1. FileCollectionView.tsx
-   - Tipo: Relação de UI
-   - Relação: Fornece classes estilísticas (.fcv-container, .fcv-header, .fcv-body).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O cabeçalho superior não encolhe (flex-shrink: 0) e o corpo (.fcv-body) ocupa o espaço restante do container flex.
-2. Não existem classes de switcher de visualização — a FileView é a view única desde a Sprint 2.3 (FileGridView eliminado).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .fcv-container {

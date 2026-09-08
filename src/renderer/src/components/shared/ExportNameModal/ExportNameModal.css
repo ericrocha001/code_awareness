@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o modal de nome personalizado para exportação com prefixo enm-.
-2. Espelhar o padrão dos modais existentes: overlay escurecido, painel centralizado, cabeçalho, corpo, rodapé.
-
-Mapa de Relacionamentos do Script
-
-1. ExportNameModal.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo enm- para evitar colisões com outros componentes.
-2. Nenhuma cor hardcoded — apenas variáveis CSS globais.
-3. O overlay usa position: fixed para cobrir a tela inteira.
-4. Os botões de ação do rodapé usam o design system global de pílula (app-pill-btn para o secundário, app-pill-btn primary para o primário); o botão de fechar do cabeçalho e os botões de formato NÃO são pílula.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .enm-overlay {

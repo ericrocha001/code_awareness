@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Traduzir o SourceProfile, o formato de saída e a lista de arquivos selecionados em argumentos CLI válidos para o Repomix.
-2. Aplicar regras de dependência entre opções da CLI (subopções de diretório dependem de includeDirectoryStructure).
-3. Emitir avisos estruturados ao detectar combinações de flags incompatíveis.
-4. Garantir que nenhum caminho de construção emita compressão estrutural.
-
-Mapa de Relacionamentos do Script
-
-1. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome SourceProfile e SourceOutputFormat como contratos de entrada.
-   - Criticidade: Alta
-
-2. shared/utils/source-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome DEFAULT_SOURCE_PROFILE apenas para validação defensiva do formato em runtime.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O módulo é de domínio puro — sem acesso a filesystem, spawn de processos, IPC, UI ou estado global.
-2. Jamais emite a flag de compressão estrutural (--compress) — invariante central do Code Source.
-3. Argumentos começam com o transporte de arquivos (--include inline ou --config <path>), seguido das flags opcionais do perfil, --style e --stdout, nesta ordem determinística.
-4. Transporte config-file exige configPath absoluto; ausência lança Error (contrato violado pelo chamador).
-5. Lista de arquivos vazia no transporte inline lança Error — a geração seletiva requer arquivos selecionados.
-6. Formato diferente de markdown/xml lança Error (defesa contra entrada corrompida em runtime).
-7. O builder não decide qual transporte usar — decisão pertence ao chamador.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { SourceOutputFormat, SourceProfile } from '../../shared/types'

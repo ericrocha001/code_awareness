@@ -1,16 +1,5 @@
 /*
- --- ARQUITETURA DO SCRIPT ---
- Responsabilidades do Script
- 1. Estilizar o breadcrumb estrutural com prefixo cmb-.
- Mapa de Relacionamentos do Script
- 1. CodeMapBreadcrumb.tsx
-    - Tipo: Relação de UI
-    - Relação: Consome as classes CSS definidas neste arquivo.
-    - Criticidade: Alta
- Invariantes do Script
- 1. O design deve respeitar estritamente as variáveis de cores globais.
- 2. Todas as classes usam prefixo cmb- para evitar colisão com outras abas.
- --- FIM ARQUITETURA DO SCRIPT ---
+ -T ---
  */
 
 .cmb-breadcrumb {

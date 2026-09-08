@@ -1,23 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer funções puras e seguras para leitura e persistência das últimas campanhas selecionadas por repositório no localStorage.
-
-Mapa de Relacionamentos do Script
-
-1. src/renderer/src/components/CodeJourneyView/hooks/useJourneyCreation.ts
-   - Tipo: Dependência Inversa
-   - Relação: Importa getLastCampaigns e setLastCampaigns para manter persistência da seleção.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. A chave do localStorage deve ser estritamente "codeAwareness:lastCampaign:<repoPath>".
-2. Erros de parse no JSON retido no localStorage devem ser capturados sem interromper a aplicação, retornando array vazio.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 const STORAGE_PREFIX = 'codeAwareness:lastCampaign:'

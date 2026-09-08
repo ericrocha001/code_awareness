@@ -1,31 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a coalescência por requestAnimationFrame do callback onDrag no ColumnResizer.
-2. Validar o flush explícito do delta acumulado no drag end.
-3. Validar o cancelamento do rAF pendente no unmount.
-
-Mapa de Relacionamentos do Script
-
-1. ColumnResizer.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, fireEvent e cleanup para asserções de DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Os mocks de requestAnimationFrame e cancelAnimationFrame são restaurados após cada teste.
-2. A coalescência por rAF é transparente ao consumidor — a interface onDrag(deltaPx) não muda.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

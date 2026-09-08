@@ -1,49 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Executar compressões de arquivos não cacheados via RepomixAdapter em lotes (batch) com controle de concorrência.
-2. Deduplicar chamadas concorrentes através do gerenciador inFlight para evitar execuções redundantes.
-3. Realizar fallback transparente para compressão individual quando o lote falhar ou omitir arquivos.
-4. Consolidar e retornar o mapeamento de resultados comprimidos e registros detalhados de erros e motivos de falha.
-5. Executar o Direct Output (markdown/xml) via RepomixAdapter.generateDirectOutput, deduplicando chamadas idênticas simultâneas via directInFlight (sem compartilhar o inFlight do Core).
-
-Mapa de Relacionamentos do Script
-
-1. repomix-adapter.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome compressMultipleFiles e compressSingleFile para acionamento do processo Repomix (Core) e generateDirectOutput para o Direct Output.
-   - Criticidade: Alta
-
-2. repomix-request.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome o tipo RepomixRequest para parametrizar execuções individuais e em lote.
-   - Criticidade: Alta
-
-3. repomix-arguments-builder.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome buildRepomixRequest para estruturar sub-requisições de lote.
-   - Criticidade: Alta
-
-4. compression-constants.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome COMPRESSION_VERSION para composição da chave inFlight.
-   - Criticidade: Alta
-
-5. compression-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome computeProfileHash para incluir o hash do perfil efetivo na chave do directInFlight.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. inFlight keys são limpas obrigatoriamente via finally — Promises rejeitadas nunca travam execuções futuras.
-2. O executor é desacoplado de caching e de formatação de Markdown, operando exclusivamente sobre listas de arquivos não cacheados.
-3. Resultados parciais de lotes são preservados, acionando fallback apenas para arquivos ausentes.
-4. A chave do directInFlight inclui o hash do EffectiveProfile — chamadas concorrentes com perfis efetivos diferentes nunca são deduplicadas entre si.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { basename } from 'path'

@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a seção de mudanças com métrica de escopo, botão de diff e arquivos agrupados por tipo.
-2. Agrupar os arquivos em três subgrupos (Criados, Modificados, Removidos) por filtragem de apresentação.
-3. Exibir o erro de preview inline abaixo do cabeçalho quando presente.
-
-Mapa de Relacionamentos do Script
-
-1. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece a interface FileListItem sem criar dependência circular com CheckpointDrawer.
-   - Criticidade: Alta
-
-2. DrawerFileCard.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza cada arquivo dos subgrupos como DrawerFileCard.
-   - Criticidade: Alta
-
-3. ChangesSection.css
-   - Tipo: Relação de UI
-   - Relação: Consome os estilos definidos neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Componente puramente apresentacional — o agrupamento é filtragem visual sobre fileList, sem mutar dados.
-2. Subgrupos vazios não são renderizados — nunca exibe título sem cards.
-3. O botão "Visualizar diff" fica desabilitado se selectedFilePaths.size === 0 ou isGeneratingPreview.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

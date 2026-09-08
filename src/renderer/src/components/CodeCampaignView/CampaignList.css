@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir os estilos da listagem de campanhas.
-2. Garantir que cada card de campanha exiba bandeira (Flag), nome, status e ações.
-
-Mapa de Relacionamentos do Script
-
-1. CampaignList.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo (prefixo cl-).
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O design deve respeitar estritamente as variáveis de cores globais.
-2. Todas as classes usam prefixo cl- para evitar colisão com outras abas.
-3. Cores sólidas de status (`#fbbf24` em andamento / `#4ade80` concluída) e seus tingimentos translúcidos em `rgba()` são a exceção aceita neste arquivo — representam semântica de status fixa e o CSS puro não deriva opacidade a partir de variável; as demais cores vêm de variáveis globais. Caminho futuro opcional: `color-mix(in srgb, var(--accent) n%, transparent)`, quando a base do Electron garantir suporte.
-4. As classes de cor de status (cl-action-reopen, cl-action-complete) sobrescrevem apenas a cor do texto/ícone do Button ghost, sem usar !important.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .cl-list {

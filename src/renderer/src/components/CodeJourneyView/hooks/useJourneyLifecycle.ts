@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar as ações administrativas de uma implementação (renomear, excluir, marcar/desmarcar restauração, vincular campanha).
-2. Manter o estado dos modais de renomear e excluir.
-3. Notificar o orquestrador sobre limpeza de conteúdo e seleção da primeira implementação restante via callbacks.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome os estados e funções de ciclo de vida fornecidos por este hook.
-   - Criticidade: Alta
-
-2. ../../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome CheckpointSummary.
-   - Criticidade: Alta
-
-3. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relação: Invoca renameCheckpoint, deleteCheckpoint, restoreMarkManual, restoreUnmark e setCheckpointCampaigns.
-   - Criticidade: Alta
-
-4. reloadCheckpoints.ts
-   - Tipo: Dependência Direta
-   - Relação: Utilitário compartilhado para recarregar a lista de checkpoints via IPC.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A exclusão deve limpar o conteúdo exibido antes de recarregar a lista.
-2. O modal de exclusão e o alvo da ação devem ser limpos mesmo se o recarregamento falhar.
-3. A seleção da primeira implementação restante só ocorre se o recarregamento tiver sucesso.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useCallback, useState } from 'react'

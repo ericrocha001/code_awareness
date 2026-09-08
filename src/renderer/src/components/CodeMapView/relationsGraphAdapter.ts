@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Traduzir o FileGraph + arquivo selecionado no formato de elementos da Cytoscape.
-2. Calcular o grau de cada nó (número de conexões) para dimensionar o círculo.
-3. Deduplicar nós e arestas, descartando ids que não existem no conjunto de arquivos.
-
-Mapa de Relacionamentos do Script
-
-1. fileRelationships.ts
-   - Tipo: Fluxo de Dados
-   - Relação: Consome FileGraph com imports/importedBy já derivados.
-   - Criticidade: Alta
-
-2. RelationsGraph.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome buildCytoscapeElements para alimentar a instância Cytoscape.
-   - Criticidade: Alta
-
-3. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece o tipo CodeMapFile.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é puro — nunca importa React, Cytoscape, IPC ou DOM.
-2. A saída é determinística para a mesma entrada.
-3. Nenhuma função lança exceção — entradas inválidas produzem elementos vazios.
-4. Arestas apontam na direção do import (importador → importado).
-5. O nó central é sempre o arquivo selecionado.
-6. Nós e arestas são deduplicados por id.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { CodeMapFile } from '../../../../shared/types'

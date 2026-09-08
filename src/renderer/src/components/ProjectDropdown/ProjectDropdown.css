@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout visual do ProjectDropdown.
-2. Controlar comportamento do menu suspenso e estados de foco/hover.
-
-Mapa de Relacionamentos do Script
-
-1. ProjectDropdown.tsx
-   - Tipo: Relação de UI
-   - Relação: Usa essas classes para renderizar o dropdown.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O menu suspenso nunca deve transbordar a sidebar.
-2. O estado aberto e o foco do menu devem permanecer consistentes durante a interação.
-3. O projeto ativo deve sempre ser exibido no botão principal.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .project-dropdown-container {

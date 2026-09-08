@@ -1,54 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Orquestrar a interface do modal de geração do Code Source com layout em duas colunas (configuração à esquerda e preview à direita).
-2. Integrar os hooks useSourceGeneration e useSourceSettings para ciclo de vida de geração, debounce, deduplicação e persistência.
-3. Renderizar o preview do documento utilizando o componente virtualizado SourcePreviewVirtualized.
-4. Refletir dependências de UI entre opções de estrutura e fornecer ações de cópia e exportação sobre o conteúdo integral.
-
-Mapa de Relacionamentos do Script
-
-1. hooks/useSourceGeneration.ts
-   - Tipo: Dependência Direta
-   - Relação: Gerencia o ciclo de vida e estado de geração com debounce e deduplicação.
-   - Criticidade: Alta
-
-2. hooks/useSourceSettings.ts
-   - Tipo: Dependência Direta
-   - Relação: Gerencia hidratação, autosave debounced e flush de configurações.
-   - Criticidade: Alta
-
-3. SourcePreviewVirtualized.tsx
-   - Tipo: Dependência Direta
-   - Relação: Renderiza o preview virtualizado por linhas com syntax highlighting.
-   - Criticidade: Alta
-
-4. window.codeAwareness.saveToDownloads / exportToNotebookLM
-   - Tipo: Dependência Inversa
-   - Relação: Executa a exportação do documento gerado.
-   - Criticidade: Alta
-
-5. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece SourceOutputFormat e SourceProfile.
-   - Criticidade: Alta
-
-6. SourceOutputModal.css
-   - Tipo: Relação de UI
-   - Relação: Estiliza o modal com prefixo som-.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O último preview válido permanece visível durante novas gerações até a conclusão da nova requisição.
-2. Ações de cópia e exportação utilizam estritamente o conteúdo integral em memória (lastCompletedDocument.content).
-3. Opções filhas de estrutura são desabilitadas na UI quando a estrutura pai estiver desligada, preservando seus valores internos no perfil.
-4. O fechamento do modal aciona o flush imediato de configurações pendentes via useSourceSettings.
-5. A exportação para NotebookLM é desabilitada quando o formato selecionado não for Markdown.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react'

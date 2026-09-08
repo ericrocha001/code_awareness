@@ -1,34 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Construir as seções de Context Enrichment (header, instruction file, git diff e git log) para a montagem final do documento de compressão.
-2. Validar o header text contra o limite de segurança, lançando erro claro quando excedido (único caso que interrompe).
-3. Validar o caminho do instruction file contra path traversal antes de qualquer leitura, produzindo a seção de instruções apenas quando seguro.
-4. Executar comandos Git (diff e log sem cor) e tratar falhas de forma graceful (warning + omissão da seção).
-5. Limitar o includeLogsCount ao intervalo válido, aplicando o default quando inválido.
-
-Mapa de Relacionamentos do Script
-
-1. compression-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome buildEnrichmentSections e aplica as seções apenas na montagem final do documento, sem afetar o cache por arquivo.
-   - Criticidade: Alta
-
-2. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome o tipo ContextEnrichment que parametriza o contexto de enriquecimento solicitado.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo não conhece cache, CompressionService, Repomix, profile hash nem CLI.
-2. Apenas o header text acima do limite lança erro; demais falhas são tolerantes (warning + omissão da seção).
-3. Instruction path inválido nunca é lido e nunca interrompe o fluxo; retorna caminho absoluto seguro apenas quando válido.
-4. As seções são produzidas apenas quando aplicáveis, preservando emojis, títulos, quebras de linha e estrutura textual.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { existsSync, readFileSync } from 'fs'

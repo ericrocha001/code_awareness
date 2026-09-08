@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Carregar preferências de UI por projeto a partir do settings.json.
-2. Expor setters tipados para sidebar e larguras de coluna da FileView com salvamento automático.
-3. Retornar estado atual consolidado para consumo dos componentes.
-
-Mapa de Relacionamentos do Script
-
-1. window.codeAwareness.loadSettings/saveSettings
-   - Tipo: Dependência Direta
-   - Relação: Lê e persiste preferências no settings.json.
-   - Criticidade: Alta
-
-2. GlobalSidebar.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: Consome o estado de sidebar e atualiza via hook.
-   - Criticidade: Alta
-
-3. CodeSourceView.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: Consome o modo de visualização e atualiza via hook.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Sempre retornar valores válidos mesmo quando repoPath for nulo.
-2. Nunca lançar erros não tratados para o componente consumidor.
-3. O salvamento deve sempre refletir o mesmo estado retornado para a UI.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useState, useEffect } from 'react'

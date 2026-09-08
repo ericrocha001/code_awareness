@@ -1,50 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar a representação em lista compacta de arquivos (FileView), montando as FileRows de forma incremental no DOM via lazy mount acumulativo (lotes de 80, nunca desmontam).
-2. Fornecer cabeçalho sticky dentro da superfície de scroll bidirecional única, com alinhamento rigoroso às colunas de FileRow.
-3. Fornecer a FileViewMeasurementSurface concreta que desacopla o FileViewLayoutObserver da estrutura DOM.
-4. Injetar tags pré-resolvidas (tagsByFile) nas FileRows — preparadas pelo useFileCollectionData.
-
-Mapa de Relacionamentos do Script
-
-1. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa FileCardFile e RowActionType.
-   - Criticidade: Alta
-
-2. FileRow.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente atômico renderizado em cada linha da lista.
-   - Criticidade: Alta
-
-3. controllers/useFileViewLazyMount.ts
-   - Tipo: Dependência Direta
-   - Relação: Hook que fornece mountedCount, sentinelRef e hasMore para o lazy mount acumulativo.
-   - Criticidade: Alta
-
-4. controllers/FileViewLayoutObserver.ts
-   - Tipo: Dependência Direta
-   - Relação: Observer de layout consumindo a FileViewMeasurementSurface implementada aqui.
-   - Criticidade: Alta
-
-5. useFileCollectionData.ts
-   - Tipo: Dependência Inversa
-   - Relação: Produz tagsByFile injetado como prop.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O cabeçalho (FileViewHeader) é o primeiro filho da superfície de scroll bidirecional (.fv-scroll-container), sticky no topo.
-2. Quando a lista de arquivos estiver vazia, exibe mensagem de estado vazio mantendo o cabeçalho visível.
-3. O evento `window.resize` despacha `fv-columns-changed` no `.fv-container` com coalescência por rAF.
-4. onRowAction chega estável do pai e é repassado diretamente ao FileRow — preserva o React.memo.
-5. O FileViewLayoutObserver é re-medido sempre que a lista de arquivos muda e sempre que novas rows são montadas via lazy mount (efeito próprio observando mountedCount).
-6. measurementSurface é memoizada com deps [] — referência permanente evita re-instanciação do observer.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'

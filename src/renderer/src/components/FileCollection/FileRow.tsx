@@ -1,43 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Renderizar uma linha compacta de arquivo como componente visual puro (zero hooks, zero estado, zero medições).
-2. Delegar todas as interações da row via callback consolidado onRowAction(type, relativePath, anchor?).
-3. Exibir o contador "+N" de tags ocultas a partir da prop hiddenCount injetada pelo FileView.
-
-Mapa de Relacionamentos do Script
-
-1. types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa FileCardFile e RowActionType.
-   - Criticidade: Alta
-
-2. models/FileRowModel.ts
-   - Tipo: Contrato / Interface
-   - Relação: Importa TagRenderData (tags pré-resolvidas com paleta).
-   - Criticidade: Alta
-
-3. ../ToggleSwitch/ToggleSwitch.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente de controle de seleção individual.
-   - Criticidade: Alta
-
-4. FileView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Instancia FileRow e injeta tags, hiddenCount e onRowAction.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Não contém hooks, estado local, refs, useEffect, useMemo nem forwardRef.
-2. Não instancia nem monta Popover, TagPopover ou ActionMenu no DOM.
-3. O anchor de qualquer interação é sempre e.currentTarget capturado no momento do clique — sem registry externo.
-4. hiddenCount=0 desabilita o contador "+N" (trade-off documentado: Sprint 3 injetará os valores via TagOverflowController).
-5. Todos os callbacks de interação passam por onRowAction com o tipo discriminado correspondente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

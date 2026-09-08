@@ -1,0 +1,95 @@
+.cmh-panel {
+  width: min(340px, calc(100vw - 24px));
+  padding: 14px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  color: var(--text-primary);
+}
+
+.cmh-header,
+.cmh-header > div,
+.cmh-actions {
+  display: flex;
+}
+
+.cmh-header {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.cmh-header > div {
+  flex-direction: column;
+  gap: 3px;
+}
+
+.cmh-header span,
+.cmh-details dt {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.cmh-state-icon--healthy,
+.cmh-trigger--healthy .btn-icon {
+  color: var(--success-color, #1f8a55);
+}
+
+.cmh-state-icon--updating,
+.cmh-trigger--updating .btn-icon {
+  color: var(--accent-color);
+}
+
+.cmh-state-icon--issue,
+.cmh-trigger--issue .btn-icon {
+  color: var(--warning-color, #c17b16);
+}
+
+.cmh-details {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.cmh-details > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.cmh-details dt,
+.cmh-details dd {
+  margin: 0;
+}
+
+.cmh-details dd {
+  overflow-wrap: anywhere;
+  text-align: right;
+  font-size: 13px;
+}
+
+.cmh-actions {
+  align-items: center;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-color);
+}
+
+.cmh-advanced {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+}
+
+.cmh-advanced summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.cmh-advanced .app-ghost-btn {
+  margin-top: 6px;
+}

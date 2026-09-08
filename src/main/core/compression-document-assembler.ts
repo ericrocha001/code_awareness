@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Montar o documento Markdown final consolidando os arquivos comprimidos na ordem estrita de selectedFiles.
-2. Inserir as seções de Context Enrichment (header, instruções, diffs e logs) nos pontos especificados do documento.
-3. Formatar a seção de avisos para falhas parciais de compressão com os motivos informados.
-4. Retornar o marcador de falha total quando nenhum dos arquivos solicitados puder ser comprimido.
-
-Mapa de Relacionamentos do Script
-
-1. compression-constants.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome COMPRESSION_TOTAL_FAILURE_MARKER.
-   - Criticidade: Alta
-
-2. context-enrichment-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome o tipo EnrichmentSections para inserção das seções adicionais.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A ordem dos blocos de arquivo no Markdown final segue rigorosamente a ordem do array selectedFiles original.
-2. Context Enrichment é aplicado apenas na montagem final, sem introduzir efeitos colaterais.
-3. Se todos os arquivos falharem ou results estiver vazio para todos os itens, retorna COMPRESSION_TOTAL_FAILURE_MARKER.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { basename } from 'path'

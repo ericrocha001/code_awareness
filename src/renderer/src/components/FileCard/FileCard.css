@@ -1,29 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o layout visual do FileCard.
-2. Reforçar o destaque visual do card selecionado (borda inset, fundo tingido, glow).
-3. Estilizar as badges de tags com área clicável e teto determinístico de duas linhas com clip.
-4. Estilizar o indicador "+N" de tags ocultas, sobreposto à região clipada.
-
-Mapa de Relacionamentos do Script
-
-1. FileCard.tsx
-   - Tipo: Relação de UI
-   - Relação: Fornece classes visuais para a renderização do card em grade.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O container de tags (.file-card-tags) declara position: relative, max-height: 40px (2 linhas de chip de 18px + gap de 4px) e overflow: hidden — contenção vertical ratificada na Sprint 2.2; a integralidade das tags permanece no DOM e é consultável via tooltip e TagPopover.
-2. O indicador ".file-card-tags-more" é absoluto e pointer-events: none — não consome slot de tag visível, não altera a geometria medida (sem loop de ResizeObserver) e o clique pertence à área de tags.
-3. O card selecionado usa border: 1px com box-shadow inset para a borda visual, evitando layout shift.
-4. Não contém regras de menu interno (.file-card-actions-menu), pois os popovers são montados externamente.
-5. .file-card nunca declara height em percentual (BUGFIX B1); o rodapé (.file-card-footer) ancora via margin-top: auto.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .file-card {

@@ -1,48 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar comportamentalmente o roteamento arquitetural dos 4 formatos (Compression Core vs Direct Output).
-2. Provar a identidade e deduplicação corretas do directInFlight (enrichment deduplica; profile efetivo diferente NÃO deduplica).
-3. Provar a identidade semântica do EffectiveProfile (flags no-op e formato).
-4. Provar a Inversão de Dependência real (DIP) do CodeMapService via injeção de portas fakes, sem vincular a PA-06 ao CompressionService real.
-
-Mapa de Relacionamentos do Script
-
-1. compression-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Instanciado dinamicamente (sem import estático) para validar o roteamento da PA-02 e a deduplicação da PA-03.
-   - Criticidade: Alta
-
-2. compression-executor.ts
-   - Tipo: Fluxo de Dados
-   - Relação: PA-03 valida a chave do directInFlight (que deve conter o hash do perfil efetivo).
-   - Criticidade: Alta
-
-3. compression-port.ts / content-identity-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: PA-06 injeta Fakes que implementam estas portas no CodeMapService.
-   - Criticidade: Alta
-
-4. code-map-service.ts
-   - Tipo: Dependência Inversa
-   - Relação: PA-06 prova que o CodeMapService depende apenas da porta CompressionPort (DIP comportamental).
-   - Criticidade: Alta
-
-5. compression-profile.ts / effective-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: PA-05 valida computeProfileHash e resolveEffectiveProfile.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A PA-06 NÃO referencia o CompressionService real no ponto da inversão de dependência — injeta somente Fakes das portas.
-2. Nenhum teste depende da CLI real do Repomix — o adapter é sempre mockado.
-3. Os testes não alteram a intenção dos testes existentes; apenas agregam Provas de Aceitação arquiteturais.
-4. Diretórios temporários são sempre limpos de forma tolerante a lock (Windows).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
@@ -61,45 +18,50 @@ import { WatcherService } from './watcher-service'
 
 // Mock do RepositoryModel para isolar a PA-06 contra bindings nativos de banco no runtime Node/Vitest
 vi.mock('./repository-model', () => {
-  return {
-    RepositoryModel: class FakeRepositoryModel {
-      private readonly repoPath: string
-      private files: Array<{ id: string; relativePath: string; language: string; contentHash: string }> = []
+  class FakeRepositoryModel {
+    private readonly repoPath: string
+    private files: Array<{ id: string; relativePath: string; language: string; contentHash: string }> = []
 
-      constructor(repoPath: string) {
-        this.repoPath = repoPath
-      }
-
-      async backfillContentHashes(): Promise<void> {}
-      async reconcileWithDisk(): Promise<unknown> { return {} }
-      getRepositoryId(): string { return 'fake-repo-id' }
-
-      async indexRepository(): Promise<{ filesIndexed: number; elementsExtracted: number }> {
-        this.files = [{ id: 'file-anchor', relativePath: 'anchor.ts', language: 'typescript', contentHash: 'hash-anchor' }]
-        return { filesIndexed: 1, elementsExtracted: 1 }
-      }
-
-      getFiles(): Array<{ id: string; relativePath: string; language: string; contentHash: string }> {
-        if (this.files.length === 0) {
-          this.files = [{ id: 'file-anchor', relativePath: 'anchor.ts', language: 'typescript', contentHash: 'hash-anchor' }]
-        }
-        return this.files
-      }
-
-      getModifiedFiles(): Array<{ id: string; relativePath: string; language: string; contentHash: string }> {
-        return []
-      }
-
-      getElementsByRepository(): unknown[] { return [] }
-      getRelationships(): unknown[] { return [] }
-
-      getFileByRelativePath(rel: string): { id: string; relativePath: string; language: string; contentHash: string } | null {
-        return this.getFiles().find((f) => f.relativePath === rel) ?? null
-      }
-
-      getRepoPath(): string { return this.repoPath }
-      close(): void {}
+    constructor(repoPath: string) {
+      this.repoPath = repoPath
     }
+
+    async backfillContentHashes(): Promise<void> {}
+    async backfillContextReferences(): Promise<void> {}
+    async reconcileWithDisk(): Promise<unknown> { return {} }
+    pruneKnownBinaryFiles(): number { return 0 }
+    getRepositoryId(): string { return 'fake-repo-id' }
+
+    async indexRepository(): Promise<{ filesIndexed: number; elementsExtracted: number }> {
+      this.files = [{ id: 'file-anchor', relativePath: 'anchor.ts', language: 'typescript', contentHash: 'hash-anchor' }]
+      return { filesIndexed: 1, elementsExtracted: 1 }
+    }
+
+    getFiles(): Array<{ id: string; relativePath: string; language: string; contentHash: string }> {
+      if (this.files.length === 0) {
+        this.files = [{ id: 'file-anchor', relativePath: 'anchor.ts', language: 'typescript', contentHash: 'hash-anchor' }]
+      }
+      return this.files
+    }
+
+    getModifiedFiles(): Array<{ id: string; relativePath: string; language: string; contentHash: string }> {
+      return []
+    }
+
+    getElementsByRepository(): unknown[] { return [] }
+    getRelationships(): unknown[] { return [] }
+
+    getFileByRelativePath(rel: string): { id: string; relativePath: string; language: string; contentHash: string } | null {
+      return this.getFiles().find((f) => f.relativePath === rel) ?? null
+    }
+
+    getRepoPath(): string { return this.repoPath }
+    close(): void {}
+  }
+
+  return {
+    RepositoryModel: FakeRepositoryModel,
+    createRepositoryModel: (repoPath: string) => new FakeRepositoryModel(repoPath)
   }
 })
 

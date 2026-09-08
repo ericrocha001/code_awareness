@@ -1,37 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o carregamento (hidratação) assíncrono de sourceSettings a partir de AppSettings ao abrir o modal.
-2. Controlar a persistência automática com debounce de 500ms ao alterar formato ou perfil.
-3. Garantir o flush imediato de alterações no fechamento do modal e evitar salvamentos indesejados durante a hidratação inicial.
-
-Mapa de Relacionamentos do Script
-
-1. shared/utils/source-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece DEFAULT_SOURCE_PROFILE e normalizeSourceProfile para inicialização e validação.
-   - Criticidade: Alta
-
-2. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece SourceOutputFormat e SourceProfile.
-   - Criticidade: Alta
-
-3. window.codeAwareness.loadSettings / saveSettings
-   - Tipo: Dependência Inversa
-   - Relação: Carrega e persiste as configurações globais do aplicativo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A hidratação inicial nunca dispara gravação em disco (proteção via skipSaveRef).
-2. A transição de aberto para fechado (isOpen: true -> false) executa flush imediato das configurações atuais.
-3. A persistência preserva integralmente as demais propriedades de AppSettings, atualizando apenas sourceSettings.
-4. Timers pendentes de debounce são sempre cancelados no cleanup do hook.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useCallback, useEffect, useRef, useState } from 'react'

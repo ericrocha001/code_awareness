@@ -1,44 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Resolver a allowlist final de caminhos relativos de arquivos para a geração do One-Click XML.
-2. Obter a lista base de arquivos candidatos via FileListingPort (ou fallback determinístico: GitService / scanRepository).
-3. Aplicar filtros de Git Ignore baseados no arquivo .gitignore presente na raiz do repositório.
-4. Aplicar filtros de Code Awareness Ignore baseados na lista exata de caminhos ignorados persistida nas configurações por repositório.
-5. Normalizar separadores de caminho, remover duplicatas e ordenar os caminhos de forma determinística.
-
-Mapa de Relacionamentos do Script
-
-1. file-listing-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome a porta para obter lista de arquivos candidatos.
-   - Criticidade: Alta
-
-2. git-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Utilizado como listador padrão para repositórios Git.
-   - Criticidade: Média
-
-3. repository-scanner.ts
-   - Tipo: Dependência Direta
-   - Relação: Utilizado como listador padrão para diretórios não-Git.
-   - Criticidade: Média
-
-4. settings-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Lê as configurações do Code Awareness para obter ignoredDiffFiles por repositório.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. A política é pura no que tange a regras de negócio: não interpreta conteúdo de arquivos, não comprime e não gera XML.
-2. Code Awareness Ignore é aplicado estritamente como caminhos relativos exatos (não como padrões glob).
-3. Git Ignore é derivado exclusivamente do .gitignore da raiz do repositório se existir; na ausência, nenhum filtro Git Ignore é aplicado.
-4. A lista resultante é sempre deduplicada, normalizada para barras normais (/) e ordenada alfabeticamente.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { existsSync, readFileSync } from 'fs'
@@ -48,6 +9,7 @@ import type { FileListingPort } from './file-listing-port'
 import { GitService } from './git-service'
 import { scanRepository } from './repository-scanner'
 import { settingsService } from './settings-service'
+import type { CodeAwarenessIgnoreService } from './code-awareness-ignore-service'
 
 export interface SettingsReader {
   loadSettings(): { ignoredDiffFiles?: Record<string, string[]> }
@@ -56,7 +18,8 @@ export interface SettingsReader {
 export class IgnorePolicy {
   constructor(
     private readonly fileLister?: FileListingPort,
-    private readonly settingsReader?: SettingsReader
+    private readonly settingsReader?: SettingsReader,
+    private readonly ignoreService?: CodeAwarenessIgnoreService
   ) {}
 
   /**
@@ -135,11 +98,26 @@ export class IgnorePolicy {
   }
 
   /**
-   * Lê os arquivos ignorados pelo Code Awareness para o repositório a partir das configurações.
+   * Lê os arquivos ignorados pelo Code Awareness para o repositório a partir do serviço ou das configurações.
    */
   private loadCodeAwarenessIgnores(repoPath: string): Set<string> {
-    const reader = this.settingsReader ?? settingsService
     const ignoredSet = new Set<string>()
+
+    if (this.ignoreService) {
+      try {
+        const ignores = this.ignoreService.list(repoPath)
+        for (const item of ignores) {
+          if (typeof item === 'string') {
+            ignoredSet.add(this.normalizePath(item))
+          }
+        }
+      } catch {
+        // Falha ao consultar o serviço resulta em nenhum arquivo ignorado pelo Code Awareness
+      }
+      return ignoredSet
+    }
+
+    const reader = this.settingsReader ?? settingsService
 
     try {
       const settings = reader.loadSettings()

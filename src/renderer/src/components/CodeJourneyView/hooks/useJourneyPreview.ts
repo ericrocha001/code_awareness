@@ -1,55 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Gerenciar o carregamento dos arquivos alterados de uma implementação selecionada.
-2. Gerenciar a seleção de arquivos e a inicialização dos toggles.
-3. Gerar o preview do diff via IPC e filtrá-lo pelos arquivos selecionados.
-4. Calcular e recalcular a estimativa de tokens do diff.
-5. Atualizar o markdown e a mensagem de erro via setters recebidos do orquestrador, permitindo que fluxos externos (exclusão, restauração parcial) limpem o preview.
-
-Mapa de Relacionamentos do Script
-
-1. CodeJourneyView.tsx
-   - Tipo: Dependência Inversa
-   - Relação: Consome todos os estados e funções expostos por este hook; fornece os setters de previewMarkdown e previewError.
-   - Criticidade: Alta
-
-2. ../checkpointUtils.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome getCompareIds, estimateDiffTokens e calculateTokens.
-   - Criticidade: Alta
-
-3. ../types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome FileListItem para o memo da lista de arquivos.
-   - Criticidade: Alta
-
-4. ../../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Consome CheckpointSummary e CheckpointDiffFile.
-   - Criticidade: Alta
-
-5. window.codeAwareness.*
-   - Tipo: Dependência Inversa
-   - Relación: Invoca getCheckpointChangedFiles e generateCheckpointDiff via IPC.
-   - Criticidade: Alta
-
-6. ../utils/markdown-filter.ts
-   - Tipo: Dependência Direta
-   - Relação: Importa filterMarkdownBySelection para filtrar seções do diff pelos arquivos selecionados.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os arquivos carregados começam com toggle ligado (todos os caminhos na seleção).
-2. O preview do diff só é gerado se houver ao menos um arquivo selecionado.
-3. O estado de "gerando preview" é sempre desativado no bloco finally.
-4. A seleção é reinicializada quando os dados do detalhe são carregados (isCheckpointDataLoaded muda para true) — essa dependência nunca pode ser removida.
-5. Os setters de markdown e mensagem de erro são recebidos do orquestrador para permitir limpeza centralizada por fluxos externos.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { useState, useEffect, useCallback, useMemo } from 'react'

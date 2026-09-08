@@ -1,30 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Compor o documento XML canônico estruturado com metadados, falhas parciais e nós de código do Code Dash.
-2. Encapsular com segurança conteúdos de arquivos em seções CDATA prevenindo corrupção por caracteres especiais.
-
-Mapa de Relacionamentos do Script
-
-1. src/shared/types/dash-types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome DashContextPlan e tipos associados para montagem do XML.
-   - Criticidade: Alta
-
-2. src/shared/utils/dash-protocol.ts
-   - Tipo: Dependência Direta
-   - Relação: Fornece DASH_PROTOCOL_VERSION para atribuição de versão no nó raiz.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Operar puramente em memória como função determinística sem efeitos colaterais ou I/O.
-2. Todo conteúdo de item deve ser encapsulado em CDATA com tratamento para ocorrências de ']]>'.
-3. A ordenação dos nós <item> deve coincidir estritamente com a ordem estabelecida em DashContextPlan.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { DashContextPlan } from '../../../shared/types/dash-types'

@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Prover um Event Bus global para eventos de alteração de arquivos no repositório.
-2. Publicar eventos file:modified, file:created, file:deleted e file:confirmed.
-3. Permitir que múltiplos consumidores assinem os eventos.
-4. Transportar o correlation ID opcional junto ao evento para manter a cadeia de observabilidade contínua.
-
-Mapa de Relacionamentos do Script
-
-1. watcher-bridge.ts
-   - Tipo: Dependência Inversa
-   - Relação: Emite eventos no Event Bus ao receber notificações do WatcherService.
-   - Criticidade: Alta
-
-2. repository-synchronizer.ts (Sprint 5)
-   - Tipo: Dependência Inversa
-   - Relação: Assina eventos para disparar reindexação seletiva.
-   - Criticidade: Alta
-
-3. outros consumidores futuros (Code Journey, Diff Service, AI Context)
-   - Tipo: Dependência Inversa
-   - Relação: Podem assinar eventos para reagir a alterações.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O Event Bus é um singleton — uma única instância compartilhada por todo o main process.
-2. O Event Bus não conhece o WatcherService nem o Synchronizer — apenas emite e recebe eventos.
-3. Eventos são publicados com o caminho relativo do arquivo, nunca o caminho absoluto.
-4. O Event Bus não faz buffering de eventos — se não houver assinante, o evento é perdido.
-5. O evento file:confirmed carrega caminho relativo e nunca é bufferizado, com a mesma semântica dos demais eventos.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { EventEmitter } from 'events'

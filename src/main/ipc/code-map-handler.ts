@@ -1,52 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Registrar handlers IPC para operações do Code Map.
-2. Validar parâmetros recebidos antes de delegar ao Code Map Service.
-3. Capturar erros e retornar respostas estruturadas ao renderer.
-4. Ser o único ponto de entrada IPC para o Code Map — o renderer nunca acessa o Service diretamente.
-5. Expor o recorte de trecho de elemento via IPC.
-6. Expor a leitura de arquivo integral via IPC com validação de relativePath.
-7. Expor a abertura do elemento no VS Code via protocolo vscode://, com fallback para showItemInFolder.
-8. Emitir eventos push (code-map:file-modified, code-map:file-confirmed e code-map:file-indexed) para o renderer quando arquivos forem modificados no disco, confirmados ou reindexados.
-9. Expor a geração de markdown de escopo (arquivo âncora + relacionados) via IPC.
-
-Mapa de Relacionamentos do Script
-
-1. code-map-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e consome Code Map Service para todas as operações.
-   - Criticidade: Alta
-
-2. repository-events.ts
-   - Tipo: Dependência Direta
-   - Relação: Escuta eventos de alteração de arquivo para emitir pushes ao renderer.
-   - Criticidade: Alta
-
-3. ../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos CodeMapRepository, CodeMapFile, CodeMapElement, CodeMapRelationship, CodeMapSyncStatus.
-   - Criticidade: Alta
-
-4. preload.ts
-   - Tipo: Dependência Inversa
-   - Relação: Os métodos expostos no preload invocam estes handlers e escutam os eventos via IPC.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Handlers IPC nunca devem lançar exceções não tratadas — erros devem ser capturados e retornados como { success: false, error }.
-2. Caminhos recebidos por IPC devem sempre ser validados como strings não vazias.
-3. Toda resposta de handler deve conter o campo success.
-4. Nenhuma lógica de negócio — apenas validação de parâmetros e delegação ao service.
-5. O Code Map Service é injetado via parâmetro no registerCodeMapHandlers — nunca instanciado diretamente.
-6. relativePath recebido por IPC nunca pode conter "..", ser absoluto ou conter drive Windows.
-7. Eventos de modificação e indexação são propagados a todas as janelas ativas via BrowserWindow.getAllWindows().
-8. O listener do repositoryEventBus vive durante todo o ciclo de vida da aplicação (instância única no bootstrap) e o envio via webContents é protegido por try/catch para evitar interrupções no loop.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { ipcMain, shell, BrowserWindow } from 'electron'
@@ -170,6 +123,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService): void {
       typeof (opts as { autoRepair?: unknown }).autoRepair === 'boolean'
         ? (opts as { autoRepair: boolean }).autoRepair
         : false
+    const deep = (opts as { deep?: unknown }).deep === true
     const selectedIssues = Array.isArray((opts as { selectedIssues?: unknown }).selectedIssues)
       ? ((opts as { selectedIssues: unknown[] }).selectedIssues.filter(id => typeof id === 'string') as string[])
       : undefined
@@ -194,7 +148,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService): void {
     telemetryService.log(correlationId, 'INTEGRITY', 'IPC_VERIFY_STARTED', { repoPath, autoRepair, selectedCount: selectedIssues?.length, issuesCount: issues?.length })
 
     try {
-      const result = await codeMapService.verifyIntegrity(repoPath, { autoRepair, selectedIssues, issues })
+      const result = await codeMapService.verifyIntegrity(repoPath, { autoRepair, selectedIssues, issues, deep })
       telemetryService.log(correlationId, 'INTEGRITY', 'IPC_VERIFY_COMPLETED', {
         status: result.status,
         durationMs: result.durationMs,

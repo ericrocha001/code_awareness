@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Provar E2E os contratos centrais do Code Dash (E2E-01 a E2E-10): integração, representações source/compression, mixed mode, ordem, resolução por basename, ambiguidade, falha parcial e profile.
-2. Usar DashService, Parser, Validator, Resolver, Planner e Assembler reais com filesystem temporário real.
-
-Mapa de Relacionamentos do Script
-
-1. dash-e2e-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome DashService real, SpyContextProvider e utilidades de XML.
-   - Criticidade: Alta
-
-2. dash-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Exercitado de ponta a ponta com entrada bruta de texto.
-   - Criticidade: Alta
-
-3. git-test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Cria e limpa repositórios temporários reais.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Nenhum componente do pipeline central é mockado; apenas os providers são espiões controlados.
-2. Toda resolução opera contra repositório temporário real, limpo no afterEach sem lançar exceção.
-3. Ordem e representação declaradas no request devem aparecer intactas no XML.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { afterEach, describe, expect, it } from 'vitest'

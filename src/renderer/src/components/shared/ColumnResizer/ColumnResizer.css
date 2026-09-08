@@ -1,26 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar a alça vertical de redimensionamento entre colunas (compartilhada por Code Map e FileView).
-2. Fornecer feedback visual no hover e durante o arraste.
-3. Garantir área de clique confortável sem ocupar espaço visual relevante.
-
-Mapa de Relacionamentos do Script
-
-1. ColumnResizer.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes crs-* definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todas as classes usam prefixo crs- para evitar colisão entre views.
-2. A alça nunca introduz scroll horizontal — largura total ≤ 20px.
-3. As cores usam apenas variáveis de tema — nenhuma cor hardcoded.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* Contêiner da alça — 20px de área de clique, centralizada sobre a borda */

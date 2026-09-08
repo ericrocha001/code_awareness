@@ -1,22 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Armazenar a constante do prompt padrão de auditoria de implementações.
-
-Mapa de Relacionamentos do Script
-
-1. ../components/CodeJourneyView/hooks/useJourneyAudit.ts
-   - Tipo: Dependência Inversa
-   - Relação: Importa DEFAULT_AUDIT_PROMPT para inicializar o prompt padrão de auditoria.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. O prompt padrão deve ser exportado como uma string imutável preservando exatamente o texto estabelecido.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 export const DEFAULT_AUDIT_PROMPT = `Analise as alterações de código abaixo como um Engenheiro de Software Staff extremamente rigoroso.

@@ -1,28 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer estilos CSS para o layout CommandBar + FileGrid da aba Code Compression.
-2. Estilizar a barra de ações com botões Copiar e Exportar.
-3. Estilizar o estado vazio (dropzone).
-4. Estilizar o toggle "Selecionados no topo".
-
-Mapa de Relacionamentos do Script
-
-1. CodeCompressionView.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome estilos CSS do componente.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O FileGrid deve ocupar 100% do espaço disponível (flex: 1).
-2. O layout não deve quebrar em larguras pequenas.
-3. Não deve conter estilos duplicados com CommandBar.css ou FileGrid.css.
-4. O toggle cc-sort-toggle usa prefixo cc-; cores sólidas via variáveis de tema (--accent); variações de opacidade do destaque em rgba(120, 82, 238, …), conforme o padrão do projeto.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 /* Layout simplificado: CommandBar + FileGrid ocupam 100% */

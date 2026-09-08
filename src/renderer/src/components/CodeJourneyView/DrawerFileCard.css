@@ -1,25 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Estilizar o card de arquivo (DrawerFileCard) com cantos arredondados, fundo elevado e hover.
-2. Definir variantes de cor do badge por tipo de mudança (added, modified, deleted).
-
-Mapa de Relacionamentos do Script
-
-1. DrawerFileCard.tsx
-   - Tipo: Relação de UI
-   - Relação: Consome as classes CSS definidas neste arquivo.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As classes devem usar o prefixo dfc- para evitar colisões.
-2. O hover acende o card — transição suave é obrigatória.
-3. O caminho (.dfc-path) deve sempre truncar com ellipsis, nunca quebrar.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 .dfc-card {

@@ -1,32 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a renderização exclusiva da FileView no componente FileCollectionView.
-2. Validar a operação de seleção master (selecionar todos e limpar todos) e botão Limpar seleção.
-3. Validar o repasse de interações para o ActivePopover via onRowAction e seu auto-fechamento.
-
-Mapa de Relacionamentos do Script
-
-1. FileCollectionView.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente orquestrador sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Fornece render, screen, fireEvent e cleanup para asserções de DOM.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. FileView e ActivePopover são mockados para isolamento total do orquestrador.
-2. O mock do FileView usa onRowAction (Sprint 2) — sem callbacks separados.
-3. anchorRefs foi eliminado (Sprint 2) — o mock propaga anchor via onRowAction.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React from 'react'

@@ -1,28 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar mount/dispose do FileViewLayoutObserver (ResizeObserver, event listener, scroll listener, rAF).
-2. Validar que o observer consome exclusivamente a FileViewMeasurementSurface — sem queries CSS concretas.
-3. Validar measureAll sobre rows entregues pela surface (overflow, hiddenCount 0, agrupamento em uma chamada).
-4. Validar coalescência de múltiplos triggers em uma única medição por frame.
-
-Mapa de Relacionamentos do Script
-
-1. controllers/FileViewLayoutObserver.ts
-   - Tipo: Dependência Direta
-   - Relação: Classe sob teste, consumindo surfaces mock.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. requestAnimationFrame é stubado para execução síncrona em todos os testes.
-2. ResizeObserver é mockado com classe controlável por teste.
-3. As surfaces mock simulam chips com geometria via getters de offsetLeft/offsetWidth e clientWidth — nenhuma estrutura DOM da FileView é construída aqui.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'

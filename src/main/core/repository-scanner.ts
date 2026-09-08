@@ -1,50 +1,24 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Escanear o repositório e localizar arquivos candidatos à indexação.
-2. Filtrar arquivos ignorados pelo .gitignore do projeto.
-3. Filtrar pastas internas (node_modules, .git, dist, build, code_awareness, code_checkpoints).
-4. Filtrar arquivos binários e arquivos maiores que 2MB.
-5. Detectar linguagem com base na extensão do arquivo.
-6. Retornar metadados básicos (caminho relativo, extensão, linguagem, tamanho, mtime).
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts (Sprint 5)
-   - Tipo: Dependência Inversa
-   - Relação: Consumirá a lista de arquivos escaneados para disparar indexação.
-   - Criticidade: Alta
-
-2. ignore (biblioteca npm)
-   - Tipo: Dependência Direta
-   - Relação: Usa para filtrar arquivos ignorados pelo .gitignore.
-   - Criticidade: Alta
-
-3. fs/promises
-   - Tipo: Dependência Direta
-   - Relação: Usa para ler diretórios e metadados de arquivos.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O Scanner nunca lê o conteúdo completo de arquivos binários — apenas os primeiros bytes para detecção.
-2. O Scanner nunca retorna arquivos que não existem no disco.
-3. O Scanner nunca retorna arquivos maiores que MAX_FILE_SIZE (2MB).
-4. O Scanner respeita o .gitignore do repositório se existir.
-5. O Scanner ignora pastas internas independentemente do .gitignore.
-6. O Scanner detecta linguagem apenas por extensão — não analisa conteúdo.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { readdir, stat, open } from 'fs/promises'
 import { existsSync, readFileSync, statSync } from 'fs'
 import { join, extname, relative } from 'path'
 import ignore, { Ignore } from 'ignore'
+import { getLanguageForExtension } from './language-adapter'
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024 // 2MB
+
+const BINARY_EXTENSIONS = new Set([
+  '.7z', '.avi', '.bmp', '.class', '.dll', '.doc', '.docx', '.eot', '.exe', '.gif', '.gz',
+  '.ico', '.jar', '.jpeg', '.jpg', '.mov', '.mp3', '.mp4', '.otf', '.pdf', '.png', '.so',
+  '.tar', '.tiff', '.ttf', '.wav', '.webm', '.webp', '.woff', '.woff2', '.xls', '.xlsx', '.zip'
+])
+
+export function isKnownBinaryExtension(filePath: string): boolean {
+  return BINARY_EXTENSIONS.has(extname(filePath).toLowerCase())
+}
 
 const IGNORED_DIRS = new Set([
   'node_modules',
@@ -66,6 +40,8 @@ const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   '.tsx': 'typescript',
   '.js': 'javascript',
   '.jsx': 'javascript',
+  '.mjs': 'javascript',
+  '.cjs': 'javascript',
   '.py': 'python',
   '.go': 'go',
   '.rs': 'rust',
@@ -101,7 +77,7 @@ export interface ScannedFile {
 /** Retorna a linguagem com base na extensão do arquivo. Retorna 'unknown' se não estiver no mapa. */
 export function detectLanguage(filePath: string): string {
   const ext = extname(filePath).toLowerCase()
-  return EXTENSION_TO_LANGUAGE[ext] ?? 'unknown'
+  return getLanguageForExtension(ext) ?? EXTENSION_TO_LANGUAGE[ext] ?? 'unknown'
 }
 
 /**
@@ -109,6 +85,7 @@ export function detectLanguage(filePath: string): string {
  * Evita carregar arquivos binários grandes inteiros na memória.
  */
 export async function isBinaryFile(filePath: string): Promise<boolean> {
+  if (isKnownBinaryExtension(filePath)) return true
   const buffer = Buffer.alloc(4096)
   let handle: import('fs').promises.FileHandle | undefined
   try {
@@ -123,6 +100,15 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
     if (handle !== undefined) {
       await handle.close()
     }
+  }
+}
+
+export async function isEligibleTextFile(filePath: string): Promise<boolean> {
+  try {
+    const fileStat = await stat(filePath)
+    return fileStat.isFile() && fileStat.size <= MAX_FILE_SIZE && !(await isBinaryFile(filePath))
+  } catch {
+    return false
   }
 }
 
@@ -214,12 +200,7 @@ export async function scanRepository(repoPath: string): Promise<ScannedFile[]> {
 
         const fileStat = await stat(fullPath)
 
-        if (fileStat.size > MAX_FILE_SIZE) {
-          continue
-        }
-
-        // Primeiro detecta se é binário lendo apenas 4096 bytes (evita carregar binários grandes)
-        if (await isBinaryFile(fullPath)) {
+        if (!(await isEligibleTextFile(fullPath))) {
           continue
         }
 

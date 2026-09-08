@@ -1,35 +1,12 @@
-/*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Fornecer os estilos CSS para o layout principal, painéis de entrada, formulários e botões de ação do CodeDashView.
-2. Garantir adaptação responsiva com altura ajustada ao viewport e estados visuais consistentes.
-
-Mapa de Relacionamentos do Script
-
-1. CodeDashView.tsx
-   - Tipo: Relação de UI
-   - Relação: Fornece classes CSS estruturais para o container principal da aba Code Dash.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Utilizar as variáveis CSS de tema (--bg-secondary, --accent, --border-color, etc.) da aplicação.
-2. Manter scroll interno e layout vertical limpo em todas as resoluções.
-
---- FIM ARQUITETURA DO SCRIPT ---
-*/
-
 .dash-view-container {
   display: flex;
   flex-direction: column;
   height: 100vh;
   overflow-y: auto;
   box-sizing: border-box;
-  padding: 30px 40px;
-  background-color: var(--bg-primary, #121212);
-  color: var(--text-primary, #ffffff);
+  padding: 30px 20px;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
 }
 
 .dash-view-header {
@@ -44,7 +21,7 @@ Invariantes do Script
 }
 
 .dash-view-icon {
-  color: var(--accent, #7852ee);
+  color: var(--text-subtle);
 }
 
 .dash-view-title {
@@ -56,8 +33,94 @@ Invariantes do Script
 
 .dash-view-subtitle {
   font-size: 14px;
-  color: var(--text-secondary, #888888);
+  color: var(--text-secondary);
   margin: 0;
+}
+
+.repo-discovery {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 0 20px;
+  margin-bottom: 20px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.repo-discovery-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.repo-discovery-heading h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  font-size: 15px;
+  letter-spacing: 0;
+}
+
+.repo-discovery-heading p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.repo-discovery-layers {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(112px, 1fr));
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.repo-discovery-layers button {
+  min-height: 48px;
+  padding: 6px 10px;
+  border: 0;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.repo-discovery-layers button:last-child { border-right: 0; }
+.repo-discovery-layers button.active { background: var(--accent); color: var(--text-on-accent, white); }
+.repo-discovery-layers button span { display: block; font-weight: 700; font-size: 12px; }
+
+.repo-discovery-actions,
+.repo-discovery-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.repo-discovery-generate {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.repo-discovery-meta {
+  padding: 8px 12px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.repo-discovery-meta span + span::before { content: '|'; margin-right: 8px; color: var(--border-subtle); }
+.repo-discovery-result { border: 1px solid var(--border-subtle); border-radius: 6px; overflow: hidden; }
+.repo-discovery-result pre { max-height: 360px; overflow: auto; margin: 0; padding: 14px; background: var(--bg-secondary); font: 12px/1.5 var(--font-mono); }
+.repo-discovery-error { color: var(--color-danger); font-size: 12px; }
+
+@media (max-width: 900px) {
+  .repo-discovery-heading { flex-direction: column; }
+  .repo-discovery-layers { width: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 .dash-input-section {
@@ -72,11 +135,11 @@ Invariantes do Script
   box-sizing: border-box;
   min-height: 160px;
   padding: 14px;
-  background-color: var(--bg-secondary, #1e1e1e);
-  border: 1px solid var(--border-color, #333333);
-  border-radius: 8px;
-  color: var(--text-primary, #ffffff);
-  font-family: var(--font-mono, 'Fira Code', Consolas, monospace);
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.5;
   resize: vertical;
@@ -85,8 +148,7 @@ Invariantes do Script
 
 .dash-textarea:focus {
   outline: none;
-  border-color: var(--accent, #7852ee);
-  box-shadow: 0 0 0 2px rgba(120, 82, 238, 0.2);
+  border-color: var(--accent);
 }
 
 .dash-textarea:disabled {
@@ -97,45 +159,7 @@ Invariantes do Script
 .dash-actions-bar {
   display: flex;
   align-items: center;
-  gap: 12px;
-}
-
-.dash-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
   gap: 8px;
-  padding: 10px 20px;
-  border-radius: 6px;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  border: none;
-  transition: filter 0.15s ease, opacity 0.15s ease, background-color 0.15s ease;
-}
-
-.dash-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.dash-btn.primary {
-  background-color: var(--accent, #7852ee);
-  color: #ffffff;
-}
-
-.dash-btn.primary:hover:not(:disabled) {
-  filter: brightness(1.1);
-}
-
-.dash-btn.secondary {
-  background-color: var(--btn-secondary-bg, #2a2a2a);
-  color: var(--text-primary, #ffffff);
-  border: 1px solid var(--border-color, #444444);
-}
-
-.dash-btn.secondary:hover:not(:disabled) {
-  background-color: var(--btn-secondary-hover-bg, #383838);
 }
 
 .dash-error-banner {
@@ -143,10 +167,10 @@ Invariantes do Script
   align-items: flex-start;
   gap: 12px;
   padding: 14px 16px;
-  border-radius: 8px;
-  background-color: rgba(248, 81, 73, 0.1);
-  border: 1px solid #f85149;
-  color: #f85149;
+  border-radius: 10px;
+  background-color: color-mix(in srgb, var(--color-danger) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--color-danger) 40%, transparent);
+  color: var(--color-danger);
   margin-bottom: 20px;
 }
 
@@ -167,87 +191,92 @@ Invariantes do Script
 }
 
 .dash-no-project-msg {
-  padding: 30px;
-  background-color: var(--bg-secondary, #1e1e1e);
-  border: 1px solid var(--border-color, #333333);
-  border-radius: 8px;
-  text-align: center;
-  color: var(--text-secondary, #aaaaaa);
-  font-size: 14px;
-}
-
-/* Quick Action: One-Click XML */
-.dash-quick-action-section {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 16px 20px;
-  background-color: var(--bg-secondary, #1e1e1e);
-  border: 1px solid var(--border-color, #333333);
-  border-radius: 8px;
-  margin-bottom: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
-.dash-quick-action-header {
+/* OptimizationBar — linha de título + toggles compartilhada entre os modos */
+.dash-optimization-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  gap: 16px;
   flex-wrap: wrap;
+  margin-bottom: 16px;
 }
 
-.dash-quick-action-icon {
-  color: var(--accent, #7852ee);
-}
-
-.dash-quick-action-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--text-primary, #ffffff);
-}
-
-.dash-quick-action-description {
+.dash-opt-title {
   font-size: 12px;
-  color: var(--text-secondary, #888888);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
 }
 
-.dash-quick-action-controls {
+.dash-opt-toggles {
   display: flex;
-  gap: 18px;
   flex-wrap: wrap;
-  align-items: center;
+  gap: 18px;
 }
 
-.dash-toggle-label {
+.dash-opt-toggle {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  color: var(--text-secondary, #cccccc);
+  color: var(--text-secondary);
   cursor: pointer;
   user-select: none;
 }
 
-.dash-toggle-label input[type='checkbox'] {
-  cursor: pointer;
-  accent-color: var(--accent, #7852ee);
-}
-
-.dash-quick-action-bar {
+/* Seletor de modo de workflow (divisor visual via borda inferior) */
+.dash-mode-switcher {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  margin-top: 4px;
+  gap: 4px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--border-subtle);
 }
 
-.dash-quick-action-error {
-  margin-top: 10px;
-  margin-bottom: 0;
-  padding: 10px 14px;
+.dash-mode-tab {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 6px 12px;
   font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s ease, border-color 0.15s ease;
 }
 
-.dash-section-divider {
-  height: 1px;
-  background-color: var(--border-color, #333333);
-  margin-bottom: 24px;
+.dash-mode-tab[aria-selected='true'] {
+  color: var(--text-primary);
+  border-bottom-color: var(--accent);
+}
+
+.dash-mode-tab:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Workspace: colunas empilhadas dos painéis de modo ativo */
+.dash-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.dash-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }

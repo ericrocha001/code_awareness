@@ -1,33 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Criar repositórios Git temporários reais e determinísticos para a bateria de testes de GitService e DiffService.
-2. Encapsular a execução do binário `git` com timeout, tratando códigos de saída como contrato de sucesso.
-3. Fornecer primitivas de manipulação de arquivos e commits (escrita, deleção, stage, commit, touch de mtime).
-4. Limpar repositórios temporários de forma tolerante a falhas de lock do filesystem no Windows.
-
-Mapa de Relacionamentos do Script
-
-1. git-service.test.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome os helpers para montar cenários reais de status Git e validar contratos.
-   - Criticidade: Alta
-
-2. diff-service.test.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome os helpers para montar repos com adição, modificação e deleção de arquivos.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum helper de cleanup lança exceção — falhas na remoção são logadas e ignoradas, nunca abortando os testes.
-2. createTempGitRepo sempre configura user.name e user.email locais e core.quotePath false, garantindo commits e caminhos UTF-8 determinísticos.
-3. gitExec lança erro quando o código de saída não é o esperado (0, ou 0/1 no caso de `git diff`).
-4. Diretórios temporários são sempre únicos via mkdtempSync com prefixo git_test_.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { spawn } from 'child_process'

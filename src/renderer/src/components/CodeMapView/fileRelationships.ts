@@ -1,31 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Derivar o grafo de dependências entre arquivos a partir dos relacionamentos `imports`.
-2. Expor a união dos arquivos importados e dos que importam um dado arquivo.
-
-Mapa de Relacionamentos do Script
-
-1. CodeMapView.tsx
-   - Tipo: Fluxo de Dados
-   - Relação: Consome buildFileGraph e getRelatedFileIds para acender os arquivos relacionados na árvore.
-   - Criticidade: Alta
-
-2. ../../../../shared/types
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos CodeMapRelationship, CodeMapElement e CodeMapFile.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O módulo é puro: não acessa React, IPC, DOM ou estado global.
-2. A saída é determinística para a mesma entrada.
-3. Nenhuma função lança exceção — entradas inválidas produzem grafos vazios.
-4. A complexidade é O(n) no total de relacionamentos e elementos.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { CodeMapElement, CodeMapFile, CodeMapRelationship } from '../../../../shared/types'

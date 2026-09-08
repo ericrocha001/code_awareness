@@ -1,41 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Definir o contrato de persistência do Repository Model para operações CRUD.
-2. Declarar os tipos de persistência (Row) que representam o formato flat das colunas no SQLite.
-3. Declarar métodos para persistência e consulta de interfaces implementadas por elementos.
-4. Declarar o método de atualização do carimbo de última sincronização (updateLastSyncAt).
-
-Mapa de Relacionamentos do Script
-
-1. shared/types.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome os tipos de domínio CodeMapElement, CodeMapFile, CodeMapRepository, CodeMapRelationship, CodeMapFileStatus e CodeMapSyncStatus.
-   - Criticidade: Alta
-
-2. repository-model.ts (Sprint 5)
-   - Tipo: Contrato / Interface
-   - Relação: Dependerá apenas desta interface, nunca diretamente do SQLite.
-   - Criticidade: Alta
-
-3. repository-database.ts (Sprint 2)
-   - Tipo: Dependência Inversa
-   - Relação: Implementará esta interface, convertendo entre tipos Row e tipos de domínio.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum tipo de domínio pode conter referência a SQLite ou qualquer tecnologia de banco.
-2. Os métodos do contrato devem receber e retornar apenas tipos de domínio, nunca tipos Row.
-3. A conversão entre Row e domínio é responsabilidade exclusiva da implementação.
-4. Nenhum método pode ser implementado neste arquivo — apenas declarado na interface.
-5. Os tipos Row devem permanecer internos ao main process, nunca exportados para shared/types.ts.
-6. O tipo CodeMapFileRow representa o formato flat da tabela files, incluindo a coluna content_hash.
-7. getFileById deve retornar null quando o id não existir — nunca lançar exceção.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type {
@@ -58,6 +22,7 @@ export interface CodeMapRepositoryRow {
 export interface CodeMapFileRow {
   id: string
   repository_id: string
+  context_reference: string | null
   relative_path: string
   language: string
   extension: string
@@ -65,6 +30,10 @@ export interface CodeMapFileRow {
   size_bytes: number
   mtime: number
   content_hash: string | null
+  token_count: number | null
+  tokenizer_id: string | null
+  tokenizer_encoding: string | null
+  tokenized_content_hash: string | null
   status: string
 }
 
@@ -89,6 +58,11 @@ export interface CodeMapElementRow {
   base_class: string | null
   has_documentation: number
   parameter_count: number
+  retrieval_kind: string | null
+  /** Granularidade semântica do elemento */
+  granularity: string
+  /** Se 1, o elemento pode ser recuperado exatamente via getElementExactSource */
+  retrievable: number
 }
 
 export interface CodeMapRelationshipRow {
@@ -97,6 +71,8 @@ export interface CodeMapRelationshipRow {
   source_id: string
   target_id: string
   type: string
+  source_kind: string
+  target_kind: string
 }
 
 export interface RepositoryRepository {
@@ -118,6 +94,14 @@ export interface RepositoryRepository {
 
   /** Insere ou atualiza (upsert) um arquivo. Usa (repositoryId, relativePath) como chave de unicidade. */
   saveFile(file: CodeMapFile): void
+
+  allocateContextReference(repositoryId: string): string
+
+  backfillContextReferences(repositoryId: string): number
+
+  retireContextReference(repositoryId: string, contextReference: string): void
+
+  moveFile(fileId: string, relativePath: string): void
 
   /** Lista todos os arquivos de um repositório, ordenados por relativePath. */
   getFilesByRepository(repositoryId: string): CodeMapFile[]
@@ -157,6 +141,19 @@ export interface RepositoryRepository {
   /** Remove todos os elementos de um arquivo específico, incluindo registros das tabelas auxiliares e relacionamentos associados. */
   deleteElementsByFile(fileId: string): void
 
+  /**
+   * Substitui atomicamente o estado indexado de um arquivo (tudo ou nada).
+   * Dentro de UMA transação: deleta tabelas-filha e relações do arquivo, deleta os elementos antigos,
+   * grava o file, os novos elements, as relações locais do arquivo e as elementInterfaces.
+   * Os mappers (com validação) rodam DENTRO da transação — entrada envenenada causa rollback total.
+   */
+  replaceIndexedFileState(
+    file: CodeMapFile,
+    elements: CodeMapElement[],
+    relationships: CodeMapRelationship[],
+    elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>
+  ): void
+
   /** Salva ou substitui as interfaces implementadas por elementos em uma transação. */
   saveElementInterfaces(entries: Array<{ elementId: string; interfaceNames: string[] }>): void
 
@@ -187,4 +184,4 @@ export interface RepositoryRepository {
 
   /** Retorna contagens agregadas do repositório (totalFiles, indexedFiles, modifiedFiles, totalElements, lastSyncAt) usando queries COUNT do SQLite. */
   getSyncStatus(repositoryId: string): CodeMapSyncStatus
-}
+}

@@ -1,38 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Testar resiliência do RepositoryModel e RepositorySynchronizer diante de falhas de parse e de indexação.
-2. Testar concorrência entre eventos de file watcher e varreduras periódicas.
-3. Testar resiliência sob carga de múltiplos arquivos modificados simultaneamente.
-4. Testar race conditions quando um arquivo é modificado durante a sincronização em lote.
-
-Mapa de Relacionamentos do Script
-
-1. repository-model.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e executa indexRepository, updateFileContent, verifyIntegrity.
-   - Criticidade: Alta
-
-2. repository-synchronizer.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa a sincronização em lote e filas de pendentes.
-   - Criticidade: Alta
-
-3. test-helpers.ts
-   - Tipo: Dependência Direta
-   - Relação: Utiliza createAndIndexRepo, cleanupTestDir, createTempRepo, writeTestFile, verifyInvariant.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os testes utilizam repositórios temporários isolados com cleanupTestDir no afterEach.
-2. Nenhuma falha de parse ou erro parcial pode corromper os dados de arquivos válidos já indexados.
-3. Assertivas de elementos devem filtrar por kind (ex: e.kind === 'class') para evitar ambiguidades com exports.
-4. Timers reais são utilizados onde a concorrência assíncrona ou debounce de eventos do watcher for exercitado.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect, afterEach, vi } from 'vitest'
@@ -45,7 +12,7 @@ import {
   cleanupTestDir,
   verifyInvariant
 } from './test-helpers'
-import { RepositoryModel } from './repository-model'
+import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { RepositorySynchronizer } from './repository-synchronizer'
 import { closeRepositoryDatabase } from './repository-database'
 import { repositoryEventBus } from './repository-events'
@@ -69,7 +36,7 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
     writeTestFile(repoPath, 'src/valid2.ts', 'export class Class2 {}\n')
     writeTestFile(repoPath, 'src/valid3.ts', 'export class Class3 {}\n')
 
-    model = new RepositoryModel(repoPath)
+    model = createRepositoryModel(repoPath)
 
     const realReadStructure = structureReaderModule.readStructure
     const spy = vi.spyOn(structureReaderModule, 'readStructure').mockImplementation(
@@ -150,7 +117,7 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
     expect(fullInvariant.passed).toBe(true)
   })
 
-  it('Teste 3 — Evento recebido durante sincronização em lote não é perdido', async () => {
+  it('Teste 3 — Evento recebido durante sincronização em lote não é perdido (auto-sync)', async () => {
     ;({ model, repoPath } = await createAndIndexRepo({
       'src/first.ts': 'export class First {}\n',
       'src/second.ts': 'export class Second {}\n'
@@ -175,14 +142,21 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
     // O evento do terceiro arquivo foi capturado no pendingFiles
     expect(synchronizer.getPendingFilesCount()).toBeGreaterThan(0)
 
-    // Aguarda o debounce de 500ms + processamento da fila
-    await new Promise((resolve) => setTimeout(resolve, 800))
+    // Aguarda o debounce de 500ms + estabilização + auto-reindex do terceiro
+    // NOTA (Sprint 6): com auto-sync, o terceiro arquivo é reindexado automaticamente
+    // após sua confirmação, então modifiedFilesCount vai a 0 (não fica pendente).
+    await new Promise((resolve) => setTimeout(resolve, 1500))
 
-    expect(synchronizer.getModifiedFilesCount()).toBe(1)
+    // Auto-sync reindexou o third → sem pendentes (critério congelado #2)
+    expect(synchronizer.getModifiedFilesCount()).toBe(0)
+    expect(synchronizer.getPendingFilesCount()).toBe(0)
 
-    // Segunda chamada sincroniza o terceiro arquivo
-    const res2 = await synchronizer.synchronizeModified()
-    expect(res2.filesUpdated).toBe(1)
+    // Terceiro arquivo está indexado com elementos
+    const thirdFile = model.getFileByRelativePath('src/third.ts')
+    expect(thirdFile).toBeDefined()
+    expect(thirdFile!.status).toBe('indexed')
+    const elements = model.getElementsByFile(thirdFile!.id)
+    expect(elements.find((e) => e.name === 'Third' && e.kind === 'class')).toBeDefined()
 
     const invariant = await verifyInvariant(model, repoPath)
     expect(invariant.passed).toBe(true)
@@ -236,13 +210,19 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
     }
 
     // Aguarda debounce + estabilização sequencial de 50 arquivos (50 x 100ms = 5000ms + buffer)
+    // NOTA (Sprint 6): com auto-sync, cada arquivo é reindexado automaticamente após sua
+    // confirmação, então modifiedFiles fica vazio (sem pendentes). O critério congelado #2
+    // exige "após debounce, elementos novos indexados, status indexed".
     await new Promise((resolve) => setTimeout(resolve, 7000))
 
-    expect(synchronizer.getModifiedFilesCount()).toBe(50)
+    expect(synchronizer.getModifiedFilesCount()).toBe(0) // auto-sync reindexou todos → sem pendentes
 
-    const syncResult = await synchronizer.synchronizeModified()
-    expect(syncResult.filesUpdated).toBe(50)
-    expect(syncResult.errors.length).toBe(0)
+    // Todos os 50 arquivos estão indexados com o conteúdo modificado
+    const files = model.getFiles()
+    expect(files.length).toBe(50)
+    for (const file of files) {
+      expect(file.status).toBe('indexed')
+    }
 
     const invariant = await verifyInvariant(model, repoPath)
     expect(invariant.passed).toBe(true)
@@ -278,15 +258,11 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
 
     spy.mockRestore()
 
-    // Aguarda o debounce do evento emitido durante a sincronização
-    await new Promise((resolve) => setTimeout(resolve, 800))
+    // Aguarda o debounce do evento emitido durante a sincronização + auto-reindex
+    await new Promise((resolve) => setTimeout(resolve, 1500))
 
-    // Arquivo foi detectado como modificado novamente (Race3 no disco != Race2 no banco)
-    expect(synchronizer.getModifiedFilesCount()).toBe(1)
-
-    // Segunda chamada sincroniza a nova versão (Race3)
-    const res2 = await synchronizer.synchronizeModified()
-    expect(res2.filesUpdated).toBe(1)
+    // Auto-sync reindexou Race3 → sem pendentes (critério congelado #2)
+    expect(synchronizer.getModifiedFilesCount()).toBe(0)
 
     const files = model.getFiles()
     const raceFile = files.find((f) => f.relativePath === 'src/race.ts')!

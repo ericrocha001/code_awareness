@@ -1,32 +1,6 @@
 // @vitest-environment jsdom
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a navegação por teclado e foco no componente TagPopover.
-2. Comprovar que o foco inicial ao abrir é direcionado ao input de busca.
-3. Comprovar que as teclas de seta navegam o destaque visual mesmo com foco em botões internos de tag.
-4. Garantir que a tecla Enter não duplica a chamada IPC quando o foco estiver diretamente no botão da tag.
-
-Mapa de Relacionamentos do Script
-
-1. TagPopover.tsx
-   - Tipo: Dependência Direta
-   - Relação: Componente sob teste.
-   - Criticidade: Alta
-
-2. @testing-library/react
-   - Tipo: Dependência Direta
-   - Relação: Utilizado para renderização e simulação de eventos.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. As setas movem o destaque visual independentemente de o foco estar no input ou em um botão interno.
-2. O Enter em botão de tag dispara a ação exatamente uma vez via clique nativo sem redundância do handler do balão.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import React, { useRef } from 'react'

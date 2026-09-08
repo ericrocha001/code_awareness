@@ -1,34 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Derivar o status de cada checkpoint (active, restored, reverted) a partir da lista de sumários com restoredAt.
-2. Determinar os IDs de comparação de diff com ciência de restauração, usando o ponto de restauração como base para o primeiro checkpoint pós-restauração.
-3. Montar o documento de auditoria em quatro níveis (Prompt + Diff, Resultado + Prompt + Diff, Instruções + Prompt + Diff, Auditoria Completa).
-4. Concentrar toda a lógica pura de cálculo da restauração no renderer, isolada em um único arquivo removível.
-
-Mapa de Relacionamentos do Script
-
-1. ../../../../shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Fornece os tipos CheckpointStatus e CheckpointSummary.
-   - Criticidade: Alta
-
-2. ./checkpointUtils.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome getCompareIds como fallback quando não há ponto de restauração.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todas as funções exportadas são puras — sem side effects, sem estado global, sem IPC.
-2. A derivação de status usa duas datas (createdAt e restoredAt) — trabalho criado após a ação de restaurar é active, nunca reverted.
-3. getRestoreAwareCompareIds delega ao getCompareIds original quando não há ponto de restauração, produzindo resultado idêntico.
-4. Campos opcionais ausentes na auditoria (instruções, resultado) são tratados com aviso explícito, nunca omitidos silenciosamente.
-5. buildAuditDocument nunca lança erro para entradas válidas.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { CheckpointStatus, CheckpointSummary } from '../../../../shared/types'

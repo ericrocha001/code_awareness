@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente o planejador de execução de contexto do Code Dash.
-2. Garantir preservação de ordem, mapeamento de índices e filtragem de falhas parciais.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/dash/dash-execution-planner.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa a função planExecution e valida os planos gerados.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Operar puramente em memória sem qualquer I/O ou dependência de filesystem.
-2. Cobrir todos os cenários obrigatórios de planejamento da Sprint 2.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, expect, it } from 'vitest'

@@ -1,39 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar a pipeline de resolução semântica que transforma o Stored Profile em Effective Profile.
-2. Validar a eliminação de campos sem efeito no caminho compression-core (showLineNumbers, parsableStyle, flags de sumário e árvore).
-3. Validar a eliminação universal de outputFilePathStyle em todos os caminhos arquiteturais.
-4. Validar a preservação de todos os campos relevantes a nível de documento no caminho direct-output.
-5. Garantir o determinismo estrito da resolução semântica.
-
-Mapa de Relacionamentos do Script
-
-1. effective-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Testa a função resolveEffectiveProfile e a estrutura do tipo EffectiveProfile.
-   - Criticidade: Alta
-
-2. compression-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Consome DEFAULT_PROFILE para os cenários de teste.
-   - Criticidade: Alta
-
-3. shared/types.ts
-   - Tipo: Contrato / Interface
-   - Relação: Consome CompressionProfile e OutputFormat para tipagem de entrada dos testes.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Nenhum teste acessa filesystem, Git real ou invoca processos externos — testes 100% determinísticos em memória.
-2. No caminho compression-core, apenas removeComments, removeEmptyLines e truncateBase64 existem no objeto resultante.
-3. outputFilePathStyle nunca está presente no EffectiveProfile retornado.
-4. Mesma entrada sempre produz o mesmo EffectiveProfile (imutabilidade e determinismo).
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { describe, it, expect } from 'vitest'

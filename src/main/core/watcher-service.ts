@@ -1,33 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Monitorar em segundo plano as mudanças de arquivos de texto em múltiplas raízes de diretório simultaneamente.
-2. Manter um registro de ouvintes por raiz vigiada, gerenciando o ciclo de vida do vigia do sistema por contagem de assinaturas.
-3. Manter em memória a lista global de caminhos de arquivos modificados desde o início da observação.
-
-Mapa de Relacionamentos do Script
-
-1. watcher-bridge.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome o serviço via assinatura por raiz para alimentar o Event Bus.
-   - Criticidade: Alta
-
-2. git-handler.ts
-   - Tipo: Dependência Inversa
-   - Relação: Consome o serviço via assinatura por raiz para enviar pushes via IPC.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. O watcher principal deve ignorar extensões binárias e pastas de build/node_modules/.git.
-2. O watcher principal NUNCA deve monitorar recursivamente a pasta .git.
-3. Cada raiz de repositório deve possuir no máximo um vigia do sistema (FSWatcher) ativo, compartilhado entre todos os ouvintes daquela raiz.
-4. Quando o número de ouvintes de uma raiz chegar a zero, o vigia do sistema correspondente deve ser imediatamente encerrado e removido.
-5. Uma exceção lançada por um ouvinte não pode interromper nem impedir a notificação dos demais ouvintes registrados.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { watch, FSWatcher } from 'fs'

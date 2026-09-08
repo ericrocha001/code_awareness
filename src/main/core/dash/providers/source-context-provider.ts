@@ -1,36 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Adaptar o CodeSourceService para a interface ContextProvider do protocolo Code Dash.
-2. Executar a geração sequencial de código-fonte em formato XML para os arquivos planejados.
-3. Tratar falhas individuais de geração e respeitar sinais de cancelamento AbortSignal.
-
-Mapa de Relacionamentos do Script
-
-1. context-provider.ts
-   - Tipo: Contrato / Interface
-   - Relação: Implementa a interface ContextProvider.
-   - Criticidade: Alta
-
-2. src/main/core/code-source-service.ts
-   - Tipo: Dependência Direta
-   - Relação: Delega a extração de código-fonte ao CodeSourceService.
-   - Criticidade: Alta
-
-3. src/shared/utils/source-profile.ts
-   - Tipo: Dependência Direta
-   - Relação: Utiliza DEFAULT_SOURCE_PROFILE como perfil padrão de extração.
-   - Criticidade: Média
-
-Invariantes do Script
-
-1. Executar os itens de forma estritamente sequencial para não sobrecarregar processos externos do Repomix.
-2. Usar invariavelmente o formato 'xml' como formato canônico de extração.
-3. Não criar cache próprio ou duplicar lógica de geração de arquivos.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import type { DashPlannedItem } from '../../../../shared/types/dash-types'
@@ -59,11 +28,23 @@ export class SourceContextProvider implements ContextProvider {
       }
 
       try {
+        // Resolve o profile base do item e aplica o merge das configurações globais de economia.
+        // O merge sobrescreve apenas os três campos econômicos; os demais campos do profile base são preservados.
+        const baseProfile = item.profile ?? DEFAULT_SOURCE_PROFILE
+        const effectiveProfile = options.settings
+          ? {
+              ...baseProfile,
+              removeComments: options.settings.removeComments,
+              removeEmptyLines: options.settings.removeEmptyLines,
+              truncateBase64: options.settings.truncateBase64
+            }
+          : baseProfile
+
         const result = await this.codeSourceService.generateWithProfile({
           repoPath: options.repoPath,
           selectedFiles: [item.path],
           format: 'xml',
-          profile: item.profile ?? DEFAULT_SOURCE_PROFILE,
+          profile: effectiveProfile,
           signal: options.signal
         })
 

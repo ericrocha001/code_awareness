@@ -1,35 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente os handlers IPC do Code Dash: registro de canais, validação defensiva e formato de respostas.
-2. Garantir que exceções sejam tratadas e que o contrato IPC { success, data?, error? } seja respeitado.
-3. Validar a delegação de dash:one-click-xml para o OneClickXmlService.
-
-Mapa de Relacionamentos do Script
-
-1. dash-handler.ts
-   - Tipo: Dependência Direta
-   - Relação: Executa registerDashHandlers para capturar e invocar os handlers IPC.
-   - Criticidade: Alta
-
-2. src/main/core/dash/dash-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Mockado para simular respostas e erros do serviço Code Dash.
-   - Criticidade: Alta
-
-3. src/main/core/one-click-xml-service.ts
-   - Tipo: Contrato / Interface
-   - Relação: Mockado para simular respostas e erros do serviço OneClickXmlService.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os testes devem rodar em memória sem instanciar o Electron real.
-2. Handlers IPC nunca devem lançar exceções não tratadas.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -124,7 +94,41 @@ describe('registerDashHandlers', () => {
       const res = await handler()({}, 'valid input', '/test/repo')
       expect(mockDashService.execute).toHaveBeenCalledWith(
         'valid input',
-        '/test/repo'
+        '/test/repo',
+        {
+          repoPath: '/test/repo',
+          settings: undefined
+        }
+      )
+      expect(res).toEqual({
+        success: true,
+        data: fakeExecutionResult
+      })
+    })
+
+    it('deve repassar settings para dashService.execute quando fornecidas', async () => {
+      const fakeExecutionResult = {
+        success: true,
+        xml: '<code-dash-context />',
+        tokenCount: 123,
+        metadata: { requested: 1, resolved: 1, generated: 1, failed: 0 }
+      }
+      vi.mocked(mockDashService.execute).mockResolvedValue(fakeExecutionResult as any)
+
+      const settings = {
+        removeComments: true,
+        removeEmptyLines: true,
+        truncateBase64: true
+      }
+
+      const res = await handler()({}, 'valid input', '/test/repo', settings)
+      expect(mockDashService.execute).toHaveBeenCalledWith(
+        'valid input',
+        '/test/repo',
+        {
+          repoPath: '/test/repo',
+          settings
+        }
       )
       expect(res).toEqual({
         success: true,
@@ -176,9 +180,52 @@ describe('registerDashHandlers', () => {
 
       const res = await handler()({}, '/test/repo', { removeComments: true })
       expect(mockOneClickXmlService.generateOneClickXml).toHaveBeenCalledWith('/test/repo', {
-        removeComments: true
+        removeComments: true,
+        removeEmptyLines: undefined,
+        truncateBase64: undefined
       })
       expect(res).toEqual(fakeResult)
+    })
+
+    it('deve usar persistedSettings quando opções inline não forem fornecidas', async () => {
+      const fakeResult = { success: true, xml: '<xml/>' }
+      vi.mocked(mockOneClickXmlService.generateOneClickXml).mockResolvedValue(fakeResult as any)
+
+      const persistedSettings = {
+        removeComments: true,
+        removeEmptyLines: false,
+        truncateBase64: true
+      }
+
+      await handler()({}, '/test/repo', { persistedSettings })
+
+      expect(mockOneClickXmlService.generateOneClickXml).toHaveBeenCalledWith('/test/repo', {
+        removeComments: true,
+        removeEmptyLines: false,
+        truncateBase64: true
+      })
+    })
+
+    it('deve priorizar opções inline explícitas sobre persistedSettings', async () => {
+      const fakeResult = { success: true, xml: '<xml/>' }
+      vi.mocked(mockOneClickXmlService.generateOneClickXml).mockResolvedValue(fakeResult as any)
+
+      const persistedSettings = {
+        removeComments: true,
+        removeEmptyLines: true,
+        truncateBase64: true
+      }
+
+      await handler()({}, '/test/repo', {
+        removeComments: false,
+        persistedSettings
+      })
+
+      expect(mockOneClickXmlService.generateOneClickXml).toHaveBeenCalledWith('/test/repo', {
+        removeComments: false,
+        removeEmptyLines: true,
+        truncateBase64: true
+      })
     })
 
     it('deve retornar erro quando generateOneClickXml falhar', async () => {

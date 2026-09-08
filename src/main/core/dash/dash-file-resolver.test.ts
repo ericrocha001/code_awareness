@@ -1,24 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente a resolução de arquivos de requisições Code Dash em diretórios temporários controlados.
-2. Garantir que caminhos exatos, fallbacks por basename, ambiguidades e tentativas de path traversal sejam tratados corretamente.
-
-Mapa de Relacionamentos do Script
-
-1. src/main/core/dash/dash-file-resolver.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa os métodos da classe DashFileResolver.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Todos os testes devem criar sua própria sandbox temporária e removê-la completamente ao final da execução.
-2. Cobrir todos os casos obrigatórios da Sprint 2 para resolução de caminhos.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import fs from 'fs'

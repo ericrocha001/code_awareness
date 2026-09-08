@@ -1,32 +1,5 @@
 /*
---- ARQUITETURA DO SCRIPT ---
-
-Responsabilidades do Script
-
-1. Validar unitariamente o comportamento do IgnorePolicy na resolução da allowlist.
-2. Garantir que filtros de Git Ignore (.gitignore) sejam aplicados a todos os candidatos.
-3. Garantir que filtros de Code Awareness Ignore (caminhos exatos de settings) sejam aplicados.
-4. Validar normalização de caminhos (barras invertidas), deduplicação e ordenação determinística.
-5. Validar o comportamento sob ausência de .gitignore e propagação de erros de listagem.
-
-Mapa de Relacionamentos do Script
-
-1. ignore-policy.ts
-   - Tipo: Dependência Direta
-   - Relação: Instancia e testa a classe IgnorePolicy com dublês de porta e settings.
-   - Criticidade: Alta
-
-2. file-listing-port.ts
-   - Tipo: Contrato / Interface
-   - Relação: Mockado para simular fornecimento de candidatos sem I/O real.
-   - Criticidade: Alta
-
-Invariantes do Script
-
-1. Testes não devem chamar o Repomix nem depender de Electron real.
-2. Testes de filesystem utilizam diretórios temporários limpos após execução.
-
---- FIM ARQUITETURA DO SCRIPT ---
+-T ---
 */
 
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
@@ -35,6 +8,7 @@ import { join } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { FileListingPort } from './file-listing-port'
 import { IgnorePolicy, type SettingsReader } from './ignore-policy'
+import type { CodeAwarenessIgnoreService } from './code-awareness-ignore-service'
 
 describe('IgnorePolicy', () => {
   let tempDirs: string[] = []
@@ -218,5 +192,58 @@ describe('IgnorePolicy', () => {
     await expect(policy.resolveAllowlist(tempDir)).rejects.toThrow(
       'Disco corrompido ou inacessível'
     )
+  })
+
+  it('9. Utiliza CodeAwarenessIgnoreService quando injetado para filtrar arquivos ignorados', async () => {
+    const tempDir = createTempDir()
+
+    const mockLister: FileListingPort = {
+      listAllFiles: vi.fn().mockResolvedValue([
+        { relativePath: 'src/main.ts' },
+        { relativePath: 'src/config.ts' },
+        { relativePath: 'src/secret.ts' }
+      ])
+    }
+
+    const mockIgnoreService: CodeAwarenessIgnoreService = {
+      list: vi.fn().mockReturnValue(['src/secret.ts'])
+    } as unknown as CodeAwarenessIgnoreService
+
+    const policy = new IgnorePolicy(mockLister, undefined, mockIgnoreService)
+    const allowlist = await policy.resolveAllowlist(tempDir)
+
+    expect(mockIgnoreService.list).toHaveBeenCalledWith(tempDir)
+    expect(allowlist).toEqual(['src/config.ts', 'src/main.ts'])
+  })
+
+  it('10. CodeAwarenessIgnoreService tem precedência sobre settingsReader quando ambos são injetados', async () => {
+    const tempDir = createTempDir()
+
+    const mockLister: FileListingPort = {
+      listAllFiles: vi.fn().mockResolvedValue([
+        { relativePath: 'src/a.ts' },
+        { relativePath: 'src/b.ts' },
+        { relativePath: 'src/c.ts' }
+      ])
+    }
+
+    const mockSettings: SettingsReader = {
+      loadSettings: vi.fn().mockReturnValue({
+        ignoredDiffFiles: {
+          [tempDir]: ['src/b.ts']
+        }
+      })
+    }
+
+    const mockIgnoreService: CodeAwarenessIgnoreService = {
+      list: vi.fn().mockReturnValue(['src/c.ts'])
+    } as unknown as CodeAwarenessIgnoreService
+
+    const policy = new IgnorePolicy(mockLister, mockSettings, mockIgnoreService)
+    const allowlist = await policy.resolveAllowlist(tempDir)
+
+    expect(mockIgnoreService.list).toHaveBeenCalledWith(tempDir)
+    expect(mockSettings.loadSettings).not.toHaveBeenCalled()
+    expect(allowlist).toEqual(['src/a.ts', 'src/b.ts'])
   })
 })
