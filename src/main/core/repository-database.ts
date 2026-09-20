@@ -26,6 +26,8 @@ import type {
   CodeMapRepositoryRow,
   RepositoryRepository
 } from './repository-repository'
+import type { SymbolReferenceKind } from './extraction/structure-extraction-port'
+import type { PersistedSymbolReference } from './symbol-reference-resolver'
 
 // Cache de conexões abertas: chave = repoPath, valor = instância do banco
 interface DatabaseConnection {
@@ -36,10 +38,11 @@ interface DatabaseConnection {
 const connections = new Map<string, DatabaseConnection>()
 
 const FILE_STATUSES: readonly CodeMapFileStatus[] = ['indexed', 'modified'] as const
-const ELEMENT_KINDS: readonly CodeMapElementKind[] = ['class', 'function', 'method', 'interface', 'enum', 'typeAlias', 'variable', 'constant', 'import', 'export', 'property', 'parameter', 'enumMember', 'cssRule', 'cssAtRule', 'cssCustomProperty'] as const
+const ELEMENT_KINDS: readonly CodeMapElementKind[] = ['class', 'function', 'method', 'interface', 'enum', 'typeAlias', 'variable', 'constant', 'import', 'export', 'property', 'parameter', 'enumMember', 'cssRule', 'cssAtRule', 'cssCustomProperty', 'document', 'section'] as const
 const ELEMENT_VISIBILITIES: readonly Exclude<CodeMapElementVisibility, null>[] = ['public', 'private', 'protected'] as const
 const RELATIONSHIP_TYPES: readonly CodeMapRelationshipType[] = ['contains', 'extends', 'implements', 'imports', 'exports'] as const
 const ENDPOINT_KINDS: readonly CodeMapEndpointKind[] = ['element', 'file'] as const
+const SYMBOL_REFERENCE_KINDS: readonly SymbolReferenceKind[] = ['reference', 'call', 'instantiation', 'type'] as const
 
 // ─── Gestão de Conexões ─────────────────────────────────────────────────────
 
@@ -111,6 +114,7 @@ function ensureSchema(db: BetterSqlite3Database): void {
       retrieval_kind TEXT,
       granularity TEXT NOT NULL DEFAULT 'structural',
       retrievable INTEGER NOT NULL DEFAULT 0,
+      declaration_signature TEXT,
       FOREIGN KEY (repository_id) REFERENCES repositories(id),
       FOREIGN KEY (file_id) REFERENCES files(id),
       FOREIGN KEY (parent_element_id) REFERENCES elements(id)
@@ -187,6 +191,23 @@ function ensureSchema(db: BetterSqlite3Database): void {
       PRIMARY KEY (element_id, name)
     );
 
+    CREATE TABLE IF NOT EXISTS symbol_references (
+      id TEXT PRIMARY KEY,
+      repository_id TEXT NOT NULL,
+      source_file_id TEXT NOT NULL,
+      source_element_id TEXT,
+      target_element_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      line INTEGER NOT NULL,
+      column INTEGER NOT NULL,
+      start_byte INTEGER NOT NULL,
+      end_byte INTEGER NOT NULL,
+      FOREIGN KEY (repository_id) REFERENCES repositories(id) ON DELETE CASCADE,
+      FOREIGN KEY (source_file_id) REFERENCES files(id) ON DELETE CASCADE,
+      FOREIGN KEY (source_element_id) REFERENCES elements(id) ON DELETE CASCADE,
+      FOREIGN KEY (target_element_id) REFERENCES elements(id) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS idx_files_repository_id ON files(repository_id);
     CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
     CREATE INDEX IF NOT EXISTS idx_elements_file_id ON elements(file_id);
@@ -195,6 +216,9 @@ function ensureSchema(db: BetterSqlite3Database): void {
     CREATE INDEX IF NOT EXISTS idx_relationships_repository_id ON relationships(repository_id);
     CREATE INDEX IF NOT EXISTS idx_relationships_source ON relationships(source_id);
     CREATE INDEX IF NOT EXISTS idx_relationships_target ON relationships(target_id);
+    CREATE INDEX IF NOT EXISTS idx_symbol_references_target ON symbol_references(target_element_id);
+    CREATE INDEX IF NOT EXISTS idx_symbol_references_source_element ON symbol_references(source_element_id);
+    CREATE INDEX IF NOT EXISTS idx_symbol_references_source_file ON symbol_references(source_file_id);
 
     INSERT OR IGNORE INTO schema_versions (id, schema_version, model_version, parser_version, created_at, updated_at)
     VALUES (1, 1, 1, NULL, datetime('now'), datetime('now'));
@@ -244,6 +268,11 @@ function ensureSchema(db: BetterSqlite3Database): void {
     db.exec('UPDATE elements SET granularity=\'structural\', retrievable=1 WHERE retrieval_kind=\'A\'')
   }
 
+  const hasDeclarationSignature = elementColumns.some(col => col.name === 'declaration_signature')
+  if (!hasDeclarationSignature) {
+    db.exec('ALTER TABLE elements ADD COLUMN declaration_signature TEXT')
+  }
+
   // Migração idempotente: adicionar source_kind e target_kind na tabela relationships.
   const relationshipColumns = db.prepare('PRAGMA table_info(relationships)').all() as Array<{ name: string }>
   const hasSourceKind = relationshipColumns.some(col => col.name === 'source_kind')
@@ -278,6 +307,7 @@ function getOrCreateConnection(repoPath: string): BetterSqlite3Database {
   const dbPath = getDbPath(repoPath)
   const db = new Database(dbPath)
   db.pragma('journal_mode = WAL')
+  db.pragma('foreign_keys = ON')
   ensureSchema(db)
 
   const conn: DatabaseConnection = { db, repoPath }
@@ -344,7 +374,8 @@ function domainToElementRow(element: CodeMapElement): CodeMapElementRow {
     parameter_count: element.parameterCount,
     retrieval_kind: element.retrievalKind ?? null,
     granularity: element.granularity,
-    retrievable: element.retrievable ? 1 : 0
+    retrievable: element.retrievable ? 1 : 0,
+    declaration_signature: element.declarationSignature ?? null
   }
 }
 
@@ -358,6 +389,21 @@ function domainToRelationshipRow(rel: CodeMapRelationship): CodeMapRelationshipR
     type: rel.type,
     source_kind: rel.sourceKind,
     target_kind: rel.targetKind
+  }
+}
+
+function domainToSymbolReferenceRow(reference: PersistedSymbolReference): Record<string, string | number | null> {
+  return {
+    id: reference.id,
+    repository_id: reference.repositoryId,
+    source_file_id: reference.sourceFileId,
+    source_element_id: reference.sourceElementId,
+    target_element_id: reference.targetElementId,
+    kind: validateEnum(reference.kind, SYMBOL_REFERENCE_KINDS, 'symbol reference kind'),
+    line: reference.location.start.line,
+    column: reference.location.start.column,
+    start_byte: reference.location.start.byte,
+    end_byte: reference.location.end.byte
   }
 }
 
@@ -447,7 +493,8 @@ function rowToElement(row: any): CodeMapElement {
     parameterCount: row.parameter_count,
     retrievalKind: row.retrieval_kind ?? null,
     granularity: (row.granularity as CodeMapGranularity) ?? 'structural',
-    retrievable: (row.retrievable ?? 0) === 1 || row.retrievable === true
+    retrievable: (row.retrievable ?? 0) === 1 || row.retrievable === true,
+    declarationSignature: row.declaration_signature ?? null
   }
 }
 
@@ -461,6 +508,21 @@ function rowToRelationship(row: any): CodeMapRelationship {
     type: validateEnum(row.type, RELATIONSHIP_TYPES, 'type'),
     sourceKind: validateEnum(row.source_kind ?? 'element', ENDPOINT_KINDS, 'source_kind'),
     targetKind: validateEnum(row.target_kind ?? 'element', ENDPOINT_KINDS, 'target_kind')
+  }
+}
+
+function rowToSymbolReference(row: any): PersistedSymbolReference {
+  return {
+    id: row.id,
+    repositoryId: row.repository_id,
+    sourceFileId: row.source_file_id,
+    sourceElementId: row.source_element_id ?? null,
+    targetElementId: row.target_element_id,
+    kind: validateEnum(row.kind, SYMBOL_REFERENCE_KINDS, 'symbol reference kind'),
+    location: {
+      start: { line: row.line, column: row.column, byte: row.start_byte },
+      end: { line: row.line, column: row.column, byte: row.end_byte }
+    }
   }
 }
 
@@ -479,8 +541,13 @@ class RepositoryDatabase implements RepositoryRepository {
   saveRepository(repository: CodeMapRepository): void {
     const row = domainToRepositoryRow(repository)
     this.db.prepare(`
-      INSERT OR REPLACE INTO repositories (id, path, name, model_version, last_indexed_at)
+      INSERT INTO repositories (id, path, name, model_version, last_indexed_at)
       VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        path = excluded.path,
+        name = excluded.name,
+        model_version = excluded.model_version,
+        last_indexed_at = excluded.last_indexed_at
     `).run(row.id, row.path, row.name, row.model_version, row.last_indexed_at)
   }
 
@@ -510,8 +577,23 @@ class RepositoryDatabase implements RepositoryRepository {
   saveFile(file: CodeMapFile): void {
     const row = domainToFileRow(file)
     this.db.prepare(`
-      INSERT OR REPLACE INTO files (id, repository_id, context_reference, relative_path, language, extension, lines, size_bytes, mtime, content_hash, token_count, tokenizer_id, tokenizer_encoding, tokenized_content_hash, status)
+      INSERT INTO files (id, repository_id, context_reference, relative_path, language, extension, lines, size_bytes, mtime, content_hash, token_count, tokenizer_id, tokenizer_encoding, tokenized_content_hash, status)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        repository_id = excluded.repository_id,
+        context_reference = excluded.context_reference,
+        relative_path = excluded.relative_path,
+        language = excluded.language,
+        extension = excluded.extension,
+        lines = excluded.lines,
+        size_bytes = excluded.size_bytes,
+        mtime = excluded.mtime,
+        content_hash = excluded.content_hash,
+        token_count = excluded.token_count,
+        tokenizer_id = excluded.tokenizer_id,
+        tokenizer_encoding = excluded.tokenizer_encoding,
+        tokenized_content_hash = excluded.tokenized_content_hash,
+        status = excluded.status
     `).run(row.id, row.repository_id, row.context_reference, row.relative_path, row.language, row.extension, row.lines, row.size_bytes, row.mtime, row.content_hash, row.token_count, row.tokenizer_id, row.tokenizer_encoding, row.tokenized_content_hash, row.status)
   }
 
@@ -635,14 +717,16 @@ class RepositoryDatabase implements RepositoryRepository {
         id, repository_id, file_id, kind, name, parent_element_id,
         start_line, start_column, start_byte, end_line, end_column, end_byte,
         size_lines, size_bytes, visibility, modifiers, return_type, base_class,
-        has_documentation, parameter_count, retrieval_kind, granularity, retrievable
+        has_documentation, parameter_count, retrieval_kind, granularity, retrievable,
+        declaration_signature
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
       row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
       row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
-      row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable
+      row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable,
+      row.declaration_signature
     )
   }
 
@@ -654,9 +738,10 @@ class RepositoryDatabase implements RepositoryRepository {
           id, repository_id, file_id, kind, name, parent_element_id,
           start_line, start_column, start_byte, end_line, end_column, end_byte,
           size_lines, size_bytes, visibility, modifiers, return_type, base_class,
-          has_documentation, parameter_count, retrieval_kind, granularity, retrievable
+          has_documentation, parameter_count, retrieval_kind, granularity, retrievable,
+          declaration_signature
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       for (const element of items) {
         const row = domainToElementRow(element)
@@ -664,7 +749,8 @@ class RepositoryDatabase implements RepositoryRepository {
           row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
           row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
           row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
-          row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable
+          row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable,
+          row.declaration_signature
         )
       }
     })
@@ -705,17 +791,20 @@ class RepositoryDatabase implements RepositoryRepository {
     file: CodeMapFile,
     elements: CodeMapElement[],
     relationships: CodeMapRelationship[],
-    elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>
+    elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>,
+    symbolReferences: PersistedSymbolReference[] = []
   ): void {
     const tx = this.db.transaction((
       _file: CodeMapFile,
       _elements: CodeMapElement[],
       _relationships: CodeMapRelationship[],
-      _elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>
+      _elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>,
+      _symbolReferences: PersistedSymbolReference[]
     ) => {
       const fileId = _file.id
 
       // 1) Deleta tabelas-filha e relações que tocam os elementos do arquivo
+      this.db.prepare(`DELETE FROM symbol_references WHERE source_file_id = ? OR source_element_id IN (SELECT id FROM elements WHERE file_id = ?) OR target_element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId, fileId, fileId)
       this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
       this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
       this.db.prepare(`DELETE FROM element_decorators WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
@@ -741,17 +830,19 @@ class RepositoryDatabase implements RepositoryRepository {
           id, repository_id, file_id, kind, name, parent_element_id,
           start_line, start_column, start_byte, end_line, end_column, end_byte,
           size_lines, size_bytes, visibility, modifiers, return_type, base_class,
-          has_documentation, parameter_count, retrieval_kind, granularity, retrievable
+          has_documentation, parameter_count, retrieval_kind, granularity, retrievable,
+          declaration_signature
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       for (const element of _elements) {
-        const row = domainToElementRow(element) // lança em kind inválido → rollback
+        const row = domainToElementRow(element) //lança em kind inválido → rollback
         elementInsert.run(
           row.id, row.repository_id, row.file_id, row.kind, row.name, row.parent_element_id,
           row.start_line, row.start_column, row.start_byte, row.end_line, row.end_column, row.end_byte,
           row.size_lines, row.size_bytes, row.visibility, row.modifiers, row.return_type, row.base_class,
-          row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable
+          row.has_documentation, row.parameter_count, row.retrieval_kind, row.granularity, row.retrievable,
+          row.declaration_signature
         )
       }
 
@@ -774,9 +865,23 @@ class RepositoryDatabase implements RepositoryRepository {
           insertIface.run(entry.elementId, ifaceName)
         }
       }
+
+      const referenceInsert = this.db.prepare(`
+        INSERT OR REPLACE INTO symbol_references (
+          id, repository_id, source_file_id, source_element_id, target_element_id,
+          kind, line, column, start_byte, end_byte
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const reference of _symbolReferences) {
+        const row = domainToSymbolReferenceRow(reference)
+        referenceInsert.run(
+          row.id, row.repository_id, row.source_file_id, row.source_element_id,
+          row.target_element_id, row.kind, row.line, row.column, row.start_byte, row.end_byte
+        )
+      }
     })
 
-    tx(file, elements, relationships, elementInterfaces)
+    tx(file, elements, relationships, elementInterfaces, symbolReferences)
   }
 
   /** Salva ou substitui as interfaces implementadas por elementos em uma transação. */
@@ -829,6 +934,71 @@ class RepositoryDatabase implements RepositoryRepository {
     return result
   }
 
+  replaceSymbolReferencesForFile(sourceFileId: string, references: PersistedSymbolReference[]): void {
+    this.db.transaction((items: PersistedSymbolReference[]) => {
+      this.db.prepare('DELETE FROM symbol_references WHERE source_file_id = ?').run(sourceFileId)
+      const insert = this.db.prepare(`
+        INSERT INTO symbol_references (
+          id, repository_id, source_file_id, source_element_id, target_element_id,
+          kind, line, column, start_byte, end_byte
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const reference of items) {
+        const row = domainToSymbolReferenceRow(reference)
+        insert.run(
+          row.id, row.repository_id, row.source_file_id, row.source_element_id,
+          row.target_element_id, row.kind, row.line, row.column, row.start_byte, row.end_byte
+        )
+      }
+    })(references)
+  }
+
+  getSymbolReferencesByTargetElement(targetElementId: string): PersistedSymbolReference[] {
+    const rows = this.db.prepare(`
+      SELECT sr.*
+      FROM symbol_references sr
+      JOIN files f ON f.id = sr.source_file_id
+      WHERE sr.target_element_id = ?
+      ORDER BY f.relative_path, sr.start_byte, sr.end_byte, sr.id
+    `).all(targetElementId)
+    return rows.map(rowToSymbolReference)
+  }
+
+  getSymbolReferencesBySourceElement(sourceElementId: string): PersistedSymbolReference[] {
+    const rows = this.db.prepare(`
+      SELECT sr.*
+      FROM symbol_references sr
+      JOIN elements target ON target.id = sr.target_element_id
+      JOIN files target_file ON target_file.id = target.file_id
+      WHERE sr.source_element_id = ?
+      ORDER BY target_file.relative_path, sr.kind, sr.target_element_id, sr.start_byte, sr.end_byte, sr.id
+    `).all(sourceElementId)
+    return rows.map(rowToSymbolReference)
+  }
+
+  getSymbolReferencesBySourceFile(sourceFileId: string): PersistedSymbolReference[] {
+    const rows = this.db.prepare(`
+      SELECT sr.*
+      FROM symbol_references sr
+      JOIN files f ON f.id = sr.source_file_id
+      WHERE sr.source_file_id = ?
+      ORDER BY f.relative_path, sr.start_byte, sr.end_byte, sr.id
+    `).all(sourceFileId)
+    return rows.map(rowToSymbolReference)
+  }
+
+  getImporterFileIds(targetFileId: string): string[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT source.file_id
+      FROM relationships relationship
+      JOIN elements source ON source.id = relationship.source_id
+      JOIN files source_file ON source_file.id = source.file_id
+      WHERE relationship.type = 'imports' AND relationship.target_id = ?
+      ORDER BY source_file.relative_path
+    `).all(targetFileId) as Array<{ file_id: string }>
+    return rows.map((row) => row.file_id)
+  }
+
   // ─── Relacionamentos ──────────────────────────────────────────────────────
 
   /** Insere ou atualiza (upsert) uma relação. Usa id como chave de unicidade. */
@@ -864,6 +1034,30 @@ class RepositoryDatabase implements RepositoryRepository {
   /** Busca relacionamentos onde o elemento é fonte (sourceId) ou destino (targetId). */
   getRelationshipsByElement(elementId: string): CodeMapRelationship[] {
     const rows = this.db.prepare(`SELECT * FROM relationships WHERE source_id = ? OR target_id = ?`).all(elementId, elementId)
+    return rows.map(rowToRelationship)
+  }
+
+  getHierarchyRelationshipsBySourceElement(elementId: string): CodeMapRelationship[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM relationships
+      WHERE source_id = ?
+        AND source_kind = 'element'
+        AND target_kind = 'element'
+        AND type IN ('extends', 'implements')
+      ORDER BY type, target_id, id
+    `).all(elementId)
+    return rows.map(rowToRelationship)
+  }
+
+  getHierarchyRelationshipsByTargetElement(elementId: string): CodeMapRelationship[] {
+    const rows = this.db.prepare(`
+      SELECT * FROM relationships
+      WHERE target_id = ?
+        AND source_kind = 'element'
+        AND target_kind = 'element'
+        AND type IN ('extends', 'implements')
+      ORDER BY type, source_id, id
+    `).all(elementId)
     return rows.map(rowToRelationship)
   }
 

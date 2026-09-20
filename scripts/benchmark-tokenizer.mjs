@@ -10,7 +10,10 @@ const extensions = /\.(ts|tsx|js|jsx|mjs|cjs|css|json|md)$/i
 const paths = execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' })
   .split(/\r?\n/)
   .filter((path) => extensions.test(path))
-  .filter((path) => statSync(resolve(root, path)).size <= 2 * 1024 * 1024)
+  .filter((path) => {
+    const entry = statSync(resolve(root, path), { throwIfNoEntry: false })
+    return entry?.isFile() && entry.size <= 2 * 1024 * 1024
+  })
 const corpus = paths.map((path) => ({ path, content: readFileSync(resolve(root, path), 'utf8') }))
 
 function measure(name, count) {

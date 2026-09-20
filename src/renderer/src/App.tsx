@@ -2,7 +2,8 @@
 -T ---
 */
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import type { ActiveProjectState } from "../../shared/types/active-project-types";
 import { CodeDiffView } from "./components/CodeDiffView/CodeDiffView";
 import { CodeCompressionView } from "./components/CodeCompressionView/CodeCompressionView";
 import { CodeSourceView } from "./components/CodeSourceView/CodeSourceView";
@@ -11,6 +12,7 @@ import { CodeJourneyView } from "./components/CodeJourneyView/CodeJourneyView";
 import { CodeMapView } from "./components/CodeMapView/CodeMapView";
 import { CodeDashView } from "./components/CodeDashView/CodeDashView";
 import { HomeView } from "./components/HomeView/HomeView";
+import { SettingsView } from "./components/SettingsView/SettingsView";
 
 
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
@@ -27,10 +29,8 @@ export const App: React.FC = () => {
   useTheme();
 
   const [activeTab, setActiveTab] = useState<Tab>("home");
-    const [activeProject, setActiveProject] = useState<{
-    path: string;
-    name: string;
-  } | null>(null);
+  const [{ project: activeProject }, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
+  const selectionRequest = useRef(0);
   const [statusMessage, setStatusMessage] = useState<{
     text: string;
     isError: boolean;
@@ -94,13 +94,38 @@ export const App: React.FC = () => {
     run();
   }, [pendingDeepLink, activeProject, handleStatusMessage]);
 
-  // Inicialização antecipada e desacoplada do CodeMap no ciclo de vida do projeto ativo
   useEffect(() => {
-    if (!activeProject?.path) return;
-    window.codeAwareness.openRepository(activeProject.path).catch((err) => {
-      console.warn('[App] Falha ao inicializar CodeMap para o projeto ativo:', err);
+    let mounted = true;
+    const receive = (state: ActiveProjectState) => {
+      if (mounted) setActiveProjectState((previous) => state.revision > previous.revision ? state : previous);
+    };
+    const unsubscribe = window.codeAwareness.onActiveProjectChanged(receive);
+    window.codeAwareness.getActiveProject().then(receive).catch(() => {
+      if (mounted) handleStatusMessage('Falha ao consultar o projeto ativo', true);
     });
-  }, [activeProject?.path]);
+    return () => {
+      mounted = false;
+      selectionRequest.current++;
+      unsubscribe();
+    };
+  }, [handleStatusMessage]);
+
+  const setActiveProject = useCallback(async (project: { path: string; name: string } | null) => {
+    const request = ++selectionRequest.current;
+    try {
+      let projectId: string | null = null;
+      if (project) {
+        const opened = await window.codeAwareness.openRepository(project.path);
+        if (!opened.success || !opened.projectId) throw new Error(opened.error ?? 'Falha ao abrir projeto');
+        projectId = opened.projectId;
+      }
+      if (request !== selectionRequest.current) return;
+      const result = await window.codeAwareness.activateProject(projectId);
+      if (!result.success) throw new Error(result.error ?? 'Falha ao ativar projeto');
+    } catch (error) {
+      if (request === selectionRequest.current) handleStatusMessage(error instanceof Error ? error.message : 'Falha ao ativar projeto', true);
+    }
+  }, [handleStatusMessage]);
 
   return (
     <div
@@ -122,6 +147,7 @@ export const App: React.FC = () => {
       />
 
       <main className="app-main">
+        {activeTab === "settings" && <SettingsView />}
         {activeTab === "home" && (
           <HomeView
             activeProject={activeProject}

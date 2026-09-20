@@ -3,12 +3,28 @@
 */
 
 /// <reference types="vite/client" />
+import type { ActiveProjectState } from '../../shared/types/active-project-types'
+import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
+import type { ChatGptIntegrationState } from '../../shared/types/chatgpt-integration-types'
+import type { SystemHealthState } from '../../shared/types/system-health-types'
 
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag, DashResolutionReport, DashExecutionResult } from '../../shared/types'
 
 declare global {
   interface Window {
     codeAwareness: {
+      getChatGptIntegrationState: () => Promise<ChatGptIntegrationState>
+      onChatGptIntegrationChanged: (callback: (state: ChatGptIntegrationState) => void) => () => void
+      getSystemHealthState: () => Promise<SystemHealthState>
+      getSystemHealthDiagnosticReport: () => Promise<string>
+      onSystemHealthChanged: (callback: (state: SystemHealthState) => void) => () => void
+      getConnectionState: () => Promise<ConnectionResult>
+      connect: () => Promise<ConnectionResult>
+      disconnect: () => Promise<ConnectionResult>
+      onConnectionChanged: (callback: (state: ConnectionState) => void) => () => void
+      getActiveProject: () => Promise<ActiveProjectState>
+      activateProject: (projectId: string | null) => Promise<{ success: boolean; data?: ActiveProjectState; error?: string }>
+      onActiveProjectChanged: (callback: (state: ActiveProjectState) => void) => () => void
       saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveXml: (xml: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveToDownloads: (markdown: string, baseFileName: string, outputFormat?: OutputFormat) => Promise<{ success: boolean; filePath?: string; error?: string }>
@@ -188,7 +204,7 @@ declare global {
       onDeepLink: (callback: (url: string) => void) => () => void
 
       // ─── Code Map ─────────────────────────────────────────────────────────────
-      openRepository: (repoPath: string) => Promise<{ success: boolean; error?: string }>
+      openRepository: (repoPath: string) => Promise<{ success: boolean; projectId?: string; error?: string }>
       closeRepository: (repoPath: string) => Promise<{ success: boolean; error?: string }>
       indexRepository: (repoPath: string) => Promise<{ success: boolean; data?: { filesIndexed: number; elementsExtracted: number }; error?: string }>
       synchronizeModified: (repoPath: string) => Promise<{ success: boolean; data?: { filesUpdated: number; errors: string[] }; error?: string }>

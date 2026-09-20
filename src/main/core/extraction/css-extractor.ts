@@ -368,6 +368,10 @@ function assembleCssResult(ctx: {
   return {
     elements,
     relationships,
-    elementInterfaces: []
+    elementInterfaces: [],
+    importBindings: [],
+    exportedConstNewBindings: [],
+    exportedConstCallBindings: [],
+    symbolReferences: []
   }
 }

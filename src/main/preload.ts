@@ -5,8 +5,41 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { RepoDiscoveryRequest, RepoDiscoveryResult } from '../shared/types/repo-discovery-types'
+import type { ActiveProjectState } from '../shared/types/active-project-types'
+import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
+import type { ChatGptIntegrationState } from '../shared/types/chatgpt-integration-types'
+import type { SystemHealthState } from '../shared/types/system-health-types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
+  getChatGptIntegrationState: (): Promise<ChatGptIntegrationState> => ipcRenderer.invoke('integration:chatgpt:get-state'),
+  onChatGptIntegrationChanged: (callback: (state: ChatGptIntegrationState) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: ChatGptIntegrationState): void => callback(state)
+    ipcRenderer.on('integration:chatgpt:changed', handler)
+    return () => ipcRenderer.removeListener('integration:chatgpt:changed', handler)
+  },
+  getSystemHealthState: (): Promise<SystemHealthState> => ipcRenderer.invoke('system-health:get-state'),
+  getSystemHealthDiagnosticReport: (): Promise<string> => ipcRenderer.invoke('system-health:get-diagnostic-report'),
+  onSystemHealthChanged: (callback: (state: SystemHealthState) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: SystemHealthState): void => callback(state)
+    ipcRenderer.on('system-health:changed', handler)
+    return () => ipcRenderer.removeListener('system-health:changed', handler)
+  },
+  getConnectionState: (): Promise<ConnectionResult> => ipcRenderer.invoke('connection:get-state'),
+  connect: (): Promise<ConnectionResult> => ipcRenderer.invoke('connection:connect'),
+  disconnect: (): Promise<ConnectionResult> => ipcRenderer.invoke('connection:disconnect'),
+  onConnectionChanged: (callback: (state: ConnectionState) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: ConnectionState): void => callback(state)
+    ipcRenderer.on('connection:changed', handler)
+    return () => ipcRenderer.removeListener('connection:changed', handler)
+  },
+  getActiveProject: (): Promise<ActiveProjectState> => ipcRenderer.invoke('project:get-active'),
+  activateProject: (projectId: string | null): Promise<{ success: boolean; data?: ActiveProjectState; error?: string }> =>
+    ipcRenderer.invoke('project:activate', projectId),
+  onActiveProjectChanged: (callback: (state: ActiveProjectState) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: ActiveProjectState): void => callback(state)
+    ipcRenderer.on('project:active-changed', handler)
+    return () => ipcRenderer.removeListener('project:active-changed', handler)
+  },
   saveMarkdown: (markdown: string, repoName: string): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('save-markdown', markdown, repoName)
   },

@@ -3,7 +3,12 @@
 */
 
 const assert = require('assert')
+const { spawnSync } = require('child_process')
+const path = require('path')
 const {
+  ELECTRON_DESKTOP_ENVIRONMENT_CODE,
+  createDesktopEnvironmentIssue,
+  inspectElectronDesktopEnvironment,
   validatePackageManifest,
   validateNpmUserAgent
 } = require('./native-runtime-policy.cjs')
@@ -77,7 +82,43 @@ const cases = [
       assert.strictEqual(result.ok, false)
       assert.ok(result.issues.some((issue) => issue.property === 'npm major'))
     }
-  }
+  },
+  {
+    name: 'Desktop environment limpo e aceito',
+    run: () => {
+      const inspection = inspectElectronDesktopEnvironment({})
+      assert.strictEqual(inspection.healthy, true)
+      assert.strictEqual(createDesktopEnvironmentIssue({}), null)
+    }
+  },
+  {
+    name: 'ELECTRON_RUN_AS_NODE=1 rejeitado com codigo especifico',
+    run: () => {
+      const inspection = inspectElectronDesktopEnvironment({ ELECTRON_RUN_AS_NODE: '1' })
+      assert.strictEqual(inspection.healthy, false)
+      assert.strictEqual(inspection.code, ELECTRON_DESKTOP_ENVIRONMENT_CODE)
+      const issue = createDesktopEnvironmentIssue({ ELECTRON_RUN_AS_NODE: '1' })
+      assert.strictEqual(issue.code, ELECTRON_DESKTOP_ENVIRONMENT_CODE)
+      assert.strictEqual(issue.property, 'Electron Desktop Environment')
+    }
+  },
+  {
+    name: 'Doctor falha com exit nao-zero e nao muta o ambiente',
+    run: () => {
+      const doctorPath = path.join(__dirname, 'native-runtime-doctor.cjs')
+      const before = process.env.ELECTRON_RUN_AS_NODE
+      const result = spawnSync(process.execPath, [doctorPath], {
+        encoding: 'utf8',
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }
+      })
+      assert.notStrictEqual(result.status, 0)
+      const output = `${result.stdout || ''}\n${result.stderr || ''}`
+      assert.ok(output.includes(ELECTRON_DESKTOP_ENVIRONMENT_CODE))
+      assert.ok(output.includes('Electron Desktop Environment'))
+      assert.strictEqual(process.env.ELECTRON_RUN_AS_NODE, before)
+      assert.strictEqual(result.stdout.includes('start electron app'), false)
+    }
+  },
 ]
 
 let failures = 0

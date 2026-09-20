@@ -16,7 +16,7 @@ import type {
   IntegrityRepair,
   IntegrityCheckOptions
 } from '../../shared/types'
-import { isEligibleTextFile, isKnownBinaryExtension, scanRepository } from './repository-scanner'
+import { isBinaryContent, isEligibleTextFile, isKnownBinaryExtension, scanRepository } from './repository-scanner'
 import { getLanguageForExtension } from './language-adapter'
 import { createRepositoryDatabase, closeRepositoryDatabase } from './repository-database'
 import type { RepositoryRepository } from './repository-repository'
@@ -24,9 +24,18 @@ import { telemetryService } from './telemetry-service'
 import type { StructureExtractionPort } from './extraction/structure-extraction-port'
 import { TypeScriptStructureExtractor } from './extraction/typescript-extractor'
 import { JavaScriptStructureExtractor } from './extraction/javascript-extractor'
+import { extractTextDocument } from './extraction/text-document-extractor'
 import { CssStructureExtractor } from './extraction/css-extractor'
+import { JsonStructureExtractor } from './extraction/json-extractor'
+import { MarkdownStructureExtractor } from './extraction/markdown-extractor'
 import { RelationshipResolver } from './relationship-resolver'
 import { getCanonicalTokenizer, type TokenizerPort } from './tokenizer'
+import {
+  createSymbolReferenceId,
+  resolveSymbolReferences,
+  type PersistedSymbolReference,
+  type SymbolReferenceFile
+} from './symbol-reference-resolver'
 
 export interface ImportSourceEntry {
   elementId: string
@@ -113,7 +122,7 @@ export class RepositoryModel {
 
   /**
    * Percorre o array de portas em ordem e retorna a primeira que suporta a extensão.
-   * Retorna null se nenhuma porta suportar — arquivo tratado como "sem extração estrutural".
+   * Retorna null se nenhuma porta suportar; o chamador aplica o fallback documental.
    */
   private findExtractorForExtension(extension: string): StructureExtractionPort | null {
     for (const extractor of this.extractors) {
@@ -152,6 +161,127 @@ export class RepositoryModel {
     }
   }
 
+  private persistableReferences(files: readonly SymbolReferenceFile[]): PersistedSymbolReference[] {
+    return resolveSymbolReferences(this.repoPath, files).map((reference) => ({
+      ...reference,
+      id: createSymbolReferenceId(this.repositoryId, reference),
+      repositoryId: this.repositoryId
+    }))
+  }
+
+  private async resolutionFiles(source: SymbolReferenceFile): Promise<SymbolReferenceFile[]> {
+    const elementsByFile = new Map<string, CodeMapElement[]>()
+    for (const element of this.db.getElementsByRepository(this.repositoryId)) {
+      const elements = elementsByFile.get(element.fileId) ?? []
+      elements.push(element)
+      elementsByFile.set(element.fileId, elements)
+    }
+    const files: SymbolReferenceFile[] = []
+    for (const file of this.db.getFilesByRepository(this.repositoryId)) {
+      if (file.id === source.fileId) {
+        files.push(source)
+        continue
+      }
+      const extractor = this.findExtractorForExtension(file.extension)
+      if (!extractor) {
+        files.push({ fileId: file.id, relativePath: file.relativePath, elements: elementsByFile.get(file.id) ?? [], importBindings: [], exportedConstNewBindings: [], exportedConstCallBindings: [], symbolReferences: [] })
+        continue
+      }
+      try {
+        const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+        const extraction = extractor.extract({ repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content })
+        files.push({
+          fileId: file.id,
+          relativePath: file.relativePath,
+          elements: elementsByFile.get(file.id) ?? [],
+          importBindings: extraction.importBindings,
+          exportedConstNewBindings: extraction.exportedConstNewBindings,
+          exportedConstCallBindings: extraction.exportedConstCallBindings,
+          symbolReferences: []
+        })
+      } catch {
+        files.push({ fileId: file.id, relativePath: file.relativePath, elements: elementsByFile.get(file.id) ?? [], importBindings: [], exportedConstNewBindings: [], exportedConstCallBindings: [], symbolReferences: [] })
+      }
+    }
+    if (!files.some((file) => file.fileId === source.fileId)) files.push(source)
+    return files
+  }
+
+  private async refreshSymbolReferencesForFile(fileId: string): Promise<number> {
+    const file = this.db.getFileById(fileId)
+    if (!file) return 0
+    const extractor = this.findExtractorForExtension(file.extension)
+    if (!extractor) {
+      this.db.replaceSymbolReferencesForFile(file.id, [])
+      return 0
+    }
+    try {
+      const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+      const extraction = extractor.extract({
+        repositoryId: this.repositoryId,
+        relativePath: file.relativePath,
+        extension: file.extension,
+        content
+      })
+      const source: SymbolReferenceFile = {
+        fileId: file.id,
+        relativePath: file.relativePath,
+        elements: this.db.getElementsByFile(file.id),
+        importBindings: extraction.importBindings,
+        exportedConstNewBindings: extraction.exportedConstNewBindings,
+        exportedConstCallBindings: extraction.exportedConstCallBindings,
+        symbolReferences: extraction.symbolReferences
+      }
+      const references = this.persistableReferences(await this.resolutionFiles(source))
+        .filter((reference) => reference.sourceFileId === file.id)
+      this.db.replaceSymbolReferencesForFile(file.id, references)
+      return references.length
+    } catch {
+      this.db.replaceSymbolReferencesForFile(file.id, [])
+      return 0
+    }
+  }
+
+  async backfillSymbolReferences(): Promise<number> {
+    const startedAt = Date.now()
+    const correlationId = telemetryService.startOperation('BACKFILL_SYMBOL_REFERENCES')
+    const files = this.db.getFilesByRepository(this.repositoryId)
+    const facts: SymbolReferenceFile[] = []
+    for (const file of files) {
+      const extractor = this.findExtractorForExtension(file.extension)
+      if (!extractor) {
+        facts.push({ fileId: file.id, relativePath: file.relativePath, elements: this.db.getElementsByFile(file.id), importBindings: [], exportedConstNewBindings: [], exportedConstCallBindings: [], symbolReferences: [] })
+        continue
+      }
+      try {
+        const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+        const extraction = extractor.extract({ repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content })
+        facts.push({
+          fileId: file.id,
+          relativePath: file.relativePath,
+          elements: this.db.getElementsByFile(file.id),
+          importBindings: extraction.importBindings,
+          exportedConstNewBindings: extraction.exportedConstNewBindings,
+          exportedConstCallBindings: extraction.exportedConstCallBindings,
+          symbolReferences: extraction.symbolReferences
+        })
+      } catch {
+        facts.push({ fileId: file.id, relativePath: file.relativePath, elements: this.db.getElementsByFile(file.id), importBindings: [], exportedConstNewBindings: [], exportedConstCallBindings: [], symbolReferences: [] })
+      }
+    }
+    const references = this.persistableReferences(facts)
+    for (const file of files) {
+      this.db.replaceSymbolReferencesForFile(file.id, references.filter((reference) => reference.sourceFileId === file.id))
+    }
+    telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_COMPLETED', {
+      files: files.length,
+      references: references.length,
+      estimatedPayloadBytes: Buffer.byteLength(JSON.stringify(references), 'utf-8'),
+      durationMs: Date.now() - startedAt
+    })
+    return references.length
+  }
+
   async backfillTokenMetadata(): Promise<number> {
     let updated = 0
     let processed = 0
@@ -182,6 +312,40 @@ export class RepositoryModel {
 
   async backfillContextReferences(): Promise<number> {
     return this.db.backfillContextReferences(this.repositoryId)
+  }
+
+  async backfillTextDocuments(): Promise<void> {
+    for (const file of this.getFiles()) {
+      const extractor = this.findExtractorForExtension(file.extension)
+      const elements = this.getElementsByFile(file.id)
+      if (extractor) {
+        if (!['.json', '.md', '.markdown'].includes(file.extension.toLowerCase()) || elements.some(element => element.kind === 'section')) continue
+        try {
+          const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+          const result = extractor.extract({ repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content })
+          if (!result.elements.some(element => element.kind === 'section')) continue
+        } catch {
+          continue
+        }
+      } else if (elements.some(element => element.kind === 'document')) {
+        continue
+      }
+      await this.updateFileContent(file.relativePath)
+    }
+  }
+
+  async backfillDeclarationSignatures(): Promise<void> {
+    for (const file of this.getFiles()) {
+      if (file.status !== 'indexed') continue
+      const elements = this.getElementsByFile(file.id)
+      const needsBackfill = elements.some(
+        (element) =>
+          (element.kind === 'function' || element.kind === 'method' || element.kind === 'class') &&
+          element.declarationSignature === null
+      )
+      if (!needsBackfill) continue
+      await this.updateFileContent(file.relativePath)
+    }
   }
 
   pruneKnownBinaryFiles(): number {
@@ -492,6 +656,7 @@ export class RepositoryModel {
     const allElementInterfaces: Array<{ elementId: string; interfaceNames: string[] }> = []
     const allImportSources: ImportSourceEntry[] = []
     const allFiles: CodeMapFile[] = []
+    const symbolReferenceFiles: SymbolReferenceFile[] = []
     let elementsExtractedCount = 0
 
     for (const scanned of scannedFiles) {
@@ -500,7 +665,9 @@ export class RepositoryModel {
       const fullPath = join(this.repoPath, scanned.relativePath)
       let content = ''
       try {
-        content = await readFile(fullPath, 'utf-8')
+        const buffer = await readFile(fullPath)
+        if (isBinaryContent(buffer)) continue
+        content = buffer.toString('utf-8')
       } catch (err) {
         console.warn(`[RepositoryModel] Falha ao ler arquivo "${scanned.relativePath}":`, err)
         continue
@@ -531,7 +698,7 @@ export class RepositoryModel {
       const extractor = this.findExtractorForExtension(scanned.extension)
       const structureResult = extractor
         ? extractor.extract({ repositoryId: this.repositoryId, relativePath: scanned.relativePath, extension: scanned.extension, content })
-        : { elements: [], relationships: [], elementInterfaces: [] }
+        : extractTextDocument({ repositoryId: this.repositoryId, relativePath: scanned.relativePath, extension: scanned.extension, content })
 
       // Substitui o fileId placeholder (que era o relativePath) pelo fileId real gerado
       for (const element of structureResult.elements) {
@@ -545,6 +712,15 @@ export class RepositoryModel {
       allFiles.push(fileRecord)
       allElements.push(...structureResult.elements)
       allElementInterfaces.push(...structureResult.elementInterfaces)
+      symbolReferenceFiles.push({
+        fileId,
+        relativePath: scanned.relativePath,
+        elements: structureResult.elements,
+        importBindings: structureResult.importBindings,
+        exportedConstNewBindings: structureResult.exportedConstNewBindings,
+        exportedConstCallBindings: structureResult.exportedConstCallBindings,
+        symbolReferences: structureResult.symbolReferences
+      })
       elementsExtractedCount += structureResult.elements.length
 
       // Coleta imports para resolução cross-file
@@ -572,6 +748,14 @@ export class RepositoryModel {
 
     this.db.saveRelationships(crossRelationships)
 
+    const symbolReferences = this.persistableReferences(symbolReferenceFiles)
+    for (const file of allFiles) {
+      this.db.replaceSymbolReferencesForFile(
+        file.id,
+        symbolReferences.filter((reference) => reference.sourceFileId === file.id)
+      )
+    }
+
     // WARNING: o lastIndexedAt só é gravado após a indexação completar com sucesso.
     // Se a indexação falhar no meio (OOM, permissão negada, timeout), o registro permanece
     // com lastIndexedAt = null, permitindo que a UI detecte o estado "nunca indexado" e
@@ -588,6 +772,8 @@ export class RepositoryModel {
     telemetryService.log(cid, 'CODE_MAP', 'INDEX_COMPLETED', {
       filesIndexed: result.filesIndexed,
       elementsExtracted: result.elementsExtracted,
+      symbolReferences: symbolReferences.length,
+      symbolReferencePayloadBytes: Buffer.byteLength(JSON.stringify(symbolReferences), 'utf-8'),
       durationMs: Date.now() - startedAt
     })
     return result
@@ -627,10 +813,17 @@ export class RepositoryModel {
     const fullPath = join(this.repoPath, relativePath)
     const existingFile = this.db.getFileByPath(this.repositoryId, relativePath)
     const fileId = existingFile?.id ?? this.generateFileId(relativePath)
+    const importerFileIds = existingFile ? this.db.getImporterFileIds(existingFile.id) : []
+    const refreshDirectImporters = async (): Promise<void> => {
+      for (const importerFileId of importerFileIds) {
+        if (importerFileId !== fileId) await this.refreshSymbolReferencesForFile(importerFileId)
+      }
+    }
 
     if (!existsSync(fullPath)) {
       if (existingFile) {
         this.db.deleteFile(existingFile.id)
+        await refreshDirectImporters()
       }
       telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', {
         relativePath,
@@ -641,7 +834,10 @@ export class RepositoryModel {
     }
 
     if (!(await isEligibleTextFile(fullPath))) {
-      if (existingFile) this.db.deleteFile(existingFile.id)
+      if (existingFile) {
+        this.db.deleteFile(existingFile.id)
+        await refreshDirectImporters()
+      }
       telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', {
         relativePath,
         durationMs: Date.now() - startedAt,
@@ -652,10 +848,19 @@ export class RepositoryModel {
 
     let content = ''
     try {
-      content = await readFile(fullPath, 'utf-8')
+      const buffer = await readFile(fullPath)
+      if (isBinaryContent(buffer)) {
+        if (existingFile) {
+          this.db.deleteFile(existingFile.id)
+          await refreshDirectImporters()
+        }
+        return true
+      }
+      content = buffer.toString('utf-8')
     } catch {
       // Se não conseguir ler, deleta do banco
       this.db.deleteFile(fileId)
+      await refreshDirectImporters()
       telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', {
         relativePath,
         durationMs: Date.now() - startedAt,
@@ -700,14 +905,32 @@ export class RepositoryModel {
     const extractor = this.findExtractorForExtension(extension)
     const structureResult = extractor
       ? extractor.extract({ repositoryId: this.repositoryId, relativePath, extension, content })
-      : { elements: [], relationships: [], elementInterfaces: [] }
+      : extractTextDocument({ repositoryId: this.repositoryId, relativePath, extension, content })
 
     for (const element of structureResult.elements) {
       element.fileId = fileId
     }
 
+    const sourceReferenceFile: SymbolReferenceFile = {
+      fileId,
+      relativePath,
+      elements: structureResult.elements,
+      importBindings: structureResult.importBindings,
+      exportedConstNewBindings: structureResult.exportedConstNewBindings,
+      exportedConstCallBindings: structureResult.exportedConstCallBindings,
+      symbolReferences: structureResult.symbolReferences
+    }
+    const sourceReferences = this.persistableReferences(await this.resolutionFiles(sourceReferenceFile))
+      .filter((reference) => reference.sourceFileId === fileId)
+
     // Substituição atômica: tudo dentro de UMA transação (rollback em entrada envenenada)
-    this.db.replaceIndexedFileState(fileRecord, structureResult.elements, structureResult.relationships, structureResult.elementInterfaces)
+    this.db.replaceIndexedFileState(
+      fileRecord,
+      structureResult.elements,
+      structureResult.relationships,
+      structureResult.elementInterfaces,
+      sourceReferences
+    )
 
     // Re-resolve relacionamentos cross-file para todo o repositório
     const allElements = this.db.getElementsByRepository(this.repositoryId)
@@ -741,8 +964,12 @@ export class RepositoryModel {
     )
 
     this.db.saveRelationships(crossRelationships)
+    await refreshDirectImporters()
     telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', {
       relativePath,
+      symbolReferences: sourceReferences.length,
+      symbolReferencePayloadBytes: Buffer.byteLength(JSON.stringify(sourceReferences), 'utf-8'),
+      directImportersReevaluated: importerFileIds.filter((importerFileId) => importerFileId !== fileId).length,
       durationMs: Date.now() - startedAt
     })
     return true
@@ -805,6 +1032,26 @@ export class RepositoryModel {
 
   getRelationships(): CodeMapRelationship[] {
     return this.db.getRelationshipsByRepository(this.repositoryId)
+  }
+
+  getHierarchyRelationshipsBySourceElement(elementId: string): CodeMapRelationship[] {
+    return this.db.getHierarchyRelationshipsBySourceElement(elementId)
+  }
+
+  getHierarchyRelationshipsByTargetElement(elementId: string): CodeMapRelationship[] {
+    return this.db.getHierarchyRelationshipsByTargetElement(elementId)
+  }
+
+  getSymbolReferencesByTargetElement(targetElementId: string): PersistedSymbolReference[] {
+    return this.db.getSymbolReferencesByTargetElement(targetElementId)
+  }
+
+  getSymbolReferencesBySourceElement(sourceElementId: string): PersistedSymbolReference[] {
+    return this.db.getSymbolReferencesBySourceElement(sourceElementId)
+  }
+
+  getSymbolReferencesBySourceFile(sourceFileId: string): PersistedSymbolReference[] {
+    return this.db.getSymbolReferencesBySourceFile(sourceFileId)
   }
 
   getSyncStatus(): CodeMapSyncStatus {
@@ -1600,6 +1847,8 @@ export function createRepositoryModel(repoPath: string, tokenizer: TokenizerPort
   return new RepositoryModel(repoPath, [
     new TypeScriptStructureExtractor(),
     new JavaScriptStructureExtractor(),
-    new CssStructureExtractor()
+    new CssStructureExtractor(),
+    new JsonStructureExtractor(),
+    new MarkdownStructureExtractor()
   ], tokenizer)
 }

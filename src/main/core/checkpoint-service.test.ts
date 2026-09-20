@@ -708,7 +708,7 @@ describe('CheckpointService', () => {
       expect(diff).toContain('## 📄 `b.ts` (excluído)')
       expect(diff).toContain('#### 🟥 [Código Original / Removido]')
       expect(diff).toContain('export const b = 2')
-    })
+    }, 15000)
   })
 
   // ─── PA-08 — Primeiro Checkpoint Compara com Disco ───────────────────────

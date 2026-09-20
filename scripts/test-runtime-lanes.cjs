@@ -4,7 +4,9 @@ const nativeTestFiles = Object.freeze([
   'src/main/core/codemap-startup.e2e.test.ts',
   'src/main/core/codemap-system-acceptance.e2e.test.ts',
   'src/main/core/context-reference.e2e.test.ts',
-  'src/main/core/context/repo-discovery.e2e.test.ts'
+  'src/main/core/symbol-reference-persistence.e2e.test.ts',
+  'src/main/core/context/repo-discovery.e2e.test.ts',
+  'src/main/core/context/context-navigation.e2e.test.ts'
 ])
 
 module.exports = { nativeTestFiles }

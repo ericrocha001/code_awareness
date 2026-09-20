@@ -5,6 +5,8 @@
 import type { CodeMapElementKind } from '../../../shared/types'
 
 const KIND_TO_CODICON: Record<CodeMapElementKind, string> = {
+  document: 'codicon codicon-file-text',
+  section: 'codicon codicon-symbol-namespace',
   class: 'codicon codicon-symbol-class',
   function: 'codicon codicon-symbol-method',
   method: 'codicon codicon-symbol-method',

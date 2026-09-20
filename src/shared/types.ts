@@ -20,6 +20,9 @@ export interface ProjectPreferences {
 }
 
 export interface AppSettings {
+  ngrokDomain?: string
+  remoteAccessEnabled?: boolean
+  transportKind?: 'relay' | 'ngrok'
   rootFolders: string[]
   individualProjects: string[]
   hiddenProjects: string[]
@@ -230,7 +233,7 @@ export interface CheckpointDiffFile {
 
 export type CodeMapFileStatus = 'indexed' | 'modified'
 
-export type CodeMapElementKind = 'class' | 'function' | 'method' | 'interface' | 'enum' | 'typeAlias' | 'variable' | 'constant' | 'import' | 'export' | 'property' | 'parameter' | 'enumMember' | 'cssRule' | 'cssAtRule' | 'cssCustomProperty'
+export type CodeMapElementKind = 'class' | 'function' | 'method' | 'interface' | 'enum' | 'typeAlias' | 'variable' | 'constant' | 'import' | 'export' | 'property' | 'parameter' | 'enumMember' | 'cssRule' | 'cssAtRule' | 'cssCustomProperty' | 'document' | 'section'
 
 export type CodeMapElementVisibility = 'public' | 'private' | 'protected' | null
 
@@ -274,6 +277,7 @@ export interface CodeMapElement {
   baseClass: string | null
   hasDocumentation: boolean
   parameterCount: number
+  declarationSignature?: string | null
   /** @deprecated Use 'granularity' e 'retrievable' em vez deste campo */
   retrievalKind?: CodeMapRetrievalKind
   /** Granularidade semântica do elemento */

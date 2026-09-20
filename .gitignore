@@ -13,4 +13,7 @@ code_checkpoints/
 assets/
 # Devicon assets copiados localmente para funcionamento offline-first
 src/renderer/public/devicon/
-
+.auth0_token*
+.cloud_test_installation.json
+scratch/
+.skills

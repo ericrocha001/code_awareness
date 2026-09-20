@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "code-awareness-gateway",
+  "main": "cloudflare/worker.ts",
+  "compatibility_date": "2026-09-11",
+  "workers_dev": true,
+  "observability": { "enabled": false },
+  "durable_objects": { "bindings": [{ "name": "RELAY", "class_name": "InstallationRelay" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["InstallationRelay"] }],
+  "d1_databases": [{ "binding": "REGISTRY", "database_name": "code-awareness-installations", "database_id": "15082393-c2cd-49f3-b945-9f1f736fbf67", "migrations_dir": "migrations" }],
+  "vars": {
+    "AUTHORIZATION_SERVER": "https://code-awareness.us.auth0.com/"
+  }
+}

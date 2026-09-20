@@ -8,7 +8,9 @@ const { spawnSync } = require('child_process')
 const {
   EXPECTED_ELECTRON_VERSION,
   REQUIRED_NATIVE_DEPENDENCIES,
+  createDesktopEnvironmentIssue,
   formatIssues,
+  inspectElectronDesktopEnvironment,
   readPackageJson,
   validatePackageManifest
 } = require('./native-runtime-policy.cjs')
@@ -83,6 +85,16 @@ function failWithIssues(issues) {
 }
 
 function runCli() {
+  const environmentIssue = createDesktopEnvironmentIssue(process.env)
+  if (environmentIssue) {
+    printStatus(environmentIssue.property, false)
+    console.error(formatIssues([environmentIssue]))
+    console.error(inspectElectronDesktopEnvironment(process.env).reason)
+    console.log('Native Runtime    INVALID')
+    process.exit(1)
+  }
+  printStatus('Electron Desktop Environment', true)
+
   const issues = []
   let packageJson
 

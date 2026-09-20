@@ -5,6 +5,7 @@
 import { createHash } from 'crypto'
 import type {
   CodeMapElement,
+  CodeMapElementLocation,
   CodeMapRelationship,
   CodeMapElementKind,
   CodeMapElementVisibility,
@@ -13,17 +14,24 @@ import type {
   CodeMapRetrievalKind
 } from '../../shared/types'
 import { getParser, getLanguageForExtension } from './language-adapter'
+import type {
+  ExportedConstCallBinding,
+  ExportedConstNewBinding,
+  ImportBinding,
+  StructureExtractionResult,
+  SymbolReferenceCandidate,
+  SymbolReferenceKind
+} from './extraction/structure-extraction-port'
 
 // ─── Tipos públicos ──────────────────────────────────────────────────────────
 
-export interface StructureReaderResult {
-  elements: CodeMapElement[]
-  relationships: CodeMapRelationship[]
-  /**
-   * Nomes de interfaces implementadas por cada elemento de classe.
-   * O Repository Model (Sprint 5) resolverá esses nomes para IDs reais.
-   */
-  elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>
+export type StructureReaderResult = StructureExtractionResult
+
+export class StructureExtractionError extends Error {
+  constructor(relativePath: string, phase: 'parse' | 'traverse', cause: unknown) {
+    super(`Structure extraction failed during ${phase} for "${relativePath}"`, { cause })
+    this.name = 'StructureExtractionError'
+  }
 }
 
 // ─── Geração de IDs ─────────────────────────────────────────────────────────
@@ -136,8 +144,9 @@ function extractModifiers(node: any): string[] {
   const modifiers: string[] = []
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i)
-    if (child && MODIFIER_TYPES.has(child.type)) {
-      modifiers.push(child.type)
+    const modifier = child?.type === 'accessibility_modifier' ? child.text : child?.type
+    if (modifier && MODIFIER_TYPES.has(modifier)) {
+      modifiers.push(modifier)
     }
   }
   return modifiers
@@ -151,9 +160,10 @@ function extractVisibility(node: any): CodeMapElementVisibility {
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i)
     if (!child) continue
-    if (child.type === 'private') return 'private'
-    if (child.type === 'protected') return 'protected'
-    if (child.type === 'public') return 'public'
+    const modifier = child.type === 'accessibility_modifier' ? child.text : child.type
+    if (modifier === 'private') return 'private'
+    if (modifier === 'protected') return 'protected'
+    if (modifier === 'public') return 'public'
   }
   return null
 }
@@ -255,8 +265,64 @@ function extractMemberName(node: any): string | null {
   return candidate || null
 }
 
+/** Extrai nomes dos parâmetros diretos de um nó de função/método (sem recursão em callbacks). */
+function extractDirectParamNames(node: any): string[] {
+  for (let i = 0; i < node.childCount; i++) {
+    const child = node.child(i)
+    if (child && (child.type === 'formal_parameters' || child.type === 'parameters')) {
+      const names: string[] = []
+      for (let j = 0; j < child.childCount; j++) {
+        const param = child.child(j)
+        if (!param || param.type === ',' || param.type === '(' || param.type === ')') continue
+        if (param.type === 'required_parameter' || param.type === 'optional_parameter' || param.type === 'rest_pattern' || param.type === 'rest_parameter') {
+          for (let k = 0; k < param.childCount; k++) {
+            const nameNode = param.child(k)
+            if (nameNode && (nameNode.type === 'identifier' || nameNode.type === 'shorthand_property_identifier_pattern')) {
+              names.push(nameNode.text)
+              break
+            }
+          }
+        } else if (param.type === 'identifier') {
+          names.push(param.text)
+        }
+      }
+      return names
+    }
+  }
+  return []
+}
+
+function extractDeclarationSignature(
+  kind: CodeMapElementKind,
+  name: string,
+  node: any,
+  returnType: string | null,
+  baseClass: string | null
+): string | null {
+  if (kind === 'function' || kind === 'method') {
+    const params = extractDirectParamNames(node).join(', ')
+    return returnType ? `${name}(${params}): ${returnType}` : `${name}(${params})`
+  }
+  if (kind === 'constructor') {
+    const params = extractDirectParamNames(node).join(', ')
+    return `constructor(${params})`
+  }
+  if (kind === 'class') {
+    return baseClass ? `${name} extends ${baseClass}` : null
+  }
+  return null
+}
+
 /** Extrai o nome de um nó, procurando pelo filho do tipo 'identifier' ou 'type_identifier'. */
 function extractName(node: any): string {
+  if (node.type === 'lexical_declaration') {
+    for (let i = 0; i < node.childCount; i++) {
+      const child = node.child(i)
+      if (child?.type === 'variable_declarator') {
+        return extractName(child)
+      }
+    }
+  }
   for (let i = 0; i < node.childCount; i++) {
     const child = node.child(i)
     if (child && (child.type === 'identifier' || child.type === 'type_identifier' || child.type === 'property_identifier')) {
@@ -265,6 +331,372 @@ function extractName(node: any): string {
   }
   // Fallback estável para declarações anônimas — evita IDs instáveis baseados em conteúdo
   return '(anonymous)'
+}
+
+interface ReceiverBinding {
+  name: string
+  typeName: string | null
+  kind: 'parameter' | 'const-new' | null
+  availableAfter: number
+}
+
+interface BindingScope {
+  bindings: ReceiverBinding[]
+}
+
+function isFunctionScope(node: any): boolean {
+  return [
+    'function_declaration',
+    'function_expression',
+    'generator_function_declaration',
+    'generator_function',
+    'arrow_function',
+    'method_definition'
+  ].includes(node.type)
+}
+
+function isBindingScope(node: any): boolean {
+  return isFunctionScope(node) || [
+    'program',
+    'statement_block',
+    'catch_clause',
+    'for_statement',
+    'for_in_statement',
+    'switch_case',
+    'switch_default'
+  ].includes(node.type)
+}
+
+function directGenericTypeNames(node: any): Set<string> {
+  const names = new Set<string>()
+  for (let index = 0; index < node.childCount; index++) {
+    const child = node.child(index)
+    if (child?.type !== 'type_parameters') continue
+    for (let parameterIndex = 0; parameterIndex < child.childCount; parameterIndex++) {
+      const parameter = child.child(parameterIndex)
+      if (!parameter || !['type_parameter', 'required_type_parameter', 'optional_type_parameter'].includes(parameter.type)) continue
+      for (let nameIndex = 0; nameIndex < parameter.childCount; nameIndex++) {
+        const name = parameter.child(nameIndex)
+        if (name?.type === 'type_identifier') {
+          names.add(name.text)
+          break
+        }
+      }
+    }
+  }
+  return names
+}
+
+function parameterName(node: any): string | null {
+  const pattern = node.childForFieldName?.('pattern')
+  if (pattern?.type === 'identifier') return pattern.text
+  for (let index = 0; index < node.childCount; index++) {
+    const child = node.child(index)
+    if (child?.type === 'identifier') return child.text
+  }
+  return null
+}
+
+function simpleAnnotatedType(node: any, genericTypeNames: ReadonlySet<string>): string | null {
+  for (let index = 0; index < node.childCount; index++) {
+    const annotation = node.child(index)
+    if (annotation?.type !== 'type_annotation') continue
+    const types: any[] = []
+    for (let typeIndex = 0; typeIndex < annotation.childCount; typeIndex++) {
+      const type = annotation.child(typeIndex)
+      if (type?.isNamed) types.push(type)
+    }
+    if (types.length !== 1 || types[0].type !== 'type_identifier') return null
+    const typeName = types[0].text
+    return genericTypeNames.has(typeName) ? null : typeName
+  }
+  return null
+}
+
+interface InstancePropertyBinding {
+  name: string
+  explicitType: string | null
+  origin: 'class-property' | 'constructor-parameter-property'
+}
+
+function isConstructorDefinition(node: any): boolean {
+  if (node?.type !== 'method_definition') return false
+  const name = node.childForFieldName?.('name')
+  return name?.type === 'property_identifier' && name.text === 'constructor'
+}
+
+function isConstructorParameterProperty(node: any): boolean {
+  if (!['required_parameter', 'optional_parameter'].includes(node?.type)) return false
+  if (!isConstructorDefinition(node.parent?.parent)) return false
+  return extractModifiers(node).some((modifier) =>
+    ['private', 'protected', 'public', 'readonly'].includes(modifier)
+  )
+}
+
+function directClassPropertyBindings(
+  node: any,
+  genericTypeNames: ReadonlySet<string>
+): ReadonlyMap<string, InstancePropertyBinding | null> {
+  const properties = new Map<string, InstancePropertyBinding | null>()
+  const body = Array.from({ length: node.childCount }, (_, index) => node.child(index))
+    .find((child: any) => child?.type === 'class_body')
+  if (!body) return properties
+  const add = (binding: InstancePropertyBinding): void => {
+    properties.set(binding.name, properties.has(binding.name) ? null : binding)
+  }
+  for (let index = 0; index < body.childCount; index++) {
+    const member = body.child(index)
+    if (member?.type === 'public_field_definition') {
+      const name = member.childForFieldName?.('name')
+      if (name?.type === 'property_identifier') {
+        add({ name: name.text, explicitType: simpleAnnotatedType(member, genericTypeNames), origin: 'class-property' })
+      }
+      continue
+    }
+    if (!isConstructorDefinition(member)) continue
+    const parameters = Array.from({ length: member.childCount }, (_, childIndex) => member.child(childIndex))
+      .find((child: any) => child?.type === 'formal_parameters')
+    if (!parameters) continue
+    for (let parameterIndex = 0; parameterIndex < parameters.childCount; parameterIndex++) {
+      const parameter = parameters.child(parameterIndex)
+      if (!isConstructorParameterProperty(parameter)) continue
+      const name = parameterName(parameter)
+      if (!name) continue
+      add({
+        name,
+        explicitType: parameter.type === 'required_parameter'
+          ? simpleAnnotatedType(parameter, genericTypeNames)
+          : null,
+        origin: 'constructor-parameter-property'
+      })
+    }
+  }
+  return properties
+}
+
+function patternNames(node: any): string[] {
+  if (!node) return []
+  if (['identifier', 'shorthand_property_identifier_pattern', 'shorthand_property_identifier'].includes(node.type)) {
+    return [node.text]
+  }
+  const names: string[] = []
+  for (let index = 0; index < node.childCount; index++) {
+    const child = node.child(index)
+    if (child) names.push(...patternNames(child))
+  }
+  return names
+}
+
+function directConstNewType(declarator: any): string | null {
+  const name = declarator.childForFieldName?.('name')
+  const value = declarator.childForFieldName?.('value')
+  if (name?.type !== 'identifier' || value?.type !== 'new_expression') return null
+  const constructor = value.childForFieldName?.('constructor')
+  return constructor?.type === 'identifier' ? constructor.text : null
+}
+
+function collectFunctionVarBindings(node: any): ReceiverBinding[] {
+  const bindings: ReceiverBinding[] = []
+  const visit = (current: any, root = false): void => {
+    if (!root && isFunctionScope(current)) return
+    if (current.type === 'variable_declaration') {
+      for (let index = 0; index < current.childCount; index++) {
+        const declarator = current.child(index)
+        if (declarator?.type !== 'variable_declarator') continue
+        const name = declarator.childForFieldName?.('name')
+        for (const bindingName of patternNames(name)) {
+          bindings.push({ name: bindingName, typeName: null, kind: null, availableAfter: current.endIndex })
+        }
+      }
+      return
+    }
+    for (let index = 0; index < current.childCount; index++) {
+      const child = current.child(index)
+      if (child) visit(child)
+    }
+  }
+  visit(node, true)
+  return bindings
+}
+
+function addDeclarationBindings(node: any, bindings: ReceiverBinding[]): void {
+  const declaration = node.type === 'export_statement'
+    ? Array.from({ length: node.childCount }, (_, index) => node.child(index)).find((child: any) =>
+      child && ['lexical_declaration', 'variable_declaration', 'function_declaration', 'class_declaration'].includes(child.type)
+    )
+    : node
+  if (!declaration) return
+  if (declaration.type === 'lexical_declaration' || declaration.type === 'variable_declaration') {
+    const isConst = declaration.child(0)?.type === 'const'
+    for (let index = 0; index < declaration.childCount; index++) {
+      const declarator = declaration.child(index)
+      if (declarator?.type !== 'variable_declarator') continue
+      const name = declarator.childForFieldName?.('name')
+      const names = patternNames(name)
+      const typeName = isConst ? directConstNewType(declarator) : null
+      for (const bindingName of names) {
+        bindings.push({
+          name: bindingName,
+          typeName: names.length === 1 ? typeName : null,
+          kind: names.length === 1 && typeName ? 'const-new' : null,
+          availableAfter: declaration.endIndex
+        })
+      }
+    }
+    return
+  }
+  if (declaration.type === 'function_declaration' || declaration.type === 'class_declaration') {
+    const name = declaration.childForFieldName?.('name')
+    if (name?.type === 'identifier' || name?.type === 'type_identifier') {
+      bindings.push({ name: name.text, typeName: null, kind: null, availableAfter: declaration.startIndex })
+    }
+  }
+}
+
+function bindingScope(node: any, genericTypeNames: ReadonlySet<string>): BindingScope {
+  const bindings: ReceiverBinding[] = []
+  if (isFunctionScope(node)) {
+    for (let index = 0; index < node.childCount; index++) {
+      const parameters = node.child(index)
+      if (!parameters || !['formal_parameters', 'parameters'].includes(parameters.type)) continue
+      for (let parameterIndex = 0; parameterIndex < parameters.childCount; parameterIndex++) {
+        const parameter = parameters.child(parameterIndex)
+        if (!parameter || !['required_parameter', 'optional_parameter', 'rest_pattern', 'rest_parameter', 'identifier'].includes(parameter.type)) continue
+        const name = parameter.type === 'identifier' ? parameter.text : parameterName(parameter)
+        if (!name) continue
+        bindings.push({
+          name,
+          typeName: parameter.type === 'identifier' ? null : simpleAnnotatedType(parameter, genericTypeNames),
+          kind: 'parameter',
+          availableAfter: node.startIndex
+        })
+      }
+    }
+    if (node.type === 'arrow_function') {
+      const parameter = node.childForFieldName?.('parameter')
+      if (parameter?.type === 'identifier') {
+        bindings.push({ name: parameter.text, typeName: null, kind: 'parameter', availableAfter: node.startIndex })
+      }
+    }
+    bindings.push(...collectFunctionVarBindings(node))
+  }
+  if (node.type === 'catch_clause') {
+    const parameter = node.childForFieldName?.('parameter')
+    for (const name of patternNames(parameter)) {
+      bindings.push({ name, typeName: null, kind: null, availableAfter: node.startIndex })
+    }
+  }
+  for (let index = 0; index < node.childCount; index++) {
+    const child = node.child(index)
+    if (child) addDeclarationBindings(child, bindings)
+  }
+  return { bindings }
+}
+
+function receiverBinding(scopes: readonly BindingScope[], name: string, occurrenceStart: number): ReceiverBinding | null {
+  for (let index = scopes.length - 1; index >= 0; index--) {
+    const scope = scopes[index]
+    const matches = scope.bindings.filter((binding) => binding.name === name)
+    if (matches.length === 0) continue
+    if (matches.length !== 1 || matches[0].availableAfter > occurrenceStart) return null
+    return matches[0]
+  }
+  return null
+}
+
+function locationOf(node: any, content: string): CodeMapElementLocation {
+  return {
+    start: {
+      line: node.startPosition.row + 1,
+      column: node.startPosition.column,
+      byte: Buffer.byteLength(content.slice(0, node.startIndex), 'utf-8')
+    },
+    end: {
+      line: node.endPosition.row + 1,
+      column: node.endPosition.column,
+      byte: Buffer.byteLength(content.slice(0, node.endIndex), 'utf-8')
+    }
+  }
+}
+
+function isSameNode(left: any, right: any): boolean {
+  return Boolean(left && right && left.type === right.type && left.startIndex === right.startIndex && left.endIndex === right.endIndex)
+}
+
+function isField(node: any, fieldName: string): boolean {
+  return isSameNode(node.parent?.childForFieldName?.(fieldName), node)
+}
+
+function isTypeReferenceNode(node: any): boolean {
+  if (node.type === 'identifier' && node.parent?.type === 'extends_clause' && isField(node, 'value')) return true
+  if (node.type !== 'type_identifier') return false
+  if (node.parent?.type === 'nested_type_identifier') return false
+  if (isField(node, 'name') && [
+    'class_declaration',
+    'abstract_class_declaration',
+    'interface_declaration',
+    'type_alias_declaration',
+    'enum_declaration',
+    'type_parameter'
+  ].includes(node.parent?.type)) return false
+  return true
+}
+
+function isValueReferenceNode(node: any): boolean {
+  if (node.type !== 'identifier') return false
+  const parentType = node.parent?.type
+  if (!parentType) return false
+  if ([
+    'import_specifier',
+    'import_clause',
+    'namespace_import',
+    'export_specifier',
+    'nested_type_identifier'
+  ].includes(parentType)) return false
+  if (parentType.endsWith('_pattern')) return false
+  if (parentType === 'formal_parameters') return false
+  if (parentType === 'arrow_function' && isField(node, 'parameter')) return false
+  if (['required_parameter', 'optional_parameter'].includes(parentType) && isField(node, 'pattern')) return false
+  if (parentType === 'catch_clause' && isField(node, 'parameter')) return false
+  if (isField(node, 'name') && [
+    'function_declaration',
+    'function_signature',
+    'class_declaration',
+    'abstract_class_declaration',
+    'interface_declaration',
+    'type_alias_declaration',
+    'enum_declaration',
+    'variable_declarator'
+  ].includes(parentType)) return false
+  if (isField(node, 'key') && parentType === 'pair') return false
+  if (isField(node, 'label')) return false
+  return true
+}
+
+function extractNamedImportBindings(node: any, sourceModule: string, content: string): ImportBinding[] {
+  const bindings: ImportBinding[] = []
+  const visit = (current: any): void => {
+    if (current.type === 'import_specifier') {
+      const imported = current.childForFieldName?.('name')
+      const alias = current.childForFieldName?.('alias')
+      if (imported?.type === 'identifier' && (!alias || alias.type === 'identifier')) {
+        const local = alias ?? imported
+        bindings.push({
+          sourceModule,
+          importedName: imported.text,
+          localName: local.text,
+          location: locationOf(local, content)
+        })
+      }
+      return
+    }
+    for (let index = 0; index < current.childCount; index++) {
+      const child = current.child(index)
+      if (child) visit(child)
+    }
+  }
+  visit(node)
+  return bindings
 }
 
 // ─── Lógica principal ────────────────────────────────────────────────────────
@@ -287,22 +719,32 @@ export function readStructure(
   // Verifica suporte da linguagem via extensão
   const language = getLanguageForExtension(extension)
   if (!language) {
-    return { elements: [], relationships: [], elementInterfaces: [] }
+    return {
+      elements: [],
+      relationships: [],
+      elementInterfaces: [],
+      importBindings: [],
+      symbolReferences: []
+    }
   }
 
   let tree: any
   try {
     const parser = getParser(language)
-    tree = parser.parse(content)
+    const bufferSize = Math.max(32 * 1024, Buffer.byteLength(content, 'utf8') + 1)
+    tree = parser.parse(content, undefined, { bufferSize })
   } catch (err) {
-    // INVARIANT: parse failures nunca quebram o pipeline de indexação
-    console.warn(`[StructureReader] Falha ao parsear "${relativePath}":`, err)
-    return { elements: [], relationships: [], elementInterfaces: [] }
+    throw new StructureExtractionError(relativePath, 'parse', err)
   }
 
   const elements: CodeMapElement[] = []
   const relationships: CodeMapRelationship[] = []
   const elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }> = []
+  const importBindings: ImportBinding[] = []
+  const exportedConstNewBindings: ExportedConstNewBinding[] = []
+  const exportedConstCallBindings: ExportedConstCallBinding[] = []
+  const symbolReferences: SymbolReferenceCandidate[] = []
+  const seenSymbolOccurrences = new Set<string>()
 
   // Usa relativePath como fileId placeholder — será substituído pelo Repository Model (Sprint 5)
   const fileId = relativePath
@@ -328,6 +770,26 @@ export function readStructure(
     return generateElementId(repositoryId, relativePath, kind, name, parentElementId, signature, twinIndex)
   }
 
+  function addSymbolReference(
+    node: any,
+    kind: SymbolReferenceKind,
+    sourceElementId: string | null,
+    details: Pick<SymbolReferenceCandidate,
+      'receiver' | 'receiverName' | 'receiverTypeName' | 'receiverBindingKind' |
+      'receiverPropertyName' | 'receiverPropertyOrigin' | 'optional'> = {}
+  ): void {
+    const key = `${node.startIndex}:${node.endIndex}`
+    if (seenSymbolOccurrences.has(key)) return
+    seenSymbolOccurrences.add(key)
+    symbolReferences.push({
+      name: node.text,
+      kind,
+      location: locationOf(node, content),
+      sourceElementId,
+      ...details
+    })
+  }
+
   /**
    * Percorre a AST recursivamente extraindo elementos estruturais.
    * @param node            - Nó atual da AST
@@ -336,13 +798,79 @@ export function readStructure(
    *                          ou embutida em export_statement). Granularidade contextual das lexical_declaration.
    * @param parentKind      - Kind do elemento pai (null no nível de arquivo) — usado para method_signature
    */
-  function visitNode(node: any, parentElementId: string | null, isTopLevel = false, parentKind: CodeMapElementKind | null = null): void {
+  function visitNode(
+    node: any,
+    parentElementId: string | null,
+    isTopLevel = false,
+    parentKind: CodeMapElementKind | null = null,
+    sourceElementId: string | null = null,
+    bindingScopes: readonly BindingScope[] = [],
+    genericTypeNames: ReadonlySet<string> = new Set(),
+    thisPropertyBindings: ReadonlyMap<string, InstancePropertyBinding | null> | null = null
+  ): void {
     let element: CodeMapElement | null = null
     let skipRecursion = false
     // Override: filhos de export_statement embutido preservam o escopo top-level do módulo
     let childIsTopLevel: boolean | null = null
     // Escopo top-level só se propaga através de containers transparentes do módulo
     const childrenTopLevel = isTopLevel && (node.type === 'program' || node.type === 'export_statement')
+    const nodeGenericTypeNames = directGenericTypeNames(node)
+    const activeGenericTypeNames = nodeGenericTypeNames.size === 0
+      ? genericTypeNames
+      : new Set([...genericTypeNames, ...nodeGenericTypeNames])
+    const activeBindingScopes = isBindingScope(node)
+      ? [...bindingScopes, bindingScope(node, activeGenericTypeNames)]
+      : bindingScopes
+    const activeThisPropertyBindings = ['class_declaration', 'abstract_class_declaration'].includes(node.type)
+      ? directClassPropertyBindings(node, activeGenericTypeNames)
+      : thisPropertyBindings
+
+    if (node.type === 'new_expression') {
+      const constructor = node.childForFieldName?.('constructor')
+      if (constructor?.type === 'identifier') addSymbolReference(constructor, 'instantiation', sourceElementId)
+    } else if (node.type === 'call_expression') {
+      const callee = node.childForFieldName?.('function')
+      const argumentsNode = Array.from({ length: node.childCount }, (_, index) => node.child(index))
+        .find((child: any) => child?.type === 'arguments') as any
+      const optional = Boolean(callee && (
+        callee.text.includes('?.') ||
+        (argumentsNode && content.slice(callee.endIndex, argumentsNode.startIndex).includes('?.'))
+      ))
+      if (callee?.type === 'identifier') addSymbolReference(callee, 'call', sourceElementId)
+      else if (callee?.type === 'member_expression') {
+        const receiver = callee.childForFieldName?.('object')
+        const member = callee.childForFieldName?.('property')
+        if (receiver?.type === 'this' && member?.type === 'property_identifier') {
+          addSymbolReference(member, 'call', sourceElementId, { receiver: 'this', ...(optional ? { optional: true } : {}) })
+        } else if (receiver?.type === 'member_expression' && member?.type === 'property_identifier') {
+          const root = receiver.childForFieldName?.('object')
+          const property = receiver.childForFieldName?.('property')
+          if (root?.type === 'this' && property?.type === 'property_identifier') {
+            const binding = activeThisPropertyBindings?.get(property.text)
+            addSymbolReference(member, 'call', sourceElementId, {
+              receiver: 'this-property',
+              receiverPropertyName: property.text,
+              ...(binding?.explicitType ? { receiverTypeName: binding.explicitType } : {}),
+              ...(binding?.origin ? { receiverPropertyOrigin: binding.origin } : {}),
+              ...(optional ? { optional: true } : {})
+            })
+          }
+        } else if (receiver?.type === 'identifier' && member?.type === 'property_identifier') {
+          const binding = receiverBinding(activeBindingScopes, receiver.text, receiver.startIndex)
+          addSymbolReference(member, 'call', sourceElementId, {
+            receiver: 'identifier',
+            receiverName: receiver.text,
+            ...(binding?.typeName ? { receiverTypeName: binding.typeName } : {}),
+            ...(binding?.kind ? { receiverBindingKind: binding.kind } : {}),
+            ...(optional ? { optional: true } : {})
+          })
+        }
+      }
+    } else if (isTypeReferenceNode(node)) {
+      addSymbolReference(node, 'type', sourceElementId)
+    } else if (isValueReferenceNode(node)) {
+      addSymbolReference(node, 'reference', sourceElementId)
+    }
 
     switch (node.type) {
       case 'class_declaration':
@@ -353,7 +881,7 @@ export function readStructure(
         const interfaces = extractInterfaces(node)
         const modifiers = extractModifiers(node)
 
-        element = buildElement(id, repositoryId, fileId, 'class', name, parentElementId, node, modifiers, null, extractVisibility(node), baseClass, hasJSDoc(node), 0, content)
+        element = buildElement(id, repositoryId, fileId, 'class', name, parentElementId, node, modifiers, null, extractVisibility(node), baseClass, hasJSDoc(node), 0, extractDeclarationSignature('class', name, node, null, baseClass), content)
 
         // Coleta interfaces implementadas como dados brutos — resolução cross-file é responsabilidade do Repository Model
         if (interfaces.length > 0) {
@@ -373,7 +901,7 @@ export function readStructure(
         const returnType = extractReturnType(node)
         const paramCount = extractParameterCount(node)
 
-        element = buildElement(id, repositoryId, fileId, 'function', name, parentElementId, node, modifiers, returnType, null, null, hasJSDoc(node), paramCount, content)
+        element = buildElement(id, repositoryId, fileId, 'function', name, parentElementId, node, modifiers, returnType, null, null, hasJSDoc(node), paramCount, extractDeclarationSignature('function', name, node, returnType, null), content)
         break
       }
 
@@ -385,7 +913,7 @@ export function readStructure(
         const visibility = extractVisibility(node)
         const paramCount = extractParameterCount(node)
 
-        element = buildElement(id, repositoryId, fileId, 'method', name, parentElementId, node, modifiers, returnType, visibility, null, hasJSDoc(node), paramCount, content)
+        element = buildElement(id, repositoryId, fileId, 'method', name, parentElementId, node, modifiers, returnType, visibility, null, hasJSDoc(node), paramCount, extractDeclarationSignature(name === 'constructor' ? 'constructor' : 'method', name, node, returnType, null), content)
         break
       }
 
@@ -397,7 +925,7 @@ export function readStructure(
         const returnType = extractReturnType(node)
         const paramCount = extractParameterCount(node)
 
-        const base = buildElement(id, repositoryId, fileId, 'method', name, parentElementId, node, modifiers, returnType, null, null, hasJSDoc(node), paramCount, content)
+        const base = buildElement(id, repositoryId, fileId, 'method', name, parentElementId, node, modifiers, returnType, null, null, hasJSDoc(node), paramCount, extractDeclarationSignature('method', name, node, returnType, null), content)
         // Sob interface/type = member; sob classe = structural (contrato congelado)
         element = { ...base, granularity: parentKind === 'interface' ? 'member' : 'structural' }
         break
@@ -407,7 +935,7 @@ export function readStructure(
         const name = extractName(node)
         if (name !== '(anonymous)') {
           const id = generateIdWithTwinIndex('property', name, parentElementId, node)
-          element = buildElement(id, repositoryId, fileId, 'property', name, parentElementId, node, [], null, null, null, false, 0, content)
+          element = buildElement(id, repositoryId, fileId, 'property', name, parentElementId, node, [], null, null, null, false, 0, null, content)
         }
         break
       }
@@ -418,7 +946,8 @@ export function readStructure(
           const id = generateIdWithTwinIndex('property', name, parentElementId, node)
           const modifiers = extractModifiers(node)
           const visibility = extractVisibility(node)
-          element = buildElement(id, repositoryId, fileId, 'property', name, parentElementId, node, modifiers, null, visibility, null, hasJSDoc(node), 0, content)
+          const typeName = simpleAnnotatedType(node, activeGenericTypeNames)
+          element = buildElement(id, repositoryId, fileId, 'property', name, parentElementId, node, modifiers, null, visibility, null, hasJSDoc(node), 0, typeName ? `${name}: ${typeName}` : null, content)
         }
         break
       }
@@ -428,7 +957,28 @@ export function readStructure(
         const name = extractName(node)
         if (name !== '(anonymous)') {
           const id = generateIdWithTwinIndex('parameter', name, parentElementId, node)
-          element = buildElement(id, repositoryId, fileId, 'parameter', name, parentElementId, node, [], null, null, null, false, 0, content)
+          const parameterProperty = isConstructorParameterProperty(node)
+          const modifiers = parameterProperty ? extractModifiers(node) : []
+          const typeName = parameterProperty && node.type === 'required_parameter'
+            ? simpleAnnotatedType(node, activeGenericTypeNames)
+            : null
+          element = buildElement(
+            id,
+            repositoryId,
+            fileId,
+            'parameter',
+            name,
+            parentElementId,
+            node,
+            modifiers,
+            null,
+            parameterProperty ? extractVisibility(node) : null,
+            null,
+            false,
+            0,
+            typeName ? `${name}: ${typeName}` : null,
+            content
+          )
         }
         break
       }
@@ -445,7 +995,7 @@ export function readStructure(
             const memberNameStr = extractMemberName(member)
             if (!memberNameStr) continue
             const id = generateIdWithTwinIndex('enumMember', memberNameStr, parentElementId, member)
-            const mem = buildElement(id, repositoryId, fileId, 'enumMember', memberNameStr, parentElementId, member, [], null, null, null, false, 0, content)
+            const mem = buildElement(id, repositoryId, fileId, 'enumMember', memberNameStr, parentElementId, member, [], null, null, null, false, 0, null, content)
             elements.push(mem)
             if (parentElementId) {
               relationships.push(buildRelationship(repositoryId, parentElementId, id, 'contains'))
@@ -461,7 +1011,7 @@ export function readStructure(
       case 'interface_declaration': {
         const name = extractName(node)
         const id = generateIdWithTwinIndex('interface', name, parentElementId, node)
-        element = buildElement(id, repositoryId, fileId, 'interface', name, parentElementId, node, [], null, null, null, hasJSDoc(node), 0, content)
+        element = buildElement(id, repositoryId, fileId, 'interface', name, parentElementId, node, [], null, null, null, hasJSDoc(node), 0, null, content)
         break
       }
 
@@ -469,7 +1019,7 @@ export function readStructure(
         const name = extractName(node)
         const id = generateIdWithTwinIndex('enum', name, parentElementId, node)
         const modifiers = extractModifiers(node)
-        element = buildElement(id, repositoryId, fileId, 'enum', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0, content)
+        element = buildElement(id, repositoryId, fileId, 'enum', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0, null, content)
         break
       }
 
@@ -477,7 +1027,7 @@ export function readStructure(
         const name = extractName(node)
         const id = generateIdWithTwinIndex('typeAlias', name, parentElementId, node)
         const modifiers = extractModifiers(node)
-        element = buildElement(id, repositoryId, fileId, 'typeAlias', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0, content)
+        element = buildElement(id, repositoryId, fileId, 'typeAlias', name, parentElementId, node, modifiers, null, null, null, hasJSDoc(node), 0, null, content)
         break
       }
 
@@ -502,9 +1052,52 @@ export function readStructure(
           const id = generateIdWithTwinIndex(kind, name, parentElementId, node, signature)
 
           const nodeForRange = declaratorIndex === 0 ? node : declarator
-          const baseElem = buildElement(id, repositoryId, fileId, kind, name, parentElementId, nodeForRange, modifiers, null, null, null, false, 0, content)
+          const baseElem = buildElement(id, repositoryId, fileId, kind, name, parentElementId, nodeForRange, modifiers, null, null, null, false, 0, null, content)
           const declarationElement: CodeMapElement = { ...baseElem, granularity: isMember ? 'member' : 'structural' }
           elements.push(declarationElement)
+
+          const initializer = declarator.childForFieldName?.('value')
+          const constructor = initializer?.type === 'new_expression'
+            ? initializer.childForFieldName?.('constructor')
+            : null
+          const exportElement = parentKind === 'export' && parentElementId
+            ? elements.find((candidate) => candidate.id === parentElementId)
+            : null
+          if (
+            isConst &&
+            isTopLevel &&
+            exportElement?.name === name
+          ) {
+            if (constructor?.type === 'identifier') {
+              exportedConstNewBindings.push({
+                declarationElementId: id,
+                exportedName: name,
+                constructorName: constructor.text
+              })
+            } else if (initializer?.type === 'call_expression') {
+              const callee = initializer.childForFieldName?.('function')
+              if (callee?.type === 'member_expression') {
+                const receiver = callee.childForFieldName?.('object')
+                const member = callee.childForFieldName?.('property')
+                if (receiver?.type === 'identifier' && member?.type === 'property_identifier') {
+                  exportedConstCallBindings.push({
+                    declarationElementId: id,
+                    exportedName: name,
+                    calleeKind: 'member',
+                    calleeName: member.text,
+                    calleeReceiverName: receiver.text
+                  })
+                }
+              } else if (callee?.type === 'identifier') {
+                exportedConstCallBindings.push({
+                  declarationElementId: id,
+                  exportedName: name,
+                  calleeKind: 'identifier',
+                  calleeName: callee.text
+                })
+              }
+            }
+          }
 
           // Relacionamento contains: pai → filho
           if (parentElementId) {
@@ -515,7 +1108,10 @@ export function readStructure(
           // Filhos de declarator nunca são top-level
           for (let k = 0; k < declarator.childCount; k++) {
             const dchild = declarator.child(k)
-            if (dchild) visitNode(dchild, id, false, kind)
+            if (dchild) {
+              const declarationSourceId = declarationElement.granularity === 'structural' ? id : sourceElementId
+              visitNode(dchild, id, false, kind, declarationSourceId, activeBindingScopes, activeGenericTypeNames, activeThisPropertyBindings)
+            }
           }
           declaratorIndex++
         }
@@ -530,7 +1126,9 @@ export function readStructure(
         const source = extractImportSource(node)
         const name = source ?? '(unknown-import)'
         const id = generateIdWithTwinIndex('import', name, parentElementId, node)
-        element = buildElement(id, repositoryId, fileId, 'import', name, parentElementId, node, [], null, null, null, false, 0, content)
+        element = buildElement(id, repositoryId, fileId, 'import', name, parentElementId, node, [], null, null, null, false, 0, null, content)
+
+        if (source) importBindings.push(...extractNamedImportBindings(node, source, content))
 
         // NOTA: relacionamento imports NÃO é gerado aqui.
         // O Repository Model (Sprint 5) resolverá o caminho do módulo para um fileId real.
@@ -541,7 +1139,7 @@ export function readStructure(
         const source = extractRequireSource(node)
         if (source) {
           const id = generateIdWithTwinIndex('import', source, parentElementId, node)
-          element = buildElement(id, repositoryId, fileId, 'import', source, parentElementId, node, [], null, null, null, false, 0, content)
+          element = buildElement(id, repositoryId, fileId, 'import', source, parentElementId, node, [], null, null, null, false, 0, null, content)
         }
         break
       }
@@ -550,7 +1148,7 @@ export function readStructure(
         const name = extractCommonJsExportName(node)
         if (name) {
           const id = generateIdWithTwinIndex('export', name, parentElementId, node)
-          element = buildElement(id, repositoryId, fileId, 'export', name, parentElementId, node, [], null, null, null, false, 0, content)
+          element = buildElement(id, repositoryId, fileId, 'export', name, parentElementId, node, [], null, null, null, false, 0, null, content)
         }
         break
       }
@@ -560,7 +1158,7 @@ export function readStructure(
         const name = extractExportName(node)
         if (name) {
           const id = generateIdWithTwinIndex('export', name, parentElementId, node)
-          element = buildElement(id, repositoryId, fileId, 'export', name, parentElementId, node, [], null, null, null, false, 0, content)
+          element = buildElement(id, repositoryId, fileId, 'export', name, parentElementId, node, [], null, null, null, false, 0, null, content)
           // Declaração embutida (`export const x = 1`) continua sendo top-level
           childIsTopLevel = isTopLevel
         }
@@ -581,17 +1179,19 @@ export function readStructure(
         relationships.push(buildRelationship(repositoryId, parentElementId, element.id, 'contains'))
       }
 
+      const childSourceElementId = element.granularity === 'structural' ? element.id : sourceElementId
+
       // Continua percorrendo filhos com o elemento atual como pai.
       // Filhos de elemento nunca são top-level, exceto export_statement embutido (override).
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i)
-        if (child) visitNode(child, element.id, childIsTopLevel ?? false, element.kind)
+        if (child) visitNode(child, element.id, childIsTopLevel ?? false, element.kind, childSourceElementId, activeBindingScopes, activeGenericTypeNames, activeThisPropertyBindings)
       }
     } else {
       // Nó sem mapeamento — continua percorrendo filhos mantendo o pai atual
       for (let i = 0; i < node.childCount; i++) {
         const child = node.child(i)
-        if (child) visitNode(child, parentElementId, childrenTopLevel, parentKind)
+        if (child) visitNode(child, parentElementId, childrenTopLevel, parentKind, sourceElementId, activeBindingScopes, activeGenericTypeNames, activeThisPropertyBindings)
       }
     }
   }
@@ -599,12 +1199,10 @@ export function readStructure(
   try {
     visitNode(tree.rootNode, null, true)
   } catch (err) {
-    // INVARIANT: erros de percurso da AST nunca quebram o pipeline
-    console.warn(`[StructureReader] Erro ao percorrer AST de "${relativePath}":`, err)
-    return { elements: [], relationships: [], elementInterfaces: [] }
+    throw new StructureExtractionError(relativePath, 'traverse', err)
   }
 
-  return { elements, relationships, elementInterfaces }
+  return { elements, relationships, elementInterfaces, importBindings, exportedConstNewBindings, exportedConstCallBindings, symbolReferences }
 }
 
 // ─── Construtores internos ───────────────────────────────────────────────────
@@ -615,6 +1213,8 @@ export function readStructure(
  */
 export function classifyElement(kind: CodeMapElementKind): { granularity: CodeMapGranularity; retrievable: boolean } {
   switch (kind) {
+    case 'document':
+    case 'section':
     case 'class':
     case 'function':
     case 'method':
@@ -660,6 +1260,7 @@ function buildElement(
   baseClass: string | null,
   hasDocumentation: boolean,
   parameterCount: number,
+  declarationSignature: string | null,
   content: string
 ): CodeMapElement {
   // Tree-sitter usa 0-indexed para linhas; nosso modelo usa 1-indexed
@@ -692,6 +1293,7 @@ function buildElement(
     baseClass,
     hasDocumentation,
     parameterCount,
+    declarationSignature,
     retrievalKind: classification.retrievable ? 'A' : null,
     granularity: classification.granularity,
     retrievable: classification.retrievable

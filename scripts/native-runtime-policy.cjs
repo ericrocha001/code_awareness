@@ -10,6 +10,8 @@ const EXPECTED_ELECTRON_VERSION = '32.0.0'
 const EXPECTED_VITEST_VERSION = '3.2.7'
 const EXPECTED_PACKAGE_MANAGER_PREFIX = 'npm@10.'
 const SUPPORTED_NPM_MAJOR = 10
+const ELECTRON_RUN_AS_NODE_ENV = 'ELECTRON_RUN_AS_NODE'
+const ELECTRON_DESKTOP_ENVIRONMENT_CODE = 'ELECTRON_RUN_AS_NODE_LEAKED'
 
 const REQUIRED_NATIVE_DEPENDENCIES = Object.freeze({
   'better-sqlite3': '12.11.1',
@@ -25,6 +27,38 @@ function createIssue(property, expected, found, action) {
     expected,
     found: found === undefined ? 'absent' : found,
     action
+  }
+}
+
+function normalizeDesktopEnvironmentValue(rawValue) {
+  if (rawValue === undefined || rawValue === null) return null
+  if (typeof rawValue !== 'string') return String(rawValue)
+  const trimmed = rawValue.trim()
+  return trimmed === '' ? null : trimmed
+}
+
+function inspectElectronDesktopEnvironment(environment = process.env) {
+  const value = normalizeDesktopEnvironmentValue(environment ? environment[ELECTRON_RUN_AS_NODE_ENV] : undefined)
+  if (value === null || value === '0') {
+    return { healthy: true, code: null, reason: null }
+  }
+  return {
+    healthy: false,
+    code: ELECTRON_DESKTOP_ENVIRONMENT_CODE,
+    reason: `${ELECTRON_RUN_AS_NODE_ENV}=${value} is incompatible with the Electron desktop runtime.`
+  }
+}
+
+function createDesktopEnvironmentIssue(environment = process.env) {
+  const inspection = inspectElectronDesktopEnvironment(environment)
+  if (inspection.healthy) return null
+  const found = normalizeDesktopEnvironmentValue(environment[ELECTRON_RUN_AS_NODE_ENV])
+  return {
+    code: inspection.code,
+    property: 'Electron Desktop Environment',
+    expected: `${ELECTRON_RUN_AS_NODE_ENV} absent`,
+    found: `${ELECTRON_RUN_AS_NODE_ENV}=${found}`,
+    action: 'Remove-Item Env:\\ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue'
   }
 }
 
@@ -199,8 +233,12 @@ module.exports = {
   EXPECTED_VITEST_VERSION,
   REQUIRED_NATIVE_DEPENDENCIES,
   SUPPORTED_NPM_MAJOR,
+  ELECTRON_RUN_AS_NODE_ENV,
+  ELECTRON_DESKTOP_ENVIRONMENT_CODE,
   formatIssues,
+  createDesktopEnvironmentIssue,
   detectCurrentNpmVersion,
+  inspectElectronDesktopEnvironment,
   parseNpmMajorFromVersion,
   parseNpmMajorFromUserAgent,
   readPackageJson,

@@ -11,6 +11,7 @@ import { projectRM2, serializeRM2, type RM2Snapshot } from './rm2-encoder'
 
 export interface CodeMapDiscoveryPort {
   awaitSnapshot(repoPath: string): Promise<void>
+  awaitReadiness?(repoPath: string, capability: 'FILE_INVENTORY'): Promise<void>
   getFiles(repoPath: string): CodeMapFile[]
   getElements(repoPath: string): CodeMapElement[]
   getRelationships(repoPath: string): CodeMapRelationship[]

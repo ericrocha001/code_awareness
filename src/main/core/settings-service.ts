@@ -4,13 +4,15 @@
 
 import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
-import { join } from 'path'
 import { AppSettings, OutputFormat, ContextEnrichment } from '../../shared/types'
 import { DEFAULT_COMPRESSION_SETTINGS, normalizeCompressionProfile } from './compression-profile'
 import { DEFAULT_DASH_SETTINGS, normalizeDashSettings } from '../../shared/utils/dash-settings'
+import { desktopProfilePaths } from '../desktop-profile'
 
 const DEFAULT_SETTINGS = {
   rootFolders: [],
+  remoteAccessEnabled: false,
+  transportKind: 'ngrok',
   individualProjects: [],
   hiddenProjects: [],
   ignoredDiffFiles: {},
@@ -22,6 +24,12 @@ const DEFAULT_SETTINGS = {
 } as AppSettings
 
 export class SettingsService {
+  private readonly listeners = new Set<() => void>()
+
+  onChanged(listener: () => void): () => void {
+    this.listeners.add(listener)
+    return () => this.listeners.delete(listener)
+  }
   private static instance: SettingsService
 
   static getInstance(): SettingsService {
@@ -32,8 +40,7 @@ export class SettingsService {
   }
 
   private getConfigFile(): string {
-    const configDir = app.getPath('userData')
-    return join(configDir, 'settings.json')
+    return desktopProfilePaths(app.getPath('userData')).settingsPath
   }
 
   loadSettings(): AppSettings {
@@ -67,6 +74,8 @@ export class SettingsService {
       }
 
       merged.rootFolders = rest.rootFolders || []
+      merged.remoteAccessEnabled = rest.remoteAccessEnabled === true
+      merged.transportKind = rest.transportKind === 'relay' ? 'relay' : 'ngrok'
       merged.individualProjects = rest.individualProjects || []
       merged.hiddenProjects = rest.hiddenProjects || []
       merged.tags = rest.tags || {}
@@ -114,6 +123,7 @@ export class SettingsService {
     const configFile = this.getConfigFile()
     if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
     writeFileSync(configFile, JSON.stringify(settings, null, 2), 'utf-8')
+    for (const listener of this.listeners) listener()
   }
 }
 

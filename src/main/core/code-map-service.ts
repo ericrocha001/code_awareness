@@ -1,3 +1,4 @@
+import { projectFileRelationships } from './context/file-relationships'
 /*
 -T ---
 */
@@ -18,6 +19,8 @@ import { WatcherService } from './watcher-service'
 import { COMPRESSION_TOTAL_FAILURE_MARKER, type CompressionPort } from './compression-port'
 import type { ContentIdentityPort } from './content-identity-port'
 import { telemetryService } from './telemetry-service'
+import type { ActiveProject } from '../../shared/types/active-project-types'
+import type { PersistedSymbolReference } from './symbol-reference-resolver'
 
 function formatTimestampForFilename(date: Date = new Date()): string {
   const pad = (num: number) => String(num).padStart(2, '0')
@@ -32,6 +35,8 @@ function formatTimestampForFilename(date: Date = new Date()): string {
 function sanitizeFilenamePart(part: string): string {
   return part.replace(/[/\\:*?"<>|]/g, '_')
 }
+
+export type CodeMapReadinessCapability = 'FILE_INVENTORY'
 
 interface CodeMapInstance {
   model: RepositoryModel
@@ -51,6 +56,14 @@ export class CodeMapService {
   constructor(watcherService: WatcherService, compressionService: CompressionPort) {
     this.watcherService = watcherService
     this.compressionService = compressionService
+  }
+
+  getOpenProjects(): ActiveProject[] {
+    return Array.from(instances.values(), ({ model }) => ({
+      id: model.getRepositoryId(),
+      path: model.getRepoPath(),
+      name: basename(model.getRepoPath())
+    }))
   }
 
   /**
@@ -117,6 +130,11 @@ export class CodeMapService {
           await new Promise((resolve) => setImmediate(resolve))
           // Offline reconcile: detects files created/deleted/changed while app was closed.
           await model.reconcileWithDisk({ indexUnexpected: true })
+          await new Promise((resolve) => setImmediate(resolve))
+          await model.backfillTextDocuments?.()
+          await model.backfillDeclarationSignatures?.()
+          await model.backfillSymbolReferences?.()
+          await new Promise((resolve) => setImmediate(resolve))
           // Sync in-memory modified set with the updated DB state.
           synchronizer.reconcileMemoryWithDatabase()
           telemetryService.log(cid, 'CODE_MAP', 'BACKGROUND_MAINTENANCE_COMPLETED', {
@@ -188,6 +206,18 @@ export class CodeMapService {
     return instance.backgroundMaintenance
   }
 
+  async awaitReadiness(repoPath: string, capability: CodeMapReadinessCapability): Promise<void> {
+    if (capability === 'FILE_INVENTORY') {
+      const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
+      const pending = this.pendingOpenRequests.get(normalizedPath)
+      if (pending) {
+        await pending
+      }
+      this.ensureInstance(normalizedPath)
+      return
+    }
+  }
+
   async awaitSnapshot(repoPath: string): Promise<void> {
     const instance = this.ensureInstance(repoPath)
     // Wait for both: any in-flight background maintenance (backfill+reconcile) AND
@@ -214,6 +244,26 @@ export class CodeMapService {
   getRelationships(repoPath: string): CodeMapRelationship[] {
     const instance = this.ensureInstance(repoPath)
     return instance.model.getRelationships()
+  }
+
+  getHierarchyRelationshipsBySourceElement(repoPath: string, elementId: string): CodeMapRelationship[] {
+    const instance = this.ensureInstance(repoPath)
+    return instance.model.getHierarchyRelationshipsBySourceElement(elementId)
+  }
+
+  getHierarchyRelationshipsByTargetElement(repoPath: string, elementId: string): CodeMapRelationship[] {
+    const instance = this.ensureInstance(repoPath)
+    return instance.model.getHierarchyRelationshipsByTargetElement(elementId)
+  }
+
+  getSymbolReferencesByTargetElement(repoPath: string, targetElementId: string): PersistedSymbolReference[] {
+    const instance = this.ensureInstance(repoPath)
+    return instance.model.getSymbolReferencesByTargetElement(targetElementId)
+  }
+
+  getSymbolReferencesBySourceElement(repoPath: string, sourceElementId: string): PersistedSymbolReference[] {
+    const instance = this.ensureInstance(repoPath)
+    return instance.model.getSymbolReferencesBySourceElement(sourceElementId)
   }
 
   getSyncStatus(repoPath: string): CodeMapSyncStatus {
@@ -250,9 +300,6 @@ export class CodeMapService {
     return result
   }
 
-  /**
-   * Deriva a lista de arquivos do escopo (âncora + relacionados ordenados por relativePath).
-   */
   private getScopeFiles(
     repoPath: string,
     anchorFileId: string
@@ -267,27 +314,7 @@ export class CodeMapService {
     const elements = model.getElementsByRepository()
     const relationships = model.getRelationships()
 
-    // Deriva relacionamentos de importação (imports + importedBy)
-    const fileIds = new Set(files.map((f) => f.id))
-    const elementFileIds = new Map(elements.map((e) => [e.id, e.fileId]))
-
-    const importsMap = new Map<string, Set<string>>()
-    const importedByMap = new Map<string, Set<string>>()
-
-    for (const rel of relationships) {
-      if (rel.type !== 'imports') continue
-      const sourceFileId = elementFileIds.get(rel.sourceId)
-      const targetFileId = rel.targetId
-
-      if (!sourceFileId || !fileIds.has(sourceFileId) || !fileIds.has(targetFileId)) continue
-      if (sourceFileId === targetFileId) continue
-
-      if (!importsMap.has(sourceFileId)) importsMap.set(sourceFileId, new Set())
-      importsMap.get(sourceFileId)!.add(targetFileId)
-
-      if (!importedByMap.has(targetFileId)) importedByMap.set(targetFileId, new Set())
-      importedByMap.get(targetFileId)!.add(sourceFileId)
-    }
+    const { out: importsMap, in: importedByMap } = projectFileRelationships(files, elements, relationships)
 
     const relatedIds = new Set<string>()
     const imported = importsMap.get(anchorFileId)

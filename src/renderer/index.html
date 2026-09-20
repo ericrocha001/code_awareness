@@ -12,15 +12,12 @@ T ---
     <!-- Logo gradiente azul-roxo como favicon -->
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/devicon/devicon.min.css" />
     <!--
-      CSP mínima: style_src 'unsafe-inline' necessário para estilos inline do React.
-      Fontes vêm do próprio bundle (offline-first), sem dependência externa.
+      CSP minima: style_src 'unsafe-inline' necessario para estilos inline do React.
+      Offline-first: sem fontes externas; usa a pilha de fontes do sistema definida em index.css.
     -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self';" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; connect-src 'self' ws://localhost:5173;" />
   </head>
   <body>
     <div id="root"></div>

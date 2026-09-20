@@ -7,6 +7,7 @@ import { join } from 'path'
 import { CodeMapService } from '../core/code-map-service'
 import { repositoryEventBus } from '../core/repository-events'
 import { telemetryService } from '../core/telemetry-service'
+import type { ActiveProjectService } from '../core/active-project-service'
 
 function isValidPath(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0
@@ -39,7 +40,7 @@ function broadcastToWindows(channel: string, payload: unknown): void {
   })
 }
 
-export function registerCodeMapHandlers(codeMapService: CodeMapService): void {
+export function registerCodeMapHandlers(codeMapService: CodeMapService, activeProjects: ActiveProjectService): void {
   // Escuta alterações de arquivos no Event Bus e emite evento push para o renderer
   // Mantido por retrocompatibilidade: o canal code-map:file-modified segue sendo emitido,
   // embora o CodeMapView consuma agora o canal confirmado (code-map:file-confirmed).
@@ -63,7 +64,9 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService): void {
         return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia' }
       }
       await codeMapService.openRepository(repoPath)
-      return { success: true }
+      const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
+      const project = codeMapService.getOpenProjects().find((entry) => entry.path === normalizedPath)
+      return { success: true, projectId: project?.id }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -74,7 +77,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService): void {
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia' }
       }
-      codeMapService.closeRepository(repoPath)
+      await activeProjects.closeRepository(repoPath)
       return { success: true }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }

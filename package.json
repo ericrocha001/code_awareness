@@ -26,14 +26,15 @@
     "test:db": "npm run native:doctor && npm run test:db:adapter && npm run test:db:codemap",
     "test:db:adapter": "electron scripts/run-adapter-tests-electron.js",
     "test:db:codemap": "electron scripts/run-codemap-tests-electron.js",
-    "test:codemap:native": "npm run native:doctor && npm run test:lanes:guard && node scripts/run-vitest-electron.cjs run --config vitest.native.config.ts src/main/core/codemap-addressability.test.ts src/main/core/codemap-extraction-contract.test.ts src/main/core/codemap-startup.e2e.test.ts src/main/core/codemap-system-acceptance.e2e.test.ts src/main/core/context-reference.e2e.test.ts",
+    "test:codemap:native": "npm run native:doctor && npm run test:lanes:guard && node scripts/run-vitest-electron.cjs run --config vitest.native.config.ts src/main/core/codemap-addressability.test.ts src/main/core/codemap-extraction-contract.test.ts src/main/core/codemap-startup.e2e.test.ts src/main/core/codemap-system-acceptance.e2e.test.ts src/main/core/context-reference.e2e.test.ts src/main/core/symbol-reference-persistence.e2e.test.ts",
     "test:git": "npm run test:lanes:guard && vitest run src/main/core/git-service.test.ts src/main/core/diff-service.test.ts",
     "test:compression": "npm run test:lanes:guard && vitest run src/main/core/compression-service.test.ts",
     "benchmark:tokenizer": "node scripts/benchmark-tokenizer.mjs",
     "benchmark:repo-map-real": "npm run native:doctor && node scripts/run-vitest-electron.cjs run --config vitest.benchmark.config.ts",
     "benchmark:rm2-readability": "vite-node scripts/rm2-ai-readability-smoke.ts",
+    "mcp:serve": "node scripts/run-mcp-server.cjs",
     "test:context:node": "npm run test:lanes:guard && vitest run src/main/core/tokenizer.test.ts src/main/core/context/repo-map-serialization-harness.test.ts src/main/core/context/repo-discovery.test.ts src/main/core/dash/dash-discovery-service.test.ts src/renderer/src/components/CodeDashView/RepoDiscoveryPanel.test.tsx src/renderer/src/components/CodeDashView/repo-discovery-flow.test.tsx",
-    "test:context:native": "npm run test:native -- --run src/main/core/context/repo-discovery.e2e.test.ts",
+    "test:context:native": "npm run test:native -- --run src/main/core/context/repo-discovery.e2e.test.ts src/main/core/context/context-navigation.e2e.test.ts",
     "test:ui": "npm run test:lanes:guard && vitest run src/renderer/src/components/CodeJourneyView/restore-modal.test.tsx",
     "bootstrap": "npm run native:preflight && npm ci",
     "native:prepare": "electron-rebuild --only better-sqlite3",
@@ -46,7 +47,10 @@
     "native:validate": "npm run native:doctor && npm run build",
     "validate:codemap": "npm run test:codemap:native && npm run test:db:codemap && npm run native:doctor && echo CODEMAP VALID",
     "validate:context": "npm run benchmark:tokenizer && npm run test:context:node && npm run test:context:native && npm run benchmark:repo-map-real && echo CONTEXT VALID",
-    "validate": "npm run native:policy:test && npm run native:preflight:test && npm run test:lanes:guard:test && npm run native:doctor && npm run typecheck && npm run test:node && npm run validate:codemap && npm run validate:context && npm run test:db:adapter && npm run build && npm run native:doctor"
+    "validate": "npm run native:policy:test && npm run native:preflight:test && npm run test:lanes:guard:test && npm run native:doctor && npm run typecheck && npm run test:node && npm run harness:desktop:test && npm run validate:codemap && npm run validate:context && npm run test:db:adapter && npm run build && npm run native:doctor",
+    "harness:desktop-doctor": "node scripts/desktop-runtime.cjs doctor",
+    "harness:desktop-profile:migrate": "node scripts/desktop-runtime.cjs migrate",
+    "harness:desktop:test": "node scripts/desktop-runtime.test.cjs"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.2",
@@ -57,6 +61,7 @@
     "@types/react": "^18.3.0",
     "@types/react-dom": "^18.3.0",
     "@types/react-window": "^1.8.8",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^4.3.0",
     "electron": "32.0.0",
     "electron-builder": "^24.13.3",
@@ -101,6 +106,7 @@
     "dompurify": "^3.4.12",
     "gitdiff-parser": "^0.3.1",
     "ignore": "^7.0.6",
+    "jose": "^6.2.12",
     "js-tiktoken": "^1.0.21",
     "lucide-react": "^1.25.0",
     "markdown-to-jsx": "^9.8.2",
@@ -108,7 +114,8 @@
     "react-window": "^1.8.10",
     "tree-sitter": "0.21.1",
     "tree-sitter-javascript": "0.23.1",
-    "tree-sitter-typescript": "0.23.2"
+    "tree-sitter-typescript": "0.23.2",
+    "ws": "8.21.3"
   },
   "allowScripts": {
     "tree-sitter@0.21.1": true,

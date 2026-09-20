@@ -21,7 +21,7 @@ export class JavaScriptStructureExtractor implements StructureExtractionPort {
       return readStructure(input.repositoryId, input.relativePath, input.extension, input.content)
     } catch (err) {
       console.warn(`[JavaScriptStructureExtractor] Falha ao extrair estrutura de "${input.relativePath}":`, err)
-      return { elements: [], relationships: [], elementInterfaces: [] }
+      return { elements: [], relationships: [], elementInterfaces: [], importBindings: [], exportedConstNewBindings: [], exportedConstCallBindings: [], symbolReferences: [] }
     }
   }
 }

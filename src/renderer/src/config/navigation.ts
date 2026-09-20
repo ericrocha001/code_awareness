@@ -2,9 +2,9 @@
 -T ---
 */
 
-import { Home, Flag, FileText, Archive, Zap, GitBranch, Bookmark, Map, type LucideIcon } from 'lucide-react'
+import { Home, Flag, FileText, Archive, Zap, GitBranch, Bookmark, Map, Settings, type LucideIcon } from 'lucide-react'
 
-export type NavId = 'home' | 'campaigns' | 'codebase' | 'compression' | 'dash' | 'diff' | 'journey' | 'code-map'
+export type NavId = 'home' | 'campaigns' | 'codebase' | 'compression' | 'dash' | 'diff' | 'journey' | 'code-map' | 'settings'
 export type Tab = NavId
 
 export interface NavItem {
@@ -22,6 +22,7 @@ export const NAV_ITEMS: NavItem[] = [
   { id: 'dash', label: 'Code Dash', icon: 'codicon-zap', lucideIcon: Zap },
   { id: 'diff', label: 'Code Diff', icon: '🔀', lucideIcon: GitBranch },
   { id: 'journey', label: 'Code Journey', icon: '📋', lucideIcon: Bookmark },
-  { id: 'code-map', label: 'Code Map', icon: '🗺️', lucideIcon: Map }
+  { id: 'code-map', label: 'Code Map', icon: '🗺️', lucideIcon: Map },
+  { id: 'settings', label: 'Settings', icon: '⚙', lucideIcon: Settings }
 ]
 

@@ -56,6 +56,7 @@ const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   '.h': 'c',
   '.hpp': 'cpp',
   '.md': 'markdown',
+  '.markdown': 'markdown',
   '.json': 'json',
   '.yaml': 'yaml',
   '.yml': 'yaml',
@@ -91,7 +92,7 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
   try {
     handle = await open(filePath, 'r')
     const { bytesRead } = await handle.read(buffer, 0, 4096, 0)
-    return isBinaryContent(buffer.subarray(0, bytesRead))
+    return isBinaryContent(buffer.subarray(0, bytesRead), bytesRead === buffer.length)
   } catch {
     // Se não conseguir ler (permissão, arquivo inexistente), assume não-binário
     return false
@@ -112,9 +113,13 @@ export async function isEligibleTextFile(filePath: string): Promise<boolean> {
   }
 }
 
-/** Detecta se o conteúdo de um buffer é binário (não UTF-8 válido). Analisa apenas os primeiros 4096 bytes. */
-function isBinaryContent(content: Buffer): boolean {
-  for (let i = 0; i < Math.min(content.length, 4096); i++) {
+export function isBinaryContent(content: Buffer, partial = false): boolean {
+  try {
+    new TextDecoder('utf-8', { fatal: true }).decode(content, { stream: partial })
+  } catch {
+    return true
+  }
+  for (let i = 0; i < content.length; i++) {
     const byte = content[i]
     if (byte === 0) return true
     if (byte < 32 && byte !== 9 && byte !== 10 && byte !== 13) {

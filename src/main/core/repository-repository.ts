@@ -10,6 +10,7 @@ import type {
   CodeMapRepository,
   CodeMapSyncStatus
 } from '../../shared/types'
+import type { PersistedSymbolReference } from './symbol-reference-resolver'
 
 export interface CodeMapRepositoryRow {
   id: string
@@ -58,6 +59,7 @@ export interface CodeMapElementRow {
   base_class: string | null
   has_documentation: number
   parameter_count: number
+  declaration_signature?: string | null
   retrieval_kind: string | null
   /** Granularidade semântica do elemento */
   granularity: string
@@ -151,7 +153,8 @@ export interface RepositoryRepository {
     file: CodeMapFile,
     elements: CodeMapElement[],
     relationships: CodeMapRelationship[],
-    elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>
+    elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>,
+    symbolReferences?: PersistedSymbolReference[]
   ): void
 
   /** Salva ou substitui as interfaces implementadas por elementos em uma transação. */
@@ -162,6 +165,16 @@ export interface RepositoryRepository {
 
   /** Busca todas as interfaces associadas a elementos de um repositório. */
   getElementInterfacesByRepository(repositoryId: string): Array<{ elementId: string; interfaceNames: string[] }>
+
+  replaceSymbolReferencesForFile(sourceFileId: string, references: PersistedSymbolReference[]): void
+
+  getSymbolReferencesByTargetElement(targetElementId: string): PersistedSymbolReference[]
+
+  getSymbolReferencesBySourceElement(sourceElementId: string): PersistedSymbolReference[]
+
+  getSymbolReferencesBySourceFile(sourceFileId: string): PersistedSymbolReference[]
+
+  getImporterFileIds(targetFileId: string): string[]
 
   // ─── Relacionamentos ──────────────────────────────────────────────────────
 
@@ -176,6 +189,10 @@ export interface RepositoryRepository {
 
   /** Busca relacionamentos onde o elemento é fonte (sourceId) ou destino (targetId). */
   getRelationshipsByElement(elementId: string): CodeMapRelationship[]
+
+  getHierarchyRelationshipsBySourceElement(elementId: string): CodeMapRelationship[]
+
+  getHierarchyRelationshipsByTargetElement(elementId: string): CodeMapRelationship[]
 
   /** Remove todos os relacionamentos onde o arquivo é fonte ou destino (via sourceId do arquivo ou de seus elementos). */
   deleteRelationshipsByFile(fileId: string): void

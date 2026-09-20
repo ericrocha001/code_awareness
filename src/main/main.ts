@@ -2,7 +2,7 @@
 -T ---
 */
 
-import { app, BrowserWindow, Menu, nativeTheme, shell } from 'electron'
+import { app, BrowserWindow, Menu, nativeTheme, shell, safeStorage } from 'electron'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { registerFileHandlers } from './ipc/file-handler'
@@ -43,6 +43,25 @@ import { RepomixAdapter } from './core/repomix-adapter'
 import { CodeAwarenessIgnoreService } from './core/code-awareness-ignore-service'
 import { ContextEngine } from './core/context/context-engine'
 import { DashDiscoveryService } from './core/dash/dash-discovery-service'
+import { ActiveProjectService } from './core/active-project-service'
+import { bindProjectNavigation } from './core/context/project-context-navigation'
+import { registerActiveProjectHandlers } from './ipc/active-project-handler'
+import { McpLifecycle } from './mcp/mcp-lifecycle'
+import { registerApplicationShutdown } from './application-shutdown'
+import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
+import { NgrokTransport } from './mcp/connection/ngrok-transport'
+import { RelayTransport } from './mcp/connection/relay-transport'
+import { SelectedTransport } from './mcp/connection/selected-transport'
+import { RemoteAccessService } from './mcp/connection/remote-access-service'
+import { InstallationIdentityService } from './installation/installation-identity-service'
+import { desktopProfilePaths } from './desktop-profile'
+import { registerConnectionHandlers } from './ipc/connection-handler'
+import { ChatGptIntegrationProjection } from './integrations/chatgpt-integration-projection'
+import { isInstallationConfigured } from './integrations/installation-configured'
+import { registerChatGptIntegrationHandlers } from './ipc/chatgpt-integration-handler'
+import { CodeScopeHealthMonitor } from './mcp/code-scope-health'
+import { SystemHealthCore } from './system-health/system-health-core'
+import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 
 
 
@@ -60,6 +79,35 @@ process.on('unhandledRejection', (reason) => {
 let mainWindow: BrowserWindow | null = null
 let dbAdapter: BetterSqlite3DatabaseAdapter | null = null
 const watcherService = new WatcherService()
+const codeScopeHealth = new CodeScopeHealthMonitor()
+const systemHealth = new SystemHealthCore()
+const traceSink = {
+  record(event: import('./mcp/code-scope-health').CodeScopeTraceEvent) {
+    codeScopeHealth.record(event)
+    systemHealth.sink.record(event)
+  }
+}
+const mcpLifecycle = new McpLifecycle({ trace: traceSink, systemHealth })
+const selectedTransport = new SelectedTransport(
+  () => settingsService.loadSettings().transportKind === 'relay' ? 'relay' : 'ngrok',
+  (kind) => {
+    if (kind === 'ngrok') return new NgrokTransport()
+    const installPath = desktopProfilePaths(app.getPath('userData')).installationPath
+    return new RelayTransport(
+      'https://code-awareness-gateway.eric-rocha.workers.dev/mcp',
+      new InstallationIdentityService(installPath, safeStorage),
+      30_000,
+      25_000,
+      traceSink
+    )
+  }
+)
+const connectionLifecycle = new ConnectionLifecycle(mcpLifecycle, selectedTransport, () => ({
+  publicDomain: settingsService.loadSettings().ngrokDomain
+}))
+const remoteAccess = new RemoteAccessService(settingsService, connectionLifecycle)
+let activeProjects: ActiveProjectService | null = null
+let chatGptIntegration: ChatGptIntegrationProjection | null = null
 
 // Single instance lock ANTES de app.whenReady() — evita race condition de duas janelas.
 // Se outra instância já está rodando, esta encerra imediatamente.
@@ -81,28 +129,29 @@ if (!gotTheLock) {
   })
 }
 
-// Resolve caminho de assets de forma robusta: dev usa caminho relativo,
-// produção usa resourcesPath (build empacotado) com fallback para app.getAppPath()
+// Resolve caminho de assets de forma robusta: dev usa a pasta assets da raiz
+// do projeto (em dev __dirname e out/main, entao dois niveis acima e a raiz),
+// producao usa resourcesPath (build empacotado) com fallback para app.getAppPath()
 const getAssetPath = (filename: string): string => {
   const isDev = !!process.env.ELECTRON_RENDERER_URL
   if (isDev) {
-    return join(__dirname, '../assets', filename)
+    return join(__dirname, '../../assets', filename)
   }
-  // BUGFIX: No build de produção, __dirname resolve para dentro do asar.
-  // Usar process.resourcesPath ou app.getAppPath() garante resolução correta.
+  // BUGFIX: No build de producao, __dirname resolve para dentro do asar.
+  // Usar process.resourcesPath ou app.getAppPath() garante resolucao correta.
   const basePath = process.resourcesPath ?? app.getAppPath()
   return join(basePath, 'assets', filename)
 }
 
-// Retorna o caminho do ícone único e colorido da janela.
-// Não há mais variante por tema — usa-se sempre o ícone colorido.
+// Retorna o caminho do icone unico e colorido da janela.
+// Nao ha mais variante por tema — usa-se sempre o icone colorido.
 const getWindowIconPath = (): string => {
   return getAssetPath('app-icon-1024x1024.png')
 }
 
 function createWindow(): void {
-  // BUGFIX: Verifica se o ícone existe antes de passá-lo ao BrowserWindow.
-  // Se estiver ausente, omite a opção icon para evitar falha na criação da janela.
+  // BUGFIX: Verifica se o icone existe antes de passa-lo ao BrowserWindow.
+  // Se estiver ausente, omite a opcao icon para evitar falha na criacao da janela.
   const iconPath = getWindowIconPath()
   const windowOptions: Electron.BrowserWindowConstructorOptions = {
     width: 1200,
@@ -119,7 +168,7 @@ function createWindow(): void {
   if (existsSync(iconPath)) {
     windowOptions.icon = iconPath
   } else {
-    console.warn('[Main] Ícone não encontrado em:', iconPath, '— usando ícone padrão do Electron')
+    console.warn('[Main] Icone nao encontrado em:', iconPath, '— usando icone padrao do Electron')
   }
 
   mainWindow = new BrowserWindow(windowOptions)
@@ -132,6 +181,12 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    console.log(`[Renderer] [${level}] ${message} (${sourceId}:${line})`)
+  })
+  mainWindow.webContents.on('did-finish-load', () => {
+    console.log('[Main] Janela do aplicativo carregada e visivel.')
+  })
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -201,7 +256,23 @@ app.whenReady().then(() => {
     sourceContextProvider,
     compressionContextProvider
   )
-  const dashDiscoveryService = new DashDiscoveryService(new ContextEngine(codeMapService))
+  const contextNavigation = new ContextEngine(codeMapService)
+  const dashDiscoveryService = new DashDiscoveryService(contextNavigation)
+  activeProjects = new ActiveProjectService(codeMapService)
+  activeProjects.onBeforeChange(() => mcpLifecycle.quiesce())
+  activeProjects.onChanged(({ project }) => project
+    ? mcpLifecycle.activate(project.id, bindProjectNavigation(contextNavigation, project.path))
+    : mcpLifecycle.deactivate())
+  registerActiveProjectHandlers(activeProjects)
+  registerConnectionHandlers(remoteAccess)
+  chatGptIntegration = new ChatGptIntegrationProjection(remoteAccess, activeProjects, mcpLifecycle,
+    () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, codeScopeHealth)
+  registerChatGptIntegrationHandlers(chatGptIntegration)
+  registerSystemHealthHandlers(systemHealth)
+  remoteAccess.onChanged((state) => {
+    if (state.status === 'CONNECTED') systemHealth.invalidate()
+  })
+  remoteAccess.start()
 
   // Composição do One-Click XML com política de escopo e adapter de Direct Output
   const repomixAdapterForOneClick = new RepomixAdapter()
@@ -220,7 +291,7 @@ app.whenReady().then(() => {
   registerTagHandlers()
   registerDatabaseHandlers(dbAdapter)
   registerCampaignHandlers(campaignService)
-  registerCodeMapHandlers(codeMapService)
+  registerCodeMapHandlers(codeMapService, activeProjects)
   registerDashHandlers(dashService, oneClickXmlService, dashDiscoveryService)
 
 
@@ -260,7 +331,11 @@ app.whenReady().then(() => {
   })
 })
 
-app.on('before-quit', () => {
+registerApplicationShutdown(app, async () => {
+  chatGptIntegration?.dispose()
+  await remoteAccess.dispose()
+  await activeProjects?.dispose()
+  await mcpLifecycle.dispose()
   DevToolsManager.unregisterShortcuts()
   watcherService.stop()
   // Fecha o Code Map Service (fecha conexões de banco e watchers do Repository Model)
