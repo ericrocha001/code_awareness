@@ -18,16 +18,6 @@ function requestMetadata(body: string): { method: string; tool: string } {
   }
 }
 
-function successfulMcpResponse(status: number, body: string): boolean {
-  if (status < 200 || status >= 300) return false
-  try {
-    const message = JSON.parse(body) as { error?: unknown; result?: { isError?: unknown } }
-    return !message.error && Object.prototype.hasOwnProperty.call(message, 'result') && message.result?.isError !== true
-  } catch {
-    return false
-  }
-}
-
 export class RelayTransport implements ConnectionTransportPort {
   readonly name = 'relay'
   private state: TransportState = { status: 'STOPPED' }
@@ -36,7 +26,7 @@ export class RelayTransport implements ConnectionTransportPort {
   private starting: Promise<{ externalEndpoint: string }> | null = null
   private heartbeat: ReturnType<typeof setInterval> | null = null
   private readonly pending = new Map<RequestId, Promise<void>>()
-  private readonly outcomes = new Map<RequestId, { success: boolean; tool: string }>()
+  private readonly outcomes = new Map<RequestId, { tool: string }>()
   private readonly listeners = new Set<(state: TransportState) => void>()
 
   constructor(
@@ -93,12 +83,8 @@ export class RelayTransport implements ConnectionTransportPort {
         const cleanup = () => { clearTimeout(timeout); signal.removeEventListener('abort', abort) }
         const fail = (code: import('../../../shared/distribution/relay-protocol').RelayErrorCode) => {
           cleanup()
-          if (this.heartbeat) clearInterval(this.heartbeat)
-          this.heartbeat = null
           reject(new ConnectionError(code))
-          if (this.socket === socket && this.state.status === 'RUNNING') this.setState({ status: 'ERROR', error: code })
-          controller.abort()
-          socket.terminate()
+          this.failConnection(code)
         }
         signal.addEventListener('abort', abort, { once: true })
         socket.on('error', () => fail('RELAY_CLOSED'))
@@ -118,19 +104,18 @@ export class RelayTransport implements ConnectionTransportPort {
               this.heartbeat = setInterval(() => {
                 if (awaitingPong) { fail('REQUEST_TIMEOUT'); return }
                 awaitingPong = true
-                this.send(socket, { protocol: RELAY_PROTOCOL, type: 'ping', connectionId: connectionId! })
+                this.send(socket, { protocol: RELAY_PROTOCOL, type: 'ping', connectionId: connectionId! }).catch(() => fail('RELAY_CLOSED'))
               }, this.heartbeatMs)
               resolve()
               return
             }
             if (!('connectionId' in message) || message.connectionId !== connectionId) throw new RelayError('INVALID_MESSAGE')
             if (message.type === 'pong') { awaitingPong = false; return }
-            if (message.type === 'ping') { this.send(socket, { protocol: RELAY_PROTOCOL, type: 'pong', connectionId }); return }
+            if (message.type === 'ping') { this.send(socket, { protocol: RELAY_PROTOCOL, type: 'pong', connectionId }).catch(() => fail('RELAY_CLOSED')); return }
             if (message.type === 'close') { fail('RELAY_CLOSED'); return }
             if (message.type === 'delivered') {
               const outcome = this.outcomes.get(message.requestId)
               if (message.stage === 'gateway-response-delivered') this.outcomes.delete(message.requestId)
-              const toolSuccess = outcome ? outcome.success : true
               this.trace?.record({
                 timestamp: new Date().toISOString(),
                 requestId: message.requestId,
@@ -139,14 +124,13 @@ export class RelayTransport implements ConnectionTransportPort {
                 tool: outcome?.tool ?? '',
                 stage: message.stage,
                 durationMs: message.durationMs ?? 0,
-                status: toolSuccess ? 'success' : 'error',
-                ...(toolSuccess ? {} : { error: 'TOOL_ERROR' })
+                status: 'success'
               })
               return
             }
             if (message.type !== 'invoke' || this.pending.has(message.requestId)) throw new RelayError('INVALID_MESSAGE')
             if (this.pending.size >= 32) {
-              this.send(socket, { protocol: RELAY_PROTOCOL, type: 'error', connectionId, requestId: message.requestId, code: 'RELAY_BUSY' })
+              this.send(socket, { protocol: RELAY_PROTOCOL, type: 'error', connectionId, requestId: message.requestId, code: 'RELAY_BUSY' }).catch(() => fail('RELAY_CLOSED'))
               return
             }
             const request = this.invoke(socket, localEndpoint, message, controller.signal).finally(() => this.pending.delete(message.requestId))
@@ -210,13 +194,17 @@ export class RelayTransport implements ConnectionTransportPort {
         }
       }
       const body = Buffer.concat(chunks).toString('utf8')
-      const success = successfulMcpResponse(response.status, body)
-      this.outcomes.set(message.requestId, { success, tool: metadata.tool })
-      record('bridge-response-received', success ? 'success' : 'error', success ? undefined : 'MCP_RESPONSE_ERROR')
+      this.outcomes.set(message.requestId, { tool: metadata.tool })
+      record('bridge-response-received', 'success')
       if (!signal.aborted) {
-        this.send(socket, { protocol: RELAY_PROTOCOL, type: 'result', connectionId: message.connectionId, requestId: message.requestId, response: { status: response.status, contentType: response.headers.get('content-type')?.split(';')[0] ?? '', body } })
-        record('desktop-relay-response-sent', success ? 'success' : 'error', success ? undefined : 'MCP_RESPONSE_ERROR')
-        record('relay-response-forwarded', success ? 'success' : 'error', success ? undefined : 'MCP_RESPONSE_ERROR')
+        try {
+          await this.send(socket, { protocol: RELAY_PROTOCOL, type: 'result', connectionId: message.connectionId, requestId: message.requestId, response: { status: response.status, contentType: response.headers.get('content-type')?.split(';')[0] ?? '', body } })
+          record('desktop-relay-response-sent', 'success')
+          record('relay-response-forwarded', 'success')
+        } catch {
+          record('desktop-relay-response-sent', 'error', 'RELAY_CLOSED')
+          this.failConnection('RELAY_CLOSED')
+        }
       }
     } catch (error) {
       const code = error instanceof RelayError
@@ -227,7 +215,13 @@ export class RelayTransport implements ConnectionTransportPort {
             ? 'REQUEST_TIMEOUT'
             : 'LOCAL_MCP_UNAVAILABLE'
       record('bridge-forward-started', 'error', code)
-      if (!signal.aborted) this.send(socket, { protocol: RELAY_PROTOCOL, type: 'error', connectionId: message.connectionId, requestId: message.requestId, code })
+      if (!signal.aborted) {
+        try {
+          await this.send(socket, { protocol: RELAY_PROTOCOL, type: 'error', connectionId: message.connectionId, requestId: message.requestId, code })
+        } catch {
+          this.failConnection('RELAY_CLOSED')
+        }
+      }
     }
   }
 
@@ -250,8 +244,33 @@ export class RelayTransport implements ConnectionTransportPort {
     this.setState({ status: 'STOPPED' })
   }
 
-  private send(socket: WebSocket, message: RelayMessage): void {
-    if (socket.readyState === WebSocket.OPEN) socket.send(encodeRelayMessage(message))
+  private send(socket: WebSocket, message: RelayMessage): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (socket.readyState !== WebSocket.OPEN) {
+        reject(new RelayError('RELAY_CLOSED'))
+        return
+      }
+      socket.send(encodeRelayMessage(message), (error) => {
+        if (error) {
+          reject(new RelayError('RELAY_CLOSED'))
+        } else {
+          resolve()
+        }
+      })
+    })
+  }
+
+  private failConnection(code: import('../../../shared/distribution/relay-protocol').RelayErrorCode): void {
+    if (this.heartbeat) clearInterval(this.heartbeat)
+    this.heartbeat = null
+    const socket = this.socket
+    this.controller?.abort()
+    if (socket) {
+      if (this.state.status === 'RUNNING') {
+        this.setState({ status: 'ERROR', error: code })
+      }
+      socket.terminate()
+    }
   }
 
   private setState(state: TransportState): void {

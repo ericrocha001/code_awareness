@@ -36,7 +36,7 @@ function sanitizeFilenamePart(part: string): string {
   return part.replace(/[/\\:*?"<>|]/g, '_')
 }
 
-export type CodeMapReadinessCapability = 'FILE_INVENTORY'
+export type CodeMapReadinessCapability = 'FILE_INVENTORY' | 'STRUCTURE'
 
 interface CodeMapInstance {
   model: RepositoryModel
@@ -179,11 +179,13 @@ export class CodeMapService {
   }
 
   async indexRepository(repoPath: string): Promise<{ filesIndexed: number; elementsExtracted: number }> {
+    await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
     return instance.model.indexRepository()
   }
 
   async synchronizeModified(repoPath: string): Promise<{ filesUpdated: number; errors: string[] }> {
+    await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
     return instance.synchronizer.synchronizeModified()
   }
@@ -207,21 +209,17 @@ export class CodeMapService {
   }
 
   async awaitReadiness(repoPath: string, capability: CodeMapReadinessCapability): Promise<void> {
-    if (capability === 'FILE_INVENTORY') {
-      const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
-      const pending = this.pendingOpenRequests.get(normalizedPath)
-      if (pending) {
-        await pending
-      }
-      this.ensureInstance(normalizedPath)
+    const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
+    await this.openRepository(normalizedPath)
+    if (capability === 'FILE_INVENTORY' || capability === 'STRUCTURE') {
       return
     }
   }
 
   async awaitSnapshot(repoPath: string): Promise<void> {
-    const instance = this.ensureInstance(repoPath)
-    // Wait for both: any in-flight background maintenance (backfill+reconcile) AND
-    // the synchronizer queue to drain. This gives callers a fully-reconciled snapshot.
+    const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
+    await this.openRepository(normalizedPath)
+    const instance = this.ensureInstance(normalizedPath)
     await instance.backgroundMaintenance
     await instance.synchronizer.waitForIdle()
   }
@@ -290,6 +288,7 @@ export class CodeMapService {
     repoPath: string,
     options: IntegrityCheckOptions = {}
   ): Promise<import('../../shared/types').IntegrityCheckResult> {
+    await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
     const result = await instance.model.verifyIntegrity(options)
 
@@ -484,27 +483,29 @@ export class CodeMapService {
     return instance.model.getElementCodeSnippet(elementId)
   }
 
-  getElementExactSource(repoPath: string, elementId: string): Promise<ExactElementSource | null> {
+  async getElementExactSource(repoPath: string, elementId: string): Promise<ExactElementSource | null> {
+    await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
     return instance.model.getElementExactSource(elementId)
   }
 
-  getElementExactSources(repoPath: string, elementIds: string[]): Promise<Map<string, ExactElementSource>> {
+  async getElementExactSources(repoPath: string, elementIds: string[]): Promise<Map<string, ExactElementSource>> {
+    await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
     return instance.model.getElementExactSources(elementIds)
   }
 
-  getFileContent(repoPath: string, relativePath: string): Promise<FileContent | null> {
+  async getFileContent(repoPath: string, relativePath: string): Promise<FileContent | null> {
+    await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
     return instance.model.getFileContent(relativePath)
   }
 
   private ensureInstance(repoPath: string): CodeMapInstance {
     const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
-    let instance = instances.get(normalizedPath)
+    const instance = instances.get(normalizedPath)
     if (!instance) {
-      this.openRepository(normalizedPath)
-      instance = instances.get(normalizedPath)!
+      throw new Error(`Repository not open: ${repoPath}. Call openRepository, awaitReadiness or awaitSnapshot before accessing.`)
     }
     return instance
   }

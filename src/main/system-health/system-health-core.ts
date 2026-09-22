@@ -4,6 +4,9 @@ import { buildDiagnosticTrace } from './diagnostic-trace'
 import { generateDiagnosticReportFromTrace } from './diagnostic-report'
 import { mcpRequestDrilldownProvider } from './mcp-request-drilldown'
 import { codeScopeExecutionDrilldownProvider } from './codescope-execution-drilldown'
+import { relayInboundDrilldownProvider } from './relay-inbound-drilldown'
+
+import type { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
 
 export const CODESCOPE_FUNCTIONAL_TOOLS = new Set([
   'discover_repository',
@@ -20,8 +23,14 @@ export const MCP_EXCLUDED_OPERATIONS = new Set([
   'notifications/initialized',
   'tools/list',
   'get_system_health',
+  'get_runtime_identity',
   'ping',
 ])
+
+export interface SystemHealthCoreOptions {
+  drilldownProviders?: StageDrilldownProvider[]
+  runtimeIdentityProvider?: RuntimeIdentityProvider
+}
 
 export interface SystemHealthProvider {
   readonly sink: CodeScopeTraceSink
@@ -41,16 +50,41 @@ export class SystemHealthCore {
   private readonly pendingTimeouts = new Map<string, NodeJS.Timeout>()
   private readonly listeners = new Set<(state: SystemHealthState) => void>()
   private readonly drilldownProviders = new Map<CanonicalStage, StageDrilldownProvider>()
+  private runtimeIdentityProvider?: RuntimeIdentityProvider
 
-  constructor(drilldownProviders?: StageDrilldownProvider[]) {
-    if (drilldownProviders) {
-      for (const provider of drilldownProviders) {
+  constructor(
+    drilldownProvidersOrOptions?: StageDrilldownProvider[] | SystemHealthCoreOptions,
+    runtimeIdentityProvider?: RuntimeIdentityProvider
+  ) {
+    let providers: StageDrilldownProvider[] | undefined
+    if (Array.isArray(drilldownProvidersOrOptions)) {
+      providers = drilldownProvidersOrOptions
+      this.runtimeIdentityProvider = runtimeIdentityProvider
+    } else if (drilldownProvidersOrOptions && typeof drilldownProvidersOrOptions === 'object') {
+      providers = drilldownProvidersOrOptions.drilldownProviders
+      this.runtimeIdentityProvider =
+        drilldownProvidersOrOptions.runtimeIdentityProvider ?? runtimeIdentityProvider
+    } else {
+      this.runtimeIdentityProvider = runtimeIdentityProvider
+    }
+
+    if (providers) {
+      for (const provider of providers) {
         this.drilldownProviders.set(provider.canonicalStage, provider)
       }
     } else {
       this.drilldownProviders.set(mcpRequestDrilldownProvider.canonicalStage, mcpRequestDrilldownProvider)
       this.drilldownProviders.set(codeScopeExecutionDrilldownProvider.canonicalStage, codeScopeExecutionDrilldownProvider)
+      this.drilldownProviders.set(relayInboundDrilldownProvider.canonicalStage, relayInboundDrilldownProvider)
     }
+  }
+
+  setRuntimeIdentityProvider(provider: RuntimeIdentityProvider): void {
+    this.runtimeIdentityProvider = provider
+  }
+
+  getRuntimeIdentityProvider(): RuntimeIdentityProvider | undefined {
+    return this.runtimeIdentityProvider
   }
 
   registerDrilldownProvider(provider: StageDrilldownProvider): void {
@@ -67,7 +101,17 @@ export class SystemHealthCore {
     if (proof && !CODESCOPE_FUNCTIONAL_TOOLS.has(proof.operation)) {
       proof = null
     }
+    const currentInstanceId = this.runtimeIdentityProvider?.getInstanceId()
     const failure = this.lastFailure
+      ? {
+          ...this.lastFailure,
+          isHistoricalRuntime: Boolean(
+            this.lastFailure.runtimeInstanceId &&
+            currentInstanceId &&
+            this.lastFailure.runtimeInstanceId !== currentInstanceId
+          )
+        }
+      : null
     let status: SystemHealthState['status']
     if (this.stale || (!proof && !failure)) {
       status = 'UNKNOWN'
@@ -193,12 +237,18 @@ export class SystemHealthCore {
         return
       }
 
+      const runtimeInstanceId =
+        events.find((e) => e.runtimeInstanceId)?.runtimeInstanceId ??
+        this.runtimeIdentityProvider?.getInstanceId() ??
+        null
+
       if (trace.success) {
         this.lastFunctionalProof = {
           operation: trace.operation,
           traceId: trace.traceId,
           at: trace.completedAt,
           durationMs: trace.durationMs,
+          runtimeInstanceId,
         }
         this.lastProofSeq = ++this.seq
         this.stale = false
@@ -210,6 +260,11 @@ export class SystemHealthCore {
           ? this.drilldownProviders.get(trace.firstFailedBoundary)?.evaluate(events, trace.reasonCode) ?? null
           : null
 
+        const currentInstanceId = this.runtimeIdentityProvider?.getInstanceId()
+        const isHistoricalRuntime = Boolean(
+          runtimeInstanceId && currentInstanceId && runtimeInstanceId !== currentInstanceId
+        )
+
         this.lastFailure = {
           operation: trace.operation,
           traceId: trace.traceId,
@@ -220,6 +275,8 @@ export class SystemHealthCore {
           stages: trace.stages,
           hasContradictoryExecution: trace.hasContradictoryExecution,
           drilldown,
+          runtimeInstanceId,
+          isHistoricalRuntime,
         }
         this.lastFailureSeq = ++this.seq
         if (isTerminalSuccess || event.stage === 'relay-response-forwarded' || event.stage === 'desktop-relay-response-sent') {
@@ -266,6 +323,15 @@ export class SystemHealthCore {
       ? this.drilldownProviders.get(trace.firstFailedBoundary)?.evaluate(events, trace.reasonCode) ?? null
       : null
 
+    const runtimeInstanceId =
+      events.find((e) => e.runtimeInstanceId)?.runtimeInstanceId ??
+      this.runtimeIdentityProvider?.getInstanceId() ??
+      null
+    const currentInstanceId = this.runtimeIdentityProvider?.getInstanceId()
+    const isHistoricalRuntime = Boolean(
+      runtimeInstanceId && currentInstanceId && runtimeInstanceId !== currentInstanceId
+    )
+
     this.lastFailure = {
       operation: trace.operation,
       traceId: trace.traceId,
@@ -276,6 +342,8 @@ export class SystemHealthCore {
       stages: trace.stages,
       hasContradictoryExecution: trace.hasContradictoryExecution,
       drilldown,
+      runtimeInstanceId,
+      isHistoricalRuntime,
     }
     this.lastFailureSeq = ++this.seq
     this.publish()

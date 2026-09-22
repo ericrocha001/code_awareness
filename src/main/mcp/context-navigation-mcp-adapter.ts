@@ -104,35 +104,111 @@ function failure(error: unknown): McpToolResult {
 
 import { SYSTEM_HEALTH_MCP_TOOL, executeGetSystemHealth } from '../system-health/system-health-mcp'
 import { SystemHealthCore } from '../system-health/system-health-core'
+import { RUNTIME_IDENTITY_MCP_TOOL, executeGetRuntimeIdentity } from '../runtime-identity/runtime-identity-mcp'
+import { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
+import {
+  LIST_VALIDATION_PROOFS_TOOL,
+  GET_VALIDATION_PROOF_TOOL,
+  RECORD_VALIDATION_PROOF_TOOL,
+  executeListValidationProofs,
+  executeGetValidationProof,
+  executeRecordValidationProof
+} from '../validation-ledger/validation-ledger-mcp'
+import type { ValidationLedger } from '../validation-ledger/validation-ledger'
 
 export class ContextNavigationMcpAdapter {
   private readonly navigation: ProjectContextNavigation
   private readonly systemHealth: SystemHealthCore | undefined
+  private readonly runtimeIdentity: RuntimeIdentityProvider | undefined
+  private readonly validationLedger: ValidationLedger | undefined
 
-  constructor(navigation: ProjectContextNavigation, systemHealth?: SystemHealthCore)
-  constructor(navigation: ContextNavigationPort, repoPath: string, systemHealth?: SystemHealthCore)
+  constructor(
+    navigation: ProjectContextNavigation,
+    systemHealth?: SystemHealthCore,
+    runtimeIdentity?: RuntimeIdentityProvider,
+    validationLedger?: ValidationLedger
+  )
+  constructor(
+    navigation: ContextNavigationPort,
+    repoPath: string,
+    systemHealth?: SystemHealthCore,
+    runtimeIdentity?: RuntimeIdentityProvider,
+    validationLedger?: ValidationLedger
+  )
   constructor(
     navigation: ContextNavigationPort | ProjectContextNavigation,
     repoPathOrHealth?: string | SystemHealthCore,
-    systemHealth?: SystemHealthCore
+    systemHealthOrIdentity?: SystemHealthCore | RuntimeIdentityProvider,
+    runtimeIdentityOrLedger?: RuntimeIdentityProvider | ValidationLedger,
+    validationLedger?: ValidationLedger
   ) {
     if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
-      this.systemHealth = systemHealth
+      this.systemHealth = systemHealthOrIdentity as SystemHealthCore | undefined
+      this.runtimeIdentity =
+        (runtimeIdentityOrLedger as RuntimeIdentityProvider | undefined) ??
+        this.systemHealth?.getRuntimeIdentityProvider()
+      this.validationLedger = validationLedger
     } else {
       this.navigation = navigation as ProjectContextNavigation
       this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
+      this.runtimeIdentity =
+        (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ??
+        this.systemHealth?.getRuntimeIdentityProvider()
+      this.validationLedger =
+        (runtimeIdentityOrLedger as ValidationLedger | undefined) ?? validationLedger
     }
   }
 
   listTools(): McpToolDefinition[] {
-    return [...contextNavigationMcpTools, SYSTEM_HEALTH_MCP_TOOL]
+    const tools = [
+      ...contextNavigationMcpTools,
+      SYSTEM_HEALTH_MCP_TOOL,
+      RUNTIME_IDENTITY_MCP_TOOL
+    ]
+    if (this.validationLedger) {
+      tools.push(
+        LIST_VALIDATION_PROOFS_TOOL,
+        GET_VALIDATION_PROOF_TOOL,
+        RECORD_VALIDATION_PROOF_TOOL
+      )
+    }
+    return tools
   }
 
   async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (name === 'get_runtime_identity') {
+      const provider =
+        this.runtimeIdentity ??
+        this.systemHealth?.getRuntimeIdentityProvider() ??
+        new RuntimeIdentityProvider()
+      return executeGetRuntimeIdentity(provider, args)
+    }
+
     if (name === 'get_system_health') {
       const core = this.systemHealth ?? new SystemHealthCore()
       return executeGetSystemHealth(core, args)
+    }
+
+    if (name === 'list_validation_proofs') {
+      if (!this.validationLedger) {
+        return { content: [{ type: 'text', text: 'LEDGER_UNAVAILABLE: No validation ledger configured' }], isError: true }
+      }
+      return executeListValidationProofs(this.validationLedger, args)
+    }
+
+    if (name === 'get_validation_proof') {
+      if (!this.validationLedger) {
+        return { content: [{ type: 'text', text: 'LEDGER_UNAVAILABLE: No validation ledger configured' }], isError: true }
+      }
+      return executeGetValidationProof(this.validationLedger, args)
+    }
+
+    if (name === 'record_validation_proof') {
+      if (!this.validationLedger) {
+        return { content: [{ type: 'text', text: 'LEDGER_UNAVAILABLE: No validation ledger configured' }], isError: true }
+      }
+      return executeRecordValidationProof(this.validationLedger, args)
     }
 
     const trace = invocationContext?.trace ?? this.systemHealth?.sink

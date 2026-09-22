@@ -11,6 +11,8 @@ import type {
 } from '../../shared/types/system-health-types'
 import { getCodeScopeInvestigationTarget } from './codescope-investigation-targets'
 
+import type { RuntimeIdentitySummary } from '../runtime-identity/runtime-identity-types'
+
 export interface SystemHealthDiagnosticPayload {
   feature: 'codescope'
   status: 'OPERATIONAL' | 'DEGRADED' | 'UNAVAILABLE' | 'UNKNOWN' | 'CHECKING'
@@ -22,12 +24,14 @@ export interface SystemHealthDiagnosticPayload {
   reasonCode: string | null
   diagnosis: SystemHealthDiagnosis
   currentHealth: CurrentHealthState
+  runtimeIdentity?: RuntimeIdentitySummary | null
   lastFailureDiagnosis: LastFailureDiagnosis | null
   lastFunctionalProof: {
     operation: string
     traceId: string
     at: string
     durationMs: number
+    runtimeInstanceId?: string | null
   } | null
   lastFailure: {
     operation: string
@@ -36,6 +40,8 @@ export interface SystemHealthDiagnosticPayload {
     firstFailedBoundary: CanonicalStage | null
     reasonCode: string | null
     lastSuccessfulStage: CanonicalStage | null
+    runtimeInstanceId?: string | null
+    isHistoricalRuntime?: boolean
   } | null
   stages: Array<{
     name: CanonicalStage
@@ -149,8 +155,9 @@ export function executeGetSystemHealth(core: SystemHealthCore, args: unknown): M
         firstBlockedStage
       }
     } else {
+      const precision = failure.firstFailedBoundary === 'Relay Inbound' ? 'BOUNDED' : 'EXACT'
       faultScope = {
-        precision: 'EXACT',
+        precision,
         lastSuccessfulStage: failure.lastSuccessfulStage,
         firstFailedStage: failure.firstFailedBoundary,
         firstFailedBoundary: failure.firstFailedBoundary,
@@ -168,7 +175,9 @@ export function executeGetSystemHealth(core: SystemHealthCore, args: unknown): M
       faultScope,
       ...(drilldownPayload ? { drilldown: drilldownPayload } : {}),
       investigationTarget,
-      evidenceState: state.stale ? 'HISTORICAL' : 'CURRENT',
+      evidenceState: state.stale || Boolean(failure.isHistoricalRuntime) ? 'HISTORICAL' : 'CURRENT',
+      runtimeInstanceId: failure.runtimeInstanceId ?? null,
+      isHistoricalRuntime: failure.isHistoricalRuntime ?? false,
       ...(drilldown?.deepestProvenProgress ? { deepestProvenProgress: drilldown.deepestProvenProgress } : {}),
       ...(drilldown?.diagnosticFrontier ? { diagnosticFrontier: drilldown.diagnosticFrontier } : {}),
       ...(drilldown?.diagnosticResolution ? { diagnosticResolution: drilldown.diagnosticResolution } : {}),
@@ -330,8 +339,17 @@ export function executeGetSystemHealth(core: SystemHealthCore, args: unknown): M
     reasonCode,
     diagnosis,
     currentHealth,
+    runtimeIdentity: core.getRuntimeIdentityProvider()?.getSummary() ?? null,
     lastFailureDiagnosis: failureDiagnosis,
-    lastFunctionalProof: proof,
+    lastFunctionalProof: proof
+      ? {
+          operation: proof.operation,
+          traceId: proof.traceId,
+          at: proof.at,
+          durationMs: proof.durationMs,
+          runtimeInstanceId: proof.runtimeInstanceId ?? null
+        }
+      : null,
     lastFailure: failure
       ? {
           operation: failure.operation,
@@ -339,7 +357,9 @@ export function executeGetSystemHealth(core: SystemHealthCore, args: unknown): M
           at: failure.at,
           firstFailedBoundary: failure.firstFailedBoundary,
           reasonCode: failure.reasonCode,
-          lastSuccessfulStage: failure.lastSuccessfulStage
+          lastSuccessfulStage: failure.lastSuccessfulStage,
+          runtimeInstanceId: failure.runtimeInstanceId ?? null,
+          isHistoricalRuntime: failure.isHistoricalRuntime ?? false
         }
       : null,
     stages,

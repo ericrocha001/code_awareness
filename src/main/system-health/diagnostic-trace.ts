@@ -103,6 +103,7 @@ export function buildDiagnosticTrace(events: CodeScopeTraceEvent[]): DiagnosticT
           const csAcc = accumulated.get('CodeScope Execution')!
           csAcc.failed = false
           csAcc.succeeded = true
+          csAcc.reasonCode = null
 
           const respAcc = accumulated.get('MCP Response')!
           respAcc.failed = true
@@ -116,6 +117,7 @@ export function buildDiagnosticTrace(events: CodeScopeTraceEvent[]): DiagnosticT
           const mcpAcc = accumulated.get('MCP Request')!
           mcpAcc.failed = false
           mcpAcc.succeeded = true
+          mcpAcc.reasonCode = null
           const mcpNonErrorDurations = events
             .filter((e) => toCanonicalStage(e.stage) === 'MCP Request' && e.status !== 'error')
             .map((e) => e.durationMs)
@@ -192,7 +194,7 @@ export function buildDiagnosticTrace(events: CodeScopeTraceEvent[]): DiagnosticT
       stage,
       status,
       durationMs: status === 'BLOCKED' ? null : acc.durationMs,
-      reasonCode: status === 'BLOCKED' ? null : acc.reasonCode
+      reasonCode: status === 'FAILED' ? acc.reasonCode : null
     }
   })
 

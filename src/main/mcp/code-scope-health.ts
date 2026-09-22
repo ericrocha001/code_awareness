@@ -49,6 +49,7 @@ export interface CodeScopeTraceEvent {
   status: 'started' | 'success' | 'error'
   error?: string
   capability?: string
+  runtimeInstanceId?: string
 }
 
 export interface CodeScopeFunctionalHealth {

@@ -92,7 +92,7 @@ describe('authenticated gateway and local relay', () => {
     expect(results.every((result) => result.status === 200)).toBe(true)
     expect(results[0].body.result.serverInfo).toBeDefined()
     expect(results[1].body.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
-      'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health'
+      'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health', 'get_runtime_identity'
     ])
     expect(results[2].body.result.content[0].text).toBe('[.]\nuser-a')
     await a.connection.disconnect()
@@ -138,7 +138,7 @@ describe('authenticated gateway and local relay', () => {
     }
   })
 
-  it('preserves specific tool reason code in health and operational logs instead of generic MCP_REQUEST_FAILED', async () => {
+  it('preserves functional tool error to client without degrading operational health', async () => {
     const f = await setup()
     const recordedEvents: CodeScopeTraceEvent[] = []
     const health = new CodeScopeHealthMonitor()
@@ -154,14 +154,13 @@ describe('authenticated gateway and local relay', () => {
     expect(result.body.result.isError).toBe(true)
     expect(result.body.result.content[0].text).toContain('ELEMENT_NOT_FOUND')
 
-    await vi.waitFor(() => expect(health.getState().status).toBe('DEGRADED'))
+    await vi.waitFor(() => expect(health.getState().status).toBe('OPERATIONAL'))
     const state = health.getState()
-    expect(state.lastFailedToolCall).toBe('read_code')
-    expect(state.lastError).toBe('ELEMENT_NOT_FOUND')
+    expect(state.lastSuccessfulToolCall).toBe('read_code')
 
     const responseSent = recordedEvents.find((e) => e.stage === 'mcp-response-sent')
     expect(responseSent).toBeDefined()
-    expect(responseSent?.error).toBe('ELEMENT_NOT_FOUND')
+    expect(responseSent?.status).toBe('success')
   })
 
   it('proves valid response delivered near deadline without race condition', async () => {

@@ -14,6 +14,8 @@ interface McpLifecycleOptions {
   log?: (state: McpLifecycleState) => void
   trace?: CodeScopeTraceSink
   systemHealth?: import('../system-health/system-health-core').SystemHealthCore
+  runtimeIdentity?: import('../runtime-identity/runtime-identity-provider').RuntimeIdentityProvider
+  validationLedger?: import('../validation-ledger/validation-ledger').ValidationLedger
 }
 
 export class McpLifecycle {
@@ -30,9 +32,10 @@ export class McpLifecycle {
   private readonly log: (state: McpLifecycleState) => void
 
   constructor(options: McpLifecycleOptions = {}) {
-    this.createServer = options.createServer ?? ((navigation) => createMcpHttpServer(new ContextNavigationMcpAdapter(navigation, options.systemHealth), console.log, options.trace))
+    this.createServer = options.createServer ?? ((navigation) => createMcpHttpServer(new ContextNavigationMcpAdapter(navigation, options.systemHealth, options.runtimeIdentity, options.validationLedger), console.log, options.trace))
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))
   }
+
 
   getState(): McpLifecycleState {
     return { ...this.state }

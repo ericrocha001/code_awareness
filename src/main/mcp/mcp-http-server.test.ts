@@ -62,7 +62,7 @@ describe('MCP HTTP server', () => {
     expect(logs.at(-1)).toMatchObject({
       timestamp: expect.any(String), requestId: expect.any(String), sessionId: 'local', method: 'tools/call',
       tool: 'read_code', stage: 'mcp-response-sent', durationMs: expect.any(Number),
-      responseSize: expect.any(Number), success: false, status: 'error'
+      responseSize: expect.any(Number), success: true, status: 'success'
     })
     expect(JSON.stringify(logs)).not.toContain('private')
   })
@@ -76,7 +76,7 @@ describe('MCP HTTP server', () => {
     expect(initialized.response.status).toBe(200)
     expect(initialized.body.result.protocolVersion).toBe('2025-06-18')
     expect(listed.body.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
-      'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health'
+      'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health', 'get_runtime_identity'
     ])
     for (const tool of listed.body.result.tools) {
       expect(tool.securitySchemes).toEqual([{ type: 'oauth2', scopes: [] }])

@@ -30,6 +30,7 @@ export interface SystemHealthState {
     traceId: string
     at: string
     durationMs: number
+    runtimeInstanceId?: string | null
   } | null
   lastFailure: {
     operation: string
@@ -41,6 +42,8 @@ export interface SystemHealthState {
     stages: CanonicalStageResult[]
     hasContradictoryExecution?: boolean
     drilldown?: StageDrilldownResult | null
+    runtimeInstanceId?: string | null
+    isHistoricalRuntime?: boolean
   } | null
   stale: boolean
 }
@@ -184,5 +187,7 @@ export interface LastFailureDiagnosis {
   diagnosticResolution?: DiagnosticResolution | null
   observabilityGap?: ObservabilityGapState | ObservabilityGap | null
   nextBestEvidence?: NextBestEvidence | null
+  runtimeInstanceId?: string | null
+  isHistoricalRuntime?: boolean
 }
 

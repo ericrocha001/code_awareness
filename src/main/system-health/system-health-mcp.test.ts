@@ -42,11 +42,12 @@ function mockNavigation() {
 }
 
 describe('System Health MCP — get_system_health tool', () => {
-  it('appears in the MCP catalog alongside the seven CodeScope tools (8 tools total)', () => {
+  it('appears in the MCP catalog alongside the seven CodeScope tools and runtime identity (9 tools total)', () => {
     const adapter = new ContextNavigationMcpAdapter(mockNavigation(), new SystemHealthCore())
     const tools = adapter.listTools()
-    expect(tools).toHaveLength(8)
+    expect(tools).toHaveLength(9)
     expect(tools.map((t) => t.name)).toContain('get_system_health')
+    expect(tools.map((t) => t.name)).toContain('get_runtime_identity')
     expect(tools.map((t) => t.name)).toEqual([
       'discover_repository',
       'get_relationships',
@@ -56,6 +57,7 @@ describe('System Health MCP — get_system_health tool', () => {
       'get_symbol_hierarchy',
       'read_code',
       'get_system_health',
+      'get_runtime_identity',
     ])
     const healthTool = tools.find((t) => t.name === 'get_system_health')!
     expect(healthTool.description).toContain('Inspect the operational health')

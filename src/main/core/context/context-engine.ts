@@ -64,25 +64,52 @@ export class ContextEngine implements ContextNavigationPort {
     return this.repoDiscovery.generate(repoPath, layer)
   }
 
-  async discoverRepository(repoPath: string, relativePaths: string[] = ['.'], context?: NavigationInvocationContext): Promise<DiscoverRepositoryResult> {
-    const paths = this.validatePaths(relativePaths)
-
-    emitTrace(context, 'codescope-readiness-requested', 'started', { tool: 'discover_repository', capability: 'FILE_INVENTORY' })
+  private async awaitInstrumentedReadiness(
+    repoPath: string,
+    capability: 'FILE_INVENTORY' | 'STRUCTURE',
+    tool: string,
+    context?: NavigationInvocationContext
+  ): Promise<void> {
+    emitTrace(context, 'codescope-readiness-requested', 'started', { tool, capability })
     try {
       if (typeof this.codeMap.awaitReadiness === 'function') {
-        await this.codeMap.awaitReadiness(repoPath, 'FILE_INVENTORY')
+        await this.codeMap.awaitReadiness(repoPath, capability)
       } else {
         await this.codeMap.awaitSnapshot(repoPath)
       }
-      emitTrace(context, 'codescope-readiness-satisfied', 'success', { tool: 'discover_repository', capability: 'FILE_INVENTORY' })
+      emitTrace(context, 'codescope-readiness-satisfied', 'success', { tool, capability })
     } catch (error) {
       emitTrace(context, 'codescope-readiness-failed', 'error', {
-        tool: 'discover_repository',
+        tool,
         error: error instanceof Error ? error.message : String(error),
-        capability: 'FILE_INVENTORY'
+        capability
       })
       throw error
     }
+  }
+
+  private async awaitInstrumentedSnapshot(
+    repoPath: string,
+    tool: string,
+    context?: NavigationInvocationContext
+  ): Promise<void> {
+    emitTrace(context, 'codescope-snapshot-started', 'started', { tool })
+    try {
+      await this.codeMap.awaitSnapshot(repoPath)
+      emitTrace(context, 'codescope-snapshot-completed', 'success', { tool })
+    } catch (error) {
+      emitTrace(context, 'codescope-snapshot-completed', 'error', {
+        tool,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      throw error
+    }
+  }
+
+  async discoverRepository(repoPath: string, relativePaths: string[] = ['.'], context?: NavigationInvocationContext): Promise<DiscoverRepositoryResult> {
+    const paths = this.validatePaths(relativePaths)
+
+    await this.awaitInstrumentedReadiness(repoPath, 'FILE_INVENTORY', 'discover_repository', context)
 
     emitTrace(context, 'codescope-index-query-started', 'started', { tool: 'discover_repository' })
     const files = this.codeMap.getFiles(repoPath)
@@ -148,11 +175,11 @@ export class ContextEngine implements ContextNavigationPort {
     return targets
   }
 
-  async getRelationships(repoPath: string, relativePaths: string[], options: RelationshipOptions = {}): Promise<GetRelationshipsResult> {
+  async getRelationships(repoPath: string, relativePaths: string[], options: RelationshipOptions = {}, context?: NavigationInvocationContext): Promise<GetRelationshipsResult> {
     const paths = this.validatePaths(relativePaths)
     const direction = options.direction ?? 'both'
     if (!['in', 'out', 'both'].includes(direction)) throw new ContextNavigationError('INVALID_ARGUMENT', 'Invalid relationship direction')
-    await this.codeMap.awaitSnapshot(repoPath)
+    await this.awaitInstrumentedSnapshot(repoPath, 'get_relationships', context)
     const files = this.codeMap.getFiles(repoPath)
     const selected = this.selectFiles(files, paths)
     const byId = new Map(files.map((file) => [file.id, file.relativePath]))
@@ -166,20 +193,27 @@ export class ContextEngine implements ContextNavigationPort {
     })) }
   }
 
-  async inspectFiles(repoPath: string, relativePaths: string[], options: InspectFilesOptions = {}): Promise<InspectFilesResult> {
+  async inspectFiles(repoPath: string, relativePaths: string[], options: InspectFilesOptions = {}, context?: NavigationInvocationContext): Promise<InspectFilesResult> {
     const paths = this.validatePaths(relativePaths)
-    await this.codeMap.awaitSnapshot(repoPath)
+    await this.awaitInstrumentedReadiness(repoPath, 'STRUCTURE', 'inspect_files', context)
+
+    emitTrace(context, 'codescope-index-query-started', 'started', { tool: 'inspect_files' })
     const selected = this.selectFiles(this.codeMap.getFiles(repoPath), paths)
     const elements = this.codeMap.getElements(repoPath)
-    return { files: selected.map((file) => ({
+    emitTrace(context, 'codescope-index-query-completed', 'success', { tool: 'inspect_files' })
+
+    emitTrace(context, 'codescope-result-assembly-started', 'started', { tool: 'inspect_files' })
+    const result = { files: selected.map((file) => ({
       relativePath: file.relativePath,
       elements: projectFileOutline(elements.filter((element) => element.fileId === file.id), options)
     })) }
+    emitTrace(context, 'codescope-result-assembly-completed', 'success', { tool: 'inspect_files' })
+    return result
   }
 
-  async getReferences(repoPath: string, targetIds: string[]): Promise<GetReferencesResult> {
+  async getReferences(repoPath: string, targetIds: string[], context?: NavigationInvocationContext): Promise<GetReferencesResult> {
     requireNonEmptyUnique(targetIds, 'EMPTY_TARGETS', 'DUPLICATE_TARGET')
-    await this.codeMap.awaitSnapshot(repoPath)
+    await this.awaitInstrumentedSnapshot(repoPath, 'get_references', context)
     const elements = this.codeMap.getElements(repoPath)
     const elementsById = new Map(elements.map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))
@@ -215,9 +249,9 @@ export class ContextEngine implements ContextNavigationPort {
     }
   }
 
-  async getSymbolDependencies(repoPath: string, sourceTargetIds: string[]): Promise<GetSymbolDependenciesResult> {
+  async getSymbolDependencies(repoPath: string, sourceTargetIds: string[], context?: NavigationInvocationContext): Promise<GetSymbolDependenciesResult> {
     requireNonEmptyUnique(sourceTargetIds, 'EMPTY_TARGETS', 'DUPLICATE_TARGET')
-    await this.codeMap.awaitSnapshot(repoPath)
+    await this.awaitInstrumentedSnapshot(repoPath, 'get_symbol_dependencies', context)
     const elements = this.codeMap.getElements(repoPath)
     const elementsById = new Map(elements.map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))
@@ -244,13 +278,13 @@ export class ContextEngine implements ContextNavigationPort {
     }
   }
 
-  async getSymbolHierarchy(repoPath: string, targetIds: string[], options: SymbolHierarchyOptions = {}): Promise<GetSymbolHierarchyResult> {
+  async getSymbolHierarchy(repoPath: string, targetIds: string[], options: SymbolHierarchyOptions = {}, context?: NavigationInvocationContext): Promise<GetSymbolHierarchyResult> {
     requireNonEmptyUnique(targetIds, 'EMPTY_TARGETS', 'DUPLICATE_TARGET')
     const direction = options.direction ?? 'both'
     if (!['up', 'down', 'both'].includes(direction)) {
       throw new ContextNavigationError('INVALID_ARGUMENT', 'Invalid symbol hierarchy direction')
     }
-    await this.codeMap.awaitSnapshot(repoPath)
+    await this.awaitInstrumentedSnapshot(repoPath, 'get_symbol_hierarchy', context)
     const elements = this.codeMap.getElements(repoPath)
     const elementsById = new Map(elements.map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))
@@ -283,9 +317,9 @@ export class ContextEngine implements ContextNavigationPort {
     }
   }
 
-  async readCode(repoPath: string, targetIds: string[]): Promise<ReadCodeResult[]> {
+  async readCode(repoPath: string, targetIds: string[], context?: NavigationInvocationContext): Promise<ReadCodeResult[]> {
     requireNonEmptyUnique(targetIds, 'EMPTY_TARGETS', 'DUPLICATE_TARGET')
-    await this.codeMap.awaitSnapshot(repoPath)
+    await this.awaitInstrumentedSnapshot(repoPath, 'read_code', context)
 
     const elementsById = new Map(this.codeMap.getElements(repoPath).map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))

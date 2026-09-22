@@ -138,8 +138,20 @@ export class CodeScopeExecutionDrilldownProvider implements StageDrilldownProvid
         e.stage === 'codescope-readiness-requested' ||
         e.stage === 'codescope-readiness-satisfied' ||
         e.stage === 'codescope-readiness-failed' ||
-        e.capability === 'FILE_INVENTORY'
+        e.capability === 'FILE_INVENTORY' ||
+        e.capability === 'STRUCTURE'
     )
+    const readinessCapability = events.find((e) => e.capability)?.capability ?? 'FILE_INVENTORY'
+    const readinessTarget: InvestigationTarget = {
+      systemArea: 'CodeMap Readiness',
+      component: `CodeMap Service / Readiness (${readinessCapability})`,
+      boundary: 'Context Engine → CodeMap Readiness',
+      responsibility: `Awaiting repository readiness capability ${readinessCapability} before query`,
+      investigationSeeds: [
+        'src/main/core/code-map-service.ts',
+        'src/main/core/context/context-engine.ts'
+      ]
+    }
 
     const snapshotStarted =
       hasEvent('codescope-snapshot-started') ||
@@ -161,7 +173,7 @@ export class CodeScopeExecutionDrilldownProvider implements StageDrilldownProvid
         state: 'BOUNDED',
         missingEvidence: [hasReadiness ? 'codescope-readiness-requested' : 'codescope-snapshot-started'],
         durationMs: 30_000,
-        customTarget: hasReadiness ? READINESS_TARGET : undefined
+        customTarget: hasReadiness ? readinessTarget : undefined
       })
     }
 
@@ -173,7 +185,7 @@ export class CodeScopeExecutionDrilldownProvider implements StageDrilldownProvid
         precision: 'EXACT',
         state: 'LOCALIZED',
         durationMs: snapshotError.durationMs,
-        customTarget: hasReadiness ? READINESS_TARGET : undefined
+        customTarget: hasReadiness ? readinessTarget : undefined
       })
     }
 
@@ -184,7 +196,7 @@ export class CodeScopeExecutionDrilldownProvider implements StageDrilldownProvid
         precision: 'EXACT',
         state: 'LOCALIZED',
         durationMs: 30_000,
-        customTarget: hasReadiness ? READINESS_TARGET : undefined
+        customTarget: hasReadiness ? readinessTarget : undefined
       })
     }
 

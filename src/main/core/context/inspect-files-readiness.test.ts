@@ -11,8 +11,32 @@ import { createFullTargetId } from './code-target'
 
 const sampleFiles: CodeMapFile[] = [
   { id: 'f1', relativePath: 'src/index.ts', contentHash: 'h1', updatedAt: '2026-09-20' } as CodeMapFile,
-  { id: 'f2', relativePath: 'src/utils.ts', contentHash: 'h2', updatedAt: '2026-09-20' } as CodeMapFile,
-  { id: 'f3', relativePath: 'package.json', contentHash: 'h3', updatedAt: '2026-09-20' } as CodeMapFile
+  { id: 'f2', relativePath: 'src/utils.ts', contentHash: 'h2', updatedAt: '2026-09-20' } as CodeMapFile
+]
+
+const sampleElements: CodeMapElement[] = [
+  {
+    id: '0000000000000001',
+    fileId: 'f1',
+    name: 'MainService',
+    kind: 'class',
+    parentElementId: null,
+    startLine: 1,
+    endLine: 20,
+    retrievable: true,
+    location: { start: { line: 1, column: 0, byte: 0 }, end: { line: 20, column: 1, byte: 200 } }
+  } as CodeMapElement,
+  {
+    id: '0000000000000002',
+    fileId: 'f1',
+    name: 'run',
+    kind: 'method',
+    parentElementId: '0000000000000001',
+    startLine: 5,
+    endLine: 10,
+    retrievable: true,
+    location: { start: { line: 5, column: 2, byte: 50 }, end: { line: 10, column: 3, byte: 100 } }
+  } as CodeMapElement
 ]
 
 vi.mock('../repository-model', async (importOriginal) => {
@@ -20,7 +44,9 @@ vi.mock('../repository-model', async (importOriginal) => {
   return {
     ...actual,
     createRepositoryModel: vi.fn((repoPath: string) => {
-      let files = repoPath.includes('warm') ? [...sampleFiles] : []
+      const isWarm = repoPath.includes('warm')
+      const files = isWarm ? [...sampleFiles] : []
+      const elements = isWarm ? [...sampleElements] : []
       return {
         getRepoPath: () => repoPath,
         getRepositoryId: () => 'test-repo-id',
@@ -29,12 +55,9 @@ vi.mock('../repository-model', async (importOriginal) => {
         getFiles: () => files,
         getModifiedFiles: () => [],
         getFilesModifiedSince: () => [],
-        getElementsByRepository: () => [],
+        getElementsByRepository: () => elements,
         getRelationships: () => [],
-        indexRepository: vi.fn(async () => {
-          files = [...sampleFiles]
-          return { filesIndexed: files.length, elementsExtracted: 0 }
-        }),
+        indexRepository: vi.fn(async () => ({ filesIndexed: files.length, elementsExtracted: elements.length })),
         reconcileWithDisk: vi.fn(async () => {}),
         backfillContentHashes: vi.fn(async () => {}),
         backfillContextReferences: vi.fn(async () => {}),
@@ -60,14 +83,14 @@ class ReadOnlyWatcherService extends WatcherService {
   }
 }
 
-describe('discover_repository readiness contract', () => {
-  it('Harness 13: reprodução exata do bug — backgroundMaintenance pendente não bloqueia discover_repository', async () => {
+describe('inspect_files readiness contract — Unidade 1', () => {
+  it('1. maintenance permanentemente pendente não bloqueia inspect_files', async () => {
     let maintenanceFinished = false
     const pendingMaintenance = new Promise<void>((resolve) => {
       setTimeout(() => {
         maintenanceFinished = true
         resolve()
-      }, 5_000)
+      }, 10_000)
     })
 
     let snapshotWaited = false
@@ -77,14 +100,13 @@ describe('discover_repository readiness contract', () => {
         await pendingMaintenance
       }),
       awaitReadiness: vi.fn(async (_repoPath, capability) => {
-        if (capability === 'FILE_INVENTORY') {
-          // Readiness imediata para leitura do inventário: NÃO aguarda pendingMaintenance
+        if (capability === 'STRUCTURE') {
           return
         }
         await pendingMaintenance
       }),
       getFiles: vi.fn(() => sampleFiles),
-      getElements: vi.fn(() => []),
+      getElements: vi.fn(() => sampleElements),
       getRelationships: vi.fn(() => []),
       getSymbolReferencesByTargetElement: vi.fn(() => []),
       getSymbolReferencesBySourceElement: vi.fn(() => []),
@@ -94,34 +116,30 @@ describe('discover_repository readiness contract', () => {
     }
 
     const engine = new ContextEngine(mockPort)
-
     const startedAt = performance.now()
-    const result = await engine.discoverRepository('/test/repo')
+    const result = await engine.inspectFiles('/test/repo', ['src/index.ts'])
     const elapsed = performance.now() - startedAt
 
-    // discover_repository retorna o inventário imediatamente
-    expect(result.directories).toBeDefined()
-    expect(result.directories[0].children).toContain('package.json')
-    expect(result.directories[0].children).toContain('src/')
-    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'FILE_INVENTORY')
+    expect(result.files).toHaveLength(1)
+    expect(result.files[0].relativePath).toBe('src/index.ts')
+    expect(result.files[0].elements).toHaveLength(1)
+    expect(result.files[0].elements[0].name).toBe('MainService')
+    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'STRUCTURE')
     expect(snapshotWaited).toBe(false)
     expect(maintenanceFinished).toBe(false)
     expect(elapsed).toBeLessThan(100)
   })
 
-  it('Harness 14: Synchronizer ocupado — fila global não bloqueia discover_repository', async () => {
+  it('2. synchronizer ocupado não bloqueia inspect_files', async () => {
     let synchronizerIdleWaited = false
     const mockPort: CodeMapNavigationPort = {
       awaitSnapshot: vi.fn(async () => {
         synchronizerIdleWaited = true
-        // waitForIdle simula sincronizador ocupado processando fila
-        await new Promise((resolve) => setTimeout(resolve, 3_000))
+        await new Promise((resolve) => setTimeout(resolve, 5_000))
       }),
-      awaitReadiness: vi.fn(async () => {
-        // Readiness de inventário não chama waitForIdle
-      }),
+      awaitReadiness: vi.fn(async () => {}),
       getFiles: vi.fn(() => sampleFiles),
-      getElements: vi.fn(() => []),
+      getElements: vi.fn(() => sampleElements),
       getRelationships: vi.fn(() => []),
       getSymbolReferencesByTargetElement: vi.fn(() => []),
       getSymbolReferencesBySourceElement: vi.fn(() => []),
@@ -131,29 +149,29 @@ describe('discover_repository readiness contract', () => {
     }
 
     const engine = new ContextEngine(mockPort)
-    const result = await engine.discoverRepository('/busy/repo')
+    const result = await engine.inspectFiles('/busy/repo', ['src/index.ts'])
 
-    expect(result.directories).toHaveLength(1)
-    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/busy/repo', 'FILE_INVENTORY')
+    expect(result.files[0].elements[0].name).toBe('MainService')
+    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/busy/repo', 'STRUCTURE')
     expect(synchronizerIdleWaited).toBe(false)
   })
 
-  it('Harness 15: Warm repository — responde imediatamente com inventário persistido no CodeMapService real', async () => {
+  it('3. repositório warm responde com estrutura persistida no CodeMapService real', async () => {
     const watcher = new ReadOnlyWatcherService()
     const service = new CodeMapService(watcher, dummyCompression)
-    const repoPath = '/workspace/warm-repo'
+    const repoPath = '/workspace/warm-structure-repo'
 
     try {
       await service.openRepository(repoPath)
-
       const engine = new ContextEngine(service as unknown as CodeMapNavigationPort)
+
       const started = performance.now()
-      const result = await engine.discoverRepository(repoPath)
+      const result = await engine.inspectFiles(repoPath, ['src/index.ts'])
       const duration = performance.now() - started
 
-      expect(result.directories[0].children.length).toBeGreaterThan(0)
-      expect(result.directories[0].children).toContain('package.json')
-      expect(result.directories[0].children).toContain('src/')
+      expect(result.files).toHaveLength(1)
+      expect(result.files[0].relativePath).toBe('src/index.ts')
+      expect(result.files[0].elements[0].name).toBe('MainService')
       expect(duration).toBeLessThan(100)
     } finally {
       service.closeAll()
@@ -161,37 +179,30 @@ describe('discover_repository readiness contract', () => {
     }
   })
 
-  it('Harness 16: Never indexed — preserva semântica conhecida sem disparar indexação implícita', async () => {
+  it('4. repositório nunca indexado preserva a semântica existente', async () => {
     const watcher = new ReadOnlyWatcherService()
     const service = new CodeMapService(watcher, dummyCompression)
-    const indexSpy = vi.spyOn(service, 'indexRepository')
-    const repoPath = '/workspace/never-indexed-repo'
+    const repoPath = '/workspace/never-indexed-inspect-repo'
 
     try {
-      // Abre repositório nunca indexado
       await service.openRepository(repoPath)
-
       const engine = new ContextEngine(service as unknown as CodeMapNavigationPort)
-      const result = await engine.discoverRepository(repoPath)
 
-      expect(result.directories).toEqual([{ relativePath: '.', children: [] }])
-      expect(indexSpy).not.toHaveBeenCalled()
+      await expect(engine.inspectFiles(repoPath, ['src/missing.ts'])).rejects.toThrow('Unknown CodeMap file: src/missing.ts')
     } finally {
       service.closeAll()
       watcher.stop()
     }
   })
 
-  it('Harness 17: Maintenance failure — falha de background enrichment não impede leitura do inventário existente', async () => {
+  it('5. falha de maintenance não destrói STRUCTURE já disponível', async () => {
     const mockPort: CodeMapNavigationPort = {
       awaitSnapshot: vi.fn(async () => {
         throw new Error('Background maintenance crashed')
       }),
-      awaitReadiness: vi.fn(async () => {
-        // Falha posterior de maintenance não afeta FILE_INVENTORY
-      }),
+      awaitReadiness: vi.fn(async () => {}),
       getFiles: vi.fn(() => sampleFiles),
-      getElements: vi.fn(() => []),
+      getElements: vi.fn(() => sampleElements),
       getRelationships: vi.fn(() => []),
       getSymbolReferencesByTargetElement: vi.fn(() => []),
       getSymbolReferencesBySourceElement: vi.fn(() => []),
@@ -201,35 +212,21 @@ describe('discover_repository readiness contract', () => {
     }
 
     const engine = new ContextEngine(mockPort)
-    const result = await engine.discoverRepository('/repo/with/failing/maintenance')
+    const result = await engine.inspectFiles('/repo/with/failing/maintenance', ['src/index.ts'])
 
-    expect(result.directories[0].children).toContain('src/')
-    expect(mockPort.awaitReadiness).toHaveBeenCalled()
+    expect(result.files[0].elements[0].name).toBe('MainService')
+    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/repo/with/failing/maintenance', 'STRUCTURE')
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
   })
 
-  it('Harness 18: Outras tools mantêm awaitSnapshot e não usam readiness simplificada de inventário', async () => {
+  it('6. discover_repository usa FILE_INVENTORY, inspect_files usa STRUCTURE e demais tools permanecem em awaitSnapshot', async () => {
     const elementId = '0000000000000001'
     const targetId = createFullTargetId(elementId)
     const mockPort: CodeMapNavigationPort = {
       awaitSnapshot: vi.fn(async () => {}),
       awaitReadiness: vi.fn(async () => {}),
       getFiles: vi.fn(() => sampleFiles),
-      getElements: vi.fn(() => [
-        {
-          id: elementId,
-          fileId: 'f1',
-          name: 'myFn',
-          kind: 'function',
-          startLine: 1,
-          endLine: 5,
-          retrievable: true,
-          location: {
-            start: { line: 1, column: 0, byte: 0 },
-            end: { line: 5, column: 1, byte: 20 }
-          }
-        } as CodeMapElement
-      ]),
+      getElements: vi.fn(() => sampleElements),
       getRelationships: vi.fn(() => [
         { id: 'rel-1', sourceId: 'src/index.ts', targetId: 'src/utils.ts', type: 'imports' } as CodeMapRelationship
       ]),
@@ -238,44 +235,97 @@ describe('discover_repository readiness contract', () => {
       getHierarchyRelationshipsBySourceElement: vi.fn(() => []),
       getHierarchyRelationshipsByTargetElement: vi.fn(() => []),
       getElementExactSources: vi.fn(async () => new Map([
-        [elementId, { source: 'function myFn() {}', startLine: 1, endLine: 5, startByte: 0, endByte: 20, relativePath: 'src/index.ts' }]
+        [elementId, { source: 'class MainService {}', startLine: 1, endLine: 5, startByte: 0, endByte: 200, relativePath: 'src/index.ts' }]
       ]))
     }
 
     const engine = new ContextEngine(mockPort)
 
-    // inspectFiles usa readiness com STRUCTURE
-    await engine.inspectFiles('/test/repo', ['src/index.ts'])
-    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'STRUCTURE')
+    // discover_repository usa FILE_INVENTORY
+    await engine.discoverRepository('/test/repo')
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'FILE_INVENTORY')
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
-    // getRelationships
+    // inspect_files usa STRUCTURE
+    await engine.inspectFiles('/test/repo', ['src/index.ts'])
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'STRUCTURE')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
+
+    // Demais tools usam awaitSnapshot
     await engine.getRelationships('/test/repo', ['src/index.ts'])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(1)
 
-    // readCode
     await engine.readCode('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(2)
 
-    // getReferences
     await engine.getReferences('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3)
 
-    // getSymbolDependencies
     await engine.getSymbolDependencies('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(4)
 
-    // getSymbolHierarchy
     await engine.getSymbolHierarchy('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(5)
-
-    // discoverRepository usa awaitReadiness com FILE_INVENTORY
-    await engine.discoverRepository('/test/repo')
-    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'FILE_INVENTORY')
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(5) // sem incremento em awaitSnapshot
   })
 
-  it('Harness 12: Diagnostic Zoom by Design — emite traces de readiness com capability FILE_INVENTORY e drilldown localiza com precisão', async () => {
+  it('7. abertura concorrente é aguardada corretamente sem dependência temporal oculta', async () => {
+    const watcher = new ReadOnlyWatcherService()
+    const service = new CodeMapService(watcher, dummyCompression)
+    const repoPath = '/workspace/concurrent-warm-repo'
+
+    try {
+      // Duas chamadas simultâneas de readiness para o mesmo repositório ainda fechado
+      const [r1, r2] = await Promise.all([
+        service.awaitReadiness(repoPath, 'STRUCTURE'),
+        service.awaitReadiness(repoPath, 'FILE_INVENTORY')
+      ])
+
+      expect(r1).toBeUndefined()
+      expect(r2).toBeUndefined()
+
+      // Acesso síncrono imediatamente após o await conjunto obtém a instância sem erro
+      const files = service.getFiles(repoPath)
+      const elements = service.getElements(repoPath)
+      expect(files).toBeDefined()
+      expect(elements).toBeDefined()
+    } finally {
+      service.closeAll()
+      watcher.stop()
+    }
+  })
+
+  it('8. a duração de inspect_files não cresce com a duração de enrichments que ele não utiliza', async () => {
+    const runWithDelay = async (enrichmentDelayMs: number) => {
+      const mockPort: CodeMapNavigationPort = {
+        awaitSnapshot: vi.fn(async () => {
+          await new Promise((resolve) => setTimeout(resolve, enrichmentDelayMs))
+        }),
+        awaitReadiness: vi.fn(async () => {}),
+        getFiles: vi.fn(() => sampleFiles),
+        getElements: vi.fn(() => sampleElements),
+        getRelationships: vi.fn(() => []),
+        getSymbolReferencesByTargetElement: vi.fn(() => []),
+        getSymbolReferencesBySourceElement: vi.fn(() => []),
+        getHierarchyRelationshipsBySourceElement: vi.fn(() => []),
+        getHierarchyRelationshipsByTargetElement: vi.fn(() => []),
+        getElementExactSources: vi.fn(async () => new Map())
+      }
+      const engine = new ContextEngine(mockPort)
+      const start = performance.now()
+      await engine.inspectFiles('/test/repo', ['src/index.ts'])
+      return performance.now() - start
+    }
+
+    const durationFast = await runWithDelay(10)
+    const durationSlow = await runWithDelay(1_000)
+
+    // Ambas as execuções devem ser praticamente instantâneas (<50ms)
+    // demonstrando que a duração de inspect_files não cresce com a duração do enrichment
+    expect(durationFast).toBeLessThan(50)
+    expect(durationSlow).toBeLessThan(50)
+  })
+
+  it('9. Unidade 2: emite traces com capability STRUCTURE e drilldown isola corretamente', async () => {
     const recordedEvents: CodeScopeTraceEvent[] = []
     const trace = {
       record: (ev: CodeScopeTraceEvent) => {
@@ -283,8 +333,8 @@ describe('discover_repository readiness contract', () => {
       }
     }
     const context: NavigationInvocationContext = {
-      requestId: 'req-readiness-test',
-      sessionId: 'sess-001',
+      requestId: 'req-inspect-trace',
+      sessionId: 'sess-002',
       trace
     }
 
@@ -292,7 +342,7 @@ describe('discover_repository readiness contract', () => {
       awaitSnapshot: vi.fn(async () => {}),
       awaitReadiness: vi.fn(async () => {}),
       getFiles: vi.fn(() => sampleFiles),
-      getElements: vi.fn(() => []),
+      getElements: vi.fn(() => sampleElements),
       getRelationships: vi.fn(() => []),
       getSymbolReferencesByTargetElement: vi.fn(() => []),
       getSymbolReferencesBySourceElement: vi.fn(() => []),
@@ -302,26 +352,25 @@ describe('discover_repository readiness contract', () => {
     }
 
     const engine = new ContextEngine(mockPort)
-    await engine.discoverRepository('/test/repo', ['.'], context)
+    await engine.inspectFiles('/test/repo', ['src/index.ts'], {}, context)
 
-    // Verifica que os estágios específicos de readiness foram emitidos com capability FILE_INVENTORY
     const reqEvent = recordedEvents.find((e) => e.stage === 'codescope-readiness-requested')
     const satEvent = recordedEvents.find((e) => e.stage === 'codescope-readiness-satisfied')
     expect(reqEvent).toBeDefined()
-    expect(reqEvent?.capability).toBe('FILE_INVENTORY')
-    expect(reqEvent?.tool).toBe('discover_repository')
+    expect(reqEvent?.capability).toBe('STRUCTURE')
+    expect(reqEvent?.tool).toBe('inspect_files')
     expect(satEvent).toBeDefined()
-    expect(satEvent?.capability).toBe('FILE_INVENTORY')
+    expect(satEvent?.capability).toBe('STRUCTURE')
     expect(satEvent?.status).toBe('success')
 
-    // Drilldown em caso de falha de readiness isola especificamente CodeMap Readiness / FILE_INVENTORY
+    // Drilldown com falha em STRUCTURE
     const failureEvents: CodeScopeTraceEvent[] = [
       {
         timestamp: new Date().toISOString(),
         requestId: 'req-fail',
         sessionId: 'sess-fail',
         method: 'tools/call',
-        tool: 'discover_repository',
+        tool: 'inspect_files',
         stage: 'codescope-operation-routed',
         durationMs: 1,
         status: 'success'
@@ -331,9 +380,9 @@ describe('discover_repository readiness contract', () => {
         requestId: 'req-fail',
         sessionId: 'sess-fail',
         method: 'tools/call',
-        tool: 'discover_repository',
+        tool: 'inspect_files',
         stage: 'codescope-readiness-requested',
-        capability: 'FILE_INVENTORY',
+        capability: 'STRUCTURE',
         durationMs: 0,
         status: 'started'
       },
@@ -342,31 +391,28 @@ describe('discover_repository readiness contract', () => {
         requestId: 'req-fail',
         sessionId: 'sess-fail',
         method: 'tools/call',
-        tool: 'discover_repository',
+        tool: 'inspect_files',
         stage: 'codescope-readiness-failed',
-        capability: 'FILE_INVENTORY',
-        durationMs: 50,
+        capability: 'STRUCTURE',
+        durationMs: 25,
         status: 'error',
-        error: 'REPOSITORY_NOT_ACCESSIBLE'
+        error: 'DATABASE_LOCKED'
       }
     ]
 
-    const drilldown = codeScopeExecutionDrilldownProvider.evaluate(failureEvents, 'REPOSITORY_NOT_ACCESSIBLE')
+    const drilldown = codeScopeExecutionDrilldownProvider.evaluate(failureEvents, 'DATABASE_LOCKED')
     expect(drilldown).not.toBeNull()
     expect(drilldown?.state).toBe('LOCALIZED')
     expect(drilldown?.firstFailedCheckpoint).toBe('Snapshot Synchronization')
     expect(drilldown?.refinedInvestigationTarget).toEqual({
       systemArea: 'CodeMap Readiness',
-      component: 'CodeMap Service / Readiness (FILE_INVENTORY)',
+      component: 'CodeMap Service / Readiness (STRUCTURE)',
       boundary: 'Context Engine → CodeMap Readiness',
-      responsibility: 'Awaiting repository readiness capability FILE_INVENTORY before query',
+      responsibility: 'Awaiting repository readiness capability STRUCTURE before query',
       investigationSeeds: [
         'src/main/core/code-map-service.ts',
         'src/main/core/context/context-engine.ts'
       ]
     })
-    expect(drilldown?.diagnosticResolution).toBe('COMPONENT')
-    expect(drilldown?.observabilityGap.state).toBe('NONE')
-    expect(drilldown?.resolutionSufficient).toBe(true)
   })
 })

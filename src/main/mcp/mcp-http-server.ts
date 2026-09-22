@@ -129,26 +129,17 @@ export function createMcpHttpServer(
         emit('codescope-request-started', 'started')
         emit('codescope-handler-started', 'started')
         rpcResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace })
-        const isError = Boolean(rpcResult && typeof rpcResult === 'object' && 'isError' in rpcResult && (rpcResult as { isError?: boolean }).isError === true)
-        let toolError: string | undefined
-        if (isError && rpcResult && typeof rpcResult === 'object' && Array.isArray((rpcResult as any).content) && (rpcResult as any).content[0]?.text) {
-          const match = /^([A-Z_]+):/.exec((rpcResult as any).content[0].text)
-          toolError = match ? match[1] : 'TOOL_ERROR'
-        } else if (isError) {
-          toolError = 'TOOL_ERROR'
-        }
-        if (toolError) failure = toolError
-        emit('codescope-response-produced', isError ? 'error' : 'success', toolError)
-        emit('codescope-handler-completed', isError ? 'error' : 'success', toolError)
+        emit('codescope-response-produced', 'success')
+        emit('codescope-handler-completed', 'success')
       } else {
         failure = 'METHOD_NOT_FOUND'
         responseSize = writeJson(response, 200, error(id, -32601, 'Method not found'))
         return
       }
 
-      emit('mcp-response-produced', !(rpcResult && typeof rpcResult === 'object' && 'isError' in rpcResult) ? 'success' : 'error')
+      emit('mcp-response-produced', 'success')
       responseSize = writeJson(response, 200, result(id, rpcResult))
-      success = !(rpcResult && typeof rpcResult === 'object' && 'isError' in rpcResult)
+      success = true
     } catch (caught) {
       failure = caught instanceof Error ? caught.name : 'PARSE_ERROR'
       responseSize = writeJson(

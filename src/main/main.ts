@@ -61,7 +61,10 @@ import { isInstallationConfigured } from './integrations/installation-configured
 import { registerChatGptIntegrationHandlers } from './ipc/chatgpt-integration-handler'
 import { CodeScopeHealthMonitor } from './mcp/code-scope-health'
 import { SystemHealthCore } from './system-health/system-health-core'
+import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-provider'
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
+import { ValidationLedger } from './validation-ledger/validation-ledger'
+
 
 
 
@@ -80,14 +83,30 @@ let mainWindow: BrowserWindow | null = null
 let dbAdapter: BetterSqlite3DatabaseAdapter | null = null
 const watcherService = new WatcherService()
 const codeScopeHealth = new CodeScopeHealthMonitor()
-const systemHealth = new SystemHealthCore()
+const runtimeIdentityProvider = new RuntimeIdentityProvider({
+  appVersion: app.getVersion(),
+  mode: app.isPackaged ? 'production' : 'development'
+})
+const systemHealth = new SystemHealthCore({ runtimeIdentityProvider })
+const validationLedger = new ValidationLedger(
+  join(app.getPath('userData'), 'validation-ledger.db'),
+  runtimeIdentityProvider
+)
 const traceSink = {
   record(event: import('./mcp/code-scope-health').CodeScopeTraceEvent) {
+    if (!event.runtimeInstanceId) {
+      event.runtimeInstanceId = runtimeIdentityProvider.getInstanceId()
+    }
     codeScopeHealth.record(event)
     systemHealth.sink.record(event)
   }
 }
-const mcpLifecycle = new McpLifecycle({ trace: traceSink, systemHealth })
+const mcpLifecycle = new McpLifecycle({
+  trace: traceSink,
+  systemHealth,
+  runtimeIdentity: runtimeIdentityProvider,
+  validationLedger
+})
 const selectedTransport = new SelectedTransport(
   () => settingsService.loadSettings().transportKind === 'relay' ? 'relay' : 'ngrok',
   (kind) => {
@@ -351,6 +370,11 @@ registerApplicationShutdown(app, async () => {
     }
   } catch (error: any) {
     console.error('[Main] Erro ao fechar conexões de banco:', error)
+  }
+  try {
+    validationLedger.close()
+  } catch (error: any) {
+    console.error('[Main] Erro ao fechar Validation Ledger:', error)
   }
 })
 
