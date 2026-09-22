@@ -3,6 +3,7 @@ import type { ProjectContextNavigation } from '../core/context/project-context-n
 import { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
 import { createMcpHttpServer } from './mcp-http-server'
 import type { CodeScopeTraceSink } from './code-scope-health'
+import type { IArtifactReader } from '../continuum/continuum-types'
 
 export type McpLifecycleState =
   | { status: 'STOPPED' | 'STARTING' | 'STOPPING'; available: false }
@@ -10,7 +11,7 @@ export type McpLifecycleState =
   | { status: 'ERROR'; available: false; error: 'MCP_START_FAILED' | 'MCP_SERVER_FAILED' }
 
 interface McpLifecycleOptions {
-  createServer?: (navigation: ProjectContextNavigation) => Server
+  createServer?: (navigation: ProjectContextNavigation, artifactReader?: IArtifactReader) => Server
   log?: (state: McpLifecycleState) => void
   trace?: CodeScopeTraceSink
   systemHealth?: import('../system-health/system-health-core').SystemHealthCore
@@ -22,17 +23,30 @@ export class McpLifecycle {
   private state: McpLifecycleState = { status: 'STOPPED', available: false }
   private server: Server | null = null
   private binding: string | null = null
-  private requested: { identity: string; navigation: ProjectContextNavigation } | null = null
+  private bindingReader: IArtifactReader | undefined = undefined
+  private requested: { identity: string; navigation: ProjectContextNavigation; artifactReader?: IArtifactReader } | null = null
   private revision = 0
   private transition = Promise.resolve()
   private disposed = false
   private runtimeFailure = false
   private readonly listeners = new Set<(state: McpLifecycleState) => void | Promise<void>>()
-  private readonly createServer: (navigation: ProjectContextNavigation) => Server
+  private readonly createServer: (navigation: ProjectContextNavigation, artifactReader?: IArtifactReader) => Server
   private readonly log: (state: McpLifecycleState) => void
 
   constructor(options: McpLifecycleOptions = {}) {
-    this.createServer = options.createServer ?? ((navigation) => createMcpHttpServer(new ContextNavigationMcpAdapter(navigation, options.systemHealth, options.runtimeIdentity, options.validationLedger), console.log, options.trace))
+    this.createServer = options.createServer ?? ((navigation, artifactReader) =>
+      createMcpHttpServer(
+        new ContextNavigationMcpAdapter(
+          navigation,
+          options.systemHealth,
+          options.runtimeIdentity,
+          options.validationLedger,
+          artifactReader
+        ),
+        console.log,
+        options.trace
+      )
+    )
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))
   }
 
@@ -46,10 +60,17 @@ export class McpLifecycle {
     return () => this.listeners.delete(listener)
   }
 
-  activate(identity: string, navigation: ProjectContextNavigation): Promise<void> {
+  activate(identity: string, navigation: ProjectContextNavigation, artifactReader?: IArtifactReader): Promise<void> {
     if (this.disposed) return this.transition
-    if (this.requested?.identity === identity && this.state.status !== 'ERROR' && this.state.status !== 'STOPPING') return this.transition
-    this.requested = { identity, navigation }
+    if (
+      this.requested?.identity === identity &&
+      this.requested?.artifactReader === artifactReader &&
+      this.state.status !== 'ERROR' &&
+      this.state.status !== 'STOPPING'
+    ) {
+      return this.transition
+    }
+    this.requested = { identity, navigation, artifactReader }
     this.runtimeFailure = false
     return this.schedule()
   }
@@ -110,12 +131,20 @@ export class McpLifecycle {
     })
     this.server = null
     this.binding = null
+    this.bindingReader = undefined
     server.removeAllListeners('error')
   }
 
   private async reconcile(revision: number): Promise<void> {
     if (revision !== this.revision) return
-    if (this.requested && this.binding === this.requested.identity && this.state.status === 'RUNNING') return
+    if (
+      this.requested &&
+      this.binding === this.requested.identity &&
+      this.bindingReader === this.requested.artifactReader &&
+      this.state.status === 'RUNNING'
+    ) {
+      return
+    }
     await this.stop()
     if (revision !== this.revision) return
     const requested = this.requested
@@ -127,7 +156,7 @@ export class McpLifecycle {
     }
     await this.setState({ status: 'STARTING', available: false })
     try {
-      const server = this.createServer(requested.navigation)
+      const server = this.createServer(requested.navigation, requested.artifactReader)
       this.server = server
       await new Promise<void>((resolve, reject) => {
         const onError = (error: Error) => {
@@ -155,6 +184,7 @@ export class McpLifecycle {
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('MCP address unavailable')
       this.binding = requested.identity
+      this.bindingReader = requested.artifactReader
       await this.setState({ status: 'RUNNING', available: true, endpoint: `http://127.0.0.1:${address.port}/mcp`, projectId: requested.identity })
     } catch {
       await this.stop()

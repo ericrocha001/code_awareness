@@ -64,6 +64,7 @@ import { SystemHealthCore } from './system-health/system-health-core'
 import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-provider'
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
+import { ProjectContinuumSession } from './continuum/project-continuum-session'
 
 
 
@@ -92,6 +93,7 @@ const validationLedger = new ValidationLedger(
   join(app.getPath('userData'), 'validation-ledger.db'),
   runtimeIdentityProvider
 )
+const continuumSession = new ProjectContinuumSession(join(app.getPath('userData'), 'continuum'))
 const traceSink = {
   record(event: import('./mcp/code-scope-health').CodeScopeTraceEvent) {
     if (!event.runtimeInstanceId) {
@@ -278,10 +280,32 @@ app.whenReady().then(() => {
   const contextNavigation = new ContextEngine(codeMapService)
   const dashDiscoveryService = new DashDiscoveryService(contextNavigation)
   activeProjects = new ActiveProjectService(codeMapService)
-  activeProjects.onBeforeChange(() => mcpLifecycle.quiesce())
-  activeProjects.onChanged(({ project }) => project
-    ? mcpLifecycle.activate(project.id, bindProjectNavigation(contextNavigation, project.path))
-    : mcpLifecycle.deactivate())
+  activeProjects.onBeforeChange(() => {
+    void mcpLifecycle.quiesce()
+    continuumSession.deactivate()
+  })
+  activeProjects.onChanged(({ project }) => {
+    if (!project) {
+      void mcpLifecycle.deactivate()
+      continuumSession.deactivate()
+      return
+    }
+
+    let artifactReader = undefined
+    try {
+      const report = continuumSession.activate(project.path)
+      if (report && report.discovered > 0) {
+        console.log(`[Continuum] Ingestion: discovered=${report.discovered} ingested=${report.ingested} rejected=${report.rejected} retryable=${report.retryableFailures}`)
+      }
+      artifactReader = continuumSession.getActiveReader() ?? undefined
+    } catch (error: any) {
+      // Continuum is auxiliary context — never block project opening on its failure.
+      console.error('[Continuum] Session activation failed, continuing without Continuum:', error?.message)
+    }
+
+    const navigation = bindProjectNavigation(contextNavigation, project.path)
+    void mcpLifecycle.activate(project.id, navigation, artifactReader)
+  })
   registerActiveProjectHandlers(activeProjects)
   registerConnectionHandlers(remoteAccess)
   chatGptIntegration = new ChatGptIntegrationProjection(remoteAccess, activeProjects, mcpLifecycle,
@@ -375,6 +399,11 @@ registerApplicationShutdown(app, async () => {
     validationLedger.close()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Validation Ledger:', error)
+  }
+  try {
+    continuumSession.dispose()
+  } catch (error: any) {
+    console.error('[Main] Erro ao fechar Continuum Session:', error)
   }
 })
 

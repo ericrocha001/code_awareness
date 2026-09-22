@@ -314,9 +314,31 @@ Quando não houver oportunidade qualificada, registre:
 
 `Nenhuma`
 
+### Implementation Handoff
+
+O Relato Final é também o `IMPLEMENTATION_HANDOFF` canônico da execução.
+
+Após finalizá-lo, utilize a capacidade especializada `continuum` para publicar **exatamente o mesmo conteúdo** no Continuum do projeto.
+
+Não:
+
+- produza uma segunda versão do relatório para publicação;
+- resuma novamente o relato para o Continuum;
+- duplique suas seções em outra representação sem necessidade.
+
+Considere o handoff publicado somente após confirmação explícita de publicação.
+
+Se a publicação falhar:
+
+- não descarte o Relato Final;
+- preserve-o na resposta ao usuário;
+- informe explicitamente que o handoff não foi publicado.
+
 ## 11. Economia de Contexto
 
 Adquira contexto sob demanda.
+
+Quando contexto histórico material da tarefa puder já existir no Continuum, utilize a capacidade especializada `continuum` para recuperar somente os artifacts relevantes antes de pedir ao usuário que reconstrua ou copie informações anteriores.
 
 Não carregue informação adicional apenas por precaução quando ela puder ser obtida depois com baixo custo.
 

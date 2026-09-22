@@ -115,32 +115,43 @@ import {
   executeRecordValidationProof
 } from '../validation-ledger/validation-ledger-mcp'
 import type { ValidationLedger } from '../validation-ledger/validation-ledger'
+import {
+  LIST_ARTIFACTS_TOOL,
+  GET_ARTIFACT_TOOL,
+  executeListArtifacts,
+  executeGetArtifact
+} from '../continuum/continuum-mcp'
+import type { IArtifactReader } from '../continuum/continuum-types'
 
 export class ContextNavigationMcpAdapter {
   private readonly navigation: ProjectContextNavigation
   private readonly systemHealth: SystemHealthCore | undefined
   private readonly runtimeIdentity: RuntimeIdentityProvider | undefined
   private readonly validationLedger: ValidationLedger | undefined
+  private readonly artifactReader: IArtifactReader | undefined
 
   constructor(
     navigation: ProjectContextNavigation,
     systemHealth?: SystemHealthCore,
     runtimeIdentity?: RuntimeIdentityProvider,
-    validationLedger?: ValidationLedger
+    validationLedger?: ValidationLedger,
+    artifactReader?: IArtifactReader
   )
   constructor(
     navigation: ContextNavigationPort,
     repoPath: string,
     systemHealth?: SystemHealthCore,
     runtimeIdentity?: RuntimeIdentityProvider,
-    validationLedger?: ValidationLedger
+    validationLedger?: ValidationLedger,
+    artifactReader?: IArtifactReader
   )
   constructor(
     navigation: ContextNavigationPort | ProjectContextNavigation,
     repoPathOrHealth?: string | SystemHealthCore,
     systemHealthOrIdentity?: SystemHealthCore | RuntimeIdentityProvider,
     runtimeIdentityOrLedger?: RuntimeIdentityProvider | ValidationLedger,
-    validationLedger?: ValidationLedger
+    validationLedgerOrReader?: ValidationLedger | IArtifactReader,
+    artifactReader?: IArtifactReader
   ) {
     if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
@@ -148,7 +159,8 @@ export class ContextNavigationMcpAdapter {
       this.runtimeIdentity =
         (runtimeIdentityOrLedger as RuntimeIdentityProvider | undefined) ??
         this.systemHealth?.getRuntimeIdentityProvider()
-      this.validationLedger = validationLedger
+      this.validationLedger = validationLedgerOrReader as ValidationLedger | undefined
+      this.artifactReader = artifactReader
     } else {
       this.navigation = navigation as ProjectContextNavigation
       this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
@@ -156,7 +168,9 @@ export class ContextNavigationMcpAdapter {
         (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ??
         this.systemHealth?.getRuntimeIdentityProvider()
       this.validationLedger =
-        (runtimeIdentityOrLedger as ValidationLedger | undefined) ?? validationLedger
+        runtimeIdentityOrLedger as ValidationLedger | undefined
+      this.artifactReader =
+        (validationLedgerOrReader as IArtifactReader | undefined) ?? artifactReader
     }
   }
 
@@ -173,10 +187,30 @@ export class ContextNavigationMcpAdapter {
         RECORD_VALIDATION_PROOF_TOOL
       )
     }
+    if (this.artifactReader) {
+      tools.push(
+        LIST_ARTIFACTS_TOOL,
+        GET_ARTIFACT_TOOL
+      )
+    }
     return tools
   }
 
   async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (name === 'list_artifacts') {
+      if (!this.artifactReader) {
+        return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: No artifact reader configured for active project' }], isError: true }
+      }
+      return executeListArtifacts(this.artifactReader, args)
+    }
+
+    if (name === 'get_artifact') {
+      if (!this.artifactReader) {
+        return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: No artifact reader configured for active project' }], isError: true }
+      }
+      return executeGetArtifact(this.artifactReader, args)
+    }
+
     if (name === 'get_runtime_identity') {
       const provider =
         this.runtimeIdentity ??
