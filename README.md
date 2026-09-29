@@ -316,4 +316,8 @@ Built by **Eric Rocha** as an ongoing exploration of context engineering, develo
 
 ## License
 
-No open-source license has been granted yet. Unless otherwise stated, all rights are reserved.
+**Proprietary — All Rights Reserved.**
+
+This repository is publicly available for inspection, but it is **not open source**. No permission is granted to modify, redistribute, create derivative works from, incorporate into another product, or otherwise reuse the original Code Awareness materials except where required by applicable law or the hosting platform's terms.
+
+See [LICENSE](LICENSE) for the complete proprietary notice.
