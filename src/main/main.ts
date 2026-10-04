@@ -65,6 +65,29 @@ import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-pro
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
 import { ProjectContinuumSession } from './continuum/project-continuum-session'
+import { CodeMapSyncMonitor, CodeMapSyncDrilldownProvider } from './system-health/codemap-sync-monitor'
+import { CodeMapLifecycleMonitor } from './system-health/codemap-lifecycle-monitor'
+import { codeScopeExecutionDrilldownProvider } from './system-health/codescope-execution-drilldown'
+import { ValidationExecution } from './validation-execution/validation-execution'
+import { DiagnosticSourceAccess } from './diagnostic-source-access/diagnostic-source-access'
+import { EnvironmentRestartSupervisorClient, RuntimeRestartController } from './runtime-restart/runtime-restart-controller'
+import { AcademyService } from './academy/academy-service'
+import { registerAcademyHandlers } from './ipc/academy-handler'
+import { RepositoryCatalogStore } from './repository-catalog/repository-catalog-store'
+import { RepositoryCatalogService } from './repository-catalog/repository-catalog-service'
+import { RepositoryRuntimeService } from './repository-catalog/repository-runtime-service'
+import { GitHubCredentialStore } from './github/github-credential-store'
+import { GitHubAuthService } from './github/github-auth-service'
+import { GitHubApiClient } from './github/github-api-client'
+import { GitHubIntegrationService } from './github/github-integration-service'
+import { loadGitHubProductConfig } from './github/github-config'
+import { registerGitHubHandlers } from './ipc/github-handler'
+import { AcademyGitMaterializer } from './academy/git/academy-git-materializer'
+import { AcademyGitSyncService } from './academy/git/academy-git-sync-service'
+import { AcademyPluginRepositoryProjection } from './academy/git/academy-plugin-repository-projection'
+import { GitHubGitTransport } from './github/github-git-transport'
+import { GitOperationsService } from './git-operations/git-operations-service'
+import { GitService } from './core/git-service'
 
 
 
@@ -89,15 +112,32 @@ const runtimeIdentityProvider = new RuntimeIdentityProvider({
   mode: app.isPackaged ? 'production' : 'development'
 })
 const systemHealth = new SystemHealthCore({ runtimeIdentityProvider })
+const codeMapSyncMonitor = new CodeMapSyncMonitor().connect()
+const codeMapLifecycleMonitor = new CodeMapLifecycleMonitor().connect()
+systemHealth.registerDrilldownProvider(
+  new CodeMapSyncDrilldownProvider(codeMapSyncMonitor, codeScopeExecutionDrilldownProvider, codeMapLifecycleMonitor)
+)
 const validationLedger = new ValidationLedger(
   join(app.getPath('userData'), 'validation-ledger.db'),
   runtimeIdentityProvider
 )
 const continuumSession = new ProjectContinuumSession(join(app.getPath('userData'), 'continuum'))
+const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
+const runtimeRestart = new RuntimeRestartController(
+  runtimeIdentityProvider,
+  new EnvironmentRestartSupervisorClient(),
+  () => app.quit()
+)
+let activeValidationExecution: ValidationExecution | null = null
+let diagnosticInstallationId: string | null = null
+let repositoryCatalog: RepositoryCatalogService | null = null
 const traceSink = {
   record(event: import('./mcp/code-scope-health').CodeScopeTraceEvent) {
     if (!event.runtimeInstanceId) {
       event.runtimeInstanceId = runtimeIdentityProvider.getInstanceId()
+    }
+    if (!event.installationId && diagnosticInstallationId) {
+      event.installationId = diagnosticInstallationId
     }
     codeScopeHealth.record(event)
     systemHealth.sink.record(event)
@@ -107,7 +147,8 @@ const mcpLifecycle = new McpLifecycle({
   trace: traceSink,
   systemHealth,
   runtimeIdentity: runtimeIdentityProvider,
-  validationLedger
+  validationLedger,
+  academy: academyService
 })
 const selectedTransport = new SelectedTransport(
   () => settingsService.loadSettings().transportKind === 'relay' ? 'relay' : 'ngrok',
@@ -222,7 +263,7 @@ function createWindow(): void {
 // Normalizar ambiente PATH antes de qualquer operação
 sanitizeEnvironment()
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Força o Electron a seguir o tema do sistema operacional antes de criar a janela
   nativeTheme.themeSource = 'system'
 
@@ -237,7 +278,75 @@ app.whenReady().then(() => {
     app.setAsDefaultProtocolClient('codeawareness')
   }
 
+  const gitService = new GitService()
+  const githubConfig = loadGitHubProductConfig()
+  const githubCredentials = new GitHubCredentialStore(desktopProfilePaths(app.getPath('userData')).githubPath, safeStorage)
+  const githubAuth = githubConfig ? new GitHubAuthService(githubConfig, githubCredentials) : null
+  const githubApi = githubAuth ? new GitHubApiClient(() => githubAuth.getValidAccessToken()) : null
+  const gitTransport = new GitHubGitTransport(githubAuth, gitService)
+  const academyGitMaterializer = new AcademyGitMaterializer()
+  const academyPluginProjection = new AcademyPluginRepositoryProjection()
+
   const workspaceService = new WorkspaceService()
+  const repositoryCatalogStore = new RepositoryCatalogStore(desktopProfilePaths(app.getPath('userData')).repositoryCatalogPath)
+  repositoryCatalog = new RepositoryCatalogService(repositoryCatalogStore, workspaceService, academyService)
+  await repositoryCatalog.initialize(settingsService.loadSettings())
+
+  const academyGitRepositoryPort = {
+    resolveRepository: (id: string) => {
+      try { return repositoryCatalog!.store.get(id) } catch { return null }
+    },
+    findByGitHubId: (ghId: string) => repositoryCatalog!.findByGitHubRepositoryId(ghId),
+    listEligibleRepositories: () => repositoryCatalog!.list().filter((r) =>
+      Boolean(r.github && r.github.accessState === 'AVAILABLE' && r.localCheckout?.availability === 'AVAILABLE' && r.localCheckout.gitState === 'GIT')
+    )
+  }
+  const academyGitSyncService = new AcademyGitSyncService(
+    academyService.store,
+    academyGitMaterializer,
+    gitService,
+    gitTransport,
+    academyGitRepositoryPort,
+    academyService,
+    academyPluginProjection,
+    { packageRevisions: academyService.packageRevisions }
+  )
+  academyService.initializeGitSync(academyGitSyncService)
+  registerAcademyHandlers(academyService)
+
+  void (async () => {
+    if (academyService.store.list().length === 0) {
+      for (const destination of academyService.store.listDestinations()) {
+        const skillsRoot = join(destination.path, '.skills')
+        if (existsSync(skillsRoot)) await academyService.importer.import(skillsRoot, 'GLOBAL', [destination.id])
+      }
+    }
+    if (!academyService.store.getOpenAiPluginProfile() || !academyService.listOpenAiReleases().some((release) => release.baseline)) {
+      try { await academyService.bootstrapOpenAiPlugin() }
+      catch (error: any) { console.warn('[Academy] OpenAI plugin profile bootstrap pending:', error?.code ?? error?.message) }
+    }
+    if (academyService.store.getOpenAiPluginProfile()) {
+      academyService.initializePluginPackage()
+      academyService.recordMarketplaceProbeUnsupported()
+    }
+    const gitProfile = academyService.store.getGitProfile()
+    if (!gitProfile) {
+      const eligible = academyGitRepositoryPort.listEligibleRepositories()
+      const matches = eligible.filter((r) => r.name.toLowerCase() === 'academy')
+      if (matches.length === 1) {
+        try {
+          console.log('[Academy] Auto-bootstrapping Academy Git repository:', matches[0].name)
+          await academyGitSyncService.bindRepository(matches[0].id)
+        } catch (error: any) {
+          console.warn('[Academy] Auto-bootstrap pending:', error?.message)
+        }
+      }
+    } else {
+      await academyGitSyncService.recoverOnStartup()
+    }
+    await academyService.reconcileAll()
+    academyService.start()
+  })().catch((error) => console.error('[Academy] Initialization failed:', error))
 
   // Composição de dependências (bootstrap): o CodeMapService depende apenas das portas
   // CompressionPort/ContentIdentityPort. A implementação concreta do ContentIdentityPort
@@ -280,8 +389,11 @@ app.whenReady().then(() => {
   const contextNavigation = new ContextEngine(codeMapService)
   const dashDiscoveryService = new DashDiscoveryService(contextNavigation)
   activeProjects = new ActiveProjectService(codeMapService)
-  activeProjects.onBeforeChange(() => {
-    void mcpLifecycle.quiesce()
+  const repositoryRuntime = new RepositoryRuntimeService(repositoryCatalog, codeMapService, activeProjects)
+  activeProjects.onBeforeChange(async () => {
+    await mcpLifecycle.quiesce()
+    await activeValidationExecution?.shutdown()
+    activeValidationExecution = null
     continuumSession.deactivate()
   })
   activeProjects.onChanged(({ project }) => {
@@ -304,7 +416,17 @@ app.whenReady().then(() => {
     }
 
     const navigation = bindProjectNavigation(contextNavigation, project.path)
-    void mcpLifecycle.activate(project.id, navigation, artifactReader)
+    activeValidationExecution = new ValidationExecution(project.path, validationLedger, runtimeIdentityProvider)
+    void mcpLifecycle.activateContext({
+      projectId: project.id,
+      repoRoot: project.path,
+      navigation,
+      artifactReader,
+      validationExecution: activeValidationExecution,
+      diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
+      gitOperations: new GitOperationsService(project.path, gitService, gitTransport),
+      runtimeRestart
+    })
   })
   registerActiveProjectHandlers(activeProjects)
   registerConnectionHandlers(remoteAccess)
@@ -312,14 +434,33 @@ app.whenReady().then(() => {
     () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, codeScopeHealth)
   registerChatGptIntegrationHandlers(chatGptIntegration)
   registerSystemHealthHandlers(systemHealth)
+  try {
+    const installPath = desktopProfilePaths(app.getPath('userData')).installationPath
+    diagnosticInstallationId = new InstallationIdentityService(installPath, safeStorage).getId()
+  } catch { diagnosticInstallationId = null }
+  try {
+    const trace = traceSink as import('./mcp/code-scope-health').CodeScopeTraceSink
+    const catalogProbe = (mcpLifecycle as unknown as { getCatalogProbe?: () => { getToolCatalogHash: () => string } }).getCatalogProbe?.()
+    console.log('[Spike] runtime-boot', JSON.stringify({ instanceId: runtimeIdentityProvider.getInstanceId(), installationId: diagnosticInstallationId, startedAt: runtimeIdentityProvider.getStartedAt(), toolCatalogHash: catalogProbe?.getToolCatalogHash() ?? null, timestamp: new Date().toISOString() }))
+  } catch {}
   remoteAccess.onChanged((state) => {
-    if (state.status === 'CONNECTED') systemHealth.invalidate()
+    if (state.status === 'CONNECTED') {
+      systemHealth.invalidate()
+      try {
+        const trace = traceSink as import('./mcp/code-scope-health').CodeScopeTraceSink
+        const catalogProbe = (mcpLifecycle as unknown as { getCatalogProbe?: () => { getToolCatalogHash: () => string } }).getCatalogProbe?.()
+        trace.record({ timestamp: new Date().toISOString(), requestId: 'none', sessionId: state.localEndpoint ?? 'local', method: 'unknown', tool: 'unknown', stage: 'desktop-connection-established', durationMs: 0, status: 'started', runtimeInstanceId: runtimeIdentityProvider.getInstanceId(), installationId: diagnosticInstallationId ?? undefined })
+        console.log('[Spike] runtime-boot', JSON.stringify({ instanceId: runtimeIdentityProvider.getInstanceId(), installationId: diagnosticInstallationId, toolCatalogHash: catalogProbe?.getToolCatalogHash() ?? null, timestamp: new Date().toISOString() }))
+      } catch {}
+    }
   })
   remoteAccess.start()
 
   // Composição do One-Click XML com política de escopo e adapter de Direct Output
   const repomixAdapterForOneClick = new RepomixAdapter()
-  const gitService = new GitService()
+  const githubIntegration = new GitHubIntegrationService(
+    githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell
+  )
   const codeAwarenessIgnoreService = new CodeAwarenessIgnoreService(settingsService)
   const ignorePolicy = new IgnorePolicy(gitService, settingsService, codeAwarenessIgnoreService)
   const oneClickXmlService = new OneClickXmlService(ignorePolicy, repomixAdapterForOneClick)
@@ -328,7 +469,8 @@ app.whenReady().then(() => {
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
   registerGitHandlers(watcherService, settingsService, compressionService, codeAwarenessIgnoreService)
-  registerWorkspaceHandlers(settingsService, workspaceService)
+  registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime)
+  registerGitHubHandlers(githubIntegration)
   registerCheckpointHandlers(checkpointService, dbAdapter)
   registerRestoreHandlers(restoreService)
   registerTagHandlers()
@@ -376,7 +518,11 @@ app.whenReady().then(() => {
 
 registerApplicationShutdown(app, async () => {
   chatGptIntegration?.dispose()
+  codeMapSyncMonitor.dispose()
+  codeMapLifecycleMonitor.dispose()
   await remoteAccess.dispose()
+  await activeValidationExecution?.shutdown()
+  activeValidationExecution = null
   await activeProjects?.dispose()
   await mcpLifecycle.dispose()
   DevToolsManager.unregisterShortcuts()
@@ -404,6 +550,16 @@ registerApplicationShutdown(app, async () => {
     continuumSession.dispose()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Continuum Session:', error)
+  }
+  try {
+    academyService.close()
+  } catch (error: any) {
+    console.error('[Main] Erro ao fechar Academy:', error)
+  }
+  try {
+    repositoryCatalog?.store.close()
+  } catch (error: any) {
+    console.error('[Main] Erro ao fechar Repository Catalog:', error)
   }
 })
 

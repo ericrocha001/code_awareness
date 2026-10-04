@@ -13,8 +13,8 @@ import { bindProjectNavigation } from './project-context-navigation'
 import { McpLifecycle } from '../../mcp/mcp-lifecycle'
 import type { McpToolResult } from '../../mcp/context-navigation-mcp-adapter'
 import { createLocalGateway, MemoryInstallationRegistry } from '../../../../infra/gateway/testing/local-gateway'
-import { hashInstallationCredential } from '../../../../infra/gateway/domain/installation-credential'
-import { newInstallationId, type UserId } from '../../../shared/distribution/relay-protocol'
+import { provisionCanonicalRelayIdentity } from '../../../../infra/gateway/testing/canonical-relay-identity-fixture'
+import { type UserId } from '../../../shared/distribution/relay-protocol'
 import { RelayTransport } from '../../mcp/connection/relay-transport'
 import { ConnectionLifecycle } from '../../mcp/connection/connection-lifecycle'
 import { CodeScopeHealthMonitor, type CodeScopeTraceEvent } from '../../mcp/code-scope-health'
@@ -38,10 +38,17 @@ describe('Context Navigation system acceptance', () => {
     const trace = { record: (event: CodeScopeTraceEvent) => { traceEvents.push(event); health.record(event) } }
     const mcp = new McpLifecycle({ log: () => {}, trace })
     const registry = new MemoryInstallationRegistry()
-    const owner = 'relay-proof-user' as UserId, id = newInstallationId(), credential = 'x'.repeat(43)
-    await registry.enroll({ id, ownerUserId: owner, credentialHash: await hashInstallationCredential(credential), createdAt: new Date().toISOString(), lastSeenAt: null, status: 'ACTIVE' })
-    const gateway = await createLocalGateway(registry, { async verify(assertion) { if (assertion !== 'test-access-assertion') throw new Error(); return { id: owner } } })
-    const connection = new ConnectionLifecycle(mcp, new RelayTransport(gateway.endpoint, { getId: () => id, getCredential: () => credential }, 30_000, 25_000, trace), () => ({}), () => {})
+    const owner = 'relay-proof-user' as UserId
+    const externalIdentity = { issuer: 'https://test.cloudflareaccess.com', subject: 'relay-proof-subject' }
+    const gateway = await createLocalGateway(registry, { async verify(assertion) { if (assertion !== 'test-access-assertion') throw new Error(); return externalIdentity } })
+    const identity = await provisionCanonicalRelayIdentity({
+      identityResolver: gateway.resolver,
+      installationRegistry: registry,
+      externalIdentity,
+      canonicalUserId: owner,
+      credential: 'x'.repeat(43)
+    })
+    const connection = new ConnectionLifecycle(mcp, new RelayTransport(gateway.endpoint, { getId: () => identity.installationId, getCredential: () => identity.credential }, 30_000, 25_000, trace), () => ({}), () => {})
     projects.onBeforeChange(() => mcp.quiesce())
     projects.onChanged(({ project }) => project ? mcp.activate(project.id, bindProjectNavigation(engine, project.path)) : mcp.deactivate())
     async function call(endpoint: string, method: string, params: unknown) {
@@ -64,7 +71,7 @@ describe('Context Navigation system acceptance', () => {
       }
       const listed = await call(gateway.endpoint, 'tools/list', {})
       expect((listed.result.tools as Array<{ name: string }>).map((tool) => tool.name)).toEqual([
-        'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health'
+        'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health', 'get_runtime_identity'
       ])
       const discover = await call(gateway.endpoint, 'tools/call', { name: 'discover_repository', arguments: {} })
       expect(discover.result.content[0].text).toBe(serializeDiscovery(await engine.discoverRepository(fixture.repoPath)))
@@ -140,7 +147,7 @@ describe('Context Navigation system acceptance', () => {
       expect(discoverB.result.content[0].text).toBe(serializeDiscovery(await engine.discoverRepository(second.repoPath)))
       await projects.activate(null)
       expect(connection.getState().status).toBe('DISCONNECTED')
-      expect(await gateway.directory.isOnline(id)).toBe(false)
+      expect(await gateway.directory.isOnline(identity.installationId)).toBe(false)
       await projects.activate(local.projectId)
       await vi.waitFor(() => expect(connection.getState()).toMatchObject({ status: 'CONNECTED', projectId: local.projectId }))
       const restored = await call(gateway.endpoint, 'tools/call', { name: 'discover_repository', arguments: {} })

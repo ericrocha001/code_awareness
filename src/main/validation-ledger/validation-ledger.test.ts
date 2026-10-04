@@ -94,10 +94,12 @@ describe('Validation Ledger — Permanent Harness', () => {
     const p1 = ledger.recordProof(baseProof({ producer: 'ARCHITECT' }))
     const p2 = ledger.recordProof(baseProof({ producer: 'USER' }))
     const p3 = ledger.recordProof(baseProof({ producer: 'SYSTEM' }))
+    const p4 = ledger.recordProof(baseProof({ producer: 'TESTER' }))
 
     expect(ledger.getProof(p1.proofId)!.producer).toBe('ARCHITECT')
     expect(ledger.getProof(p2.proofId)!.producer).toBe('USER')
     expect(ledger.getProof(p3.proofId)!.producer).toBe('SYSTEM')
+    expect(ledger.getProof(p4.proofId)!.producer).toBe('TESTER')
   })
 
   it('4. commandProfile preservado', () => {

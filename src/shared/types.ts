@@ -50,6 +50,9 @@ export interface ProjectInfo {
   isGit: boolean
 }
 
+export * from './types/repository-catalog-types'
+export * from './types/github-types'
+
 export interface CodefetchResult {
   success: boolean
   markdown?: string

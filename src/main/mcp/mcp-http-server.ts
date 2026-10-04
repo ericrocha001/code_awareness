@@ -64,6 +64,7 @@ export function createMcpHttpServer(
     let tool = 'unknown'
     let responseSize = 0
     let success = false
+    let responseSent = false
     let failure = 'MCP_REQUEST_FAILED'
     const emit = (stage: CodeScopeTraceEvent['stage'], status: CodeScopeTraceEvent['status'], errorCode?: string): void => {
       const entry: McpOperationalLogEntry = {
@@ -128,9 +129,30 @@ export function createMcpHttpServer(
       } else if (method === 'tools/call' && typeof params?.name === 'string') {
         emit('codescope-request-started', 'started')
         emit('codescope-handler-started', 'started')
-        rpcResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace })
+        const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace })
+        const { postResponse, ...publicResult } = toolResult
+        rpcResult = publicResult
         emit('codescope-response-produced', 'success')
         emit('codescope-handler-completed', 'success')
+        if (postResponse) {
+          emit('mcp-response-produced', 'success')
+          const finished = new Promise<void>((resolve) => response.once('finish', resolve))
+          responseSize = writeJson(response, 200, result(id, rpcResult))
+          success = true
+          await finished
+          emit('mcp-response-sent', 'success')
+          responseSent = true
+          try {
+            await postResponse()
+          } catch {
+            log({
+              timestamp: new Date().toISOString(), requestId: correlationId, sessionId: relaySessionId,
+              method, tool, stage: 'mcp-response-sent', durationMs: Math.round((performance.now() - startedAt) * 100) / 100,
+              responseSize, success: false, status: 'error', error: 'POST_RESPONSE_ACTION_FAILED'
+            })
+          }
+          return
+        }
       } else {
         failure = 'METHOD_NOT_FOUND'
         responseSize = writeJson(response, 200, error(id, -32601, 'Method not found'))
@@ -148,7 +170,7 @@ export function createMcpHttpServer(
         error(null, -32700, caught instanceof Error ? caught.message : 'Parse error')
       )
     } finally {
-      emit('mcp-response-sent', success ? 'success' : 'error', success ? undefined : failure)
+      if (!responseSent) emit('mcp-response-sent', success ? 'success' : 'error', success ? undefined : failure)
     }
   })
 }

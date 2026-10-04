@@ -1,3 +1,6 @@
+import { createHash } from 'node:crypto'
+import type { GitOperationsService } from '../git-operations/git-operations-service'
+import { GIT_OPERATIONS_TOOLS, executeGitOperationsTool } from '../git-operations/git-operations-mcp'
 import { ContextNavigationError } from '../../shared/types/context-navigation-types'
 import type { RelationshipDirection, SymbolHierarchyDirection } from '../../shared/types/context-navigation-types'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
@@ -18,6 +21,7 @@ export interface McpToolDefinition {
 export interface McpToolResult {
   content: Array<{ type: 'text'; text: string }>
   isError?: true
+  postResponse?: () => void | Promise<void>
 }
 const references = { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1, uniqueItems: true }
 const oauthSecuritySchemes: McpOAuthSecurityScheme[] = [{ type: 'oauth2', scopes: [] }]
@@ -122,6 +126,15 @@ import {
   executeGetArtifact
 } from '../continuum/continuum-mcp'
 import type { IArtifactReader } from '../continuum/continuum-types'
+import type { McpProjectContext } from './project-mcp-context'
+import { VALIDATION_EXECUTION_TOOLS, executeValidationTool } from '../validation-execution/validation-execution-mcp'
+import type { ValidationExecution } from '../validation-execution/validation-execution'
+import { DIAGNOSTIC_SOURCE_TOOLS, executeDiagnosticSourceTool } from '../diagnostic-source-access/diagnostic-source-access-mcp'
+import type { DiagnosticSourceAccess } from '../diagnostic-source-access/diagnostic-source-access'
+import { REQUEST_RUNTIME_RESTART_TOOL, executeRequestRuntimeRestart } from '../runtime-restart/runtime-restart-mcp'
+import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
+import { ACADEMY_MCP_TOOLS, executeAcademyTool } from '../academy/academy-mcp'
+import type { AcademyService } from '../academy/academy-service'
 
 export class ContextNavigationMcpAdapter {
   private readonly navigation: ProjectContextNavigation
@@ -129,6 +142,19 @@ export class ContextNavigationMcpAdapter {
   private readonly runtimeIdentity: RuntimeIdentityProvider | undefined
   private readonly validationLedger: ValidationLedger | undefined
   private readonly artifactReader: IArtifactReader | undefined
+  private readonly validationExecution: ValidationExecution | undefined
+  private readonly diagnosticSourceAccess: DiagnosticSourceAccess | undefined
+  private readonly runtimeRestart: RuntimeRestartController | undefined
+  private readonly gitOperations: GitOperationsService | undefined
+  private readonly academy: AcademyService | undefined
+
+  constructor(
+    context: McpProjectContext,
+    systemHealth?: SystemHealthCore,
+    runtimeIdentity?: RuntimeIdentityProvider,
+    validationLedger?: ValidationLedger,
+    academy?: AcademyService
+  )
 
   constructor(
     navigation: ProjectContextNavigation,
@@ -146,14 +172,27 @@ export class ContextNavigationMcpAdapter {
     artifactReader?: IArtifactReader
   )
   constructor(
-    navigation: ContextNavigationPort | ProjectContextNavigation,
+    navigation: ContextNavigationPort | ProjectContextNavigation | McpProjectContext,
     repoPathOrHealth?: string | SystemHealthCore,
     systemHealthOrIdentity?: SystemHealthCore | RuntimeIdentityProvider,
     runtimeIdentityOrLedger?: RuntimeIdentityProvider | ValidationLedger,
-    validationLedgerOrReader?: ValidationLedger | IArtifactReader,
-    artifactReader?: IArtifactReader
+    validationLedgerOrReader?: ValidationLedger | IArtifactReader | AcademyService,
+    artifactReader?: IArtifactReader,
+    academy?: AcademyService
   ) {
-    if (typeof repoPathOrHealth === 'string') {
+    if ('navigation' in navigation && 'projectId' in navigation) {
+      const context = navigation as McpProjectContext
+      this.navigation = context.navigation
+      this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
+      this.runtimeIdentity = (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ?? this.systemHealth?.getRuntimeIdentityProvider()
+      this.validationLedger = runtimeIdentityOrLedger as ValidationLedger | undefined
+      this.artifactReader = context.artifactReader
+      this.validationExecution = context.validationExecution
+      this.diagnosticSourceAccess = context.diagnosticSourceAccess
+      this.runtimeRestart = context.runtimeRestart
+      this.gitOperations = context.gitOperations
+      this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
+    } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
       this.systemHealth = systemHealthOrIdentity as SystemHealthCore | undefined
       this.runtimeIdentity =
@@ -161,6 +200,10 @@ export class ContextNavigationMcpAdapter {
         this.systemHealth?.getRuntimeIdentityProvider()
       this.validationLedger = validationLedgerOrReader as ValidationLedger | undefined
       this.artifactReader = artifactReader
+      this.validationExecution = undefined
+      this.diagnosticSourceAccess = undefined
+      this.runtimeRestart = undefined
+      this.academy = academy
     } else {
       this.navigation = navigation as ProjectContextNavigation
       this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
@@ -171,6 +214,10 @@ export class ContextNavigationMcpAdapter {
         runtimeIdentityOrLedger as ValidationLedger | undefined
       this.artifactReader =
         (validationLedgerOrReader as IArtifactReader | undefined) ?? artifactReader
+      this.validationExecution = undefined
+      this.diagnosticSourceAccess = undefined
+      this.runtimeRestart = undefined
+      this.academy = academy
     }
   }
 
@@ -178,7 +225,7 @@ export class ContextNavigationMcpAdapter {
     const tools = [
       ...contextNavigationMcpTools,
       SYSTEM_HEALTH_MCP_TOOL,
-      RUNTIME_IDENTITY_MCP_TOOL
+      RUNTIME_IDENTITY_MCP_TOOL,
     ]
     if (this.validationLedger) {
       tools.push(
@@ -193,10 +240,52 @@ export class ContextNavigationMcpAdapter {
         GET_ARTIFACT_TOOL
       )
     }
+    if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
+    if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
+    if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
+    if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
+    if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     return tools
   }
 
+  getToolCatalogHash(): string {
+    const hasher = createHash('sha256')
+    for (const tool of [...this.listTools()].sort((a, b) => a.name.localeCompare(b.name))) {
+      hasher.update(
+        JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, securitySchemes: tool.securitySchemes }) + '\n'
+      )
+    }
+    return hasher.digest('hex')
+  }
+
   async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
+      return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args)
+        : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
+    }
+    if (ACADEMY_MCP_TOOLS.some((tool) => tool.name === name)) {
+      return this.academy
+        ? executeAcademyTool(this.academy, name, args)
+        : { content: [{ type: 'text', text: 'ACADEMY_UNAVAILABLE' }], isError: true }
+    }
+    if (VALIDATION_EXECUTION_TOOLS.some((tool) => tool.name === name)) {
+      return this.validationExecution
+        ? executeValidationTool(this.validationExecution, name, args)
+        : { content: [{ type: 'text', text: 'VALIDATION_EXECUTION_UNAVAILABLE' }], isError: true }
+    }
+
+    if (DIAGNOSTIC_SOURCE_TOOLS.some((tool) => tool.name === name)) {
+      return this.diagnosticSourceAccess
+        ? executeDiagnosticSourceTool(this.diagnosticSourceAccess, name, args)
+        : { content: [{ type: 'text', text: 'DIAGNOSTIC_SOURCE_ACCESS_UNAVAILABLE' }], isError: true }
+    }
+
+    if (name === 'request_runtime_restart') {
+      return this.runtimeRestart
+        ? executeRequestRuntimeRestart(this.runtimeRestart, args)
+        : { content: [{ type: 'text', text: 'RUNTIME_RESTART_UNAVAILABLE' }], isError: true }
+    }
+
     if (name === 'list_artifacts') {
       if (!this.artifactReader) {
         return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: No artifact reader configured for active project' }], isError: true }

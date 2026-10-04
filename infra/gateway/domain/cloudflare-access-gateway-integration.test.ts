@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { exportJWK, generateKeyPair, SignJWT } from 'jose'
 import { createLocalGateway, MemoryInstallationRegistry } from '../testing/local-gateway'
-import { hashInstallationCredential } from './installation-credential'
-import { newInstallationId, type UserId } from '../../../src/shared/distribution/relay-protocol'
+import { provisionCanonicalRelayIdentity } from '../testing/canonical-relay-identity-fixture'
+import { type UserId } from '../../../src/shared/distribution/relay-protocol'
 import { McpLifecycle } from '../../../src/main/mcp/mcp-lifecycle'
 import { RelayTransport } from '../../../src/main/mcp/connection/relay-transport'
 import { ConnectionLifecycle } from '../../../src/main/mcp/connection/connection-lifecycle'
@@ -46,17 +46,12 @@ describe('Cloudflare Access assertion to PublicMcpGateway', () => {
     cleanup.push(() => gateway.close())
 
     async function desktop(user: string) {
-      const id = newInstallationId()
-      const credential = crypto.randomUUID().replace(/-/g, '') + 'a'.repeat(11)
       const canonicalId = `canonical-${user}` as UserId
-      await gateway.resolver.link({ issuer, subject: user }, canonicalId, new Date().toISOString())
-      await registry.enroll({
-        id,
-        ownerUserId: canonicalId,
-        credentialHash: await hashInstallationCredential(credential),
-        createdAt: new Date().toISOString(),
-        lastSeenAt: null,
-        status: 'ACTIVE'
+      const identity = await provisionCanonicalRelayIdentity({
+        identityResolver: gateway.resolver,
+        installationRegistry: registry,
+        externalIdentity: { issuer, subject: user },
+        canonicalUserId: canonicalId
       })
       const mcp = new McpLifecycle({ log: () => {} })
       const navigation = {
@@ -64,12 +59,12 @@ describe('Cloudflare Access assertion to PublicMcpGateway', () => {
         getRelationships: vi.fn(async () => ({ files: [] })), inspectFiles: vi.fn(async () => ({ files: [] })),
         readCode: vi.fn(async () => [])
       }
-      const relay = new RelayTransport(gateway.endpoint, { getId: () => id, getCredential: () => credential })
+      const relay = new RelayTransport(gateway.endpoint, { getId: () => identity.installationId, getCredential: () => identity.credential })
       const connection = new ConnectionLifecycle(mcp, relay, () => ({}), () => {})
       cleanup.push(async () => { await connection.dispose(); await mcp.dispose() })
       await mcp.activate(user, navigation)
       expect((await connection.connect()).success).toBe(true)
-      return { id, navigation }
+      return { id: identity.installationId, navigation }
     }
 
     const call = async (assertion?: string, selected?: string) => {

@@ -12,7 +12,15 @@ export function canonicalDesktopProfile(appData: string) {
 }
 
 export function desktopProfilePaths(userData: string) {
-  return { appName: DESKTOP_APP_NAME, userData, settingsPath: join(userData, 'settings.json'), installationPath: join(userData, 'installation') }
+  return {
+    appName: DESKTOP_APP_NAME,
+    userData,
+    settingsPath: join(userData, 'settings.json'),
+    installationPath: join(userData, 'installation'),
+    academyPath: join(userData, 'academy', 'academy.db'),
+    repositoryCatalogPath: join(userData, 'repositories', 'catalog.db'),
+    githubPath: join(userData, 'github')
+  }
 }
 
 export function assertCanonicalDesktopProfile(app: DesktopApplication) {

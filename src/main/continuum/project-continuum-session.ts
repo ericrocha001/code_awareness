@@ -12,9 +12,15 @@ export interface ActiveProjectSession {
   readonly store: ArtifactStore
 }
 
+interface LiveProjectSession extends ActiveProjectSession {
+  readonly inbox: ArtifactInbox
+  readonly ingestor: ArtifactIngestor
+  readonly reader: IArtifactReader
+}
+
 export class ProjectContinuumSession {
   private readonly storageBaseDir: string
-  private currentSession: ActiveProjectSession | null = null
+  private currentSession: LiveProjectSession | null = null
 
   constructor(storageBaseDir: string) {
     this.storageBaseDir = storageBaseDir
@@ -27,12 +33,10 @@ export class ProjectContinuumSession {
 
     const projectKey = deriveRepositoryKey(projectPath)
 
-    // Idempotent: if already active for this exact project, do not re-open store
+    // Idempotent: if already active for this exact project, reuse session and reader
     if (this.currentSession && this.currentSession.projectKey === projectKey) {
       try {
-        const inbox = new ArtifactInbox(projectPath)
-        const ingestor = new ArtifactIngestor(inbox, this.currentSession.store)
-        return ingestor.ingestPending()
+        return this.currentSession.ingestor.ingestPending()
       } catch (error) {
         console.error('[ContinuumSession] Re-ingestion failed for active project:', error)
         return null
@@ -55,7 +59,10 @@ export class ProjectContinuumSession {
         projectPath,
         projectKey,
         dbPath,
-        store
+        store,
+        inbox,
+        ingestor,
+        reader: this.createLiveReader(ingestor, store)
       }
 
       return report
@@ -89,12 +96,7 @@ export class ProjectContinuumSession {
   }
 
   getActiveReader(): IArtifactReader | null {
-    if (!this.currentSession) return null
-    const store = this.currentSession.store
-    return {
-      get: (id: string) => store.get(id),
-      list: (filter?: ListArtifactsFilter) => store.list(filter)
-    }
+    return this.currentSession?.reader ?? null
   }
 
   getActiveSession(): ActiveProjectSession | null {
@@ -107,5 +109,25 @@ export class ProjectContinuumSession {
 
   dispose(): void {
     this.deactivate()
+  }
+
+  private createLiveReader(ingestor: ArtifactIngestor, store: ArtifactStore): IArtifactReader {
+    const reconcile = (): void => {
+      try {
+        ingestor.ingestPending()
+      } catch (error) {
+        console.error('[ContinuumSession] Read-through ingestion failed:', error)
+      }
+    }
+    return {
+      get: (id: string) => {
+        reconcile()
+        return store.get(id)
+      },
+      list: (filter?: ListArtifactsFilter) => {
+        reconcile()
+        return store.list(filter)
+      }
+    }
   }
 }

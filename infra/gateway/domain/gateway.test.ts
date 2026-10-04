@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createLocalGateway, MemoryInstallationRegistry } from '../testing/local-gateway'
-import { hashInstallationCredential } from './installation-credential'
-import { newInstallationId, type UserId } from '../../../src/shared/distribution/relay-protocol'
+import { provisionCanonicalRelayIdentity } from '../testing/canonical-relay-identity-fixture'
+import { type UserId } from '../../../src/shared/distribution/relay-protocol'
 import { McpLifecycle } from '../../../src/main/mcp/mcp-lifecycle'
 import { RelayTransport } from '../../../src/main/mcp/connection/relay-transport'
 import { ConnectionLifecycle } from '../../../src/main/mcp/connection/connection-lifecycle'
@@ -20,22 +20,25 @@ async function setup() {
   } })
   cleanup.push(() => gateway.close())
   async function desktop(user: string, trace?: import('../../../src/main/mcp/code-scope-health').CodeScopeTraceSink) {
-    const id = newInstallationId(), credential = crypto.randomUUID().replace(/-/g, '') + 'a'.repeat(11)
     const canonicalId = `canonical-${user}` as UserId
-    await gateway.resolver.link({ issuer, subject: user }, canonicalId, new Date().toISOString())
-    await registry.enroll({ id, ownerUserId: canonicalId, credentialHash: await hashInstallationCredential(credential), createdAt: new Date().toISOString(), lastSeenAt: null, status: 'ACTIVE' })
+    const identity = await provisionCanonicalRelayIdentity({
+      identityResolver: gateway.resolver,
+      installationRegistry: registry,
+      externalIdentity: { issuer, subject: user },
+      canonicalUserId: canonicalId
+    })
     const mcp = new McpLifecycle({ log: () => {}, trace })
     const navigation = {
       discoverRepository: vi.fn(async () => ({ directories: [{ relativePath: '.', children: [user] }] })),
       getRelationships: vi.fn(async () => ({ files: [] })), inspectFiles: vi.fn(async () => ({ files: [] })),
       readCode: vi.fn(async () => { throw new ContextNavigationError('ELEMENT_NOT_FOUND', 'missing target') })
     }
-    const relay = new RelayTransport(gateway.endpoint, { getId: () => id, getCredential: () => credential }, 30_000, 25_000, trace)
+    const relay = new RelayTransport(gateway.endpoint, { getId: () => identity.installationId, getCredential: () => identity.credential }, 30_000, 25_000, trace)
     const connection = new ConnectionLifecycle(mcp, relay, () => ({}), () => {})
     cleanup.push(async () => { await connection.dispose(); await mcp.dispose() })
     await mcp.activate(user, navigation)
     expect((await connection.connect()).success).toBe(true)
-    return { id, mcp, connection, navigation, canonicalId, relay }
+    return { id: identity.installationId, mcp, connection, navigation, canonicalId, relay }
   }
   const call = async (assertion?: string, selected?: string, method = 'tools/call', params: unknown = { name: 'discover_repository', arguments: {} }) => {
     const response = await fetch(gateway.endpoint, { method: 'POST', headers: { 'content-type': 'application/json', ...(assertion ? { 'Cf-Access-Jwt-Assertion': assertion } : {}), ...(selected ? { 'x-code-awareness-installation': selected } : {}) }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
@@ -122,6 +125,7 @@ describe('authenticated gateway and local relay', () => {
     expect(typeof state.lastStageLatencyMs).toBe('number')
 
     const stages = recordedEvents.map((e) => e.stage)
+    expect(stages).toContain('desktop-connection-established')
     expect(stages).toContain('desktop-request-received')
     expect(stages).toContain('mcp-request-started')
     expect(stages).toContain('codescope-request-started')
@@ -136,6 +140,11 @@ describe('authenticated gateway and local relay', () => {
       expect(typeof event.durationMs).toBe('number')
       expect(event.durationMs).toBeGreaterThanOrEqual(0)
     }
+
+    const established = recordedEvents.find((e) => e.stage === 'desktop-connection-established')
+    expect(established?.installationId).toBe(a.id)
+    expect(typeof established?.sessionId).toBe('string')
+    expect(established?.sessionId).not.toBe('none')
   })
 
   it('preserves functional tool error to client without degrading operational health', async () => {

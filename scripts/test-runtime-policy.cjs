@@ -56,7 +56,7 @@ function validateTestRuntimeLanes(options = {}) {
 
   for (const relativePath of testFiles) {
     const source = readFile(relativePath)
-    const belongsToNodeLane = !nativeSet.has(relativePath) && !relativePath.endsWith('.e2e.test.ts')
+    const belongsToNodeLane = !nativeSet.has(relativePath) && !relativePath.endsWith('.e2e.test.ts') && !relativePath.includes('.git.test.ts')
     if (belongsToNodeLane && (
       staticImportPattern.test(source) || requirePattern.test(source) || dynamicImportPattern.test(source)
     )) {

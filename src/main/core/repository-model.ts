@@ -17,6 +17,7 @@ import type {
   IntegrityCheckOptions
 } from '../../shared/types'
 import { isBinaryContent, isEligibleTextFile, isKnownBinaryExtension, scanRepository } from './repository-scanner'
+import type { MembershipPort } from './repository-file-membership'
 import { getLanguageForExtension } from './language-adapter'
 import { createRepositoryDatabase, closeRepositoryDatabase } from './repository-database'
 import type { RepositoryRepository } from './repository-repository'
@@ -79,13 +80,15 @@ export class RepositoryModel {
   private readonly db: RepositoryRepository
   private readonly extractors: ReadonlyArray<StructureExtractionPort>
   private readonly tokenizer: TokenizerPort
+  private readonly membership: MembershipPort | null
 
-  constructor(repoPath: string, extractors: StructureExtractionPort[] = [], tokenizer: TokenizerPort = getCanonicalTokenizer()) {
+  constructor(repoPath: string, extractors: StructureExtractionPort[] = [], tokenizer: TokenizerPort = getCanonicalTokenizer(), membership?: MembershipPort) {
     this.repoPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
     this.repositoryId = this.generateRepositoryId(this.repoPath)
     this.db = createRepositoryDatabase(this.repoPath)
     this.extractors = extractors
     this.tokenizer = tokenizer
+    this.membership = membership ?? null
   }
 
   getRepositoryId(): string {
@@ -94,6 +97,22 @@ export class RepositoryModel {
 
   getRepoPath(): string {
     return this.repoPath
+  }
+
+  /**
+   * Posta-filtra uma lista de ScannedFile pelo MembershipPort canônico.
+   * Se nenhum membership foi injetado, retorna a lista sem alteração (comportamento legado).
+   */
+  private async applyMembership<T extends { relativePath: string }>(files: T[]): Promise<T[]> {
+    if (!this.membership || files.length === 0) return files
+    const paths = files.map(f => f.relativePath)
+    try {
+      const eligibleSet = new Set(await this.membership.filterEligible(paths))
+      return files.filter(f => eligibleSet.has(f.relativePath))
+    } catch {
+      // Falha do membership → fail-open: retorna todos (nunca bloqueia indexação)
+      return files
+    }
   }
 
   private generateRepositoryId(repoPath: string): string {
@@ -245,6 +264,7 @@ export class RepositoryModel {
   async backfillSymbolReferences(): Promise<number> {
     const startedAt = Date.now()
     const correlationId = telemetryService.startOperation('BACKFILL_SYMBOL_REFERENCES')
+    telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_STARTED')
     const files = this.db.getFilesByRepository(this.repositoryId)
     const facts: SymbolReferenceFile[] = []
     for (const file of files) {
@@ -393,7 +413,7 @@ export class RepositoryModel {
       const movedFileIds = new Set<string>()
 
       if (options.indexUnexpected === true && dbFiles.length > 0) {
-        scannedFiles = await scanRepository(this.repoPath)
+        scannedFiles = await this.applyMembership(await scanRepository(this.repoPath))
         const diskPaths = new Set(scannedFiles.map((file) => file.relativePath))
         const indexedPaths = new Set(dbFiles.map((file) => file.relativePath))
         const missingByHash = new Map<string, CodeMapFile[]>()
@@ -496,7 +516,7 @@ export class RepositoryModel {
       let indexedUnexpected = 0
       if (options.indexUnexpected === true && dbFiles.length > 0) {
         this.ensureRepositoryRecord()
-        const scanned = scannedFiles ?? await scanRepository(this.repoPath)
+        const scanned = scannedFiles ?? await this.applyMembership(await scanRepository(this.repoPath))
         const dbPaths = new Set(this.db.getFilesByRepository(this.repositoryId).map((file) => file.relativePath))
         let scannedProcessed = 0
         for (const scannedFile of scanned) {
@@ -627,7 +647,8 @@ export class RepositoryModel {
     const cid = correlationId ?? telemetryService.startOperation('INDEX_REPOSITORY')
     telemetryService.log(cid, 'CODE_MAP', 'INDEX_STARTED')
     try {
-    const scannedFiles = await scanRepository(this.repoPath)
+    const rawScanned = await scanRepository(this.repoPath)
+    const scannedFiles = await this.applyMembership(rawScanned)
     telemetryService.log(cid, 'CODE_MAP', 'INDEX_SCANNED', { fileCount: scannedFiles.length })
 
     this.db.saveRepository({
@@ -911,6 +932,12 @@ export class RepositoryModel {
       element.fileId = fileId
     }
 
+    telemetryService.log(cid, 'CODE_MAP', 'STRUCTURE_EXTRACTED', {
+      relativePath,
+      elementCount: structureResult.elements.length,
+      extractor: extractor ? extension : 'text-fallback'
+    })
+
     const sourceReferenceFile: SymbolReferenceFile = {
       fileId,
       relativePath,
@@ -931,6 +958,10 @@ export class RepositoryModel {
       structureResult.elementInterfaces,
       sourceReferences
     )
+    telemetryService.log(cid, 'CODE_MAP', 'STRUCTURAL_PERSISTENCE_COMPLETED', {
+      relativePath,
+      elementCount: structureResult.elements.length
+    })
 
     // Re-resolve relacionamentos cross-file para todo o repositório
     const allElements = this.db.getElementsByRepository(this.repositoryId)
@@ -956,14 +987,30 @@ export class RepositoryModel {
       }
     }
 
-    const crossRelationships = this.resolveRelationships(
-      allElements,
-      allElementInterfaces,
-      allImportSources,
-      allFiles
-    )
+    const relResolutionStartedAt = Date.now()
+    telemetryService.log(cid, 'CODE_MAP', 'RELATIONSHIP_RESOLUTION_STARTED', { relativePath, elementCount: allElements.length, fileCount: allFiles.length })
+    let crossRelationships: CodeMapRelationship[]
+    try {
+      crossRelationships = this.resolveRelationships(
+        allElements,
+        allElementInterfaces,
+        allImportSources,
+        allFiles
+      )
+    } catch (resolveErr) {
+      telemetryService.logError(cid, 'CODE_MAP', 'RELATIONSHIP_RESOLUTION_FAILED', {
+        relativePath,
+        error: resolveErr instanceof Error ? resolveErr.message : String(resolveErr)
+      })
+      throw resolveErr
+    }
 
     this.db.saveRelationships(crossRelationships)
+    telemetryService.log(cid, 'CODE_MAP', 'RELATIONSHIP_RESOLUTION_COMPLETED', {
+      relativePath,
+      relationshipCount: crossRelationships.length,
+      durationMs: Date.now() - relResolutionStartedAt
+    })
     await refreshDirectImporters()
     telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', {
       relativePath,
@@ -1575,7 +1622,7 @@ export class RepositoryModel {
     // Scan completo do disco — opcional via scanForUnexpectedFiles para verificações rápidas.
     if (scanForUnexpectedFiles) {
       const unexpectedCheckStartedAt = Date.now()
-      const scannedFiles = await scanRepository(this.repoPath)
+      const scannedFiles = await this.applyMembership(await scanRepository(this.repoPath))
       for (const scanned of scannedFiles) {
         if (!dbFilesByPath.has(scanned.relativePath)) {
           filesUnexpected++
@@ -1843,12 +1890,12 @@ export class RepositoryModel {
 }
 
 /** Fábrica conveniente para criar instâncias de RepositoryModel com o conjunto padrão de extratores. */
-export function createRepositoryModel(repoPath: string, tokenizer: TokenizerPort = getCanonicalTokenizer()): RepositoryModel {
+export function createRepositoryModel(repoPath: string, tokenizer: TokenizerPort = getCanonicalTokenizer(), membership?: MembershipPort): RepositoryModel {
   return new RepositoryModel(repoPath, [
     new TypeScriptStructureExtractor(),
     new JavaScriptStructureExtractor(),
     new CssStructureExtractor(),
     new JsonStructureExtractor(),
     new MarkdownStructureExtractor()
-  ], tokenizer)
+  ], tokenizer, membership)
 }

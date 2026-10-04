@@ -130,4 +130,35 @@ describe('MCP HTTP server', () => {
     expect(logs.at(-1)).toMatchObject({ tool: 'get_symbol_hierarchy', success: true })
     expect(logs.at(-1)).not.toHaveProperty('args')
   })
+
+  it('finishes the HTTP response before executing a post-response action', async () => {
+    let release!: () => void
+    let actionStarted = false
+    const actionFinished = new Promise<void>((resolve) => { release = resolve })
+    const adapter = {
+      listTools: () => [],
+      callTool: async () => ({
+        content: [{ type: 'text' as const, text: 'scheduled' }],
+        postResponse: async () => {
+          actionStarted = true
+          await actionFinished
+        }
+      })
+    }
+    const postServer = createMcpHttpServer(adapter as unknown as ContextNavigationMcpAdapter, () => {})
+    await new Promise<void>((resolve) => postServer.listen(0, '127.0.0.1', resolve))
+    const address = postServer.address() as { port: number }
+    try {
+      const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'restart', arguments: {} } })
+      })
+      expect(await response.json()).toMatchObject({ result: { content: [{ text: 'scheduled' }] } })
+      expect(actionStarted).toBe(true)
+    } finally {
+      release()
+      await new Promise<void>((resolve) => postServer.close(() => resolve()))
+    }
+  })
 })

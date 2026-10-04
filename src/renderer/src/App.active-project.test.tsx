@@ -33,8 +33,7 @@ beforeEach(() => {
     onDeepLink: vi.fn(() => () => {}),
     getActiveProject: vi.fn(async () => state('A', 1)),
     onActiveProjectChanged: vi.fn((callback) => { receive = callback; return unsubscribe }),
-    openRepository: vi.fn(async () => ({ success: true, projectId: 'B' })),
-    activateProject: vi.fn(async () => ({ success: true }))
+    activateRepository: vi.fn(async () => ({ success: true }))
   } as unknown as Window['codeAwareness']
 })
 afterEach(cleanup)
@@ -42,9 +41,8 @@ afterEach(cleanup)
 it('rehydrates from main and only renders confirmed selection changes', async () => {
   const view = render(<App />)
   await waitFor(() => expect(current().activeProject?.id).toBe('A'))
-  await act(async () => current().onSelectProject({ path: '/projects/B', name: 'ignored renderer name' }))
-  expect(window.codeAwareness.openRepository).toHaveBeenCalledWith('/projects/B')
-  expect(window.codeAwareness.activateProject).toHaveBeenCalledWith('B')
+  await act(async () => current().onSelectRepository('catalog-B'))
+  expect(window.codeAwareness.activateRepository).toHaveBeenCalledWith('catalog-B')
   expect(current().activeProject.id).toBe('A')
   act(() => receive(state('B', 2)))
   expect(current().activeProject.id).toBe('B')
@@ -63,15 +61,14 @@ it('does not overwrite a newer event with an older hydration response', async ()
   expect(current().activeProject.id).toBe('B')
 })
 
-it('does not activate an obsolete selection when repository opening completes out of order', async () => {
-  let finishA!: (value: { success: boolean; projectId: string }) => void
-  vi.mocked(window.codeAwareness.openRepository).mockImplementationOnce(() => new Promise((resolve) => { finishA = resolve }))
+it('does not report an obsolete catalog selection when activation completes out of order', async () => {
+  let finishA!: (value: { success: boolean }) => void
+  vi.mocked(window.codeAwareness.activateRepository).mockImplementationOnce(() => new Promise((resolve) => { finishA = resolve }))
   render(<App />)
   await waitFor(() => expect(current().activeProject?.id).toBe('A'))
   let first!: Promise<void>
-  act(() => { first = current().onSelectProject({ path: '/projects/A', name: 'A' }) })
-  await act(async () => current().onSelectProject({ path: '/projects/B', name: 'B' }))
-  await act(async () => { finishA({ success: true, projectId: 'A' }); await first })
-  expect(window.codeAwareness.activateProject).toHaveBeenCalledTimes(1)
-  expect(window.codeAwareness.activateProject).toHaveBeenCalledWith('B')
+  act(() => { first = current().onSelectRepository('catalog-A') })
+  await act(async () => current().onSelectRepository('catalog-B'))
+  await act(async () => { finishA({ success: true }); await first })
+  expect(window.codeAwareness.activateRepository).toHaveBeenCalledTimes(2)
 })

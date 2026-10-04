@@ -13,6 +13,7 @@ import { CodeMapView } from "./components/CodeMapView/CodeMapView";
 import { CodeDashView } from "./components/CodeDashView/CodeDashView";
 import { HomeView } from "./components/HomeView/HomeView";
 import { SettingsView } from "./components/SettingsView/SettingsView";
+import { AcademyView } from "./components/AcademyView/AcademyView";
 
 
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
@@ -127,6 +128,18 @@ export const App: React.FC = () => {
     }
   }, [handleStatusMessage]);
 
+  const setActiveRepository = useCallback(async (repositoryId: string) => {
+    const request = ++selectionRequest.current;
+    try {
+      const result = await window.codeAwareness.activateRepository(repositoryId);
+      if (request === selectionRequest.current && !result.success) {
+        throw new Error(result.error ?? 'Falha ao ativar repositório');
+      }
+    } catch (error) {
+      if (request === selectionRequest.current) handleStatusMessage(error instanceof Error ? error.message : 'Falha ao ativar repositório', true);
+    }
+  }, [handleStatusMessage]);
+
   return (
     <div
       className={`app-layout ${sidebarPreferences.sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}
@@ -137,7 +150,7 @@ export const App: React.FC = () => {
         activeTab={activeTab}
         setActiveTab={setActiveTab}
         activeProject={activeProject}
-        onSelectProject={setActiveProject}
+        onSelectRepository={setActiveRepository}
         onOpenTags={() => {
           if (activeProject?.path) setIsTagManagerOpen(true);
         }}
@@ -148,10 +161,11 @@ export const App: React.FC = () => {
 
       <main className="app-main">
         {activeTab === "settings" && <SettingsView />}
+        {activeTab === "academy" && <AcademyView />}
         {activeTab === "home" && (
           <HomeView
             activeProject={activeProject}
-            onSelectProject={setActiveProject}
+            onSelectRepository={setActiveRepository}
             onStatusMessage={handleStatusMessage}
           />
         )}

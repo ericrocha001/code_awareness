@@ -1,6 +1,7 @@
 import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
 import type { IArtifactReader, ArtifactType, ProducerRole } from './continuum-types'
 import { SUPPORTED_ARTIFACT_TYPES, SUPPORTED_PRODUCER_ROLES } from './continuum-types'
+import { contextualizeTimestamps } from './continuum-time'
 
 function oauthProtected(
   definition: Omit<McpToolDefinition, 'securitySchemes'>
@@ -109,15 +110,21 @@ export function executeListArtifacts(
 
   try {
     const summaries = reader.list({ type, producerRole, limit })
-    const compact = summaries.map((s) => ({
-      artifactId: s.artifactId,
-      type: s.type,
-      title: s.title,
-      producerRole: s.producerRole,
-      createdAt: s.createdAt,
-      ingestedAt: s.ingestedAt,
-      ...(s.gitHead ? { gitHead: s.gitHead } : {})
-    }))
+    const compact = summaries.map((s) => {
+      const local = contextualizeTimestamps(s.createdAt, s.ingestedAt)
+      return {
+        artifactId: s.artifactId,
+        type: s.type,
+        title: s.title,
+        producerRole: s.producerRole,
+        createdAt: s.createdAt,
+        ingestedAt: s.ingestedAt,
+        createdAtLocal: local.createdAtLocal,
+        ingestedAtLocal: local.ingestedAtLocal,
+        timeZone: local.timeZone,
+        ...(s.gitHead ? { gitHead: s.gitHead } : {})
+      }
+    })
 
     return ok({
       count: compact.length,
@@ -148,6 +155,7 @@ export function executeGetArtifact(
       return err(`ARTIFACT_NOT_FOUND: No artifact found with id "${artifactId}"`)
     }
 
+    const local = contextualizeTimestamps(artifact.createdAt, artifact.ingestedAt)
     return ok({
       artifactId: artifact.artifactId,
       type: artifact.type,
@@ -156,6 +164,9 @@ export function executeGetArtifact(
       producerRole: artifact.producerRole,
       createdAt: artifact.createdAt,
       ingestedAt: artifact.ingestedAt,
+      createdAtLocal: local.createdAtLocal,
+      ingestedAtLocal: local.ingestedAtLocal,
+      timeZone: local.timeZone,
       sourceFingerprint: artifact.sourceFingerprint,
       gitHead: artifact.gitHead,
       contentHash: artifact.contentHash,

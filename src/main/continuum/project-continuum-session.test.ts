@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -232,6 +232,139 @@ describe('ProjectContinuumSession — Per-Project Isolation Harness', () => {
     const result = session.activate('')
     expect(result).toBeNull()
     expect(session.getActiveStore()).toBeNull()
+
+    session.dispose()
+  })
+})
+
+describe('ProjectContinuumSession — Live Reader (read-through por consulta)', () => {
+  it('9. Publicação pós-ativação: artifact criado depois de activate() aparece em list() sem reativação', () => {
+    const storageBase = tempDir('storage-')
+    const repo = tempDir('repo-live-')
+
+    const session = new ProjectContinuumSession(storageBase)
+    session.activate(repo)
+    const reader = session.getActiveReader()!
+    expect(reader.list()).toHaveLength(0)
+
+    const inbox = new ArtifactInbox(repo)
+    inbox.write(baseEnvelope(repo, { artifactId: 'art-live-list' }))
+
+    const listed = reader.list()
+    expect(listed.map((a) => a.artifactId)).toContain('art-live-list')
+    expect(inbox.listPending()).toHaveLength(0)
+
+    session.dispose()
+  })
+
+  it('10. Get direto: artifact publicado pós-ativação é recuperável por get() sem list() prévio', () => {
+    const storageBase = tempDir('storage-')
+    const repo = tempDir('repo-live-')
+
+    const session = new ProjectContinuumSession(storageBase)
+    session.activate(repo)
+    const reader = session.getActiveReader()!
+
+    const rawMarkdown = '# Direct Get Content'
+    const inbox = new ArtifactInbox(repo)
+    inbox.write(
+      baseEnvelope(repo, {
+        artifactId: 'art-live-get',
+        rawMarkdown,
+        contentHash: computeContentHash(rawMarkdown)
+      })
+    )
+
+    const recovered = reader.get('art-live-get')
+    expect(recovered).not.toBeNull()
+    expect(recovered!.rawMarkdown).toBe(rawMarkdown)
+
+    session.dispose()
+  })
+
+  it('11. Reader estável: mesma instância antes e depois da ingestão recupera o novo artifact', () => {
+    const storageBase = tempDir('storage-')
+    const repo = tempDir('repo-live-')
+
+    const session = new ProjectContinuumSession(storageBase)
+    session.activate(repo)
+    const before = session.getActiveReader()!
+
+    new ArtifactInbox(repo).write(baseEnvelope(repo, { artifactId: 'art-live-stable' }))
+
+    const listed = before.list()
+    expect(listed.map((a) => a.artifactId)).toContain('art-live-stable')
+
+    const after = session.getActiveReader()!
+    expect(after).toBe(before)
+
+    session.dispose()
+  })
+
+  it('12. Idempotência: consultas repetidas não duplicam artifacts', () => {
+    const storageBase = tempDir('storage-')
+    const repo = tempDir('repo-live-')
+
+    const session = new ProjectContinuumSession(storageBase)
+    session.activate(repo)
+    const reader = session.getActiveReader()!
+
+    new ArtifactInbox(repo).write(baseEnvelope(repo, { artifactId: 'art-live-idem' }))
+
+    expect(reader.list()).toHaveLength(1)
+    expect(reader.list()).toHaveLength(1)
+    expect(reader.get('art-live-idem')).not.toBeNull()
+    expect(reader.list()).toHaveLength(1)
+    expect(session.getActiveStore()!.list()).toHaveLength(1)
+
+    session.dispose()
+  })
+
+  it('13. Isolamento: artifact da inbox do projeto A nunca aparece no reader do projeto B', () => {
+    const storageBase = tempDir('storage-')
+    const repoA = tempDir('repo-a-')
+    const repoB = tempDir('repo-b-')
+
+    const sessionA = new ProjectContinuumSession(storageBase)
+    const sessionB = new ProjectContinuumSession(storageBase)
+    sessionA.activate(repoA)
+    sessionB.activate(repoB)
+    const readerA = sessionA.getActiveReader()!
+    const readerB = sessionB.getActiveReader()!
+
+    new ArtifactInbox(repoA).write(baseEnvelope(repoA, { artifactId: 'art-isolated-a' }))
+
+    expect(readerA.list().map((a) => a.artifactId)).toContain('art-isolated-a')
+    expect(readerB.list().map((a) => a.artifactId)).not.toContain('art-isolated-a')
+    expect(readerB.get('art-isolated-a')).toBeNull()
+
+    sessionA.dispose()
+    sessionB.dispose()
+  })
+
+  it('14. Falha isolada: entrada inválida não impede leitura de artifacts válidos já armazenados', () => {
+    const storageBase = tempDir('storage-')
+    const repo = tempDir('repo-live-')
+
+    const session = new ProjectContinuumSession(storageBase)
+    const inbox = new ArtifactInbox(repo)
+    const rawMarkdown = '# Valid Content Preserved'
+    inbox.write(
+      baseEnvelope(repo, {
+        artifactId: 'art-live-valid',
+        rawMarkdown,
+        contentHash: computeContentHash(rawMarkdown)
+      })
+    )
+    session.activate(repo)
+    const reader = session.getActiveReader()!
+    expect(reader.get('art-live-valid')).not.toBeNull()
+
+    writeFileSync(join(inbox.getInboxDir(), 'broken.json'), '{ not-json', 'utf8')
+
+    const listed = reader.list()
+    expect(listed.map((a) => a.artifactId)).toContain('art-live-valid')
+    expect(reader.get('art-live-valid')!.rawMarkdown).toBe(rawMarkdown)
 
     session.dispose()
   })

@@ -208,7 +208,7 @@ describe('discover_repository readiness contract', () => {
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
   })
 
-  it('Harness 18: Outras tools mantêm awaitSnapshot e não usam readiness simplificada de inventário', async () => {
+  it('Harness 18: Mapeamento de readiness por operação — cada tool usa a barrier mínima correta', async () => {
     const elementId = '0000000000000001'
     const targetId = createFullTargetId(elementId)
     const mockPort: CodeMapNavigationPort = {
@@ -244,35 +244,37 @@ describe('discover_repository readiness contract', () => {
 
     const engine = new ContextEngine(mockPort)
 
-    // inspectFiles usa readiness com STRUCTURE
+    // inspectFiles usa readiness com STRUCTURE (não snapshot)
     await engine.inspectFiles('/test/repo', ['src/index.ts'])
     expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'STRUCTURE')
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
-    // getRelationships
+    // getRelationships usa readiness com RELATIONSHIPS (não snapshot)
     await engine.getRelationships('/test/repo', ['src/index.ts'])
+    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'RELATIONSHIPS')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
+
+    // getSymbolHierarchy usa readiness com RELATIONSHIPS (não snapshot)
+    await engine.getSymbolHierarchy('/test/repo', [targetId])
+    expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'RELATIONSHIPS')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
+
+    // readCode ainda usa awaitSnapshot
+    await engine.readCode('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(1)
 
-    // readCode
-    await engine.readCode('/test/repo', [targetId])
+    // getReferences ainda usa awaitSnapshot (symbol references requerem backfill)
+    await engine.getReferences('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(2)
 
-    // getReferences
-    await engine.getReferences('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3)
-
-    // getSymbolDependencies
+    // getSymbolDependencies ainda usa awaitSnapshot
     await engine.getSymbolDependencies('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(4)
-
-    // getSymbolHierarchy
-    await engine.getSymbolHierarchy('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(5)
+    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3)
 
     // discoverRepository usa awaitReadiness com FILE_INVENTORY
     await engine.discoverRepository('/test/repo')
     expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'FILE_INVENTORY')
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(5) // sem incremento em awaitSnapshot
+    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3) // sem incremento em awaitSnapshot
   })
 
   it('Harness 12: Diagnostic Zoom by Design — emite traces de readiness com capability FILE_INVENTORY e drilldown localiza com precisão', async () => {

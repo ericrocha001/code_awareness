@@ -15,7 +15,7 @@ interface GlobalSidebarProps {
   activeTab: Tab;
   setActiveTab: (tab: Tab) => void;
   activeProject: { path: string; name: string } | null;
-  onSelectProject: (project: { path: string; name: string } | null) => void;
+  onSelectRepository: (repositoryId: string) => void;
   onOpenTags: () => void;
   onOpenIgnored: () => void;
 }
@@ -26,7 +26,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
   activeTab,
   setActiveTab,
   activeProject,
-  onSelectProject,
+  onSelectRepository,
   onOpenTags,
   onOpenIgnored,
 }) => {
@@ -43,7 +43,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
       />
       <GlobalSidebarProject
         activeProject={activeProject}
-        onSelectProject={onSelectProject}
+        onSelectRepository={onSelectRepository}
       />
       <GlobalSidebarNav
         items={NAV_ITEMS}
