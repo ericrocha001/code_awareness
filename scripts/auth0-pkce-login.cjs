@@ -3,13 +3,23 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 
-const ISSUER = 'https://code-awareness.us.auth0.com/'
-const CLIENT_ID = 'Yd9FXX9tGDgGISbJtkZvtcDD98LWqXEM'
-const AUDIENCE = 'https://code-awareness-gateway.eric-rocha.workers.dev/mcp'
-const SCOPE = 'openid code-awareness:read code-awareness:enroll'
-const REDIRECT = 'http://127.0.0.1:4321/callback'
-const PORT = 4321
-const TOKEN_URL = 'https://code-awareness.us.auth0.com/oauth/token'
+const requiredEnv = (name) => {
+  const value = process.env[name]?.trim()
+  if (!value) throw new Error(`Missing required environment variable: ${name}`)
+  return value
+}
+
+const ISSUER = requiredEnv('CODE_AWARENESS_AUTH0_ISSUER').replace(/\/?$/, '/')
+const CLIENT_ID = requiredEnv('CODE_AWARENESS_AUTH0_CLIENT_ID')
+const AUDIENCE = requiredEnv('CODE_AWARENESS_GATEWAY_AUDIENCE')
+const SCOPE = process.env.CODE_AWARENESS_AUTH0_SCOPE?.trim() || 'openid code-awareness:read code-awareness:enroll'
+const REDIRECT = process.env.CODE_AWARENESS_AUTH0_REDIRECT?.trim() || 'http://127.0.0.1:4321/callback'
+const redirectUrl = new URL(REDIRECT)
+if (redirectUrl.hostname !== '127.0.0.1' && redirectUrl.hostname !== 'localhost') {
+  throw new Error('CODE_AWARENESS_AUTH0_REDIRECT must use a loopback host')
+}
+const PORT = Number(redirectUrl.port || (redirectUrl.protocol === 'https:' ? 443 : 80))
+const TOKEN_URL = new URL('oauth/token', ISSUER).toString()
 const tokenFile = path.join(process.cwd(), '.auth0_token')
 
 const verifier = crypto.randomBytes(64).toString('base64url').replace(/=+$/, '')

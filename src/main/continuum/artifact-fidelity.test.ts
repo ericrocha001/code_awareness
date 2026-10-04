@@ -53,7 +53,7 @@ const HOSTILE_SHELL_MARKDOWN = [
   '',
   '## 3. Aspas, Barras e Paths Windows',
   'Aspas simples: \'single-quoted text\' e "double-quoted with $var".',
-  'Barras invertidas: C:\\Users\\ericr\\Documents\\Softwares\\code_awareness\\src\\main.',
+  'Barras invertidas: C:\\Users\\developer\\Projects\\code-awareness\\src\\main.',
   'Caminhos UNC e relativos: \\\\server\\share\\path e .\\scripts\\test.ps1 e ../../dist/.',
   '',
   '## 4. Blocos de Código e Fences',

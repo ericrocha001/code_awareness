@@ -7,8 +7,8 @@ const publisher = require('../../../scripts/continuum/publish-artifact.cjs')
 describe('Repository Key — Parity and Determinism', () => {
   it('1. TypeScript runtime e CJS publisher geram a mesma key para o mesmo root', () => {
     const testRoots = [
-      'C:\\Users\\ericr\\Documents\\Softwares\\code_awareness',
-      'c:/users/ericr/documents/softwares/code_awareness',
+      'C:\\Users\\developer\\Projects\\code-awareness',
+      'c:/users/developer/projects/code-awareness',
       'D:\\Projects\\another-project\\',
       '/home/user/workspace/repo',
       '/var/projects/sub/app/'
