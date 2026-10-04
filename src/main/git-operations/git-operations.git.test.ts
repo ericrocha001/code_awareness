@@ -143,7 +143,7 @@ describe('project-scoped Git operations with real Git', () => {
     const navigation = {} as ProjectContextNavigation
     const adapterA = new ContextNavigationMcpAdapter({ projectId: 'a', repoRoot: a.root, navigation, gitOperations: a.service })
     const adapterB = new ContextNavigationMcpAdapter({ projectId: 'b', repoRoot: b.root, navigation, gitOperations: b.service })
-    expect(adapterB.listTools().filter((tool) => GIT_OPERATIONS_TOOLS.some((gitTool) => gitTool.name === tool.name))).toHaveLength(10)
+    expect(adapterB.listTools().filter((tool) => GIT_OPERATIONS_TOOLS.some((gitTool) => gitTool.name === tool.name))).toHaveLength(13)
     expect((await adapterA.callTool('get_git_changes', {})).content[0].text).toContain('only-a')
     expect((await adapterB.callTool('get_git_changes', {})).content[0].text).not.toContain('only-a')
     expect((await adapterB.callTool('stage_git_changes', { paths: ['only-a.txt'], mode: 'STAGE', repoPath: a.root })).isError).toBe(true)

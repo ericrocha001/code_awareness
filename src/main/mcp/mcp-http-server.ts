@@ -33,7 +33,7 @@ async function readJson(request: AsyncIterable<Uint8Array>): Promise<Record<stri
   let size = 0
   for await (const chunk of request) {
     size += chunk.length
-    if (size > 64 * 1024) throw new Error('Request body is too large')
+    if (size > 8 * 1024 * 1024) throw new Error('Request body is too large')
     chunks.push(chunk)
   }
   return JSON.parse(Buffer.concat(chunks).toString('utf8'))

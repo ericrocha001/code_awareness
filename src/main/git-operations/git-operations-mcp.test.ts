@@ -6,6 +6,32 @@ import { executeGitOperationsTool } from './git-operations-mcp'
 import { GitOperationsError, type GitOperationsService } from './git-operations-service'
 
 describe('Git MCP contract', () => {
+  it('projects v1.1 typed actions without repository/command inputs and keeps legacy revert dispatch', async () => {
+    const service = { manageShelf: vi.fn(async () => []), getConflict: vi.fn(async () => ({})), resolveConflict: vi.fn(async () => ({})), revert: vi.fn(async () => ({})) }
+    const typed = service as unknown as GitOperationsService
+    const head = 'a'.repeat(40), revision = 'b'.repeat(64)
+    for (const [name, args] of [
+      ['manage_git_shelf', { action: 'CREATE', paths: ['file'], expectedWorktreeRevision: revision }],
+      ['manage_git_shelf', { action: 'RESTORE', shelfId: 'owned', expectedHead: head, expectedWorktreeRevision: revision }],
+      ['get_git_conflict', { path: 'file', side: 'OURS' }],
+      ['resolve_git_conflict', { path: 'file', resolution: 'CONTENT', content: '', expectedHead: head, expectedConflictRevision: revision }],
+      ['revert_git_commit', { commit: head, expectedHead: head }],
+      ['revert_git_commit', { action: 'CONTINUE', expectedHead: head, expectedIndexRevision: revision }],
+      ['revert_git_commit', { action: 'ABORT', expectedHead: head }]
+    ] as const) expect((await executeGitOperationsTool(typed, name, args)).isError).toBeUndefined()
+    expect(service.revert).toHaveBeenCalledWith({ commit: head, expectedHead: head })
+    for (const [name, args] of [
+      ['manage_git_shelf', { action: 'CREATE', paths: ['file'] }],
+      ['manage_git_shelf', { action: 'RESTORE', shelfId: 'owned', expectedHead: head }],
+      ['get_git_conflict', { path: 'file', cursor: 'stale' }],
+      ['resolve_git_conflict', { path: 'file', resolution: 'CONTENT', expectedHead: head, expectedConflictRevision: revision }],
+      ['revert_git_commit', { action: 'CONTINUE', expectedHead: head }]
+    ] as const) expect((await executeGitOperationsTool(typed, name, args)).isError).toBe(true)
+    for (const name of ['manage_git_shelf', 'get_git_conflict', 'resolve_git_conflict']) for (const field of ['repoPath', 'cwd', 'command', 'flags', 'credential']) {
+      expect((await executeGitOperationsTool(typed, name, { action: 'LIST', path: 'file', [field]: 'forbidden' })).isError).toBe(true)
+    }
+  })
+
   it('validates typed arguments before dispatch and sanitizes unexpected errors', async () => {
     const getState = vi.fn(async () => { throw new Error('credential=secret-token https://user:password@host') })
     const service = { getState } as unknown as GitOperationsService

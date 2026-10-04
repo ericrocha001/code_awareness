@@ -3,10 +3,10 @@
 */
 
 import { spawn } from 'child_process'
-import { createHash } from 'node:crypto'
-import { closeSync, copyFileSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
 
@@ -41,7 +41,255 @@ const GIT_STATUS_CODE_MAP: Record<string, DiffFileStatus['changeType']> = {
   '?': 'added'
 }
 
+export interface GitConflictEntry { mode: string; sha: string; stage: number; path: string }
+interface ShelfFile { path: string; raw: string | null; canonical: string | null; mode: string; untracked: boolean }
+export interface GitShelf {
+  owner: 'code-awareness/git-shelf/v1'
+  shelfId: string
+  label: string
+  date: string
+  baseHead: string
+  stash: string
+  files: ShelfFile[]
+}
+type GitProcessOptions = { timeoutMs?: number; env?: NodeJS.ProcessEnv; allowExitOne?: boolean; input?: Buffer | string }
+
 export class GitService implements FileListingPort {
+  private workingBytes(dirPath: string, path: string): Buffer | null {
+    try {
+      const fullPath = join(dirPath, path)
+      const stat = lstatSync(fullPath)
+      if (stat.isSymbolicLink()) return Buffer.from(readlinkSync(fullPath))
+      if (!stat.isFile()) throw new Error('UNSUPPORTED_GIT_PATH')
+      return readFileSync(fullPath)
+    } catch (error: any) {
+      if (error.code === 'ENOENT') return null
+      throw error
+    }
+  }
+
+  async getWorktreeRevision(dirPath: string): Promise<string> {
+    const head = await this.getCurrentCommitHash(dirPath)
+    const index = await this.getIndexRevision(dirPath)
+    const status = await this.getOperationsStatus(dirPath)
+    const hash = createHash('sha256').update(JSON.stringify({ head, index, status }))
+    const entries = status.split('\0')
+    const paths = new Set<string>()
+    for (let i = 0; i < entries.length; i++) {
+      if (!entries[i]) continue
+      paths.add(entries[i].slice(3))
+      if (/[RC]/.test(entries[i].slice(0, 2))) paths.add(entries[++i])
+    }
+    for (const path of [...paths].sort()) {
+      const bytes = this.workingBytes(dirPath, path)
+      const stat = bytes === null ? null : lstatSync(join(dirPath, path))
+      const mode = stat?.isSymbolicLink() ? 'SYMLINK' : stat ? stat.mode & 0o111 : null
+      hash.update(JSON.stringify({ path, mode, content: bytes === null ? null : createHash('sha256').update(bytes).digest('hex') }))
+    }
+    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || status !== await this.getOperationsStatus(dirPath)) throw new Error('GIT_STATE_CHANGED')
+    return hash.digest('hex')
+  }
+
+  async getConflictEntries(dirPath: string, path: string, env?: NodeJS.ProcessEnv): Promise<GitConflictEntry[]> {
+    const result = await this.runGit(['--literal-pathspecs', 'ls-files', '--unmerged', '-z', '--', path], dirPath, { env })
+    return result.split('\0').filter(Boolean).map((entry) => {
+      const tab = entry.indexOf('\t')
+      const [mode, sha, stage] = entry.slice(0, tab).split(' ')
+      return { mode, sha, stage: Number(stage), path: entry.slice(tab + 1) }
+    })
+  }
+
+  async readConflictSide(dirPath: string, path: string, side: 'BASE' | 'OURS' | 'THEIRS' | 'WORKTREE', entries?: GitConflictEntry[]): Promise<Buffer | null> {
+    if (side === 'WORKTREE') return this.workingBytes(dirPath, path)
+    const entry = (entries ?? await this.getConflictEntries(dirPath, path)).find((entry) => entry.stage === { BASE: 1, OURS: 2, THEIRS: 3 }[side])
+    return entry ? this.runGitBytes(['cat-file', 'blob', entry.sha], dirPath) : null
+  }
+
+  async getConflictRevision(dirPath: string, path: string, env?: NodeJS.ProcessEnv): Promise<string | null> {
+    const entries = await this.getConflictEntries(dirPath, path, env)
+    if (!entries.length) return null
+    const bytes = this.workingBytes(dirPath, path)
+    return createHash('sha256').update(JSON.stringify({ entries, content: bytes === null ? null : createHash('sha256').update(bytes).digest('hex') })).digest('hex')
+  }
+
+  private async withLockedIndex<T>(dirPath: string, operation: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+    const indexPath = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'index'], dirPath)).trim()
+    let lock: number | undefined
+    try { lock = openSync(`${indexPath}.lock`, 'wx') } catch { throw new Error('GIT_STATE_CHANGED') }
+    let temporary: string | undefined
+    try {
+      temporary = mkdtempSync(join(tmpdir(), 'git-operations-index-'))
+      const temporaryIndex = join(temporary, 'index')
+      const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex }
+      if (existsSync(indexPath)) copyFileSync(indexPath, temporaryIndex)
+      else await this.runGit(['read-tree', '--empty'], dirPath, { env })
+      const result = await operation(env)
+      copyFileSync(temporaryIndex, `${indexPath}.lock`)
+      closeSync(lock); lock = undefined
+      renameSync(`${indexPath}.lock`, indexPath)
+      return result
+    } finally {
+      if (lock !== undefined) closeSync(lock)
+      rmSync(`${indexPath}.lock`, { force: true })
+      if (temporary) rmSync(temporary, { recursive: true, force: true })
+    }
+  }
+
+  async resolveConflict(dirPath: string, path: string, resolution: 'OURS' | 'THEIRS' | 'CONTENT' | 'DELETE', expectedHead: string | null, expectedRevision: string, content?: string): Promise<void> {
+    await this.withLockedIndex(dirPath, async (env) => {
+      if (await this.getCurrentCommitHash(dirPath) !== expectedHead) throw new Error('GIT_STATE_CHANGED')
+      if (await this.getConflictRevision(dirPath, path, env) !== expectedRevision) throw new Error('CONFLICT_STATE_CHANGED')
+      if (resolution === 'OURS' || resolution === 'THEIRS') {
+        const stage = resolution === 'OURS' ? 2 : 3
+        if (!(await this.getConflictEntries(dirPath, path, env)).some((entry) => entry.stage === stage)) throw new Error('CONFLICT_SIDE_UNAVAILABLE')
+        await this.runGit(['--literal-pathspecs', 'checkout-index', '--force', `--stage=${stage}`, '--', path], dirPath, { env })
+      } else if (resolution === 'DELETE') {
+        if (existsSync(join(dirPath, path))) unlinkSync(join(dirPath, path))
+      } else {
+        const fullPath = join(dirPath, path)
+        if (existsSync(fullPath) && lstatSync(fullPath).isSymbolicLink()) unlinkSync(fullPath)
+        mkdirSync(dirname(fullPath), { recursive: true })
+        writeFileSync(fullPath, content!, 'utf8')
+      }
+      await this.runGit(['--literal-pathspecs', 'add', '-A', '--', path], dirPath, { env })
+    })
+  }
+
+  private shelfRef(shelfId: string): string {
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(shelfId)) throw new Error('SHELF_NOT_FOUND')
+    return `refs/code-awareness/shelves/${shelfId}`
+  }
+
+  async readShelf(dirPath: string, shelfId: string): Promise<GitShelf> {
+    const ref = this.shelfRef(shelfId)
+    try {
+      const shelf = JSON.parse(await this.runGit(['show', `${ref}:manifest`], dirPath)) as GitShelf
+      if (shelf.owner !== 'code-awareness/git-shelf/v1' || shelf.shelfId !== shelfId) throw new Error('SHELF_NOT_FOUND')
+      return shelf
+    } catch { throw new Error('SHELF_NOT_FOUND') }
+  }
+
+  async listShelves(dirPath: string): Promise<GitShelf[]> {
+    const refs = (await this.runGit(['for-each-ref', '--format=%(refname)', 'refs/code-awareness/shelves/'], dirPath)).trim().split('\n').filter(Boolean)
+    const shelves: GitShelf[] = []
+    for (const ref of refs) {
+      try { shelves.push(await this.readShelf(dirPath, ref.split('/').pop()!)) } catch {}
+    }
+    return shelves.sort((a, b) => b.date.localeCompare(a.date) || a.shelfId.localeCompare(b.shelfId))
+  }
+
+  async createShelf(dirPath: string, paths: string[], untrackedPaths: string[], revision: string, label: string): Promise<GitShelf> {
+    return this.withLockedIndex(dirPath, async (env) => {
+      if (await this.getWorktreeRevision(dirPath) !== revision) throw new Error('GIT_STATE_CHANGED')
+      const baseHead = await this.getCurrentCommitHash(dirPath)
+      if (!baseHead) throw new Error('SHELF_REQUIRES_HEAD')
+      const untracked = new Set(untrackedPaths)
+      const original = await this.runGit(['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', ...paths], dirPath)
+      const baseEntries = await this.runGit(['--literal-pathspecs', 'ls-tree', '-r', '-z', baseHead, '--', ...paths], dirPath)
+      const modes = new Map<string, string>()
+      for (const record of [...baseEntries.split('\0'), ...original.split('\0')].filter(Boolean)) modes.set(record.slice(record.indexOf('\t') + 1), record.slice(0, 6))
+      let fileMode = false
+      try { fileMode = (await this.runGit(['config', '--bool', '--get', 'core.filemode'], dirPath)).trim() === 'true' } catch {}
+      const files: ShelfFile[] = []
+      for (const path of paths) {
+        const bytes = this.workingBytes(dirPath, path)
+        const stat = bytes === null ? null : lstatSync(join(dirPath, path))
+        const mode = stat?.isSymbolicLink() ? '120000' : !fileMode && modes.has(path) ? modes.get(path)! : stat && fileMode && stat.mode & 0o111 ? '100755' : '100644'
+        const raw = bytes === null ? null : (await this.runGit(['hash-object', '-w', '--stdin', '--no-filters'], dirPath, { input: bytes })).trim()
+        const canonical = bytes === null ? null : (await this.runGit(['hash-object', '-w', '--stdin', ...(mode === '120000' ? ['--no-filters'] : [`--path=${path}`])], dirPath, { input: bytes })).trim()
+        files.push({ path, raw, canonical, mode, untracked: untracked.has(path) })
+      }
+      const tree = async (name: string, entries: string, empty = false) => {
+        const treeEnv = { ...env, GIT_INDEX_FILE: `${env.GIT_INDEX_FILE}-${name}` }
+        await this.runGit(['read-tree', empty ? '--empty' : baseHead], dirPath, { env: treeEnv })
+        await this.runGit(['--literal-pathspecs', 'update-index', '--force-remove', '--', ...paths], dirPath, { env: treeEnv })
+        if (entries) await this.runGit(['update-index', '-z', '--index-info'], dirPath, { env: treeEnv, input: entries })
+        return (await this.runGit(['write-tree'], dirPath, { env: treeEnv })).trim()
+      }
+      const entry = (file: ShelfFile) => file.canonical ? `${file.mode} ${file.canonical}\t${file.path}\0` : ''
+      const stagedTree = await tree('staged', original)
+      const worktreeTree = await tree('worktree', files.filter((file) => !file.untracked).map(entry).join(''))
+      const identity = ['-c', 'user.name=Code Awareness', '-c', 'user.email=code-awareness@local']
+      const indexCommit = (await this.runGit([...identity, 'commit-tree', stagedTree, '-p', baseHead, '-m', 'Code Awareness shelf index'], dirPath)).trim()
+      const parents = ['-p', baseHead, '-p', indexCommit]
+      if (files.some((file) => file.untracked)) {
+        const untrackedTree = await tree('untracked', files.filter((file) => file.untracked).map(entry).join(''), true)
+        parents.push('-p', (await this.runGit([...identity, 'commit-tree', untrackedTree, '-m', 'Code Awareness shelf untracked'], dirPath)).trim())
+      }
+      const stash = (await this.runGit([...identity, 'commit-tree', worktreeTree, ...parents, '-m', 'Code Awareness shelf'], dirPath)).trim()
+      const shelf: GitShelf = { owner: 'code-awareness/git-shelf/v1', shelfId: randomUUID(), label, date: new Date().toISOString(), baseHead, stash, files }
+      const manifest = (await this.runGit(['hash-object', '-w', '--stdin'], dirPath, { input: JSON.stringify(shelf) })).trim()
+      const rawEntries = files.filter((file) => file.raw).map((file, i) => `100644 blob ${file.raw}\traw-${i}\0`).join('')
+      const manifestTree = (await this.runGit(['mktree', '-z'], dirPath, { input: `100644 blob ${manifest}\tmanifest\0${rawEntries}` })).trim()
+      const shelfCommit = (await this.runGit([...identity, 'commit-tree', manifestTree, '-p', stash, '-m', 'Code Awareness owned shelf'], dirPath)).trim()
+      if (await this.getWorktreeRevision(dirPath) !== revision) throw new Error('GIT_STATE_CHANGED')
+      for (const file of files) {
+        const bytes = this.workingBytes(dirPath, file.path)
+        const raw = bytes === null ? null : (await this.runGit(['hash-object', '--stdin', '--no-filters'], dirPath, { input: bytes })).trim()
+        if (raw !== file.raw) throw new Error('GIT_STATE_CHANGED')
+      }
+      await this.runGit(['update-ref', this.shelfRef(shelf.shelfId), shelfCommit, '0'.repeat(baseHead.length)], dirPath)
+      const tracked = paths.filter((path) => !untracked.has(path))
+      if (tracked.length) await this.runGit(['--literal-pathspecs', 'restore', '--source=HEAD', '--staged', '--worktree', '--', ...tracked], dirPath, { env })
+      for (const path of untrackedPaths) unlinkSync(join(dirPath, path))
+      return shelf
+    })
+  }
+
+  async restoreShelf(dirPath: string, shelf: GitShelf, expectedHead: string | null, expectedRevision: string): Promise<'RESTORED' | 'CONFLICTS'> {
+    return this.withLockedIndex(dirPath, async (env) => {
+      if (await this.getCurrentCommitHash(dirPath) !== expectedHead || await this.getWorktreeRevision(dirPath) !== expectedRevision) throw new Error('GIT_STATE_CHANGED')
+      const originalIndex = readFileSync(env.GIT_INDEX_FILE!)
+      await this.runGit(['read-tree', 'HEAD'], dirPath, { env })
+      let result: 'RESTORED' | 'CONFLICTS' = 'RESTORED'
+      try { await this.runGit(['stash', 'apply', '--index', shelf.stash], dirPath, { env }) }
+      catch (error: any) {
+        const conflicts = await this.runGit(['ls-files', '--unmerged', '-z'], dirPath, { env })
+        if (conflicts) result = 'CONFLICTS'
+        else {
+          if (!/conflicts in index|patch failed|does not apply/i.test(error.message)) throw error
+          await this.runGit(['read-tree', 'HEAD'], dirPath, { env })
+          try { await this.runGit(['stash', 'apply', shelf.stash], dirPath, { env }) }
+          catch (fallback) {
+            if (await this.runGit(['ls-files', '--unmerged', '-z'], dirPath, { env })) result = 'CONFLICTS'
+            else throw fallback
+          }
+        }
+      }
+      const paths = shelf.files.map((file) => file.path)
+      const selectedIndex = await this.runGit(['--literal-pathspecs', 'ls-files', '--stage', '-z', '--', ...paths], dirPath, { env })
+      writeFileSync(env.GIT_INDEX_FILE!, originalIndex)
+      await this.runGit(['--literal-pathspecs', 'update-index', '--force-remove', '--', ...paths], dirPath, { env })
+      if (selectedIndex) await this.runGit(['update-index', '-z', '--index-info'], dirPath, { env, input: selectedIndex })
+      if (result === 'CONFLICTS') return result
+      for (const file of shelf.files) {
+        const bytes = this.workingBytes(dirPath, file.path)
+        if (!bytes || !file.raw || file.mode === '120000') continue
+        const canonical = (await this.runGit(['hash-object', '--stdin', `--path=${file.path}`], dirPath, { input: bytes })).trim()
+        if (canonical === file.canonical) writeFileSync(join(dirPath, file.path), await this.runGitBytes(['cat-file', 'blob', file.raw], dirPath))
+      }
+      return result
+    })
+  }
+
+  async dropShelf(dirPath: string, shelfId: string): Promise<void> {
+    await this.readShelf(dirPath, shelfId)
+    const ref = this.shelfRef(shelfId)
+    const sha = (await this.runGit(['rev-parse', '--verify', ref], dirPath)).trim()
+    await this.runGit(['update-ref', '-d', ref, sha], dirPath)
+  }
+
+  async continueRevert(dirPath: string, expectedHead: string | null, expectedIndexRevision: string): Promise<void> {
+    await this.withLockedIndex(dirPath, async (env) => {
+      if (await this.getCurrentCommitHash(dirPath) !== expectedHead || await this.getIndexRevision(dirPath) !== expectedIndexRevision) throw new Error('GIT_STATE_CHANGED')
+      await this.runGit(['-c', 'core.editor=true', 'revert', '--continue'], dirPath, { env })
+    })
+  }
+
+  async abortRevert(dirPath: string): Promise<void> {
+    await this.runGit(['revert', '--abort'], dirPath)
+  }
+
   async commitInspectedIndex(dirPath: string, message: string, expectedHead: string | null, expectedIndexRevision: string): Promise<string> {
     const indexPath = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'index'], dirPath)).trim()
     let lock: number
@@ -176,12 +424,15 @@ export class GitService implements FileListingPort {
     return existsSync(join(dirPath, '.git'))
   }
 
-  private runGit(args: string[], cwd: string, options?: { timeoutMs?: number; env?: NodeJS.ProcessEnv; allowExitOne?: boolean }): Promise<string> {
+  private async runGit(args: string[], cwd: string, options?: GitProcessOptions): Promise<string> {
+    return (await this.runGitBytes(args, cwd, options)).toString('utf8')
+  }
+
+  private runGitBytes(args: string[], cwd: string, options?: GitProcessOptions): Promise<Buffer> {
     return new Promise((resolve, reject) => {
-      let stdout = ''
+      const stdout: Buffer[] = []
       let stderr = ''
       const proc = spawn('git', args, { cwd, shell: false, env: options?.env })
-      proc.stdout.setEncoding('utf8')
       proc.stderr.setEncoding('utf8')
 
       // Timeout de proteção contra processos Git travados
@@ -190,11 +441,13 @@ export class GitService implements FileListingPort {
         reject(new Error('Git process timed out'))
       }, options?.timeoutMs ?? GIT_TIMEOUT_MS)
 
-      proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      proc.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk) })
       proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
+      proc.stdin.on('error', () => {})
+      proc.stdin.end(options?.input)
       proc.on('close', (code) => {
         clearTimeout(timer)
-        if (code === 0 || options?.allowExitOne && code === 1) resolve(stdout)
+        if (code === 0 || options?.allowExitOne && code === 1) resolve(Buffer.concat(stdout))
         else reject(new Error(stderr.trim() || `git exited with code ${code}`))
       })
       proc.on('error', (err) => {
