@@ -401,3 +401,99 @@ it('exclui pastas internas da listagem', async () => {
     })
   })
 })
+
+// ─── checkIgnoreBatch — Membership Classification (Sprint 4) ─────────────────
+describe('GitService.checkIgnoreBatch', () => {
+  let repo = ''
+  const gitService = new GitService()
+
+  afterEach(async () => {
+    if (repo) await cleanupTempRepo(repo)
+    repo = ''
+  })
+
+  it('retorna Set vazio para repositório sem .gitignore', async () => {
+    repo = await createTempGitRepo()
+    writeFile(repo, 'src.ts', 'x')
+    const result = await gitService.checkIgnoreBatch(repo, ['src.ts'])
+    expect(result).toBeInstanceOf(Set)
+    expect(result.has('src.ts')).toBe(false)
+  })
+
+  it('retorna path ignorado quando coberto pelo .gitignore da raiz', async () => {
+    repo = await createTempGitRepo()
+    writeFile(repo, '.gitignore', '*.log\n')
+    writeFile(repo, 'build.log', 'x')
+    await stageAll(repo)
+    await commit(repo, 'init')
+
+    const result = await gitService.checkIgnoreBatch(repo, ['build.log', 'src.ts'])
+    expect(result.has('build.log')).toBe(true)
+    expect(result.has('src.ts')).toBe(false)
+  })
+
+  it('respeita nested .gitignore em subdiretório', async () => {
+    repo = await createTempGitRepo()
+    writeFile(repo, '.gitignore', '')
+    writeFile(repo, 'infra/gateway/.gitignore', '.wrangler/\n')
+    writeFile(repo, 'infra/gateway/.wrangler/state.json', '{}')
+    writeFile(repo, 'infra/gateway/src.ts', 'x')
+    await stageAll(repo)
+    await commit(repo, 'init')
+
+    const result = await gitService.checkIgnoreBatch(repo, [
+      'infra/gateway/.wrangler/state.json',
+      'infra/gateway/src.ts'
+    ])
+    expect(result.has('infra/gateway/.wrangler/state.json')).toBe(true)
+    expect(result.has('infra/gateway/src.ts')).toBe(false)
+  })
+
+  it('retorna Set vazio para lista vazia de paths', async () => {
+    repo = await createTempGitRepo()
+    const result = await gitService.checkIgnoreBatch(repo, [])
+    expect(result.size).toBe(0)
+  })
+
+  it('retorna Set vazio (fail-open) quando o processo git falha', async () => {
+    const result = await gitService.checkIgnoreBatch('/nonexistent/path/that/does/not/exist', ['file.ts'])
+    expect(result).toBeInstanceOf(Set)
+    expect(result.size).toBe(0)
+  })
+
+  describe('Git Write Primitives (Academy boundary)', () => {
+    it('stages only specified paths and excludes external files from commit', async () => {
+      repo = await createTempGitRepo()
+      // Initial commit so HEAD exists
+      writeFile(repo, 'README.md', '# Initial')
+      await stageAll(repo)
+      await commit(repo, 'initial')
+
+      // Modify both inside skills/ and outside skills/
+      writeFile(repo, 'skills/my-skill/SKILL.md', '---\nname: my-skill\n---\n# My Skill')
+      writeFile(repo, 'external-file.txt', 'do not stage me')
+
+      expect(await gitService.hasWorkingTreeChanges(repo, 'skills')).toBe(true)
+      expect(await gitService.hasStagedChanges(repo)).toBe(false)
+
+      // Stage only skills
+      await gitService.stagePaths(repo, ['skills'])
+      expect(await gitService.hasStagedChanges(repo)).toBe(true)
+
+      // Commit
+      const sha = await gitService.commit(repo, 'Academy sync: 1 skills (hash123)')
+      expect(sha).toBeDefined()
+      expect(sha?.length).toBe(40)
+
+      // Working tree in skills is clean, but external-file.txt is still untracked!
+      expect(await gitService.hasWorkingTreeChanges(repo, 'skills')).toBe(false)
+      const modified = await gitService.getModifiedFiles(repo)
+      expect(modified.map((f) => f.relativePath)).toEqual(['external-file.txt'])
+
+      // Calling commit again with nothing staged returns null (no empty commit)
+      const secondSha = await gitService.commit(repo, 'noop commit')
+      expect(secondSha).toBeNull()
+    })
+  })
+})
+

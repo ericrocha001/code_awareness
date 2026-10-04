@@ -9,8 +9,36 @@ import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
 import type { ChatGptIntegrationState } from '../shared/types/chatgpt-integration-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
+import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem } from '../shared/types/academy-types'
+import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
+import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
+  getAcademySnapshot: (): Promise<AcademySnapshot> => ipcRenderer.invoke('academy:snapshot'),
+  getAcademySkill: (id: string): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:get', id),
+  getAcademyHistory: (id: string): Promise<AcademySkillVersion[]> => ipcRenderer.invoke('academy:history', id),
+  createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:create', input),
+  updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:update', input),
+  archiveAcademySkill: (id: string, expectedVersion: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:archive', id, expectedVersion),
+  restoreAcademySkill: (id: string, expectedVersion: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:restore', id, expectedVersion),
+  setAcademyDestinationEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('academy:destination-enabled', id, enabled),
+  importAcademyDestination: (id: string): Promise<AcademyImportItem[]> => ipcRenderer.invoke('academy:import-destination', id),
+  resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:resolve-conflict', id, resolution, reconciledPackage),
+  getAcademyDistributionHealth: (): Promise<AcademyDistributionHealth> => ipcRenderer.invoke('academy:distribution-health'),
+  listAcademyDistributionStates: (skillId?: string): Promise<AcademyDistributionState[]> => ipcRenderer.invoke('academy:distribution-states', skillId),
+  reconcileAcademyDistribution: (destinationId?: string): Promise<{ health: AcademyDistributionHealth; states: AcademyDistributionState[] }> => ipcRenderer.invoke('academy:distribution-reconcile', destinationId),
+  bootstrapAcademyOpenAiPlugin: (publishedVersion?: string): Promise<AcademyOpenAiPluginProfile> => ipcRenderer.invoke('academy:openai-bootstrap', publishedVersion),
+  getAcademyOpenAiPublicationState: (): Promise<AcademyOpenAiPublicationState> => ipcRenderer.invoke('academy:openai-state'),
+  getAcademyPackageDistributionState: (): Promise<AcademyPackageDistributionState> => ipcRenderer.invoke('academy:package-distribution-state'),
+  listAcademyOpenAiReleases: (): Promise<AcademyOpenAiRelease[]> => ipcRenderer.invoke('academy:openai-releases'),
+  prepareAcademyOpenAiRelease: (): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-prepare'),
+  confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-confirm-upload', releaseId, artifactHash),
+  revealAcademyOpenAiPackage: (releaseId: string): Promise<boolean> => ipcRenderer.invoke('academy:openai-reveal', releaseId),
+  getAcademyGitStatus: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-status'),
+  syncAcademyGitNow: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-sync-now'),
+  bindAcademyGitRepository: (repositoryCatalogId: string): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-bind', repositoryCatalogId),
+  listAcademyGitEligibleRepositories: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('academy:git-eligible-repos'),
+  openAcademyGitRepository: (): Promise<boolean> => ipcRenderer.invoke('academy:git-open-repo'),
   getChatGptIntegrationState: (): Promise<ChatGptIntegrationState> => ipcRenderer.invoke('integration:chatgpt:get-state'),
   onChatGptIntegrationChanged: (callback: (state: ChatGptIntegrationState) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: ChatGptIntegrationState): void => callback(state)
@@ -102,6 +130,23 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   generateCompressionMarkdown: (repoPath: string, selectedFiles: string[], settings?: CompressionSettingsPayload): Promise<string> => {
     return ipcRenderer.invoke('git:generate-compression-markdown', repoPath, selectedFiles, settings)
   },
+  listRepositories: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:list'),
+  refreshRepositories: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:refresh'),
+  importRepositoryRoot: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:import-root'),
+  importLocalRepository: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:import-local'),
+  hideRepository: (repositoryId: string): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:hide', repositoryId),
+  activateRepository: (repositoryId: string): Promise<{ success: boolean; data?: ActiveProjectState; error?: string }> => ipcRenderer.invoke('repositories:activate', repositoryId),
+  getGitHubStatus: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:get-status'),
+  connectGitHub: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:connect'),
+  cancelGitHubConnect: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:cancel-connect'),
+  openGitHubAuthorization: (): Promise<void> => ipcRenderer.invoke('github:open-authorization'),
+  openGitHubInstallation: (): Promise<void> => ipcRenderer.invoke('github:open-installation'),
+  openGitHubManageAccess: (): Promise<void> => ipcRenderer.invoke('github:open-manage-access'),
+  disconnectGitHub: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:disconnect'),
+  refreshGitHub: (): Promise<GitHubOperationResult> => ipcRenderer.invoke('github:refresh'),
+  cloneGitHubRepository: (repositoryId: string): Promise<GitHubOperationResult> => ipcRenderer.invoke('github:clone-repository', repositoryId),
+  createGitHubRepository: (input: GitHubCreateRepositoryInput): Promise<GitHubOperationResult> => ipcRenderer.invoke('github:create-repository', input),
+  publishGitHubRepository: (input: GitHubPublishRepositoryInput): Promise<GitHubOperationResult> => ipcRenderer.invoke('github:publish-repository', input),
   addRootFolder: (): Promise<ProjectInfo[]> => {
     return ipcRenderer.invoke('workspace:add-root-folder')
   },

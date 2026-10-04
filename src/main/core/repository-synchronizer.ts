@@ -64,10 +64,14 @@ import { repositoryEventBus, RepositoryFileEvent } from './repository-events'
 import { RepositoryModel } from './repository-model'
 import { telemetryService } from './telemetry-service'
 import type { CodeMapFile } from '../../shared/types'
+import type { RepositoryFileMembership } from './repository-file-membership'
+import type { SyncHarness } from './sync-harness'
 
 interface PendingFileEntry {
   addedAt: number
   attempts: number
+  /** Correlation ID originado no WatcherBridge — preservado para rastreabilidade causal. */
+  correlationId: string
 }
 
 const DEBOUNCE_MS = 500
@@ -87,6 +91,8 @@ export class RepositorySynchronizer {
   private readonly periodicScanIntervalMs: number
   private periodicScanTimer: NodeJS.Timeout | null = null
   private isPeriodicScanRunning = false
+  private readonly membership: RepositoryFileMembership | null
+  private readonly harness: SyncHarness | null
   private readonly boundHandlers: {
     onModified: (event: RepositoryFileEvent) => void
     onCreated: (event: RepositoryFileEvent) => void
@@ -96,12 +102,18 @@ export class RepositorySynchronizer {
   constructor(
     model: RepositoryModel,
     repositoryId: string,
-    options?: { periodicScanIntervalMs?: number }
+    options?: {
+      periodicScanIntervalMs?: number
+      membership?: RepositoryFileMembership
+      harness?: SyncHarness
+    }
   ) {
     this.model = model
     this.repositoryId = repositoryId
     this.normalizedRepoPath = model.getRepoPath()
     this.correlationId = telemetryService.startOperation('SYNCHRONIZER_INIT')
+    this.membership = options?.membership ?? null
+    this.harness = options?.harness ?? null
     this.boundHandlers = {
       onModified: this.handleFileEvent.bind(this),
       onCreated: this.handleFileEvent.bind(this),
@@ -131,6 +143,7 @@ export class RepositorySynchronizer {
    */
   private async autoReindex(relativePath: string, correlationId: string): Promise<void> {
     if (this.isDisposed) return
+    this.harness?.record('reindex')
     try {
       const ok = await this.model.updateFileContent(relativePath, correlationId)
       if (ok) {
@@ -141,6 +154,12 @@ export class RepositorySynchronizer {
       }
     } catch (err) {
       // Falha → mantém como modified (recovery via synchronizeModified)
+      telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_FAILED', {
+        relativePath,
+        operation: 'updateFileContent',
+        error: err instanceof Error ? err.message : String(err),
+        recovery: 'synchronizeModified'
+      })
     }
   }
 
@@ -159,6 +178,14 @@ export class RepositorySynchronizer {
     const relativePath = event.relativePath
     const cid = event.correlationId ?? telemetryService.startOperation('EVENT_RECEIVED')
 
+    this.harness?.record('observed')
+    telemetryService.log(cid, 'CHANGE_DETECTION', 'OBSERVED', { relativePath })
+
+    // Change Intake Gate — membership é avaliado de forma assíncrona após debounce.
+    // Paths rejeitados são descartados antes de entrar em stabilization/verification/reindex.
+    // A avaliação assíncrona acontece em processQueue, não aqui, para preservar o debounce.
+    // O correlationId é preservado no PendingFileEntry para rastreabilidade causal.
+
     // Deduplicação: se já está na fila, apenas atualiza o timestamp e loga
     if (this.pendingFiles.has(relativePath)) {
       const existing = this.pendingFiles.get(relativePath)!
@@ -167,7 +194,7 @@ export class RepositorySynchronizer {
       return
     }
 
-    this.pendingFiles.set(relativePath, { addedAt: Date.now(), attempts: 0 })
+    this.pendingFiles.set(relativePath, { addedAt: Date.now(), attempts: 0, correlationId: cid })
     telemetryService.log(cid, 'CHANGE_DETECTION', 'QUEUED', { relativePath })
 
     // Agenda debounce se ainda não estiver ativo
@@ -179,28 +206,68 @@ export class RepositorySynchronizer {
   /**
    * Drena a fila de arquivos pendentes e verifica cada um.
    * Executado após o debounce de 500ms para absorver tempestades de eventos.
+   * Aplica o Change Intake Gate (RepositoryFileMembership) antes de stabilization.
    */
   private async processQueue(): Promise<void> {
     this.debounceTimer = null
     if (this.isDisposed) return
     this.isProcessingQueue = true
 
-    const correlationId = telemetryService.startOperation('PROCESS_QUEUE')
+    const batchCorrelationId = telemetryService.startOperation('PROCESS_QUEUE')
     const filesToProcess = Array.from(this.pendingFiles.entries())
     this.pendingFiles.clear()
 
-    telemetryService.log(correlationId, 'CHANGE_DETECTION', 'QUEUE_PROCESSING', {
+    telemetryService.log(batchCorrelationId, 'CHANGE_DETECTION', 'QUEUE_PROCESSING', {
       fileCount: filesToProcess.length
     })
+
+    // Change Intake Gate: avalia membership em batch quando disponível
+    let rejectedPaths: Set<string> = new Set()
+    if (this.membership !== null && filesToProcess.length > 0) {
+      const paths = filesToProcess.map(([p]) => p)
+      const indexedPaths = new Set(this.model.getFiles().map(f => f.relativePath))
+      try {
+        const classifications = await this.membership.classifyBatch(paths, indexedPaths)
+        for (const [relativePath, classification] of classifications) {
+          const isDeletedIndexed = classification === 'deleted-indexed'
+          const isEligible = classification === 'eligible'
+          const isNew = classification === 'eligible' // covered by eligible
+          const shouldProcess =
+            isEligible ||
+            isDeletedIndexed ||
+            // deleted-unknown: ainda assim processa se o arquivo estava no modifiedFiles
+            (classification === 'deleted-unknown' && this.modifiedFiles.has(relativePath))
+
+          if (!shouldProcess) {
+            rejectedPaths.add(relativePath)
+          }
+        }
+      } catch {
+        // Falha do membership → fail-open: processa tudo (nunca bloqueia por erro de gate)
+      }
+    }
 
     try {
       for (const [relativePath, metadata] of filesToProcess) {
         if (this.isDisposed) break
+
+        // Usa o correlationId preservado do evento original (causalidade por path)
+        const cid = metadata.correlationId
+
+        if (rejectedPaths.has(relativePath)) {
+          this.harness?.record('rejected')
+          telemetryService.log(cid, 'CHANGE_DETECTION', 'INTAKE_REJECTED', { relativePath })
+          continue
+        }
+
+        this.harness?.record('accepted')
+        telemetryService.log(cid, 'CHANGE_DETECTION', 'INTAKE_ACCEPTED', { relativePath })
+
         try {
-          await this.verifyAndMarkIfChanged(relativePath, metadata, correlationId)
+          await this.verifyAndMarkIfChanged(relativePath, metadata, cid)
         } catch (err) {
           if (this.isDisposed) break
-          telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'VERIFY_FAILED', {
+          telemetryService.logError(cid, 'CHANGE_DETECTION', 'VERIFY_FAILED', {
             relativePath,
             error: err instanceof Error ? err.message : String(err)
           })
@@ -213,8 +280,9 @@ export class RepositorySynchronizer {
       this.isProcessingQueue = false
     }
 
-    telemetryService.log(correlationId, 'CHANGE_DETECTION', 'QUEUE_PROCESSED', {
-      fileCount: filesToProcess.length
+    telemetryService.log(batchCorrelationId, 'CHANGE_DETECTION', 'QUEUE_PROCESSED', {
+      fileCount: filesToProcess.length,
+      rejected: rejectedPaths.size
     })
   }
 
@@ -240,13 +308,15 @@ export class RepositorySynchronizer {
     }
 
     // Estabilização: garante que o arquivo não está sendo escrito ativamente
+    this.harness?.record('stabilization')
     const stabilized = await this.waitForStabilization(fullPath, metadata.attempts, correlationId)
     if (!stabilized) {
       if (metadata.attempts < MAX_STABILIZE_ATTEMPTS) {
         // Re-enfileira com tentativa incrementada para nova verificação após debounce
         this.pendingFiles.set(relativePath, {
           addedAt: Date.now(),
-          attempts: metadata.attempts + 1
+          attempts: metadata.attempts + 1,
+          correlationId
         })
         telemetryService.log(correlationId, 'CHANGE_DETECTION', 'RESTABILIZE_SCHEDULED', {
           relativePath,
@@ -266,6 +336,7 @@ export class RepositorySynchronizer {
     }
 
     // Busca o arquivo indexado para comparação de hash
+    this.harness?.record('verification')
     const indexedFile = this.model.getFileByRelativePath(relativePath)
     if (!indexedFile) {
       // Arquivo novo (não indexado) → marca para indexação

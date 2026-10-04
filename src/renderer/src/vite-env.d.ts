@@ -7,12 +7,35 @@ import type { ActiveProjectState } from '../../shared/types/active-project-types
 import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
 import type { ChatGptIntegrationState } from '../../shared/types/chatgpt-integration-types'
 import type { SystemHealthState } from '../../shared/types/system-health-types'
+import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput } from '../../shared/types/academy-types'
+import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
+import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../../shared/types/github-types'
 
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag, DashResolutionReport, DashExecutionResult } from '../../shared/types'
 
 declare global {
   interface Window {
     codeAwareness: {
+      getAcademySnapshot: () => Promise<AcademySnapshot>
+      getAcademySkill: (id: string) => Promise<AcademySkillDetail>
+      getAcademyHistory: (id: string) => Promise<AcademySkillVersion[]>
+      createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>) => Promise<AcademySkillDetail>
+      updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>) => Promise<AcademySkillDetail>
+      archiveAcademySkill: (id: string, expectedVersion: number) => Promise<AcademySkillDetail>
+      restoreAcademySkill: (id: string, expectedVersion: number) => Promise<AcademySkillDetail>
+      setAcademyDestinationEnabled: (id: string, enabled: boolean) => Promise<unknown>
+      importAcademyDestination: (id: string) => Promise<AcademyImportItem[]>
+      resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage) => Promise<AcademySkillDetail>
+      getAcademyDistributionHealth: () => Promise<AcademyDistributionHealth>
+      listAcademyDistributionStates: (skillId?: string) => Promise<AcademyDistributionState[]>
+      reconcileAcademyDistribution: (destinationId?: string) => Promise<{ health: AcademyDistributionHealth; states: AcademyDistributionState[] }>
+      bootstrapAcademyOpenAiPlugin: (publishedVersion?: string) => Promise<AcademyOpenAiPluginProfile>
+      getAcademyOpenAiPublicationState: () => Promise<AcademyOpenAiPublicationState>
+      getAcademyPackageDistributionState: () => Promise<AcademyPackageDistributionState>
+      listAcademyOpenAiReleases: () => Promise<AcademyOpenAiRelease[]>
+      prepareAcademyOpenAiRelease: () => Promise<AcademyOpenAiRelease>
+      confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string) => Promise<AcademyOpenAiRelease>
+      revealAcademyOpenAiPackage: (releaseId: string) => Promise<boolean>
       getChatGptIntegrationState: () => Promise<ChatGptIntegrationState>
       onChatGptIntegrationChanged: (callback: (state: ChatGptIntegrationState) => void) => () => void
       getSystemHealthState: () => Promise<SystemHealthState>
@@ -47,6 +70,23 @@ declare global {
       generateSemanticDiff: (repoPath: string, selectedFiles?: string[]) => Promise<string>
       getAllFiles: (dirPath: string) => Promise<DiffFileStatus[]>
       generateCompressionMarkdown: (repoPath: string, selectedFiles: string[], settings?: CompressionSettingsPayload) => Promise<string>
+      listRepositories: () => Promise<RepositoryRecord[]>
+      refreshRepositories: () => Promise<RepositoryRecord[]>
+      importRepositoryRoot: () => Promise<RepositoryRecord[]>
+      importLocalRepository: () => Promise<RepositoryRecord[]>
+      hideRepository: (repositoryId: string) => Promise<RepositoryRecord[]>
+      activateRepository: (repositoryId: string) => Promise<{ success: boolean; data?: ActiveProjectState; error?: string }>
+      getGitHubStatus: () => Promise<GitHubStatusProjection>
+      connectGitHub: () => Promise<GitHubStatusProjection>
+      cancelGitHubConnect: () => Promise<GitHubStatusProjection>
+      openGitHubAuthorization: () => Promise<void>
+      openGitHubInstallation: () => Promise<void>
+      openGitHubManageAccess: () => Promise<void>
+      disconnectGitHub: () => Promise<GitHubStatusProjection>
+      refreshGitHub: () => Promise<GitHubOperationResult>
+      cloneGitHubRepository: (repositoryId: string) => Promise<GitHubOperationResult>
+      createGitHubRepository: (input: GitHubCreateRepositoryInput) => Promise<GitHubOperationResult>
+      publishGitHubRepository: (input: GitHubPublishRepositoryInput) => Promise<GitHubOperationResult>
       addRootFolder: () => Promise<ProjectInfo[]>
       addIndividualProject: () => Promise<ProjectInfo[]>
       getProjectsList: () => Promise<ProjectInfo[]>

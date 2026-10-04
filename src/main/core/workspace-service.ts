@@ -12,7 +12,7 @@ export class WorkspaceService {
   /**
    * Verifica fisicamente se a pasta existe e se possui um `.git` dentro dela.
    */
-  private async checkProjectGitInfo(folderPath: string): Promise<ProjectInfo | null> {
+  async inspectLocalProject(folderPath: string): Promise<ProjectInfo | null> {
     try {
       const stats = await fs.promises.stat(folderPath)
       if (!stats.isDirectory()) return null
@@ -38,7 +38,7 @@ export class WorkspaceService {
   /**
    * Lê o primeiro nível de uma pasta raiz e retorna todos os subdiretórios válidos.
    */
-  private async scanRootFolder(rootPath: string): Promise<ProjectInfo[]> {
+  async discoverRootFolder(rootPath: string): Promise<ProjectInfo[]> {
     const projects: ProjectInfo[] = []
     try {
       const entries = await fs.promises.readdir(rootPath, { withFileTypes: true })
@@ -53,7 +53,7 @@ export class WorkspaceService {
         }
 
         const fullPath = path.join(rootPath, name)
-        const projectInfo = await this.checkProjectGitInfo(fullPath)
+        const projectInfo = await this.inspectLocalProject(fullPath)
         
         if (projectInfo) {
           projects.push(projectInfo)
@@ -75,7 +75,7 @@ export class WorkspaceService {
 
     // 1. Processar pastas individuais (ganham precedência)
     for (const projPath of settings.individualProjects || []) {
-      const info = await this.checkProjectGitInfo(projPath)
+      const info = await this.inspectLocalProject(projPath)
       if (info) {
         // Normaliza chave para evitar duplicatas em Windows vs Unix
         allProjects.set(path.resolve(projPath), info)
@@ -84,7 +84,7 @@ export class WorkspaceService {
 
     // 2. Escanear pastas raízes
     for (const rootPath of settings.rootFolders || []) {
-      const scanned = await this.scanRootFolder(rootPath)
+      const scanned = await this.discoverRootFolder(rootPath)
       for (const info of scanned) {
         const key = path.resolve(info.path)
         if (!allProjects.has(key)) {

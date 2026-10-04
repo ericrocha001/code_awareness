@@ -21,6 +21,8 @@ import type { ContentIdentityPort } from './content-identity-port'
 import { telemetryService } from './telemetry-service'
 import type { ActiveProject } from '../../shared/types/active-project-types'
 import type { PersistedSymbolReference } from './symbol-reference-resolver'
+import { RepositoryFileMembership } from './repository-file-membership'
+import { GitService } from './git-service'
 
 function formatTimestampForFilename(date: Date = new Date()): string {
   const pad = (num: number) => String(num).padStart(2, '0')
@@ -36,7 +38,7 @@ function sanitizeFilenamePart(part: string): string {
   return part.replace(/[/\\:*?"<>|]/g, '_')
 }
 
-export type CodeMapReadinessCapability = 'FILE_INVENTORY' | 'STRUCTURE'
+export type CodeMapReadinessCapability = 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS'
 
 interface CodeMapInstance {
   model: RepositoryModel
@@ -51,11 +53,13 @@ const instances = new Map<string, CodeMapInstance>()
 export class CodeMapService {
   private readonly watcherService: WatcherService
   private readonly compressionService: CompressionPort
+  private readonly gitService: GitService
   private readonly pendingOpenRequests = new Map<string, Promise<void>>()
 
   constructor(watcherService: WatcherService, compressionService: CompressionPort) {
     this.watcherService = watcherService
     this.compressionService = compressionService
+    this.gitService = new GitService()
   }
 
   getOpenProjects(): ActiveProject[] {
@@ -98,12 +102,14 @@ export class CodeMapService {
     this.pendingOpenRequests.set(normalizedPath, openPromise)
 
     try {
-      const model = createRepositoryModel(normalizedPath)
+      const membership = new RepositoryFileMembership(normalizedPath, this.gitService)
+      const model = createRepositoryModel(normalizedPath, undefined, membership)
       model.pruneKnownBinaryFiles()
 
       const repositoryId = model.getRepositoryId()
       const synchronizer = new RepositorySynchronizer(model, repositoryId, {
-        periodicScanIntervalMs: options?.periodicScanIntervalMs
+        periodicScanIntervalMs: options?.periodicScanIntervalMs,
+        membership
       })
       const unsubscribeWatcherBridge = createWatcherBridge(normalizedPath, this.watcherService)
 
@@ -120,20 +126,84 @@ export class CodeMapService {
         const cid = telemetryService.startOperation('OPEN_REPO_MAINTENANCE')
         telemetryService.log(cid, 'CODE_MAP', 'BACKGROUND_MAINTENANCE_STARTED', { repoPath: normalizedPath })
         const startedAt = Date.now()
+
+        /**
+         * Executa um step de manutenção com telemetria STARTED/COMPLETED/FAILED
+         * usando o correlation ID da sessão. Relança a exceção original sem engolir.
+         * Todos os steps da mesma sessão compartilham o mesmo cid causal.
+         */
+        const runStep = async (
+          startedEvent: string,
+          completedEvent: string,
+          failedEvent: string,
+          fn: () => Promise<unknown> | undefined
+        ): Promise<void> => {
+          telemetryService.log(cid, 'CODE_MAP', startedEvent, { repoPath: normalizedPath })
+          try {
+            await fn?.()
+            telemetryService.log(cid, 'CODE_MAP', completedEvent, { repoPath: normalizedPath })
+          } catch (stepErr) {
+            telemetryService.logError(cid, 'CODE_MAP', failedEvent, {
+              repoPath: normalizedPath,
+              error: stepErr instanceof Error ? stepErr.message : String(stepErr)
+            })
+            throw stepErr
+          }
+        }
+
         try {
-          // Backfill runs first so reconcile can compare hashes for legacy files.
-          await model.backfillContentHashes()
+          // Step 1: Content Identity Backfill — must run first so reconcile can compare hashes.
+          await runStep(
+            'BACKFILL_STARTED',
+            'BACKFILL_COMPLETED',
+            'BACKFILL_FAILED',
+            () => model.backfillContentHashes()
+          )
           await new Promise((resolve) => setImmediate(resolve))
-          await model.backfillContextReferences()
+
+          // Step 2: Context Reference Backfill
+          await runStep(
+            'MAINTENANCE_CONTEXT_REF_STARTED',
+            'MAINTENANCE_CONTEXT_REF_COMPLETED',
+            'MAINTENANCE_CONTEXT_REF_FAILED',
+            () => model.backfillContextReferences()
+          )
           await new Promise((resolve) => setImmediate(resolve))
-          await model.backfillTokenMetadata?.()
+
+          // Step 3: Token Metadata Backfill
+          await runStep(
+            'MAINTENANCE_TOKEN_METADATA_STARTED',
+            'MAINTENANCE_TOKEN_METADATA_COMPLETED',
+            'MAINTENANCE_TOKEN_METADATA_FAILED',
+            () => model.backfillTokenMetadata?.() ?? Promise.resolve()
+          )
           await new Promise((resolve) => setImmediate(resolve))
-          // Offline reconcile: detects files created/deleted/changed while app was closed.
+
+          // Step 4: Offline reconcile — detects files created/deleted/changed while app was closed.
+          // Note: reconcileWithDisk emits RECONCILE_STARTED/COMPLETED/FAILED internally.
           await model.reconcileWithDisk({ indexUnexpected: true })
           await new Promise((resolve) => setImmediate(resolve))
-          await model.backfillTextDocuments?.()
-          await model.backfillDeclarationSignatures?.()
+
+          // Step 5: Text Document Backfill
+          await runStep(
+            'MAINTENANCE_TEXT_DOCUMENTS_STARTED',
+            'MAINTENANCE_TEXT_DOCUMENTS_COMPLETED',
+            'MAINTENANCE_TEXT_DOCUMENTS_FAILED',
+            () => model.backfillTextDocuments?.() ?? Promise.resolve()
+          )
+
+          // Step 6: Declaration Signature Backfill
+          await runStep(
+            'MAINTENANCE_DECLARATION_SIGS_STARTED',
+            'MAINTENANCE_DECLARATION_SIGS_COMPLETED',
+            'MAINTENANCE_DECLARATION_SIGS_FAILED',
+            () => model.backfillDeclarationSignatures?.() ?? Promise.resolve()
+          )
+
+          // Step 7: Symbol Reference Backfill
+          // Note: backfillSymbolReferences emits BACKFILL_SYMBOL_REFERENCES_STARTED/COMPLETED/FAILED internally.
           await model.backfillSymbolReferences?.()
+
           await new Promise((resolve) => setImmediate(resolve))
           // Sync in-memory modified set with the updated DB state.
           synchronizer.reconcileMemoryWithDatabase()
@@ -156,8 +226,13 @@ export class CodeMapService {
         unsubscribeWatcherBridge,
         backgroundMaintenance
       })
+      telemetryService.log(telemetryService.startOperation('REPO_OPEN'), 'CODE_MAP', 'REPO_OPENED', { repoPath: normalizedPath })
       resolveOpen()
     } catch (error) {
+      telemetryService.logError(telemetryService.startOperation('REPO_OPEN'), 'CODE_MAP', 'REPO_OPEN_FAILED', {
+        repoPath: normalizedPath,
+        error: error instanceof Error ? error.message : String(error)
+      })
       rejectOpen(error)
     } finally {
       this.pendingOpenRequests.delete(normalizedPath)
@@ -176,6 +251,7 @@ export class CodeMapService {
     instance.unsubscribeWatcherBridge()
 
     instances.delete(normalizedPath)
+    telemetryService.log(telemetryService.startOperation('REPO_CLOSE'), 'CODE_MAP', 'REPO_CLOSED', { repoPath: normalizedPath })
   }
 
   async indexRepository(repoPath: string): Promise<{ filesIndexed: number; elementsExtracted: number }> {
@@ -212,6 +288,18 @@ export class CodeMapService {
     const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
     await this.openRepository(normalizedPath)
     if (capability === 'FILE_INVENTORY' || capability === 'STRUCTURE') {
+      return
+    }
+    if (capability === 'RELATIONSHIPS') {
+      // RELATIONSHIPS está pronto quando:
+      // 1. O repositório está aberto (openRepository garantido acima)
+      // 2. O synchronizer está idle — mudanças pendentes foram processadas e
+      //    updateFileContent já resolveu os relacionamentos para cada arquivo
+      //
+      // Não esperamos backgroundMaintenance completo (backfills de token/symbol/text)
+      // porque esses backfills não afetam a correção dos relacionamentos estruturais.
+      const instance = this.ensureInstance(normalizedPath)
+      await instance.synchronizer.waitForIdle()
       return
     }
   }

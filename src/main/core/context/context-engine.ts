@@ -66,7 +66,7 @@ export class ContextEngine implements ContextNavigationPort {
 
   private async awaitInstrumentedReadiness(
     repoPath: string,
-    capability: 'FILE_INVENTORY' | 'STRUCTURE',
+    capability: 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS',
     tool: string,
     context?: NavigationInvocationContext
   ): Promise<void> {
@@ -179,18 +179,23 @@ export class ContextEngine implements ContextNavigationPort {
     const paths = this.validatePaths(relativePaths)
     const direction = options.direction ?? 'both'
     if (!['in', 'out', 'both'].includes(direction)) throw new ContextNavigationError('INVALID_ARGUMENT', 'Invalid relationship direction')
-    await this.awaitInstrumentedSnapshot(repoPath, 'get_relationships', context)
+    await this.awaitInstrumentedReadiness(repoPath, 'RELATIONSHIPS', 'get_relationships', context)
+    emitTrace(context, 'codescope-index-query-started', 'started', { tool: 'get_relationships' })
     const files = this.codeMap.getFiles(repoPath)
     const selected = this.selectFiles(files, paths)
     const byId = new Map(files.map((file) => [file.id, file.relativePath]))
     const index = projectFileRelationships(files, this.codeMap.getElements(repoPath), this.codeMap.getRelationships(repoPath))
+    emitTrace(context, 'codescope-index-query-completed', 'success', { tool: 'get_relationships' })
+    emitTrace(context, 'codescope-result-assembly-started', 'started', { tool: 'get_relationships' })
     const edges = (ids: Set<string> | undefined): FileRelationship[] => [...(ids ?? [])].map((id) => byId.get(id)!).sort()
       .map((relativePath) => ({ relativePath, ...(options.details ? { type: 'imports' as const } : {}) }))
-    return { files: selected.map((file) => ({
+    const result = { files: selected.map((file) => ({
       relativePath: file.relativePath,
       ...(direction !== 'in' ? { out: edges(index.out.get(file.id)) } : {}),
       ...(direction !== 'out' ? { in: edges(index.in.get(file.id)) } : {})
     })) }
+    emitTrace(context, 'codescope-result-assembly-completed', 'success', { tool: 'get_relationships' })
+    return result
   }
 
   async inspectFiles(repoPath: string, relativePaths: string[], options: InspectFilesOptions = {}, context?: NavigationInvocationContext): Promise<InspectFilesResult> {
@@ -284,7 +289,7 @@ export class ContextEngine implements ContextNavigationPort {
     if (!['up', 'down', 'both'].includes(direction)) {
       throw new ContextNavigationError('INVALID_ARGUMENT', 'Invalid symbol hierarchy direction')
     }
-    await this.awaitInstrumentedSnapshot(repoPath, 'get_symbol_hierarchy', context)
+    await this.awaitInstrumentedReadiness(repoPath, 'RELATIONSHIPS', 'get_symbol_hierarchy', context)
     const elements = this.codeMap.getElements(repoPath)
     const elementsById = new Map(elements.map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))

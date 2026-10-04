@@ -9,6 +9,7 @@ import {
   executeListArtifacts,
   executeGetArtifact
 } from './continuum-mcp'
+import { contextualizeTimestamps, toLocalTimestamp } from './continuum-time'
 import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { ProjectContinuumSession } from './project-continuum-session'
@@ -449,5 +450,148 @@ describe('Continuum MCP — Tool Definitions and Execution', () => {
     const listRes = await adapter.callTool('list_artifacts', {})
     expect(listRes.isError).toBe(true)
     expect(listRes.content[0].text).toContain('CONTINUUM_UNAVAILABLE')
+  })
+
+  it('14. Fluxo MCP vivo: artifact publicado pós-ativação aparece em list_artifacts/get_artifact sem reativação', async () => {
+    const storageBase = tempDir('storage-')
+    const repo = tempDir('repo-live-mcp-')
+
+    const session = new ProjectContinuumSession(storageBase)
+    session.activate(repo)
+    const reader = session.getActiveReader()!
+    const adapter = new ContextNavigationMcpAdapter(
+      mockNavigation(),
+      undefined,
+      undefined,
+      undefined,
+      reader
+    )
+
+    const emptyList = JSON.parse((await adapter.callTool('list_artifacts', {})).content[0].text)
+    expect(emptyList.count).toBe(0)
+
+    const liveMarkdown = '# Live MCP Handoff'
+    new ArtifactInbox(repo).write({
+      protocol: ENVELOPE_PROTOCOL,
+      artifactId: 'art-live-mcp',
+      type: 'IMPLEMENTATION_HANDOFF',
+      schemaVersion: 1,
+      title: 'Live MCP Handoff',
+      producerRole: 'IMPLEMENTER',
+      repositoryKey: deriveRepositoryKey(repo),
+      createdAt: new Date().toISOString(),
+      sourceFingerprint: null,
+      gitHead: null,
+      contentHash: computeContentHash(liveMarkdown),
+      rawMarkdown: liveMarkdown
+    })
+
+    const listRes = await adapter.callTool('list_artifacts', {})
+    expect(listRes.isError).toBeUndefined()
+    const listData = JSON.parse(listRes.content[0].text)
+    expect(listData.artifacts.map((a: any) => a.artifactId)).toContain('art-live-mcp')
+
+    const getRes = await adapter.callTool('get_artifact', { artifactId: 'art-live-mcp' })
+    expect(getRes.isError).toBeUndefined()
+    const getData = JSON.parse(getRes.content[0].text)
+    expect(getData.rawMarkdown).toBe(liveMarkdown)
+
+    session.dispose()
+  })
+})
+
+describe('Continuum MCP — Contextualização temporal local', () => {
+  function localReaderFor(artifact: Artifact): IArtifactReader {
+    const summary: ArtifactSummary = {
+      artifactId: artifact.artifactId,
+      type: artifact.type,
+      schemaVersion: artifact.schemaVersion,
+      title: artifact.title,
+      producerRole: artifact.producerRole,
+      repositoryKey: artifact.repositoryKey,
+      createdAt: artifact.createdAt,
+      ingestedAt: artifact.ingestedAt,
+      sourceFingerprint: artifact.sourceFingerprint,
+      gitHead: artifact.gitHead,
+      contentHash: artifact.contentHash
+    }
+    return {
+      get: () => artifact,
+      list: () => [summary]
+    }
+  }
+
+  it('15. Caso real: UTC 2026-09-23T01:49:01.764Z vira véspera às 22:49 em America/Sao_Paulo', () => {
+    const createdAt = '2026-09-23T01:48:29.920Z'
+    const ingestedAt = '2026-09-23T01:49:01.764Z'
+    const local = contextualizeTimestamps(createdAt, ingestedAt, 'America/Sao_Paulo')
+
+    expect(local.timeZone).toBe('America/Sao_Paulo')
+    expect(local.createdAtLocal).toBe('2026-09-22T22:48:29.920-03:00')
+    expect(local.ingestedAtLocal).toBe('2026-09-22T22:49:01.764-03:00')
+    expect(Date.parse(local.createdAtLocal)).toBe(Date.parse(createdAt))
+    expect(Date.parse(local.ingestedAtLocal)).toBe(Date.parse(ingestedAt))
+  })
+
+  it('16. Offset positivo e mudança de data em Asia/Tokyo preservam o mesmo instante', () => {
+    const utc = '2026-09-22T16:30:00.000Z'
+    const converted = toLocalTimestamp(utc, 'Asia/Tokyo')
+
+    expect(converted).toBe('2026-09-23T01:30:00.000+09:00')
+    expect(Date.parse(converted)).toBe(Date.parse(utc))
+  })
+
+  it('17. Regra sazonal: America/New_York usa offsets diferentes no inverno e no verão', () => {
+    const winter = toLocalTimestamp('2026-01-15T12:00:00.000Z', 'America/New_York')
+    const summer = toLocalTimestamp('2026-07-15T12:00:00.000Z', 'America/New_York')
+
+    expect(winter.endsWith('-05:00')).toBe(true)
+    expect(summer.endsWith('-04:00')).toBe(true)
+    expect(Date.parse(winter)).toBe(Date.parse('2026-01-15T12:00:00.000Z'))
+    expect(Date.parse(summer)).toBe(Date.parse('2026-07-15T12:00:00.000Z'))
+  })
+
+  it('18. Fallback usa UTC quando o timezone do sistema não pode ser determinado', () => {
+    const local = contextualizeTimestamps(
+      '2026-09-23T01:49:01.764Z',
+      '2026-09-23T01:49:01.764Z',
+      'Invalid/Zone'
+    )
+
+    expect(local.timeZone).toBe('UTC')
+    expect(local.ingestedAtLocal).toBe('2026-09-23T01:49:01.764+00:00')
+  })
+
+  it('19. Mesmo artifact produz representações locais distintas por timezone com UTC idêntico', () => {
+    const utc = '2026-09-23T01:49:01.764Z'
+    const saoPaulo = toLocalTimestamp(utc, 'America/Sao_Paulo')
+    const tokyo = toLocalTimestamp(utc, 'Asia/Tokyo')
+
+    expect(saoPaulo).not.toBe(tokyo)
+    expect(Date.parse(saoPaulo)).toBe(Date.parse(tokyo))
+    expect(Date.parse(saoPaulo)).toBe(Date.parse(utc))
+  })
+
+  it('20. list_artifacts e get_artifact apresentam a mesma contextualização sem alterar UTC nem persistir campos locais', () => {
+    const artifact = sampleArtifact({
+      createdAt: '2026-09-23T01:48:29.920Z',
+      ingestedAt: '2026-09-23T01:49:01.764Z'
+    })
+    const reader = localReaderFor(artifact)
+
+    const listData = JSON.parse(executeListArtifacts(reader, {}).content[0].text)
+    const getData = JSON.parse(executeGetArtifact(reader, { artifactId: artifact.artifactId }).content[0].text)
+
+    expect(listData.artifacts[0].createdAt).toBe(artifact.createdAt)
+    expect(listData.artifacts[0].ingestedAt).toBe(artifact.ingestedAt)
+    expect(getData.createdAt).toBe(artifact.createdAt)
+    expect(getData.ingestedAt).toBe(artifact.ingestedAt)
+
+    expect(listData.artifacts[0].createdAtLocal).toBe(getData.createdAtLocal)
+    expect(listData.artifacts[0].ingestedAtLocal).toBe(getData.ingestedAtLocal)
+    expect(listData.artifacts[0].timeZone).toBe(getData.timeZone)
+    expect(Date.parse(getData.createdAtLocal)).toBe(Date.parse(artifact.createdAt))
+    expect(Date.parse(getData.ingestedAtLocal)).toBe(Date.parse(artifact.ingestedAt))
+    expect(reader.get(artifact.artifactId)!).not.toHaveProperty('createdAtLocal')
   })
 })

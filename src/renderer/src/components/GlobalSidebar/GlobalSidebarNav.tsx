@@ -14,7 +14,7 @@ interface GlobalSidebarNavProps {
 
 export const GlobalSidebarNav: React.FC<GlobalSidebarNavProps> = ({ items, activeTab, onSelect, isSidebarOpen }) => {
   return (
-    <nav aria-label="Navegação principal">
+    <nav className="global-sidebar-nav" aria-label="Seções do produto">
       <ul className="global-sidebar-nav-list">
         {items.map((item) => {
           const LucideIconComponent = item.lucideIcon

@@ -3,7 +3,9 @@
 */
 
 import { spawn } from 'child_process'
-import { existsSync, statSync } from 'fs'
+import { createHash } from 'node:crypto'
+import { closeSync, copyFileSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
 import { join } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
@@ -40,27 +42,159 @@ const GIT_STATUS_CODE_MAP: Record<string, DiffFileStatus['changeType']> = {
 }
 
 export class GitService implements FileListingPort {
+  async commitInspectedIndex(dirPath: string, message: string, expectedHead: string | null, expectedIndexRevision: string): Promise<string> {
+    const indexPath = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'index'], dirPath)).trim()
+    let lock: number
+    try { lock = openSync(`${indexPath}.lock`, 'wx') } catch { throw new Error('GIT_STATE_CHANGED') }
+    let temporary: string | undefined
+    try {
+      if (await this.getCurrentCommitHash(dirPath) !== expectedHead || await this.getIndexRevision(dirPath) !== expectedIndexRevision) throw new Error('GIT_STATE_CHANGED')
+      if (!await this.hasStagedChanges(dirPath)) throw new Error('NOTHING_TO_COMMIT')
+      temporary = mkdtempSync(join(tmpdir(), 'git-inspected-index-'))
+      copyFileSync(indexPath, join(temporary, 'index'))
+      const tree = (await this.runGit(['write-tree'], dirPath, { env: { ...process.env, GIT_INDEX_FILE: join(temporary, 'index') } })).trim()
+      const args: string[] = []
+      try { await this.runGit(['var', 'GIT_AUTHOR_IDENT'], dirPath) }
+      catch { args.push('-c', 'user.name=Code Awareness', '-c', 'user.email=code-awareness@local') }
+      args.push('commit-tree', tree, ...(expectedHead ? ['-p', expectedHead] : []), '-m', message)
+      const mergeHeadPath = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'], dirPath)).trim()
+      if (existsSync(mergeHeadPath)) for (const parent of readFileSync(mergeHeadPath, 'utf8').trim().split('\n')) args.push('-p', parent)
+      const sha = (await this.runGit(args, dirPath)).trim()
+      try { await this.runGit(['update-ref', '-m', message.split('\n')[0], 'HEAD', sha, expectedHead ?? '0'.repeat(40)], dirPath) }
+      catch { throw new Error('GIT_STATE_CHANGED') }
+      if (existsSync(mergeHeadPath)) {
+        for (const file of ['MERGE_HEAD', 'MERGE_MSG', 'MERGE_MODE']) rmSync(join(mergeHeadPath, '..', file), { force: true })
+      }
+      return sha
+    } finally {
+      closeSync(lock); rmSync(`${indexPath}.lock`, { force: true })
+      if (temporary) rmSync(temporary, { recursive: true, force: true })
+    }
+  }
+  async getOperationsStatus(dirPath: string): Promise<string> {
+    return this.runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], dirPath)
+  }
+
+  async getIndexRevision(dirPath: string): Promise<string> {
+    return createHash('sha256').update(await this.runGit(['ls-files', '--stage', '-z'], dirPath)).digest('hex')
+  }
+
+  async getGitOperation(dirPath: string): Promise<string | null> {
+    const gitDir = (await this.runGit(['rev-parse', '--absolute-git-dir'], dirPath)).trim()
+    for (const [file, operation] of [['rebase-merge', 'REBASE'], ['rebase-apply', 'REBASE'], ['MERGE_HEAD', 'MERGE'], ['CHERRY_PICK_HEAD', 'CHERRY_PICK'], ['REVERT_HEAD', 'REVERT']] as const) {
+      if (existsSync(join(gitDir, file))) return operation
+    }
+    return null
+  }
+
+  async getUpstreamState(dirPath: string): Promise<{ upstream: string | null; ahead: number; behind: number }> {
+    try {
+      const upstream = (await this.runGit(['rev-parse', '--abbrev-ref', '@{upstream}'], dirPath)).trim()
+      const counts = (await this.runGit(['rev-list', '--left-right', '--count', 'HEAD...@{upstream}'], dirPath)).trim().split(/\s+/).map(Number)
+      return { upstream, ahead: counts[0], behind: counts[1] }
+    } catch { return { upstream: null, ahead: 0, behind: 0 } }
+  }
+
+  async validateBranch(dirPath: string, branch: string): Promise<void> {
+    await this.runGit(['check-ref-format', '--branch', branch], dirPath)
+  }
+
+  async resolveCommit(dirPath: string, ref: string): Promise<string> {
+    return (await this.runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], dirPath)).trim()
+  }
+
+  async getOperationsDiff(dirPath: string, paths: string[], mode: 'WORKTREE' | 'STAGED' | 'BETWEEN_REFS', base?: string, head?: string): Promise<string> {
+    const args = ['--literal-pathspecs', 'diff', '--no-ext-diff', '--no-textconv', '--no-color']
+    if (mode === 'STAGED') args.push('--cached')
+    if (mode === 'BETWEEN_REFS') args.push(base!, head!)
+    let patch = await this.runGit([...args, '--', ...paths], dirPath)
+    if (mode === 'WORKTREE') {
+      const untracked = new Set((await this.runGit(['--literal-pathspecs', 'ls-files', '--others', '--exclude-standard', '-z', '--', ...paths], dirPath)).split('\0').filter(Boolean))
+      for (const path of untracked) patch += await this.runGit(['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--', '/dev/null', path], dirPath, { allowExitOne: true })
+    }
+    return patch
+  }
+
+  async getOperationsHistory(dirPath: string, ref: string, limit: number, path?: string): Promise<string> {
+    return this.runGit(['--literal-pathspecs', 'log', `--max-count=${limit}`, '--format=%H%x00%P%x00%an%x00%aI%x00%s', ref, '--', ...(path ? [path] : [])], dirPath)
+  }
+
+  async getCommittedPaths(dirPath: string, sha: string): Promise<string[]> {
+    return (await this.runGit(['diff-tree', '--root', '--first-parent', '--no-commit-id', '--name-only', '-r', '-z', sha], dirPath)).split('\0').filter(Boolean)
+  }
+
+  async unstagePaths(dirPath: string, paths: string[]): Promise<void> {
+    if (await this.hasCommits(dirPath)) await this.runGit(['--literal-pathspecs', 'restore', '--staged', '--', ...paths], dirPath)
+    else await this.runGit(['--literal-pathspecs', 'rm', '--cached', '--ignore-unmatch', '--', ...paths], dirPath)
+  }
+
+  async listBranches(dirPath: string): Promise<string> {
+    return this.runGit(['for-each-ref', '--format=%(refname:short)%00%(objectname)%00%(HEAD)', 'refs/heads/'], dirPath)
+  }
+
+  async createBranch(dirPath: string, branch: string, startPoint: string): Promise<void> {
+    await this.runGit(['branch', branch, startPoint], dirPath)
+  }
+
+  async switchBranch(dirPath: string, branch: string): Promise<void> {
+    await this.runGit(['switch', '--no-guess', branch], dirPath)
+  }
+
+  async renameBranch(dirPath: string, branch: string, newBranch: string): Promise<void> {
+    await this.runGit(['branch', '-m', branch, newBranch], dirPath)
+  }
+
+  async deleteBranch(dirPath: string, branch: string): Promise<void> {
+    await this.runGit(['branch', '-d', branch], dirPath)
+  }
+
+  async mergeBranch(dirPath: string, source: string, mode: 'FF_ONLY' | 'MERGE'): Promise<void> {
+    await this.runGit(['merge', mode === 'FF_ONLY' ? '--ff-only' : '--no-edit', source], dirPath)
+  }
+
+  async abortMerge(dirPath: string): Promise<void> {
+    await this.runGit(['merge', '--abort'], dirPath)
+  }
+
+  async revertCommit(dirPath: string, commit: string): Promise<void> {
+    await this.runGit(['revert', '--no-edit', commit], dirPath)
+  }
+
+  async fetchRemote(dirPath: string, remote: string, token?: string): Promise<void> {
+    const execute = (env?: NodeJS.ProcessEnv) => this.runGit(['fetch', '--', remote], dirPath, { timeoutMs: 120_000, env })
+    if (token) await this.withEphemeralCredential(token, execute)
+    else await execute({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
+  }
+
+  async pullFastForward(dirPath: string, remote: string, branch: string, token?: string): Promise<void> {
+    const execute = (env?: NodeJS.ProcessEnv) => this.runGit(['pull', '--ff-only', '--', remote, branch], dirPath, { timeoutMs: 120_000, env })
+    if (token) await this.withEphemeralCredential(token, execute)
+    else await execute({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
+  }
+
   async isGitRepository(dirPath: string): Promise<boolean> {
     return existsSync(join(dirPath, '.git'))
   }
 
-  private runGit(args: string[], cwd: string): Promise<string> {
+  private runGit(args: string[], cwd: string, options?: { timeoutMs?: number; env?: NodeJS.ProcessEnv; allowExitOne?: boolean }): Promise<string> {
     return new Promise((resolve, reject) => {
       let stdout = ''
       let stderr = ''
-      const proc = spawn('git', args, { cwd, shell: false })
+      const proc = spawn('git', args, { cwd, shell: false, env: options?.env })
+      proc.stdout.setEncoding('utf8')
+      proc.stderr.setEncoding('utf8')
 
       // Timeout de proteção contra processos Git travados
       const timer = setTimeout(() => {
         proc.kill()
         reject(new Error('Git process timed out'))
-      }, GIT_TIMEOUT_MS)
+      }, options?.timeoutMs ?? GIT_TIMEOUT_MS)
 
       proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
       proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
       proc.on('close', (code) => {
         clearTimeout(timer)
-        if (code === 0) resolve(stdout)
+        if (code === 0 || options?.allowExitOne && code === 1) resolve(stdout)
         else reject(new Error(stderr.trim() || `git exited with code ${code}`))
       })
       proc.on('error', (err) => {
@@ -68,6 +202,146 @@ export class GitService implements FileListingPort {
         reject(err)
       })
     })
+  }
+
+  async getRemoteUrl(dirPath: string, remote = 'origin'): Promise<string | null> {
+    try {
+      const value = await this.runGit(['remote', 'get-url', remote], dirPath)
+      return value.trim() || null
+    } catch { return null }
+  }
+
+  async addRemote(dirPath: string, remote: string, url: string): Promise<void> {
+    await this.runGit(['remote', 'add', remote, url], dirPath)
+  }
+
+  async getCurrentBranch(dirPath: string): Promise<string | null> {
+    try {
+      const value = await this.runGit(['branch', '--show-current'], dirPath)
+      return value.trim() || null
+    } catch { return null }
+  }
+
+  async hasCommits(dirPath: string): Promise<boolean> {
+    return (await this.getCurrentCommitHash(dirPath)) !== null
+  }
+
+  async cloneAuthenticated(remoteUrl: string, parentPath: string, directoryName: string, token: string): Promise<string> {
+    const destination = join(parentPath, directoryName)
+    if (!existsSync(parentPath) || existsSync(destination)) throw new Error('LOCAL_PATH_CONFLICT')
+    try {
+      await this.withEphemeralCredential(token, (env) =>
+        this.runGit(['clone', '--', remoteUrl, directoryName], parentPath, { timeoutMs: 120_000, env })
+      )
+    } catch (error) {
+      rmSync(destination, { recursive: true, force: true })
+      throw error
+    }
+    return destination
+  }
+
+  async pushAuthenticated(dirPath: string, remote: string, branch: string, token: string, expectedHead?: string): Promise<void> {
+    await this.withEphemeralCredential(token, (env) =>
+      this.runGit(['push', ...(expectedHead ? [] : ['--set-upstream']), '--', remote, expectedHead ? `${expectedHead}:refs/heads/${branch}` : branch], dirPath, { timeoutMs: 120_000, env })
+    )
+  }
+
+  async pushUrlAuthenticated(dirPath: string, remoteUrl: string, branch: string, token: string): Promise<void> {
+    await this.withEphemeralCredential(token, (env) =>
+      this.runGit(['push', '--', remoteUrl, `${branch}:refs/heads/${branch}`], dirPath, { timeoutMs: 120_000, env })
+    )
+  }
+
+  async push(dirPath: string, remote: string, branch: string, expectedHead?: string): Promise<void> {
+    await this.runGit(['push', '--', remote, expectedHead ? `${expectedHead}:refs/heads/${branch}` : branch], dirPath, { timeoutMs: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
+  }
+
+  async stagePaths(dirPath: string, relativePaths: string[]): Promise<void> {
+    if (relativePaths.length === 0) return
+    await this.runGit(['--literal-pathspecs', '-c', 'core.quotePath=false', 'add', '-A', '--', ...relativePaths], dirPath)
+  }
+
+  async hasWorkingTreeChanges(dirPath: string, subPath?: string): Promise<boolean> {
+    const args = ['-c', 'core.quotePath=false', 'status', '--porcelain']
+    if (subPath) args.push('--', subPath)
+    try {
+      const stdout = await this.runGit(args, dirPath)
+      return stdout.trim().length > 0
+    } catch {
+      return false
+    }
+  }
+
+  async hasStagedChanges(dirPath: string): Promise<boolean> {
+    try {
+      const stdout = await this.runGit(['diff', '--cached', '--name-only'], dirPath)
+      return stdout.trim().length > 0
+    } catch {
+      return false
+    }
+  }
+
+  async commit(dirPath: string, message: string, author?: { name: string; email: string }): Promise<string | null> {
+    const hasStaged = await this.hasStagedChanges(dirPath)
+    if (!hasStaged) return null
+
+    let hasIdentity = false
+    try {
+      const ident = await this.runGit(['var', 'GIT_AUTHOR_IDENT'], dirPath)
+      if (ident.trim().length > 0) hasIdentity = true
+    } catch {
+      hasIdentity = false
+    }
+
+    const args: string[] = ['-c', 'core.quotePath=false']
+    if (!hasIdentity) {
+      const name = author?.name ?? 'Code Awareness'
+      const email = author?.email ?? 'code-awareness@local'
+      args.push('-c', `user.name=${name}`, '-c', `user.email=${email}`)
+    }
+    args.push('commit', '-m', message)
+    await this.runGit(args, dirPath)
+    return await this.getCurrentCommitHash(dirPath)
+  }
+
+  async isRemoteDiverged(dirPath: string, remote: string, branch: string, token: string): Promise<boolean> {
+    try {
+      await this.withEphemeralCredential(token, (env) =>
+        this.runGit(['push', '--dry-run', remote, branch], dirPath, { timeoutMs: 30_000, env })
+      )
+      return false
+    } catch (error: any) {
+      const msg = String(error?.message ?? '').toLowerCase()
+      if (
+        msg.includes('non-fast-forward') ||
+        msg.includes('fetch first') ||
+        msg.includes('[rejected]') ||
+        msg.includes('behind')
+      ) {
+        return true
+      }
+      throw error
+    }
+  }
+
+
+  private async withEphemeralCredential<T>(token: string, operation: (env: NodeJS.ProcessEnv) => Promise<T>): Promise<T> {
+    const directory = mkdtempSync(join(tmpdir(), 'code-awareness-git-'))
+    const helper = join(directory, process.platform === 'win32' ? 'askpass.cmd' : 'askpass.sh')
+    const content = process.platform === 'win32'
+      ? '@echo off\r\necho %~1 | findstr /I "Username" >nul\r\nif %errorlevel%==0 (echo x-access-token) else (echo %CODE_AWARENESS_GIT_TOKEN%)\r\n'
+      : '#!/bin/sh\ncase "$1" in *Username*) printf "%s\\n" "x-access-token" ;; *) printf "%s\\n" "$CODE_AWARENESS_GIT_TOKEN" ;; esac\n'
+    try {
+      writeFileSync(helper, content, { mode: 0o700, flag: 'wx' })
+      return await operation({
+        ...process.env,
+        GIT_ASKPASS: helper,
+        GIT_TERMINAL_PROMPT: '0',
+        CODE_AWARENESS_GIT_TOKEN: token
+      })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
   }
 
   async getModifiedFiles(dirPath: string): Promise<DiffFileStatus[]> {
@@ -259,6 +533,45 @@ export class GitService implements FileListingPort {
       // Repositório sem commits ou erro ao executar git rev-parse
       return null
     }
+  }
+
+  /**
+   * Verifica em batch se os paths dados são ignorados pelo Git (`.gitignore` + nested).
+   * Usa `git check-ignore --stdin -z` para evitar um processo por path.
+   *
+   * Retorna um Set com os paths que são ignorados.
+   * Paths fora do repositório ou erros de processo resultam em Set vazio (fail-open: trata como não-ignorado).
+   */
+  async checkIgnoreBatch(repoPath: string, relativePaths: string[]): Promise<Set<string>> {
+    if (relativePaths.length === 0) return new Set()
+    // Input separado por NUL para lidar com espaços e caracteres especiais
+    const input = relativePaths.join('\0') + '\0'
+    const ignored = new Set<string>()
+    return new Promise((resolve) => {
+      let stdout = ''
+      // exit code 1 = nenhum ignorado; exit code 0 = algum ignorado — ambos são sucesso operacional
+      const proc = spawn('git', ['check-ignore', '--stdin', '-z'], { cwd: repoPath, shell: false })
+      const timer = setTimeout(() => {
+        proc.kill()
+        resolve(ignored) // timeout → fail-open
+      }, GIT_TIMEOUT_MS)
+      proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      proc.stdin.write(input)
+      proc.stdin.end()
+      proc.on('close', () => {
+        clearTimeout(timer)
+        // Saída também é separada por NUL
+        for (const p of stdout.split('\0')) {
+          const trimmed = p.trim()
+          if (trimmed) ignored.add(trimmed)
+        }
+        resolve(ignored)
+      })
+      proc.on('error', () => {
+        clearTimeout(timer)
+        resolve(ignored) // erro de spawn → fail-open
+      })
+    })
   }
 
   private parseGitStatus(output: string): DiffFileStatus[] {

@@ -1,72 +1,86 @@
-// Responsabilidades do Script
-//
-// 1. Interceptar chamadas IPC do render process relacionadas a projetos e pastas raízes.
-// 2. Acionar as caixas de diálogo nativas do sistema para seleção de pastas.
-// 3. Orquestrar a persistência nas configurações e acionar o WorkspaceService para devolver a lista atualizada.
-
-import { ipcMain, dialog, BrowserWindow } from 'electron'
-import { SettingsService } from '../core/settings-service'
-import { WorkspaceService } from '../core/workspace-service'
+import { BrowserWindow, dialog, ipcMain } from 'electron'
+import type { SettingsService } from '../core/settings-service'
+import type { RepositoryCatalogService } from '../repository-catalog/repository-catalog-service'
+import type { RepositoryRuntimeService } from '../repository-catalog/repository-runtime-service'
 
 export function registerWorkspaceHandlers(
   settingsService: SettingsService,
-  workspaceService: WorkspaceService
-) {
-  ipcMain.handle('workspace:add-root-folder', async (event) => {
+  repositories: RepositoryCatalogService,
+  runtime: RepositoryRuntimeService
+): void {
+  const chooseDirectory = async (event: Electron.IpcMainInvokeEvent, title: string): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
-    const result = await dialog.showOpenDialog(win, {
-      title: 'Adicionar Pasta Raiz (Múltiplos Projetos)',
-      properties: ['openDirectory']
-    })
+    const result = await dialog.showOpenDialog(win, { title, properties: ['openDirectory'] })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  }
 
-    if (!result.canceled && result.filePaths.length > 0) {
-      const folderPath = result.filePaths[0]
+  const importRoot = async (event: Electron.IpcMainInvokeEvent) => {
+    const rootPath = await chooseDirectory(event, 'Adicionar Pasta Raiz (Múltiplos Repositórios)')
+    if (rootPath) {
       const settings = settingsService.loadSettings()
-      
-      if (!settings.rootFolders.includes(folderPath)) {
-        settings.rootFolders.push(folderPath)
+      if (!settings.rootFolders.includes(rootPath)) {
+        settings.rootFolders.push(rootPath)
         settingsService.saveSettings(settings)
       }
-      
-      return await workspaceService.getProjectsList(settings)
+      await repositories.importRoot(rootPath)
     }
+    return repositories.list()
+  }
 
-    return await workspaceService.getProjectsList(settingsService.loadSettings())
-  })
-
-  ipcMain.handle('workspace:add-individual-project', async (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
-    const result = await dialog.showOpenDialog(win, {
-      title: 'Adicionar Projeto Único',
-      properties: ['openDirectory']
-    })
-
-    if (!result.canceled && result.filePaths.length > 0) {
-      const projectPath = result.filePaths[0]
+  const importLocal = async (event: Electron.IpcMainInvokeEvent) => {
+    const checkoutPath = await chooseDirectory(event, 'Adicionar Repositório Local')
+    if (checkoutPath) {
       const settings = settingsService.loadSettings()
-      
-      if (!settings.individualProjects.includes(projectPath)) {
-        settings.individualProjects.push(projectPath)
+      if (!settings.individualProjects.includes(checkoutPath)) {
+        settings.individualProjects.push(checkoutPath)
         settingsService.saveSettings(settings)
       }
-      
-      return await workspaceService.getProjectsList(settings)
+      await repositories.importLocal(checkoutPath)
     }
+    return repositories.list()
+  }
 
-    return await workspaceService.getProjectsList(settingsService.loadSettings())
-  })
-
-  ipcMain.handle('workspace:get-projects-list', async () => {
+  const hide = (repositoryId: string) => {
+    const record = repositories.store.get(repositoryId)
     const settings = settingsService.loadSettings()
-    return await workspaceService.getProjectsList(settings)
-  })
-
-  ipcMain.handle('workspace:hide-project', async (_event, projectPath: string) => {
-    const settings = settingsService.loadSettings()
-    if (!settings.hiddenProjects.includes(projectPath)) {
-      settings.hiddenProjects.push(projectPath)
+    const checkoutPath = record.localCheckout?.path
+    if (checkoutPath && !settings.hiddenProjects.includes(checkoutPath)) {
+      settings.hiddenProjects.push(checkoutPath)
       settingsService.saveSettings(settings)
     }
-    return await workspaceService.getProjectsList(settings)
+    repositories.hide(repositoryId)
+    return repositories.list()
+  }
+
+  ipcMain.handle('repositories:list', () => repositories.list())
+  ipcMain.handle('repositories:refresh', () => repositories.refresh(settingsService.loadSettings()))
+  ipcMain.handle('repositories:import-root', importRoot)
+  ipcMain.handle('repositories:import-local', importLocal)
+  ipcMain.handle('repositories:hide', (_event, repositoryId: unknown) => {
+    if (typeof repositoryId !== 'string' || !repositoryId) throw new Error('INVALID_REPOSITORY_ID')
+    return hide(repositoryId)
+  })
+  ipcMain.handle('repositories:activate', async (_event, repositoryId: unknown) => {
+    if (typeof repositoryId !== 'string' || !repositoryId) return { success: false, error: 'INVALID_REPOSITORY_ID' }
+    try {
+      return { success: true, data: await runtime.activate(repositoryId) }
+    } catch (error) {
+      return { success: false, error: error instanceof Error ? error.message : String(error) }
+    }
+  })
+
+  ipcMain.handle('workspace:add-root-folder', async (event) => {
+    await importRoot(event)
+    return repositories.toLegacyProjects()
+  })
+  ipcMain.handle('workspace:add-individual-project', async (event) => {
+    await importLocal(event)
+    return repositories.toLegacyProjects()
+  })
+  ipcMain.handle('workspace:get-projects-list', () => repositories.toLegacyProjects())
+  ipcMain.handle('workspace:hide-project', (_event, projectPath: string) => {
+    const record = repositories.findByPath(projectPath)
+    if (record) hide(record.id)
+    return repositories.toLegacyProjects()
   })
 }

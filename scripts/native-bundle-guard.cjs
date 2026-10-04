@@ -38,6 +38,18 @@ function runCli() {
   const bundleSource = fs.readFileSync(mainBundlePath, 'utf8')
   const failures = []
 
+  if (bundleSource.includes('scripts/test-runtime-lanes.cjs')) {
+    failures.push({
+      moduleName: 'test runtime lanes',
+      external: true,
+      bundled: false,
+      action: 'keep test harness modules out of the Electron Main runtime bundle.'
+    })
+    console.log(`${'test runtime lanes'.padEnd(24)} isolated FAIL`)
+  } else {
+    console.log(`${'test runtime lanes'.padEnd(24)} isolated PASS`)
+  }
+
   for (const moduleName of nativeModules) {
     const external = moduleHasExternalRequire(bundleSource, moduleName)
     const bundled = moduleLooksBundled(bundleSource, moduleName)
@@ -58,7 +70,7 @@ function runCli() {
         failure.moduleName,
         'expected: external require in out/main/main.js',
         `found: external=${failure.external}, bundled=${failure.bundled}`,
-        'action: keep native dependencies direct and externalized by electron-vite externalizeDepsPlugin().'
+        `action: ${failure.action ?? 'keep native dependencies direct and externalized by electron-vite externalizeDepsPlugin().'}`
       ].join('\n'))
     }
     process.exit(1)

@@ -7,7 +7,7 @@ export type ProofKind =
   | 'E2E'
   | 'MANUAL_ACCEPTANCE'
 
-export type ProofProducer = 'IMPLEMENTER' | 'ARCHITECT' | 'USER' | 'SYSTEM'
+export type ProofProducer = 'IMPLEMENTER' | 'ARCHITECT' | 'USER' | 'SYSTEM' | 'TESTER'
 
 export type ProofStatus = 'PASSED' | 'FAILED' | 'ERROR'
 

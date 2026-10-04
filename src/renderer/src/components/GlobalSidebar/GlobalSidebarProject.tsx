@@ -3,22 +3,22 @@
 */
 
 import React from 'react'
-import { ProjectDropdown } from '../ProjectDropdown/ProjectDropdown'
+import { ProjectSwitcher } from '../ProjectSwitcher/ProjectSwitcher'
 
 interface GlobalSidebarProjectProps {
   activeProject: { path: string; name: string } | null
-  onSelectProject: (project: { path: string; name: string } | null) => void
+  onSelectRepository: (repositoryId: string) => void
 }
 
 export const GlobalSidebarProject: React.FC<GlobalSidebarProjectProps> = ({
   activeProject,
-  onSelectProject
+  onSelectRepository
 }) => {
   return (
     <div className="global-sidebar-project">
-      <ProjectDropdown
+      <ProjectSwitcher
         activeProject={activeProject}
-        onSelectProject={onSelectProject}
+        onSelectRepository={onSelectRepository}
       />
     </div>
   )

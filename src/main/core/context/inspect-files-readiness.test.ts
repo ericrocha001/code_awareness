@@ -251,21 +251,25 @@ describe('inspect_files readiness contract — Unidade 1', () => {
     expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'STRUCTURE')
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
-    // Demais tools usam awaitSnapshot
+    // get_relationships usa RELATIONSHIPS (não snapshot)
     await engine.getRelationships('/test/repo', ['src/index.ts'])
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'RELATIONSHIPS')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
+
+    // get_symbol_hierarchy usa RELATIONSHIPS (não snapshot)
+    await engine.getSymbolHierarchy('/test/repo', [targetId])
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'RELATIONSHIPS')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
+
+    // Demais tools usam awaitSnapshot
+    await engine.readCode('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(1)
 
-    await engine.readCode('/test/repo', [targetId])
+    await engine.getReferences('/test/repo', [targetId])
     expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(2)
 
-    await engine.getReferences('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3)
-
     await engine.getSymbolDependencies('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(4)
-
-    await engine.getSymbolHierarchy('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(5)
+    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3)
   })
 
   it('7. abertura concorrente é aguardada corretamente sem dependência temporal oculta', async () => {

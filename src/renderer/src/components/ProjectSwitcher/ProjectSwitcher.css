@@ -80,16 +80,15 @@
 
 /* Painel suspenso (Dropdown) */
 .project-switcher-dropdown {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  z-index: 150;
-  min-width: 280px;
-  max-width: 380px;
-  background: var(--bg-secondary);
+  position: fixed;
+  z-index: 1400;
+  min-width: min(280px, calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  background: color-mix(in srgb, var(--bg-secondary) 96%, transparent);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+  border-radius: 10px;
+  box-shadow: 0 16px 42px rgba(0, 0, 0, 0.42), 0 0 0 1px color-mix(in srgb, var(--accent) 12%, transparent);
+  backdrop-filter: blur(16px);
   overflow: hidden;
   animation: slideInDown 0.18s cubic-bezier(0, 0, 0.2, 1);
 }

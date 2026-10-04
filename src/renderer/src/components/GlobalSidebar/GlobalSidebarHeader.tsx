@@ -17,6 +17,7 @@ export const GlobalSidebarHeader: React.FC<GlobalSidebarHeaderProps> = ({ isSide
           src="/logo.svg"
           alt="Code Awareness"
         />
+        {isSidebarOpen && <span className="global-sidebar-logo-title">Code Awareness</span>}
       </span>
     </div>
   )
