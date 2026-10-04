@@ -51,6 +51,7 @@ import { registerApplicationShutdown } from './application-shutdown'
 import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
 import { NgrokTransport } from './mcp/connection/ngrok-transport'
 import { RelayTransport } from './mcp/connection/relay-transport'
+import { resolveRelayEndpoint } from './mcp/connection/relay-endpoint'
 import { SelectedTransport } from './mcp/connection/selected-transport'
 import { RemoteAccessService } from './mcp/connection/remote-access-service'
 import { InstallationIdentityService } from './installation/installation-identity-service'
@@ -156,7 +157,7 @@ const selectedTransport = new SelectedTransport(
     if (kind === 'ngrok') return new NgrokTransport()
     const installPath = desktopProfilePaths(app.getPath('userData')).installationPath
     return new RelayTransport(
-      'https://code-awareness-gateway.eric-rocha.workers.dev/mcp',
+      resolveRelayEndpoint(),
       new InstallationIdentityService(installPath, safeStorage),
       30_000,
       25_000,
