@@ -1,7 +1,7 @@
 {
   "name": "code-awareness",
   "version": "1.0.0",
-  "description": "Desktop app to analyze code repos and export to Obsidian via Codefetch",
+  "description": "Local context and reliability infrastructure for AI-assisted software engineering",
   "author": "Eric Rocha",
   "homepage": "https://github.com/ericrocha001/code_awareness",
   "main": "./out/main/main.js",
