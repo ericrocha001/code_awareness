@@ -1,6 +1,6 @@
 const { spawn } = require('node:child_process')
 const path = require('node:path')
-const { createDevSupervisor } = require('./dev-supervisor-core.cjs')
+const { createDevSupervisor, createDevRuntimeEnvironment } = require('./dev-supervisor-core.cjs')
 
 const projectRoot = path.resolve(__dirname, '..')
 const supervisor = createDevSupervisor({
@@ -14,11 +14,7 @@ const supervisor = createDevSupervisor({
       stdio: 'inherit',
       windowsHide: true,
       shell: false,
-      env: {
-        ...process.env,
-        CODE_AWARENESS_DEV_SUPERVISOR_ENDPOINT: String(port),
-        CODE_AWARENESS_DEV_SUPERVISOR_TOKEN: token
-      }
+      env: createDevRuntimeEnvironment(process.env, { port, token })
     })
   },
   onFinalExit(code) {

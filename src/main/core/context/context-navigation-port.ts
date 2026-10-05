@@ -16,6 +16,7 @@ import type { PersistedSymbolReference } from '../symbol-reference-resolver'
 import type { CodeMapDiscoveryPort } from './repo-discovery'
 
 export interface NavigationInvocationContext {
+  deadlineAtMs?: number
   requestId?: string
   sessionId?: string
   trace?: import('../../mcp/code-scope-health').CodeScopeTraceSink

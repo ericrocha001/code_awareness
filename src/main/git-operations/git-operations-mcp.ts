@@ -1,5 +1,7 @@
 import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
 import { GitOperationsError, type GitOperationsService, type BranchRequest, type MergeRequest, type SyncRequest, type ShelfRequest, type RevertRequest } from './git-operations-service'
+import { isReceiptedGitMutation } from './git-operation-receipts'
+import { gitGuidance, operationalFailure } from '../mcp/operational-guidance'
 
 const string = { type: 'string', minLength: 1 }
 const expectedHead = { type: ['string', 'null'], pattern: '^[a-f0-9]{40,64}$' }
@@ -25,6 +27,11 @@ export const GIT_OPERATIONS_TOOLS = [
   tool('resolve_git_conflict', 'Resolve only an existing conflicted path using OURS, THEIRS, CONTENT (complete literal text, up to 1 MiB) or DELETE. Requires observed HEAD and conflict revision; content is allowed only for CONTENT. Stages the resolution.', { path: string, resolution: choice('OURS', 'THEIRS', 'CONTENT', 'DELETE'), expectedHead, expectedConflictRevision: revision, content: { type: 'string', maxLength: 1024 * 1024 } }, ['path', 'resolution', 'expectedHead', 'expectedConflictRevision'])
 ]
 
+for (const definition of GIT_OPERATIONS_TOOLS.filter((entry) => ['commit_git_changes', 'manage_git_branch', 'merge_git_branch', 'sync_git_remote', 'revert_git_commit', 'manage_git_shelf', 'resolve_git_conflict'].includes(entry.name))) {
+  (definition.inputSchema.properties as Record<string, unknown>).operationId = { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$', maxLength: 128 }
+  definition.description += ' Mutating actions require a caller-created operationId; reuse that same ID to recover a lost acknowledgement, never retry with a new ID blindly.'
+}
+
 function validate(schema: Record<string, any>, value: unknown): boolean {
   if (Array.isArray(schema.type)) return schema.type.some((type: string) => validate({ ...schema, type }, value))
   if (schema.type === 'null') return value === null
@@ -40,6 +47,22 @@ function validate(schema: Record<string, any>, value: unknown): boolean {
 }
 
 export async function executeGitOperationsTool(service: GitOperationsService, name: string, args: unknown): Promise<McpToolResult> {
+  const definition = GIT_OPERATIONS_TOOLS.find((entry) => entry.name === name)
+  if (!definition || !validate(definition.inputSchema, args)) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
+  const { operationId, ...values } = args as Record<string, unknown>
+  if (!isReceiptedGitMutation(name, values)) {
+    if (operationId !== undefined) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
+    return dispatchGitOperationsTool(service, name, values)
+  }
+  if (typeof operationId !== 'string') return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
+  try { return await service.executeReceipted(operationId, name, values, () => dispatchGitOperationsTool(service, name, values)) }
+  catch (caught) {
+    const code = caught instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED'].includes(caught.message) ? caught.message : 'RECEIPT_UNAVAILABLE'
+    return operationalFailure({ code, operationId, retryability: 'SAME_OPERATION_ID', retryAfterMs: 2000, recommendedAction: 'RECOVER_SAME_OPERATION' })
+  }
+}
+
+async function dispatchGitOperationsTool(service: GitOperationsService, name: string, args: unknown): Promise<McpToolResult> {
   try {
     const definition = GIT_OPERATIONS_TOOLS.find((entry) => entry.name === name)
     if (!definition || !validate(definition.inputSchema, args)) throw new GitOperationsError('INVALID_ARGUMENT')
@@ -80,6 +103,8 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
     }
     return { content: [{ type: 'text', text: JSON.stringify(result) }] }
   } catch (error) {
-    return { content: [{ type: 'text', text: JSON.stringify({ code: error instanceof GitOperationsError ? error.code : 'GIT_OPERATION_FAILED' }) }], isError: true }
+    const code = error instanceof GitOperationsError ? error.code : 'GIT_OPERATION_FAILED'
+    if (['GIT_STATE_CHANGED', 'CONFLICT_STATE_CHANGED'].includes(code)) return operationalFailure(gitGuidance(code))
+    return { content: [{ type: 'text', text: JSON.stringify({ code }) }], isError: true }
   }
 }

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import * as fs from 'fs'
+import { basename, join, resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GitService } from '../core/git-service'
 import { cleanupTempRepo, commit, createTempGitRepo, gitExec, stageAll, writeFile } from '../core/git-test-helpers'
@@ -7,10 +8,15 @@ import { GitHubGitTransport } from '../github/github-git-transport'
 import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
-import { executeGitOperationsTool } from './git-operations-mcp'
+import { executeGitOperationsTool as dispatchGitOperationsTool } from './git-operations-mcp'
+import { randomUUID } from 'node:crypto'
+import { isReceiptedGitMutation } from './git-operation-receipts'
 import { GitOperationsService } from './git-operations-service'
 
+vi.mock('fs', async (importOriginal) => ({ ...await importOriginal<typeof import('fs')>() }))
+
 const roots: string[] = []
+const executeGitOperationsTool = (service: GitOperationsService, name: string, args: Record<string, unknown>) => dispatchGitOperationsTool(service, name, isReceiptedGitMutation(name, args) ? { ...args, operationId: randomUUID() } : args)
 afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await cleanupTempRepo(root) })
 async function fixture(files: Record<string, string | Buffer> = { 'a.txt': 'base\n', 'b.txt': 'base\n' }) {
   const root = await createTempGitRepo(); roots.push(root)
@@ -44,6 +50,56 @@ async function conflicts(files: Record<string, string | Buffer>, ours: Record<st
 }
 
 describe('Git Operations v1.1 safe shelving', () => {
+  it('keeps public CREATE successful across post-commit concurrency and cleanup failure', async () => {
+    const { root, git, service } = await fixture()
+    writeFile(root, 'a.txt', 'selected literal ç🙂\r\n')
+    const observed = await service.getState()
+    const lockPath = join(root, '.git', 'index.lock')
+    const rename = fs.renameSync
+    const remove = fs.rmSync
+    const revision = git.getWorktreeRevision.bind(git)
+    let committed = false
+    let temporary: string | undefined
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    vi.spyOn(fs, 'renameSync').mockImplementation((from, to) => {
+      rename(from, to)
+      if (resolve(String(to)).toLowerCase() === resolve(root, '.git', 'index').toLowerCase()) {
+        committed = true
+        writeFile(root, 'b.txt', 'concurrent actor after commit\n')
+        writeFileSync(lockPath, 'another Git owner')
+      }
+    })
+    vi.spyOn(fs, 'rmSync').mockImplementation((path, options) => {
+      if (committed && basename(String(path)).startsWith('git-operations-index-')) {
+        temporary = String(path)
+        throw new Error('GIT_STATE_CHANGED')
+      }
+      remove(path, options)
+    })
+    vi.spyOn(git, 'getWorktreeRevision').mockImplementation((...args) => committed ? Promise.reject(new Error('GIT_STATE_CHANGED')) : revision(...args))
+    try {
+      const reply = await executeGitOperationsTool(service, 'manage_git_shelf', { action: 'CREATE', paths: ['a.txt'], expectedWorktreeRevision: observed.worktreeRevision })
+      expect(committed).toBe(true)
+      expect(await service.manageShelf({ action: 'LIST' })).toEqual([expect.objectContaining({ pathCount: 1 })])
+      expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('base\n')
+      expect(reply.isError).not.toBe(true)
+      const created = JSON.parse(reply.content[0].text)
+      expect(created).toMatchObject({ pathCount: 1, observation: { status: 'UNAVAILABLE', code: 'GIT_STATE_CHANGED' } })
+      expect(readFileSync(lockPath, 'utf8')).toBe('another Git owner')
+      expect(warning).toHaveBeenCalled()
+      vi.restoreAllMocks()
+      remove(lockPath, { force: true })
+      const state = await service.getState()
+      expect(await service.manageShelf({ action: 'RESTORE', shelfId: created.shelfId, expectedHead: state.head, expectedWorktreeRevision: state.worktreeRevision })).toMatchObject({ result: 'RESTORED' })
+      expect(readFileSync(join(root, 'a.txt'), 'utf8')).toBe('selected literal ç🙂\r\n')
+      expect(readFileSync(join(root, 'b.txt'), 'utf8')).toBe('concurrent actor after commit\n')
+    } finally {
+      vi.restoreAllMocks()
+      remove(lockPath, { force: true })
+      if (temporary) remove(temporary, { recursive: true, force: true })
+    }
+  }, 60000)
+
   it('reports completed CREATE and RESTORE even when post-mutation observation fails', async () => {
     const { root, git, service } = await fixture()
     writeFile(root, 'a.txt', 'staged\n'); await service.stage({ mode: 'STAGE', paths: ['a.txt'] })
@@ -83,11 +139,11 @@ describe('Git Operations v1.1 safe shelving', () => {
     vi.spyOn(git, 'createShelf').mockRejectedValueOnce(new Error('mutation failed'))
     const failedCreate = await executeGitOperationsTool(service, 'manage_git_shelf', { action: 'CREATE', paths: ['a.txt', 'new.txt'], expectedWorktreeRevision: current.worktreeRevision })
     expect(failedCreate).toMatchObject({ isError: true })
-    expect(JSON.parse(failedCreate.content[0].text)).toEqual({ code: 'GIT_OPERATION_FAILED' })
+    expect(JSON.parse(failedCreate.content[0].text)).toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN' })
     vi.spyOn(git, 'restoreShelf').mockRejectedValueOnce(new Error('mutation failed'))
     const failedRestore = await executeGitOperationsTool(service, 'manage_git_shelf', { action: 'RESTORE', shelfId: created.shelfId, expectedHead: current.head, expectedWorktreeRevision: current.worktreeRevision })
     expect(failedRestore).toMatchObject({ isError: true })
-    expect(JSON.parse(failedRestore.content[0].text)).toEqual({ code: 'GIT_OPERATION_FAILED' })
+    expect(JSON.parse(failedRestore.content[0].text)).toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN' })
     expect(await service.getChanges()).toEqual(changes)
     expect(readFileSync(join(root, 'a.txt'))).toEqual(bytes)
     expect(await service.manageShelf({ action: 'LIST' })).toHaveLength(1)
@@ -222,7 +278,7 @@ describe('Git Operations v1.1 typed conflicts', () => {
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('No MCP endpoint')
       const call = async (name: string, args: Record<string, unknown> = {}) => {
-        const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }) })
+        const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: isReceiptedGitMutation(name, args) ? { ...args, operationId: randomUUID() } : args } }) })
         const reply = await response.json()
         if (reply.error || reply.result.isError) throw new Error(JSON.stringify(reply))
         return JSON.parse(reply.result.content[0].text)

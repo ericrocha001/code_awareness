@@ -1,6 +1,15 @@
 const { randomBytes } = require('node:crypto')
 const { createServer } = require('node:net')
 
+function createDevRuntimeEnvironment(environment, { port, token }) {
+  return {
+    ...environment,
+    CODE_AWARENESS_RELAY_ENDPOINT: environment.CODE_AWARENESS_RELAY_ENDPOINT ?? 'https://code-awareness-gateway.eric-rocha.workers.dev/mcp',
+    CODE_AWARENESS_DEV_SUPERVISOR_ENDPOINT: String(port),
+    CODE_AWARENESS_DEV_SUPERVISOR_TOKEN: token
+  }
+}
+
 function createDevSupervisor(options) {
   const token = options.token || randomBytes(32).toString('base64url')
   let child = null
@@ -53,4 +62,4 @@ function createDevSupervisor(options) {
   }
 }
 
-module.exports = { createDevSupervisor }
+module.exports = { createDevSupervisor, createDevRuntimeEnvironment }

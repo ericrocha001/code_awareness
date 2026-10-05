@@ -2,6 +2,7 @@ import type { Server } from 'node:http'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
 import { createMcpHttpServer } from './mcp-http-server'
+import { McpWorkloadGovernor } from './mcp-workload-governor'
 import type { CodeScopeTraceSink } from './code-scope-health'
 import type { IArtifactReader } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
@@ -23,6 +24,7 @@ interface McpLifecycleOptions {
 }
 
 export class McpLifecycle {
+  private readonly governor = new McpWorkloadGovernor()
   private state: McpLifecycleState = { status: 'STOPPED', available: false }
   private server: Server | null = null
   private binding: string | null = null
@@ -49,6 +51,7 @@ export class McpLifecycle {
         options.academy
       )
       this.currentAdapter = adapter
+      adapter.setWorkloadGovernor(this.governor)
       return createMcpHttpServer(adapter, console.log, options.trace)
     }))
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))

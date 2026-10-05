@@ -3,9 +3,11 @@ import { createConnection, type Socket } from 'node:net'
 import { createRequire } from 'node:module'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { describe, expect, it, vi } from 'vitest'
+import { resolveRelayEndpoint } from '../mcp/connection/relay-endpoint'
 
 const require = createRequire(import.meta.url)
-const { createDevSupervisor } = require('../../../scripts/dev-supervisor-core.cjs') as {
+const { createDevSupervisor, createDevRuntimeEnvironment } = require('../../../scripts/dev-supervisor-core.cjs') as {
+  createDevRuntimeEnvironment(environment: NodeJS.ProcessEnv, supervisor: { port: number; token: string }): NodeJS.ProcessEnv
   createDevSupervisor(options: { token: string; spawnRuntime(input: { port: number; token: string }): EventEmitter & { kill(signal?: string): void } }): { server: import('node:net').Server; stop(): void }
 }
 
@@ -18,6 +20,18 @@ function exchange(socket: Socket, message: unknown): Promise<string> {
 }
 
 describe('development supervisor', () => {
+  it('supplies a public Relay default without manual env and preserves explicit overrides', () => {
+    const supervisor = { port: 12345, token: 'test-token' }
+    const defaults = createDevRuntimeEnvironment({}, supervisor)
+    expect(resolveRelayEndpoint(defaults.CODE_AWARENESS_RELAY_ENDPOINT)).toBe('https://code-awareness-gateway.eric-rocha.workers.dev/mcp')
+    expect(defaults.CODE_AWARENESS_DEV_SUPERVISOR_ENDPOINT).toBe('12345')
+    const override = createDevRuntimeEnvironment({ CODE_AWARENESS_RELAY_ENDPOINT: 'http://127.0.0.1:8787/mcp' }, supervisor)
+    expect(resolveRelayEndpoint(override.CODE_AWARENESS_RELAY_ENDPOINT)).toBe('http://127.0.0.1:8787/mcp')
+    for (const value of ['', 'invalid', 'https://gateway.example/mcp?token=secret']) {
+      const invalid = createDevRuntimeEnvironment({ CODE_AWARENESS_RELAY_ENDPOINT: value }, supervisor)
+      expect(() => resolveRelayEndpoint(invalid.CODE_AWARENESS_RELAY_ENDPOINT)).toThrowError(expect.objectContaining({ code: 'RELAY_ENDPOINT_NOT_CONFIGURED' }))
+    }
+  })
   it('starts the fixed runtime again only after an authorized committed restart and child exit', async () => {
     const children: Array<EventEmitter & { kill: ReturnType<typeof vi.fn> }> = []
     const spawnRuntime = vi.fn(() => {
@@ -44,11 +58,15 @@ describe('development supervisor', () => {
   it('relaunches a real child process with a new runtime instance identity', async () => {
     const children: ChildProcessWithoutNullStreams[] = []
     const instanceIds: string[] = []
+    const endpoints: string[] = []
     const supervisor = createDevSupervisor({
       token: 'integration-token',
-      spawnRuntime: () => {
-        const child = spawn(process.execPath, ['-e', "console.log(require('node:crypto').randomUUID()); setInterval(() => {}, 1000)"], { stdio: 'pipe' }) as ChildProcessWithoutNullStreams
-        child.stdout.once('data', (chunk) => instanceIds.push(chunk.toString('utf8').trim()))
+      spawnRuntime: (supervisor: { port: number; token: string }) => {
+        const child = spawn(process.execPath, ['-e', "console.log(JSON.stringify([require('node:crypto').randomUUID(), process.env.CODE_AWARENESS_RELAY_ENDPOINT])); setInterval(() => {}, 1000)"], { stdio: 'pipe', env: createDevRuntimeEnvironment({}, supervisor) }) as ChildProcessWithoutNullStreams
+        child.stdout.once('data', (chunk) => {
+          const [id, endpoint] = JSON.parse(chunk.toString('utf8'))
+          instanceIds.push(id); endpoints.push(endpoint)
+        })
         children.push(child)
         return child
       }
@@ -63,6 +81,7 @@ describe('development supervisor', () => {
     children[0].kill()
     await vi.waitFor(() => expect(instanceIds).toHaveLength(2))
     expect(instanceIds[1]).not.toBe(instanceIds[0])
+    expect(endpoints).toEqual(['https://code-awareness-gateway.eric-rocha.workers.dev/mcp', 'https://code-awareness-gateway.eric-rocha.workers.dev/mcp'])
     socket.end()
     supervisor.stop()
   })

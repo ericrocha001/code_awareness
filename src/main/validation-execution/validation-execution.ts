@@ -5,10 +5,16 @@ import type { ValidationLedger } from '../validation-ledger/validation-ledger'
 import type { ProofProducer, ProofStatus } from '../validation-ledger/validation-ledger-types'
 import { ValidationProfileCatalog } from './validation-profile-catalog'
 import type { ResolvedValidationCommand, ValidationProfile } from './validation-profile'
+import { MCP_REQUEST_BUDGET_MS, VALIDATION_RETRY_AFTER_MS } from '../mcp/operational-guidance'
+
+export class ValidationBusyError extends Error {
+  constructor(readonly activeRunId: string) { super(`VALIDATION_BUSY: ${activeRunId}`) }
+}
 
 export type ValidationRunStatus = 'RUNNING' | 'PASSED' | 'FAILED' | 'ERROR'
 
 export interface ValidationRun {
+  retryAfterMs?: number
   runId: string
   profileId: string
   status: ValidationRunStatus
@@ -55,6 +61,7 @@ class BoundedOutput {
 }
 
 export class ValidationExecution {
+  private readonly waiters = new Map<string, Set<() => void>>()
   private readonly runs = new Map<string, ValidationRun>()
   private active: ActiveRun | null = null
 
@@ -70,10 +77,10 @@ export class ValidationExecution {
   }
 
   start(input: StartValidationInput): ValidationRun {
-    if (this.active) throw new Error(`VALIDATION_BUSY: ${this.active.publicRun.runId}`)
+    if (this.active) throw new ValidationBusyError(this.active.publicRun.runId)
     const resolved = this.catalog.resolve(this.repoRoot, input.profileId, input.targets)
     const runId = `run-${randomUUID()}`
-    const publicRun: ValidationRun = { runId, profileId: resolved.profile.id, status: 'RUNNING', startedAt: new Date().toISOString() }
+    const publicRun: ValidationRun = { runId, profileId: resolved.profile.id, status: 'RUNNING', retryAfterMs: VALIDATION_RETRY_AFTER_MS, startedAt: new Date().toISOString() }
     const output = new BoundedOutput()
     const child = spawn(resolved.command.executable, resolved.command.args, {
       cwd: resolved.command.cwd,
@@ -110,6 +117,27 @@ export class ValidationExecution {
   get(runId: string): ValidationRun | null {
     const run = this.runs.get(runId)
     return run ? { ...run, failures: run.failures ? [...run.failures] : undefined } : null
+  }
+
+  getActiveRunId(): string | null { return this.active?.publicRun.runId ?? null }
+
+  async wait(runId: string, waitMs: number, deadlineAtMs = Date.now() + MCP_REQUEST_BUDGET_MS): Promise<ValidationRun | null> {
+    const run = this.get(runId)
+    if (!run || run.status !== 'RUNNING' || !waitMs) return run
+    const boundedWait = Math.max(0, Math.min(waitMs, 15_000, deadlineAtMs - Date.now() - 1000))
+    if (!boundedWait) return run
+    await new Promise<void>((resolve) => {
+      const waiters = this.waiters.get(runId) ?? new Set<() => void>()
+      this.waiters.set(runId, waiters)
+      const done = () => {
+        clearTimeout(timer); waiters.delete(done)
+        if (!waiters.size) this.waiters.delete(runId)
+        resolve()
+      }
+      const timer = setTimeout(done, boundedWait)
+      waiters.add(done)
+    })
+    return this.get(runId)
   }
 
   async shutdown(): Promise<void> {
@@ -156,7 +184,9 @@ export class ValidationExecution {
     } catch (error) {
       Object.assign(active.publicRun, { status: 'ERROR', finishedAt, durationMs, summary: 'Validation proof could not be recorded', failures, diagnostic: `LEDGER_WRITE_FAILED: ${error instanceof Error ? error.message : String(error)}` })
     } finally {
+      delete active.publicRun.retryAfterMs
       this.active = null
+      for (const done of [...this.waiters.get(active.publicRun.runId) ?? []]) done()
     }
   }
 }

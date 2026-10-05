@@ -9,6 +9,7 @@ import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
+import type { GitOperationReceipt } from '../git-operations/git-operation-receipts'
 
 
 const GIT_TIMEOUT_MS = 10_000
@@ -55,6 +56,51 @@ export interface GitShelf {
 type GitProcessOptions = { timeoutMs?: number; env?: NodeJS.ProcessEnv; allowExitOne?: boolean; input?: Buffer | string }
 
 export class GitService implements FileListingPort {
+  private receiptRef(operationId: string): string {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(operationId)) throw new Error('INVALID_ARGUMENT')
+    return `refs/code-awareness/operation-receipts/${operationId}`
+  }
+
+  async readOperationReceipt(root: string, operationId: string): Promise<{ receipt: GitOperationReceipt; sha: string } | null> {
+    const ref = this.receiptRef(operationId)
+    const refs = await this.runGit(['for-each-ref', '--format=%(refname) %(objectname)', ref], root)
+    const sha = refs.split('\n').find((line) => line.startsWith(`${ref} `))?.slice(ref.length + 1).trim()
+    if (!sha) return null
+    const receipt = JSON.parse(await this.runGit(['cat-file', 'blob', sha], root)) as GitOperationReceipt
+    if (receipt.operationId !== operationId || !['PREPARED', 'COMPLETED', 'FAILED'].includes(receipt.status)) throw new Error('INVALID_RECEIPT')
+    return { receipt, sha }
+  }
+
+  async prepareOperationReceipt(root: string, receipt: GitOperationReceipt): Promise<{ created: boolean; receipt: GitOperationReceipt; sha: string }> {
+    const gitDir = (await this.runGit(['rev-parse', '--absolute-git-dir'], root)).trim()
+    const lockPath = join(gitDir, 'code-awareness-operation-receipts.lock')
+    let lock: number
+    try { lock = openSync(lockPath, 'wx') } catch { throw new Error('RECEIPT_BUSY') }
+    try {
+      const existing = await this.readOperationReceipt(root, receipt.operationId)
+      if (existing) return { created: false, ...existing }
+      const refs = (await this.runGit(['for-each-ref', '--format=%(refname)', 'refs/code-awareness/operation-receipts/'], root)).trim().split('\n').filter(Boolean)
+      let count = refs.length
+      if (count >= 1024) {
+        for (const ref of refs) {
+          const old = await this.readOperationReceipt(root, ref.split('/').pop()!)
+          if (old && old.receipt.status !== 'PREPARED' && Date.parse(old.receipt.createdAt) < Date.now() - 7 * 24 * 60 * 60 * 1000) {
+            await this.runGit(['update-ref', '-d', ref, old.sha], root); count--
+          }
+        }
+      }
+      if (count >= 1024) throw new Error('RECEIPT_CAPACITY_EXCEEDED')
+      const sha = (await this.runGit(['hash-object', '-w', '--stdin'], root, { input: JSON.stringify(receipt) })).trim()
+      await this.runGit(['update-ref', this.receiptRef(receipt.operationId), sha, '0'.repeat(sha.length)], root)
+      return { created: true, receipt, sha }
+    } finally { closeSync(lock); rmSync(lockPath, { force: true }) }
+  }
+
+  async completeOperationReceipt(root: string, receipt: GitOperationReceipt, expectedSha: string): Promise<void> {
+    const sha = (await this.runGit(['hash-object', '-w', '--stdin'], root, { input: JSON.stringify(receipt) })).trim()
+    await this.runGit(['update-ref', this.receiptRef(receipt.operationId), sha, expectedSha], root)
+  }
+
   private workingBytes(dirPath: string, path: string): Buffer | null {
     try {
       const fullPath = join(dirPath, path)
@@ -117,6 +163,7 @@ export class GitService implements FileListingPort {
     let lock: number | undefined
     try { lock = openSync(`${indexPath}.lock`, 'wx') } catch { throw new Error('GIT_STATE_CHANGED') }
     let temporary: string | undefined
+    let committed = false
     try {
       temporary = mkdtempSync(join(tmpdir(), 'git-operations-index-'))
       const temporaryIndex = join(temporary, 'index')
@@ -127,11 +174,18 @@ export class GitService implements FileListingPort {
       copyFileSync(temporaryIndex, `${indexPath}.lock`)
       closeSync(lock); lock = undefined
       renameSync(`${indexPath}.lock`, indexPath)
+      committed = true
       return result
     } finally {
       if (lock !== undefined) closeSync(lock)
-      rmSync(`${indexPath}.lock`, { force: true })
-      if (temporary) rmSync(temporary, { recursive: true, force: true })
+      if (!committed) rmSync(`${indexPath}.lock`, { force: true })
+      if (temporary) {
+        try { rmSync(temporary, { recursive: true, force: true }) }
+        catch (error) {
+          if (!committed) throw error
+          console.warn('[GitService] Committed index temporary cleanup failed')
+        }
+      }
     }
   }
 

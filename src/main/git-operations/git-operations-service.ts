@@ -3,6 +3,8 @@ import { existsSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import type { GitService } from '../core/git-service'
 import type { GitRemoteTransport } from '../core/git-remote-transport'
+import { GitOperationReceipts } from './git-operation-receipts'
+import type { McpToolResult } from '../mcp/context-navigation-mcp-adapter'
 
 export class GitOperationsError extends Error {
   constructor(readonly code: string) { super(code) }
@@ -43,8 +45,16 @@ function isBinary(bytes: Buffer): boolean {
 }
 
 export class GitOperationsService {
+  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<McpToolResult>): Promise<McpToolResult> {
+    return new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate)
+  }
   private pending: Promise<unknown> = Promise.resolve()
   constructor(private readonly repoRoot: string, private readonly git: GitService, private readonly transport: GitRemoteTransport) {}
+
+  private async observeMutation<T>(observe: () => Promise<T>): Promise<T> {
+    try { return await observe() }
+    catch { throw new GitOperationsError('OPERATION_OUTCOME_UNKNOWN') }
+  }
 
   private async serialized<T>(operation: () => Promise<T>): Promise<T> {
     const result = this.pending.then(operation).catch((error: unknown) => { throw this.normalizeError(error) })
@@ -193,7 +203,7 @@ export class GitOperationsService {
       if ((await this.getChanges('CONFLICTED')).length) fail('MERGE_CONFLICT')
       if (typeof request.message !== 'string' || !request.message.trim() || request.message.length > 10000 || request.message.includes('\0')) fail('INVALID_ARGUMENT')
       const sha = await this.git.commitInspectedIndex(this.repoRoot, request.message, request.expectedHead, request.expectedIndexRevision)
-      return { sha, parent: request.expectedHead, branch: await this.git.getCurrentBranch(this.repoRoot), message: request.message, paths: await this.git.getCommittedPaths(this.repoRoot, sha) }
+      return this.observeMutation(async () => ({ sha, parent: request.expectedHead, branch: await this.git.getCurrentBranch(this.repoRoot), message: request.message, paths: await this.git.getCommittedPaths(this.repoRoot, sha) }))
     })
   }
 
@@ -212,7 +222,7 @@ export class GitOperationsService {
       else if (request.action === 'DELETE') await this.git.deleteBranch(this.repoRoot, branch)
       else if (request.action === 'RENAME') await this.git.renameBranch(this.repoRoot, branch, await this.branch(request.newBranch))
       else fail('INVALID_ARGUMENT')
-      return this.getState()
+      return this.observeMutation(() => this.getState())
     })
   }
 
@@ -222,7 +232,7 @@ export class GitOperationsService {
       if (request.action === 'ABORT') {
         if (await this.git.getGitOperation(this.repoRoot) !== 'MERGE') fail('GIT_OPERATION_NOT_IN_PROGRESS')
         await this.git.abortMerge(this.repoRoot)
-        return { result: 'ABORTED', ...await this.getState() }
+        return this.observeMutation(async () => ({ result: 'ABORTED', ...await this.getState() }))
       }
       await this.ready(); await this.checkHead(request.expectedHead)
       const source = await this.ref(request.source)
@@ -235,8 +245,10 @@ export class GitOperationsService {
         if (conflicts.length) return { result: 'CONFLICTS', paths: conflicts.map((c) => c.path) }
         throw error
       }
-      const head = await this.git.getCurrentCommitHash(this.repoRoot)
-      return { result: head === request.expectedHead ? 'ALREADY_UP_TO_DATE' : head === source ? 'FAST_FORWARDED' : 'MERGED', head }
+      return this.observeMutation(async () => {
+        const head = await this.git.getCurrentCommitHash(this.repoRoot)
+        return { result: head === request.expectedHead ? 'ALREADY_UP_TO_DATE' : head === source ? 'FAST_FORWARDED' : 'MERGED', head }
+      })
     })
   }
 
@@ -263,7 +275,7 @@ export class GitOperationsService {
       if ((await this.getChanges()).length) fail('DIRTY_WORKTREE')
       if (this.transport.pullFastForward) await this.transport.pullFastForward(this.repoRoot, remote, branch)
       else await this.git.pullFastForward(this.repoRoot, remote, branch)
-      return { remote, branch, head: await this.git.getCurrentCommitHash(this.repoRoot) }
+      return this.observeMutation(async () => ({ remote, branch, head: await this.git.getCurrentCommitHash(this.repoRoot) }))
     })
   }
 
@@ -357,7 +369,7 @@ export class GitOperationsService {
         if ('sides' in metadata && metadata.sides!.some((side) => side.classification === 'BINARY')) fail('BINARY_CONFLICT_CONTENT_UNSUPPORTED')
       } else if (request.content !== undefined) fail('INVALID_ARGUMENT')
       await this.git.resolveConflict(this.repoRoot, path, request.resolution, request.expectedHead, request.expectedConflictRevision, request.content)
-      return { path, resolution: request.resolution, remainingConflictCount: (await this.getChanges('CONFLICTED')).length, indexRevision: await this.git.getIndexRevision(this.repoRoot) }
+      return this.observeMutation(async () => ({ path, resolution: request.resolution, remainingConflictCount: (await this.getChanges('CONFLICTED')).length, indexRevision: await this.git.getIndexRevision(this.repoRoot) }))
     })
   }
 
@@ -368,12 +380,12 @@ export class GitOperationsService {
         if (await this.git.getGitOperation(this.repoRoot) !== 'REVERT') fail('GIT_OPERATION_NOT_IN_PROGRESS')
         if (request.action === 'ABORT') {
           await this.git.abortRevert(this.repoRoot)
-          return { result: 'ABORTED', head: await this.git.getCurrentCommitHash(this.repoRoot) }
+          return this.observeMutation(async () => ({ result: 'ABORTED', head: await this.git.getCurrentCommitHash(this.repoRoot) }))
         }
         if ((await this.getChanges('CONFLICTED')).length) fail('MERGE_CONFLICT')
         if (await this.git.getIndexRevision(this.repoRoot) !== request.expectedIndexRevision) fail('GIT_STATE_CHANGED')
         await this.git.continueRevert(this.repoRoot, request.expectedHead, request.expectedIndexRevision)
-        return { result: 'REVERTED', head: await this.git.getCurrentCommitHash(this.repoRoot) }
+        return this.observeMutation(async () => ({ result: 'REVERTED', head: await this.git.getCurrentCommitHash(this.repoRoot) }))
       }
       await this.ready(); await this.checkHead(request.expectedHead)
       if ((await this.getChanges()).length) fail('DIRTY_WORKTREE')
@@ -385,7 +397,7 @@ export class GitOperationsService {
         if (conflicts.length) return { result: 'CONFLICTS', paths: conflicts.map((c) => c.path) }
         throw error
       }
-      return { result: 'REVERTED', head: await this.git.getCurrentCommitHash(this.repoRoot) }
+      return this.observeMutation(async () => ({ result: 'REVERTED', head: await this.git.getCurrentCommitHash(this.repoRoot) }))
     })
   }
 }

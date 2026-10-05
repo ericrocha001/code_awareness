@@ -1,5 +1,6 @@
 import { createServer, type Server } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { MCP_REQUEST_BUDGET_MS } from './operational-guidance'
 import type { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
 import type { CodeScopeTraceEvent, CodeScopeTraceSink } from './code-scope-health'
 
@@ -56,6 +57,7 @@ export function createMcpHttpServer(
 ): Server {
   return createServer(async (request, response) => {
     const startedAt = performance.now()
+    const deadlineAtMs = Date.now() + MCP_REQUEST_BUDGET_MS
     const requestId = request.headers['x-code-awareness-request-id'] ?? randomUUID()
     const sessionId = request.headers['x-code-awareness-session-id'] ?? 'local'
     const correlationId = Array.isArray(requestId) ? requestId[0] : requestId
@@ -129,7 +131,7 @@ export function createMcpHttpServer(
       } else if (method === 'tools/call' && typeof params?.name === 'string') {
         emit('codescope-request-started', 'started')
         emit('codescope-handler-started', 'started')
-        const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace })
+        const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs })
         const { postResponse, ...publicResult } = toolResult
         rpcResult = publicResult
         emit('codescope-response-produced', 'success')

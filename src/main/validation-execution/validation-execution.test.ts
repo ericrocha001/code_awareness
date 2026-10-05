@@ -38,6 +38,30 @@ async function terminal(execution: ValidationExecution, runId: string) {
 }
 
 describe('ValidationExecution', () => {
+  it('follows the active run and bounds waiting by the request deadline', async () => {
+    const { execution, proofs } = setup('node -e "setTimeout(() => process.exit(0), 300)"')
+    const started = JSON.parse((await executeValidationTool(execution, 'start_validation', { profileId: 'typecheck', producer: 'TESTER' })).content[0].text)
+    expect(started).toMatchObject({ status: 'RUNNING', retryAfterMs: 2000 })
+    const busy = JSON.parse((await executeValidationTool(execution, 'start_validation', { profileId: 'typecheck', producer: 'TESTER' })).content[0].text)
+    expect(busy).toMatchObject({ activeRunId: started.runId, recommendedAction: 'FOLLOW_ACTIVE_RUN' })
+    const before = Date.now()
+    const running = JSON.parse((await executeValidationTool(execution, 'get_validation_run', { runId: started.runId, waitMs: 15000 }, before + 1050)).content[0].text)
+    expect(running).toMatchObject({ status: 'RUNNING', retryAfterMs: 2000 })
+    expect(Date.now() - before).toBeLessThan(250)
+    const done = JSON.parse((await executeValidationTool(execution, 'get_validation_run', { runId: started.runId, waitMs: 5000 })).content[0].text)
+    expect(done).toMatchObject({ status: 'PASSED', proofId: 'proof-1' })
+    expect(done.retryAfterMs).toBeUndefined()
+    expect(proofs).toHaveLength(1)
+    const baseline = setup('node -e "setTimeout(() => process.exit(0), 300)"')
+    const run = baseline.execution.start({ profileId: 'typecheck', producer: 'TESTER' })
+    let polls = 0
+    while (baseline.execution.get(run.runId)?.status === 'RUNNING') {
+      polls++
+      await new Promise((resolve) => setTimeout(resolve, 20))
+    }
+    expect(polls).toBeGreaterThan(10)
+    expect(baseline.proofs).toHaveLength(1)
+  })
   it('runs asynchronously and records PASSED and FAILED proofs before publishing terminal state', async () => {
     const passed = setup('node -e "setTimeout(() => process.exit(0), 100)"')
     const initial = passed.execution.start({ profileId: 'typecheck', producer: 'TESTER', evidenceFor: ['acceptance'] })
@@ -57,7 +81,7 @@ describe('ValidationExecution', () => {
     const { execution } = setup('node -e "setTimeout(() => process.exit(0), 300)"')
     const run = execution.start({ profileId: 'typecheck', producer: 'TESTER' })
     expect(() => execution.start({ profileId: 'typecheck', producer: 'TESTER' })).toThrow('VALIDATION_BUSY')
-    const rejected = executeValidationTool(execution, 'start_validation', { profileId: 'typecheck', producer: 'TESTER', command: 'whoami', flags: ['--anything'] })
+    const rejected = await executeValidationTool(execution, 'start_validation', { profileId: 'typecheck', producer: 'TESTER', command: 'whoami', flags: ['--anything'] })
     expect(rejected).toMatchObject({ isError: true })
     await terminal(execution, run.runId)
   })

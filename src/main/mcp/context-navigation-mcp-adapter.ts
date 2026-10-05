@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { McpWorkloadGovernor } from './mcp-workload-governor'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import { GIT_OPERATIONS_TOOLS, executeGitOperationsTool } from '../git-operations/git-operations-mcp'
 import { ContextNavigationError } from '../../shared/types/context-navigation-types'
@@ -137,6 +138,9 @@ import { ACADEMY_MCP_TOOLS, executeAcademyTool } from '../academy/academy-mcp'
 import type { AcademyService } from '../academy/academy-service'
 
 export class ContextNavigationMcpAdapter {
+  private governor = new McpWorkloadGovernor()
+
+  setWorkloadGovernor(governor: McpWorkloadGovernor): void { this.governor = governor }
   private readonly navigation: ProjectContextNavigation
   private readonly systemHealth: SystemHealthCore | undefined
   private readonly runtimeIdentity: RuntimeIdentityProvider | undefined
@@ -259,6 +263,15 @@ export class ContextNavigationMcpAdapter {
   }
 
   async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    const result = await this.governor.run(name, args, invocationContext?.requestId, invocationContext?.deadlineAtMs, () => this.dispatchTool(name, args, invocationContext))
+    if (name === 'get_system_health' && !result.isError) {
+      const health = JSON.parse(result.content[0].text)
+      return { ...result, content: [{ type: 'text', text: JSON.stringify({ ...health, workloadGovernor: this.governor.snapshot(), activeRunId: this.validationExecution?.getActiveRunId() ?? null }) }] }
+    }
+    return result
+  }
+
+  private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
       return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args)
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
@@ -270,7 +283,7 @@ export class ContextNavigationMcpAdapter {
     }
     if (VALIDATION_EXECUTION_TOOLS.some((tool) => tool.name === name)) {
       return this.validationExecution
-        ? executeValidationTool(this.validationExecution, name, args)
+        ? executeValidationTool(this.validationExecution, name, args, invocationContext?.deadlineAtMs)
         : { content: [{ type: 'text', text: 'VALIDATION_EXECUTION_UNAVAILABLE' }], isError: true }
     }
 

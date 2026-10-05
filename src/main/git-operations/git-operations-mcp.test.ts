@@ -1,4 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
+import { randomUUID } from 'node:crypto'
+import { isReceiptedGitMutation } from './git-operation-receipts'
 import { GitHubGitTransport } from '../github/github-git-transport'
 import type { GitService } from '../core/git-service'
 import type { GitHubAuthService } from '../github/github-auth-service'
@@ -7,7 +9,7 @@ import { GitOperationsError, type GitOperationsService } from './git-operations-
 
 describe('Git MCP contract', () => {
   it('projects v1.1 typed actions without repository/command inputs and keeps legacy revert dispatch', async () => {
-    const service = { manageShelf: vi.fn(async () => []), getConflict: vi.fn(async () => ({})), resolveConflict: vi.fn(async () => ({})), revert: vi.fn(async () => ({})) }
+    const service = { executeReceipted: vi.fn(async (_id, _name, _args, mutate) => mutate()), manageShelf: vi.fn(async () => []), getConflict: vi.fn(async () => ({})), resolveConflict: vi.fn(async () => ({})), revert: vi.fn(async () => ({})) }
     const typed = service as unknown as GitOperationsService
     const head = 'a'.repeat(40), revision = 'b'.repeat(64)
     for (const [name, args] of [
@@ -18,7 +20,7 @@ describe('Git MCP contract', () => {
       ['revert_git_commit', { commit: head, expectedHead: head }],
       ['revert_git_commit', { action: 'CONTINUE', expectedHead: head, expectedIndexRevision: revision }],
       ['revert_git_commit', { action: 'ABORT', expectedHead: head }]
-    ] as const) expect((await executeGitOperationsTool(typed, name, args)).isError).toBeUndefined()
+    ] as const) expect((await executeGitOperationsTool(typed, name, isReceiptedGitMutation(name, args) ? { ...args, operationId: randomUUID() } : args)).isError).toBeUndefined()
     expect(service.revert).toHaveBeenCalledWith({ commit: head, expectedHead: head })
     for (const [name, args] of [
       ['manage_git_shelf', { action: 'CREATE', paths: ['file'] }],
