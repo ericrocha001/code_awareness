@@ -60,8 +60,9 @@ describe('Git Operations worktree hygiene', () => {
     expect(existsSync(join(root, '.code-awareness/codemap-ui-runtime/screenshot.png'))).toBe(true)
     expect(existsSync(join(root, '.claude/skills/continuum/SKILL.md'))).toBe(true)
     const remaining = await service.getChanges('UNTRACKED')
-    expect(remaining.map((change) => change.path)).toEqual(expect.arrayContaining(['.gitignore', 'keep.txt']))
-    expect(remaining).toHaveLength(2)
+    const remainingPaths = remaining.map((change) => change.path)
+    expect(remainingPaths).toEqual(expect.arrayContaining(['.gitignore', 'keep.txt']))
+    if (remainingPaths.length !== 2) throw new Error('UNEXPECTED_REMAINING ' + JSON.stringify(remainingPaths))
 
     const repeated = await service.manageGitignore({ action: 'PREVIEW_ADD', rules: preview.rules })
     expect(repeated.candidateRules).toEqual([])
