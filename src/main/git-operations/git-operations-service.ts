@@ -161,7 +161,7 @@ export class GitOperationsService {
     return [...new Set(values.map((value) => {
       if (typeof value !== 'string') fail('INVALID_ARGUMENT')
       const rule = value.trim().replace(/\\/g, '/')
-      if (!rule || rule.length > 500 || rule.includes('\\0') || /[\\r\\n]/.test(rule) || rule.startsWith('!')) fail('INVALID_ARGUMENT')
+      if (!rule || rule.length > 500 || rule.includes('\0') || /[\r\n]/.test(rule) || rule.startsWith('!')) fail('INVALID_ARGUMENT')
       const pathLike = rule.replace(/^\/+/, '').replace(/^\.\//, '')
       if (!pathLike || /^[A-Za-z]:/.test(pathLike) || pathLike.split('/').some((part) => part === '..' || part.toLowerCase() === '.git')) fail('INVALID_ARGUMENT')
       return rule
