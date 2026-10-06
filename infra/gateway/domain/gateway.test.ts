@@ -6,7 +6,8 @@ import { McpLifecycle } from '../../../src/main/mcp/mcp-lifecycle'
 import { RelayTransport } from '../../../src/main/mcp/connection/relay-transport'
 import { ConnectionLifecycle } from '../../../src/main/mcp/connection/connection-lifecycle'
 import { ContextNavigationError } from '../../../src/shared/types/context-navigation-types'
-import { CodeScopeHealthMonitor, type CodeScopeTraceEvent } from '../../../src/main/mcp/code-scope-health'
+import { ChannelFunctionalHealthMonitor } from '../../../src/main/mcp/channel-functional-health'
+import type { ChannelTraceEvent } from '../../../src/shared/types/channel-types'
 
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
@@ -19,7 +20,7 @@ async function setup() {
     return { issuer, subject: assertion }
   } })
   cleanup.push(() => gateway.close())
-  async function desktop(user: string, trace?: import('../../../src/main/mcp/code-scope-health').CodeScopeTraceSink) {
+  async function desktop(user: string, trace?: import('../../../src/shared/types/channel-types').ChannelTraceSink) {
     const canonicalId = `canonical-${user}` as UserId
     const identity = await provisionCanonicalRelayIdentity({
       identityResolver: gateway.resolver,
@@ -104,11 +105,11 @@ describe('authenticated gateway and local relay', () => {
 
   it('tracks the full operational lifecycle across all stages and delivered acknowledgments', async () => {
     const f = await setup()
-    const recordedEvents: CodeScopeTraceEvent[] = []
-    const health = new CodeScopeHealthMonitor()
+    const recordedEvents: ChannelTraceEvent[] = []
+    const health = new ChannelFunctionalHealthMonitor()
     health.onChanged(() => {})
     const traceSink = {
-      record(event: CodeScopeTraceEvent) {
+      record(event: ChannelTraceEvent) {
         recordedEvents.push(event)
         health.record(event)
       }
@@ -150,10 +151,10 @@ describe('authenticated gateway and local relay', () => {
 
   it('preserves functional tool error to client without degrading operational health', async () => {
     const f = await setup()
-    const recordedEvents: CodeScopeTraceEvent[] = []
-    const health = new CodeScopeHealthMonitor()
+    const recordedEvents: ChannelTraceEvent[] = []
+    const health = new ChannelFunctionalHealthMonitor()
     const traceSink = {
-      record(event: CodeScopeTraceEvent) {
+      record(event: ChannelTraceEvent) {
         recordedEvents.push(event)
         health.record(event)
       }

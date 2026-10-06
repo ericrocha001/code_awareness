@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { SystemHealthCore } from './system-health-core'
 import type {
   CanonicalStage,
@@ -7,7 +7,7 @@ import type {
   StageDrilldownResult
 } from '../../shared/types/system-health-types'
 
-function makeEvent(overrides: Partial<CodeScopeTraceEvent> & Pick<CodeScopeTraceEvent, 'stage' | 'status'>): CodeScopeTraceEvent {
+function makeEvent(overrides: Partial<ChannelTraceEvent> & Pick<ChannelTraceEvent, 'stage' | 'status'>): ChannelTraceEvent {
   return {
     timestamp: new Date().toISOString(),
     requestId: 'req-drilldown-harness',
@@ -23,7 +23,7 @@ describe('System Health — Generic Stage Diagnostic Drilldown Harness', () => {
   it('Core remains independent of MCP concepts and accepts arbitrary stage drilldown providers', () => {
     const dummyProvider: StageDrilldownProvider = {
       canonicalStage: 'Access Assertion' as CanonicalStage,
-      evaluate: (events: CodeScopeTraceEvent[], failureReason?: string | null): StageDrilldownResult => {
+      evaluate: (events: ChannelTraceEvent[], failureReason?: string | null): StageDrilldownResult => {
         return {
           canonicalStage: 'Access Assertion',
           state: 'LOCALIZED',

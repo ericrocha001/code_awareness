@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { SystemHealthCore } from './system-health-core'
 import { executeGetSystemHealth, type SystemHealthDiagnosticPayload } from './system-health-mcp'
 import type {
@@ -9,7 +9,7 @@ import type {
 } from '../../shared/types/system-health-types'
 import { computeLinearAdaptiveLocalization } from './adaptive-fault-locator'
 
-function makeEvent(overrides: Partial<CodeScopeTraceEvent> & Pick<CodeScopeTraceEvent, 'stage' | 'status'>): CodeScopeTraceEvent {
+function makeEvent(overrides: Partial<ChannelTraceEvent> & Pick<ChannelTraceEvent, 'stage' | 'status'>): ChannelTraceEvent {
   return {
     timestamp: new Date().toISOString(),
     requestId: 'req-adaptive-harness',

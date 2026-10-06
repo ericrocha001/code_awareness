@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { ContextNavigationError } from '../../shared/types/context-navigation-types'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
-import { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from './channel-mcp-adapter'
 import { createMcpHttpServer, type McpOperationalLogEntry } from './mcp-http-server'
 
 const logs: McpOperationalLogEntry[] = []
@@ -17,7 +17,7 @@ const navigation: ContextNavigationPort = {
   getSymbolHierarchy: vi.fn(async (_repoPath, targetIds) => ({ targets: targetIds.map((target) => ({ target, up: [], down: [] })) }))
 }
 const server = createMcpHttpServer(
-  new ContextNavigationMcpAdapter(navigation, 'C:/bound-repository'),
+  new ChannelMcpAdapter(navigation, 'C:/bound-repository'),
   (entry) => logs.push(entry)
 )
 let endpoint: string
@@ -145,7 +145,7 @@ describe('MCP HTTP server', () => {
         }
       })
     }
-    const postServer = createMcpHttpServer(adapter as unknown as ContextNavigationMcpAdapter, () => {})
+    const postServer = createMcpHttpServer(adapter as unknown as ChannelMcpAdapter, () => {})
     await new Promise<void>((resolve) => postServer.listen(0, '127.0.0.1', resolve))
     const address = postServer.address() as { port: number }
     try {

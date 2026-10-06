@@ -11,13 +11,14 @@ import { getCanonicalTokenizer } from '../tokenizer'
 import { ActiveProjectService } from '../active-project-service'
 import { bindProjectNavigation } from './project-context-navigation'
 import { McpLifecycle } from '../../mcp/mcp-lifecycle'
-import type { McpToolResult } from '../../mcp/context-navigation-mcp-adapter'
+import { ChannelMcpAdapter, type McpToolResult } from '../../mcp/channel-mcp-adapter'
 import { createLocalGateway, MemoryInstallationRegistry } from '../../../../infra/gateway/testing/local-gateway'
 import { provisionCanonicalRelayIdentity } from '../../../../infra/gateway/testing/canonical-relay-identity-fixture'
 import { type UserId } from '../../../shared/distribution/relay-protocol'
 import { RelayTransport } from '../../mcp/connection/relay-transport'
 import { ConnectionLifecycle } from '../../mcp/connection/connection-lifecycle'
-import { CodeScopeHealthMonitor, type CodeScopeTraceEvent } from '../../mcp/code-scope-health'
+import { ChannelFunctionalHealthMonitor } from '../../mcp/channel-functional-health'
+import type { ChannelTraceEvent } from '../../../shared/types/channel-types'
 
 const unusedCompression: CompressionPort = {
   async generateCompressionMarkdown() {
@@ -26,6 +27,60 @@ const unusedCompression: CompressionPort = {
 }
 
 describe('Context Navigation system acceptance', () => {
+  it('executes simultaneous reads through the Channel against a shared real CodeMap', async () => {
+    const fixture = createCodeMapSystemFixture()
+    const watcher = new WatcherService()
+    const codeMap = new CodeMapService(watcher, unusedCompression)
+    const engine = new ContextEngine(codeMap)
+    try {
+      await codeMap.openRepository(fixture.repoPath)
+      await codeMap.awaitMaintenance(fixture.repoPath)
+      await codeMap.indexRepository(fixture.repoPath)
+      const adapter = new ChannelMcpAdapter(engine, fixture.repoPath)
+      const inspected = await engine.inspectFiles(fixture.repoPath, ['src/core/BaseService.ts'])
+      const target = inspected.files[0].elements.find(element => element.target)!.target!
+      const expected = (await engine.readCode(fixture.repoPath, [target])).map(result => ({ type: 'text', text: serializeReadCode(result) }))
+      const discovery = serializeDiscovery(await engine.discoverRepository(fixture.repoPath))
+      const mandatory = [
+        adapter.callTool('read_code', { targetIds: [target] }),
+        adapter.callTool('read_code', { targetIds: [target] }),
+        adapter.callTool('inspect_files', { relativePaths: ['src/core/BaseService.ts'] }),
+        adapter.callTool('discover_repository', {})
+      ]
+      expect(adapter.getActivityState().activeRequests).toBe(4)
+      const results = await Promise.all(mandatory)
+      expect(results.every(result => !result.isError)).toBe(true)
+      expect(results[0].content).toEqual(expected)
+      expect(results[1].content).toEqual(expected)
+      expect(results[2].content[0].text).toBe(serializeInspectFiles(inspected))
+      expect(results[3].content[0].text).toBe(discovery)
+      expect(adapter.getActivityState()).toMatchObject({ activeRequests: 0, peakConcurrentRequests: 4, totalRequests: 4, succeededRequests: 4 })
+      for (const concurrency of [2, 4, 8, 16, 24, 32]) {
+        const probe = new ChannelMcpAdapter(engine, fixture.repoPath)
+        const startedAt = performance.now()
+        const calls = Array.from({ length: concurrency }, (_, i) => i % 4 < 2
+          ? probe.callTool('read_code', { targetIds: [target] })
+          : i % 4 === 2
+            ? probe.callTool('inspect_files', { relativePaths: ['src/core/BaseService.ts'] })
+            : probe.callTool('discover_repository', {}))
+        await Promise.all(calls)
+        const after = probe.getActivityState()
+        console.log('CHANNEL_CONCURRENCY_CHARACTERIZATION', JSON.stringify({
+          concurrency, completed: after.succeededRequests,
+          timeouts: after.timedOutRequests,
+          failures: after.failedRequests,
+          elapsedMs: performance.now() - startedAt,
+          meanLatencyMs: after.latency.totalDurationMs / concurrency,
+          peakConcurrentRequests: after.peakConcurrentRequests
+        }))
+      }
+    } finally {
+      codeMap.closeAll()
+      watcher.stop()
+      await fixture.cleanup()
+    }
+  })
+
   it('preserves local navigation results through authenticated outbound relay without persisting context', async () => {
     const fixture = createCodeMapSystemFixture()
     const second = createCodeMapSystemFixture()
@@ -33,9 +88,9 @@ describe('Context Navigation system acceptance', () => {
     const codeMap = new CodeMapService(watcher, unusedCompression)
     const engine = new ContextEngine(codeMap)
     const projects = new ActiveProjectService(codeMap)
-    const health = new CodeScopeHealthMonitor()
-    const traceEvents: CodeScopeTraceEvent[] = []
-    const trace = { record: (event: CodeScopeTraceEvent) => { traceEvents.push(event); health.record(event) } }
+    const health = new ChannelFunctionalHealthMonitor()
+    const traceEvents: ChannelTraceEvent[] = []
+    const trace = { record: (event: ChannelTraceEvent) => { traceEvents.push(event); health.record(event) } }
     const mcp = new McpLifecycle({ log: () => {}, trace })
     const registry = new MemoryInstallationRegistry()
     const owner = 'relay-proof-user' as UserId

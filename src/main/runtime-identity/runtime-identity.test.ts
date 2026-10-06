@@ -4,10 +4,10 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { RuntimeIdentityProvider } from './runtime-identity-provider'
 import { executeGetRuntimeIdentity, RUNTIME_IDENTITY_MCP_TOOL } from './runtime-identity-mcp'
-import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { SystemHealthCore } from '../system-health/system-health-core'
 import { executeGetSystemHealth } from '../system-health/system-health-mcp'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { createDecoratedTraceSink } from './trace-decorator'
 
 describe('Runtime Identity & Freshness — Permanent Harness', () => {
@@ -150,7 +150,7 @@ describe('Runtime Identity & Freshness — Permanent Harness', () => {
       getSymbolHierarchy: vi.fn()
     }
 
-    const adapter = new ContextNavigationMcpAdapter(hangingNavigation as any, undefined, provider)
+    const adapter = new ChannelMcpAdapter(hangingNavigation as any, undefined, provider)
 
     // get_runtime_identity responde imediatamente sem tocar a navegação
     const result = await adapter.callTool('get_runtime_identity', {})
@@ -164,7 +164,7 @@ describe('Runtime Identity & Freshness — Permanent Harness', () => {
 
   it('9. Tool get_runtime_identity está listada no catálogo público do MCP com schema protegido', () => {
     const provider = new RuntimeIdentityProvider({ rootDir: tempDir })
-    const adapter = new ContextNavigationMcpAdapter({} as any, undefined, provider)
+    const adapter = new ChannelMcpAdapter({} as any, undefined, provider)
 
     const tools = adapter.listTools()
     const tool = tools.find((t) => t.name === 'get_runtime_identity')
@@ -183,7 +183,7 @@ describe('Runtime Identity & Freshness — Permanent Harness', () => {
 
     // Simular chamada bem sucedida end-to-end
     const ts = new Date().toISOString()
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { timestamp: ts, requestId: 'req-h1', sessionId: 'sess-h1', method: 'tools/call', tool: 'discover_repository', stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { timestamp: ts, requestId: 'req-h1', sessionId: 'sess-h1', method: 'tools/call', tool: 'discover_repository', stage: 'desktop-request-received', durationMs: 10, status: 'started' },
       { timestamp: ts, requestId: 'req-h1', sessionId: 'sess-h1', method: 'tools/call', tool: 'discover_repository', stage: 'codescope-response-produced', durationMs: 20, status: 'success' },
@@ -237,7 +237,7 @@ describe('Runtime Identity & Freshness — Permanent Harness', () => {
 
     const ts = new Date().toISOString()
     // Evento contendo o instanceId do runtime anterior
-    const failEvents: CodeScopeTraceEvent[] = [
+    const failEvents: ChannelTraceEvent[] = [
       { timestamp: ts, requestId: 'req-old', sessionId: 'sess-old', method: 'tools/call', tool: 'discover_repository', stage: 'gateway-request-started', durationMs: 0, status: 'started', runtimeInstanceId: oldProvider.getInstanceId() },
       { timestamp: ts, requestId: 'req-old', sessionId: 'sess-old', method: 'tools/call', tool: 'discover_repository', stage: 'desktop-request-received', durationMs: 10, status: 'started', runtimeInstanceId: oldProvider.getInstanceId() },
       { timestamp: ts, requestId: 'req-old', sessionId: 'sess-old', method: 'tools/call', tool: 'discover_repository', stage: 'relay-response-forwarded', durationMs: 20, status: 'error', error: 'RELAY_CLOSED', runtimeInstanceId: oldProvider.getInstanceId() }

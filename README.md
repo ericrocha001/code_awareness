@@ -282,6 +282,10 @@ npm run dev
 npm run typecheck
 ```
 
+This gate checks the actual Node and Web projects without emitting files and requires an exact match with `scripts/typecheck-baseline.json`. New diagnostics or increased occurrences fail. Fixing known errors also fails the check until `npm run typecheck:baseline` explicitly reduces the baseline; that command refuses regressions. Neither command recreates a missing baseline.
+
+`npm run typecheck:test` exercises the guard. Initial baseline creation is exceptional: `node scripts/typecheck-gate.cjs --bootstrap` creates it only when absent, after checking both projects, and never replaces an existing baseline. Do not use bootstrap to approve new debt; restore the versioned baseline instead.
+
 ### Validation
 
 The repository exposes targeted validation lanes as well as a broad validation pipeline:

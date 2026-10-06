@@ -1,12 +1,12 @@
-import type { CodeScopeTraceEvent, CodeScopeTraceSink } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent, ChannelTraceSink } from '../../shared/types/channel-types'
 import type { RuntimeIdentityProvider } from './runtime-identity-provider'
 
 export function createDecoratedTraceSink(
-  sink: CodeScopeTraceSink,
+  sink: ChannelTraceSink,
   provider: RuntimeIdentityProvider
-): CodeScopeTraceSink {
+): ChannelTraceSink {
   return {
-    record(event: CodeScopeTraceEvent): void {
+    record(event: ChannelTraceEvent): void {
       if (!event.runtimeInstanceId) {
         event.runtimeInstanceId = provider.getInstanceId()
       }

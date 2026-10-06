@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { GitService } from '../core/git-service'
-import type { McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import { operationalFailure } from '../mcp/operational-guidance'
 
 export interface GitOperationReceipt {

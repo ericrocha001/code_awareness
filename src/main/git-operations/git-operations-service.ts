@@ -5,7 +5,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { GitService } from '../core/git-service'
 import type { GitRemoteTransport } from '../core/git-remote-transport'
 import { GitOperationReceipts } from './git-operation-receipts'
-import type { McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 
 export class GitOperationsError extends Error {
   constructor(readonly code: string) { super(code) }

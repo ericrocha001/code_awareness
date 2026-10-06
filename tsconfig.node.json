@@ -7,7 +7,7 @@
     "strict": true,
     "skipLibCheck": true,
     "outDir": "out/main",
-    "rootDir": "src/main"
+    "rootDir": "."
   },
   "include": ["src/main/**/*", "src/shared/**/*"]
 }

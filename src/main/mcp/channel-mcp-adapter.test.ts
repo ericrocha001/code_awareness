@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { ContextNavigationError } from '../../shared/types/context-navigation-types'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
 import { createEfficiencyFixture } from '../core/context/context-efficiency-fixture'
 import { serializeDiscovery, serializeRelationships, serializeInspectFiles, serializeReadCode, serializeReferences, serializeSymbolDependencies, serializeSymbolHierarchy } from '../core/context/context-navigation-serializer'
-import { ContextNavigationMcpAdapter, contextNavigationMcpTools } from './context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from './channel-mcp-adapter'
+import { CODE_NAVIGATION_MCP_TOOLS as contextNavigationMcpTools } from './code-navigation-mcp'
 
 function createNavigation(): ContextNavigationPort {
   return {
@@ -33,7 +35,28 @@ function createNavigation(): ContextNavigationPort {
   }
 }
 
-describe('ContextNavigationMcpAdapter', () => {
+describe('ChannelMcpAdapter', () => {
+  it('fingerprints metadata and annotations with stable object key ordering', () => {
+    const adapter = new ChannelMcpAdapter(createNavigation(), 'repo')
+    const original = adapter.listTools()[0]
+    const list = vi.spyOn(adapter, 'listTools')
+    list.mockReturnValue([original])
+    const baseline = adapter.getToolCatalogHash()
+    list.mockReturnValue([{ ...original, _meta: { 'openai/fileParams': ['file'], other: { b: 2, a: 1 } } }])
+    const metadataHash = adapter.getToolCatalogHash()
+    expect(metadataHash).not.toBe(baseline)
+    list.mockReturnValue([{ ...original, _meta: { other: { a: 1, b: 2 }, 'openai/fileParams': ['file'] } }])
+    expect(adapter.getToolCatalogHash()).toBe(metadataHash)
+    list.mockReturnValue([{ ...original, _meta: { 'openai/fileParams': ['file'], other: { b: 2, a: 1 } }, annotations: { readOnlyHint: false } }])
+    expect(adapter.getToolCatalogHash()).not.toBe(metadataHash)
+    list.mockReturnValue([original])
+    expect(adapter.getToolCatalogHash()).toBe(baseline)
+  })
+
+  it('preserves the ordered navigation catalog from before the Channel extraction', () => {
+    expect(createHash('sha256').update(JSON.stringify(contextNavigationMcpTools)).digest('hex')).toBe('92fcf3f0031863ce4557de703ad3865dda44e6e22c91f8de6994dc467dff0f7e')
+  })
+
   it('publishes exactly seven independent progressive capabilities', () => {
     expect(contextNavigationMcpTools.map((tool) => tool.name)).toEqual(['discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code'])
     for (const tool of contextNavigationMcpTools) {
@@ -56,7 +79,7 @@ describe('ContextNavigationMcpAdapter', () => {
 
   it('binds the project and freezes compact golden outputs without enrichment', async () => {
     const navigation = createNavigation()
-    const adapter = new ContextNavigationMcpAdapter(navigation, 'C:/bound')
+    const adapter = new ChannelMcpAdapter(navigation, 'C:/bound')
     expect((await adapter.callTool('discover_repository', {})).content).toEqual([{ type: 'text', text: '[.]\nsrc/\ntests/\npackage.json\n\n[src/main/core/context]\ncode-target.ts\ncontext-engine.ts\nrepo-discovery.ts' }])
     expect(navigation.discoverRepository).toHaveBeenCalledWith('C:/bound', undefined)
     expect(navigation.getRelationships).not.toHaveBeenCalled()
@@ -86,7 +109,7 @@ describe('ContextNavigationMcpAdapter', () => {
 
   it('forwards explicit options without adding implicit requests', async () => {
     const navigation = createNavigation()
-    const adapter = new ContextNavigationMcpAdapter(navigation, 'repo')
+    const adapter = new ChannelMcpAdapter(navigation, 'repo')
     await adapter.callTool('discover_repository', { relativePaths: ['src', 'tests'] })
     await adapter.callTool('get_relationships', { relativePaths: ['src/a.ts'], direction: 'out', details: true })
     await adapter.callTool('inspect_files', { relativePaths: ['src/a.ts'], signatures: true })
@@ -116,7 +139,7 @@ describe('ContextNavigationMcpAdapter', () => {
     ['inspect_files', { relativePaths: ['a'], signatures: 'true' }]
   ])('rejects invalid call %s', async (name, args) => {
     const navigation = createNavigation()
-    const result = await new ContextNavigationMcpAdapter(navigation, 'repo').callTool(name as string, args)
+    const result = await new ChannelMcpAdapter(navigation, 'repo').callTool(name as string, args)
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toMatch(/^INVALID_ARGUMENT:/)
     for (const operation of Object.values(navigation)) expect(operation).not.toHaveBeenCalled()
@@ -125,7 +148,7 @@ describe('ContextNavigationMcpAdapter', () => {
   it('preserves domain failure without fallback or JSON', async () => {
     const navigation = createNavigation()
     vi.mocked(navigation.inspectFiles).mockRejectedValueOnce(new ContextNavigationError('UNKNOWN_FILE', 'Unknown file: missing.ts'))
-    const result = await new ContextNavigationMcpAdapter(navigation, 'repo').callTool('inspect_files', { relativePaths: ['missing.ts'] })
+    const result = await new ChannelMcpAdapter(navigation, 'repo').callTool('inspect_files', { relativePaths: ['missing.ts'] })
     expect(result).toEqual({ isError: true, content: [{ type: 'text', text: 'UNKNOWN_FILE: Unknown file: missing.ts' }] })
     expect(navigation.discoverRepository).not.toHaveBeenCalled()
   })
@@ -162,7 +185,7 @@ describe('ContextNavigationMcpAdapter', () => {
 
   it('content.text equals serializer output exactly, with no JSON escaping', async () => {
     const navigation = createNavigation()
-    const adapter = new ContextNavigationMcpAdapter(navigation, 'repo')
+    const adapter = new ChannelMcpAdapter(navigation, 'repo')
 
     const discResult = await navigation.discoverRepository('repo', undefined)
     const expectedDiscovery = serializeDiscovery(discResult)
@@ -216,7 +239,7 @@ describe('ContextNavigationMcpAdapter', () => {
 
   it('navigates hierarchy in both directions through public MCP tools without reading source early', async () => {
     const fixture = createEfficiencyFixture()
-    const adapter = new ContextNavigationMcpAdapter(fixture.engine, fixture.repoPath)
+    const adapter = new ChannelMcpAdapter(fixture.engine, fixture.repoPath)
     const inspected = await adapter.callTool('inspect_files', { relativePaths: ['src/service.ts', 'src/types.ts'] })
     const service = inspected.content[0].text.match(/class DataService (t:[A-Za-z0-9_-]{11})/)?.[1]
     const contract = inspected.content[0].text.match(/interface ServiceConfig (t:[A-Za-z0-9_-]{11})/)?.[1]
@@ -247,7 +270,7 @@ describe('ContextNavigationMcpAdapter', () => {
 
   it('navigates inspect to references to source code through public MCP tools without reading source early', async () => {
     const fixture = createEfficiencyFixture()
-    const adapter = new ContextNavigationMcpAdapter(fixture.engine, fixture.repoPath)
+    const adapter = new ChannelMcpAdapter(fixture.engine, fixture.repoPath)
 
     const inspected = await adapter.callTool('inspect_files', { relativePaths: ['src/service.ts'] })
     const target = inspected.content[0].text.match(/class DataService (t:[A-Za-z0-9_-]{11})/)?.[1]
@@ -267,7 +290,7 @@ describe('ContextNavigationMcpAdapter', () => {
 
   it('navigates inspect to outbound dependency, inbound references and source through public MCP tools', async () => {
     const fixture = createEfficiencyFixture()
-    const adapter = new ContextNavigationMcpAdapter(fixture.engine, fixture.repoPath)
+    const adapter = new ChannelMcpAdapter(fixture.engine, fixture.repoPath)
     const inspected = await adapter.callTool('inspect_files', { relativePaths: ['src/app.ts'] })
     const sourceTarget = inspected.content[0].text.match(/function startApp (t:[A-Za-z0-9_-]{11})/)?.[1]
     expect(sourceTarget).toBeDefined()

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { SystemHealthCore } from './system-health-core'
 import { executeGetSystemHealth, type SystemHealthDiagnosticPayload } from './system-health-mcp'
 import { mcpRequestDrilldownProvider } from './mcp-request-drilldown'
 
-function makeEvent(overrides: Partial<CodeScopeTraceEvent> & Pick<CodeScopeTraceEvent, 'stage' | 'status'>): CodeScopeTraceEvent {
+function makeEvent(overrides: Partial<ChannelTraceEvent> & Pick<ChannelTraceEvent, 'stage' | 'status'>): ChannelTraceEvent {
   const baseTs = new Date().toISOString()
   return {
     timestamp: baseTs,
@@ -126,7 +126,7 @@ describe('Diagnostic Accuracy Harness — MCP Request Drilldown', () => {
       responsibility: 'JSON-RPC parsing, schema validation, and tool method routing',
       investigationSeeds: [
         'src/main/mcp/mcp-http-server.ts',
-        'src/main/mcp/context-navigation-mcp-adapter.ts'
+        'src/main/mcp/channel-mcp-adapter.ts'
       ]
     })
   })

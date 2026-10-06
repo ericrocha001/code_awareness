@@ -19,7 +19,7 @@ export interface NavigationInvocationContext {
   deadlineAtMs?: number
   requestId?: string
   sessionId?: string
-  trace?: import('../../mcp/code-scope-health').CodeScopeTraceSink
+  trace?: import('../../../shared/types/channel-types').ChannelTraceSink
 }
 
 export interface ContextNavigationPort {

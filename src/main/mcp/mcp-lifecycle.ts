@@ -1,9 +1,10 @@
 import type { Server } from 'node:http'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
-import { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from './channel-mcp-adapter'
 import { createMcpHttpServer } from './mcp-http-server'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
-import type { CodeScopeTraceSink } from './code-scope-health'
+import { ChannelActivityMonitor } from './channel-activity-monitor'
+import type { ChannelTraceSink } from '../../shared/types/channel-types'
 import type { IArtifactReader } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
 
@@ -16,7 +17,8 @@ interface McpLifecycleOptions {
   createServer?: (navigation: ProjectContextNavigation, artifactReader?: IArtifactReader) => Server
   createContextServer?: (context: McpProjectContext) => Server
   log?: (state: McpLifecycleState) => void
-  trace?: CodeScopeTraceSink
+  trace?: ChannelTraceSink
+  activity?: ChannelActivityMonitor
   systemHealth?: import('../system-health/system-health-core').SystemHealthCore
   runtimeIdentity?: import('../runtime-identity/runtime-identity-provider').RuntimeIdentityProvider
   validationLedger?: import('../validation-ledger/validation-ledger').ValidationLedger
@@ -25,11 +27,12 @@ interface McpLifecycleOptions {
 
 export class McpLifecycle {
   private readonly governor = new McpWorkloadGovernor()
+  private readonly activity: ChannelActivityMonitor
   private state: McpLifecycleState = { status: 'STOPPED', available: false }
   private server: Server | null = null
   private binding: string | null = null
   private bindingReader: IArtifactReader | undefined = undefined
-  private currentAdapter: ContextNavigationMcpAdapter | null = null
+  private currentAdapter: ChannelMcpAdapter | null = null
   private requested: McpProjectContext | null = null
   private revision = 0
   private transition = Promise.resolve()
@@ -40,10 +43,11 @@ export class McpLifecycle {
   private readonly log: (state: McpLifecycleState) => void
 
   constructor(options: McpLifecycleOptions = {}) {
+    this.activity = options.activity ?? new ChannelActivityMonitor()
     this.createServer = options.createContextServer ?? (options.createServer
       ? ((context) => options.createServer!(context.navigation, context.artifactReader))
       : ((context) => {
-      const adapter = new ContextNavigationMcpAdapter(
+      const adapter = new ChannelMcpAdapter(
         context,
         options.systemHealth,
         options.runtimeIdentity,
@@ -52,6 +56,7 @@ export class McpLifecycle {
       )
       this.currentAdapter = adapter
       adapter.setWorkloadGovernor(this.governor)
+      adapter.setActivityMonitor(this.activity)
       return createMcpHttpServer(adapter, console.log, options.trace)
     }))
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))
@@ -61,6 +66,9 @@ export class McpLifecycle {
   getState(): McpLifecycleState {
     return { ...this.state }
   }
+
+  getActivityState() { return this.activity.getState() }
+  onActivityChanged(listener: () => void) { return this.activity.onChanged(listener) }
 
   getCatalogProbe(): { getToolCatalogHash: () => string } | null {
     return this.currentAdapter ? { getToolCatalogHash: () => this.currentAdapter!.getToolCatalogHash() } : null
@@ -86,6 +94,7 @@ export class McpLifecycle {
       this.requested.diagnosticSourceAccess === context.diagnosticSourceAccess &&
       this.requested.runtimeRestart === context.runtimeRestart &&
       this.requested.gitOperations === context.gitOperations &&
+      this.requested.repositoryFileIngress === context.repositoryFileIngress &&
       this.state.status !== 'ERROR' &&
       this.state.status !== 'STOPPING'
     ) {

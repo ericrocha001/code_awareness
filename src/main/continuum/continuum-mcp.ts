@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { IArtifactReader, IContinuumService, ListArtifactsFilter } from './continuum-types'
 const string = { type: 'string', minLength: 1 }
 function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []): McpToolDefinition {

@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import { GitOperationsError, type GitOperationsService, type BranchRequest, type MergeRequest, type SyncRequest, type ShelfRequest, type RevertRequest, type GitIgnoreRequest } from './git-operations-service'
 import { isReceiptedGitMutation } from './git-operation-receipts'
 import { gitGuidance, operationalFailure } from '../mcp/operational-guidance'

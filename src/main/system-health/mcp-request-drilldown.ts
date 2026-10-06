@@ -1,4 +1,4 @@
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import type {
   CheckpointResult,
   InvestigationTarget,
@@ -60,7 +60,7 @@ const REFINED_TARGETS: Record<McpRequestCheckpoint, InvestigationTarget> = {
     responsibility: 'JSON-RPC parsing, schema validation, and tool method routing',
     investigationSeeds: [
       'src/main/mcp/mcp-http-server.ts',
-      'src/main/mcp/context-navigation-mcp-adapter.ts'
+      'src/main/mcp/channel-mcp-adapter.ts'
     ]
   }
 }
@@ -68,7 +68,7 @@ const REFINED_TARGETS: Record<McpRequestCheckpoint, InvestigationTarget> = {
 export class McpRequestDrilldownProvider implements StageDrilldownProvider {
   readonly canonicalStage = 'MCP Request' as const
 
-  evaluate(events: CodeScopeTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
+  evaluate(events: ChannelTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
     if (events.length === 0) return null
 
     const hasEvent = (stage: string, status?: string) =>
@@ -265,7 +265,7 @@ export class McpRequestDrilldownProvider implements StageDrilldownProvider {
     }
   }
 
-  private buildHappyPathResult(events: CodeScopeTraceEvent[]): StageDrilldownResult {
+  private buildHappyPathResult(events: ChannelTraceEvent[]): StageDrilldownResult {
     const last = events[events.length - 1]
     const checkpoints: CheckpointResult[] = MCP_REQUEST_CHECKPOINTS.map((name) => ({
       name,

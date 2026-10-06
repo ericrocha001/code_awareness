@@ -1,7 +1,7 @@
 import WebSocket from 'ws'
 import { encodeRelayMessage, MAX_RELAY_BYTES, parseRelayMessage, RELAY_PROTOCOL, RelayError, type ConnectionId, type InstallationId, type RelayMessage, type RequestId } from '../../../shared/distribution/relay-protocol'
 import { ConnectionError, type ConnectionConfiguration, type ConnectionTransportPort, type TransportState } from './connection-transport-port'
-import type { CodeScopeTraceEvent, CodeScopeTraceSink } from '../code-scope-health'
+import type { ChannelTraceEvent, ChannelTraceSink } from '../../../shared/types/channel-types'
 
 interface RelayIdentity { getId(): InstallationId; getCredential(): string | null }
 
@@ -34,7 +34,7 @@ export class RelayTransport implements ConnectionTransportPort {
     private readonly identity: RelayIdentity,
     private readonly heartbeatMs = 30_000,
     private readonly requestTimeoutMs = 25_000,
-    private readonly trace?: CodeScopeTraceSink
+    private readonly trace?: ChannelTraceSink
   ) {}
 
   getState(): TransportState { return { ...this.state } }
@@ -150,7 +150,7 @@ export class RelayTransport implements ConnectionTransportPort {
   private async invoke(socket: WebSocket, endpoint: string, message: Extract<RelayMessage, { type: 'invoke' }>, signal: AbortSignal): Promise<void> {
     const startedAt = performance.now()
     const metadata = requestMetadata(message.body)
-    const record = (stage: CodeScopeTraceEvent['stage'], status: CodeScopeTraceEvent['status'], error?: string): void => {
+    const record = (stage: ChannelTraceEvent['stage'], status: ChannelTraceEvent['status'], error?: string): void => {
       const elapsed = Math.round((performance.now() - startedAt) * 100) / 100
       const deadlineRemainingMs = Math.max(0, Math.round((this.requestTimeoutMs - elapsed) * 100) / 100)
       this.trace?.record({

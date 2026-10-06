@@ -7,7 +7,7 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 import type { RepoDiscoveryRequest, RepoDiscoveryResult } from '../shared/types/repo-discovery-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
-import type { ChatGptIntegrationState } from '../shared/types/chatgpt-integration-types'
+import type { ChannelState } from '../shared/types/channel-state-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
 import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem } from '../shared/types/academy-types'
 import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
@@ -39,11 +39,11 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   bindAcademyGitRepository: (repositoryCatalogId: string): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-bind', repositoryCatalogId),
   listAcademyGitEligibleRepositories: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('academy:git-eligible-repos'),
   openAcademyGitRepository: (): Promise<boolean> => ipcRenderer.invoke('academy:git-open-repo'),
-  getChatGptIntegrationState: (): Promise<ChatGptIntegrationState> => ipcRenderer.invoke('integration:chatgpt:get-state'),
-  onChatGptIntegrationChanged: (callback: (state: ChatGptIntegrationState) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, state: ChatGptIntegrationState): void => callback(state)
-    ipcRenderer.on('integration:chatgpt:changed', handler)
-    return () => ipcRenderer.removeListener('integration:chatgpt:changed', handler)
+  getChannelState: (): Promise<ChannelState> => ipcRenderer.invoke('channel:get-state'),
+  onChannelChanged: (callback: (state: ChannelState) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, state: ChannelState): void => callback(state)
+    ipcRenderer.on('channel:changed', handler)
+    return () => ipcRenderer.removeListener('channel:changed', handler)
   },
   getSystemHealthState: (): Promise<SystemHealthState> => ipcRenderer.invoke('system-health:get-state'),
   getSystemHealthDiagnosticReport: (): Promise<string> => ipcRenderer.invoke('system-health:get-diagnostic-report'),

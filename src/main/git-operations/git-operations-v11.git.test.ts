@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GitService } from '../core/git-service'
 import { cleanupTempRepo, commit, createTempGitRepo, gitExec, stageAll, writeFile } from '../core/git-test-helpers'
 import { GitHubGitTransport } from '../github/github-git-transport'
-import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { executeGitOperationsTool as dispatchGitOperationsTool } from './git-operations-mcp'
@@ -272,7 +272,7 @@ describe('Git Operations v1.1 typed conflicts', () => {
     writeFile(root, 'a.txt', 'upstream\n'); await stageAll(root); await commit(root, 'upstream')
     await gitExec(root, ['checkout', 'main'])
     writeFile(root, 'a.txt', 'local\n'); writeFile(root, 'untracked.txt', 'untracked\n')
-    const server = createMcpHttpServer(new ContextNavigationMcpAdapter({ projectId: 'fixture', repoRoot: root, navigation: {} as ProjectContextNavigation, gitOperations: service }), () => {})
+    const server = createMcpHttpServer(new ChannelMcpAdapter({ projectId: 'fixture', repoRoot: root, navigation: {} as ProjectContextNavigation, gitOperations: service }), () => {})
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     try {
       const address = server.address()

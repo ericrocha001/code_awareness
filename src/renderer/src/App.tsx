@@ -12,7 +12,7 @@ import { CodeJourneyView } from "./components/CodeJourneyView/CodeJourneyView";
 import { CodeMapView } from "./components/CodeMapView/CodeMapView";
 import { CodeDashView } from "./components/CodeDashView/CodeDashView";
 import { HomeView } from "./components/HomeView/HomeView";
-import { SettingsView } from "./components/SettingsView/SettingsView";
+import { ChannelView } from "./components/ChannelView/ChannelView";
 import { AcademyView } from "./components/AcademyView/AcademyView";
 
 
@@ -160,7 +160,7 @@ export const App: React.FC = () => {
       />
 
       <main className="app-main">
-        {activeTab === "settings" && <SettingsView />}
+        {activeTab === "channel" && <ChannelView />}
         {activeTab === "academy" && <AcademyView />}
         {activeTab === "home" && (
           <HomeView

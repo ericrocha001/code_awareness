@@ -37,7 +37,7 @@ describe('CodeScope real repository acceptance', () => {
       expect(port.getElements).not.toHaveBeenCalled()
       expect(port.getRelationships).not.toHaveBeenCalled()
 
-      const paths = ['src/main/core/context/context-engine.ts', 'src/main/core/context/code-target.ts', 'src/main/core/code-map-service.ts', 'src/main/mcp/context-navigation-mcp-adapter.ts', 'src/shared/types/context-navigation-types.ts']
+      const paths = ['src/main/core/context/context-engine.ts', 'src/main/core/context/code-target.ts', 'src/main/core/code-map-service.ts', 'src/main/mcp/channel-mcp-adapter.ts', 'src/shared/types/context-navigation-types.ts']
       const relationships = await engine.getRelationships(repoPath, [paths[0]])
       expect(relationships.files[0].out?.map((edge) => edge.relativePath)).toEqual(expect.arrayContaining([paths[1], paths[4]]))
 

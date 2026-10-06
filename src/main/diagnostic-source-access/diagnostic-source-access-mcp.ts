@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { DiagnosticSourceAccess } from './diagnostic-source-access'
 
 const securitySchemes = [{ type: 'oauth2' as const, scopes: [] as string[] }]

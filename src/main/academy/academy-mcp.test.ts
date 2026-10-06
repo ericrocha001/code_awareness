@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AcademyService } from './academy-service'
 import { ACADEMY_MCP_TOOLS, executeAcademyTool } from './academy-mcp'
-import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -37,7 +37,7 @@ describe('Academy MCP administration', () => {
       inspectFiles: async () => ({ files: [] }), readCode: async () => [], getReferences: async () => ({ references: [] }),
       getSymbolDependencies: async () => ({ dependencies: [] }), getSymbolHierarchy: async () => ({ relationships: [] })
     } as any
-    const adapter = new ContextNavigationMcpAdapter({ projectId: 'project', repoRoot: root, navigation }, undefined, undefined, undefined, service)
+    const adapter = new ChannelMcpAdapter({ projectId: 'project', repoRoot: root, navigation }, undefined, undefined, undefined, service)
     expect(adapter.listTools().map((item) => item.name)).toContain('list_academy_skills')
     expect(adapter.listTools().map((item) => item.name)).toContain('prepare_openai_plugin_release')
     const listed = await adapter.callTool('list_academy_skills', {})

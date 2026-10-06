@@ -5,7 +5,7 @@ import type { CompressionPort } from '../core/compression-port'
 import { CodeMapService } from '../core/code-map-service'
 import { ContextEngine } from '../core/context/context-engine'
 import { WatcherService } from '../core/watcher-service'
-import { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from './channel-mcp-adapter'
 import { createMcpHttpServer } from './mcp-http-server'
 
 class ReadOnlyWatcherService extends WatcherService {
@@ -36,7 +36,7 @@ if (codeMap.getFiles(repoPath).length === 0) {
   await codeMap.indexRepository(repoPath)
 }
 
-const adapter = new ContextNavigationMcpAdapter(new ContextEngine(codeMap), repoPath)
+const adapter = new ChannelMcpAdapter(new ContextEngine(codeMap), repoPath)
 const server = createMcpHttpServer(adapter, (entry) => {
   const serialized = JSON.stringify(entry)
   console.log(serialized)

@@ -13,7 +13,7 @@
 
 import { telemetryService, type TelemetryEntry } from '../core/telemetry-service'
 import type { StageDrilldownProvider, StageDrilldownResult, InvestigationTarget, CheckpointResult, StageStatus } from '../../shared/types/system-health-types'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { computeLinearAdaptiveLocalization } from './adaptive-fault-locator'
 
 // Fronteiras de sincronização expostas ao System Health
@@ -376,7 +376,7 @@ export class CodeMapSyncDrilldownProvider implements StageDrilldownProvider {
     private readonly lifecycleMonitor?: import('./codemap-lifecycle-monitor').CodeMapLifecycleMonitor
   ) {}
 
-  evaluate(events: CodeScopeTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
+  evaluate(events: ChannelTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
     // Delega ao provider base primeiro
     const baseResult = this.baseProvider.evaluate(events, failureReason)
     if (!baseResult) return null

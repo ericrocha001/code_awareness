@@ -1,4 +1,4 @@
-import type { CodeScopeTraceEvent, CodeScopeTraceSink } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent, ChannelTraceSink } from '../../shared/types/channel-types'
 import type { CanonicalStage, StageDrilldownProvider, SystemHealthState } from '../../shared/types/system-health-types'
 import { buildDiagnosticTrace } from './diagnostic-trace'
 import { generateDiagnosticReportFromTrace } from './diagnostic-report'
@@ -33,7 +33,7 @@ export interface SystemHealthCoreOptions {
 }
 
 export interface SystemHealthProvider {
-  readonly sink: CodeScopeTraceSink
+  readonly sink: ChannelTraceSink
   invalidate(): void
 }
 
@@ -46,7 +46,7 @@ export class SystemHealthCore {
   private lastProofSeq = 0
   private lastFailureSeq = 0
   private seq = 0
-  private readonly pendingEvents = new Map<string, CodeScopeTraceEvent[]>()
+  private readonly pendingEvents = new Map<string, ChannelTraceEvent[]>()
   private readonly pendingTimeouts = new Map<string, NodeJS.Timeout>()
   private readonly listeners = new Set<(state: SystemHealthState) => void>()
   private readonly drilldownProviders = new Map<CanonicalStage, StageDrilldownProvider>()
@@ -91,8 +91,8 @@ export class SystemHealthCore {
     this.drilldownProviders.set(provider.canonicalStage, provider)
   }
 
-  readonly sink: CodeScopeTraceSink = {
-    record: (event: CodeScopeTraceEvent) => this.receive(event)
+  readonly sink: ChannelTraceSink = {
+    record: (event: ChannelTraceEvent) => this.receive(event)
   }
 
   getState(): SystemHealthState {
@@ -191,7 +191,7 @@ export class SystemHealthCore {
     })
   }
 
-  private receive(event: CodeScopeTraceEvent): void {
+  private receive(event: ChannelTraceEvent): void {
     if (event.sessionId === 'local') return
 
     // Explicitly exclude MCP protocol/control traffic
@@ -306,7 +306,7 @@ export class SystemHealthCore {
 
     const last = events[events.length - 1]
     const timeoutStage = last.status === 'started' ? last.stage : 'relay-response-forwarded'
-    const timeoutEvent: CodeScopeTraceEvent = {
+    const timeoutEvent: ChannelTraceEvent = {
       ...last,
       stage: timeoutStage,
       status: 'error',

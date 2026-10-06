@@ -7,7 +7,7 @@ import { CodeMapService } from '../code-map-service'
 import { WatcherService } from '../watcher-service'
 import type { CompressionPort } from '../compression-port'
 import { codeScopeExecutionDrilldownProvider } from '../../system-health/codescope-execution-drilldown'
-import type { CodeScopeTraceEvent } from '../../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../../shared/types/channel-types'
 import { createFullTargetId } from './code-target'
 
 const sampleFiles: CodeMapFile[] = [
@@ -334,9 +334,9 @@ describe('inspect_files readiness contract — Unidade 1', () => {
   })
 
   it('9. Unidade 2: emite traces com capability STRUCTURE e drilldown isola corretamente', async () => {
-    const recordedEvents: CodeScopeTraceEvent[] = []
+    const recordedEvents: ChannelTraceEvent[] = []
     const trace = {
-      record: (ev: CodeScopeTraceEvent) => {
+      record: (ev: ChannelTraceEvent) => {
         recordedEvents.push(ev)
       }
     }
@@ -372,7 +372,7 @@ describe('inspect_files readiness contract — Unidade 1', () => {
     expect(satEvent?.status).toBe('success')
 
     // Drilldown com falha em STRUCTURE
-    const failureEvents: CodeScopeTraceEvent[] = [
+    const failureEvents: ChannelTraceEvent[] = [
       {
         timestamp: new Date().toISOString(),
         requestId: 'req-fail',

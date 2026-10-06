@@ -7,7 +7,7 @@ import { CodeMapService } from '../code-map-service'
 import { WatcherService } from '../watcher-service'
 import type { CompressionPort } from '../compression-port'
 import { codeScopeExecutionDrilldownProvider } from '../../system-health/codescope-execution-drilldown'
-import type { CodeScopeTraceEvent } from '../../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../../shared/types/channel-types'
 import { createFullTargetId } from './code-target'
 
 const sampleFiles: CodeMapFile[] = [
@@ -282,9 +282,9 @@ describe('discover_repository readiness contract', () => {
   })
 
   it('Harness 12: Diagnostic Zoom by Design — emite traces de readiness com capability FILE_INVENTORY e drilldown localiza com precisão', async () => {
-    const recordedEvents: CodeScopeTraceEvent[] = []
+    const recordedEvents: ChannelTraceEvent[] = []
     const trace = {
-      record: (ev: CodeScopeTraceEvent) => {
+      record: (ev: ChannelTraceEvent) => {
         recordedEvents.push(ev)
       }
     }
@@ -321,7 +321,7 @@ describe('discover_repository readiness contract', () => {
     expect(satEvent?.status).toBe('success')
 
     // Drilldown em caso de falha de readiness isola especificamente CodeMap Readiness / FILE_INVENTORY
-    const failureEvents: CodeScopeTraceEvent[] = [
+    const failureEvents: ChannelTraceEvent[] = [
       {
         timestamp: new Date().toISOString(),
         requestId: 'req-fail',

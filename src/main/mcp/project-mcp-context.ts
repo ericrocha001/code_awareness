@@ -4,6 +4,7 @@ import type { DiagnosticSourceAccess } from '../diagnostic-source-access/diagnos
 import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
 import type { ValidationExecution } from '../validation-execution/validation-execution'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
+import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
 
 export interface McpProjectContext {
   projectId: string
@@ -15,4 +16,5 @@ export interface McpProjectContext {
   diagnosticSourceAccess?: DiagnosticSourceAccess
   runtimeRestart?: RuntimeRestartController
   gitOperations?: GitOperationsService
+  repositoryFileIngress?: RepositoryFileIngress
 }

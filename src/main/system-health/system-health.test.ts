@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { SystemHealthCore } from './system-health-core'
 import { buildDiagnosticTrace, type DiagnosticTrace } from './diagnostic-trace'
 import { CANONICAL_PIPELINE } from './canonical-pipeline'
 import type { CanonicalStage } from '../../shared/types/system-health-types'
 
-function makeEvent(overrides: Partial<CodeScopeTraceEvent> & Pick<CodeScopeTraceEvent, 'stage' | 'status'>): CodeScopeTraceEvent {
+function makeEvent(overrides: Partial<ChannelTraceEvent> & Pick<ChannelTraceEvent, 'stage' | 'status'>): ChannelTraceEvent {
   return {
     timestamp: new Date().toISOString(),
     requestId: 'req-00000000-0000-4000-8000-000000000001',
@@ -17,7 +17,7 @@ function makeEvent(overrides: Partial<CodeScopeTraceEvent> & Pick<CodeScopeTrace
   }
 }
 
-function happyPathEvents(requestId = 'req-00000000-0000-4000-8000-000000000001', sessionId = 'sess-00000000-0000-4000-8000-000000000001'): CodeScopeTraceEvent[] {
+function happyPathEvents(requestId = 'req-00000000-0000-4000-8000-000000000001', sessionId = 'sess-00000000-0000-4000-8000-000000000001'): ChannelTraceEvent[] {
   const ts = new Date().toISOString()
   const base = { requestId, sessionId, method: 'tools/call', tool: 'discover_repository', timestamp: ts }
   return [
@@ -115,7 +115,7 @@ describe('Reliability Harness — full functional path', () => {
     const base = { requestId, sessionId, method: 'tools/call', tool: 'discover_repository', timestamp: ts }
 
     // Send only up to mcp-response-sent (no relay delivery or gateway confirmation)
-    const partialEvents: CodeScopeTraceEvent[] = [
+    const partialEvents: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -178,7 +178,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   const base = { requestId, sessionId, method: 'tools/call', tool: 'discover_repository', timestamp: ts }
 
   it('1. Access assertion invalid → Access Assertion FAILED, lastSuccessfulStage=Remote Request', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'error', error: 'ACCESS_ASSERTION_INVALID' },
     ]
@@ -192,7 +192,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('2. Access configuration error → Access Assertion FAILED, lastSuccessfulStage=Remote Request', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'error', error: 'ACCESS_CONFIGURATION_ERROR' },
     ]
@@ -206,7 +206,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('3. Identity not linked → Identity Resolution FAILED, lastSuccessfulStage=Access Assertion', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'error', error: 'IDENTITY_NOT_LINKED' },
@@ -221,7 +221,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('4. Installation selection failure (offline) → Installation Routing FAILED, lastSuccessfulStage=Identity Resolution', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -237,7 +237,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('5. Installation ambiguous → Installation Routing FAILED, lastSuccessfulStage=Identity Resolution', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -253,7 +253,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('6. Installation routed, but Relay Outbound fails → Relay Outbound FAILED, lastSuccessfulStage=Installation Routing', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -270,7 +270,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('7. Desktop request parsing/connection fails → Desktop Request FAILED, lastSuccessfulStage=Relay Outbound', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -288,7 +288,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('8. Local MCP server unavailable → MCP Request FAILED, lastSuccessfulStage=Desktop Request', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -307,7 +307,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('9. CodeScope tool returns error → CodeScope Execution FAILED, lastSuccessfulStage=MCP Request', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -328,7 +328,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('10. Relay return timeout → Relay Inbound FAILED, lastSuccessfulStage=MCP Response', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -352,7 +352,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('11. Gateway response processing fails → Gateway Response FAILED, lastSuccessfulStage=Relay Inbound', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -378,7 +378,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
   })
 
   it('12. Client response HTTP return fails → Client Response FAILED, lastSuccessfulStage=Gateway Response', () => {
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -412,7 +412,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
     const base = { requestId, sessionId, method: 'tools/call', tool: 'discover_repository', timestamp: ts }
 
     // Exactly the scenario from the original incident: mcp-response-sent appears but relay never delivers
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -438,7 +438,7 @@ describe('Diagnostic Accuracy Harness — semantic fault localization audit', ()
 
   it('DEGRADED is set in SystemHealthCore when trace fails', () => {
     const core = new SystemHealthCore()
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },

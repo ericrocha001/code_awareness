@@ -138,7 +138,7 @@ export interface StageDrilldownResult extends StageDrilldownDiagnosis {
 export interface StageDrilldownProvider {
   readonly canonicalStage: CanonicalStage
   evaluate(
-    events: import('../../main/mcp/code-scope-health').CodeScopeTraceEvent[],
+    events: import('./channel-types').ChannelTraceEvent[],
     failureReason?: string | null
   ): StageDrilldownResult | null
 }

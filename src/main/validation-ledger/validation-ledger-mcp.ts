@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { ValidationLedger } from './validation-ledger'
 import type {
   ListProofsFilter,

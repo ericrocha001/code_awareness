@@ -1,5 +1,5 @@
 import type { AcademyPackage, AcademySkillScope } from '../../shared/types/academy-types'
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { AcademyService } from './academy-service'
 
 const securitySchemes = [{ type: 'oauth2' as const, scopes: [] }]

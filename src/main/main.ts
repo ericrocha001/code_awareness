@@ -57,10 +57,11 @@ import { RemoteAccessService } from './mcp/connection/remote-access-service'
 import { InstallationIdentityService } from './installation/installation-identity-service'
 import { desktopProfilePaths } from './desktop-profile'
 import { registerConnectionHandlers } from './ipc/connection-handler'
-import { ChatGptIntegrationProjection } from './integrations/chatgpt-integration-projection'
+import { ChannelStateProjection } from './integrations/channel-state-projection'
 import { isInstallationConfigured } from './integrations/installation-configured'
-import { registerChatGptIntegrationHandlers } from './ipc/chatgpt-integration-handler'
-import { CodeScopeHealthMonitor } from './mcp/code-scope-health'
+import { registerChannelHandlers } from './ipc/channel-handler'
+import { ChannelFunctionalHealthMonitor } from './mcp/channel-functional-health'
+import { ChannelActivityMonitor } from './mcp/channel-activity-monitor'
 import { SystemHealthCore } from './system-health/system-health-core'
 import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-provider'
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
@@ -88,6 +89,7 @@ import { AcademyGitSyncService } from './academy/git/academy-git-sync-service'
 import { AcademyPluginRepositoryProjection } from './academy/git/academy-plugin-repository-projection'
 import { GitHubGitTransport } from './github/github-git-transport'
 import { GitOperationsService } from './git-operations/git-operations-service'
+import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { GitService } from './core/git-service'
 
 
@@ -107,7 +109,8 @@ process.on('unhandledRejection', (reason) => {
 let mainWindow: BrowserWindow | null = null
 let dbAdapter: BetterSqlite3DatabaseAdapter | null = null
 const watcherService = new WatcherService()
-const codeScopeHealth = new CodeScopeHealthMonitor()
+const channelFunctionalHealth = new ChannelFunctionalHealthMonitor()
+const channelActivity = new ChannelActivityMonitor()
 const runtimeIdentityProvider = new RuntimeIdentityProvider({
   appVersion: app.getVersion(),
   mode: app.isPackaged ? 'production' : 'development'
@@ -135,18 +138,19 @@ let activeValidationExecution: ValidationExecution | null = null
 let diagnosticInstallationId: string | null = null
 let repositoryCatalog: RepositoryCatalogService | null = null
 const traceSink = {
-  record(event: import('./mcp/code-scope-health').CodeScopeTraceEvent) {
+  record(event: import('../shared/types/channel-types').ChannelTraceEvent) {
     if (!event.runtimeInstanceId) {
       event.runtimeInstanceId = runtimeIdentityProvider.getInstanceId()
     }
     if (!event.installationId && diagnosticInstallationId) {
       event.installationId = diagnosticInstallationId
     }
-    codeScopeHealth.record(event)
+    channelFunctionalHealth.record(event)
     systemHealth.sink.record(event)
   }
 }
 const mcpLifecycle = new McpLifecycle({
+  activity: channelActivity,
   trace: traceSink,
   systemHealth,
   runtimeIdentity: runtimeIdentityProvider,
@@ -172,7 +176,7 @@ const connectionLifecycle = new ConnectionLifecycle(mcpLifecycle, selectedTransp
 }))
 const remoteAccess = new RemoteAccessService(settingsService, connectionLifecycle)
 let activeProjects: ActiveProjectService | null = null
-let chatGptIntegration: ChatGptIntegrationProjection | null = null
+let channelProjection: ChannelStateProjection | null = null
 
 // Single instance lock ANTES de app.whenReady() — evita race condition de duas janelas.
 // Se outra instância já está rodando, esta encerra imediatamente.
@@ -428,21 +432,22 @@ app.whenReady().then(async () => {
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations: new GitOperationsService(project.path, gitService, gitTransport),
+      repositoryFileIngress: new RepositoryFileIngress(project.path),
       runtimeRestart
     })
   })
   registerActiveProjectHandlers(activeProjects)
   registerConnectionHandlers(remoteAccess)
-  chatGptIntegration = new ChatGptIntegrationProjection(remoteAccess, activeProjects, mcpLifecycle,
-    () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, codeScopeHealth)
-  registerChatGptIntegrationHandlers(chatGptIntegration)
+  channelProjection = new ChannelStateProjection(remoteAccess, activeProjects, mcpLifecycle,
+    () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, channelFunctionalHealth)
+  registerChannelHandlers(channelProjection)
   registerSystemHealthHandlers(systemHealth)
   try {
     const installPath = desktopProfilePaths(app.getPath('userData')).installationPath
     diagnosticInstallationId = new InstallationIdentityService(installPath, safeStorage).getId()
   } catch { diagnosticInstallationId = null }
   try {
-    const trace = traceSink as import('./mcp/code-scope-health').CodeScopeTraceSink
+    const trace = traceSink as import('../shared/types/channel-types').ChannelTraceSink
     const catalogProbe = (mcpLifecycle as unknown as { getCatalogProbe?: () => { getToolCatalogHash: () => string } }).getCatalogProbe?.()
     console.log('[Spike] runtime-boot', JSON.stringify({ instanceId: runtimeIdentityProvider.getInstanceId(), installationId: diagnosticInstallationId, startedAt: runtimeIdentityProvider.getStartedAt(), toolCatalogHash: catalogProbe?.getToolCatalogHash() ?? null, timestamp: new Date().toISOString() }))
   } catch {}
@@ -450,7 +455,7 @@ app.whenReady().then(async () => {
     if (state.status === 'CONNECTED') {
       systemHealth.invalidate()
       try {
-        const trace = traceSink as import('./mcp/code-scope-health').CodeScopeTraceSink
+        const trace = traceSink as import('../shared/types/channel-types').ChannelTraceSink
         const catalogProbe = (mcpLifecycle as unknown as { getCatalogProbe?: () => { getToolCatalogHash: () => string } }).getCatalogProbe?.()
         trace.record({ timestamp: new Date().toISOString(), requestId: 'none', sessionId: state.localEndpoint ?? 'local', method: 'unknown', tool: 'unknown', stage: 'desktop-connection-established', durationMs: 0, status: 'started', runtimeInstanceId: runtimeIdentityProvider.getInstanceId(), installationId: diagnosticInstallationId ?? undefined })
         console.log('[Spike] runtime-boot', JSON.stringify({ instanceId: runtimeIdentityProvider.getInstanceId(), installationId: diagnosticInstallationId, toolCatalogHash: catalogProbe?.getToolCatalogHash() ?? null, timestamp: new Date().toISOString() }))
@@ -520,7 +525,7 @@ app.whenReady().then(async () => {
 })
 
 registerApplicationShutdown(app, async () => {
-  chatGptIntegration?.dispose()
+  channelProjection?.dispose()
   codeMapSyncMonitor.dispose()
   codeMapLifecycleMonitor.dispose()
   await remoteAccess.dispose()

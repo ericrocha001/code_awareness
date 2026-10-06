@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import { SystemHealthCore } from './system-health-core'
 import { executeGetSystemHealth, SYSTEM_HEALTH_MCP_TOOL, type SystemHealthDiagnosticPayload } from './system-health-mcp'
-import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { CANONICAL_PIPELINE } from './canonical-pipeline'
 
-function happyPathEvents(requestId = 'req-00000000-0000-4000-8000-000000000001'): CodeScopeTraceEvent[] {
+function happyPathEvents(requestId = 'req-00000000-0000-4000-8000-000000000001'): ChannelTraceEvent[] {
   const ts = new Date().toISOString()
   const base = { requestId, sessionId: 'sess-0001', method: 'tools/call', tool: 'discover_repository', timestamp: ts }
   return [
@@ -43,7 +43,7 @@ function mockNavigation() {
 
 describe('System Health MCP — get_system_health tool', () => {
   it('appears in the MCP catalog alongside the seven CodeScope tools and runtime identity (9 tools total)', () => {
-    const adapter = new ContextNavigationMcpAdapter(mockNavigation(), new SystemHealthCore())
+    const adapter = new ChannelMcpAdapter(mockNavigation(), new SystemHealthCore())
     const tools = adapter.listTools()
     expect(tools).toHaveLength(9)
     expect(tools.map((t) => t.name)).toContain('get_system_health')
@@ -69,7 +69,7 @@ describe('System Health MCP — get_system_health tool', () => {
     const core = new SystemHealthCore()
     for (const event of happyPathEvents()) core.sink.record(event)
 
-    const adapter = new ContextNavigationMcpAdapter(mockNavigation(), core)
+    const adapter = new ChannelMcpAdapter(mockNavigation(), core)
     const result = await adapter.callTool('get_system_health', {})
 
     expect(result.isError).toBeUndefined()
@@ -96,7 +96,7 @@ describe('System Health MCP — get_system_health tool', () => {
     const core = new SystemHealthCore()
     const ts = new Date().toISOString()
     const base = { requestId: 'req-fail-1', sessionId: 'sess-fail', method: 'tools/call', tool: 'discover_repository', timestamp: ts }
-    const failureEvents: CodeScopeTraceEvent[] = [
+    const failureEvents: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -112,7 +112,7 @@ describe('System Health MCP — get_system_health tool', () => {
     ]
     for (const event of failureEvents) core.sink.record(event)
 
-    const adapter = new ContextNavigationMcpAdapter(mockNavigation(), core)
+    const adapter = new ChannelMcpAdapter(mockNavigation(), core)
     const result = await adapter.callTool('get_system_health', { feature: 'codescope' })
 
     expect(result.isError).toBeUndefined()
@@ -187,7 +187,7 @@ describe('System Health MCP — get_system_health tool', () => {
     expect(stateBefore.lastFunctionalProof?.traceId).toBe('req-real-proof')
 
     // Simulate get_system_health being called via MCP
-    const adapter = new ContextNavigationMcpAdapter(mockNavigation(), core)
+    const adapter = new ChannelMcpAdapter(mockNavigation(), core)
     await adapter.callTool('get_system_health', {})
 
     // Simulate trace sink receiving a get_system_health event
@@ -266,7 +266,7 @@ describe('System Health MCP — get_system_health tool', () => {
     const base = { requestId: reqId, sessionId: 'sess-real', method: 'tools/call', tool: 'discover_repository', timestamp: ts }
 
     // discover_repository starts, executes in MCP, but times out before delivery
-    const timeoutEvents: CodeScopeTraceEvent[] = [
+    const timeoutEvents: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'desktop-request-received', durationMs: 10, status: 'started' },
       { ...base, stage: 'mcp-request-started', durationMs: 20, status: 'started' },
@@ -327,7 +327,7 @@ describe('System Health MCP — get_system_health tool', () => {
     const ts = new Date().toISOString()
     const base = { requestId: 'req-real-acceptance', sessionId: 'sess-real', method: 'tools/call', tool: 'discover_repository', timestamp: ts }
 
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'access-assertion-validated', durationMs: 31, status: 'success' },
       { ...base, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -338,7 +338,7 @@ describe('System Health MCP — get_system_health tool', () => {
     ]
     for (const e of events) core.sink.record(e)
 
-    const adapter = new ContextNavigationMcpAdapter(mockNavigation(), core)
+    const adapter = new ChannelMcpAdapter(mockNavigation(), core)
     const result = await adapter.callTool('get_system_health', { feature: 'codescope' })
 
     expect(result.isError).toBeUndefined()
@@ -423,7 +423,7 @@ describe('System Health MCP — get_system_health tool', () => {
     const ts = new Date().toISOString()
     const base = { requestId: 'req-contradiction', sessionId: 'sess-contra', method: 'tools/call', tool: 'discover_repository', timestamp: ts }
 
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...base, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...base, stage: 'desktop-request-received', durationMs: 10, status: 'started' },
       { ...base, stage: 'bridge-forward-started', durationMs: 20, status: 'error', error: 'LOCAL_MCP_UNAVAILABLE' },
@@ -534,7 +534,7 @@ describe('System Health MCP — get_system_health tool', () => {
     expect(afterPayload.lastFailureDiagnosis?.firstFailedBoundary).toBe('CodeScope Execution')
     expect(afterPayload.lastFailureDiagnosis?.drilldown?.firstFailedCheckpoint).toBe('Operation Routing')
     expect(afterPayload.lastFailureDiagnosis?.investigationTarget?.investigationSeeds).toContain(
-      'src/main/mcp/context-navigation-mcp-adapter.ts'
+      'src/main/mcp/channel-mcp-adapter.ts'
     )
 
     // diagnosis also carries HISTORICAL evidence and preserved coordinates

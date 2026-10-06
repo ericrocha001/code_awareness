@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { SystemHealthCore } from './system-health-core'
 import { buildDiagnosticTrace } from './diagnostic-trace'
 
@@ -17,7 +17,7 @@ function base(requestId: string, sessionId: string) {
 describe('Cenário A — erro funcional entregue com sucesso operacional', () => {
   it('A1: trace não tem firstFailedBoundary quando todos os eventos de transporte são success', () => {
     const b = base('req-A1', 'sess-A1')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -50,7 +50,7 @@ describe('Cenário A — erro funcional entregue com sucesso operacional', () =>
   it('A2: SystemHealthCore não fica DEGRADED quando todos eventos de transporte são success', () => {
     const core = new SystemHealthCore()
     const b = base('req-A2', 'sess-A2')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -79,7 +79,7 @@ describe('Cenário A — erro funcional entregue com sucesso operacional', () =>
 
   it('A3: nenhum estágio Gateway Response ou Client Response fica FAILED quando ACKs chegam com status success', () => {
     const b = base('req-A3', 'sess-A3')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -112,7 +112,7 @@ describe('Cenário A — erro funcional entregue com sucesso operacional', () =>
 describe('Cenário B — ACKs recebidos independem do resultado funcional', () => {
   it('B1: relay-response-delivered com status success representa transporte bem-sucedido', () => {
     const b = base('req-B1', 'sess-B1')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'desktop-request-received', durationMs: 0, status: 'started' },
       { ...b, stage: 'mcp-request-started', durationMs: 5, status: 'started' },
       { ...b, stage: 'codescope-response-produced', durationMs: 50, status: 'success' },
@@ -132,7 +132,7 @@ describe('Cenário B — ACKs recebidos independem do resultado funcional', () =
 
   it('B2: gateway-response-delivered com status success representa entrega ao cliente sem falha operacional', () => {
     const b = base('req-B2', 'sess-B2')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -160,7 +160,7 @@ describe('Cenário B — ACKs recebidos independem do resultado funcional', () =
   it('B3: alternância entre erro funcional e sucesso não produz DEGRADED persistente', () => {
     const core = new SystemHealthCore()
 
-    const makeFullPath = (id: string): CodeScopeTraceEvent[] => {
+    const makeFullPath = (id: string): ChannelTraceEvent[] => {
       const b = base(id, 'sess-B3')
       return [
         { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
@@ -199,7 +199,7 @@ describe('Cenário C — falha operacional real continua degradando', () => {
   it('C1: socket fechado antes de enviar resposta → Relay Inbound FAILED, estado DEGRADED', () => {
     const core = new SystemHealthCore()
     const b = base('req-C1', 'sess-C1')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -225,7 +225,7 @@ describe('Cenário C — falha operacional real continua degradando', () => {
     const core = new SystemHealthCore()
     const b = base('req-C2', 'sess-C2')
 
-    const socketFailEvents: CodeScopeTraceEvent[] = [
+    const socketFailEvents: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -247,7 +247,7 @@ describe('Cenário C — falha operacional real continua degradando', () => {
 
     // Nova operação bem-sucedida restaura OPERATIONAL
     const b2 = base('req-C2-recovery', 'sess-C2')
-    const recoveryEvents: CodeScopeTraceEvent[] = [
+    const recoveryEvents: ChannelTraceEvent[] = [
       { ...b2, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b2, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b2, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -272,7 +272,7 @@ describe('Cenário D — timeout real de transporte continua diagnosticável', (
   it('D1: ausência de retorno até deadline → REQUEST_TIMEOUT, Relay Inbound FAILED, DEGRADED', () => {
     const core = new SystemHealthCore()
     const b = base('req-D1', 'sess-D1')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },
@@ -296,7 +296,7 @@ describe('Cenário D — timeout real de transporte continua diagnosticável', (
   it('D2: bridge timeout (LOCAL_MCP_UNAVAILABLE) → MCP Request FAILED, DEGRADED', () => {
     const core = new SystemHealthCore()
     const b = base('req-D2', 'sess-D2')
-    const events: CodeScopeTraceEvent[] = [
+    const events: ChannelTraceEvent[] = [
       { ...b, stage: 'gateway-request-started', durationMs: 0, status: 'started' },
       { ...b, stage: 'access-assertion-validated', durationMs: 30, status: 'success' },
       { ...b, stage: 'identity-resolved', durationMs: 40, status: 'success' },

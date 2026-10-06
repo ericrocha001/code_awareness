@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { ProofProducer } from '../validation-ledger/validation-ledger-types'
 import type { ValidationExecution } from './validation-execution'
 import { ValidationBusyError } from './validation-execution'

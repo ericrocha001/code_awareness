@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import { CODESCOPE_FUNCTIONAL_TOOLS, type SystemHealthCore } from './system-health-core'
 import { CANONICAL_PIPELINE } from './canonical-pipeline'
 import type {

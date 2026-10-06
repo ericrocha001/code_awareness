@@ -1,4 +1,4 @@
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import type {
   CheckpointResult,
   InvestigationTarget,
@@ -51,7 +51,7 @@ const REFINED_TARGETS: Record<CodeScopeExecutionCheckpoint, InvestigationTarget>
     boundary: 'MCP Request → Tool Operation Routing',
     responsibility: 'Validating tool arguments and routing to the designated context operation',
     investigationSeeds: [
-      'src/main/mcp/context-navigation-mcp-adapter.ts'
+      'src/main/mcp/channel-mcp-adapter.ts'
     ]
   },
   'Snapshot Synchronization': {
@@ -89,7 +89,7 @@ const REFINED_TARGETS: Record<CodeScopeExecutionCheckpoint, InvestigationTarget>
     boundary: 'Context Operation Return → MCP Server',
     responsibility: 'Packaging tool result into MCP content envelope and returning to caller',
     investigationSeeds: [
-      'src/main/mcp/context-navigation-mcp-adapter.ts',
+      'src/main/mcp/channel-mcp-adapter.ts',
       'src/main/mcp/mcp-http-server.ts'
     ]
   }
@@ -98,7 +98,7 @@ const REFINED_TARGETS: Record<CodeScopeExecutionCheckpoint, InvestigationTarget>
 export class CodeScopeExecutionDrilldownProvider implements StageDrilldownProvider {
   readonly canonicalStage = 'CodeScope Execution' as const
 
-  evaluate(events: CodeScopeTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
+  evaluate(events: ChannelTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
     if (events.length === 0) return null
 
     const hasEvent = (stage: string, status?: string) =>
@@ -380,7 +380,7 @@ export class CodeScopeExecutionDrilldownProvider implements StageDrilldownProvid
     }
   }
 
-  private buildHappyPathResult(events: CodeScopeTraceEvent[]): StageDrilldownResult {
+  private buildHappyPathResult(events: ChannelTraceEvent[]): StageDrilldownResult {
     const checkpoints: CheckpointResult[] = CODESCOPE_EXECUTION_CHECKPOINTS.map((name) => ({
       name,
       status: 'OPERATIONAL'

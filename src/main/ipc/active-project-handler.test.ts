@@ -4,7 +4,7 @@ import type { CodeMapService } from '../core/code-map-service'
 import { ActiveProjectService } from '../core/active-project-service'
 import { bindProjectNavigation } from '../core/context/project-context-navigation'
 import { McpLifecycle } from '../mcp/mcp-lifecycle'
-import type { McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import { registerActiveProjectHandlers } from './active-project-handler'
 import { registerCodeMapHandlers } from './code-map-handler'
 

@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { SystemHealthCore } from './system-health-core'
 import { executeGetSystemHealth, type SystemHealthDiagnosticPayload } from './system-health-mcp'
 import { codeScopeExecutionDrilldownProvider } from './codescope-execution-drilldown'
 
-function makeEvent(overrides: Partial<CodeScopeTraceEvent> & Pick<CodeScopeTraceEvent, 'stage' | 'status'>): CodeScopeTraceEvent {
+function makeEvent(overrides: Partial<ChannelTraceEvent> & Pick<ChannelTraceEvent, 'stage' | 'status'>): ChannelTraceEvent {
   const baseTs = new Date().toISOString()
   return {
     timestamp: baseTs,
@@ -66,7 +66,7 @@ describe('Diagnostic Accuracy Harness — CodeScope Execution Drilldown', () => 
       boundary: 'MCP Request → Tool Operation Routing',
       responsibility: 'Validating tool arguments and routing to the designated context operation',
       investigationSeeds: [
-        'src/main/mcp/context-navigation-mcp-adapter.ts'
+        'src/main/mcp/channel-mcp-adapter.ts'
       ]
     })
   })
@@ -225,7 +225,7 @@ describe('Diagnostic Accuracy Harness — CodeScope Execution Drilldown', () => 
       boundary: 'Context Operation Return → MCP Server',
       responsibility: 'Packaging tool result into MCP content envelope and returning to caller',
       investigationSeeds: [
-        'src/main/mcp/context-navigation-mcp-adapter.ts',
+        'src/main/mcp/channel-mcp-adapter.ts',
         'src/main/mcp/mcp-http-server.ts'
       ]
     })

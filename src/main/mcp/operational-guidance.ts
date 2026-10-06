@@ -1,4 +1,4 @@
-import type { McpToolResult } from './context-navigation-mcp-adapter'
+import type { McpToolResult } from './channel-mcp-adapter'
 
 export type Retryability = 'SAFE_AFTER_BACKOFF' | 'SAME_OPERATION_ID' | 'AFTER_STATE_REFRESH' | 'NOT_SAFE'
 export interface OperationalGuidance {

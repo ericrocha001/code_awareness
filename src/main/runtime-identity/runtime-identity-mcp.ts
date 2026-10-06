@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { RuntimeIdentityProvider } from './runtime-identity-provider'
 
 export const RUNTIME_IDENTITY_MCP_TOOL: McpToolDefinition = {

@@ -24,7 +24,7 @@ import { RepoDiscovery } from './repo-discovery'
 
 function emitTrace(
   context: NavigationInvocationContext | undefined,
-  stage: import('../../mcp/code-scope-health').CodeScopeTraceStage,
+  stage: import('../../../shared/types/channel-types').ChannelTraceStage,
   status: 'started' | 'success' | 'error',
   options?: { tool?: string; error?: string; durationMs?: number; capability?: string }
 ): void {

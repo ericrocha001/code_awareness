@@ -7,7 +7,7 @@ import { GitService } from '../core/git-service'
 import { cleanupTempRepo, commit, createTempGitRepo, gitExec, stageAll, writeFile } from '../core/git-test-helpers'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { GitHubGitTransport } from '../github/github-git-transport'
-import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import { McpWorkloadGovernor } from '../mcp/mcp-workload-governor'
 import { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
@@ -69,16 +69,16 @@ describe('Operational reliability through real MCP HTTP', () => {
     expect(create).not.toHaveBeenCalled()
   }, 60000)
 
-  it('recovers lost Git acknowledgements and follows validation while navigation is degraded', async () => {
+  it('recovers lost Git acknowledgements and follows validation while navigation calls time out independently', async () => {
     const { root, git, service } = await fixture()
     const identity = new RuntimeIdentityProvider({ rootDir: root, includedDirectories: [], includedRootFiles: ['package.json'], mode: 'development' })
     const proofs: unknown[] = []
     const ledger = { recordProof: (input: unknown) => { proofs.push(input); return { proofId: 'proof-one' } } } as unknown as ValidationLedger
     const validation = new ValidationExecution(root, ledger, identity)
-    let release!: (value: unknown) => void
-    const navigation = { readCode: vi.fn(() => new Promise((resolve) => { release = resolve })) } as unknown as ProjectContextNavigation
+    const releases: Array<(value: []) => void> = []
+    const navigation = { readCode: vi.fn(() => new Promise<[]>((resolve) => { releases.push(resolve) })) } as unknown as ProjectContextNavigation
     const health = new SystemHealthCore({ runtimeIdentityProvider: identity })
-    const adapter = new ContextNavigationMcpAdapter({ projectId: 'fixture', repoRoot: root, navigation, gitOperations: service(), validationExecution: validation }, health, identity, ledger)
+    const adapter = new ChannelMcpAdapter({ projectId: 'fixture', repoRoot: root, navigation, gitOperations: service(), validationExecution: validation }, health, identity, ledger)
     adapter.setWorkloadGovernor(new McpWorkloadGovernor(50, 25))
     const server = createMcpHttpServer(adapter, () => {})
     let loseAck = false
@@ -125,23 +125,24 @@ describe('Operational reliability through real MCP HTTP', () => {
       expect(started).toMatchObject({ status: 'RUNNING', retryAfterMs: 2000 })
       expect(await call('start_validation', { profileId: 'typecheck', producer: 'TESTER' })).toMatchObject({ code: 'VALIDATION_BUSY', activeRunId: started.runId, recommendedAction: 'FOLLOW_ACTIVE_RUN' })
       expect(await call('read_code', { targetIds: ['target'] })).toMatchObject({ code: 'REQUEST_TIMEOUT' })
-      expect(await call('read_code', { targetIds: ['target'] })).toMatchObject({ code: 'CHANNEL_DEGRADED' })
-      expect(navigation.readCode).toHaveBeenCalledTimes(1)
+      expect(await call('read_code', { targetIds: ['target'] })).toMatchObject({ code: 'REQUEST_TIMEOUT' })
+      expect(navigation.readCode).toHaveBeenCalledTimes(2)
       expect(await call('get_git_state')).toMatchObject({ head: changed.head })
       expect(await call('get_runtime_identity')).toBeDefined()
       const snapshot = await call('get_system_health')
       expect(snapshot.activeRunId).toBe(started.runId)
-      expect(snapshot.workloadGovernor.events.map((event: any) => event.event)).toEqual(expect.arrayContaining(['DEGRADED', 'ADMISSION_REFUSED']))
+      expect(snapshot.workloadGovernor.events.map((event: any) => event.event)).toContain('EXECUTION_FAILED')
+      expect(snapshot.workloadGovernor.lanes.some((lane: any) => lane.lane === 'NAVIGATION')).toBe(false)
       expect(await call('get_validation_run', { runId: started.runId, waitMs: 5000 })).toMatchObject({ status: 'PASSED', proofId: 'proof-one' })
       expect(proofs).toHaveLength(1)
-      release({ targets: [] })
+      releases.forEach(release => release([]))
       await new Promise((resolve) => setTimeout(resolve, 30))
       vi.mocked(navigation.readCode).mockRejectedValueOnce(new Error('controlled execution failure'))
       await call('read_code', { targetIds: ['target'] }).catch(() => {})
       const failed = await call('get_system_health')
       expect(failed.workloadGovernor.events.map((event: any) => event.event)).toContain('EXECUTION_FAILED')
     } finally {
-      if (release) release({ targets: [] })
+      releases.forEach(release => release([]))
       await validation.shutdown()
       server.closeAllConnections()
       await new Promise<void>((resolve) => server.close(() => resolve()))

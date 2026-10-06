@@ -25,11 +25,13 @@ function formatTs(iso: string | null | undefined): string {
   }
 }
 
+const stageLabel = (stage: string) => stage.replace('CodeScope', 'Code Navigation')
+
 function StageRow({ result }: { result: CanonicalStageResult }) {
   return (
     <li className="diagnostic-stage">
       <div style={{ flex: 1 }}>
-        <div className="diagnostic-stage-name">{result.stage}</div>
+        <div className="diagnostic-stage-name">{stageLabel(result.stage)}</div>
         {(result.durationMs !== null || result.reasonCode) && (
           <div className="diagnostic-stage-detail">
             {result.durationMs !== null && `${result.durationMs}ms`}
@@ -47,6 +49,23 @@ export function DiagnosticModal({ onClose }: DiagnosticModalProps) {
   const [state, setState] = useState<SystemHealthState | null>(null)
   const [copied, setCopied] = useState(false)
   const mounted = useRef(false)
+  const dialog = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    const previousFocus = document.activeElement as HTMLElement | null
+    dialog.current?.querySelector<HTMLButtonElement>('button')?.focus()
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onClose() }
+      if (event.key !== 'Tab') return
+      const buttons = dialog.current?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')
+      if (!buttons?.length) return
+      const first = buttons[0], last = buttons[buttons.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', handleKey)
+    return () => { document.removeEventListener('keydown', handleKey); previousFocus?.focus() }
+  }, [onClose])
 
   useEffect(() => {
     mounted.current = true
@@ -77,11 +96,11 @@ export function DiagnosticModal({ onClose }: DiagnosticModalProps) {
   const stages = failure?.stages ?? null
 
   return (
-    <div className="diagnostic-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="diag-title" onClick={handleOverlayClick}>
+    <div ref={dialog} className="diagnostic-modal-overlay" role="dialog" aria-modal="true" aria-labelledby="diag-title" onClick={handleOverlayClick}>
       <div className="diagnostic-modal">
         <div className="diagnostic-modal-header">
           <div>
-            <h2 id="diag-title">Diagnóstico — CodeScope</h2>
+            <h2 id="diag-title">System Health — Code Navigation</h2>
             <p>
               Estado: <strong>{state?.status ?? '…'}</strong>
               {state?.stale && ' (evidência desatualizada)'}
@@ -123,10 +142,10 @@ export function DiagnosticModal({ onClose }: DiagnosticModalProps) {
                   {failure.firstFailedBoundary && (
                     <div className="diagnostic-section">
                       <div className="diagnostic-failure-summary">
-                        <strong>Primeira fronteira falha: {failure.firstFailedBoundary}</strong>
+                        <strong>Primeira fronteira falha: {stageLabel(failure.firstFailedBoundary)}</strong>
                         {failure.reasonCode && <span>Motivo: {failure.reasonCode}</span>}
                         {failure.lastSuccessfulStage && (
-                          <><br /><span>Última etapa saudável: {failure.lastSuccessfulStage}</span></>
+                          <><br /><span>Última etapa saudável: {stageLabel(failure.lastSuccessfulStage)}</span></>
                         )}
                       </div>
                     </div>

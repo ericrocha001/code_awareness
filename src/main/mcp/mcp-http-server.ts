@@ -1,8 +1,8 @@
 import { createServer, type Server } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { MCP_REQUEST_BUDGET_MS } from './operational-guidance'
-import type { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
-import type { CodeScopeTraceEvent, CodeScopeTraceSink } from './code-scope-health'
+import type { ChannelMcpAdapter } from './channel-mcp-adapter'
+import type { ChannelTraceEvent, ChannelTraceSink } from '../../shared/types/channel-types'
 
 const supportedProtocolVersions = new Set(['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'])
 const defaultProtocolVersion = '2025-11-25'
@@ -13,11 +13,11 @@ export interface McpOperationalLogEntry {
   sessionId: string
   method: string
   tool: string
-  stage: CodeScopeTraceEvent['stage']
+  stage: ChannelTraceEvent['stage']
   durationMs: number
   responseSize: number
   success: boolean
-  status: CodeScopeTraceEvent['status']
+  status: ChannelTraceEvent['status']
   error?: string
 }
 
@@ -51,9 +51,9 @@ function writeJson(response: import('node:http').ServerResponse, status: number,
 }
 
 export function createMcpHttpServer(
-  adapter: ContextNavigationMcpAdapter,
+  adapter: ChannelMcpAdapter,
   log: (entry: McpOperationalLogEntry) => void = console.log,
-  trace?: CodeScopeTraceSink
+  trace?: ChannelTraceSink
 ): Server {
   return createServer(async (request, response) => {
     const startedAt = performance.now()
@@ -68,7 +68,7 @@ export function createMcpHttpServer(
     let success = false
     let responseSent = false
     let failure = 'MCP_REQUEST_FAILED'
-    const emit = (stage: CodeScopeTraceEvent['stage'], status: CodeScopeTraceEvent['status'], errorCode?: string): void => {
+    const emit = (stage: ChannelTraceEvent['stage'], status: ChannelTraceEvent['status'], errorCode?: string): void => {
       const entry: McpOperationalLogEntry = {
         timestamp: new Date().toISOString(),
         requestId: correlationId,

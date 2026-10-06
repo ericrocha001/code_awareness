@@ -1,4 +1,4 @@
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import type { CanonicalStage, CanonicalStageResult, StageStatus } from '../../shared/types/system-health-types'
 import { CANONICAL_PIPELINE, pipelineIndexOf, toCanonicalStage } from './canonical-pipeline'
 
@@ -24,7 +24,7 @@ interface StageAccumulator {
   succeeded: boolean
 }
 
-export function buildDiagnosticTrace(events: CodeScopeTraceEvent[]): DiagnosticTrace | null {
+export function buildDiagnosticTrace(events: ChannelTraceEvent[]): DiagnosticTrace | null {
   if (events.length === 0) return null
 
   const first = events[0]

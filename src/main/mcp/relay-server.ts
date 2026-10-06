@@ -11,7 +11,7 @@ import { McpLifecycle } from './mcp-lifecycle'
 import { ConnectionLifecycle } from './connection/connection-lifecycle'
 import { RelayTransport } from './connection/relay-transport'
 import { createMcpHttpServer } from './mcp-http-server'
-import { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from './channel-mcp-adapter'
 
 const emit = (event: Record<string, unknown>) => process.stdout.write(`RELAY_OPERATION ${JSON.stringify(event)}\n`)
 const repository = resolve(process.argv[2] ?? '.')
@@ -28,7 +28,7 @@ const engine = new ContextEngine(codeMap)
 const projects = new ActiveProjectService(codeMap)
 const mcp = new McpLifecycle({
   log: (state) => emit({ mcp: state.status }),
-  createServer: (navigation) => createMcpHttpServer(new ContextNavigationMcpAdapter(navigation), (entry) => {
+  createServer: (navigation) => createMcpHttpServer(new ChannelMcpAdapter(navigation), (entry) => {
     emit({ tool: entry.tool, latencyMs: entry.durationMs, bytes: entry.responseSize, success: entry.success })
   })
 })

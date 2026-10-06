@@ -1,0 +1,1525 @@
+{
+  "version": 1,
+  "diagnostics": [
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/canonical-relay-identity-fixture.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../../../src/shared/distribution/relay-protocol.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/canonical-relay-identity-fixture.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/external-identity-resolver.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/canonical-relay-identity-fixture.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/installation-credential.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/canonical-relay-identity-fixture.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/installation-router.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../../../src/shared/distribution/authorization-ports.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../../../src/shared/distribution/relay-protocol.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/cloudflare-access-assertion-verifier.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/enrollment-service.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/external-identity-resolver.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/installation-credential.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/installation-router.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/memory-installation-registry.js'?",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/public-mcp-gateway.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../domain/relay-session.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'body' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'durationMs' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'id' implicitly has an 'any' type.",
+      "count": 3
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'message' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "infra/gateway/testing/local-gateway.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'requestId' implicitly has an 'any' type.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/academy/academy-projection-service.ts",
+      "code": 18047,
+      "category": "Error",
+      "message": "'projection' is possibly 'null'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/academy/git/academy-git-sync-service.test.ts",
+      "code": 2561,
+      "category": "Error",
+      "message": "Object literal may only specify known properties, but 'owner' does not exist in type 'GitHubRepositoryIdentity'. Did you mean to write 'ownerId'?",
+      "count": 6
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './context/context-engine.js'?",
+      "count": 4
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './context/context-navigation-serializer.js'?",
+      "count": 4
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './repository-database.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './repository-model.js'?",
+      "count": 4
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'a' implicitly has an 'any' type.",
+      "count": 6
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'b' implicitly has an 'any' type.",
+      "count": 6
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'candidate' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'e' implicitly has an 'any' type.",
+      "count": 12
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'element' implicitly has an 'any' type.",
+      "count": 9
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'elements' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'f' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'file' implicitly has an 'any' type.",
+      "count": 7
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'result' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-addressability.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'section' implicitly has an 'any' type.",
+      "count": 7
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/codemap-extraction-contract.test.ts",
+      "code": 18048,
+      "category": "Error",
+      "message": "'runtime.exportedConstNewBindings' is possibly 'undefined'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/compression-architecture.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'ArchitectureMockAdapter' is not assignable to parameter of type 'RepomixAdapter'.\n  Type 'ArchitectureMockAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 3
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/compression-architecture.test.ts",
+      "code": 2720,
+      "category": "Error",
+      "message": "Class 'ArchitectureMockAdapter' incorrectly implements class 'RepomixAdapter'. Did you mean to extend 'RepomixAdapter' and inherit its members as a subclass?\n  Type 'ArchitectureMockAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/compression-architecture.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './compression-service.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/compression-profile.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type 'EffectiveProfile' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type 'DirectOutputEffectiveProfile' is not comparable to type 'Record<string, unknown>'.\n    Index signature for type 'string' is missing in type 'DirectOutputEffectiveProfile'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/compression-service.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'MockRepomixAdapter' is not assignable to parameter of type 'RepomixAdapter'.\n  Type 'MockRepomixAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 28
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/compression-service.test.ts",
+      "code": 2720,
+      "category": "Error",
+      "message": "Class 'MockRepomixAdapter' incorrectly implements class 'RepomixAdapter'. Did you mean to extend 'RepomixAdapter' and inherit its members as a subclass?\n  Type 'MockRepomixAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context-enrichment-service.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'MockAdapter' is not assignable to parameter of type 'RepomixAdapter'.\n  Type 'MockAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 7
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context-enrichment-service.test.ts",
+      "code": 2720,
+      "category": "Error",
+      "message": "Class 'MockAdapter' incorrectly implements class 'RepomixAdapter'. Did you mean to extend 'RepomixAdapter' and inherit its members as a subclass?\n  Type 'MockAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-efficiency-fixture.ts",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type '{ id: string; repositoryId: string; relativePath: \"src/service.ts\" | \"src/types.ts\" | \"src/app.ts\" | \"src/unused.ts\"; language: string; status: \"indexed\"; lastModified: number; sizeBytes: number; lineCount: number; }[]' is not assignable to type 'CodeMapFile[]'.\n  Type '{ id: string; repositoryId: string; relativePath: \"src/service.ts\" | \"src/types.ts\" | \"src/app.ts\" | \"src/unused.ts\"; language: string; status: \"indexed\"; lastModified: number; sizeBytes: number; lineCount: number; }' is missing the following properties from type 'CodeMapFile': extension, lines, mtime",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-efficiency-harness.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'readonly [string]' is not assignable to parameter of type 'string[]'.\n  The type 'readonly [string]' is 'readonly' and cannot be assigned to the mutable type 'string[]'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-efficiency-harness.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type 'FileOutlineElement' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Index signature for type 'string' is missing in type 'FileOutlineElement'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-efficiency-harness.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type 'ReadCodeResult' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Index signature for type 'string' is missing in type 'ReadCodeResult'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 1479,
+      "category": "Error",
+      "message": "The current file is a CommonJS module whose imports will produce 'require' calls; however, the referenced file is an ECMAScript module and cannot be imported with 'require'. Consider writing a dynamic 'import(\"../../../../infra/gateway/testing/canonical-relay-identity-fixture\")' call instead.\n  To convert this file to an ECMAScript module, change its file extension to '.mts', or add the field `\"type\": \"module\"` to '<root>/package.json'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 1479,
+      "category": "Error",
+      "message": "The current file is a CommonJS module whose imports will produce 'require' calls; however, the referenced file is an ECMAScript module and cannot be imported with 'require'. Consider writing a dynamic 'import(\"../../../../infra/gateway/testing/local-gateway\")' call instead.\n  To convert this file to an ECMAScript module, change its file extension to '.mts', or add the field `\"type\": \"module\"` to '<root>/package.json'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'crossRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'dependenciesRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'dependencyReferences.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'discoverRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'hierarchyReferences.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'hierarchyRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'initRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'inspectRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'offlineRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'pingRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'readRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'referencesRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'toolsRes.data' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/context-navigation.e2e.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'assertion' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/discover-repository-readiness.test.ts",
+      "code": 18049,
+      "category": "Error",
+      "message": "'drilldown.observabilityGap' is possibly 'null' or 'undefined'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/discover-repository-readiness.test.ts",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type 'Mock<() => Promise<Map<string, { source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }>>>' is not assignable to type '(repoPath: string, elementIds: string[]) => Promise<Map<string, ExactElementSource>>'.\n  Type 'Promise<Map<string, { source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }>>' is not assignable to type 'Promise<Map<string, ExactElementSource>>'.\n    Type 'Map<string, { source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }>' is not assignable to type 'Map<string, ExactElementSource>'.\n      Property 'content' is missing in type '{ source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }' but required in type 'ExactElementSource'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/discover-repository-readiness.test.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'state' does not exist on type 'ObservabilityGapState | ObservabilityGap'.\n  Property 'state' does not exist on type '\"NONE\"'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/discover-repository-readiness.test.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type '{ id: string; fileId: string; name: string; kind: \"function\"; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { line: number; column: number; byte: number; }; }; }' to type 'CodeMapElement' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type '{ id: string; fileId: string; name: string; kind: \"function\"; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { line: number; column: number; byte: number; }; }; }' is missing the following properties from type 'CodeMapElement': repositoryId, parentElementId, sizeLines, sizeBytes, and 7 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/discover-repository-readiness.test.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type '{ id: string; relativePath: string; contentHash: string; updatedAt: string; }' to type 'CodeMapFile' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type '{ id: string; relativePath: string; contentHash: string; updatedAt: string; }' is missing the following properties from type 'CodeMapFile': repositoryId, language, extension, lines, and 3 more.",
+      "count": 3
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/get-relationships-readiness.test.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type '{ id: string; fileId: string; name: string; kind: \"class\"; parentElementId: null; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { ...; }; }; }' to type 'CodeMapElement' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type '{ id: string; fileId: string; name: string; kind: \"class\"; parentElementId: null; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { ...; }; }; }' is missing the following properties from type 'CodeMapElement': repositoryId, sizeLines, sizeBytes, visibility, and 6 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/inspect-files-readiness.test.ts",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type 'Mock<() => Promise<Map<string, { source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }>>>' is not assignable to type '(repoPath: string, elementIds: string[]) => Promise<Map<string, ExactElementSource>>'.\n  Type 'Promise<Map<string, { source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }>>' is not assignable to type 'Promise<Map<string, ExactElementSource>>'.\n    Type 'Map<string, { source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }>' is not assignable to type 'Map<string, ExactElementSource>'.\n      Property 'content' is missing in type '{ source: string; startLine: number; endLine: number; startByte: number; endByte: number; relativePath: string; }' but required in type 'ExactElementSource'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/inspect-files-readiness.test.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type '{ id: string; fileId: string; name: string; kind: \"class\"; parentElementId: null; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { ...; }; }; }' to type 'CodeMapElement' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type '{ id: string; fileId: string; name: string; kind: \"class\"; parentElementId: null; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { ...; }; }; }' is missing the following properties from type 'CodeMapElement': repositoryId, sizeLines, sizeBytes, visibility, and 6 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/inspect-files-readiness.test.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type '{ id: string; fileId: string; name: string; kind: \"method\"; parentElementId: string; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { ...; }; }; }' to type 'CodeMapElement' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type '{ id: string; fileId: string; name: string; kind: \"method\"; parentElementId: string; startLine: number; endLine: number; retrievable: true; location: { start: { line: number; column: number; byte: number; }; end: { ...; }; }; }' is missing the following properties from type 'CodeMapElement': repositoryId, sizeLines, sizeBytes, visibility, and 6 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/inspect-files-readiness.test.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type '{ id: string; relativePath: string; contentHash: string; updatedAt: string; }' to type 'CodeMapFile' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type '{ id: string; relativePath: string; contentHash: string; updatedAt: string; }' is missing the following properties from type 'CodeMapFile': repositoryId, language, extension, lines, and 3 more.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/member-resolution-real.benchmark.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ awaitSnapshot: () => Promise<void>; getFiles: () => CodeMapFile[]; getElements: () => CodeMapElement[]; getRelationships: () => CodeMapRelationship[]; getSymbolReferencesByTargetElement: (_repo: string, target: string) => PersistedSymbolReference[]; getSymbolReferencesBySourceElement: (_repo: string, source: strin...' is not assignable to parameter of type 'CodeMapNavigationPort'.\n  Type '{ awaitSnapshot: () => Promise<void>; getFiles: () => CodeMapFile[]; getElements: () => CodeMapElement[]; getRelationships: () => CodeMapRelationship[]; getSymbolReferencesByTargetElement: (_repo: string, target: string) => PersistedSymbolReference[]; getSymbolReferencesBySourceElement: (_repo: string, source: strin...' is missing the following properties from type 'CodeMapNavigationPort': getHierarchyRelationshipsBySourceElement, getHierarchyRelationshipsByTargetElement",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/progressive-navigation-real.benchmark.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ awaitSnapshot: () => Promise<void>; getFiles: () => CodeMapFile[]; getElements: Mock<() => CodeMapElement[]>; getRelationships: Mock<() => CodeMapRelationship[]>; getSymbolReferencesByTargetElement: Mock<...>; getSymbolReferencesBySourceElement: Mock<...>; getElementExactSources: Mock<...>; }' is not assignable to parameter of type 'CodeMapNavigationPort'.\n  Type '{ awaitSnapshot: () => Promise<void>; getFiles: () => CodeMapFile[]; getElements: Mock<() => CodeMapElement[]>; getRelationships: Mock<() => CodeMapRelationship[]>; getSymbolReferencesByTargetElement: Mock<...>; getSymbolReferencesBySourceElement: Mock<...>; getElementExactSources: Mock<...>; }' is missing the following properties from type 'CodeMapNavigationPort': getHierarchyRelationshipsBySourceElement, getHierarchyRelationshipsByTargetElement",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/progressive-navigation.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ awaitSnapshot: Mock<() => Promise<void>>; getFiles: Mock<() => CodeMapFile[]>; getElements: Mock<() => CodeMapElement[]>; getRelationships: Mock<...>; getSymbolReferencesByTargetElement: Mock<...>; getSymbolReferencesBySourceElement: Mock<...>; getElementExactSources: Mock<...>; }' is not assignable to parameter of type 'CodeMapNavigationPort'.\n  Type '{ awaitSnapshot: Mock<() => Promise<void>>; getFiles: Mock<() => CodeMapFile[]>; getElements: Mock<() => CodeMapElement[]>; getRelationships: Mock<...>; getSymbolReferencesByTargetElement: Mock<...>; getSymbolReferencesBySourceElement: Mock<...>; getElementExactSources: Mock<...>; }' is missing the following properties from type 'CodeMapNavigationPort': getHierarchyRelationshipsBySourceElement, getHierarchyRelationshipsByTargetElement",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/repo-discovery-real.benchmark.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ awaitSnapshot: () => Promise<undefined>; getFiles: () => CodeMapFile[]; getElements: () => CodeMapElement[]; getRelationships: () => CodeMapRelationship[]; }' is not assignable to parameter of type 'CodeMapNavigationPort'.\n  Type '{ awaitSnapshot: () => Promise<undefined>; getFiles: () => CodeMapFile[]; getElements: () => CodeMapElement[]; getRelationships: () => CodeMapRelationship[]; }' is missing the following properties from type 'CodeMapNavigationPort': getSymbolReferencesByTargetElement, getSymbolReferencesBySourceElement, getHierarchyRelationshipsBySourceElement, getHierarchyRelationshipsByTargetElement, getElementExactSources",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/repo-discovery.e2e.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../dash/dash-discovery-service.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/token-aware-delimiter.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'NestingBenchmark' is not assignable to parameter of type 'Record<string, { tokens: number; }>'.\n  Index signature for type 'string' is missing in type 'NestingBenchmark'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/token-aware-delimiter.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'RelationshipBenchmark' is not assignable to parameter of type 'Record<string, { tokens: number; }>'.\n  Index signature for type 'string' is missing in type 'RelationshipBenchmark'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/context/token-aware-delimiter.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'SeparationBenchmark' is not assignable to parameter of type 'Record<string, { tokens: number; }>'.\n  Index signature for type 'string' is missing in type 'SeparationBenchmark'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-context-assembler.test.ts",
+      "code": 7016,
+      "category": "Error",
+      "message": "Could not find a declaration file for module 'jsdom'. '<root>/node_modules/jsdom/lib/api.js' implicitly has an 'any' type.\n  Try `npm i --save-dev @types/jsdom` if it exists or add a new declaration (.d.ts) file containing `declare module 'jsdom';`",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-discovery-service.test.ts",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type 'Mock<() => Promise<{ protocol: string; layer: 2; content: string; tokenCount: number; mapTokenCount: number; tokenizerId: string; tokenizerEncoding: string; fileCount: number; generationMs: number; timings: { ...; }; }>>' is not assignable to type '(repoPath: string, layer: RepoDiscoveryLayer) => Promise<RepoDiscoveryResult>'.\n  Type 'Promise<{ protocol: string; layer: 2; content: string; tokenCount: number; mapTokenCount: number; tokenizerId: string; tokenizerEncoding: string; fileCount: number; generationMs: number; timings: { readinessMs: number; projectionMs: number; serializationMs: number; outputTokenizationMs: number; totalMs: number; }; }>' is not assignable to type 'Promise<RepoDiscoveryResult>'.\n    Type '{ protocol: string; layer: 2; content: string; tokenCount: number; mapTokenCount: number; tokenizerId: string; tokenizerEncoding: string; fileCount: number; generationMs: number; timings: { readinessMs: number; projectionMs: number; serializationMs: number; outputTokenizationMs: number; totalMs: number; }; }' is not assignable to type 'RepoDiscoveryResult'.\n      Types of property 'protocol' are incompatible.\n        Type 'string' is not assignable to type '\"repo-discovery/v1\"'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-core.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean './providers/compression-context-provider.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-core.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter '_repo' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-core.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'f' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-core.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'files' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-core.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'profile' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-robustness.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ signal: AbortSignal; }' is not assignable to parameter of type 'DashExecutionOptions'.\n  Property 'repoPath' is missing in type '{ signal: AbortSignal; }' but required in type 'DashExecutionOptions'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-security.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../ignore-policy.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/dash-e2e-security.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../one-click-xml-service.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/dash/providers/source-context-provider.ts",
+      "code": 2698,
+      "category": "Error",
+      "message": "Spread types may only be created from object types.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/diff-service.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'parse' does not exist on type 'typeof import(\"<root>/node_modules/gitdiff-parser/index\")'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/diff-service.ts",
+      "code": 2741,
+      "category": "Error",
+      "message": "Property 'tracked' is missing in type '{ modified: string; added: string; deleted: string; }' but required in type 'Record<\"modified\" | \"added\" | \"deleted\" | \"tracked\", string>'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/diff-service.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'c' implicitly has an 'any' type.",
+      "count": 4
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/diff-service.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'hunk' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/diff-service.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'index' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/direct-output.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'MockDirectRepomixAdapter' is not assignable to parameter of type 'RepomixAdapter'.\n  Type 'MockDirectRepomixAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 18
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/direct-output.test.ts",
+      "code": 2720,
+      "category": "Error",
+      "message": "Class 'MockDirectRepomixAdapter' incorrectly implements class 'RepomixAdapter'. Did you mean to extend 'RepomixAdapter' and inherit its members as a subclass?\n  Type 'MockDirectRepomixAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/extraction/css-extractor.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ id: string; repositoryId: string; sourceId: string; targetId: string; type: \"contains\"; }' is not assignable to parameter of type 'CodeMapRelationship'.\n  Type '{ id: string; repositoryId: string; sourceId: string; targetId: string; type: \"contains\"; }' is missing the following properties from type 'CodeMapRelationship': sourceKind, targetKind",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/restore-service.test.ts",
+      "code": 2769,
+      "category": "Error",
+      "message": "No overload matches this call.\n  Overload 1 of 2, '(fn: NormalizedProcedure<(this: unknown, ...args: unknown[]) => unknown>): MockInstance<(this: unknown, ...args: unknown[]) => unknown>', gave the following error.\n    Argument of type '(rPath: string, cpData: any) => Promise<any>' is not assignable to parameter of type 'NormalizedProcedure<(this: unknown, ...args: unknown[]) => unknown>'.\n      Types of parameters 'rPath' and 'args' are incompatible.\n        Type 'unknown' is not assignable to type 'string'.\n  Overload 2 of 2, '(fn: NormalizedProcedure<any>): MockInstance<(this: unknown, ...args: unknown[]) => unknown>', gave the following error.\n    Argument of type '(rPath: string, cpData: any) => Promise<any>' is not assignable to parameter of type 'NormalizedProcedure<any>'.\n      Types of parameters 'rPath' and 'args' are incompatible.\n        Type 'unknown' is not assignable to type 'string'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/settings-service.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'fileImportance' does not exist on type 'Partial<AppSettings>'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 18047,
+      "category": "Error",
+      "message": "'parser' is possibly 'null'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '\"method\" | \"constructor\"' is not assignable to parameter of type 'CodeMapElementKind'.\n  Type '\"constructor\"' is not assignable to type 'CodeMapElementKind'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2367,
+      "category": "Error",
+      "message": "This comparison appears to be unintentional because the types '\"property\" | \"class\" | \"interface\" | \"enum\" | \"typeAlias\" | \"variable\" | \"constant\" | \"import\" | \"export\" | \"parameter\" | \"enumMember\" | \"cssRule\" | \"cssAtRule\" | \"cssCustomProperty\" | \"document\" | \"section\"' and '\"constructor\"' have no overlap.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2678,
+      "category": "Error",
+      "message": "Type '\"constructor\"' is not comparable to type 'CodeMapElementKind'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2739,
+      "category": "Error",
+      "message": "Type '{ elements: never[]; relationships: never[]; elementInterfaces: never[]; importBindings: never[]; symbolReferences: never[]; }' is missing the following properties from type 'StructureExtractionResult': exportedConstNewBindings, exportedConstCallBindings",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structured-compression.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'MockRepomixAdapter' is not assignable to parameter of type 'RepomixAdapter'.\n  Type 'MockRepomixAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 7
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structured-compression.test.ts",
+      "code": 2720,
+      "category": "Error",
+      "message": "Class 'MockRepomixAdapter' incorrectly implements class 'RepomixAdapter'. Did you mean to extend 'RepomixAdapter' and inherit its members as a subclass?\n  Type 'MockRepomixAdapter' is missing the following properties from type 'RepomixAdapter': estimateCommandLineBytes, buildTempConfigFilePath, writeTempConfigFile, buildBatches, and 5 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/structured-compression.test.ts",
+      "code": 2740,
+      "category": "Error",
+      "message": "Type '{ removeComments: true; removeEmptyLines: true; truncateBase64: true; }' is missing the following properties from type 'CompressionProfile': showLineNumbers, parsableStyle, outputFilePathStyle, includeFileSummary, and 4 more.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/tokenizer.ts",
+      "code": 1479,
+      "category": "Error",
+      "message": "The current file is a CommonJS module whose imports will produce 'require' calls; however, the referenced file is an ECMAScript module and cannot be imported with 'require'. Consider writing a dynamic 'import(\"js-tiktoken/lite\")' call instead.\n  To convert this file to an ECMAScript module, change its file extension to '.mts', or add the field `\"type\": \"module\"` to '<root>/package.json'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/core/tokenizer.ts",
+      "code": 1479,
+      "category": "Error",
+      "message": "The current file is a CommonJS module whose imports will produce 'require' calls; however, the referenced file is an ECMAScript module and cannot be imported with 'require'. Consider writing a dynamic 'import(\"js-tiktoken/ranks/cl100k_base\")' call instead.\n  To convert this file to an ECMAScript module, change its file extension to '.mts', or add the field `\"type\": \"module\"` to '<root>/package.json'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-operations-service.ts",
+      "code": 18048,
+      "category": "Error",
+      "message": "'side' is possibly 'undefined'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-operations-service.ts",
+      "code": 2769,
+      "category": "Error",
+      "message": "No overload matches this call.\n  Overload 1 of 4, '(arrayBuffer: WithImplicitCoercion<ArrayBufferLike>, byteOffset?: number | undefined, length?: number | undefined): Buffer<ArrayBufferLike>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<ArrayBufferLike>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<ArrayBufferLike>'.\n  Overload 2 of 4, '(string: WithImplicitCoercion<string>, encoding?: BufferEncoding | undefined): Buffer<ArrayBuffer>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<string>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<string>'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-operations-v11.git.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'reply' is of type 'unknown'.",
+      "count": 3
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-operations.git.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'reply' is of type 'unknown'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-worktree-hygiene.git.test.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'alreadyPresent' does not exist on type '{ rules: string[]; candidateRules: string[]; alreadyPresent: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; affectedGroups: { classification: string; group: string; count: number; suggestedRule?: string | undefined; }[]; worktreeRevision: string; previewId: string; } | { ...; }'.\n  Property 'alreadyPresent' does not exist on type '{ result: string; addedRules: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; worktreeRevision: string; }'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-worktree-hygiene.git.test.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'candidateRules' does not exist on type '{ rules: string[]; candidateRules: string[]; alreadyPresent: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; affectedGroups: { classification: string; group: string; count: number; suggestedRule?: string | undefined; }[]; worktreeRevision: string; previewId: string; } | { ...; }'.\n  Property 'candidateRules' does not exist on type '{ result: string; addedRules: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; worktreeRevision: string; }'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-worktree-hygiene.git.test.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'previewId' does not exist on type '{ rules: string[]; candidateRules: string[]; alreadyPresent: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; affectedGroups: { classification: string; group: string; count: number; suggestedRule?: string | undefined; }[]; worktreeRevision: string; previewId: string; } | { ...; }'.\n  Property 'previewId' does not exist on type '{ result: string; addedRules: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; worktreeRevision: string; }'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/git-worktree-hygiene.git.test.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'rules' does not exist on type '{ rules: string[]; candidateRules: string[]; alreadyPresent: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; affectedGroups: { classification: string; group: string; count: number; suggestedRule?: string | undefined; }[]; worktreeRevision: string; previewId: string; } | { ...; }'.\n  Property 'rules' does not exist on type '{ result: string; addedRules: string[]; newlyIgnoredCount: number; remainingUntrackedCount: number; worktreeRevision: string; }'.",
+      "count": 3
+    },
+    {
+      "project": "node",
+      "file": "src/main/git-operations/mcp-operational-reliability.git.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'reply' is of type 'unknown'.",
+      "count": 4
+    },
+    {
+      "project": "node",
+      "file": "src/main/github/github-auth-service.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type 'TokenResponse' is not assignable to parameter of type 'Required<Pick<TokenResponse, \"refresh_token\" | \"access_token\" | \"expires_in\" | \"refresh_token_expires_in\">>'.\n  Types of property 'refresh_token' are incompatible.\n    Type 'string | undefined' is not assignable to type 'string'.\n      Type 'undefined' is not assignable to type 'string'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/ipc/active-project-handler.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ discoverRepository: Mock<(repoPath: string) => Promise<{ directories: { relativePath: string; children: string[]; }[]; }>>; getRelationships: Mock<() => Promise<{ files: never[]; }>>; inspectFiles: Mock<...>; readCode: Mock<...>; }' is not assignable to parameter of type 'ContextNavigationPort'.\n  Type '{ discoverRepository: Mock<(repoPath: string) => Promise<{ directories: { relativePath: string; children: string[]; }[]; }>>; getRelationships: Mock<() => Promise<{ files: never[]; }>>; inspectFiles: Mock<...>; readCode: Mock<...>; }' is missing the following properties from type 'ContextNavigationPort': getReferences, getSymbolDependencies, getSymbolHierarchy",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/ipc/connection-handler.test.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ discoverRepository: Mock<Procedure>; getRelationships: Mock<() => Promise<{ files: never[]; }>>; inspectFiles: Mock<Procedure>; readCode: Mock<...>; }' is not assignable to parameter of type 'ProjectContextNavigation'.\n  Type '{ discoverRepository: Mock<Procedure>; getRelationships: Mock<() => Promise<{ files: never[]; }>>; inspectFiles: Mock<Procedure>; readCode: Mock<...>; }' is missing the following properties from type 'ProjectContextNavigation': getReferences, getSymbolDependencies, getSymbolHierarchy",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/main.ts",
+      "code": 2300,
+      "category": "Error",
+      "message": "Duplicate identifier 'GitService'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/channel-mcp-adapter.test.ts",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type 'Mock<() => Promise<{ files: { relativePath: string; elements: { kind: string; name: string; target: string; children: { kind: string; name: string; target: string; }[]; }[]; }[]; }>>' is not assignable to type '(repoPath: string, relativePaths: string[], options?: InspectFilesOptions | undefined, context?: NavigationInvocationContext | undefined) => Promise<...>'.\n  Type 'Promise<{ files: { relativePath: string; elements: { kind: string; name: string; target: string; children: { kind: string; name: string; target: string; }[]; }[]; }[]; }>' is not assignable to type 'Promise<InspectFilesResult>'.\n    Type '{ files: { relativePath: string; elements: { kind: string; name: string; target: string; children: { kind: string; name: string; target: string; }[]; }[]; }[]; }' is not assignable to type 'InspectFilesResult'.\n      Types of property 'files' are incompatible.\n        Type '{ relativePath: string; elements: { kind: string; name: string; target: string; children: { kind: string; name: string; target: string; }[]; }[]; }[]' is not assignable to type '{ relativePath: string; elements: FileOutlineElement[]; }[]'.\n          Type '{ relativePath: string; elements: { kind: string; name: string; target: string; children: { kind: string; name: string; target: string; }[]; }[]; }' is not assignable to type '{ relativePath: string; elements: FileOutlineElement[]; }'.\n            Types of property 'elements' are incompatible.\n              Type '{ kind: string; name: string; target: string; children: { kind: string; name: string; target: string; }[]; }[]' is not assignable to type 'FileOutlineElement[]'.\n                Type '{ kind: string; name: string; target: string; children: { kind: string; name: string; target: string; }[]; }' is not assignable to type 'FileOutlineElement'.\n                  Types of property 'kind' are incompatible.\n                    Type 'string' is not assignable to type '\"function\" | \"class\" | \"method\" | \"interface\" | \"enum\" | \"typeAlias\" | \"constant\" | \"document\" | \"section\"'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/channel-mcp-adapter.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'index' implicitly has an 'any' type.",
+      "count": 3
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/channel-mcp-adapter.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'source' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/channel-mcp-adapter.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'target' implicitly has an 'any' type.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/channel-mcp-adapter.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'targetId' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/connection/connection-lifecycle.test.ts",
+      "code": 2741,
+      "category": "Error",
+      "message": "Property 'getSymbolHierarchy' is missing in type '{ discoverRepository: Mock<Procedure>; getRelationships: Mock<() => Promise<{ files: never[]; }>>; inspectFiles: Mock<Procedure>; getReferences: Mock<...>; getSymbolDependencies: Mock<...>; readCode: Mock<...>; }' but required in type 'ProjectContextNavigation'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/mcp-http-server.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'called.body' is of type 'unknown'.",
+      "count": 5
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/mcp-http-server.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'initialized.body' is of type 'unknown'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/mcp-http-server.test.ts",
+      "code": 18046,
+      "category": "Error",
+      "message": "'listed.body' is of type 'unknown'.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/mcp-http-server.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'source' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/mcp-http-server.test.ts",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'target' implicitly has an 'any' type.",
+      "count": 2
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/mcp-lifecycle.test.ts",
+      "code": 2741,
+      "category": "Error",
+      "message": "Property 'getSymbolHierarchy' is missing in type '{ discoverRepository: Mock<() => Promise<{ directories: { relativePath: string; children: string[]; }[]; }>>; getRelationships: Mock<() => Promise<{ files: never[]; }>>; inspectFiles: Mock<...>; getReferences: Mock<...>; getSymbolDependencies: Mock<...>; readCode: Mock<...>; }' but required in type 'ProjectContextNavigation'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/relay-server.ts",
+      "code": 1309,
+      "category": "Error",
+      "message": "The current file is a CommonJS module and cannot use 'await' at the top level.",
+      "count": 10
+    },
+    {
+      "project": "node",
+      "file": "src/main/mcp/server.ts",
+      "code": 1309,
+      "category": "Error",
+      "message": "The current file is a CommonJS module and cannot use 'await' at the top level.",
+      "count": 3
+    },
+    {
+      "project": "node",
+      "file": "src/main/preload.ts",
+      "code": 2307,
+      "category": "Error",
+      "message": "Cannot find module '../../shared/types' or its corresponding type declarations.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/runtime-restart/dev-supervisor.test.ts",
+      "code": 1470,
+      "category": "Error",
+      "message": "The 'import.meta' meta-property is not allowed in files which will build into CommonJS output.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/runtime-restart/dev-supervisor.test.ts",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type '(supervisor: { port: number; token: string; }) => ChildProcessWithoutNullStreams' is not assignable to type '(input: { port: number; token: string; }) => EventEmitter<DefaultEventMap> & { kill(signal?: string | undefined): void; }'.\n  Type 'ChildProcessWithoutNullStreams' is not assignable to type 'EventEmitter<DefaultEventMap> & { kill(signal?: string | undefined): void; }'.\n    Type 'ChildProcessWithoutNullStreams' is not assignable to type '{ kill(signal?: string | undefined): void; }'.\n      Types of property 'kill' are incompatible.\n        Type '(signal?: number | Signals | undefined) => boolean' is not assignable to type '(signal?: string | undefined) => void'.\n          Types of parameters 'signal' and 'signal' are incompatible.\n            Type 'string | undefined' is not assignable to type 'number | Signals | undefined'.\n              Type 'string' is not assignable to type 'number | Signals | undefined'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/runtime-restart/dev-supervisor.test.ts",
+      "code": 2493,
+      "category": "Error",
+      "message": "Tuple type '[]' of length '0' has no element at index '0'.",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/main/validation-ledger/validation-ledger.test.ts",
+      "code": 2835,
+      "category": "Error",
+      "message": "Relative import paths need explicit file extensions in ECMAScript imports when '--moduleResolution' is 'node16' or 'nodenext'. Did you mean '../system-health/system-health-core.js'?",
+      "count": 1
+    },
+    {
+      "project": "node",
+      "file": "src/shared/utils/reloadCheckpoints.ts",
+      "code": 2304,
+      "category": "Error",
+      "message": "Cannot find name 'window'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/academy/academy-package.ts",
+      "code": 2550,
+      "category": "Error",
+      "message": "Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/academy/academy-projection-service.ts",
+      "code": 18047,
+      "category": "Error",
+      "message": "'projection' is possibly 'null'.",
+      "count": 2
+    },
+    {
+      "project": "web",
+      "file": "src/main/academy/git/academy-plugin-repository-projection.ts",
+      "code": 2550,
+      "category": "Error",
+      "message": "Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/academy/publication/openai-plugin-validator.ts",
+      "code": 2550,
+      "category": "Error",
+      "message": "Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/compression-profile.ts",
+      "code": 2352,
+      "category": "Error",
+      "message": "Conversion of type 'EffectiveProfile' to type 'Record<string, unknown>' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.\n  Type 'DirectOutputEffectiveProfile' is not comparable to type 'Record<string, unknown>'.\n    Index signature for type 'string' is missing in type 'DirectOutputEffectiveProfile'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/extraction/css-extractor.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ id: string; repositoryId: string; sourceId: string; targetId: string; type: \"contains\"; }' is not assignable to parameter of type 'CodeMapRelationship'.\n  Type '{ id: string; repositoryId: string; sourceId: string; targetId: string; type: \"contains\"; }' is missing the following properties from type 'CodeMapRelationship': sourceKind, targetKind",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/settings-service.ts",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'fileImportance' does not exist on type 'Partial<AppSettings>'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 18047,
+      "category": "Error",
+      "message": "'parser' is possibly 'null'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '\"method\" | \"constructor\"' is not assignable to parameter of type 'CodeMapElementKind'.\n  Type '\"constructor\"' is not assignable to type 'CodeMapElementKind'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2367,
+      "category": "Error",
+      "message": "This comparison appears to be unintentional because the types '\"class\" | \"interface\" | \"enum\" | \"typeAlias\" | \"variable\" | \"constant\" | \"import\" | \"export\" | \"property\" | \"parameter\" | \"enumMember\" | \"cssRule\" | \"cssAtRule\" | \"cssCustomProperty\" | \"document\" | \"section\"' and '\"constructor\"' have no overlap.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2554,
+      "category": "Error",
+      "message": "Expected 0-1 arguments, but got 2.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2678,
+      "category": "Error",
+      "message": "Type '\"constructor\"' is not comparable to type 'CodeMapElementKind'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/core/structure-reader.ts",
+      "code": 2739,
+      "category": "Error",
+      "message": "Type '{ elements: never[]; relationships: never[]; elementInterfaces: never[]; importBindings: never[]; symbolReferences: never[]; }' is missing the following properties from type 'StructureExtractionResult': exportedConstNewBindings, exportedConstCallBindings",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/git-operations/git-operations-mcp.ts",
+      "code": 2550,
+      "category": "Error",
+      "message": "Property 'hasOwn' does not exist on type 'ObjectConstructor'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2022' or later.",
+      "count": 3
+    },
+    {
+      "project": "web",
+      "file": "src/main/git-operations/git-operations-service.ts",
+      "code": 18048,
+      "category": "Error",
+      "message": "'side' is possibly 'undefined'.",
+      "count": 2
+    },
+    {
+      "project": "web",
+      "file": "src/main/git-operations/git-operations-service.ts",
+      "code": 2769,
+      "category": "Error",
+      "message": "No overload matches this call.\n  Overload 1 of 4, '(arrayBuffer: WithImplicitCoercion<ArrayBufferLike>, byteOffset?: number | undefined, length?: number | undefined): Buffer<ArrayBufferLike>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<ArrayBufferLike>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<ArrayBufferLike>'.\n  Overload 2 of 4, '(string: WithImplicitCoercion<string>, encoding?: BufferEncoding | undefined): Buffer<ArrayBuffer>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<string>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<string>'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/main/mcp/channel-activity-monitor.ts",
+      "code": 2550,
+      "category": "Error",
+      "message": "Property 'hasOwn' does not exist on type 'ObjectConstructor'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2022' or later.",
+      "count": 2
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyPanels.tsx",
+      "code": 2550,
+      "category": "Error",
+      "message": "Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyPanels.tsx",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'character' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'bindAcademyGitRepository' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'getAcademyGitStatus' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
+      "count": 2
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'listAcademyGitEligibleRepositories' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
+      "count": 2
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'openAcademyGitRepository' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'syncAcademyGitNow' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'repos' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeCampaignView/campaignContextUtils.ts",
+      "code": 2551,
+      "category": "Error",
+      "message": "Property 'campaignId' does not exist on type 'CheckpointSummary'. Did you mean 'campaignIds'?",
+      "count": 4
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeDashView/dash-e2e-ui.test.tsx",
+      "code": 2345,
+      "category": "Error",
+      "message": "Argument of type '{ valid: boolean; request: { protocol: string; output: { format: string; }; items: { path: string; representation: string; }[]; }; failures: { index: number; path: string; reason: string; }[]; }' is not assignable to parameter of type '{ valid: boolean; request: { protocol: string; output: { format: string; }; items: { path: string; representation: string; }[]; }; failures: never[]; }'.\n  Types of property 'failures' are incompatible.\n    Type '{ index: number; path: string; reason: string; }[]' is not assignable to type 'never[]'.\n      Type '{ index: number; path: string; reason: string; }' is not assignable to type 'never'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeDashView/hooks/useDashWorkflow.ts",
+      "code": 2307,
+      "category": "Error",
+      "message": "Cannot find module '../../../../shared/types' or its corresponding type declarations.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeDashView/hooks/useDashWorkflow.ts",
+      "code": 2307,
+      "category": "Error",
+      "message": "Cannot find module '../../../../shared/types/dash-types' or its corresponding type declarations.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeDashView/repo-discovery-flow.test.tsx",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type 'Mock<() => { id: string; repositoryId: string; relativePath: string; language: string; extension: string; lines: number; sizeBytes: number; mtime: number; contentHash: string; tokenCount: number; status: string; }[]>' is not assignable to type '(repoPath: string) => CodeMapFile[]'.\n  Type '{ id: string; repositoryId: string; relativePath: string; language: string; extension: string; lines: number; sizeBytes: number; mtime: number; contentHash: string; tokenCount: number; status: string; }[]' is not assignable to type 'CodeMapFile[]'.\n    Type '{ id: string; repositoryId: string; relativePath: string; language: string; extension: string; lines: number; sizeBytes: number; mtime: number; contentHash: string; tokenCount: number; status: string; }' is not assignable to type 'CodeMapFile'.\n      Types of property 'status' are incompatible.\n        Type 'string' is not assignable to type 'CodeMapFileStatus'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeDashView/repo-discovery-flow.test.tsx",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'repoPath' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeDashView/repo-discovery-flow.test.tsx",
+      "code": 7006,
+      "category": "Error",
+      "message": "Parameter 'request' implicitly has an 'any' type.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/CodeJourneyView/restore-modal.test.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'disabled' does not exist on type 'HTMLElement'.",
+      "count": 2
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/FileCollection/FileView.tsx",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'LegacyRef<HTMLDivElement> | undefined'.\n  Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'RefObject<HTMLDivElement>'.\n    Type 'HTMLDivElement | null' is not assignable to type 'HTMLDivElement'.\n      Type 'null' is not assignable to type 'HTMLDivElement'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/FileCollection/controllers/useFileViewLazyMount.test.tsx",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'LegacyRef<HTMLDivElement> | undefined'.\n  Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'RefObject<HTMLDivElement>'.\n    Type 'HTMLDivElement | null' is not assignable to type 'HTMLDivElement'.\n      Type 'null' is not assignable to type 'HTMLDivElement'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/FileCollection/useFileCollectionData.test.ts",
+      "code": 2322,
+      "category": "Error",
+      "message": "Type '\"light\"' is not assignable to type '\"dark\"'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/HiddenFilesModal/HiddenFilesModal.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'persistent' does not exist on type 'string[]'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/HiddenFilesModal/HiddenFilesModal.tsx",
+      "code": 2339,
+      "category": "Error",
+      "message": "Property 'temporary' does not exist on type 'string[]'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/HiddenFilesModal/HiddenFilesModal.tsx",
+      "code": 2554,
+      "category": "Error",
+      "message": "Expected 2 arguments, but got 3.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/ProjectSwitcher/ProjectSwitcher.test.tsx",
+      "code": 2741,
+      "category": "Error",
+      "message": "Property 'github' is missing in type '{ id: string; name: string; status: \"ACTIVE\"; createdAt: string; updatedAt: string; localCheckout: { path: string; availability: \"AVAILABLE\" | \"MISSING\"; gitState: \"GIT\"; }; }' but required in type 'RepositoryRecord'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/shared/FormatPreview/FormatPreview.tsx",
+      "code": 2307,
+      "category": "Error",
+      "message": "Cannot find module '../../../../shared/types' or its corresponding type declarations.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/shared/FormatPreview/FormatPreview.tsx",
+      "code": 2739,
+      "category": "Error",
+      "message": "Type 'Element[]' is missing the following properties from type 'ReactElement<any, any>': type, props, key",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/shared/Popover/Popover.tsx",
+      "code": 2304,
+      "category": "Error",
+      "message": "Cannot find name 'Coords'.",
+      "count": 1
+    },
+    {
+      "project": "web",
+      "file": "src/renderer/src/components/shared/TagPopover/TagPopover.tsx",
+      "code": 2353,
+      "category": "Error",
+      "message": "Object literal may only specify known properties, and 'preventScroll' does not exist in type 'ScrollIntoViewOptions'.",
+      "count": 1
+    }
+  ]
+}

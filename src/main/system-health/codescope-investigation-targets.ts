@@ -55,7 +55,7 @@ const CODESCOPE_STAGE_TARGETS: Record<CanonicalStage, InvestigationTarget> = {
     component: 'Context Navigation Engine / Adapters',
     boundary: 'Local MCP → ProjectContextNavigation',
     responsibility: 'Execution of CodeScope tools against active project repository',
-    investigationSeeds: ['src/main/core/context/project-context-navigation.ts', 'src/main/mcp/context-navigation-mcp-adapter.ts', 'src/main/core/active-project-service.ts']
+    investigationSeeds: ['src/main/core/context/project-context-navigation.ts', 'src/main/mcp/channel-mcp-adapter.ts', 'src/main/core/active-project-service.ts']
   },
   'MCP Response': {
     systemArea: 'Local MCP Response Serialization',

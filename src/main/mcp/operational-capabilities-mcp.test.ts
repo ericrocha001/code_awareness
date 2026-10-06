@@ -6,7 +6,7 @@ import type { ProjectContextNavigation } from '../core/context/project-context-n
 import { DiagnosticSourceAccess } from '../diagnostic-source-access/diagnostic-source-access'
 import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
 import type { ValidationExecution } from '../validation-execution/validation-execution'
-import { ContextNavigationMcpAdapter } from './context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from './channel-mcp-adapter'
 
 const roots: string[] = []
 afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
@@ -26,7 +26,7 @@ describe('operational MCP capabilities', () => {
       listProfiles: () => [{ id: 'typecheck', description: 'typecheck', runtime: 'NODE', lane: 'TYPECHECK', acceptsTargets: false, proofKind: 'TYPECHECK', scope: ['repository'], timeoutMs: 1, script: 'typecheck' }]
     } as unknown as ValidationExecution
     const runtimeRestart = { request: async () => ({ status: 'RESTART_NOT_REQUIRED', message: 'not required' }) } as unknown as RuntimeRestartController
-    const adapter = new ContextNavigationMcpAdapter({ projectId: 'project', repoRoot: root, navigation, validationExecution, diagnosticSourceAccess: new DiagnosticSourceAccess(root), runtimeRestart })
+    const adapter = new ChannelMcpAdapter({ projectId: 'project', repoRoot: root, navigation, validationExecution, diagnosticSourceAccess: new DiagnosticSourceAccess(root), runtimeRestart })
 
     expect(adapter.listTools().map((tool) => tool.name)).toEqual(expect.arrayContaining([
       'list_validation_profiles', 'start_validation', 'get_validation_run',

@@ -5,7 +5,7 @@
 /// <reference types="vite/client" />
 import type { ActiveProjectState } from '../../shared/types/active-project-types'
 import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
-import type { ChatGptIntegrationState } from '../../shared/types/chatgpt-integration-types'
+import type { ChannelState } from '../../shared/types/channel-state-types'
 import type { SystemHealthState } from '../../shared/types/system-health-types'
 import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput } from '../../shared/types/academy-types'
 import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
@@ -36,8 +36,8 @@ declare global {
       prepareAcademyOpenAiRelease: () => Promise<AcademyOpenAiRelease>
       confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string) => Promise<AcademyOpenAiRelease>
       revealAcademyOpenAiPackage: (releaseId: string) => Promise<boolean>
-      getChatGptIntegrationState: () => Promise<ChatGptIntegrationState>
-      onChatGptIntegrationChanged: (callback: (state: ChatGptIntegrationState) => void) => () => void
+      getChannelState: () => Promise<ChannelState>
+      onChannelChanged: (callback: (state: ChannelState) => void) => () => void
       getSystemHealthState: () => Promise<SystemHealthState>
       getSystemHealthDiagnosticReport: () => Promise<string>
       onSystemHealthChanged: (callback: (state: SystemHealthState) => void) => () => void

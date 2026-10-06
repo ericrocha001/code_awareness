@@ -2,11 +2,12 @@ import { createServer } from 'node:http'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { describe, expect, it, vi } from 'vitest'
 import { newConnectionId, newInstallationId, newRequestId, parseRelayMessage, RELAY_PROTOCOL, type RelayMessage } from '../../../shared/distribution/relay-protocol'
-import { CodeScopeHealthMonitor, type CodeScopeTraceSink } from '../code-scope-health'
+import { ChannelFunctionalHealthMonitor } from '../channel-functional-health'
+import type { ChannelTraceSink } from '../../../shared/types/channel-types'
 import { RelayTransport } from './relay-transport'
 import { ConnectionLifecycle } from './connection-lifecycle'
 
-async function fixture(acceptCredential = true, answerHeartbeat = true, requestTimeoutMs = 25_000, localDelayMs = 0, trace?: CodeScopeTraceSink) {
+async function fixture(acceptCredential = true, answerHeartbeat = true, requestTimeoutMs = 25_000, localDelayMs = 0, trace?: ChannelTraceSink) {
   const localHeaders: Array<Record<string, string | string[] | undefined>> = []
   const local = createServer(async (request, response) => {
     localHeaders.push(request.headers)
@@ -96,7 +97,7 @@ describe('outbound RelayTransport', () => {
     } finally { await f.close() }
   })
   it('returns a correlated bridge timeout before the relay request deadline', async () => {
-    const health = new CodeScopeHealthMonitor()
+    const health = new ChannelFunctionalHealthMonitor()
     const f = await fixture(true, true, 25, 100, health)
     try {
       await f.transport.start(f.localEndpoint, {}, new AbortController().signal)

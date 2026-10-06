@@ -1,4 +1,4 @@
-import type { CodeScopeTraceEvent } from '../mcp/code-scope-health'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import type {
   CheckpointResult,
   InvestigationTarget,
@@ -47,7 +47,7 @@ const REFINED_TARGETS: Record<RelayInboundCheckpoint, InvestigationTarget> = {
 export class RelayInboundDrilldownProvider implements StageDrilldownProvider {
   readonly canonicalStage = 'Relay Inbound' as const
 
-  evaluate(events: CodeScopeTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
+  evaluate(events: ChannelTraceEvent[], failureReason?: string | null): StageDrilldownResult | null {
     if (events.length === 0) return null
 
     const findEvent = (stage: string) =>

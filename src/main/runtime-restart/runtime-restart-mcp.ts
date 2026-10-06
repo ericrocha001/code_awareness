@@ -1,4 +1,4 @@
-import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { RuntimeRestartController } from './runtime-restart-controller'
 
 export const REQUEST_RUNTIME_RESTART_TOOL: McpToolDefinition = {

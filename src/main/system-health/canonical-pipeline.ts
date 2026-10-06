@@ -1,4 +1,4 @@
-import type { CodeScopeTraceStage } from '../mcp/code-scope-health'
+import type { ChannelTraceStage } from '../../shared/types/channel-types'
 import type { CanonicalStage } from '../../shared/types/system-health-types'
 
 const PIPELINE: CanonicalStage[] = [
@@ -16,7 +16,7 @@ const PIPELINE: CanonicalStage[] = [
   'Client Response',
 ]
 
-const STAGE_TO_CANONICAL: Partial<Record<CodeScopeTraceStage, CanonicalStage>> = {
+const STAGE_TO_CANONICAL: Partial<Record<ChannelTraceStage, CanonicalStage>> = {
   'gateway-request-started': 'Remote Request',
   'access-assertion-received': 'Access Assertion',
   'access-assertion-validated': 'Access Assertion',
@@ -61,7 +61,7 @@ const STAGE_TO_CANONICAL: Partial<Record<CodeScopeTraceStage, CanonicalStage>> =
 
 export const CANONICAL_PIPELINE = PIPELINE
 
-export function toCanonicalStage(stage: CodeScopeTraceStage): CanonicalStage | null {
+export function toCanonicalStage(stage: ChannelTraceStage): CanonicalStage | null {
   return STAGE_TO_CANONICAL[stage] ?? null
 }
 

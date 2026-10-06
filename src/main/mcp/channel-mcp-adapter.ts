@@ -1,111 +1,14 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { ChannelActivityMonitor } from './channel-activity-monitor'
+import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import { GIT_OPERATIONS_TOOLS, executeGitOperationsTool } from '../git-operations/git-operations-mcp'
-import { ContextNavigationError } from '../../shared/types/context-navigation-types'
-import type { RelationshipDirection, SymbolHierarchyDirection } from '../../shared/types/context-navigation-types'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
 import { bindProjectNavigation, type ProjectContextNavigation } from '../core/context/project-context-navigation'
-import { serializeDiscovery, serializeRelationships, serializeInspectFiles, serializeReadCode, serializeReferences, serializeSymbolDependencies, serializeSymbolHierarchy } from '../core/context/context-navigation-serializer'
-
-export interface McpOAuthSecurityScheme {
-  type: 'oauth2'
-  scopes: string[]
-}
-
-export interface McpToolDefinition {
-  name: string
-  description: string
-  inputSchema: Record<string, unknown>
-  securitySchemes: McpOAuthSecurityScheme[]
-}
-export interface McpToolResult {
-  content: Array<{ type: 'text'; text: string }>
-  isError?: true
-  postResponse?: () => void | Promise<void>
-}
-const references = { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1, uniqueItems: true }
-const oauthSecuritySchemes: McpOAuthSecurityScheme[] = [{ type: 'oauth2', scopes: [] }]
-function protectedTool(definition: Omit<McpToolDefinition, 'securitySchemes'>): McpToolDefinition {
-  return { ...definition, securitySchemes: oauthSecuritySchemes }
-}
-export const contextNavigationMcpTools: McpToolDefinition[] = [
-  protectedTool({
-    name: 'discover_repository',
-    description: 'List immediate children of the root or explicitly requested directories. Expand directories progressively.',
-    inputSchema: { type: 'object', properties: { relativePaths: references }, additionalProperties: false }
-  }),
-  protectedTool({
-    name: 'get_relationships',
-    description: 'List one hop of file imports and importers for the requested files. Defaults to both directions and paths only.',
-    inputSchema: {
-      type: 'object', properties: { relativePaths: references, direction: { type: 'string', enum: ['in', 'out', 'both'] }, details: { type: 'boolean' } },
-      required: ['relativePaths'], additionalProperties: false
-    }
-  }),
-  protectedTool({
-    name: 'inspect_files',
-    description: 'Show a minimal structural outline and selectable targets for requested files. Optional signatures use indexed metadata only.',
-    inputSchema: {
-      type: 'object', properties: { relativePaths: references, signatures: { type: 'boolean' } },
-      required: ['relativePaths'], additionalProperties: false
-    }
-  }),
-  protectedTool({
-    name: 'get_references',
-    description: 'Find resolved usages of one or more CodeTargets. Returns the file, line, reference kind, and containing source target when available. Use when you need to know where a specific symbol is used. Results include only references resolved by the CodeMap.',
-    inputSchema: { type: 'object', properties: { targetIds: references }, required: ['targetIds'], additionalProperties: false }
-  }),
-  protectedTool({
-    name: 'get_symbol_dependencies',
-    description: 'Find symbols directly used by one or more CodeTargets, as resolved by the CodeMap. Returns dependency kind, target CodeTarget, and destination file without reading source.',
-    inputSchema: { type: 'object', properties: { sourceTargetIds: references }, required: ['sourceTargetIds'], additionalProperties: false }
-  }),
-  protectedTool({
-    name: 'get_symbol_hierarchy',
-    description: 'Find direct inheritance and implementation relationships known to the CodeMap for one or more CodeTargets. Use up for direct bases or implemented contracts, down for direct derived types or implementations, and both for both directions. This does not build a full tree or return transitive relationships.',
-    inputSchema: {
-      type: 'object', properties: { targetIds: references, direction: { type: 'string', enum: ['up', 'down', 'both'] } },
-      required: ['targetIds'], additionalProperties: false
-    }
-  }),
-  protectedTool({
-    name: 'read_code',
-    description: 'Read only the literal source of explicitly requested targets, in request order.',
-    inputSchema: { type: 'object', properties: { targetIds: references }, required: ['targetIds'], additionalProperties: false }
-  })
-]
-
-function validateArguments(name: string, args: unknown): Record<string, unknown> {
-  const tool = contextNavigationMcpTools.find((entry) => entry.name === name)
-  if (!tool) throw new ContextNavigationError('INVALID_ARGUMENT', 'Unknown tool: ' + name)
-  if (!args || typeof args !== 'object' || Array.isArray(args)) throw new ContextNavigationError('INVALID_ARGUMENT', 'Expected an arguments object')
-  const values = args as Record<string, unknown>
-  const properties = tool.inputSchema.properties as Record<string, unknown>
-  if (Object.keys(values).some((key) => !Object.prototype.hasOwnProperty.call(properties, key))) throw new ContextNavigationError('INVALID_ARGUMENT', 'Unexpected argument')
-  for (const key of (tool.inputSchema.required ?? []) as string[]) {
-    if (!(key in values)) throw new ContextNavigationError('INVALID_ARGUMENT', 'Missing argument: ' + key)
-  }
-  for (const [key, value] of Object.entries(values)) {
-    if (key === 'relativePaths' || key === 'targetIds' || key === 'sourceTargetIds') {
-      if (!Array.isArray(value) || !value.length || value.some((entry) => typeof entry !== 'string' || !entry.length) || new Set(value).size !== value.length) {
-        throw new ContextNavigationError('INVALID_ARGUMENT', key + ' must be a nonempty array of unique strings')
-      }
-    } else if (key === 'direction') {
-      const allowed = (properties[key] as { enum?: unknown[] }).enum
-      if (typeof value !== 'string' || !allowed?.includes(value)) throw new ContextNavigationError('INVALID_ARGUMENT', 'Invalid direction')
-    } else if (typeof value !== 'boolean') throw new ContextNavigationError('INVALID_ARGUMENT', key + ' must be a boolean')
-  }
-  return values
-}
-
-function success(text: string): McpToolResult {
-  return { content: [{ type: 'text', text }] }
-}
-function failure(error: unknown): McpToolResult {
-  const message = error instanceof Error ? error.message : String(error)
-  return { content: [{ type: 'text', text: (error instanceof ContextNavigationError ? error.code + ': ' : '') + message }], isError: true }
-}
+import { CODE_NAVIGATION_MCP_TOOLS, executeCodeNavigationTool } from './code-navigation-mcp'
+import type { McpToolDefinition, McpToolResult } from './mcp-types'
+export type { McpToolDefinition, McpToolResult, McpOAuthSecurityScheme } from './mcp-types'
 
 import { SYSTEM_HEALTH_MCP_TOOL, executeGetSystemHealth } from '../system-health/system-health-mcp'
 import { SystemHealthCore } from '../system-health/system-health-core'
@@ -140,9 +43,23 @@ import { REQUEST_RUNTIME_RESTART_TOOL, executeRequestRuntimeRestart } from '../r
 import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
 import { ACADEMY_MCP_TOOLS, executeAcademyTool } from '../academy/academy-mcp'
 import type { AcademyService } from '../academy/academy-service'
+import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
+import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../repository-file-ingress/repository-file-ingress-mcp'
 
-export class ContextNavigationMcpAdapter {
+function stableDescriptor(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stableDescriptor)
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0).map(([key, entry]) => [key, stableDescriptor(entry)]))
+  }
+  return value
+}
+
+export class ChannelMcpAdapter {
   private governor = new McpWorkloadGovernor()
+  private activity = new ChannelActivityMonitor()
+
+  setActivityMonitor(activity: ChannelActivityMonitor): void { this.activity = activity }
+  getActivityState() { return this.activity.getState() }
 
   setWorkloadGovernor(governor: McpWorkloadGovernor): void { this.governor = governor }
   private readonly navigation: ProjectContextNavigation
@@ -156,6 +73,7 @@ export class ContextNavigationMcpAdapter {
   private readonly runtimeRestart: RuntimeRestartController | undefined
   private readonly gitOperations: GitOperationsService | undefined
   private readonly academy: AcademyService | undefined
+  private readonly repositoryFileIngress?: RepositoryFileIngress
 
   constructor(
     context: McpProjectContext,
@@ -201,6 +119,7 @@ export class ContextNavigationMcpAdapter {
       this.diagnosticSourceAccess = context.diagnosticSourceAccess
       this.runtimeRestart = context.runtimeRestart
       this.gitOperations = context.gitOperations
+      this.repositoryFileIngress = context.repositoryFileIngress
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
     } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
@@ -233,7 +152,7 @@ export class ContextNavigationMcpAdapter {
 
   listTools(): McpToolDefinition[] {
     const tools = [
-      ...contextNavigationMcpTools,
+      ...CODE_NAVIGATION_MCP_TOOLS,
       SYSTEM_HEALTH_MCP_TOOL,
       RUNTIME_IDENTITY_MCP_TOOL,
     ]
@@ -255,6 +174,7 @@ export class ContextNavigationMcpAdapter {
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
+    if (this.repositoryFileIngress) tools.push(IMPORT_REPOSITORY_FILE_TOOL)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     return tools
   }
@@ -263,14 +183,31 @@ export class ContextNavigationMcpAdapter {
     const hasher = createHash('sha256')
     for (const tool of [...this.listTools()].sort((a, b) => a.name.localeCompare(b.name))) {
       hasher.update(
-        JSON.stringify({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, securitySchemes: tool.securitySchemes }) + '\n'
+        JSON.stringify(stableDescriptor(tool)) + '\n'
       )
     }
     return hasher.digest('hex')
   }
 
   async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
-    const result = await this.governor.run(name, args, invocationContext?.requestId, invocationContext?.deadlineAtMs, () => this.dispatchTool(name, args, invocationContext))
+    const requestId = invocationContext?.requestId ?? randomUUID()
+    const startedAt = performance.now()
+    const channelCapability = this.capabilityForTool(name)
+    const record = (status: ChannelTraceEvent['status'], error?: string) => this.activity.record({
+      timestamp: new Date().toISOString(), requestId, sessionId: invocationContext?.sessionId ?? 'local',
+      method: 'tools/call', tool: channelCapability ? name : 'unknown', channelCapability,
+      stage: status === 'started' ? 'channel-request-started' : 'channel-request-completed',
+      status, durationMs: performance.now() - startedAt, ...(error ? { error } : {})
+    })
+    record('started')
+    let result: McpToolResult
+    try {
+      result = await this.governor.run(name, args, requestId, invocationContext?.deadlineAtMs, () => this.dispatchTool(name, args, invocationContext))
+    } catch (error) {
+      record('error', error instanceof Error ? error.name : 'EXECUTION_FAILED')
+      throw error
+    }
+    record(result.isError ? 'error' : 'success', result.isError && result.content.some(entry => /\bREQUEST_TIMEOUT\b/.test(entry.text)) ? 'REQUEST_TIMEOUT' : undefined)
     if (name === 'get_system_health' && !result.isError) {
       const health = JSON.parse(result.content[0].text)
       return { ...result, content: [{ type: 'text', text: JSON.stringify({ ...health, workloadGovernor: this.governor.snapshot(), activeRunId: this.validationExecution?.getActiveRunId() ?? null }) }] }
@@ -278,7 +215,24 @@ export class ContextNavigationMcpAdapter {
     return result
   }
 
+  private capabilityForTool(name: string): string | undefined {
+    if (name === IMPORT_REPOSITORY_FILE_TOOL.name) return 'Repository File Ingress'
+    if (CODE_NAVIGATION_MCP_TOOLS.some(tool => tool.name === name)) return 'Code Navigation'
+    if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name)) return 'Git Operations'
+    if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
+    if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
+    if ([LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL].some(tool => tool.name === name)) return 'Continuum'
+    if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
+    if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name) return 'Runtime Identity/Restart'
+    if (name === SYSTEM_HEALTH_MCP_TOOL.name) return 'System Health'
+    return undefined
+  }
+
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (name === IMPORT_REPOSITORY_FILE_TOOL.name) {
+      return this.repositoryFileIngress ? executeImportRepositoryFile(this.repositoryFileIngress, args)
+        : { content: [{ type: 'text', text: 'REPOSITORY_FILE_INGRESS_UNAVAILABLE' }], isError: true }
+    }
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
       return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args)
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
@@ -359,123 +313,6 @@ export class ContextNavigationMcpAdapter {
       return executeRecordValidationProof(this.validationLedger, args)
     }
 
-    const trace = invocationContext?.trace ?? this.systemHealth?.sink
-    const requestId = invocationContext?.requestId
-    const sessionId = invocationContext?.sessionId ?? 'local'
-    const context: import('../core/context/context-navigation-port').NavigationInvocationContext | undefined =
-      trace && requestId ? { requestId, sessionId, trace } : undefined
-
-    const emit = (stage: import('./code-scope-health').CodeScopeTraceStage, status: 'started' | 'success' | 'error', error?: string) => {
-      if (!context?.trace || !context.requestId) return
-      context.trace.record({
-        timestamp: new Date().toISOString(),
-        requestId: context.requestId,
-        sessionId: context.sessionId ?? 'local',
-        method: 'tools/call',
-        tool: name,
-        stage,
-        durationMs: 0,
-        status,
-        ...(error ? { error } : {})
-      })
-    }
-
-    try {
-      emit('codescope-operation-routed', 'started')
-      let values: Record<string, unknown>
-      try {
-        values = validateArguments(name, args ?? {})
-        emit('codescope-operation-routed', 'success')
-      } catch (validationErr) {
-        const code = validationErr instanceof ContextNavigationError ? validationErr.code : 'INVALID_ARGUMENT'
-        emit('codescope-operation-routed', 'error', code)
-        throw validationErr
-      }
-
-      switch (name) {
-        case 'discover_repository':
-          return success(
-            serializeDiscovery(
-              await (context !== undefined
-                ? this.navigation.discoverRepository(values.relativePaths as string[] | undefined, context)
-                : this.navigation.discoverRepository(values.relativePaths as string[] | undefined))
-            )
-          )
-        case 'get_relationships':
-          return success(
-            serializeRelationships(
-              await (context !== undefined
-                ? this.navigation.getRelationships(
-                    values.relativePaths as string[],
-                    { direction: values.direction as RelationshipDirection | undefined, details: values.details as boolean | undefined },
-                    context
-                  )
-                : this.navigation.getRelationships(
-                    values.relativePaths as string[],
-                    { direction: values.direction as RelationshipDirection | undefined, details: values.details as boolean | undefined }
-                  ))
-            )
-          )
-        case 'inspect_files':
-          return success(
-            serializeInspectFiles(
-              await (context !== undefined
-                ? this.navigation.inspectFiles(
-                    values.relativePaths as string[],
-                    { signatures: values.signatures as boolean | undefined },
-                    context
-                  )
-                : this.navigation.inspectFiles(
-                    values.relativePaths as string[],
-                    { signatures: values.signatures as boolean | undefined }
-                  ))
-            )
-          )
-        case 'read_code':
-          return {
-            content: (
-              await (context !== undefined
-                ? this.navigation.readCode(values.targetIds as string[], context)
-                : this.navigation.readCode(values.targetIds as string[]))
-            ).map((result) => ({ type: 'text', text: serializeReadCode(result) }))
-          }
-        case 'get_references':
-          return success(
-            serializeReferences(
-              await (context !== undefined
-                ? this.navigation.getReferences(values.targetIds as string[], context)
-                : this.navigation.getReferences(values.targetIds as string[]))
-            )
-          )
-        case 'get_symbol_dependencies':
-          return success(
-            serializeSymbolDependencies(
-              await (context !== undefined
-                ? this.navigation.getSymbolDependencies(values.sourceTargetIds as string[], context)
-                : this.navigation.getSymbolDependencies(values.sourceTargetIds as string[]))
-            )
-          )
-        case 'get_symbol_hierarchy':
-          return success(
-            serializeSymbolHierarchy(
-              await (context !== undefined
-                ? this.navigation.getSymbolHierarchy(
-                    values.targetIds as string[],
-                    { direction: values.direction as SymbolHierarchyDirection | undefined },
-                    context
-                  )
-                : this.navigation.getSymbolHierarchy(
-                    values.targetIds as string[],
-                    { direction: values.direction as SymbolHierarchyDirection | undefined }
-                  ))
-            )
-          )
-        default:
-          emit('codescope-operation-routed', 'error', 'METHOD_NOT_FOUND')
-          return failure(new Error(`Unknown tool: ${name}`))
-      }
-    } catch (error) {
-      return failure(error)
-    }
+    return executeCodeNavigationTool(this.navigation, name, args, { ...invocationContext, trace: invocationContext?.trace ?? this.systemHealth?.sink })
   }
 }

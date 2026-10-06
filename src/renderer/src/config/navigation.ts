@@ -2,9 +2,9 @@
 -T ---
 */
 
-import { Home, Flag, FileText, Archive, Zap, GitBranch, Bookmark, Map, Settings, BookOpen, type LucideIcon } from 'lucide-react'
+import { Home, Flag, FileText, Archive, Zap, GitBranch, Bookmark, Map, Radio, BookOpen, type LucideIcon } from 'lucide-react'
 
-export type NavId = 'home' | 'academy' | 'campaigns' | 'codebase' | 'compression' | 'dash' | 'diff' | 'journey' | 'code-map' | 'settings'
+export type NavId = 'home' | 'academy' | 'campaigns' | 'codebase' | 'compression' | 'dash' | 'diff' | 'journey' | 'code-map' | 'channel'
 export type Tab = NavId
 
 export interface NavItem {
@@ -16,6 +16,7 @@ export interface NavItem {
 
 export const NAV_ITEMS: NavItem[] = [
   { id: 'home', label: 'Home', icon: '🏠', lucideIcon: Home },
+  { id: 'channel', label: 'Channel', icon: '📡', lucideIcon: Radio },
   { id: 'academy', label: 'Academy', icon: '📚', lucideIcon: BookOpen },
   { id: 'campaigns', label: 'Code Campaign', icon: '🚩', lucideIcon: Flag },
   { id: 'codebase', label: 'Code Source', icon: '📄', lucideIcon: FileText },
@@ -23,7 +24,6 @@ export const NAV_ITEMS: NavItem[] = [
   { id: 'dash', label: 'Code Dash', icon: 'codicon-zap', lucideIcon: Zap },
   { id: 'diff', label: 'Code Diff', icon: '🔀', lucideIcon: GitBranch },
   { id: 'journey', label: 'Code Journey', icon: '📋', lucideIcon: Bookmark },
-  { id: 'code-map', label: 'Code Map', icon: '🗺️', lucideIcon: Map },
-  { id: 'settings', label: 'Settings', icon: '⚙', lucideIcon: Settings }
+  { id: 'code-map', label: 'Code Map', icon: '🗺️', lucideIcon: Map }
 ]
 

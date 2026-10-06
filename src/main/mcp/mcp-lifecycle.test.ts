@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
-import { ContextNavigationMcpAdapter, type McpToolResult } from './context-navigation-mcp-adapter'
+import { ChannelMcpAdapter, type McpToolResult } from './channel-mcp-adapter'
 import { createMcpHttpServer } from './mcp-http-server'
 import { McpLifecycle, type McpLifecycleState } from './mcp-lifecycle'
 
@@ -45,7 +45,7 @@ describe('MCP lifecycle', () => {
     const servers: Server[] = []
     const { lifecycle, states } = setup((port) => {
       expect(servers.every((server) => !server.listening)).toBe(true)
-      const server = createMcpHttpServer(new ContextNavigationMcpAdapter(port), () => {})
+      const server = createMcpHttpServer(new ChannelMcpAdapter(port), () => {})
       servers.push(server)
       return server
     })
@@ -70,7 +70,7 @@ describe('MCP lifecycle', () => {
   })
 
   it('coalesces rapid A B C requests and prevents activation after disposal', async () => {
-    const factory = vi.fn((port: ProjectContextNavigation) => createMcpHttpServer(new ContextNavigationMcpAdapter(port), () => {}))
+    const factory = vi.fn((port: ProjectContextNavigation) => createMcpHttpServer(new ChannelMcpAdapter(port), () => {}))
     const { lifecycle } = setup(factory)
     await Promise.all(['A', 'B', 'C'].map((id) => lifecycle.activate(id, navigation(id))))
     expect(factory).toHaveBeenCalledTimes(1)
@@ -85,7 +85,7 @@ describe('MCP lifecycle', () => {
   it('does not publish a stale start after disposal has been requested', async () => {
     let release!: () => void
     const { lifecycle, states } = setup((port) => {
-      const server = createMcpHttpServer(new ContextNavigationMcpAdapter(port), () => {})
+      const server = createMcpHttpServer(new ChannelMcpAdapter(port), () => {})
       const listen = server.listen.bind(server)
       vi.spyOn(server, 'listen').mockImplementation((...args: any[]) => {
         release = () => (listen as Function)(...args)
@@ -124,7 +124,7 @@ describe('MCP lifecycle', () => {
     let fail = true
     const { lifecycle, states } = setup((port) => {
       if (fail) throw new Error('private repo path or credential')
-      return createMcpHttpServer(new ContextNavigationMcpAdapter(port), () => {})
+      return createMcpHttpServer(new ChannelMcpAdapter(port), () => {})
     })
     await expect(lifecycle.activate('A', navigation('A'))).resolves.toBeUndefined()
     expect(lifecycle.getState()).toEqual({ status: 'ERROR', available: false, error: 'MCP_START_FAILED' })
@@ -157,7 +157,7 @@ describe('MCP lifecycle', () => {
   it('reports runtime errors without allowing stale errors to overwrite newer state', async () => {
     const servers: Server[] = []
     const { lifecycle } = setup((port) => {
-      const server = createMcpHttpServer(new ContextNavigationMcpAdapter(port), () => {})
+      const server = createMcpHttpServer(new ChannelMcpAdapter(port), () => {})
       servers.push(server)
       return server
     })

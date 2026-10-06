@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { executeListArtifacts, executeGetArtifact, executePublishArtifact, executeUpdateArtifact, LIST_ARTIFACTS_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL } from './continuum-mcp'
 import { fixture, markdown } from './continuum-test-fixtures'
-import type { McpToolResult } from '../mcp/context-navigation-mcp-adapter'
+import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup) close(); cleanup.length = 0 })
 function data(result: McpToolResult) { expect(result.isError).not.toBe(true); return JSON.parse(result.content[0].text) }

@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { GitService } from '../core/git-service'
 import { createTempGitRepo, cleanupTempRepo, gitExec, writeFile, stageAll, commit } from '../core/git-test-helpers'
 import { GitHubGitTransport } from '../github/github-git-transport'
-import { ContextNavigationMcpAdapter } from '../mcp/context-navigation-mcp-adapter'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { McpLifecycle } from '../mcp/mcp-lifecycle'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
@@ -216,14 +216,14 @@ describe('project-scoped Git operations with real Git', () => {
     const a = await fixture(), b = await fixture()
     writeFile(a.root, 'only-a.txt', 'a'); writeFile(b.root, 'only-b.txt', 'b')
     const navigation = {} as ProjectContextNavigation
-    const adapterA = new ContextNavigationMcpAdapter({ projectId: 'a', repoRoot: a.root, navigation, gitOperations: a.service })
-    const adapterB = new ContextNavigationMcpAdapter({ projectId: 'b', repoRoot: b.root, navigation, gitOperations: b.service })
+    const adapterA = new ChannelMcpAdapter({ projectId: 'a', repoRoot: a.root, navigation, gitOperations: a.service })
+    const adapterB = new ChannelMcpAdapter({ projectId: 'b', repoRoot: b.root, navigation, gitOperations: b.service })
     expect(adapterB.listTools().filter((tool) => GIT_OPERATIONS_TOOLS.some((gitTool) => gitTool.name === tool.name))).toHaveLength(15)
     expect((await adapterA.callTool('get_git_changes', {})).content[0].text).toContain('only-a')
     expect((await adapterB.callTool('get_git_changes', {})).content[0].text).not.toContain('only-a')
     expect((await adapterB.callTool('stage_git_changes', { paths: ['only-a.txt'], mode: 'STAGE', repoPath: a.root })).isError).toBe(true)
     expect((await a.service.getState()).untrackedCount).toBe(1)
-    const lifecycle = new McpLifecycle({ createContextServer: (context) => createMcpHttpServer(new ContextNavigationMcpAdapter(context), () => {}), log: () => {} })
+    const lifecycle = new McpLifecycle({ createContextServer: (context) => createMcpHttpServer(new ChannelMcpAdapter(context), () => {}), log: () => {} })
     try {
       await lifecycle.activateContext({ projectId: 'a', repoRoot: a.root, navigation, gitOperations: a.service })
       await lifecycle.activateContext({ projectId: 'b', repoRoot: b.root, navigation, gitOperations: b.service })
