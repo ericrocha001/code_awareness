@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import ignore from 'ignore'
 import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { GitService } from '../core/git-service'
@@ -220,10 +221,11 @@ export class GitOperationsService {
     const present = new Set(content.split(/\\r?\\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')))
     const alreadyPresent = normalizedRules.filter((rule) => present.has(rule))
     const candidateRules = normalizedRules.filter((rule) => !present.has(rule))
-    const before = (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot)).map((path) => path.replace(/\\/g, '/'))
-    const after = candidateRules.length ? (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot, candidateRules)).map((path) => path.replace(/\\/g, '/')) : before
-    const afterSet = new Set(after)
-    const newlyIgnored = before.filter((path) => !afterSet.has(path))
+    const before = (await this.getChanges('UNTRACKED')).map((change) => change.path.replace(/\\/g, '/'))
+    const matcher = ignore().add(candidateRules)
+    const newlyIgnored = candidateRules.length ? before.filter((path) => matcher.ignores(path)) : []
+    const ignoredSet = new Set(newlyIgnored)
+    const after = before.filter((path) => !ignoredSet.has(path))
     const afterRevision = await this.git.getWorktreeRevision(this.repoRoot)
     if (beforeRevision !== afterRevision) fail('GIT_STATE_CHANGED')
     const previewId = createHash('sha256').update(JSON.stringify({ worktreeRevision: beforeRevision, candidateRules, newlyIgnored })).digest('hex')
