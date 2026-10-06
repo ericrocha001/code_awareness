@@ -69,7 +69,7 @@ describe('Git Operations worktree hygiene', () => {
     expect(repeated.newlyIgnoredCount).toBe(0)
   }, 30000)
 
-  it.skip('rejects ADD when preview evidence is stale through the receipted MCP path', async () => {
+  it('rejects ADD when preview evidence is stale through the receipted MCP path', async () => {
     const { root, service } = await fixture()
     writeFile(root, '.code-awareness/health-trigger-runtime/a.log', 'runtime')
     const previewReply = await call(service, 'manage_gitignore', { action: 'PREVIEW_ADD', rules: ['.code-awareness/health-trigger-runtime/'] })
