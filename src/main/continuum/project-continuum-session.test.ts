@@ -1,371 +1,97 @@
-import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
-import { randomUUID } from 'node:crypto'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ProjectContinuumSession } from './project-continuum-session'
+import { RepositoryContinuumSession } from './project-continuum-session'
 import { ArtifactInbox } from './artifact-inbox'
-import { ENVELOPE_PROTOCOL, computeContentHash } from './artifact-envelope'
-import type { ArtifactEnvelope } from './artifact-envelope'
-import { deriveRepositoryKey } from './repository-key'
+import { computeContentHash } from './artifact-store'
+import { fixture, legacyDatabase, legacyEnvelope, markdown, withFixtureDatabase } from './continuum-test-fixtures'
 
-const tmpDirs: string[] = []
-
-function tempDir(prefix = 'continuum-session-test-'): string {
-  const d = mkdtempSync(join(tmpdir(), prefix))
-  tmpDirs.push(d)
-  return d
-}
-
-function baseEnvelope(repoRoot: string, overrides: Partial<ArtifactEnvelope> = {}): ArtifactEnvelope {
-  const rawMarkdown = overrides.rawMarkdown ?? '# Handoff\n\nProject content.'
-  return {
-    protocol: ENVELOPE_PROTOCOL,
-    artifactId: 'artifact-' + randomUUID(),
-    type: 'IMPLEMENTATION_HANDOFF',
-    schemaVersion: 1,
-    title: 'Handoff Artifact',
-    producerRole: 'IMPLEMENTER',
-    repositoryKey: deriveRepositoryKey(repoRoot),
-    createdAt: new Date().toISOString(),
-    sourceFingerprint: null,
-    gitHead: null,
-    rawMarkdown,
-    contentHash: computeContentHash(rawMarkdown),
-    ...overrides
+const cleanup: (() => void)[] = []
+afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
+describe('Repository coordination, isolation and migration', () => {
+  function setup() {
+    const f = fixture(); cleanup.push(f.close)
+    const rootA = join(f.dir, 'checkout-A'), rootB = join(f.dir, 'checkout-B'), storage = join(f.dir, 'app-storage')
+    mkdirSync(rootA); mkdirSync(rootB)
+    const identities = new Map([[rootA, 'catalog-A'], [rootB, 'catalog-B']])
+    const catalog = { findByPath: (path: string) => { const id = identities.get(path); return id ? { id, localCheckout: { path } } : null } }
+    const session = new RepositoryContinuumSession(storage, catalog); cleanup.push(() => session.dispose())
+    return { ...f, rootA, rootB, storage, session, identities }
   }
-}
-
-afterEach(() => {
-  for (const d of tmpDirs) {
-    try {
-      rmSync(d, { recursive: true, force: true })
-    } catch {}
-  }
-  tmpDirs.length = 0
-})
-
-describe('ProjectContinuumSession — Per-Project Isolation Harness', () => {
-  it('1. Store por projeto: ativar A cria Store A; ativar B fecha A e cria Store B diferente', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-    const repoB = tempDir('repo-b-')
-
-    const session = new ProjectContinuumSession(storageBase)
-
-    // Ativar A
-    session.activate(repoA)
-    const storeA = session.getActiveStore()
-    expect(storeA).not.toBeNull()
-    const sessionA = session.getActiveSession()
-    expect(sessionA?.projectKey).toBe(deriveRepositoryKey(repoA))
-    expect(existsSync(join(storageBase, sessionA!.projectKey, 'continuum.db'))).toBe(true)
-
-    // Ativar B
-    session.activate(repoB)
-    const storeB = session.getActiveStore()
-    expect(storeB).not.toBeNull()
-    expect(storeB).not.toBe(storeA)
-    const sessionB = session.getActiveSession()
-    expect(sessionB?.projectKey).toBe(deriveRepositoryKey(repoB))
-    expect(existsSync(join(storageBase, sessionB!.projectKey, 'continuum.db'))).toBe(true)
-
-    session.dispose()
+  it('migrates each repository separately with exact Markdown, IDs, timestamps/provenance and idempotence after edit/restart', () => {
+    const { session, storage, rootA, rootB } = setup()
+    const originalEnvelope = legacyEnvelope(rootA)
+    const rawMarkdown = originalEnvelope.rawMarkdown + '\u0007'
+    const envelope = { ...originalEnvelope, rawMarkdown, contentHash: computeContentHash(rawMarkdown) }
+    const legacyPath = legacyDatabase(storage, rootA, envelope)
+    legacyDatabase(storage, rootB, { ...legacyEnvelope(rootB, 'legacy-B'), title: 'Other repository' })
+    session.activate(rootA)
+    const service = session.getActiveService()!
+    const original = service.get(envelope.artifactId)!
+    expect(original.metadata).toEqual({ name: envelope.title, kind: envelope.type }); expect(original.revision).toBe(1)
+    expect(Buffer.from(original.rawMarkdown)).toEqual(Buffer.from(envelope.rawMarkdown))
+    expect(original.createdAt).toBe(envelope.createdAt); expect(original.updatedAt).toBe('2026-09-02T00:00:00.000Z')
+    expect(original.provenance).toMatchObject({ gitHead: 'legacy-head', sourceFingerprint: 'legacy-fingerprint', ingestedAt: '2026-09-02T00:00:00.000Z' })
+    expect(existsSync(legacyPath)).toBe(true); expect(service.get('legacy-B')).toBeNull()
+    expect(() => service.publish(markdown('Invalid new content', '', rawMarkdown))).toThrow(/INVALID_ARGUMENT/)
+    service.update(envelope.artifactId, 1, markdown('Enriched', 'status: VALIDATED\n'))
+    session.dispose(); session.activate(rootA)
+    expect(session.getActiveService()!.get(envelope.artifactId)!.revision).toBe(2)
+    expect(session.getActiveService()!.list().artifacts).toHaveLength(1)
+    session.activate(rootB)
+    expect(session.getActiveService()!.list().artifacts.map(a => a.artifactId)).toEqual(['legacy-B'])
+    expect(session.getActiveService()!.get(envelope.artifactId)).toBeNull()
   })
-
-  it('2. Isolamento real: Store A contém apenas Artifact A; Store B contém apenas Artifact B (sem filtros SQL)', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-    const repoB = tempDir('repo-b-')
-
-    const session = new ProjectContinuumSession(storageBase)
-
-    // Publicar na Inbox A
-    const inboxA = new ArtifactInbox(repoA)
-    const envA = baseEnvelope(repoA, {
-      artifactId: 'art-project-a',
-      title: 'Artifact from Project A',
-      rawMarkdown: '# Content Project A'
-    })
-    inboxA.write(envA)
-
-    // Publicar na Inbox B
-    const inboxB = new ArtifactInbox(repoB)
-    const envB = baseEnvelope(repoB, {
-      artifactId: 'art-project-b',
-      title: 'Artifact from Project B',
-      rawMarkdown: '# Content Project B'
-    })
-    inboxB.write(envB)
-
-    // Ativar A: ingere Inbox A
-    session.activate(repoA)
-    const storeA = session.getActiveStore()!
-    const listA = storeA.list() // Chamada SEM filtro repositoryKey
-    expect(listA).toHaveLength(1)
-    expect(listA[0].artifactId).toBe('art-project-a')
-    expect(storeA.get('art-project-b')).toBeNull()
-
-    // Ativar B: fecha A, abre B, ingere Inbox B
-    session.activate(repoB)
-    const storeB = session.getActiveStore()!
-    const listB = storeB.list() // Chamada SEM filtro repositoryKey
-    expect(listB).toHaveLength(1)
-    expect(listB[0].artifactId).toBe('art-project-b')
-    expect(storeB.get('art-project-a')).toBeNull()
-
-    // Reabrir A: fecha B, reabre A
-    session.activate(repoA)
-    const storeAReopened = session.getActiveStore()!
-    const listAReopened = storeAReopened.list()
-    expect(listAReopened).toHaveLength(1)
-    expect(listAReopened[0].artifactId).toBe('art-project-a')
-    expect(storeAReopened.get('art-project-b')).toBeNull()
-
-    session.dispose()
+  it('closes old Store on switching and isolates identical metadata, read, edit, relations and cursors in two repositories', () => {
+    const { session, rootA, rootB } = setup(); session.activate(rootA)
+    const first = session.getActiveService()!; const a = first.publish(markdown('Identical')); first.publish(markdown('Identical'))
+    const cursorA = first.list({ limit: 1 }).nextCursor!
+    const pathA = session.getActiveSession()!.dbPath
+    session.activate(rootB); const second = session.getActiveService()!
+    expect(second).not.toBe(first); expect(session.getActiveSession()!.dbPath).not.toBe(pathA)
+    expect(() => first.get(a.artifactId)).toThrow(/not open/)
+    expect(second.get(a.artifactId)).toBeNull(); expect(second.list().artifacts).toHaveLength(0)
+    expect(() => second.update(a.artifactId, 1, markdown('Changed'))).toThrow(/ARTIFACT_NOT_FOUND/)
+    expect(() => second.publish(markdown('Invalid', `relations:\n  - artifactId: ${a.artifactId}\n    kind: related-to\n`))).toThrow(/INVALID_RELATION/)
+    expect(() => second.list({ limit: 1, cursor: cursorA })).toThrow(/repository/)
+    const b = second.publish(markdown('Identical'))
+    expect(second.list({ query: 'Identical' }).artifacts.map(a => a.artifactId)).toEqual([b.artifactId])
+    session.activate(rootA)
+    expect(session.getActiveService()!.list({ query: 'Identical' }).artifacts).toHaveLength(2)
+    expect(session.getActiveService()!.get(b.artifactId)).toBeNull()
+    session.deactivate(); expect(session.getActiveService()).toBeNull()
+    expect(() => session.activate('unknown-path')).toThrow(/REPOSITORY_NOT_FOUND/)
   })
-
-  it('3. Persistência entre trocas de projeto: A -> B -> A preserva o conteúdo exato', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-    const repoB = tempDir('repo-b-')
-
-    const session = new ProjectContinuumSession(storageBase)
-
-    const inboxA = new ArtifactInbox(repoA)
-    const envA = baseEnvelope(repoA, {
-      artifactId: 'art-persist-a',
-      rawMarkdown: '# Persistent Content A\n\nPreserved.'
-    })
-    inboxA.write(envA)
-
-    session.activate(repoA)
-    session.activate(repoB)
-    session.activate(repoA)
-
-    const storeA = session.getActiveStore()!
-    const recovered = storeA.get('art-persist-a')
-    expect(recovered).not.toBeNull()
-    expect(recovered!.rawMarkdown).toBe(envA.rawMarkdown)
-
-    session.dispose()
+  it('keeps canonical Store identity and history when a checkout moves and the catalog retains RepositoryRecord.id', () => {
+    const { session, rootA, identities } = setup(); session.activate(rootA)
+    const receipt = session.getActiveService()!.publish(markdown('Move proof')); const path = session.getActiveSession()!.dbPath
+    const pending = legacyEnvelope(rootA, 'moved-pending')
+    new ArtifactInbox(rootA).write(pending)
+    session.deactivate(); const moved = rootA + '-moved'; renameSync(rootA, moved)
+    identities.delete(rootA); identities.set(moved, 'catalog-A'); expect(session.activate(moved).ingested).toBe(1)
+    expect(session.getActiveSession()!.dbPath).toBe(path)
+    expect(session.getActiveService()!.get(receipt.artifactId)!.revision).toBe(1)
+    expect(session.getActiveService()!.get('moved-pending')!.rawMarkdown).toBe(pending.rawMarkdown)
   })
-
-  it('4. Idempotência: ativar o mesmo projeto duas vezes não recria o Store', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-
-    const session = new ProjectContinuumSession(storageBase)
-
-    session.activate(repoA)
-    const store1 = session.getActiveStore()
-
-    session.activate(repoA)
-    const store2 = session.getActiveStore()
-
-    expect(store2).toBe(store1)
-
-    session.dispose()
-  })
-
-  it('5. Desativação: fechar projeto limpa Store e sessão', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-
-    const session = new ProjectContinuumSession(storageBase)
-    session.activate(repoA)
-    expect(session.getActiveStore()).not.toBeNull()
-
-    session.deactivate()
-    expect(session.getActiveStore()).toBeNull()
-    expect(session.getActiveSession()).toBeNull()
-
-    session.dispose()
-  })
-
-  it('6. Shutdown: dispose fecha a conexão do Store ativo', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-
-    const session = new ProjectContinuumSession(storageBase)
-    session.activate(repoA)
-
-    session.dispose()
-    expect(session.getActiveStore()).toBeNull()
-  })
-
-  it('7. Inbox correta: ativar A ingere apenas Inbox A; Inbox B permanece intacta', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-    const repoB = tempDir('repo-b-')
-
-    const session = new ProjectContinuumSession(storageBase)
-
-    const inboxA = new ArtifactInbox(repoA)
-    const inboxB = new ArtifactInbox(repoB)
-
-    inboxA.write(baseEnvelope(repoA, { artifactId: 'art-inbox-a' }))
-    inboxB.write(baseEnvelope(repoB, { artifactId: 'art-inbox-b' }))
-
-    // Ativar apenas A
-    session.activate(repoA)
-
-    // Inbox A deve ter sido consumida
-    expect(inboxA.listPending()).toHaveLength(0)
-
-    // Inbox B ainda deve conter seu item pendente
-    expect(inboxB.listPending()).toHaveLength(1)
-    expect(inboxB.listPending()[0].filename).toBe('art-inbox-b.json')
-
-    // Agora ativar B -> consome Inbox B
-    session.activate(repoB)
-    expect(inboxB.listPending()).toHaveLength(0)
-
-    session.dispose()
-  })
-
-  it('8. Failure isolation: falha interna no Continuum não propaga exceção destrutiva', () => {
-    const storageBase = tempDir('storage-')
-    const session = new ProjectContinuumSession(storageBase)
-
-    // Ativação com caminho inválido / vazio retorna null sem lançar exceção
-    const result = session.activate('')
-    expect(result).toBeNull()
-    expect(session.getActiveStore()).toBeNull()
-
-    session.dispose()
-  })
-})
-
-describe('ProjectContinuumSession — Live Reader (read-through por consulta)', () => {
-  it('9. Publicação pós-ativação: artifact criado depois de activate() aparece em list() sem reativação', () => {
-    const storageBase = tempDir('storage-')
-    const repo = tempDir('repo-live-')
-
-    const session = new ProjectContinuumSession(storageBase)
-    session.activate(repo)
-    const reader = session.getActiveReader()!
-    expect(reader.list()).toHaveLength(0)
-
-    const inbox = new ArtifactInbox(repo)
-    inbox.write(baseEnvelope(repo, { artifactId: 'art-live-list' }))
-
-    const listed = reader.list()
-    expect(listed.map((a) => a.artifactId)).toContain('art-live-list')
+  it('accepts pending v1/v2 inbox on activation/read-through and deduplicates a v1 retry already imported from DB', () => {
+    const { session, storage, rootA } = setup(); const inbox = new ArtifactInbox(rootA); const envelope = legacyEnvelope(rootA)
+    legacyDatabase(storage, rootA, envelope); inbox.write(envelope)
+    expect(session.activate(rootA).ingested).toBe(1)
+    const service = session.getActiveService()!; const rawMarkdown = markdown('Generic')
+    inbox.write({ protocol: 'continuum-artifact/v2', artifactId: 'generic', repositoryKey: envelope.repositoryKey,
+      createdAt: envelope.createdAt, rawMarkdown, contentHash: computeContentHash(rawMarkdown) })
+    expect(service.list().artifacts).toHaveLength(2); expect(service.get(envelope.artifactId)!.rawMarkdown).toBe(envelope.rawMarkdown)
     expect(inbox.listPending()).toHaveLength(0)
-
-    session.dispose()
   })
-
-  it('10. Get direto: artifact publicado pós-ativação é recuperável por get() sem list() prévio', () => {
-    const storageBase = tempDir('storage-')
-    const repo = tempDir('repo-live-')
-
-    const session = new ProjectContinuumSession(storageBase)
-    session.activate(repo)
-    const reader = session.getActiveReader()!
-
-    const rawMarkdown = '# Direct Get Content'
-    const inbox = new ArtifactInbox(repo)
-    inbox.write(
-      baseEnvelope(repo, {
-        artifactId: 'art-live-get',
-        rawMarkdown,
-        contentHash: computeContentHash(rawMarkdown)
-      })
-    )
-
-    const recovered = reader.get('art-live-get')
-    expect(recovered).not.toBeNull()
-    expect(recovered!.rawMarkdown).toBe(rawMarkdown)
-
-    session.dispose()
-  })
-
-  it('11. Reader estável: mesma instância antes e depois da ingestão recupera o novo artifact', () => {
-    const storageBase = tempDir('storage-')
-    const repo = tempDir('repo-live-')
-
-    const session = new ProjectContinuumSession(storageBase)
-    session.activate(repo)
-    const before = session.getActiveReader()!
-
-    new ArtifactInbox(repo).write(baseEnvelope(repo, { artifactId: 'art-live-stable' }))
-
-    const listed = before.list()
-    expect(listed.map((a) => a.artifactId)).toContain('art-live-stable')
-
-    const after = session.getActiveReader()!
-    expect(after).toBe(before)
-
-    session.dispose()
-  })
-
-  it('12. Idempotência: consultas repetidas não duplicam artifacts', () => {
-    const storageBase = tempDir('storage-')
-    const repo = tempDir('repo-live-')
-
-    const session = new ProjectContinuumSession(storageBase)
-    session.activate(repo)
-    const reader = session.getActiveReader()!
-
-    new ArtifactInbox(repo).write(baseEnvelope(repo, { artifactId: 'art-live-idem' }))
-
-    expect(reader.list()).toHaveLength(1)
-    expect(reader.list()).toHaveLength(1)
-    expect(reader.get('art-live-idem')).not.toBeNull()
-    expect(reader.list()).toHaveLength(1)
-    expect(session.getActiveStore()!.list()).toHaveLength(1)
-
-    session.dispose()
-  })
-
-  it('13. Isolamento: artifact da inbox do projeto A nunca aparece no reader do projeto B', () => {
-    const storageBase = tempDir('storage-')
-    const repoA = tempDir('repo-a-')
-    const repoB = tempDir('repo-b-')
-
-    const sessionA = new ProjectContinuumSession(storageBase)
-    const sessionB = new ProjectContinuumSession(storageBase)
-    sessionA.activate(repoA)
-    sessionB.activate(repoB)
-    const readerA = sessionA.getActiveReader()!
-    const readerB = sessionB.getActiveReader()!
-
-    new ArtifactInbox(repoA).write(baseEnvelope(repoA, { artifactId: 'art-isolated-a' }))
-
-    expect(readerA.list().map((a) => a.artifactId)).toContain('art-isolated-a')
-    expect(readerB.list().map((a) => a.artifactId)).not.toContain('art-isolated-a')
-    expect(readerB.get('art-isolated-a')).toBeNull()
-
-    sessionA.dispose()
-    sessionB.dispose()
-  })
-
-  it('14. Falha isolada: entrada inválida não impede leitura de artifacts válidos já armazenados', () => {
-    const storageBase = tempDir('storage-')
-    const repo = tempDir('repo-live-')
-
-    const session = new ProjectContinuumSession(storageBase)
-    const inbox = new ArtifactInbox(repo)
-    const rawMarkdown = '# Valid Content Preserved'
-    inbox.write(
-      baseEnvelope(repo, {
-        artifactId: 'art-live-valid',
-        rawMarkdown,
-        contentHash: computeContentHash(rawMarkdown)
-      })
-    )
-    session.activate(repo)
-    const reader = session.getActiveReader()!
-    expect(reader.get('art-live-valid')).not.toBeNull()
-
-    writeFileSync(join(inbox.getInboxDir(), 'broken.json'), '{ not-json', 'utf8')
-
-    const listed = reader.list()
-    expect(listed.map((a) => a.artifactId)).toContain('art-live-valid')
-    expect(reader.get('art-live-valid')!.rawMarkdown).toBe(rawMarkdown)
-
-    session.dispose()
+  it('does not overwrite conflicting migration data or mark migration complete, keeping the legacy Store intact', () => {
+    const { session, storage, rootA } = setup(); session.activate(rootA)
+    const original = session.getActiveService()!.publish(markdown('Existing')); const dbPath = session.getActiveSession()!.dbPath
+    session.deactivate(); const legacyPath = legacyDatabase(storage, rootA, legacyEnvelope(rootA, original.artifactId))
+    expect(() => session.activate(rootA)).toThrow(/IDENTITY_CONFLICT/)
+    expect(session.getActiveService()).toBeNull(); expect(existsSync(legacyPath)).toBe(true)
+    withFixtureDatabase(dbPath, db => {
+      expect(db.prepare('SELECT count(*) AS n FROM legacy_migrations').get()).toEqual({ n: 0 })
+      expect(db.prepare('SELECT raw_markdown FROM artifacts WHERE artifact_id = ?').get(original.artifactId)).toEqual({ raw_markdown: markdown('Existing') })
+    })
   })
 })

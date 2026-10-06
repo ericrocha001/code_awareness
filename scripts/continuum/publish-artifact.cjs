@@ -5,11 +5,11 @@
  * Requires only Node.js and local filesystem/Git — no Electron, no SQLite.
  *
  * Usage:
- *   node scripts/continuum/publish-artifact.cjs implementation-handoff <markdown-file> --title "<title>"
+ *   node scripts/continuum/publish-artifact.cjs publish <markdown-file>
  *
  * NOTE: repositoryKey is derived from the normalized repository root path.
  * If the repository is physically moved to another location, the key will change.
- * Cross-machine or cross-location identity resolution is out of scope for this implementation.
+ * This is only an inbox locator; the application binds the Store to Repository Catalog identity.
  */
 
 'use strict'
@@ -79,6 +79,10 @@ function parseArgs(argv) {
   // argv = process.argv.slice(2)
   // Expected: implementation-handoff <markdown-file> --title "<title>"
   const [subcommand, markdownFile, ...rest] = argv
+  if (subcommand === 'publish') {
+    if (!markdownFile || rest.length) throw new Error('INVALID_ARGUMENT: expected publish <markdown-file>')
+    return { markdownFile }
+  }
 
   if (subcommand !== 'implementation-handoff') {
     throw new Error(
@@ -107,14 +111,14 @@ function main() {
   } catch (err) {
     console.error('ERROR: ' + err.message)
     console.error('')
-    console.error('Usage: node scripts/continuum/publish-artifact.cjs implementation-handoff <markdown-file> --title "<title>"')
+    console.error('Usage: node scripts/continuum/publish-artifact.cjs publish <markdown-file>')
     process.exit(1)
   }
 
   const { markdownFile, title } = args
 
   // Validate title
-  if (title.trim().length === 0) {
+  if (title !== undefined && title.trim().length === 0) {
     console.error('ERROR: --title must not be empty')
     process.exit(1)
   }
@@ -147,7 +151,9 @@ function main() {
   const createdAt = new Date().toISOString()
   const contentHash = crypto.createHash('sha256').update(rawMarkdown, 'utf8').digest('hex')
 
-  const envelope = {
+  const envelope = title === undefined ? {
+    protocol: 'continuum-artifact/v2', artifactId, repositoryKey, createdAt, contentHash, rawMarkdown
+  } : {
     protocol: 'continuum-artifact/v1',
     artifactId,
     type: 'IMPLEMENTATION_HANDOFF',
@@ -170,9 +176,9 @@ function main() {
 
   // Receipt
   const receipt = {
-    status: 'PUBLISHED',
+    status: 'QUEUED',
     artifactId,
-    type: 'IMPLEMENTATION_HANDOFF',
+    ...(title !== undefined ? { type: 'IMPLEMENTATION_HANDOFF' } : {}),
     createdAt,
     inboxPath: filePath
   }

@@ -1,396 +1,91 @@
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ArtifactStore, computeContentHash } from './artifact-store'
-import type { AppendArtifactInput } from './continuum-types'
-
-const openStores: Array<{ store: ArtifactStore; dir: string }> = []
-
-function createTempStore(): { store: ArtifactStore; dbPath: string; dir: string } {
-  const dir = mkdtempSync(join(tmpdir(), 'continuum-test-'))
-  const dbPath = join(dir, 'continuum.db')
-  const store = new ArtifactStore(dbPath)
-  openStores.push({ store, dir })
-  return { store, dbPath, dir }
+import { ArtifactStore, ArtifactRevisionConflictError, computeContentHash } from './artifact-store'
+import { fixture, withFixtureDatabase } from './continuum-test-fixtures'
+import type { CreateArtifactInput } from './continuum-types'
+const cleanup: (() => void)[] = []
+afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
+function setup() { const f = fixture(); cleanup.push(f.close); return f }
+function input(artifactId = 'A', overrides: Partial<CreateArtifactInput> = {}): CreateArtifactInput {
+  return { artifactId, metadata: { name: 'Decision', description: 'Find the runtime decision', kind: 'DECISION', status: 'BLOCKED', executionId: 'execution-1', future: { level: 2, valid: true } },
+    rawMarkdown: '# Decision\r\n\r\nUnicode ç 日本語 🚀 `code` ${literal}\r\n', createdAt: '2026-10-01T00:00:00.000Z', ...overrides }
 }
-
-function baseArtifactInput(overrides: Partial<AppendArtifactInput> = {}): AppendArtifactInput {
-  const now = new Date().toISOString()
-  return {
-    artifactId: 'handoff-uuid-001',
-    type: 'IMPLEMENTATION_HANDOFF',
-    schemaVersion: 1,
-    title: 'Initial Implementation Handoff',
-    producerRole: 'IMPLEMENTER',
-    repositoryKey: 'repo-code-awareness',
-    createdAt: now,
-    rawMarkdown: '# Handoff\n\nContent for handoff.',
-    ...overrides
-  }
-}
-
-describe('Continuum Artifact Store — Foundation Harness', () => {
-  afterEach(() => {
-    for (const item of openStores) {
-      item.store.close()
-      try {
-        rmSync(item.dir, { recursive: true, force: true })
-      } catch {}
-    }
-    openStores.length = 0
+describe('Repository Artifact Store', () => {
+  it('persists exact bytes, central/extensible metadata and revision 1 across restart, rejecting a different repository identity', () => {
+    const { store, path } = setup(); const created = store.create(input())
+    expect(created.revision).toBe(1); expect(created.contentHash).toBe(computeContentHash(created.rawMarkdown))
+    store.close(); const reopened = new ArtifactStore(path, 'catalog-A'); cleanup.push(() => reopened.close())
+    expect(reopened.get('A')).toEqual(created)
+    expect(Buffer.from(reopened.get('A')!.rawMarkdown)).toEqual(Buffer.from(input().rawMarkdown))
+    expect(reopened.list({ metadata: { future: { valid: true, level: 2 } } }).artifacts).toHaveLength(1)
+    expect(reopened.list({ metadata: { future: { level: 3 } } }).artifacts).toHaveLength(0)
+    expect(() => new ArtifactStore(path, 'catalog-B')).toThrow(/REPOSITORY_SCOPE_MISMATCH/)
   })
-
-  // ── 1. Persistência ─────────────────────────────────────────────────────────
-
-  it('1. Artifact persistido pode ser recuperado integralmente com todos os metadados', () => {
-    const { store } = createTempStore()
-    const input = baseArtifactInput({
-      artifactId: 'art-persist-01',
-      sourceFingerprint: 'fp-src-9988',
-      gitHead: 'commit-sha-abcdef',
-      rawMarkdown: '# Architecture Decision\n\nAll details preserved.'
-    })
-
-    const appended = store.append(input)
-
-    expect(appended.artifactId).toBe('art-persist-01')
-    expect(appended.type).toBe('IMPLEMENTATION_HANDOFF')
-    expect(appended.schemaVersion).toBe(1)
-    expect(appended.title).toBe(input.title)
-    expect(appended.producerRole).toBe('IMPLEMENTER')
-    expect(appended.repositoryKey).toBe('repo-code-awareness')
-    expect(appended.createdAt).toBe(input.createdAt)
-    expect(appended.ingestedAt).toBeTruthy()
-    expect(appended.sourceFingerprint).toBe('fp-src-9988')
-    expect(appended.gitHead).toBe('commit-sha-abcdef')
-    expect(appended.contentHash).toBe(computeContentHash(input.rawMarkdown))
-    expect(appended.rawMarkdown).toBe(input.rawMarkdown)
-
-    const retrieved = store.get('art-persist-01')
-    expect(retrieved).not.toBeNull()
-    expect(retrieved).toEqual(appended)
+  it('validates identity, central metadata and integrity without limiting semantic kind', () => {
+    const { store } = setup(); store.create(input())
+    expect(() => store.create(input())).toThrow(/IDENTITY_CONFLICT/)
+    expect(() => store.create(input('bad', { contentHash: 'tampered' }))).toThrow(/INTEGRITY_ERROR/)
+    expect(() => store.create(input('bad', { metadata: { name: 'x', kind: 'y' } }))).toThrow(/description/)
+    expect(store.create(input('new', { metadata: { name: 'New', description: 'Future communication', kind: 'UNPLANNED_KIND' } })).metadata.kind).toBe('UNPLANNED_KIND')
   })
-
-  it('2. Retorna null para artifactId inexistente', () => {
-    const { store } = createTempStore()
-    expect(store.get('non-existent-id')).toBeNull()
+  it('keeps stable identity/createdAt, increments revision and protects immutable history against stale competing connections', () => {
+    const { store, path } = setup(); const original = store.create(input())
+    const second = new ArtifactStore(path, 'catalog-A'); cleanup.push(() => second.close())
+    const updated = store.update({ artifactId: 'A', expectedRevision: 1, metadata: { ...original.metadata, status: 'VALIDATED' }, rawMarkdown: '# Improved' })
+    expect(updated.artifactId).toBe(original.artifactId); expect(updated.createdAt).toBe(original.createdAt)
+    expect(updated.updatedAt > original.updatedAt).toBe(true); expect(updated.revision).toBe(2)
+    expect(() => second.update({ artifactId: 'A', expectedRevision: 1, metadata: original.metadata, rawMarkdown: 'stale' })).toThrow(ArtifactRevisionConflictError)
+    expect(store.get('A')).toEqual(updated)
+    withFixtureDatabase(path, db => {
+      const revisions = db.prepare('SELECT snapshot_json FROM artifact_revisions ORDER BY revision').all() as { snapshot_json: string }[]
+      expect(revisions.map(r => JSON.parse(r.snapshot_json))).toEqual([original, updated])
+      expect(() => db.prepare('UPDATE artifact_revisions SET snapshot_json = ?').run('{}')).toThrow(/Immutable/)
+    }, false)
   })
-
-  // ── 2. Restart ─────────────────────────────────────────────────────────────
-
-  it('3. Restart preserva integridade exata: persistir -> fechar -> reabrir -> recuperar', () => {
-    const { dir, dbPath, store: firstStore } = createTempStore()
-    const complexMarkdown = '# Title\n\n- item 1\n- item 2\n\n```ts\nconst val = 42;\n```'
-    const input = baseArtifactInput({
-      artifactId: 'art-restart-01',
-      rawMarkdown: complexMarkdown
-    })
-
-    const original = firstStore.append(input)
-    firstStore.close()
-
-    const reopenedStore = new ArtifactStore(dbPath)
-    openStores.push({ store: reopenedStore, dir })
-
-    const fetchedAfterRestart = reopenedStore.get('art-restart-01')
-    expect(fetchedAfterRestart).not.toBeNull()
-    expect(fetchedAfterRestart).toEqual(original)
-    expect(fetchedAfterRestart!.rawMarkdown).toBe(complexMarkdown)
-    expect(fetchedAfterRestart!.contentHash).toBe(computeContentHash(complexMarkdown))
+  it('rolls back current projection, search/metadata indexes, graph and history when an update fails', () => {
+    const { store, path } = setup(); store.create(input('B'))
+    const original = store.create(input('A', { metadata: { ...input().metadata, relations: [{ artifactId: 'B', kind: 'implements' }] } }))
+    expect(() => store.update({ artifactId: 'A', expectedRevision: 1, rawMarkdown: 'failed', metadata: { ...original.metadata, name: 'Failed name', status: 'BAD', relations: [{ artifactId: 'missing', kind: 'new' }] } })).toThrow(/INVALID_RELATION/)
+    expect(store.get('A')).toEqual(original)
+    expect(store.list({ relatedToArtifactId: 'B', direction: 'inbound' }).artifacts.map(a => a.artifactId)).toEqual(['A'])
+    expect(store.list({ status: 'BAD' }).artifacts).toHaveLength(0); expect(store.list({ query: 'Failed name' }).artifacts).toHaveLength(0)
+    withFixtureDatabase(path, db => { expect(db.prepare('SELECT count(*) AS n FROM artifact_revisions WHERE artifact_id = ?').get('A')).toEqual({ n: 1 }) })
   })
-
-  // ── 3. Markdown Fidelity ───────────────────────────────────────────────────
-
-  it('4. Preserva integralmente Markdown complexo sem normalizações ou alterações', () => {
-    const { store } = createTempStore()
-    const complexMarkdown = [
-      '# Heading 1: Architectural Foundation',
-      '## Heading 2: Continuum Invariants',
-      '### Heading 3: Sub-level detail',
-      '',
-      'Paragraph with unicode characters: 🔥 ç ã õ ñ 日本語 text and symbols: ∑ ∫ ≈ ≠ ≤ ≥.',
-      '',
-      '| Column A | Column B | Column C |',
-      '| :--- | :---: | ---: |',
-      '| Value 1 | Value 2 | 100.50 |',
-      '| Multi-word | Special: `code` | 200.00 |',
-      '',
-      'Code block with formatting and indentation:',
-      '```typescript',
-      'export function executeHandoff(): boolean {',
-      '  const status = "VALIDADO";',
-      '  return status.length > 0;',
-      '}',
-      '```',
-      '',
-      'Trailing blank lines and line-ending tests:',
-      'Line with spaces at end:     ',
-      '',
-      'End of document.'
-    ].join('\n')
-
-    const input = baseArtifactInput({
-      artifactId: 'art-fidelity-01',
-      rawMarkdown: complexMarkdown
-    })
-
-    store.append(input)
-    const fetched = store.get('art-fidelity-01')
-
-    expect(fetched).not.toBeNull()
-    expect(fetched!.rawMarkdown).toBe(complexMarkdown)
-    expect(Buffer.from(fetched!.rawMarkdown, 'utf8')).toEqual(
-      Buffer.from(complexMarkdown, 'utf8')
-    )
+  it('navigates only one graph hop, preserves incoming identities during edits, and atomically replaces outgoing edges', () => {
+    const { store } = setup(); store.create(input('C'))
+    store.create(input('B', { metadata: { ...input().metadata, relations: [{ artifactId: 'C', kind: 'validates' }] } }))
+    store.create(input('A', { metadata: { ...input().metadata, relations: [{ artifactId: 'B', kind: 'implements' }] } }))
+    const ids = (id: string, direction: 'inbound' | 'outbound' | 'both', relationKind?: string) => store.list({ relatedToArtifactId: id, direction, ...(relationKind ? { relationKind } : {}) }).artifacts.map(a => a.artifactId).sort()
+    expect(ids('A', 'outbound')).toEqual(['B']); expect(ids('B', 'inbound')).toEqual(['A']); expect(ids('B', 'outbound')).toEqual(['C'])
+    expect(ids('B', 'both')).toEqual(['A', 'C']); expect(ids('B', 'both', 'implements')).toEqual(['A'])
+    store.update({ artifactId: 'B', expectedRevision: 1, metadata: { ...input().metadata, status: 'VALIDATED' }, rawMarkdown: 'resolved' })
+    expect(ids('B', 'both')).toEqual(['A']); expect(ids('C', 'inbound')).toEqual([])
+    expect(() => store.create(input('self', { metadata: { ...input().metadata, relations: [{ artifactId: 'self', kind: 'x' }] } }))).toThrow(/self/)
+    expect(store.get('self')).toBeNull()
+    expect(() => store.create(input('duplicate', { metadata: { ...input().metadata, relations: [{ artifactId: 'C', kind: 'x' }, { artifactId: 'C', kind: 'x' }] } }))).toThrow(/duplicate/)
   })
-
-  // ── 4. Imutabilidade e Conflito de Identidade ──────────────────────────────
-
-  it('5. Rejeita reutilização conflitante do mesmo artifactId com conteúdo diferente', () => {
-    const { store } = createTempStore()
-    const input = baseArtifactInput({
-      artifactId: 'art-conflict-01',
-      rawMarkdown: 'Original content.'
-    })
-    store.append(input)
-
-    const conflictingInput = baseArtifactInput({
-      artifactId: 'art-conflict-01',
-      rawMarkdown: 'Different conflicting content.'
-    })
-
-    expect(() => store.append(conflictingInput)).toThrow(/CONFLICT/)
-
-    const original = store.get('art-conflict-01')
-    expect(original!.rawMarkdown).toBe('Original content.')
+  it('bounds discovery independent of 1 KB/100 KB bodies and projects only explicitly requested metadata', () => {
+    const { store } = setup(); store.create(input('A', { rawMarkdown: 'x'.repeat(1024) })); store.create(input('B', { rawMarkdown: 'x'.repeat(102400) }))
+    const records = store.list().artifacts; const { artifactId: a, ...first } = records[0]; const { artifactId: b, ...second } = records[1]
+    expect(first).toEqual(second); expect(JSON.stringify(records[0]).length).toBe(JSON.stringify(records[1]).length)
+    expect(JSON.stringify(records)).not.toMatch(/rawMarkdown|contentHash|provenance|future|repositoryKey/)
+    expect(store.list({ metadataKeys: ['future'] }).artifacts[0].metadata).toEqual({ future: { level: 2, valid: true } })
+    store.update({ artifactId: 'A', expectedRevision: 1, rawMarkdown: 'BODY_A', metadata: { ...input().metadata, relations: [{ artifactId: 'B', kind: 'related-to' }] } })
+    expect(JSON.stringify(store.list({ relatedToArtifactId: 'A' }))).not.toContain('rawMarkdown')
+    expect(JSON.stringify(store.get('A'))).not.toContain('x'.repeat(1024))
   })
-
-  // ── 5. Idempotência ────────────────────────────────────────────────────────
-
-  it('6. Retry idempotente com mesmo artifactId e mesmo conteúdo não duplica nem falha', () => {
-    const { store } = createTempStore()
-    const input = baseArtifactInput({
-      artifactId: 'art-idempotent-01',
-      rawMarkdown: 'Stable idempotent content.'
-    })
-
-    const first = store.append(input)
-    const second = store.append(input)
-
-    expect(second).toEqual(first)
-    expect(store.list()).toHaveLength(1)
-  })
-
-  // ── 6. Content Integrity ───────────────────────────────────────────────────
-
-  it('7. Calcula contentHash automaticamente e confere com SHA-256 do rawMarkdown', () => {
-    const { store } = createTempStore()
-    const markdown = 'Deterministic content hash test.'
-    const expectedHash = computeContentHash(markdown)
-
-    const artifact = store.append(
-      baseArtifactInput({
-        artifactId: 'art-integrity-01',
-        rawMarkdown: markdown
-      })
-    )
-
-    expect(artifact.contentHash).toBe(expectedHash)
-  })
-
-  it('8. Rejeita append quando contentHash explícito fornecido diverge do rawMarkdown', () => {
-    const { store } = createTempStore()
-    expect(() =>
-      store.append(
-        baseArtifactInput({
-          artifactId: 'art-integrity-fail-01',
-          rawMarkdown: 'True content.',
-          contentHash: 'tampered-hash-00000000000000000000000000000000'
-        })
-      )
-    ).toThrow(/INTEGRITY_ERROR/)
-  })
-
-  it('9. Aceita append quando contentHash explícito fornecido é válido e correspondente', () => {
-    const { store } = createTempStore()
-    const markdown = 'Valid content match.'
-    const matchingHash = computeContentHash(markdown)
-
-    const artifact = store.append(
-      baseArtifactInput({
-        artifactId: 'art-integrity-match-01',
-        rawMarkdown: markdown,
-        contentHash: matchingHash
-      })
-    )
-
-    expect(artifact.contentHash).toBe(matchingHash)
-  })
-
-  // ── 7. Listagem e Filtros ──────────────────────────────────────────────────
-
-  it('10. Lista artefatos ordenados por createdAt decrescente por padrão', () => {
-    const { store } = createTempStore()
-    store.append(
-      baseArtifactInput({
-        artifactId: 'art-order-1',
-        createdAt: '2026-09-21T10:00:00.000Z'
-      })
-    )
-    store.append(
-      baseArtifactInput({
-        artifactId: 'art-order-2',
-        createdAt: '2026-09-21T12:00:00.000Z'
-      })
-    )
-    store.append(
-      baseArtifactInput({
-        artifactId: 'art-order-3',
-        createdAt: '2026-09-21T11:00:00.000Z'
-      })
-    )
-
-    const list = store.list()
-    expect(list.map((a) => a.artifactId)).toEqual([
-      'art-order-2',
-      'art-order-3',
-      'art-order-1'
-    ])
-  })
-
-  it('11. Listagem não carrega rawMarkdown (descoberta barata)', () => {
-    const { store } = createTempStore()
-    store.append(
-      baseArtifactInput({
-        artifactId: 'art-cheap-01',
-        rawMarkdown: 'Large markdown text not needed in listing.'
-      })
-    )
-
-    const list = store.list()
-    expect(list).toHaveLength(1)
-    expect((list[0] as any).rawMarkdown).toBeUndefined()
-    expect(list[0].title).toBe('Initial Implementation Handoff')
-    expect(list[0].contentHash).toBeTruthy()
-  })
-
-  it('12. Filtra listagem por repositoryKey, type e producerRole', () => {
-    const { store } = createTempStore()
-    store.append(
-      baseArtifactInput({
-        artifactId: 'art-repo-a',
-        repositoryKey: 'repo-alpha'
-      })
-    )
-    store.append(
-      baseArtifactInput({
-        artifactId: 'art-repo-b',
-        repositoryKey: 'repo-beta'
-      })
-    )
-
-    const alphaResults = store.list({ repositoryKey: 'repo-alpha' })
-    expect(alphaResults).toHaveLength(1)
-    expect(alphaResults[0].artifactId).toBe('art-repo-a')
-
-    const betaResults = store.list({ repositoryKey: 'repo-beta' })
-    expect(betaResults).toHaveLength(1)
-    expect(betaResults[0].artifactId).toBe('art-repo-b')
-
-    const filteredByType = store.list({ type: 'IMPLEMENTATION_HANDOFF' })
-    expect(filteredByType).toHaveLength(2)
-
-    const filteredByRole = store.list({ producerRole: 'IMPLEMENTER' })
-    expect(filteredByRole).toHaveLength(2)
-  })
-
-  it('13. Limita quantidade de resultados na listagem', () => {
-    const { store } = createTempStore()
-    store.append(baseArtifactInput({ artifactId: 'art-limit-1', createdAt: '2026-09-21T01:00:00.000Z' }))
-    store.append(baseArtifactInput({ artifactId: 'art-limit-2', createdAt: '2026-09-21T02:00:00.000Z' }))
-    store.append(baseArtifactInput({ artifactId: 'art-limit-3', createdAt: '2026-09-21T03:00:00.000Z' }))
-
-    const limited = store.list({ limit: 2 })
-    expect(limited).toHaveLength(2)
-    expect(limited.map((a) => a.artifactId)).toEqual(['art-limit-3', 'art-limit-2'])
-  })
-
-  // ── 8. Invariantes de Entrada ──────────────────────────────────────────────
-
-  it('14. Valida invariantes obrigatórios de entrada', () => {
-    const { store } = createTempStore()
-
-    expect(() => store.append(baseArtifactInput({ artifactId: '' }))).toThrow(/artifactId/)
-    expect(() => store.append(baseArtifactInput({ schemaVersion: 0 }))).toThrow(/schemaVersion/)
-    expect(() => store.append(baseArtifactInput({ title: '   ' }))).toThrow(/title/)
-    expect(() => store.append(baseArtifactInput({ repositoryKey: '' }))).toThrow(/repositoryKey/)
-    expect(() => store.append(baseArtifactInput({ createdAt: '' }))).toThrow(/createdAt/)
-    expect(() => store.append(baseArtifactInput({ type: 'UNKNOWN_TYPE' as any }))).toThrow(/Unsupported artifact type/)
-    expect(() => store.append(baseArtifactInput({ producerRole: 'UNKNOWN_ROLE' as any }))).toThrow(/Unsupported producer role/)
-  })
-
-  // ── 9. Fluxo Principal da Meta (Critério de Conclusão dos 7 Passos) ────────
-
-  it('15. Prova de Aceitação Principal do Plano (Passos 1 a 7)', () => {
-    const { dir, dbPath, store: store1 } = createTempStore()
-    const handoffMarkdown = [
-      '# Relato de Implementação',
-      '',
-      '## Resultado',
-      '`VALIDADO`',
-      '',
-      '## Implementado',
-      '- Criação da fundação do Continuum',
-      '- Persistência imutável em SQLite dedicado',
-      '',
-      '## Provas',
-      '1. Persistência integral',
-      '2. Restart e reabertura de store',
-      '3. Fidelidade de Markdown complexo'
-    ].join('\n')
-
-    // 1. Criar um IMPLEMENTATION_HANDOFF
-    // 2. Persistir seu Markdown integralmente
-    const created = store1.append({
-      artifactId: 'handoff-acceptance-001',
-      type: 'IMPLEMENTATION_HANDOFF',
-      schemaVersion: 1,
-      title: 'Continuum Foundation Handoff',
-      producerRole: 'IMPLEMENTER',
-      repositoryKey: 'code_awareness',
-      createdAt: '2026-09-21T22:30:00.000Z',
-      rawMarkdown: handoffMarkdown,
-      sourceFingerprint: 'src-fp-12345',
-      gitHead: 'git-head-abcdef123'
-    })
-
-    expect(created.artifactId).toBe('handoff-acceptance-001')
-
-    // 3. Encerrar o store
-    store1.close()
-
-    // 4. Reabrir
-    const store2 = new ArtifactStore(dbPath)
-    openStores.push({ store: store2, dir })
-
-    // 5. Listar o artefato
-    const listed = store2.list({ repositoryKey: 'code_awareness' })
-    expect(listed).toHaveLength(1)
-    expect(listed[0].artifactId).toBe('handoff-acceptance-001')
-    expect(listed[0].title).toBe('Continuum Foundation Handoff')
-    expect(listed[0].type).toBe('IMPLEMENTATION_HANDOFF')
-
-    // 6. Recuperá-lo pelo ID
-    const retrieved = store2.get('handoff-acceptance-001')
-    expect(retrieved).not.toBeNull()
-
-    // 7. Comprovar que nenhum conteúdo foi alterado
-    expect(retrieved!.rawMarkdown).toBe(handoffMarkdown)
-    expect(retrieved!.contentHash).toBe(computeContentHash(handoffMarkdown))
-    expect(retrieved!.sourceFingerprint).toBe('src-fp-12345')
-    expect(retrieved!.gitHead).toBe('git-head-abcdef123')
-    expect(retrieved!.schemaVersion).toBe(1)
-    expect(retrieved!.producerRole).toBe('IMPLEMENTER')
+  it('intersects filters, time and execution metadata; deterministically paginates timestamp ties with bounded results', () => {
+    const { store } = setup(); for (let i = 0; i < 25; i++) store.create(input(String(i).padStart(2, '0')))
+    expect(store.list().artifacts).toHaveLength(20)
+    const ids: string[] = []; let cursor: string | undefined
+    do {
+      const page = store.list({ query: 'runtime', kind: 'DECISION', status: 'BLOCKED', metadata: { executionId: 'execution-1' }, limit: 7, ...(cursor ? { cursor } : {}) })
+      ids.push(...page.artifacts.map(a => a.artifactId)); cursor = page.nextCursor
+    } while (cursor)
+    expect(ids).toHaveLength(25); expect(new Set(ids).size).toBe(25); expect(ids).toEqual([...ids].sort().reverse())
+    expect(store.list({ query: 'Unicode' }).artifacts).toHaveLength(0)
+    expect(store.list({ updatedAfter: '2026-10-02T00:00:00Z' }).artifacts).toHaveLength(0)
+    expect(store.list({ updatedBefore: '2026-10-01T00:00:00Z', limit: 100 }).artifacts).toHaveLength(25)
+    expect(() => store.list({ limit: 0 })).toThrow(/limit/); expect(() => store.list({ cursor: 'bad' })).toThrow(/cursor/)
+    expect(() => store.list({ kind: 'OTHER', cursor: store.list({ limit: 1 }).nextCursor })).toThrow(/cursor/)
   })
 })

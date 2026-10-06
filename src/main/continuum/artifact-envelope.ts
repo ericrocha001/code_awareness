@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 
 export const ENVELOPE_PROTOCOL = 'continuum-artifact/v1'
+export const GENERIC_ENVELOPE_PROTOCOL = 'continuum-artifact/v2'
 
 export const NON_TEXTUAL_CONTROL_CHAR_REGEX = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/
 
@@ -31,6 +32,15 @@ export interface EnvelopeValidationError {
   field: string
   reason: string
 }
+export interface GenericArtifactEnvelope {
+  protocol: typeof GENERIC_ENVELOPE_PROTOCOL
+  artifactId: string
+  repositoryKey: string
+  createdAt: string
+  contentHash: string
+  rawMarkdown: string
+}
+export type TransportEnvelope = ArtifactEnvelope | GenericArtifactEnvelope
 
 export function validateEnvelope(value: unknown): EnvelopeValidationError[] {
   const errors: EnvelopeValidationError[] = []
@@ -39,22 +49,22 @@ export function validateEnvelope(value: unknown): EnvelopeValidationError[] {
   }
   const e = value as Record<string, unknown>
 
-  if (e.protocol !== ENVELOPE_PROTOCOL) {
+  if (e.protocol !== ENVELOPE_PROTOCOL && e.protocol !== GENERIC_ENVELOPE_PROTOCOL) {
     errors.push({ field: 'protocol', reason: `must be "${ENVELOPE_PROTOCOL}"` })
   }
   if (typeof e.artifactId !== 'string' || e.artifactId.trim().length === 0) {
     errors.push({ field: 'artifactId', reason: 'must be a non-empty string' })
   }
-  if (e.type !== 'IMPLEMENTATION_HANDOFF') {
+  if (e.protocol !== GENERIC_ENVELOPE_PROTOCOL && e.type !== 'IMPLEMENTATION_HANDOFF') {
     errors.push({ field: 'type', reason: 'must be "IMPLEMENTATION_HANDOFF"' })
   }
-  if (!Number.isInteger(e.schemaVersion) || (e.schemaVersion as number) < 1) {
+  if (e.protocol !== GENERIC_ENVELOPE_PROTOCOL && (!Number.isInteger(e.schemaVersion) || (e.schemaVersion as number) < 1)) {
     errors.push({ field: 'schemaVersion', reason: 'must be integer >= 1' })
   }
-  if (typeof e.title !== 'string' || e.title.trim().length === 0) {
+  if (e.protocol !== GENERIC_ENVELOPE_PROTOCOL && (typeof e.title !== 'string' || e.title.trim().length === 0)) {
     errors.push({ field: 'title', reason: 'must be a non-empty string' })
   }
-  if (e.producerRole !== 'IMPLEMENTER') {
+  if (e.protocol !== GENERIC_ENVELOPE_PROTOCOL && e.producerRole !== 'IMPLEMENTER') {
     errors.push({ field: 'producerRole', reason: 'must be "IMPLEMENTER"' })
   }
   if (typeof e.repositoryKey !== 'string' || e.repositoryKey.trim().length === 0) {
@@ -63,10 +73,10 @@ export function validateEnvelope(value: unknown): EnvelopeValidationError[] {
   if (typeof e.createdAt !== 'string' || e.createdAt.trim().length === 0) {
     errors.push({ field: 'createdAt', reason: 'must be a non-empty string' })
   }
-  if (e.sourceFingerprint !== null && typeof e.sourceFingerprint !== 'string') {
+  if (e.protocol !== GENERIC_ENVELOPE_PROTOCOL && e.sourceFingerprint !== null && typeof e.sourceFingerprint !== 'string') {
     errors.push({ field: 'sourceFingerprint', reason: 'must be string or null' })
   }
-  if (e.gitHead !== null && typeof e.gitHead !== 'string') {
+  if (e.protocol !== GENERIC_ENVELOPE_PROTOCOL && e.gitHead !== null && typeof e.gitHead !== 'string') {
     errors.push({ field: 'gitHead', reason: 'must be string or null' })
   }
   if (typeof e.rawMarkdown !== 'string' || e.rawMarkdown.length === 0) {
@@ -91,11 +101,11 @@ export function validateEnvelope(value: unknown): EnvelopeValidationError[] {
   return errors
 }
 
-export function serializeEnvelope(envelope: ArtifactEnvelope): string {
+export function serializeEnvelope(envelope: TransportEnvelope): string {
   return JSON.stringify(envelope, null, 2)
 }
 
-export function deserializeEnvelope(raw: string): ArtifactEnvelope {
+export function deserializeEnvelope(raw: string): TransportEnvelope {
   let parsed: unknown
   try {
     parsed = JSON.parse(raw)
@@ -107,5 +117,5 @@ export function deserializeEnvelope(raw: string): ArtifactEnvelope {
     const details = errors.map((e) => `${e.field}: ${e.reason}`).join(', ')
     throw new Error(`ENVELOPE_INVALID: ${details}`)
   }
-  return parsed as ArtifactEnvelope
+  return parsed as TransportEnvelope
 }

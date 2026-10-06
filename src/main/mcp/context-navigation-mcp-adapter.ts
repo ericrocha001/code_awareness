@@ -124,9 +124,13 @@ import {
   LIST_ARTIFACTS_TOOL,
   GET_ARTIFACT_TOOL,
   executeListArtifacts,
-  executeGetArtifact
+  executeGetArtifact,
+  PUBLISH_ARTIFACT_TOOL,
+  UPDATE_ARTIFACT_TOOL,
+  executePublishArtifact,
+  executeUpdateArtifact
 } from '../continuum/continuum-mcp'
-import type { IArtifactReader } from '../continuum/continuum-types'
+import type { IArtifactReader, IContinuumService } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
 import { VALIDATION_EXECUTION_TOOLS, executeValidationTool } from '../validation-execution/validation-execution-mcp'
 import type { ValidationExecution } from '../validation-execution/validation-execution'
@@ -146,6 +150,7 @@ export class ContextNavigationMcpAdapter {
   private readonly runtimeIdentity: RuntimeIdentityProvider | undefined
   private readonly validationLedger: ValidationLedger | undefined
   private readonly artifactReader: IArtifactReader | undefined
+  private readonly continuum?: IContinuumService
   private readonly validationExecution: ValidationExecution | undefined
   private readonly diagnosticSourceAccess: DiagnosticSourceAccess | undefined
   private readonly runtimeRestart: RuntimeRestartController | undefined
@@ -190,7 +195,8 @@ export class ContextNavigationMcpAdapter {
       this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
       this.runtimeIdentity = (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ?? this.systemHealth?.getRuntimeIdentityProvider()
       this.validationLedger = runtimeIdentityOrLedger as ValidationLedger | undefined
-      this.artifactReader = context.artifactReader
+      this.continuum = context.continuum
+      this.artifactReader = context.continuum ?? context.artifactReader
       this.validationExecution = context.validationExecution
       this.diagnosticSourceAccess = context.diagnosticSourceAccess
       this.runtimeRestart = context.runtimeRestart
@@ -244,6 +250,7 @@ export class ContextNavigationMcpAdapter {
         GET_ARTIFACT_TOOL
       )
     }
+    if (this.continuum) tools.push(PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL)
     if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
@@ -311,6 +318,11 @@ export class ContextNavigationMcpAdapter {
         return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: No artifact reader configured for active project' }], isError: true }
       }
       return executeGetArtifact(this.artifactReader, args)
+    }
+
+    if (name === 'publish_artifact' || name === 'update_artifact') {
+      if (!this.continuum) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: repository service is not configured' }], isError: true }
+      return name === 'publish_artifact' ? executePublishArtifact(this.continuum, args) : executeUpdateArtifact(this.continuum, args)
     }
 
     if (name === 'get_runtime_identity') {

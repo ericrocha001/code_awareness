@@ -81,6 +81,7 @@ export class McpLifecycle {
       this.requested?.projectId === context.projectId &&
       this.requested.navigation === context.navigation &&
       this.requested.artifactReader === context.artifactReader &&
+      this.requested.continuum === context.continuum &&
       this.requested.validationExecution === context.validationExecution &&
       this.requested.diagnosticSourceAccess === context.diagnosticSourceAccess &&
       this.requested.runtimeRestart === context.runtimeRestart &&
@@ -159,7 +160,7 @@ export class McpLifecycle {
     if (revision !== this.revision) return
     if (
       this.requested && this.binding === this.requested.projectId &&
-      this.bindingReader === this.requested.artifactReader &&
+      this.bindingReader === (this.requested.continuum ?? this.requested.artifactReader) &&
       this.state.status === 'RUNNING'
     ) {
       return
@@ -203,7 +204,7 @@ export class McpLifecycle {
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('MCP address unavailable')
       this.binding = requested.projectId
-      this.bindingReader = requested.artifactReader
+      this.bindingReader = requested.continuum ?? requested.artifactReader
       await this.setState({ status: 'RUNNING', available: true, endpoint: `http://127.0.0.1:${address.port}/mcp`, projectId: requested.projectId })
     } catch {
       await this.stop()

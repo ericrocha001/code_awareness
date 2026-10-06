@@ -14,6 +14,7 @@ import {
 } from './artifact-envelope'
 import { ArtifactInbox } from './artifact-inbox'
 import { ArtifactStore } from './artifact-store'
+import { ContinuumService } from './continuum-service'
 import { ArtifactIngestor } from './artifact-ingestor'
 import { deriveRepositoryKey } from './repository-key'
 
@@ -85,6 +86,28 @@ const HOSTILE_SHELL_MARKDOWN = [
 
 describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
   const publisherScript = join(__dirname, '..', '..', '..', 'scripts', 'continuum', 'publish-artifact.cjs')
+  it('generic CLI publishes frontmatter as transport and preserves open metadata and literal bytes through ingestion/restart', () => {
+    const repo = tempDir('generic-cli-')
+    writeFileSync(join(repo, 'package.json'), '{}', 'utf8')
+    const rawMarkdown = '---\r\nname: Generic context\r\ndescription: Open this for literal preservation\r\nkind: FUTURE_KIND\r\nexecutionId: canonical-execution\r\n---\r\n' + HOSTILE_SHELL_MARKDOWN
+    const mdFile = join(repo, 'generic.md'); writeFileSync(mdFile, rawMarkdown, 'utf8')
+    const receipt = JSON.parse(execFileSync(process.execPath, [publisherScript, 'publish', mdFile], { cwd: repo, encoding: 'utf8' }))
+    expect(receipt.status).toBe('QUEUED')
+    const envelope = deserializeEnvelope(readFileSync(receipt.inboxPath, 'utf8'))
+    expect(envelope.protocol).toBe('continuum-artifact/v2'); expect(envelope).not.toHaveProperty('type'); expect(envelope).not.toHaveProperty('producerRole')
+    const dbPath = join(tempDir('generic-storage-'), 'continuum.db'); const store = new ArtifactStore(dbPath, 'catalog-A')
+    try {
+      const service = new ContinuumService(store)
+      expect(new ArtifactIngestor(new ArtifactInbox(repo), service, deriveRepositoryKey(repo)).ingestPending().ingested).toBe(1)
+    } finally { store.close() }
+    const reopened = new ArtifactStore(dbPath, 'catalog-A')
+    try {
+      const artifact = reopened.get(receipt.artifactId)!
+      expect(Buffer.from(artifact.rawMarkdown)).toEqual(Buffer.from(rawMarkdown))
+      expect(artifact.metadata.kind).toBe('FUTURE_KIND'); expect(artifact.revision).toBe(1)
+      expect(reopened.list({ metadata: { executionId: 'canonical-execution' } }).artifacts).toHaveLength(1)
+    } finally { reopened.close() }
+  })
 
   // ── Teste 1 — Publisher Fidelity ─────────────────────────────────────────
 
@@ -104,7 +127,7 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
     )
 
     const receipt = JSON.parse(result)
-    expect(receipt.status).toBe('PUBLISHED')
+    expect(receipt.status).toBe('QUEUED')
     expect(existsSync(receipt.inboxPath)).toBe(true)
 
     const rawEnvelope = readFileSync(receipt.inboxPath, 'utf8')
@@ -189,9 +212,9 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
 
     // 2. Ingestor ingere no store
     const dbPath = join(tempDir('storage-t4-'), 'continuum.db')
-    const store = new ArtifactStore(dbPath)
+    const store = new ArtifactStore(dbPath, 'catalog-A')
     const inbox = new ArtifactInbox(repo)
-    const ingestor = new ArtifactIngestor(inbox, store)
+    const ingestor = new ArtifactIngestor(inbox, new ContinuumService(store), deriveRepositoryKey(repo))
 
     const report = ingestor.ingestPending()
     expect(report.ingested).toBe(1)
@@ -202,7 +225,7 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
     store.close()
 
     // 4. Reabrir e recuperar o artifact
-    const storeReopened = new ArtifactStore(dbPath)
+    const storeReopened = new ArtifactStore(dbPath, 'catalog-A')
     const retrieved = storeReopened.get(artifactId)
 
     expect(retrieved).not.toBeNull()
@@ -245,8 +268,8 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
 
     // Executar ingestão
     const dbPath = join(tempDir('storage-t5-'), 'continuum.db')
-    const store = new ArtifactStore(dbPath)
-    const ingestor = new ArtifactIngestor(inbox, store)
+    const store = new ArtifactStore(dbPath, 'catalog-A')
+    const ingestor = new ArtifactIngestor(inbox, new ContinuumService(store), deriveRepositoryKey(repo))
 
     const report = ingestor.ingestPending()
 
@@ -257,7 +280,7 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
     expect(report.failures[0].reason).toContain('contentHash does not match')
 
     // Store permanece limpo
-    expect(store.list()).toHaveLength(0)
+    expect(store.list().artifacts).toHaveLength(0)
     expect(store.get(envelope.artifactId)).toBeNull()
 
     // Arquivo foi movido para rejected
@@ -292,8 +315,8 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
     inbox.write(envelope)
 
     const dbPath = join(tempDir('storage-t6-'), 'continuum.db')
-    const store = new ArtifactStore(dbPath)
-    const ingestor = new ArtifactIngestor(inbox, store)
+    const store = new ArtifactStore(dbPath, 'catalog-A')
+    const ingestor = new ArtifactIngestor(inbox, new ContinuumService(store), deriveRepositoryKey(repo))
 
     const report = ingestor.ingestPending()
     expect(report.ingested).toBe(0)
@@ -371,7 +394,7 @@ describe('Continuum — End-to-End Cryptographic Content Fidelity', () => {
     )
 
     const receipt = JSON.parse(result)
-    expect(receipt.status).toBe('PUBLISHED')
+    expect(receipt.status).toBe('QUEUED')
 
     const inbox = new ArtifactInbox(repo)
     const pending = inbox.listPending()

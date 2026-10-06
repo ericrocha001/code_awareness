@@ -1,4 +1,4 @@
-import type { IArtifactReader } from '../continuum/continuum-types'
+import type { IArtifactReader, IContinuumService } from '../continuum/continuum-types'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import type { DiagnosticSourceAccess } from '../diagnostic-source-access/diagnostic-source-access'
 import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
@@ -10,6 +10,7 @@ export interface McpProjectContext {
   repoRoot: string
   navigation: ProjectContextNavigation
   artifactReader?: IArtifactReader
+  continuum?: IContinuumService
   validationExecution?: ValidationExecution
   diagnosticSourceAccess?: DiagnosticSourceAccess
   runtimeRestart?: RuntimeRestartController

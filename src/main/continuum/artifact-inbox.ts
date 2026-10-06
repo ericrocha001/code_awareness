@@ -9,7 +9,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
-import type { ArtifactEnvelope } from './artifact-envelope'
+import type { TransportEnvelope } from './artifact-envelope'
 import { serializeEnvelope } from './artifact-envelope'
 
 export const INBOX_RELATIVE_PATH = '.code-awareness/continuum/inbox'
@@ -42,7 +42,7 @@ export class ArtifactInbox {
 
   // ── Write (publish) ──────────────────────────────────────────────────────
 
-  write(envelope: ArtifactEnvelope): InboxReceipt {
+  write(envelope: TransportEnvelope): InboxReceipt {
     this.ensureDir(this.inboxDir)
 
     const finalName = `${envelope.artifactId}.json`

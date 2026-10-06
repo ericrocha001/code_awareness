@@ -65,7 +65,7 @@ import { SystemHealthCore } from './system-health/system-health-core'
 import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-provider'
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
-import { ProjectContinuumSession } from './continuum/project-continuum-session'
+import { RepositoryContinuumSession } from './continuum/project-continuum-session'
 import { CodeMapSyncMonitor, CodeMapSyncDrilldownProvider } from './system-health/codemap-sync-monitor'
 import { CodeMapLifecycleMonitor } from './system-health/codemap-lifecycle-monitor'
 import { codeScopeExecutionDrilldownProvider } from './system-health/codescope-execution-drilldown'
@@ -122,7 +122,9 @@ const validationLedger = new ValidationLedger(
   join(app.getPath('userData'), 'validation-ledger.db'),
   runtimeIdentityProvider
 )
-const continuumSession = new ProjectContinuumSession(join(app.getPath('userData'), 'continuum'))
+const continuumSession = new RepositoryContinuumSession(join(app.getPath('userData'), 'continuum'), {
+  findByPath: path => repositoryCatalog?.findByPath(path) ?? null
+})
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const runtimeRestart = new RuntimeRestartController(
   runtimeIdentityProvider,
@@ -404,13 +406,13 @@ app.whenReady().then(async () => {
       return
     }
 
-    let artifactReader = undefined
+    let continuum = undefined
     try {
       const report = continuumSession.activate(project.path)
       if (report && report.discovered > 0) {
         console.log(`[Continuum] Ingestion: discovered=${report.discovered} ingested=${report.ingested} rejected=${report.rejected} retryable=${report.retryableFailures}`)
       }
-      artifactReader = continuumSession.getActiveReader() ?? undefined
+      continuum = continuumSession.getActiveService() ?? undefined
     } catch (error: any) {
       // Continuum is auxiliary context — never block project opening on its failure.
       console.error('[Continuum] Session activation failed, continuing without Continuum:', error?.message)
@@ -422,7 +424,7 @@ app.whenReady().then(async () => {
       projectId: project.id,
       repoRoot: project.path,
       navigation,
-      artifactReader,
+      continuum,
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations: new GitOperationsService(project.path, gitService, gitTransport),

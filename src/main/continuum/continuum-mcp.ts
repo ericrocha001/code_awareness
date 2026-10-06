@@ -1,179 +1,57 @@
 import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
-import type { IArtifactReader, ArtifactType, ProducerRole } from './continuum-types'
-import { SUPPORTED_ARTIFACT_TYPES, SUPPORTED_PRODUCER_ROLES } from './continuum-types'
-import { contextualizeTimestamps } from './continuum-time'
-
-function oauthProtected(
-  definition: Omit<McpToolDefinition, 'securitySchemes'>
-): McpToolDefinition {
-  return { ...definition, securitySchemes: [{ type: 'oauth2', scopes: [] }] }
+import type { IArtifactReader, IContinuumService, ListArtifactsFilter } from './continuum-types'
+const string = { type: 'string', minLength: 1 }
+function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []): McpToolDefinition {
+  return { name, description, securitySchemes: [{ type: 'oauth2', scopes: [] }], inputSchema: { type: 'object', properties, ...(required.length ? { required } : {}), additionalProperties: false } }
 }
-
-export const LIST_ARTIFACTS_TOOL: McpToolDefinition = oauthProtected({
-  name: 'list_artifacts',
-  description:
-    'List implementation handoffs and artifacts available in the active project. Returns high-density summaries (without raw markdown) ordered newest first. Use when you need to recover recent implementation handoffs, understand prior agent work, or gain historical context without asking the user. Follow up with get_artifact to inspect a specific artifact.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      type: {
-        type: 'string',
-        enum: ['IMPLEMENTATION_HANDOFF'],
-        description: 'Filter by artifact type.'
-      },
-      producerRole: {
-        type: 'string',
-        enum: ['IMPLEMENTER'],
-        description: 'Filter by producer role.'
-      },
-      limit: {
-        type: 'integer',
-        minimum: 1,
-        maximum: 100,
-        description: 'Maximum number of artifacts to return (1-100). Defaults to 20.'
-      }
-    },
-    additionalProperties: false
-  }
+export const LIST_ARTIFACTS_TOOL = tool('list_artifacts', 'Discover only the active repository Continuum through intersecting metadata filters and a bounded cursor page. Returns small discovery records, never Markdown or expanded relations. Navigate one graph hop, select deliberately, then get_artifact.', {
+  query: string, kind: string, status: string,
+  metadata: { type: 'object', additionalProperties: true, description: 'Exact equality filters for extensible metadata, including canonical executionId when available.' },
+  metadataKeys: { type: 'array', items: string, maxItems: 20, uniqueItems: true, description: 'Only these additional metadata keys are projected.' },
+  relatedToArtifactId: string, direction: { type: 'string', enum: ['inbound', 'outbound', 'both'] }, relationKind: string,
+  updatedAfter: { ...string, format: 'date-time' }, updatedBefore: { ...string, format: 'date-time' },
+  limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, cursor: string
 })
+export const GET_ARTIFACT_TOOL = tool('get_artifact', 'Read one explicitly selected Artifact in the active repository, including current revision, metadata and exact Markdown. Relations are identity hints and never expand related content.', { artifactId: string }, ['artifactId'])
+export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown with YAML frontmatter name, description and open kind to the active repository Continuum. Returns a compact receipt without content. Another repository requires switching the active context.', { rawMarkdown: string }, ['rawMarkdown'])
+export const UPDATE_ARTIFACT_TOOL = tool('update_artifact', 'Replace an Artifact within the active repository atomically while preserving artifactId and history. Requires expectedRevision from get_artifact; revision conflict requires rereading. Replaces Markdown, metadata and relations together.', { artifactId: string, expectedRevision: { type: 'integer', minimum: 1 }, rawMarkdown: string }, ['artifactId', 'expectedRevision', 'rawMarkdown'])
 
-export const GET_ARTIFACT_TOOL: McpToolDefinition = oauthProtected({
-  name: 'get_artifact',
-  description:
-    'Retrieve the complete content and metadata of a specific artifact by its artifactId, including full raw markdown, git head, and timestamps. Use after identifying a relevant artifact via list_artifacts to deliberately inspect its implementation report or context.',
-  inputSchema: {
-    type: 'object',
-    properties: {
-      artifactId: {
-        type: 'string',
-        minLength: 1,
-        description: 'The unique ID of the artifact to retrieve.'
-      }
-    },
-    required: ['artifactId'],
-    additionalProperties: false
+function ok(value: unknown): McpToolResult { return { content: [{ type: 'text', text: JSON.stringify(value) }] } }
+function failure(error: unknown): McpToolResult { return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true } }
+function argsFor(definition: McpToolDefinition, args: unknown): Record<string, unknown> {
+  const value = args ?? {}
+  if (typeof value !== 'object' || Array.isArray(value)) throw new Error('INVALID_ARGUMENT: arguments must be an object')
+  const values = value as Record<string, unknown>
+  const schema = definition.inputSchema as { properties: Record<string, { type: string; enum?: string[] }>; required?: string[] }
+  for (const key of schema.required ?? []) if (!(key in values)) throw new Error('INVALID_ARGUMENT: ' + key + ' is required')
+  for (const [key, item] of Object.entries(values)) {
+    const property = schema.properties[key]
+    if (!property) throw new Error('INVALID_ARGUMENT: unexpected ' + key)
+    if (property.type === 'string' && (typeof item !== 'string' || !item.trim())) throw new Error('INVALID_ARGUMENT: ' + key + ' must be a non-empty string')
+    if (property.enum && !property.enum.includes(item as string)) throw new Error('INVALID_ARGUMENT: invalid ' + key)
+    if (property.type === 'integer' && (typeof item !== 'number' || !Number.isInteger(item) || item < 1 || (key === 'limit' && item > 100))) throw new Error('INVALID_ARGUMENT: invalid ' + key)
+    if (property.type === 'object' && (!item || typeof item !== 'object' || Array.isArray(item))) throw new Error('INVALID_ARGUMENT: ' + key + ' must be an object')
+    if (property.type === 'array' && (!Array.isArray(item) || item.length > 20 || new Set(item).size !== item.length || item.some(v => typeof v !== 'string' || !v.trim() || ['__proto__', 'constructor', 'prototype'].includes(v)))) throw new Error('INVALID_ARGUMENT: invalid ' + key)
   }
-})
-
-function ok(value: unknown): McpToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
+  return values
 }
-
-function err(text: string): McpToolResult {
-  return { content: [{ type: 'text', text }], isError: true }
+export function executeListArtifacts(reader: IArtifactReader, args: unknown): McpToolResult {
+  try { const page = reader.list(argsFor(LIST_ARTIFACTS_TOOL, args) as ListArtifactsFilter); return ok({ count: page.artifacts.length, ...page }) } catch (error) { return failure(error) }
 }
-
-function parseArgs(args: unknown): Record<string, unknown> | null {
-  if (args === undefined || args === null) return {}
-  if (typeof args !== 'object' || Array.isArray(args)) return null
-  return args as Record<string, unknown>
-}
-
-export function executeListArtifacts(
-  reader: IArtifactReader,
-  args: unknown
-): McpToolResult {
-  const values = parseArgs(args)
-  if (!values) return err('INVALID_ARGUMENT: Expected an arguments object')
-
-  const allowedKeys = new Set(['type', 'producerRole', 'limit'])
-  for (const key of Object.keys(values)) {
-    if (!allowedKeys.has(key)) {
-      return err(`INVALID_ARGUMENT: Unexpected argument "${key}"`)
-    }
-  }
-
-  let type: ArtifactType | undefined
-  if (values.type !== undefined) {
-    if (typeof values.type !== 'string' || !SUPPORTED_ARTIFACT_TYPES.has(values.type)) {
-      return err(`INVALID_ARGUMENT: Unsupported artifact type "${values.type}"`)
-    }
-    type = values.type as ArtifactType
-  }
-
-  let producerRole: ProducerRole | undefined
-  if (values.producerRole !== undefined) {
-    if (typeof values.producerRole !== 'string' || !SUPPORTED_PRODUCER_ROLES.has(values.producerRole as ProducerRole)) {
-      return err(`INVALID_ARGUMENT: Unsupported producer role "${values.producerRole}"`)
-    }
-    producerRole = values.producerRole as ProducerRole
-  }
-
-  let limit = 20
-  if (values.limit !== undefined) {
-    const rawLimit = Number(values.limit)
-    if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 100) {
-      return err('INVALID_ARGUMENT: limit must be an integer between 1 and 100')
-    }
-    limit = rawLimit
-  }
-
+export function executeGetArtifact(reader: IArtifactReader, args: unknown): McpToolResult {
   try {
-    const summaries = reader.list({ type, producerRole, limit })
-    const compact = summaries.map((s) => {
-      const local = contextualizeTimestamps(s.createdAt, s.ingestedAt)
-      return {
-        artifactId: s.artifactId,
-        type: s.type,
-        title: s.title,
-        producerRole: s.producerRole,
-        createdAt: s.createdAt,
-        ingestedAt: s.ingestedAt,
-        createdAtLocal: local.createdAtLocal,
-        ingestedAtLocal: local.ingestedAtLocal,
-        timeZone: local.timeZone,
-        ...(s.gitHead ? { gitHead: s.gitHead } : {})
-      }
-    })
-
-    return ok({
-      count: compact.length,
-      artifacts: compact
-    })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return err(`CONTINUUM_ERROR: ${message}`)
-  }
+    const { artifactId } = argsFor(GET_ARTIFACT_TOOL, args); const artifact = reader.get(artifactId as string)
+    if (!artifact) throw new Error('ARTIFACT_NOT_FOUND: ' + artifactId)
+    const { contentHash, provenance, ...current } = artifact
+    return ok(current)
+  } catch (error) { return failure(error) }
 }
-
-export function executeGetArtifact(
-  reader: IArtifactReader,
-  args: unknown
-): McpToolResult {
-  const values = parseArgs(args)
-  if (!values) return err('INVALID_ARGUMENT: Expected an arguments object')
-
-  if (typeof values.artifactId !== 'string' || values.artifactId.trim().length === 0) {
-    return err('INVALID_ARGUMENT: artifactId must be a non-empty string')
-  }
-
-  const artifactId = values.artifactId.trim()
-
+export function executePublishArtifact(service: IContinuumService, args: unknown): McpToolResult {
+  try { const { rawMarkdown } = argsFor(PUBLISH_ARTIFACT_TOOL, args); return ok(service.publish(rawMarkdown as string)) } catch (error) { return failure(error) }
+}
+export function executeUpdateArtifact(service: IContinuumService, args: unknown): McpToolResult {
   try {
-    const artifact = reader.get(artifactId)
-    if (!artifact) {
-      return err(`ARTIFACT_NOT_FOUND: No artifact found with id "${artifactId}"`)
-    }
-
-    const local = contextualizeTimestamps(artifact.createdAt, artifact.ingestedAt)
-    return ok({
-      artifactId: artifact.artifactId,
-      type: artifact.type,
-      schemaVersion: artifact.schemaVersion,
-      title: artifact.title,
-      producerRole: artifact.producerRole,
-      createdAt: artifact.createdAt,
-      ingestedAt: artifact.ingestedAt,
-      createdAtLocal: local.createdAtLocal,
-      ingestedAtLocal: local.ingestedAtLocal,
-      timeZone: local.timeZone,
-      sourceFingerprint: artifact.sourceFingerprint,
-      gitHead: artifact.gitHead,
-      contentHash: artifact.contentHash,
-      rawMarkdown: artifact.rawMarkdown
-    })
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return err(`CONTINUUM_ERROR: ${message}`)
-  }
+    const values = argsFor(UPDATE_ARTIFACT_TOOL, args)
+    return ok(service.update(values.artifactId as string, values.expectedRevision as number, values.rawMarkdown as string))
+  } catch (error) { return failure(error) }
 }

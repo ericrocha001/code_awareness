@@ -1,4 +1,4 @@
-import type { IArtifactStore } from './continuum-types'
+import type { ContinuumService } from './continuum-service'
 import type { ArtifactInbox } from './artifact-inbox'
 import { deserializeEnvelope } from './artifact-envelope'
 import { ArtifactIdentityConflictError, ArtifactContentIntegrityError } from './artifact-store'
@@ -21,11 +21,11 @@ export interface IngestionReport {
 
 export class ArtifactIngestor {
   private readonly inbox: ArtifactInbox
-  private readonly store: IArtifactStore
+  private readonly service: ContinuumService
 
-  constructor(inbox: ArtifactInbox, store: IArtifactStore) {
+  constructor(inbox: ArtifactInbox, service: ContinuumService, private readonly repositoryKey: string) {
     this.inbox = inbox
-    this.store = store
+    this.service = service
   }
 
   ingestPending(): IngestionReport {
@@ -59,22 +59,11 @@ export class ArtifactIngestor {
 
       // 2. Persist into store
       try {
-        this.store.append({
-          artifactId: envelope.artifactId,
-          type: envelope.type,
-          schemaVersion: envelope.schemaVersion,
-          title: envelope.title,
-          producerRole: envelope.producerRole,
-          repositoryKey: envelope.repositoryKey,
-          createdAt: envelope.createdAt,
-          sourceFingerprint: envelope.sourceFingerprint,
-          gitHead: envelope.gitHead,
-          contentHash: envelope.contentHash,
-          rawMarkdown: envelope.rawMarkdown
-        })
+        this.service.ingest(envelope, this.repositoryKey)
       } catch (err) {
         // Identity conflict or content integrity failure is a permanent data error: reject.
-        if (err instanceof ArtifactIdentityConflictError || err instanceof ArtifactContentIntegrityError) {
+        if (err instanceof ArtifactIdentityConflictError || err instanceof ArtifactContentIntegrityError ||
+          (err instanceof Error && /^(INVALID_ARGUMENT|INVALID_RELATION):/.test(err.message))) {
           this.inbox.reject(item)
           report.rejected++
           report.failures.push({

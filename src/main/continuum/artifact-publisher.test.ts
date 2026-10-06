@@ -296,7 +296,7 @@ describe('Publisher Integration', () => {
 
     // 3. Ler e verificar
     const rawFile = readFileSync(receipt.filePath, 'utf8')
-    const restored = deserializeEnvelope(rawFile)
+    const restored = deserializeEnvelope(rawFile) as ArtifactEnvelope
 
     expect(restored.artifactId).toBe(artifactId)
     expect(restored.type).toBe('IMPLEMENTATION_HANDOFF')
