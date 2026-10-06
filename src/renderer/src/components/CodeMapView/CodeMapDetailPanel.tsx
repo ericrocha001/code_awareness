@@ -260,15 +260,15 @@ export const CodeMapDetailPanel: React.FC<CodeMapDetailPanelProps> = ({
         </button>
         <i className={`${getFileIconClass(getFileName(file.relativePath))} cmp-file-icon`} />
         <div className="cmp-identity-info">
-          <h3 className="cmp-file-name">{getFileName(file.relativePath)}</h3>
-          <span className="cmp-file-path">{file.relativePath}</span>
+          <h3 className="cmp-file-name" title={getFileName(file.relativePath)}>{getFileName(file.relativePath)}</h3>
+          <span className="cmp-file-path" title={file.relativePath}>{file.relativePath}</span>
         </div>
         <div className="cmp-identity-meta">
           <span className="cmp-meta-item">{file.language}</span>
           <span className="cmp-meta-item">{file.lines} linhas</span>
           <span className="cmp-meta-item">{formatBytes(file.sizeBytes)}</span>
           {file.status === 'modified' && (
-            <span className="cmp-meta-item cmp-meta-item--modified">● modificado</span>
+            <span className="cmp-meta-item cmp-meta-item--modified">● Pending</span>
           )}
         </div>
       </div>

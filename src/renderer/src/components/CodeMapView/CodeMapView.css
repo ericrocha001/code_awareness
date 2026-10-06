@@ -1,152 +1,330 @@
-/*
--T ---
-*/
-
 .cmv-container {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
-  height: 100vh; /* Sprint (Correção): .app-main sem padding — scrollbar na borda */
+  height: 100vh;
+  min-height: 0;
+  min-width: 0;
+  padding: 16px;
+  gap: 12px;
   overflow: hidden;
+  color: var(--text-primary);
+  background: radial-gradient(ellipse at 44% 0%, color-mix(in srgb, var(--status-restored) 8%, transparent), transparent 44%), radial-gradient(ellipse at 80% 30%, color-mix(in srgb, var(--accent) 5%, transparent), transparent 50%), var(--bg-primary);
 }
-
-.cmv-container > .vt-root {
+.cmv-container *, .cmv-container *::before, .cmv-container *::after {
+  box-sizing: border-box;
+}
+.cmv-awareness-header {
   flex-shrink: 0;
-  /* Sprint 6.1: respiro da toolbar — .app-main não tem mais padding */
-  padding: 30px 20px 0;
+  min-width: 0;
 }
-
-.cmv-container > .ab-root {
+.cmv-awareness-top {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 6px 15px;
+  min-width: 0;
+}
+.cmv-awareness-identity {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex: 1;
+  min-width: 0;
+}
+.cmv-awareness-icon {
+  width: 64px;
+  height: 64px;
   flex-shrink: 0;
-  /* Sprint 6.1: respiro lateral da ActionBar — o conteúdo permanece full-bleed */
-  padding: 0 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 15px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 65%, var(--border));
+  background: linear-gradient(135deg, color-mix(in srgb, var(--status-restored) 22%, transparent), color-mix(in srgb, var(--accent) 18%, transparent));
+  box-shadow: 0 0 25px color-mix(in srgb, var(--accent) 16%, transparent), inset 0 0 18px color-mix(in srgb, var(--accent) 10%, transparent);
 }
-
-.cmv-empty {
+.cmv-awareness-identity > div {
+  min-width: 0;
+}
+.cmv-awareness-identity h1 {
+  margin: 0 0 5px;
+  font-size: 30px;
+  line-height: 1.15;
+  letter-spacing: -.025em;
+}
+.cmv-awareness-identity p {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cmv-awareness-identity strong {
+  color: var(--text-primary);
+  font-weight: 500;
+}
+.cmv-awareness-stats {
+  display: flex;
+  gap: 10px;
+  flex-shrink: 0;
+}
+.cmv-awareness-stats > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 92px;
+  padding: 10px 13px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 6%, var(--bg-secondary)), var(--bg-secondary));
+}
+.cmv-awareness-stats svg {
+  color: var(--accent);
+}
+.cmv-awareness-stats span {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.cmv-awareness-stats strong {
+  font-size: 17px;
+  font-variant-numeric: tabular-nums;
+}
+.cmv-awareness-stats small {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.cmv-awareness-stats .cmv-awareness-stat--pending {
+  border-color: color-mix(in srgb, var(--color-warning) 35%, var(--border));
+}
+.cmv-awareness-stat--pending svg, .cmv-awareness-stat--pending strong {
+  color: var(--color-warning);
+}
+.cmv-awareness-health {
+  flex-shrink: 0;
+  padding-left: 16px;
+  border-left: 1px solid var(--border-subtle);
+}
+.cmv-awareness-search-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.cmv-awareness-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+  padding: 0 15px;
+  height: 42px;
+  color: var(--text-secondary);
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  background: color-mix(in srgb, var(--bg-secondary) 92%, var(--accent));
+}
+.cmv-awareness-search:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.cmv-awareness-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.cmv-awareness-search input::placeholder {
+  color: var(--text-secondary);
+}
+.cmv-awareness-controls {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.cmv-search-summary {
+  display: block;
+  padding: 6px 3px 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  min-height: 17px;
+}
+.cmv-empty, .cmv-loading {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 1;
   color: var(--text-secondary);
 }
-
-.cmv-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 1;
-  color: var(--text-secondary);
-}
-
 .cmv-content {
   display: flex;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
-  gap: 8px; /* as alças de redimensionamento ficam no gap nativo do flex */
-  /* Sprint 6.1: respiro lateral/inferior dos cartões — topo coberto pelo vt-root */
-  padding: 8px 20px 20px;
+  gap: 5px;
 }
-
-/* ─── Zona de Navegação (árvore) ────────────────────────────────────────── */
-
-.cmv-tree-zone {
-  /* flex-basis controlado por inline style no TSX; nenhuma largura fixa aqui */
-  flex-shrink: 0;
+.cmv-tree-zone, .cmv-reading-zone, .cmv-code-zone {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
-  /* Pele de cartão */
-  border-radius: 10px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
+  border-radius: 13px;
+  border: 1px solid var(--border-subtle);
+  background: linear-gradient(130deg, color-mix(in srgb, var(--status-restored) 3%, var(--bg-secondary)), var(--bg-secondary));
+  box-shadow: 0 6px 22px rgba(0, 0, 0, calc(var(--shadow-opacity) * .4));
   overflow: hidden;
 }
-
-/* ─── Barra do Explorer (botão inteligente) — fixa fora do scroll ────────── */
-
+.cmv-tree-zone, .cmv-reading-zone {
+  flex-shrink: 0;
+}
+.cmv-reading-zone {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+}
+.cmv-code-zone {
+  flex: 1 1 auto;
+}
+.cmv-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex-shrink: 0;
+  padding: 15px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cmv-pane-header > svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.cmv-pane-header h2 {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.4;
+}
+.cmv-pane-header > span {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 11px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmv-pane-header--awareness {
+  background: linear-gradient(110deg, color-mix(in srgb, var(--accent) 6%, transparent), transparent);
+  border-bottom: 0;
+  padding-bottom: 6px;
+}
+.cmv-pane-header--awareness > div {
+  min-width: 0;
+}
+.cmv-pane-header--awareness h2 {
+  font-size: 16px;
+}
+.cmv-pane-header p {
+  margin: 4px 0 0;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.cmv-code-zone .cmv-pane-header > svg {
+  color: var(--text-secondary);
+}
 .cmv-explorer-bar {
   flex-shrink: 0;
   display: flex;
-  justify-content: flex-start;
   align-items: center;
-  padding: 4px 8px;
-  gap: 4px;
-  row-gap: 4px;
+  gap: 5px;
+  row-gap: 5px;
   flex-wrap: wrap;
+  padding: 8px 10px;
   min-height: 36px;
 }
-
-/* ─── Miolo rolável da árvore ────────────────────────────────────────────── */
-
-.cmv-tree-scroll {
+.cmv-tree-scroll, .cmv-reading-scroll, .cmv-code-scroll {
   flex: 1;
   overflow-y: auto;
-  min-height: 0;
-}
-
-/* ─── Zona de Leitura (resumo) ──────────────────────────────────────── */
-
-.cmv-reading-zone {
-  /* flex-basis controlado por inline style no TSX; nenhuma largura fixa aqui */
-  flex-shrink: 0;
-  display: flex;
-  flex-direction: column;
+  overflow-x: hidden;
   min-height: 0;
   min-width: 0;
-  /* Pele de cartão */
-  border-radius: 10px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
-  overflow: hidden;
 }
-
-/* ─── Miolo rolável da leitura ──────────────────────────────────────────── */
-
-.cmv-reading-scroll {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-/* ─── Zona de Código (coluna flexível) ──────────────────────────────────── */
-
-.cmv-code-zone {
-  /* Absorve o espaço restante após as outras duas colunas e as alças */
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  /* Pele de cartão */
-  border-radius: 10px;
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color, rgba(0, 0, 0, 0.08));
-  overflow: hidden;
-}
-
-/* ─── Miolo rolável do código ────────────────────────────────────────────── */
-
 .cmv-code-scroll {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-/* Quando o bloco de código está virtualizado (arquivos grandes), o scroll externo
-   cede lugar ao scroll interno da lista. O contêiner vira coluna flex sem rolagem
-   própria e o filho direto (.cmcv-root) estica para preencher todo o cartão. */
-.cmv-code-scroll:has(.csb-root--virtualized) {
   display: flex;
   flex-direction: column;
+}
+.cmv-code-scroll:has(.csb-root--virtualized) {
   overflow: hidden;
 }
-
 .cmv-code-scroll:has(.csb-root--virtualized) > .cmcv-root {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
+}
+@media (max-width: 1200px) {
+  .cmv-container {
+    padding: 12px;
+    gap: 10px;
+  }
+  .cmv-awareness-top {
+    gap: 10px;
+  }
+  .cmv-awareness-icon {
+    width: 48px;
+    height: 48px;
+    border-radius: 12px;
+  }
+  .cmv-awareness-identity {
+    gap: 12px;
+  }
+  .cmv-awareness-identity h1 {
+    font-size: 25px;
+  }
+  .cmv-awareness-stats {
+    gap: 6px;
+  }
+  .cmv-awareness-stats > div {
+    min-width: 73px;
+    padding: 9px;
+    gap: 7px;
+  }
+  .cmv-awareness-stats svg {
+    width: 16px;
+  }
+  .cmv-awareness-stats strong {
+    font-size: 15px;
+  }
+  .cmv-awareness-health {
+    padding-left: 10px;
+  }
+  .cmv-pane-header {
+    padding: 12px;
+  }
+}
+@media (max-width: 850px) {
+  .cmv-awareness-top {
+    flex-wrap: wrap;
+  }
+  .cmv-awareness-identity {
+    flex-basis: calc(100% - 140px);
+  }
+  .cmv-awareness-health {
+    order: 1;
+  }
+  .cmv-awareness-stats {
+    order: 2;
+    width: 100%;
+  }
+  .cmv-awareness-stats > div {
+    flex: 1;
+  }
+  .cmv-pane-header p {
+    display: none;
+  }
 }
 
 /* ─── Árvore ─────────────────────────────────────────────────────────────── */
@@ -184,7 +362,7 @@
   top: 0;
   bottom: 15px; /* 15px = metade da altura da linha para alinhar com o centro do último filho */
   width: 1px;
-  background: var(--border-color, #e5e7eb);
+  background: var(--border);
   opacity: 0.25;
   pointer-events: none;
 }
@@ -207,7 +385,10 @@
 }
 
 .cmv-tree-node--selected {
-  background: var(--accent-bg, rgba(59, 130, 246, 0.15));
+  background: linear-gradient(100deg, color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent) 5%, transparent));
+  box-shadow: inset 3px 0 var(--accent);
+  outline: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  outline-offset: -1px;
   border-radius: 6px;
 }
 
@@ -237,7 +418,7 @@
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 14px;
+  font-size: 12px;
 }
 
 .cmv-tree-status {
@@ -246,7 +427,7 @@
 }
 
 .cmv-tree-status--modified {
-  color: #f59e0b;
+  color: var(--color-warning);
 }
 
 .cmv-tree-count {
@@ -262,13 +443,13 @@
 /* ─── Foco por Teclado ─────────────────────────────────────────────────── */
 
 .cmv-tree-node--focused {
-  outline: 2px solid var(--accent-color, #3b82f6);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
   background: var(--hover-bg, rgba(0, 0, 0, 0.05));
 }
 
 .cmv-tree-node--focused.cmv-tree-node--selected {
-  outline-color: var(--accent-color, #3b82f6);
+  outline-color: var(--accent);
 }
 
 /* ─── Destaque de Relacionamentos ──────────────────────────────────────── */
@@ -395,77 +576,6 @@
 
 /* ─── Resumo do Repositório (zona de leitura) ────────────────────────────── */
 
-.cmv-overview {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 24px;
-  padding: 48px 32px;
-  background: var(--bg-secondary);
-  border-radius: 12px;
-  min-height: 100%;
-  box-sizing: border-box;
-  text-align: center;
-}
-
-.cmv-overview-title {
-  margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-primary);
-  overflow-wrap: anywhere;
-}
-
-.cmv-overview-stats {
-  display: flex;
-  gap: 32px;
-  flex-wrap: wrap;
-  justify-content: center;
-}
-
-.cmv-overview-stat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.cmv-overview-stat-value {
-  font-size: 28px;
-  font-weight: 700;
-  color: var(--text-primary);
-}
-
-.cmv-overview-stat-value--modified {
-  color: #f59e0b;
-}
-
-.cmv-overview-stat-label {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.cmv-overview-footer {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.cmv-overview-label {
-  font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-secondary);
-}
-
-.cmv-overview-value {
-  font-size: 13px;
-  color: var(--text-primary);
-}
-
-/* Giro do ícone de verificação de integridade em andamento */
 @keyframes cmv-spin {
   to {
     transform: rotate(360deg);

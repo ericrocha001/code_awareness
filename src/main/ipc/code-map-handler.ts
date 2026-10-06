@@ -58,6 +58,13 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
     })
   })
 
+  repositoryEventBus.onFileIndexed((event) => {
+    broadcastToWindows('code-map:file-indexed', {
+      repoPath: event.repositoryId,
+      relativePath: event.relativePath
+    })
+  })
+
   ipcMain.handle('code-map:open-repository', async (_event, repoPath: unknown) => {
     try {
       if (!isValidPath(repoPath)) {
@@ -103,7 +110,6 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
         return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia' }
       }
       const result = await codeMapService.synchronizeModified(repoPath)
-      broadcastToWindows('code-map:file-indexed', { repoPath, relativePath: '' })
       return { success: true, data: result }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }

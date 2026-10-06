@@ -33,6 +33,7 @@ export interface ContextNavigationPort {
 }
 
 export interface CodeMapNavigationPort extends CodeMapDiscoveryPort {
+  awaitReadiness?(repoPath: string, capability: 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS' | 'SYMBOL_REFERENCES'): Promise<void>
   getFiles(repoPath: string): CodeMapFile[]
   getElements(repoPath: string): CodeMapElement[]
   getSymbolReferencesByTargetElement(repoPath: string, targetElementId: string): PersistedSymbolReference[]

@@ -90,6 +90,18 @@ function file(
   return { fileId: `file:${relativePath}`, relativePath, elements, symbolReferences, importBindings, exportedConstNewBindings, exportedConstCallBindings }
 }
 
+describe('incremental source selection', () => {
+  it('uses global target context without visiting candidates of unaffected sources', () => {
+    const target = file('target.ts', exported('execute-id', 'execute', 'function'))
+    const source = file('source.ts', [], [candidate('execute', 'call')], [binding('./target', 'execute')])
+    const unrelated = file('unrelated.ts', [])
+    Object.defineProperty(unrelated, 'symbolReferences', { get() { throw new Error('unaffected candidates visited') } })
+    const references = resolveSymbolReferences('/repo', [source, target, unrelated], new Set([source.fileId]))
+    expect(references).toHaveLength(1)
+    expect(references[0]).toMatchObject({ sourceFileId: source.fileId, targetElementId: 'execute-id' })
+  })
+})
+
 describe('SymbolReferenceResolver', () => {
   it('resolve declarações locais top-level apenas para kinds compatíveis e inequívocos', () => {
     const source = file('src/local.ts', [

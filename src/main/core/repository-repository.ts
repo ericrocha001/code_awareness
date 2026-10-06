@@ -11,6 +11,7 @@ import type {
   CodeMapSyncStatus
 } from '../../shared/types'
 import type { PersistedSymbolReference } from './symbol-reference-resolver'
+import type { SymbolResolutionFacts } from './symbol-resolution-facts'
 
 export interface CodeMapRepositoryRow {
   id: string
@@ -154,7 +155,8 @@ export interface RepositoryRepository {
     elements: CodeMapElement[],
     relationships: CodeMapRelationship[],
     elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>,
-    symbolReferences?: PersistedSymbolReference[]
+    symbolReferences?: PersistedSymbolReference[],
+    facts?: SymbolResolutionFacts
   ): void
 
   /** Salva ou substitui as interfaces implementadas por elementos em uma transação. */
@@ -167,6 +169,10 @@ export interface RepositoryRepository {
   getElementInterfacesByRepository(repositoryId: string): Array<{ elementId: string; interfaceNames: string[] }>
 
   replaceSymbolReferencesForFile(sourceFileId: string, references: PersistedSymbolReference[]): void
+
+  saveSymbolResolutionFacts(facts: SymbolResolutionFacts): void
+  getSymbolResolutionFacts(repositoryId: string): SymbolResolutionFacts[]
+  deleteSymbolResolutionFacts(fileId: string): void
 
   getSymbolReferencesByTargetElement(targetElementId: string): PersistedSymbolReference[]
 

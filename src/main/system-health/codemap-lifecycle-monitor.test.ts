@@ -184,6 +184,21 @@ describe('CodeMapLifecycleMonitor', () => {
   // ─── Structural State ─────────────────────────────────────────────────────────
 
   describe('Structural Index State', () => {
+    it('identifies symbol persistence failures separately from resolution failures', () => {
+      fire('CODE_MAP', 'SYMBOL_REFERENCE_PERSISTENCE_FAILED', { repoPath: '/repo/a', phase: 'PERSISTENCE', error: 'write failed' })
+      fire('CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_FAILED', { repoPath: '/repo/a', phase: 'PERSISTENCE', error: 'write failed' })
+      expect(monitor.getRepoState('/repo/a')?.structural.activeFailureBoundaryId).toBe('symbol-ref-persistence')
+      fire('CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED', { repoPath: '/repo/a' })
+      expect(monitor.getRepoState('/repo/a')?.structural.activeFailureBoundaryId).toBeNull()
+    })
+    it('retains the symbol failure boundary after a later reindex failure event', () => {
+      fire('CODE_MAP', 'RELATIONSHIP_RESOLUTION_COMPLETED', { repoPath: '/repo/a' })
+      fire('CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_FAILED', { repoPath: '/repo/a', error: 'enrichment failed' })
+      fire('CODE_MAP', 'REINDEX_FAILED', { repoPath: '/repo/a', phase: 'SYMBOL_REFERENCES', error: 'enrichment failed' })
+      expect(monitor.getRepoState('/repo/a')?.structural.activeFailureBoundaryId).toBe('symbol-ref-resolution')
+      fire('CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED', { repoPath: '/repo/a' })
+      expect(monitor.getRepoState('/repo/a')?.structural.activeFailureBoundaryId).toBeNull()
+    })
     it('STRUCTURE_EXTRACTED registra lastExtractionAt', () => {
       fire('CODE_MAP', 'STRUCTURE_EXTRACTED', { repoPath: '/repo/a', relativePath: 'src/main.ts' })
       const state = monitor.getRepoState('_default') ?? monitor.getAllStates()[0]

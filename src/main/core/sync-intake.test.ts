@@ -17,6 +17,7 @@ import { RepositoryFileMembership, type MembershipGitService } from './repositor
 import { RepositorySynchronizer } from './repository-synchronizer'
 import { repositoryEventBus } from './repository-events'
 import { telemetryService } from './telemetry-service'
+import { RepositoryChangeReadiness } from './repository-change-readiness'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -57,6 +58,7 @@ function makeModelStub(repoPath: string, indexedPaths: string[] = []) {
   const files = indexedPaths.map(p => ({ relativePath: p, status: 'indexed', contentHash: null }))
 
   return {
+    readiness: new RepositoryChangeReadiness(),
     getRepoPath: () => repoPath,
     getRepositoryId: () => 'test-repo-id',
     getModifiedFiles: () => files.filter(f => modified.has(f.relativePath)),

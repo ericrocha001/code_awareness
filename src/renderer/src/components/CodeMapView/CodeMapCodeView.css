@@ -24,5 +24,36 @@
 }
 
 .cmcv-state--error {
-  color: #f87171;
+  color: var(--color-danger);
+}
+
+.cmcv-empty {
+  flex-direction: column;
+  min-height: 100%;
+  padding: 30px 24px;
+  gap: 14px;
+}
+.cmcv-empty-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 78px;
+  height: 78px;
+  margin-bottom: 16px;
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--border));
+  border-radius: 50%;
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 17%, transparent), transparent);
+  box-shadow: 0 0 0 18px color-mix(in srgb, var(--accent) 3%, transparent);
+}
+.cmcv-empty h3 {
+  margin: 0;
+  font-size: 16px;
+  color: var(--text-primary);
+}
+.cmcv-empty p {
+  max-width: 260px;
+  margin: 0;
+  line-height: 1.7;
+  font-size: 12px;
 }

@@ -155,7 +155,10 @@ describe('CodeMap — Atualização Automática Real (Auto-Sync)', () => {
 
     // Reconciliação com indexUnexpected=true (o mesmo que CodeMapService.openRepository usa)
     const res = await model.reconcileWithDisk({ indexUnexpected: true })
-    expect(res.indexedUnexpected).toBe(1)
+    expect(res.pendingPaths).toEqual(['late.ts'])
+    sync = new RepositorySynchronizer(model, model.getRepositoryId())
+    sync.reconcileMemoryWithDatabase(res.pendingPaths)
+    expect((await sync.synchronizeModified()).filesUpdated).toBe(1)
 
     // O arquivo novo está indexado com elementos
     const lateFile = model.getFiles().find((f) => f.relativePath === 'late.ts')

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import type { CodeMapElement, CodeMapFile, CodeMapRelationship, CodeMapRepository, Tag, IntegrityIssue, IntegrityCheckResult } from '../../../../shared/types'
 import { CodeMapTree } from './CodeMapTree'
+import { CodeMapAwarenessHeader } from './CodeMapAwarenessHeader'
 import { CodeMapOverview } from './CodeMapOverview'
 import { CodeMapDetailPanel } from './CodeMapDetailPanel'
 import { CodeMapBreadcrumb } from './CodeMapBreadcrumb'
@@ -11,11 +12,9 @@ import { buildFileGraph, getRelatedFileIds } from './fileRelationships'
 import { EXTENSION_FILTER_KEY_PREFIX, TAG_FILTER_KEY_PREFIX, NO_EXTENSION_LABEL, extensionLabel } from './constants'
 import { getContrastColor } from '../../utils/color-utils'
 import { FilterPopover } from '../shared/FilterPopover/FilterPopover'
-import { ViewToolbar } from '../shared/ViewToolbar/ViewToolbar'
-import { ActionBar } from '../shared/ActionBar/ActionBar'
 import { Button } from '../shared/Button/Button'
 import { CodeMapHealth, type CodeMapIntegrityState } from './CodeMapHealth'
-import { RefreshCw, SearchX, FilterX, DatabaseZap, ChevronsDownUp, ChevronsUpDown, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
+import { Folder, Network, FileText, RefreshCw, SearchX, FilterX, DatabaseZap, ChevronsDownUp, ChevronsUpDown, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import './CodeMapView.css'
 import { normalizeProjectPath } from '../../../../shared/utils/path-utils'
 
@@ -28,8 +27,7 @@ const COLUMNS_KEY_PREFIX = 'codeMap:columns:'
 /** Chave base para persistência de visibilidade das colunas no localStorage. */
 const COLUMNS_HIDDEN_KEY_PREFIX = 'codeMap:columns:hidden:'
 
-/** Frações iniciais das colunas: tree=22%, reading e code dividem o resto em 50/50. */
-const DEFAULT_SPLIT = { tree: 0.22, reading: 0.39 }
+const DEFAULT_SPLIT = { tree: 0.24, reading: 0.45 }
 
 interface CodeMapViewProps {
   activeProject: { path: string; name: string } | null
@@ -54,6 +52,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
   const [isIndexing, setIsIndexing] = useState(false)
   const [isVerifying, setIsVerifying] = useState(false)
   const [integrityState, setIntegrityState] = useState<CodeMapIntegrityState>('unknown')
+  const [healthError, setHealthError] = useState<string | null>(null)
   const [integrityModalState, setIntegrityModalState] = useState<{
     isOpen: boolean
     issues: IntegrityIssue[]
@@ -150,6 +149,9 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
     setSelectedFileId(null)
     setFocusedElementId(null)
     setFileHistory([])
+    setHealthError(null)
+    setIntegrityState('unknown')
+    setIntegrityModalState({ isOpen: false, issues: [], checkResult: null })
     if (!activeProject) {
       setFiles([])
       setElements([])
@@ -778,6 +780,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
     if (!activeProject || isVerifying) return
 
     setIsVerifying(true)
+    setHealthError(null)
     try {
       onStatusMessage('Verificando integridade do Code Map...', false)
 
@@ -791,16 +794,23 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
           : result1.error?.includes('permission')
             ? 'Sem permissão para ler arquivos do repositório'
             : `Erro na verificação: ${result1.error}`
+        setHealthError(errorMsg)
         onStatusMessage(errorMsg, true)
         return
       }
 
-      const data = result1.data!
+      const data = result1.data
+      if (!data || data.status === 'unknown' || (data.status !== 'healthy' && !data.details?.length)) {
+        const message = 'Não foi possível determinar a integridade do CodeMap.'
+        setHealthError(message)
+        onStatusMessage(message, true)
+        return
+      }
 
-      if (data.status === 'healthy' || !data.details || data.details.length === 0) {
+      if (data.status === 'healthy') {
         setIntegrityState('healthy')
         setIntegrityModalState({ isOpen: false, issues: [], checkResult: null })
-        onStatusMessage('✓ Code Map íntegro — nenhuma inconsistência encontrada', false)
+        onStatusMessage('CodeMap íntegro — Nenhuma inconsistência encontrada.', false)
         return
       }
 
@@ -817,10 +827,9 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
         false
       )
     } catch (err) {
-      onStatusMessage(
-        `Erro ao verificar integridade: ${err instanceof Error ? err.message : String(err)}`,
-        true
-      )
+      const message = `Erro ao verificar integridade: ${err instanceof Error ? err.message : String(err)}`
+      setHealthError(message)
+      onStatusMessage(message, true)
     } finally {
       setIsVerifying(false)
     }
@@ -832,19 +841,26 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
     if (!activeProject || isIndexing) return
 
     setIsIndexing(true)
+    setHealthError(null)
     try {
       const result = await window.codeAwareness.indexRepository(activeProject.path)
       if (result.success && result.data) {
+        setIntegrityState('unknown')
+        setIntegrityModalState({ isOpen: false, issues: [], checkResult: null })
         onStatusMessage(
           `${result.data.filesIndexed} arquivo(s) indexado(s) • ${result.data.elementsExtracted} elemento(s) extraído(s)`
         )
         // Recarrega dados após indexação (popula árvore e o registro do repositório)
         await loadData(activeProject.path)
       } else {
-        onStatusMessage(`Erro ao indexar: ${result.error}`, true)
+        const message = `Erro ao reconstruir índice: ${result.error ?? 'resposta inválida'}`
+        setHealthError(message)
+        onStatusMessage(message, true)
       }
     } catch (err) {
-      onStatusMessage(`Erro ao indexar: ${err instanceof Error ? err.message : String(err)}`, true)
+      const message = `Erro ao reconstruir índice: ${err instanceof Error ? err.message : String(err)}`
+      setHealthError(message)
+      onStatusMessage(message, true)
     } finally {
       setIsIndexing(false)
     }
@@ -862,24 +878,16 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
 
   return (
     <div className="cmv-container">
-      <ViewToolbar
+      <CodeMapAwarenessHeader
+        repositoryName={repository?.name ?? activeProject.name}
+        fileCount={files.length}
+        elementCount={elements.length}
+        modifiedCount={modifiedCount}
         searchValue={searchQuery}
         onSearchChange={setSearchQuery}
-        searchPlaceholder="Buscar arquivos e elementos..."
         searchRef={searchInputRef}
-        summary={
-          searchQuery.trim() ? (
-            <span>{searchSummary}</span>
-          ) : (
-            <span>
-              {filteredByTags.length} arquivo(s) • {filteredElementCount} elemento(s) • {modifiedCount} modificado(s)
-            </span>
-          )
-        }
-      />
-
-      <ActionBar
-        left={
+        summary={searchQuery.trim() ? searchSummary ?? '' : `${filteredByTags.length} arquivos · ${filteredElementCount} elementos na visualização`}
+        controls={
           <>
             <Button
               variant="ghost"
@@ -897,11 +905,12 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
             />
           </>
         }
-        right={
+        health={
           neverIndexed ? (
             <Button
               variant="pill"
-              icon={<RefreshCw size={16} />}
+              icon={<RefreshCw size={16}
+      />}
               onClick={handleIndex}
               disabled={isIndexing}
             >
@@ -909,13 +918,15 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
             </Button>
           ) : (
             <CodeMapHealth
-              state={integrityState === 'issue' ? 'issue' : isLoading || isIndexing || modifiedCount > 0 ? 'updating' : 'healthy'}
+              key={activeProject.path}
+              state={isVerifying || isIndexing ? 'updating' : healthError || integrityState === 'issue' ? 'issue' : modifiedCount > 0 ? 'pending' : 'healthy'}
               indexedAt={repository?.lastIndexedAt ?? null}
               lastSyncAt={lastSyncAt}
               modifiedCount={modifiedCount}
               integrityState={integrityState}
               integrityIssueCount={integrityModalState.issues.length}
               isVerifying={isVerifying}
+              operationError={healthError}
               isRebuilding={isIndexing}
               onVerifyIntegrity={handleVerifyIntegrity}
               onShowIntegrityIssues={() => setIntegrityModalState((previous) => ({ ...previous, isOpen: true }))}
@@ -937,6 +948,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
             className="cmv-tree-zone"
             style={{ flexBasis: `${columnSplit.tree * 100}%` }}
           >
+            <header className="cmv-pane-header"><Folder size={20} aria-hidden="true" /><h2>Repository</h2><span>{filteredData.files.length} arquivos</span></header>
             <div className="cmv-explorer-bar">
               <Button
                 variant="ghost"
@@ -1075,6 +1087,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
             className="cmv-reading-zone"
             style={{ flexBasis: `${visibleReadingBasis * 100}%` }}
           >
+            <header className="cmv-pane-header cmv-pane-header--awareness"><Network size={23} aria-hidden="true" /><div><h2>Structural Awareness</h2><p>Estrutura, elementos e relacionamentos do repositório.</p></div></header>
             {selectedFile ? (
               <>
                 <CodeMapBreadcrumb file={selectedFile} focusedElement={focusedElement} />
@@ -1104,6 +1117,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
               <div className="cmv-reading-scroll">
                 <CodeMapOverview
                   repository={repository}
+                  repositoryName={activeProject.name}
                   fileCount={files.length}
                   elementCount={elements.length}
                   modifiedCount={modifiedCount}
@@ -1120,6 +1134,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
           {/* ── Cartão Código (ocultável) ────────────────────────── */}
           {!isCodeHidden && (
           <div className="cmv-code-zone">
+            <header className="cmv-pane-header"><FileText size={19} aria-hidden="true" /><h2>Source</h2>{selectedFile && <span title={selectedFile.relativePath}>{selectedFile.relativePath.split('/').pop()}</span>}</header>
             <div className="cmv-code-scroll">
               <CodeMapCodeView file={selectedFile} repoPath={activeProject.path} />
             </div>
@@ -1135,7 +1150,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
         collapsedGroups={integrityCollapsedGroups}
         onCollapsedGroupsChange={setIntegrityCollapsedGroups}
         onStatusMessage={onStatusMessage}
-        checkResult={integrityModalState.checkResult}
+        checkResult={integrityModalState.checkResult ?? undefined}
         onRepairComplete={(repairResult) => {
           setIntegrityModalState({ isOpen: false, issues: [], checkResult: null })
           setIntegrityState('unknown')

@@ -1,3 +1,4 @@
+import { RepositoryChangeReadiness } from '../repository-change-readiness'
 /**
  * Testes de contrato de readiness para get_relationships e get_symbol_hierarchy.
  *
@@ -58,6 +59,7 @@ vi.mock('../repository-model', async (importOriginal) => {
     createRepositoryModel: vi.fn((repoPath: string) => {
       const isWarm = repoPath.includes('warm')
       return {
+        readiness: new RepositoryChangeReadiness(),
         getRepoPath: () => repoPath,
         getRepositoryId: () => 'test-repo-id',
         pruneKnownBinaryFiles: () => {},
@@ -290,7 +292,7 @@ describe('get_symbol_hierarchy readiness contract', () => {
 })
 
 describe('RELATIONSHIPS vs snapshot — isolation', () => {
-  it('get_references ainda usa awaitSnapshot (symbol references requerem backfill completo)', async () => {
+  it('get_references usa SYMBOL_REFERENCES sem snapshot global', async () => {
     let snapshotCalled = false
     let readinessCalled = false
 
@@ -312,10 +314,9 @@ describe('RELATIONSHIPS vs snapshot — isolation', () => {
     const elemId = createFullTargetId(sampleElements[0].id)
     await engine.getReferences('/test/repo', [elemId])
 
-    // get_references usa awaitSnapshot — symbol references dependem de backfill
-    expect(snapshotCalled).toBe(true)
-    // awaitReadiness não é chamado para get_references
-    expect(readinessCalled).toBe(false)
+    expect(snapshotCalled).toBe(false)
+    expect(readinessCalled).toBe(true)
+    expect(port.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'SYMBOL_REFERENCES')
   })
 
   it('RELATIONSHIPS readiness não espera backgroundMaintenance — CodeMapService real', async () => {

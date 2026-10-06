@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { FileCode2 } from 'lucide-react'
 import type { CodeMapFile } from '../../../../shared/types'
 import { CodeSnippetBlock } from './CodeSnippetBlock'
 import './CodeMapCodeView.css'
@@ -56,7 +57,7 @@ export const CodeMapCodeView: React.FC<CodeMapCodeViewProps> = ({ file, repoPath
   }, [file, repoPath])
 
   if (!file) {
-    return <div className="cmcv-empty">Selecione um arquivo para ver o código completo.</div>
+    return <div className="cmcv-empty"><span className="cmcv-empty-icon"><FileCode2 size={36} strokeWidth={1.4} aria-hidden="true" /></span><h3>Nenhum source selecionado</h3><p>Selecione um arquivo ou elemento estrutural para inspecionar seu código.</p></div>
   }
 
   return (

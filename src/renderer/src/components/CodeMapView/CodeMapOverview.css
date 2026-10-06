@@ -1,0 +1,267 @@
+.cmv-overview {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  min-width: 0;
+}
+.cmv-overview-map {
+  min-width: 0;
+  padding: 8px 16px 15px;
+  border: 1px solid color-mix(in srgb, var(--accent) 20%, var(--border));
+  border-radius: 11px;
+  background: radial-gradient(ellipse at 50% 25%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 60%), color-mix(in srgb, var(--bg-primary) 48%, var(--bg-secondary));
+}
+.cmv-topology {
+  position: relative;
+  height: clamp(140px, 18vh, 200px);
+  color: var(--accent);
+  pointer-events: none;
+  overflow: hidden;
+}
+.cmv-topology > svg {
+  width: 100%;
+  height: 100%;
+}
+.cmv-topology-orbits {
+  stroke: currentColor;
+  stroke-opacity: .2;
+  stroke-width: .7;
+}
+.cmv-topology-links {
+  stroke: var(--status-restored);
+  stroke-opacity: .4;
+  stroke-width: .8;
+}
+.cmv-topology circle {
+  fill: var(--accent);
+  stroke: color-mix(in srgb, var(--accent) 50%, var(--text-primary));
+  stroke-width: 1;
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--accent) 65%, transparent));
+}
+.cmv-topology circle.cmv-topology-node--blue {
+  fill: var(--status-restored);
+}
+.cmv-topology-eye {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100px;
+  height: 100px;
+  transform: translate(-50%, -50%);
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
+  background: radial-gradient(circle, color-mix(in srgb, var(--accent) 18%, transparent), transparent 72%);
+  box-shadow: 0 0 36px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.cmv-topology-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  position: absolute;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--bg-primary) 88%, var(--accent));
+  color: var(--text-secondary);
+  font-size: 10px;
+}
+.cmv-topology-label svg {
+  color: var(--accent);
+}
+.cmv-topology-label--files {
+  left: 5%;
+  top: 22%;
+}
+.cmv-topology-label--symbols {
+  right: 4%;
+  top: 19%;
+}
+.cmv-topology-label--relations {
+  right: 1%;
+  bottom: 10%;
+}
+.cmv-overview-title {
+  margin: 0;
+  text-align: center;
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -.02em;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmv-overview-subtitle {
+  margin: 6px 0 18px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.cmv-overview-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.cmv-overview-stat {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 4%, var(--bg-secondary)), var(--bg-secondary));
+}
+.cmv-overview-stat > span:last-child {
+  min-width: 0;
+}
+.cmv-overview-stat-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex-shrink: 0;
+  color: var(--status-restored);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--status-restored) 10%, transparent);
+}
+.cmv-overview-stat:nth-child(2) .cmv-overview-stat-icon {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.cmv-overview-stat:last-child .cmv-overview-stat-icon {
+  color: var(--text-secondary);
+  background: var(--hover-bg);
+}
+.cmv-overview-stat-value {
+  display: block;
+  font-size: clamp(18px, 1.6vw, 25px);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cmv-overview-stat-label {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.cmv-overview-stat--pending {
+  border-color: color-mix(in srgb, var(--color-warning) 40%, var(--border));
+}
+.cmv-overview-stat--pending .cmv-overview-stat-value, .cmv-overview-stat--pending:last-child .cmv-overview-stat-icon {
+  color: var(--color-warning);
+}
+.cmv-overview-times {
+  margin-top: 17px;
+  padding-top: 15px;
+  border-top: 1px solid var(--border-subtle);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.cmv-overview-times > div {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.cmv-overview-times > div + div {
+  padding-left: 14px;
+  border-left: 1px solid var(--border-subtle);
+}
+.cmv-overview-times svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.cmv-overview-times span {
+  min-width: 0;
+}
+.cmv-overview-times small {
+  display: block;
+  color: var(--text-secondary);
+  font-size: 10px;
+  margin-bottom: 5px;
+}
+.cmv-overview-times strong {
+  display: block;
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 500;
+  overflow-wrap: normal;
+}
+.cmv-intelligence {
+  padding: 14px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 11px;
+  background: color-mix(in srgb, var(--bg-primary) 16%, var(--bg-secondary));
+}
+.cmv-intelligence header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.cmv-intelligence header svg {
+  color: var(--accent);
+}
+.cmv-intelligence h3 {
+  margin: 0;
+  font-size: 13px;
+}
+.cmv-intelligence p {
+  margin: 4px 0 0;
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+.cmv-intelligence-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 9px;
+}
+.cmv-intelligence-grid > div {
+  padding: 13px 11px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: linear-gradient(125deg, color-mix(in srgb, var(--accent) 5%, var(--bg-secondary)), var(--bg-secondary));
+}
+.cmv-intelligence-grid svg {
+  color: var(--accent);
+  margin-bottom: 9px;
+}
+.cmv-intelligence-grid > div:last-child svg {
+  color: var(--color-green);
+}
+.cmv-intelligence-grid h4 {
+  font-size: 10px;
+  margin: 0;
+  line-height: 1.5;
+}
+@media (max-width: 1200px) {
+  .cmv-overview {
+    padding: 10px;
+  }
+  .cmv-overview-map {
+    padding: 5px 11px 12px;
+  }
+  .cmv-overview-stat {
+    gap: 8px;
+    padding: 12px 9px;
+  }
+  .cmv-overview-stat-icon {
+    width: 28px;
+    height: 32px;
+  }
+  .cmv-overview-stat-icon svg {
+    width: 20px;
+  }
+  .cmv-intelligence-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

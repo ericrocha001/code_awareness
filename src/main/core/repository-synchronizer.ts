@@ -68,6 +68,7 @@ import type { RepositoryFileMembership } from './repository-file-membership'
 import type { SyncHarness } from './sync-harness'
 
 interface PendingFileEntry {
+  changeId: number
   addedAt: number
   attempts: number
   /** Correlation ID originado no WatcherBridge — preservado para rastreabilidade causal. */
@@ -88,6 +89,7 @@ export class RepositorySynchronizer {
   private debounceTimer: NodeJS.Timeout | null = null
   private isProcessingQueue = false
   private isDisposed = false
+  private readonly failedPaths = new Set<string>()
   private readonly periodicScanIntervalMs: number
   private periodicScanTimer: NodeJS.Timeout | null = null
   private isPeriodicScanRunning = false
@@ -135,31 +137,16 @@ export class RepositorySynchronizer {
     }
   }
 
-  /**
-   * Auto-reindex: após confirmação (modified/new/deleted), reindexa o arquivo imediatamente
-   * via substituição atômica. Em sucesso remove o path de modifiedFiles; em falha mantém
-   * como modified (caminho de recovery via synchronizeModified).
-   * INVARIANT: nunca lança — falha é registrada e o path permanece pendente.
-   */
-  private async autoReindex(relativePath: string, correlationId: string): Promise<void> {
+  private async autoReindex(relativePath: string, correlationId: string, changeId?: number): Promise<void> {
     if (this.isDisposed) return
     this.harness?.record('reindex')
-    try {
-      const ok = await this.model.updateFileContent(relativePath, correlationId)
-      if (ok) {
-        this.modifiedFiles.delete(relativePath)
-        telemetryService.log(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_COMPLETED', { relativePath })
-      } else {
-        telemetryService.log(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_SKIPPED', { relativePath })
-      }
-    } catch (err) {
-      // Falha → mantém como modified (recovery via synchronizeModified)
+    const result = await this.synchronizePaths([relativePath], correlationId, changeId === undefined ? undefined : new Map([[relativePath, changeId]]))
+    if (result.errors.length > 0) {
       telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_FAILED', {
-        relativePath,
-        operation: 'updateFileContent',
-        error: err instanceof Error ? err.message : String(err),
-        recovery: 'synchronizeModified'
+        repoPath: this.normalizedRepoPath, relativePath, error: result.errors[0]
       })
+    } else {
+      telemetryService.log(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_COMPLETED', { repoPath: this.normalizedRepoPath, relativePath })
     }
   }
 
@@ -194,7 +181,7 @@ export class RepositorySynchronizer {
       return
     }
 
-    this.pendingFiles.set(relativePath, { addedAt: Date.now(), attempts: 0, correlationId: cid })
+    this.pendingFiles.set(relativePath, { addedAt: Date.now(), attempts: 0, correlationId: cid, changeId: this.model.readiness.accept(0, relativePath) })
     telemetryService.log(cid, 'CHANGE_DETECTION', 'QUEUED', { relativePath })
 
     // Agenda debounce se ainda não estiver ativo
@@ -255,6 +242,7 @@ export class RepositorySynchronizer {
         const cid = metadata.correlationId
 
         if (rejectedPaths.has(relativePath)) {
+          this.model.readiness.advance(metadata.changeId, 'SYMBOL_REFERENCES')
           this.harness?.record('rejected')
           telemetryService.log(cid, 'CHANGE_DETECTION', 'INTAKE_REJECTED', { relativePath })
           continue
@@ -265,12 +253,14 @@ export class RepositorySynchronizer {
 
         try {
           await this.verifyAndMarkIfChanged(relativePath, metadata, cid)
+          if (!this.pendingFiles.has(relativePath) && !this.modifiedFiles.has(relativePath)) this.model.readiness.advance(metadata.changeId, 'SYMBOL_REFERENCES')
         } catch (err) {
           if (this.isDisposed) break
           telemetryService.logError(cid, 'CHANGE_DETECTION', 'VERIFY_FAILED', {
             relativePath,
             error: err instanceof Error ? err.message : String(err)
           })
+          this.model.readiness.fail(metadata.changeId, err)
           // Em caso de erro não antecipado, marca como modified por segurança
           this.modifiedFiles.add(relativePath)
           this.model.markFileModified(relativePath)
@@ -303,7 +293,7 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_DELETED', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-      await this.autoReindex(relativePath, correlationId)
+      await this.autoReindex(relativePath, correlationId, metadata.changeId)
       return
     }
 
@@ -315,6 +305,7 @@ export class RepositorySynchronizer {
         // Re-enfileira com tentativa incrementada para nova verificação após debounce
         this.pendingFiles.set(relativePath, {
           addedAt: Date.now(),
+          changeId: metadata.changeId,
           attempts: metadata.attempts + 1,
           correlationId
         })
@@ -327,6 +318,7 @@ export class RepositorySynchronizer {
         }
         return
       }
+      this.model.readiness.fail(metadata.changeId, new Error(`File did not stabilize: ${relativePath}`))
       // Excedeu tentativas → marca como modified por segurança
       this.modifiedFiles.add(relativePath)
       this.model.markFileModified(relativePath)
@@ -344,7 +336,7 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_NEW', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-      await this.autoReindex(relativePath, correlationId)
+      await this.autoReindex(relativePath, correlationId, metadata.changeId)
       return
     }
 
@@ -354,7 +346,7 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'LEGACY_FILE_MODIFIED', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-      await this.autoReindex(relativePath, correlationId)
+      await this.autoReindex(relativePath, correlationId, metadata.changeId)
       return
     }
 
@@ -378,7 +370,7 @@ export class RepositorySynchronizer {
     this.model.markFileModified(relativePath)
     telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_MODIFIED', { relativePath })
     repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-    await this.autoReindex(relativePath, correlationId)
+    await this.autoReindex(relativePath, correlationId, metadata.changeId)
   }
 
   /**
@@ -485,48 +477,47 @@ export class RepositorySynchronizer {
     }
   }
 
-  async synchronizeModified(): Promise<{ filesUpdated: number; errors: string[] }> {
+  async synchronizeModified(correlationId = telemetryService.startOperation('SYNC_BATCH')): Promise<{ filesUpdated: number; errors: string[] }> {
+    return this.synchronizePaths([...this.modifiedFiles], correlationId)
+  }
+
+  private async synchronizePaths(
+    paths: string[],
+    correlationId: string,
+    acceptedChanges?: Map<string, number>
+  ): Promise<{ filesUpdated: number; errors: string[] }> {
     const startedAt = Date.now()
-    const correlationId = telemetryService.startOperation('SYNC_BATCH')
-    const files = Array.from(this.modifiedFiles)
-    telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_STARTED', {
-      fileCount: files.length
-    })
+    const files = [...new Set(paths)]
+    const changes = new Map(files.map(path => [path, acceptedChanges?.get(path) ?? this.model.readiness.accept(0, path)]))
+    telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_STARTED', { repoPath: this.normalizedRepoPath, fileCount: files.length })
     const errors: string[] = []
     let filesUpdated = 0
-
-    try {
     for (const relativePath of files) {
       try {
-        const success = await this.model.updateFileContent(relativePath, correlationId)
-        if (success) {
-          filesUpdated++
-          this.modifiedFiles.delete(relativePath)
-        }
-      } catch (err) {
-        errors.push(`${relativePath}: ${err instanceof Error ? err.message : String(err)}`)
+        const success = await this.model.updateFileContent(relativePath, correlationId, changes.get(relativePath))
+        if (!success) throw new Error('File did not converge')
+        filesUpdated++
+        this.modifiedFiles.delete(relativePath)
+        this.failedPaths.delete(relativePath)
+        this.model.updateLastSyncAt(new Date().toISOString())
+        telemetryService.log(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGED', { repoPath: this.normalizedRepoPath, relativePath })
+        repositoryEventBus.emitFileIndexed(this.normalizedRepoPath, relativePath, correlationId)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.modifiedFiles.add(relativePath)
+        this.failedPaths.add(relativePath)
+        this.model.markFileModified(relativePath)
+        this.model.readiness.fail(changes.get(relativePath)!, error)
+        errors.push(`${relativePath}: ${message}`)
+        telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGENCE_FAILED', {
+          repoPath: this.normalizedRepoPath, relativePath, error: message, recovery: 'synchronizeModified'
+        })
       }
     }
-
-    if (filesUpdated > 0) {
-      this.model.updateLastSyncAt(new Date().toISOString())
-    }
-
-    telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_COMPLETED', {
-      filesUpdated,
-      errorCount: errors.length,
-      durationMs: Date.now() - startedAt
-    })
-
+    const payload = { repoPath: this.normalizedRepoPath, filesUpdated, errorCount: errors.length, errors, durationMs: Date.now() - startedAt }
+    if (errors.length > 0) telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_FAILED', payload)
+    else telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_COMPLETED', payload)
     return { filesUpdated, errors }
-    } catch (err) {
-      // try/catch exclusivo para telemetria: loga a falha e relança, mantendo o comportamento externo idêntico.
-      telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_FAILED', {
-        error: err instanceof Error ? err.message : String(err),
-        durationMs: Date.now() - startedAt
-      })
-      throw err
-    }
   }
 
   /**
@@ -547,7 +538,7 @@ export class RepositorySynchronizer {
    * (b) Em seguida faz a união com os arquivos 'modified' do banco.
    * INVARIANT: Nunca altera pendingFiles (eventos em verificação ao vivo).
    */
-  reconcileMemoryWithDatabase(): number {
+  reconcileMemoryWithDatabase(discoveredPaths: string[] = []): number {
     const dbFiles = this.model.getFiles()
     const dbModifiedPaths = new Set(
       dbFiles.filter(f => f.status === 'modified').map(f => f.relativePath)
@@ -559,7 +550,7 @@ export class RepositorySynchronizer {
       }
     }
 
-    for (const relativePath of dbModifiedPaths) {
+    for (const relativePath of [...dbModifiedPaths, ...discoveredPaths]) {
       this.modifiedFiles.add(relativePath)
     }
 
@@ -593,6 +584,7 @@ export class RepositorySynchronizer {
       const files = this.model.getFiles()
       let markedModified = 0
       let healed = 0
+      const newlyDetectedPaths = new Set<string>()
 
       for (const file of files) {
         const fullPath = join(this.model.getRepoPath(), file.relativePath)
@@ -600,6 +592,7 @@ export class RepositorySynchronizer {
         try {
           // Legado sem hash — marca para forçar reindexação e geração do hash
           if (!file.contentHash) {
+            if (file.status !== 'modified') newlyDetectedPaths.add(file.relativePath)
             this.model.markFileModified(file.relativePath)
             this.modifiedFiles.add(file.relativePath)
             markedModified++
@@ -613,6 +606,7 @@ export class RepositorySynchronizer {
 
           // Arquivo já marcado como 'modified' (pendente): decide por hash sempre
           if (file.status === 'modified') {
+            if (this.failedPaths.has(file.relativePath)) continue
             const diskHash = await this.calculateDiskHash(fullPath, correlationId)
             if (diskHash === file.contentHash) {
               // Conteúdo idêntico ao índice → cura o status obsoleto
@@ -645,6 +639,7 @@ export class RepositorySynchronizer {
             })
           } else {
             // Divergência de conteúdo confirmada → marca modified
+            newlyDetectedPaths.add(file.relativePath)
             this.model.markFileModified(file.relativePath)
             this.modifiedFiles.add(file.relativePath)
             markedModified++
@@ -652,6 +647,7 @@ export class RepositorySynchronizer {
           }
         } catch {
           // stat ou leitura falhou (deletado/inacessível) → marca modified por segurança
+          if (file.status !== 'modified') newlyDetectedPaths.add(file.relativePath)
           this.model.markFileModified(file.relativePath)
           this.modifiedFiles.add(file.relativePath)
           markedModified++
@@ -659,7 +655,10 @@ export class RepositorySynchronizer {
         }
       }
 
+      const convergence = await this.synchronizePaths([...newlyDetectedPaths], correlationId)
       telemetryService.log(correlationId, 'CODE_MAP', 'PERIODIC_SCAN_COMPLETED', {
+        filesUpdated: convergence.filesUpdated,
+        errorCount: convergence.errors.length,
         filesChecked: files.length,
         markedModified,
         healed,
@@ -694,5 +693,6 @@ export class RepositorySynchronizer {
 
     this.pendingFiles.clear()
     this.modifiedFiles.clear()
+    this.failedPaths.clear()
   }
 }

@@ -4,7 +4,7 @@
 
 import { EventEmitter } from 'events'
 
-export type RepositoryEventType = 'file:modified' | 'file:created' | 'file:deleted' | 'file:confirmed'
+export type RepositoryEventType = 'file:modified' | 'file:created' | 'file:deleted' | 'file:confirmed' | 'file:indexed'
 
 export interface RepositoryFileEvent {
   repositoryId: string
@@ -46,6 +46,14 @@ class RepositoryEventBus extends EventEmitter {
       'file:confirmed',
       { repositoryId, relativePath, correlationId } satisfies RepositoryFileEvent
     )
+  }
+
+  emitFileIndexed(repositoryId: string, relativePath: string, correlationId?: string): void {
+    this.emit('file:indexed', { repositoryId, relativePath, correlationId } satisfies RepositoryFileEvent)
+  }
+
+  onFileIndexed(handler: (event: RepositoryFileEvent) => void): void {
+    this.on('file:indexed', handler)
   }
 
   onFileConfirmed(handler: (event: RepositoryFileEvent) => void): void {

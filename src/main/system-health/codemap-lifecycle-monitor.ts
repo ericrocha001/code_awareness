@@ -296,11 +296,12 @@ export class CodeMapLifecycleMonitor {
         }
         break
       case 'RELATIONSHIP_RESOLUTION_FAILED':
-        state.structural.activeFailure = this.extractError(entry)
+        state.structural.activeFailure = this.extractError(entry) ?? null
         state.structural.activeFailureBoundaryId = 'relationship-resolution'
         break
       case 'REINDEX_FAILED':
-        state.structural.activeFailure = this.extractError(entry)
+        if ((entry.payload as Record<string, unknown> | undefined)?.phase === 'SYMBOL_REFERENCES') break
+        state.structural.activeFailure = this.extractError(entry) ?? null
         state.structural.activeFailureBoundaryId = 'file-reindex'
         break
       case 'REINDEX_COMPLETED':
@@ -309,16 +310,21 @@ export class CodeMapLifecycleMonitor {
           state.structural.activeFailureBoundaryId = null
         }
         break
+      case 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED':
       case 'BACKFILL_SYMBOL_REFERENCES_COMPLETED':
         state.structural.lastSymbolBackfillAt = entry.timestamp
-        if (state.structural.activeFailureBoundaryId === 'symbol-ref-resolution') {
+        if (state.structural.activeFailureBoundaryId === 'symbol-ref-resolution' || state.structural.activeFailureBoundaryId === 'symbol-ref-persistence') {
           state.structural.activeFailure = null
           state.structural.activeFailureBoundaryId = null
         }
         break
+      case 'SYMBOL_REFERENCE_RESOLUTION_FAILED':
+      case 'SYMBOL_REFERENCE_PERSISTENCE_FAILED':
       case 'BACKFILL_SYMBOL_REFERENCES_FAILED':
-        state.structural.activeFailure = this.extractError(entry)
-        state.structural.activeFailureBoundaryId = 'symbol-ref-resolution'
+        state.structural.activeFailure = this.extractError(entry) ?? null
+        state.structural.activeFailureBoundaryId = entry.event === 'SYMBOL_REFERENCE_PERSISTENCE_FAILED' ||
+          (entry.payload as Record<string, unknown> | undefined)?.phase === 'PERSISTENCE'
+          ? 'symbol-ref-persistence' : 'symbol-ref-resolution'
         break
     }
   }

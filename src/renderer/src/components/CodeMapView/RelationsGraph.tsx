@@ -41,11 +41,11 @@ export const RelationsGraph: React.FC<RelationsGraphProps> = ({
     // Cores concretas por tema — o Cytoscape desenha num canvas que NÃO resolve variáveis CSS.
     // No tema escuro, var(--text-primary) cairia no preto padrão e os rótulos sumiriam.
     const isDark = effectiveTheme === 'dark'
-    const nodeColor = isDark ? '#1f2937' : '#f3f4f6'
-    const nodeBorder = isDark ? '#4b5563' : '#d1d5db'
-    const edgeColor = isDark ? '#6b7280' : '#9ca3af'
+    const nodeColor = isDark ? '#26283e' : '#f2f0fb'
+    const nodeBorder = isDark ? '#57506d' : '#c6bfdd'
+    const edgeColor = isDark ? '#65618c' : '#9e94bd'
     const labelColor = isDark ? '#e5e7eb' : '#374151'
-    const accentColor = isDark ? '#60a5fa' : '#3b82f6'
+    const accentColor = isDark ? '#a78bfa' : '#7852ee'
 
     const cy = cytoscape({
       container,
@@ -63,7 +63,7 @@ export const RelationsGraph: React.FC<RelationsGraphProps> = ({
         {
           selector: 'node',
           style: {
-            'background-color': nodeColor,
+            'background-color': (ele: cytoscape.NodeSingular) => ele.data('isCentral') ? accentColor : nodeColor,
             'border-color': (ele: cytoscape.NodeSingular) =>
               ele.data('isCentral') ? accentColor : nodeBorder,
             'border-width': (ele: cytoscape.NodeSingular) =>
@@ -86,7 +86,8 @@ export const RelationsGraph: React.FC<RelationsGraphProps> = ({
             'line-color': edgeColor,
             'target-arrow-color': edgeColor,
             'target-arrow-shape': 'triangle',
-            'curve-style': 'bezier'
+            'curve-style': 'bezier',
+            opacity: 0.7
           }
         }
       ],
@@ -101,6 +102,11 @@ export const RelationsGraph: React.FC<RelationsGraphProps> = ({
         padding: 16
       }
     })
+
+    if (cy.zoom() > 1.5) {
+      cy.zoom(1.5)
+      cy.center()
+    }
 
     // Navega ao clicar em nós periféricos; ignora o nó central
     cy.on('tap', 'node', (evt) => {

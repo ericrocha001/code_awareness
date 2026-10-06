@@ -1,3 +1,4 @@
+import { RepositoryChangeReadiness } from '../repository-change-readiness'
 import { describe, expect, it, vi } from 'vitest'
 import { ContextEngine } from './context-engine'
 import type { CodeMapNavigationPort, NavigationInvocationContext } from './context-navigation-port'
@@ -22,6 +23,7 @@ vi.mock('../repository-model', async (importOriginal) => {
     createRepositoryModel: vi.fn((repoPath: string) => {
       let files = repoPath.includes('warm') ? [...sampleFiles] : []
       return {
+        readiness: new RepositoryChangeReadiness(),
         getRepoPath: () => repoPath,
         getRepositoryId: () => 'test-repo-id',
         pruneKnownBinaryFiles: () => {},
@@ -35,7 +37,7 @@ vi.mock('../repository-model', async (importOriginal) => {
           files = [...sampleFiles]
           return { filesIndexed: files.length, elementsExtracted: 0 }
         }),
-        reconcileWithDisk: vi.fn(async () => {}),
+        reconcileWithDisk: vi.fn(async () => ({})),
         backfillContentHashes: vi.fn(async () => {}),
         backfillContextReferences: vi.fn(async () => {}),
         backfillTokenMetadata: vi.fn(async () => {}),
@@ -259,22 +261,24 @@ describe('discover_repository readiness contract', () => {
     expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'RELATIONSHIPS')
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
-    // readCode ainda usa awaitSnapshot
+    // readCode usa STRUCTURE
     await engine.readCode('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(1)
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'STRUCTURE')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
-    // getReferences ainda usa awaitSnapshot (symbol references requerem backfill)
+    // getReferences usa SYMBOL_REFERENCES
     await engine.getReferences('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(2)
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'SYMBOL_REFERENCES')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
-    // getSymbolDependencies ainda usa awaitSnapshot
+    // getSymbolDependencies usa SYMBOL_REFERENCES
     await engine.getSymbolDependencies('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3)
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
     // discoverRepository usa awaitReadiness com FILE_INVENTORY
     await engine.discoverRepository('/test/repo')
     expect(mockPort.awaitReadiness).toHaveBeenCalledWith('/test/repo', 'FILE_INVENTORY')
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3) // sem incremento em awaitSnapshot
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled() // sem incremento em awaitSnapshot
   })
 
   it('Harness 12: Diagnostic Zoom by Design — emite traces de readiness com capability FILE_INVENTORY e drilldown localiza com precisão', async () => {

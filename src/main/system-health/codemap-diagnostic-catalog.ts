@@ -433,8 +433,8 @@ const SYMBOL_REF_RESOLUTION: DiagnosticBoundary = {
       'src/main/core/repository-model.ts',
     ]
   },
-  evidenceEvents: ['BACKFILL_SYMBOL_REFERENCES_STARTED', 'BACKFILL_SYMBOL_REFERENCES_COMPLETED'],
-  errorEvents: ['BACKFILL_SYMBOL_REFERENCES_FAILED'],
+  evidenceEvents: ['BACKFILL_SYMBOL_REFERENCES_STARTED', 'BACKFILL_SYMBOL_REFERENCES_COMPLETED', 'SYMBOL_REFERENCE_RESOLUTION_STARTED', 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED'],
+  errorEvents: ['BACKFILL_SYMBOL_REFERENCES_FAILED', 'SYMBOL_REFERENCE_RESOLUTION_FAILED'],
 }
 
 const SYMBOL_REF_PERSISTENCE: DiagnosticBoundary = {
@@ -452,8 +452,8 @@ const SYMBOL_REF_PERSISTENCE: DiagnosticBoundary = {
       'src/main/core/repository-model.ts',
     ]
   },
-  evidenceEvents: ['BACKFILL_SYMBOL_REFERENCES_COMPLETED'],
-  errorEvents: ['BACKFILL_SYMBOL_REFERENCES_FAILED'],
+  evidenceEvents: ['BACKFILL_SYMBOL_REFERENCES_COMPLETED', 'SYMBOL_REFERENCE_PERSISTENCE_COMPLETED'],
+  errorEvents: ['BACKFILL_SYMBOL_REFERENCES_FAILED', 'SYMBOL_REFERENCE_PERSISTENCE_FAILED'],
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -569,7 +569,7 @@ const MAINTENANCE_SYMBOL_REFS: DiagnosticBoundary = {
       'src/main/core/symbol-reference-resolver.ts',
     ]
   },
-  evidenceEvents: ['BACKFILL_SYMBOL_REFERENCES_STARTED', 'BACKFILL_SYMBOL_REFERENCES_COMPLETED'],
+  evidenceEvents: ['BACKFILL_SYMBOL_REFERENCES_STARTED', 'BACKFILL_SYMBOL_REFERENCES_COMPLETED', 'SYMBOL_REFERENCE_RESOLUTION_STARTED', 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED'],
   errorEvents: ['BACKFILL_SYMBOL_REFERENCES_FAILED'],
 }
 
@@ -668,14 +668,14 @@ const READINESS_STRUCTURE: DiagnosticBoundary = {
   target: {
     systemArea: 'CodeMap Readiness',
     component: 'CodeMapService / awaitReadiness(STRUCTURE)',
-    boundary: 'Repository Open → Structural Elements Available',
-    responsibility: 'Ensuring structural elements (classes, functions, etc.) can be served from the current persisted index without requiring full maintenance',
+    boundary: 'Accepted Changes → Structural Persistence',
+    responsibility: 'Waiting for changes captured by the causal barrier to persist structural state, independently of relationships, symbols and global maintenance',
     investigationSeeds: [
       'src/main/core/code-map-service.ts',
     ]
   },
-  evidenceEvents: ['REPO_OPENED'],
-  errorEvents: ['REPO_OPEN_FAILED'],
+  evidenceEvents: ['STRUCTURAL_PERSISTENCE_COMPLETED'],
+  errorEvents: ['REINDEX_FAILED'],
 }
 
 const READINESS_RELATIONSHIPS: DiagnosticBoundary = {
@@ -686,8 +686,8 @@ const READINESS_RELATIONSHIPS: DiagnosticBoundary = {
   target: {
     systemArea: 'CodeMap Readiness',
     component: 'CodeMapService / awaitReadiness(RELATIONSHIPS)',
-    boundary: 'Synchronizer Idle → Relationship Graph Current',
-    responsibility: 'Waiting for the synchronizer queue to drain so that all pending file changes have had their cross-file relationships updated before a relationship query proceeds',
+    boundary: 'Captured Changes → Relationship Persistence',
+    responsibility: 'Waiting for captured changes to persist consistent relationships, independently of later symbol enrichment, maintenance and future changes',
     investigationSeeds: [
       'src/main/core/code-map-service.ts',
       'src/main/core/repository-synchronizer.ts',
@@ -695,6 +695,22 @@ const READINESS_RELATIONSHIPS: DiagnosticBoundary = {
   },
   evidenceEvents: ['RELATIONSHIP_RESOLUTION_COMPLETED'],
   errorEvents: ['RELATIONSHIP_RESOLUTION_FAILED'],
+}
+
+const READINESS_SYMBOL_REFERENCES: DiagnosticBoundary = {
+  id: 'readiness-symbol-references',
+  name: 'SYMBOL_REFERENCES Readiness',
+  area: 'Readiness',
+  flows: ['readiness', 'incremental-change'],
+  target: {
+    systemArea: 'CodeMap Readiness',
+    component: 'CodeMapService / awaitReadiness(SYMBOL_REFERENCES)',
+    boundary: 'Captured Changes → Affected Symbol Reference Persistence',
+    responsibility: 'Waiting for affected sources of captured changes to resolve and persist their symbol references without waiting for unrelated maintenance or future changes',
+    investigationSeeds: ['src/main/core/code-map-service.ts', 'src/main/core/repository-change-readiness.ts', 'src/main/core/repository-model.ts']
+  },
+  evidenceEvents: ['SYMBOL_REFERENCE_PERSISTENCE_COMPLETED'],
+  errorEvents: ['SYMBOL_REFERENCE_RESOLUTION_FAILED', 'SYMBOL_REFERENCE_PERSISTENCE_FAILED']
 }
 
 const READINESS_SNAPSHOT: DiagnosticBoundary = {
@@ -758,6 +774,7 @@ export const CODEMAP_DIAGNOSTIC_CATALOG: readonly DiagnosticBoundary[] = [
   READINESS_FILE_INVENTORY,
   READINESS_STRUCTURE,
   READINESS_RELATIONSHIPS,
+  READINESS_SYMBOL_REFERENCES,
   READINESS_SNAPSHOT,
 ] as const
 

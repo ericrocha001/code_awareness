@@ -28,6 +28,7 @@ import type {
 } from './repository-repository'
 import type { SymbolReferenceKind } from './extraction/structure-extraction-port'
 import type { PersistedSymbolReference } from './symbol-reference-resolver'
+import type { SymbolResolutionFacts } from './symbol-resolution-facts'
 
 // Cache de conexões abertas: chave = repoPath, valor = instância do banco
 interface DatabaseConnection {
@@ -189,6 +190,13 @@ function ensureSchema(db: BetterSqlite3Database): void {
       constraint_text TEXT,
       FOREIGN KEY (element_id) REFERENCES elements(id),
       PRIMARY KEY (element_id, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS symbol_resolution_facts (
+      file_id TEXT PRIMARY KEY,
+      content_hash TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS symbol_references (
@@ -792,7 +800,8 @@ class RepositoryDatabase implements RepositoryRepository {
     elements: CodeMapElement[],
     relationships: CodeMapRelationship[],
     elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>,
-    symbolReferences: PersistedSymbolReference[] = []
+    symbolReferences: PersistedSymbolReference[] = [],
+    facts?: SymbolResolutionFacts
   ): void {
     const tx = this.db.transaction((
       _file: CodeMapFile,
@@ -866,6 +875,12 @@ class RepositoryDatabase implements RepositoryRepository {
         }
       }
 
+      this.deleteSymbolResolutionFacts(fileId)
+      if (facts) {
+        if (facts.fileId !== fileId) throw new Error('Symbol resolution facts belong to another file')
+        this.saveSymbolResolutionFacts(facts)
+      }
+
       const referenceInsert = this.db.prepare(`
         INSERT OR REPLACE INTO symbol_references (
           id, repository_id, source_file_id, source_element_id, target_element_id,
@@ -932,6 +947,24 @@ class RepositoryDatabase implements RepositoryRepository {
       result.push({ elementId, interfaceNames })
     }
     return result
+  }
+
+  saveSymbolResolutionFacts(facts: SymbolResolutionFacts): void {
+    const file = this.getFileById(facts.fileId)
+    if (!file || file.contentHash !== facts.contentHash) throw new Error('Symbol resolution facts do not match indexed content')
+    this.db.prepare('INSERT OR REPLACE INTO symbol_resolution_facts (file_id, content_hash, payload) VALUES (?, ?, ?)')
+      .run(facts.fileId, facts.contentHash, JSON.stringify(facts))
+  }
+
+  getSymbolResolutionFacts(repositoryId: string): SymbolResolutionFacts[] {
+    const rows = this.db.prepare(`SELECT sf.payload FROM symbol_resolution_facts sf
+      JOIN files f ON f.id = sf.file_id WHERE f.repository_id = ? AND f.content_hash = sf.content_hash`)
+      .all(repositoryId) as Array<{ payload: string }>
+    return rows.map((row) => JSON.parse(row.payload) as SymbolResolutionFacts)
+  }
+
+  deleteSymbolResolutionFacts(fileId: string): void {
+    this.db.prepare('DELETE FROM symbol_resolution_facts WHERE file_id = ?').run(fileId)
   }
 
   replaceSymbolReferencesForFile(sourceFileId: string, references: PersistedSymbolReference[]): void {

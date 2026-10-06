@@ -508,7 +508,8 @@ function memberTarget(
 
 export function resolveSymbolReferences(
   repoPath: string,
-  files: readonly SymbolReferenceFile[]
+  files: readonly SymbolReferenceFile[],
+  affectedSourceFileIds?: ReadonlySet<string>
 ): ResolvedSymbolReference[] {
   const orderedFiles = [...files].sort((left, right) =>
     left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0
@@ -519,6 +520,7 @@ export function resolveSymbolReferences(
   const resolved: ResolvedSymbolReference[] = []
 
   for (const file of orderedFiles) {
+    if (affectedSourceFileIds && !affectedSourceFileIds.has(file.fileId)) continue
     const candidates = [...file.symbolReferences].sort((left, right) =>
       left.location.start.byte - right.location.start.byte ||
       left.location.end.byte - right.location.end.byte

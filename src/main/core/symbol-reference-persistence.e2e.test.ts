@@ -1,15 +1,29 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { unlinkSync, writeFileSync } from 'fs'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as sourceFilesystem from 'fs/promises'
+import { TypeScriptStructureExtractor } from './extraction/typescript-extractor'
+import { readFileSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { closeRepositoryDatabase, createRepositoryDatabase } from './repository-database'
-import { createRepositoryModel, type RepositoryModel } from './repository-model'
+import { createRepositoryModel, RepositoryModel } from './repository-model'
+import { CodeMapService } from './code-map-service'
+import { WatcherService } from './watcher-service'
+import { ContextEngine } from './context/context-engine'
+import { createFullTargetId } from './context/code-target'
+import { RepositorySynchronizer } from './repository-synchronizer'
+import { repositoryEventBus } from './repository-events'
 import { cleanupTempRepo, createTempRepo } from './test-helpers'
+
+vi.mock('fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs/promises')>()
+  return { ...actual, readFile: vi.fn(actual.readFile) }
+})
 
 describe('Symbol References — persistência e atualização incremental', () => {
   let repoPath = ''
   let model: RepositoryModel | null = null
 
   afterEach(async () => {
+    vi.restoreAllMocks()
     if (!repoPath) return
     closeRepositoryDatabase(repoPath)
     await cleanupTempRepo(repoPath)
@@ -30,6 +44,215 @@ describe('Symbol References — persistência e atualização incremental', () =
     const sourceElementId = model.getElementsByRepository().find((element) => element.name === 'run' && element.kind === 'function')!.id
     return { targetId, sourceFileId, sourceElementId }
   }
+
+  it('persists fresh facts across reopen, replaces them atomically, rejects stale facts and removes deleted facts', async () => {
+    await indexFixture()
+    const db = createRepositoryDatabase(repoPath)
+    const original = db.getSymbolResolutionFacts(model!.getRepositoryId())
+    expect(original).toHaveLength(2)
+    for (const fact of original) expect(fact.contentHash).toBe(db.getFileById(fact.fileId)!.contentHash)
+    model!.close()
+    model = createRepositoryModel(repoPath)
+    const reopened = createRepositoryDatabase(repoPath)
+    expect(reopened.getSymbolResolutionFacts(model.getRepositoryId())).toEqual(original)
+    writeFileSync(join(repoPath, 'source.ts'), 'export function run() { return 0 }\n')
+    await model.updateFileContent('source.ts')
+    const source = model.getFileByRelativePath('source.ts')!
+    const fact = reopened.getSymbolResolutionFacts(model.getRepositoryId()).find((item) => item.fileId === source.id)!
+    expect(fact.contentHash).toBe(source.contentHash)
+    expect(fact.symbolReferenceCandidates).toEqual([])
+    expect(() => reopened.replaceIndexedFileState({ ...source, contentHash: 'new-version' },
+      reopened.getElementsByFile(source.id), [], [], [], { ...fact, contentHash: 'wrong-version' })).toThrow('do not match')
+    expect(reopened.getFileById(source.id)!.contentHash).toBe(source.contentHash)
+    expect(reopened.getSymbolResolutionFacts(model.getRepositoryId()).find((item) => item.fileId === source.id)).toEqual(fact)
+    expect(() => reopened.saveSymbolResolutionFacts({ ...fact, contentHash: 'stale' })).toThrow('do not match')
+    reopened.saveFile({ ...source, contentHash: 'stale' })
+    expect(reopened.getSymbolResolutionFacts(model.getRepositoryId()).some((item) => item.fileId === source.id)).toBe(false)
+    await model.backfillSymbolReferences()
+    expect(reopened.getFileById(source.id)!.contentHash).toBe(source.contentHash)
+    expect(reopened.getSymbolResolutionFacts(model.getRepositoryId()).find((item) => item.fileId === source.id)!.contentHash).toBe(source.contentHash)
+    reopened.saveFile(source)
+    unlinkSync(join(repoPath, 'source.ts'))
+    await model.updateFileContent('source.ts')
+    expect(reopened.getSymbolResolutionFacts(model.getRepositoryId()).some((item) => item.fileId === source.id)).toBe(false)
+  })
+
+  it('migrates missing facts once and reuses persisted facts without source reads or extraction on reopen', async () => {
+    await indexFixture()
+    const db = createRepositoryDatabase(repoPath)
+    for (const file of model!.getFiles()) db.deleteSymbolResolutionFacts(file.id)
+    const reads = vi.spyOn(sourceFilesystem, 'readFile')
+    const extraction = vi.spyOn(TypeScriptStructureExtractor.prototype, 'extract')
+    await model!.backfillSymbolReferences()
+    expect(reads).toHaveBeenCalledTimes(2)
+    expect(extraction).toHaveBeenCalledTimes(2)
+    model!.close()
+    model = createRepositoryModel(repoPath)
+    reads.mockClear()
+    extraction.mockClear()
+    await model.backfillSymbolReferences()
+    expect(reads).not.toHaveBeenCalled()
+    expect(extraction).not.toHaveBeenCalled()
+  })
+
+  it('uses one extraction and one snapshot for a large repository with multiple direct importers', async () => {
+    await indexFixture()
+    for (let index = 0; index < 80; index++) writeFileSync(join(repoPath, `unrelated-${index}.ts`), `export function unrelated${index}() { return 0 }\n`)
+    for (let index = 0; index < 6; index++) writeFileSync(join(repoPath, `importer-${index}.ts`), `import { execute } from './target'\nexport function use${index}() { return execute() }\n`)
+    const reads = vi.spyOn(sourceFilesystem, 'readFile')
+    const extraction = vi.spyOn(TypeScriptStructureExtractor.prototype, 'extract')
+    await model!.indexRepository()
+    expect(reads).toHaveBeenCalledTimes(88)
+    expect(extraction).toHaveBeenCalledTimes(88)
+    reads.mockClear()
+    extraction.mockClear()
+    const internals = model! as unknown as {
+      buildSymbolResolutionSnapshot: () => unknown
+      refreshSymbolReferences: (sources: ReadonlySet<string>, correlationId: string) => Promise<number>
+    }
+    const snapshot = vi.spyOn(internals, 'buildSymbolResolutionSnapshot')
+    const batch = vi.spyOn(internals, 'refreshSymbolReferences')
+    writeFileSync(join(repoPath, 'target.ts'), 'export function execute() { return 42 }\n')
+    const startedAt = Date.now()
+    await model!.updateFileContent('target.ts')
+    expect(reads).toHaveBeenCalledTimes(1)
+    expect(extraction).toHaveBeenCalledTimes(1)
+    expect(snapshot).toHaveBeenCalledTimes(1)
+    expect(batch).toHaveBeenCalledTimes(1)
+    const expectedSources = model!.getFiles().filter((file) => file.relativePath === 'target.ts' || file.relativePath === 'source.ts' || file.relativePath.startsWith('importer-')).map((file) => file.id)
+    expect(batch.mock.calls[0][0]).toEqual(new Set(expectedSources))
+    console.log('[symbol-scale]', { files: 88, oldExpectedVisits: 8 * 88, actualReads: reads.mock.calls.length, actualExtractions: extraction.mock.calls.length, snapshotBuilds: snapshot.mock.calls.length, affectedSources: expectedSources.length, durationMs: Date.now() - startedAt })
+  })
+
+  it('fails symbol readiness without a silent repository reread when facts are absent, then recovers through explicit migration', async () => {
+    await indexFixture()
+    const db = createRepositoryDatabase(repoPath)
+    db.deleteSymbolResolutionFacts(model!.getFileByRelativePath('source.ts')!.id)
+    const reads = vi.spyOn(sourceFilesystem, 'readFile')
+    writeFileSync(join(repoPath, 'target.ts'), 'export function execute() { return 42 }\n')
+    await expect(model!.updateFileContent('target.ts')).rejects.toThrow('SYMBOL_RESOLUTION_FACTS_UNAVAILABLE')
+    expect(reads).toHaveBeenCalledTimes(1)
+    await expect(model!.readiness.barrier('STRUCTURE')).resolves.toBeUndefined()
+    await expect(model!.readiness.barrier('RELATIONSHIPS')).resolves.toBeUndefined()
+    await expect(model!.readiness.barrier('SYMBOL_REFERENCES')).rejects.toThrow('SYMBOL_RESOLUTION_FACTS_UNAVAILABLE')
+    reads.mockClear()
+    await model!.backfillSymbolReferences()
+    expect(reads).toHaveBeenCalledTimes(1)
+    await expect(model!.readiness.barrier('SYMBOL_REFERENCES')).resolves.toBeUndefined()
+  })
+
+  it('migrates a legacy repository with an offline deletion without retaining facts or dangling references', async () => {
+    const { sourceFileId } = await indexFixture()
+    const db = createRepositoryDatabase(repoPath)
+    const target = model!.getFileByRelativePath('target.ts')!
+    for (const file of model!.getFiles()) db.deleteSymbolResolutionFacts(file.id)
+    unlinkSync(join(repoPath, 'target.ts'))
+    await model!.backfillSymbolReferences()
+    expect(model!.getFileByRelativePath('target.ts')).toBeNull()
+    expect(db.getSymbolResolutionFacts(model!.getRepositoryId()).some((fact) => fact.fileId === target.id)).toBe(false)
+    expect(model!.getSymbolReferencesBySourceFile(sourceFileId)).toEqual([])
+  })
+
+  it('moves facts with canonical file identity and recalculates imports without retaining the old path', async () => {
+    const { sourceFileId } = await indexFixture()
+    const original = model!.getFileByRelativePath('target.ts')!
+    writeFileSync(join(repoPath, 'renamed.ts'), readFileSync(join(repoPath, 'target.ts')))
+    unlinkSync(join(repoPath, 'target.ts'))
+    const reconciliation = await model!.reconcileWithDisk({ indexUnexpected: true })
+    const synchronizer = new RepositorySynchronizer(model!, model!.getRepositoryId())
+    try {
+      synchronizer.reconcileMemoryWithDatabase(reconciliation.pendingPaths)
+      expect((await synchronizer.synchronizeModified()).errors).toEqual([])
+    } finally {
+      synchronizer.dispose()
+    }
+    expect(model!.getFileByRelativePath('target.ts')).toBeNull()
+    expect(model!.getFileByRelativePath('renamed.ts')!.id).toBe(original.id)
+    expect(createRepositoryDatabase(repoPath).getSymbolResolutionFacts(model!.getRepositoryId()).find((fact) => fact.fileId === original.id)!.contentHash).toBe(original.contentHash)
+    expect(model!.getSymbolReferencesBySourceFile(sourceFileId)).toEqual([])
+    writeFileSync(join(repoPath, 'source.ts'), 'import { execute } from "./renamed"\nexport function run() { return execute() }\n')
+    await model!.updateFileContent('source.ts')
+    const references = model!.getSymbolReferencesBySourceFile(sourceFileId)
+    expect(references).toHaveLength(1)
+    expect(references[0].targetElementId).toBe(model!.getElementsByRepository().find((element) => element.fileId === original.id && element.kind === 'function')!.id)
+  })
+
+  it('releases relationships and exact reads while symbols are blocked, and isolates enrichment failure', async () => {
+    const { targetId } = await indexFixture()
+    let release!: () => void
+    let entered!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const internals = model! as unknown as { refreshSymbolReferences: () => Promise<number> }
+    vi.spyOn(internals, 'refreshSymbolReferences').mockImplementation(async () => { entered(); await blocked; throw new Error('enrichment failed') })
+    writeFileSync(join(repoPath, 'target.ts'), 'export function execute() { return 42 }\n')
+    const update = model!.updateFileContent('target.ts')
+    void update.catch(() => {})
+    await started
+    await model!.readiness.barrier('STRUCTURE')
+    await model!.readiness.barrier('RELATIONSHIPS')
+    expect(await model!.getElementExactSource(targetId)).toMatchObject({ content: 'function execute() { return 42 }' })
+    let symbolReady = false
+    const symbolBarrier = model!.readiness.barrier('SYMBOL_REFERENCES').then(() => { symbolReady = true })
+    void symbolBarrier.catch(() => {})
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(symbolReady).toBe(false)
+    release()
+    await expect(update).rejects.toThrow('enrichment failed')
+    await expect(symbolBarrier).rejects.toThrow('enrichment failed')
+    await expect(model!.readiness.barrier('RELATIONSHIPS')).resolves.toBeUndefined()
+  })
+
+  it('serves real ContextEngine consumers through causal service readiness during an accepted reindex', async () => {
+    const { targetId, sourceElementId } = await indexFixture()
+    model!.close()
+    model = null
+    class PassiveWatcher extends WatcherService {
+      override subscribe(): () => void { return () => {} }
+    }
+    const watcher = new PassiveWatcher()
+    const service = new CodeMapService(watcher, { async generateCompressionMarkdown() { throw new Error('unused') } })
+    const engine = new ContextEngine(service)
+    let release!: () => void
+    let enter!: () => void
+    const held = new Promise<void>((resolve) => { release = resolve })
+    const entered = new Promise<void>((resolve) => { enter = resolve })
+    try {
+      await service.openRepository(repoPath)
+      await service.awaitSnapshot(repoPath)
+      const prototype = RepositoryModel.prototype as unknown as {
+        refreshSymbolReferences: (sources: ReadonlySet<string>, correlationId: string) => Promise<number>
+      }
+      const original = prototype.refreshSymbolReferences
+      vi.spyOn(prototype, 'refreshSymbolReferences').mockImplementation(async function (this: RepositoryModel, sources, correlationId) {
+        enter()
+        await held
+        return original.call(this, sources, correlationId)
+      })
+      writeFileSync(join(repoPath, 'target.ts'), 'export function execute() { return 42 }\n')
+      repositoryEventBus.emitFileModified(service.getRepository(repoPath)!.id, 'target.ts')
+      let structureReady = false
+      const structuralRead = engine.readCode(repoPath, [createFullTargetId(targetId)]).then((result) => { structureReady = true; return result })
+      const relationships = engine.getRelationships(repoPath, ['target.ts'])
+      await entered
+      expect((await relationships).files[0].in).toEqual([{ relativePath: 'source.ts' }])
+      expect((await structuralRead)[0].source).toBe('function execute() { return 42 }')
+      expect(structureReady).toBe(true)
+      let symbolsReady = false
+      const references = engine.getReferences(repoPath, [createFullTargetId(targetId)]).then((result) => { symbolsReady = true; return result })
+      await new Promise<void>((resolve) => setTimeout(resolve, 2_000))
+      expect(symbolsReady).toBe(false)
+      release()
+      const result = await references
+      expect(JSON.stringify(result)).toContain('source.ts')
+      await expect(engine.getSymbolDependencies(repoPath, [createFullTargetId(sourceElementId)])).resolves.toBeDefined()
+    } finally {
+      release()
+      await service.awaitSnapshot(repoPath)
+      service.closeAll()
+      watcher.stop()
+    }
+  }, 15_000)
 
   it('persiste somente resoluções confirmadas e consulta por alvo, elemento-fonte ou arquivo-fonte em ordem estável', async () => {
     const { targetId, sourceFileId, sourceElementId } = await indexFixture()

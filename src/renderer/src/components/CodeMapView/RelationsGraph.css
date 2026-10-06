@@ -4,8 +4,9 @@
 
 .rg-root {
   height: 300px;
-  border: 1px solid var(--border);
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
   border-radius: 10px;
   overflow: hidden;
-  background: var(--bg-primary);
+  background: radial-gradient(circle at 45% 40%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 65%), var(--bg-primary);
 }

@@ -1,3 +1,4 @@
+import { RepositoryChangeReadiness } from '../repository-change-readiness'
 import { describe, expect, it, vi } from 'vitest'
 import { ContextEngine } from './context-engine'
 import type { CodeMapNavigationPort, NavigationInvocationContext } from './context-navigation-port'
@@ -48,6 +49,7 @@ vi.mock('../repository-model', async (importOriginal) => {
       const files = isWarm ? [...sampleFiles] : []
       const elements = isWarm ? [...sampleElements] : []
       return {
+        readiness: new RepositoryChangeReadiness(),
         getRepoPath: () => repoPath,
         getRepositoryId: () => 'test-repo-id',
         pruneKnownBinaryFiles: () => {},
@@ -58,7 +60,7 @@ vi.mock('../repository-model', async (importOriginal) => {
         getElementsByRepository: () => elements,
         getRelationships: () => [],
         indexRepository: vi.fn(async () => ({ filesIndexed: files.length, elementsExtracted: elements.length })),
-        reconcileWithDisk: vi.fn(async () => {}),
+        reconcileWithDisk: vi.fn(async () => ({})),
         backfillContentHashes: vi.fn(async () => {}),
         backfillContextReferences: vi.fn(async () => {}),
         backfillTokenMetadata: vi.fn(async () => {}),
@@ -219,7 +221,7 @@ describe('inspect_files readiness contract — Unidade 1', () => {
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
   })
 
-  it('6. discover_repository usa FILE_INVENTORY, inspect_files usa STRUCTURE e demais tools permanecem em awaitSnapshot', async () => {
+  it('6. discover_repository usa FILE_INVENTORY, inspect_files usa STRUCTURE e demais tools usam a fase causal correspondente', async () => {
     const elementId = '0000000000000001'
     const targetId = createFullTargetId(elementId)
     const mockPort: CodeMapNavigationPort = {
@@ -261,15 +263,17 @@ describe('inspect_files readiness contract — Unidade 1', () => {
     expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'RELATIONSHIPS')
     expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
-    // Demais tools usam awaitSnapshot
+    // Consumidores usam a fase causal correspondente
     await engine.readCode('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(1)
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'STRUCTURE')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
     await engine.getReferences('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(2)
+    expect(mockPort.awaitReadiness).toHaveBeenLastCalledWith('/test/repo', 'SYMBOL_REFERENCES')
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
 
     await engine.getSymbolDependencies('/test/repo', [targetId])
-    expect(mockPort.awaitSnapshot).toHaveBeenCalledTimes(3)
+    expect(mockPort.awaitSnapshot).not.toHaveBeenCalled()
   })
 
   it('7. abertura concorrente é aguardada corretamente sem dependência temporal oculta', async () => {

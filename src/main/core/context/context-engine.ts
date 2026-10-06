@@ -66,7 +66,7 @@ export class ContextEngine implements ContextNavigationPort {
 
   private async awaitInstrumentedReadiness(
     repoPath: string,
-    capability: 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS',
+    capability: 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS' | 'SYMBOL_REFERENCES',
     tool: string,
     context?: NavigationInvocationContext
   ): Promise<void> {
@@ -83,24 +83,6 @@ export class ContextEngine implements ContextNavigationPort {
         tool,
         error: error instanceof Error ? error.message : String(error),
         capability
-      })
-      throw error
-    }
-  }
-
-  private async awaitInstrumentedSnapshot(
-    repoPath: string,
-    tool: string,
-    context?: NavigationInvocationContext
-  ): Promise<void> {
-    emitTrace(context, 'codescope-snapshot-started', 'started', { tool })
-    try {
-      await this.codeMap.awaitSnapshot(repoPath)
-      emitTrace(context, 'codescope-snapshot-completed', 'success', { tool })
-    } catch (error) {
-      emitTrace(context, 'codescope-snapshot-completed', 'error', {
-        tool,
-        error: error instanceof Error ? error.message : String(error)
       })
       throw error
     }
@@ -218,7 +200,7 @@ export class ContextEngine implements ContextNavigationPort {
 
   async getReferences(repoPath: string, targetIds: string[], context?: NavigationInvocationContext): Promise<GetReferencesResult> {
     requireNonEmptyUnique(targetIds, 'EMPTY_TARGETS', 'DUPLICATE_TARGET')
-    await this.awaitInstrumentedSnapshot(repoPath, 'get_references', context)
+    await this.awaitInstrumentedReadiness(repoPath, 'SYMBOL_REFERENCES', 'get_references', context)
     const elements = this.codeMap.getElements(repoPath)
     const elementsById = new Map(elements.map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))
@@ -256,7 +238,7 @@ export class ContextEngine implements ContextNavigationPort {
 
   async getSymbolDependencies(repoPath: string, sourceTargetIds: string[], context?: NavigationInvocationContext): Promise<GetSymbolDependenciesResult> {
     requireNonEmptyUnique(sourceTargetIds, 'EMPTY_TARGETS', 'DUPLICATE_TARGET')
-    await this.awaitInstrumentedSnapshot(repoPath, 'get_symbol_dependencies', context)
+    await this.awaitInstrumentedReadiness(repoPath, 'SYMBOL_REFERENCES', 'get_symbol_dependencies', context)
     const elements = this.codeMap.getElements(repoPath)
     const elementsById = new Map(elements.map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))
@@ -324,7 +306,7 @@ export class ContextEngine implements ContextNavigationPort {
 
   async readCode(repoPath: string, targetIds: string[], context?: NavigationInvocationContext): Promise<ReadCodeResult[]> {
     requireNonEmptyUnique(targetIds, 'EMPTY_TARGETS', 'DUPLICATE_TARGET')
-    await this.awaitInstrumentedSnapshot(repoPath, 'read_code', context)
+    await this.awaitInstrumentedReadiness(repoPath, 'STRUCTURE', 'read_code', context)
 
     const elementsById = new Map(this.codeMap.getElements(repoPath).map((element) => [element.id, element]))
     const filesById = new Map(this.codeMap.getFiles(repoPath).map((file) => [file.id, file]))

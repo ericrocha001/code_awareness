@@ -386,11 +386,10 @@ describe('CodeMap Startup — Responsiveness Contract', () => {
         `[heartbeat-C] maintenanceMs=${maintenanceMs} heartbeats=${heartbeatCount} maxGap=${maxGap}ms changed=${CHANGED_COUNT}/${FIXTURE_SIZE}`
       )
 
-      // Verify reconcile detected changed files. Immediately after awaitMaintenance,
-      // the synchronizer may have already reindexed a few — accept a small race window.
       const files = service.getFiles(repoPath)
-      const modifiedCount = files.filter(f => f.status === 'modified').length
-      expect(modifiedCount).toBeGreaterThanOrEqual(CHANGED_COUNT - 5)
+      expect(files.filter(file => file.status === 'modified')).toHaveLength(0)
+      expect(service.getModifiedFilesCount(repoPath)).toBe(0)
+      expect(service.getElements(repoPath).filter(element => element.kind === 'class')).toHaveLength(FIXTURE_SIZE)
 
       if (maintenanceMs >= HEARTBEAT_INTERVAL_MS * 2) {
         expect(heartbeatCount).toBeGreaterThan(0)

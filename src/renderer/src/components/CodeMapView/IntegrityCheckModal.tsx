@@ -32,12 +32,12 @@ export interface IntegrityCheckModalProps {
 }
 
 const TYPE_LABELS: Record<string, string> = {
-  hash_mismatch: 'Hash Mismatch (Divergência no Conteúdo)',
-  file_missing: 'File Missing (Arquivo Ausente no Disco)',
-  file_unexpected: 'File Unexpected (Arquivo Novo Não Indexado)',
-  orphan_element: 'Orphan Element (Elemento Sem Arquivo Pai)',
-  invalid_relationship: 'Invalid Relationship (Relacionamento Quebrado)',
-  database_inconsistency: 'Database Inconsistency (Inconsistência Interna)'
+  hash_mismatch: 'Conteúdo divergente',
+  file_missing: 'Arquivos ausentes',
+  file_unexpected: 'Arquivos não indexados',
+  orphan_element: 'Elementos sem arquivo pai',
+  invalid_relationship: 'Relacionamentos inválidos',
+  database_inconsistency: 'Inconsistências internas'
 }
 
 export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
@@ -269,9 +269,9 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
         aria-labelledby="icm-title"
       >
         <div className="icm-header">
-          <div className="icm-header-title" id="icm-title">
+          <div className="icm-header-title">
             <AlertTriangle className="icm-header-icon" size={20} />
-            <span>Inconsistências Encontradas ({issues.length})</span>
+            <div><h2 id="icm-title">Inconsistências encontradas</h2><p>{issues.length} problema(s) detectado(s) no CodeMap</p></div>
           </div>
           <button
             className="icm-close-btn"
@@ -289,11 +289,13 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
               <span className="icm-summary-count">{selectedIds.size}</span> de {issues.length} problema(s) selecionado(s)
               {(checkResult?.staleHealed ?? 0) > 0 && (
                 <span className="icm-summary-subtext">
-                  Estados obsoletos curados: {checkResult.staleHealed}
+                  Estados obsoletos curados: {checkResult?.staleHealed}
                 </span>
               )}
             </span>
-            <div
+            <button
+              type="button"
+              disabled={isRepairing}
               className="icm-select-all-toggle"
               onClick={toggleSelectAll}
               role="button"
@@ -307,7 +309,7 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
                 <Square size={16} />
               )}
               <span>{allSelected ? 'Desmarcar todos' : 'Selecionar todos'}</span>
-            </div>
+            </button>
           </div>
 
           {repairError && (
@@ -325,8 +327,10 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
             return (
               <div key={groupType} className="icm-group">
                 <div className="icm-group-header">
-                  <div
+                  <button
+                    type="button"
                     className="icm-group-title"
+                    aria-expanded={!isCollapsed}
                     onClick={() => toggleGroupCollapse(groupType)}
                   >
                     {isCollapsed ? <ChevronRight size={16} /> : <ChevronDown size={16} />}
@@ -339,18 +343,21 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
                         <Info size={14} />
                       </span>
                     )}
-                    <span className="icm-badge warning">{groupList.length}</span>
-                  </div>
+                    <span className="icm-badge">{groupList.length}</span>
+                  </button>
 
                   <div className="icm-group-actions">
-                    <div
+                    <button
+                      type="button"
+                      disabled={isRepairing}
                       className="icm-select-all-toggle"
+                      aria-label={`Selecionar grupo: ${TYPE_LABELS[groupType] || groupType}`}
                       onClick={e => {
                         e.stopPropagation()
                         toggleGroupSelect(groupType, groupList)
                       }}
                       role="checkbox"
-                      aria-checked={isGroupAllSelected}
+                      aria-checked={isGroupSomeSelected ? 'mixed' : isGroupAllSelected}
                     >
                       {isGroupAllSelected ? (
                         <CheckSquare size={16} />
@@ -359,7 +366,7 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
                       ) : (
                         <Square size={16} />
                       )}
-                    </div>
+                    </button>
                   </div>
                 </div>
 
@@ -369,7 +376,7 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
                       const id = getIssueId(issue, idx)
                       const isChecked = selectedIds.has(id)
                       return (
-                        <div key={id} className="icm-issue-item">
+                        <div key={id} className={`icm-issue-item${isChecked ? ' icm-issue-item--selected' : ''}`}>
                           <input
                             type="checkbox"
                             className="icm-checkbox"
@@ -430,7 +437,7 @@ export const IntegrityCheckModal: React.FC<IntegrityCheckModalProps> = ({
             ) : (
               <>
                 <Wrench size={16} />
-                <span>Corrigir Selecionados ({selectedIds.size})</span>
+                <span>Corrigir selecionados ({selectedIds.size})</span>
               </>
             )}
           </button>

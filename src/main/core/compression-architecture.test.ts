@@ -15,10 +15,12 @@ import { DEFAULT_PROFILE, computeProfileHash } from './compression-profile'
 import { resolveEffectiveProfile } from './effective-profile'
 import { CodeMapService } from './code-map-service'
 import { WatcherService } from './watcher-service'
+import { RepositoryChangeReadiness } from './repository-change-readiness'
 
 // Mock do RepositoryModel para isolar a PA-06 contra bindings nativos de banco no runtime Node/Vitest
 vi.mock('./repository-model', () => {
   class FakeRepositoryModel {
+    readonly readiness = new RepositoryChangeReadiness()
     private readonly repoPath: string
     private files: Array<{ id: string; relativePath: string; language: string; contentHash: string }> = []
 
@@ -27,6 +29,7 @@ vi.mock('./repository-model', () => {
     }
 
     async backfillContentHashes(): Promise<void> {}
+    async backfillSymbolReferences(): Promise<number> { return 0 }
     async backfillContextReferences(): Promise<void> {}
     async reconcileWithDisk(): Promise<unknown> { return {} }
     pruneKnownBinaryFiles(): number { return 0 }

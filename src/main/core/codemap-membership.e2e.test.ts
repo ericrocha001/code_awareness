@@ -13,6 +13,7 @@ import { mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { RepositoryFileMembership } from './repository-file-membership'
 import { GitService } from './git-service'
+import { RepositorySynchronizer } from './repository-synchronizer'
 import { createRepositoryModel } from './repository-model'
 import { closeRepositoryDatabase } from './repository-database'
 import {
@@ -97,10 +98,10 @@ describe('RepositoryModel + MembershipPort — Git real', () => {
     const result = await model.reconcileWithDisk({ indexUnexpected: true })
 
     expect(model.getFiles().map(f => f.relativePath)).not.toContain('debug.log')
-    expect(result.indexedUnexpected).toBe(0)
+    expect(result.pendingPaths).not.toContain('debug.log')
   })
 
-  it('reconcileWithDisk indexa novo arquivo elegível como unexpected', async () => {
+  it('reconciliation discovers eligible paths and Synchronizer indexes them', async () => {
     repo = await createTempGitRepo()
     gitWrite(repo, '.gitignore', '*.log\n')
     gitWrite(repo, 'src/existing.ts', 'export const x = 1\n')
@@ -116,8 +117,16 @@ describe('RepositoryModel + MembershipPort — Git real', () => {
 
     const result = await model.reconcileWithDisk({ indexUnexpected: true })
 
-    expect(model.getFiles().map(f => f.relativePath)).toContain('src/new.ts')
-    expect(result.indexedUnexpected).toBeGreaterThan(0)
+    expect(result.pendingPaths).toContain('src/new.ts')
+    expect(model.getFiles().map(f => f.relativePath)).not.toContain('src/new.ts')
+    const sync = new RepositorySynchronizer(model, model.getRepositoryId())
+    try {
+      sync.reconcileMemoryWithDatabase(result.pendingPaths)
+      expect((await sync.synchronizeModified()).errors).toEqual([])
+      expect(model.getFiles().map(f => f.relativePath)).toContain('src/new.ts')
+    } finally {
+      sync.dispose()
+    }
   })
 
   it('sem membership: comportamento legado preservado', async () => {

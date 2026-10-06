@@ -16,10 +16,10 @@
 }
 
 .icm-modal {
-  background: var(--bg-primary);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 4%, var(--bg-secondary)), var(--bg-primary));
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--border));
+  border-radius: 15px;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, calc(var(--shadow-opacity) + .15));
   max-width: 680px;
   width: 90vw;
   max-height: 85vh;
@@ -46,7 +46,7 @@
 }
 
 .icm-header-icon {
-  color: var(--accent);
+  color: var(--color-warning);
 }
 
 .icm-close-btn {
@@ -78,6 +78,7 @@
   padding: 1.25rem 1.5rem;
   overflow-y: auto;
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 1rem;
@@ -180,13 +181,13 @@
 }
 
 .icm-badge.error {
-  background: rgba(248, 113, 113, 0.15);
-  color: #f87171;
+  background: color-mix(in srgb, var(--color-danger) 12%, transparent);
+  color: var(--color-danger);
 }
 
 .icm-badge.warning {
-  background: rgba(251, 191, 36, 0.15);
-  color: #fbbf24;
+  background: color-mix(in srgb, var(--color-warning) 12%, transparent);
+  color: var(--color-warning);
 }
 
 .icm-repair-error {
@@ -222,6 +223,7 @@
 
 .icm-issue-content {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
@@ -229,7 +231,7 @@
 }
 
 .icm-issue-target {
-  font-family: monospace;
+  font-family: var(--font-mono);
   font-weight: 600;
   color: var(--text-primary);
   word-break: break-all;
@@ -238,6 +240,8 @@
 .icm-issue-desc {
   color: var(--text-secondary);
   font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
 }
 
 .icm-info-icon {
@@ -277,5 +281,101 @@
   to {
     opacity: 1;
     transform: scale(1);
+  }
+}
+
+.icm-header-title {
+  min-width: 0;
+}
+.icm-header-title > svg {
+  flex-shrink: 0;
+}
+.icm-header-title h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+.icm-header-title p {
+  margin: 5px 0 0;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-secondary);
+}
+.icm-summary-bar {
+  gap: 15px;
+  font-size: 12px;
+  border-color: var(--border-subtle);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+.icm-summary-count {
+  font-size: 15px;
+}
+.icm-group {
+  border-color: var(--border-subtle);
+  border-radius: 10px;
+}
+.icm-group-title, .icm-select-all-toggle {
+  border: 0;
+  background: transparent;
+  font-family: inherit;
+  padding: 0;
+  text-align: left;
+}
+.icm-group-title {
+  font-size: 13px;
+  min-width: 0;
+}
+.icm-group-title > span:first-of-type {
+  overflow-wrap: anywhere;
+}
+.icm-group-title > svg {
+  flex-shrink: 0;
+}
+.icm-group-title .icm-badge {
+  font-size: 11px;
+  font-weight: 500;
+}
+.icm-select-all-toggle {
+  font-size: 11px;
+  flex-shrink: 0;
+}
+.icm-group-title:focus-visible, .icm-select-all-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+  border-radius: 3px;
+}
+.icm-select-all-toggle:disabled {
+  opacity: .5;
+  cursor: default;
+}
+.icm-issue-item {
+  border-top-color: var(--border-subtle);
+}
+.icm-issue-item--selected {
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  box-shadow: inset 2px 0 color-mix(in srgb, var(--accent) 40%, transparent);
+}
+.icm-issue-content {
+  min-width: 0;
+}
+.icm-footer {
+  flex-wrap: wrap;
+  flex-shrink: 0;
+  border-color: var(--border-subtle);
+}
+@media (max-width: 600px) {
+  .icm-overlay {
+    padding: 12px;
+  }
+  .icm-modal {
+    width: 100%;
+  }
+  .icm-header, .icm-body, .icm-footer {
+    padding: 16px;
+  }
+  .icm-summary-bar {
+    flex-wrap: wrap;
   }
 }

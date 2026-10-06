@@ -154,10 +154,11 @@ describe('CodeMap Diagnostic Catalog — Required Boundaries', () => {
     expect(byId.has('integrity-verification')).toBe(true)
   })
 
-  it('Readiness tem as 4 capabilities', () => {
+  it('Readiness inclui as barreiras causais e o snapshot global', () => {
     expect(byId.has('readiness-file-inventory')).toBe(true)
     expect(byId.has('readiness-structure')).toBe(true)
     expect(byId.has('readiness-relationships')).toBe(true)
+    expect(byId.has('readiness-symbol-references')).toBe(true)
     expect(byId.has('readiness-snapshot')).toBe(true)
   })
 

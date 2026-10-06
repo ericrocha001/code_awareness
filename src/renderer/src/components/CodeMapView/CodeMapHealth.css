@@ -1,95 +1,226 @@
-.cmh-panel {
-  width: min(340px, calc(100vw - 24px));
-  padding: 14px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-primary);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+.cmh-trigger--healthy {
+  --cmh-trigger-color: var(--color-green);
+}
+.cmh-trigger--pending {
+  --cmh-trigger-color: var(--color-warning);
+}
+.cmh-trigger--updating {
+  --cmh-trigger-color: var(--status-restored);
+}
+.cmh-trigger--issue {
+  --cmh-trigger-color: var(--color-danger);
+}
+.cmh-trigger.app-pill-btn {
+  border-color: color-mix(in srgb, var(--cmh-trigger-color) 75%, var(--border));
+  background: color-mix(in srgb, var(--cmh-trigger-color) 7%, var(--bg-primary));
+  color: var(--text-primary);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--cmh-trigger-color) 5%, transparent);
+}
+.cmh-trigger.app-pill-btn:hover,
+.cmh-trigger.app-pill-btn[aria-expanded="true"] {
+  border-color: var(--cmh-trigger-color);
+  background: color-mix(in srgb, var(--cmh-trigger-color) 11%, var(--bg-primary));
   color: var(--text-primary);
 }
-
-.cmh-header,
-.cmh-header > div,
-.cmh-actions {
-  display: flex;
+.cmh-trigger--issue.app-pill-btn {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--cmh-trigger-color) 10%, transparent);
 }
-
+.cmh-trigger.app-pill-btn .btn-icon {
+  color: var(--cmh-trigger-color);
+}
+.cmh-trigger.app-pill-btn:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.cmh-panel {
+  box-sizing: border-box;
+  width: min(368px, calc(100vw - 24px));
+  max-height: calc(100vh - 112px);
+  overflow-y: auto;
+  padding: 17px;
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--border));
+  border-top: 2px solid color-mix(in srgb, var(--accent) 65%, var(--border));
+  border-radius: 13px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 5%, var(--bg-secondary)), color-mix(in srgb, var(--bg-primary) 94%, transparent));
+  backdrop-filter: blur(18px);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, calc(var(--shadow-opacity) + .12));
+  color: var(--text-primary);
+}
+.cmh-panel *, .cmh-panel *::before, .cmh-panel *::after {
+  box-sizing: border-box;
+}
 .cmh-header {
+  display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--border-color);
+  gap: 14px;
 }
-
 .cmh-header > div {
+  display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 6px;
 }
-
-.cmh-header span,
-.cmh-details dt {
-  color: var(--text-secondary);
+.cmh-header strong {
+  font-size: 14px;
+}
+.cmh-header span {
   font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
-
-.cmh-state-icon--healthy,
-.cmh-trigger--healthy .btn-icon {
-  color: var(--success-color, #1f8a55);
+.cmh-state-icon {
+  flex-shrink: 0;
+  margin-top: 2px;
 }
-
-.cmh-state-icon--updating,
-.cmh-trigger--updating .btn-icon {
-  color: var(--accent-color);
+.cmh-state-icon--healthy, .cmh-trigger--healthy .btn-icon {
+  color: var(--color-green);
 }
-
-.cmh-state-icon--issue,
-.cmh-trigger--issue .btn-icon {
-  color: var(--warning-color, #c17b16);
+.cmh-state-icon--updating, .cmh-trigger--updating .btn-icon {
+  color: var(--accent);
 }
-
+.cmh-state-icon--pending, .cmh-trigger--pending .btn-icon {
+  color: var(--color-warning);
+}
+.cmh-state-icon--issue, .cmh-trigger--issue .btn-icon {
+  color: var(--color-danger);
+}
+.cmh-panel--issue .cmh-header span {
+  color: var(--color-danger);
+}
 .cmh-details {
   display: grid;
-  gap: 8px;
-  margin: 12px 0;
+  gap: 12px;
+  margin: 18px 0;
 }
-
 .cmh-details > div {
   display: grid;
-  grid-template-columns: 90px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 12px;
 }
-
-.cmh-details dt,
-.cmh-details dd {
+.cmh-details dt, .cmh-details dd {
   margin: 0;
-}
-
-.cmh-details dd {
-  overflow-wrap: anywhere;
-  text-align: right;
-  font-size: 13px;
-}
-
-.cmh-actions {
-  align-items: center;
-  gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid var(--border-color);
-}
-
-.cmh-advanced {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--border-color);
-}
-
-.cmh-advanced summary {
-  cursor: pointer;
-  color: var(--text-secondary);
   font-size: 12px;
+  line-height: 1.4;
 }
-
-.cmh-advanced .app-ghost-btn {
-  margin-top: 6px;
+.cmh-details dt {
+  color: var(--text-secondary);
+}
+.cmh-details dd {
+  text-align: right;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.cmh-details .cmh-value--healthy {
+  color: color-mix(in srgb, var(--color-green) 65%, var(--text-primary));
+}
+.cmh-details .cmh-value--unknown {
+  color: var(--text-secondary);
+  font-weight: 400;
+}
+.cmh-details .cmh-value--issue {
+  color: var(--color-danger);
+}
+.cmh-details .cmh-time {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.cmh-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.cmh-action.app-ghost-btn {
+  display: flex;
+  align-items: flex-start;
+  width: 100%;
+  padding: 12px;
+  gap: 11px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  text-align: left;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  white-space: normal;
+}
+.cmh-action .btn-icon {
+  color: var(--accent);
+  padding-top: 2px;
+}
+.cmh-action > span:not(.btn-icon) {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.cmh-action strong {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.cmh-action small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+  font-weight: 400;
+}
+.cmh-action--issue.app-ghost-btn {
+  border-color: color-mix(in srgb, var(--color-danger) 35%, var(--border));
+  background: color-mix(in srgb, var(--color-danger) 5%, transparent);
+}
+.cmh-action--issue .btn-icon, .cmh-action--issue strong {
+  color: var(--color-danger);
+}
+.cmh-advanced {
+  margin-top: 13px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+.cmh-advanced summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text-secondary);
+  list-style: none;
+}
+.cmh-advanced summary::-webkit-details-marker {
+  display: none;
+}
+.cmh-advanced[open] summary > svg {
+  transform: rotate(90deg);
+}
+.cmh-advanced .cmh-action {
+  margin-top: 12px;
+  background: transparent;
+}
+.cmh-advanced p {
+  margin: 8px 3px 0;
+  color: var(--text-secondary);
+  font-size: 10px;
+  line-height: 1.5;
+}
+.cmh-error {
+  padding: 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--color-danger) 8%, transparent);
+  color: var(--color-danger);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.cmh-confirmation.icm-modal {
+  max-width: 500px;
+}
+.cmh-confirmation .icm-header-title > svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.cmh-confirmation p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.7;
 }

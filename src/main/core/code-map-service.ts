@@ -38,7 +38,7 @@ function sanitizeFilenamePart(part: string): string {
   return part.replace(/[/\\:*?"<>|]/g, '_')
 }
 
-export type CodeMapReadinessCapability = 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS'
+export type CodeMapReadinessCapability = 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS' | 'SYMBOL_REFERENCES'
 
 interface CodeMapInstance {
   model: RepositoryModel
@@ -112,7 +112,7 @@ export class CodeMapService {
         membership
       })
       const unsubscribeWatcherBridge = createWatcherBridge(normalizedPath, this.watcherService)
-
+      const symbolInitialization = model.readiness.accept(2)
       // Background maintenance: backfill + offline reconcile run without blocking openRepository.
       // For warm repos (already indexed) the snapshot is available immediately for reading;
       // the reconcile will mark changed files as modified and auto-sync will handle them.
@@ -152,7 +152,6 @@ export class CodeMapService {
         }
 
         try {
-          // Step 1: Content Identity Backfill — must run first so reconcile can compare hashes.
           await runStep(
             'BACKFILL_STARTED',
             'BACKFILL_COMPLETED',
@@ -161,7 +160,20 @@ export class CodeMapService {
           )
           await new Promise((resolve) => setImmediate(resolve))
 
-          // Step 2: Context Reference Backfill
+          // Note: reconcileWithDisk emits RECONCILE_STARTED/COMPLETED/FAILED internally.
+          const recoveryPaths = model.getModifiedFiles().map(file => file.relativePath)
+          const reconciliation = await model.reconcileWithDisk({ indexUnexpected: true, correlationId: cid })
+          synchronizer.reconcileMemoryWithDatabase([...recoveryPaths, ...(reconciliation.pendingPaths ?? [])])
+          const convergence = await synchronizer.synchronizeModified(cid)
+          telemetryService.log(cid, 'CODE_MAP', convergence.errors.length > 0 ? 'RECONCILE_CONVERGENCE_FAILED' : 'RECONCILE_CONVERGENCE_COMPLETED', {
+            repoPath: normalizedPath, ...convergence
+          })
+          if (convergence.errors.length > 0) throw new Error(convergence.errors.join('; '))
+          // Note: backfillSymbolReferences emits BACKFILL_SYMBOL_REFERENCES_STARTED/COMPLETED/FAILED internally.
+          await model.backfillSymbolReferences()
+          model.readiness.advance(symbolInitialization, 'SYMBOL_REFERENCES')
+          await new Promise((resolve) => setImmediate(resolve))
+
           await runStep(
             'MAINTENANCE_CONTEXT_REF_STARTED',
             'MAINTENANCE_CONTEXT_REF_COMPLETED',
@@ -170,7 +182,6 @@ export class CodeMapService {
           )
           await new Promise((resolve) => setImmediate(resolve))
 
-          // Step 3: Token Metadata Backfill
           await runStep(
             'MAINTENANCE_TOKEN_METADATA_STARTED',
             'MAINTENANCE_TOKEN_METADATA_COMPLETED',
@@ -179,12 +190,6 @@ export class CodeMapService {
           )
           await new Promise((resolve) => setImmediate(resolve))
 
-          // Step 4: Offline reconcile — detects files created/deleted/changed while app was closed.
-          // Note: reconcileWithDisk emits RECONCILE_STARTED/COMPLETED/FAILED internally.
-          await model.reconcileWithDisk({ indexUnexpected: true })
-          await new Promise((resolve) => setImmediate(resolve))
-
-          // Step 5: Text Document Backfill
           await runStep(
             'MAINTENANCE_TEXT_DOCUMENTS_STARTED',
             'MAINTENANCE_TEXT_DOCUMENTS_COMPLETED',
@@ -192,7 +197,6 @@ export class CodeMapService {
             () => model.backfillTextDocuments?.() ?? Promise.resolve()
           )
 
-          // Step 6: Declaration Signature Backfill
           await runStep(
             'MAINTENANCE_DECLARATION_SIGS_STARTED',
             'MAINTENANCE_DECLARATION_SIGS_COMPLETED',
@@ -200,9 +204,6 @@ export class CodeMapService {
             () => model.backfillDeclarationSignatures?.() ?? Promise.resolve()
           )
 
-          // Step 7: Symbol Reference Backfill
-          // Note: backfillSymbolReferences emits BACKFILL_SYMBOL_REFERENCES_STARTED/COMPLETED/FAILED internally.
-          await model.backfillSymbolReferences?.()
 
           await new Promise((resolve) => setImmediate(resolve))
           // Sync in-memory modified set with the updated DB state.
@@ -212,6 +213,7 @@ export class CodeMapService {
             durationMs: Date.now() - startedAt
           })
         } catch (err) {
+          model.readiness.fail(symbolInitialization, err)
           telemetryService.logError(cid, 'CODE_MAP', 'BACKGROUND_MAINTENANCE_FAILED', {
             repoPath: normalizedPath,
             error: err instanceof Error ? err.message : String(err),
@@ -271,8 +273,10 @@ export class CodeMapService {
     const instance = this.ensureInstance(repoPath)
     // Wait for background maintenance first, then run a fresh reconcile + sync.
     await instance.backgroundMaintenance
-    await instance.model.reconcileWithDisk({ indexUnexpected: true })
-    await instance.synchronizer.synchronizeModified()
+    const cid = telemetryService.startOperation('REFRESH_INDEX')
+    const reconciliation = await instance.model.reconcileWithDisk({ indexUnexpected: true, correlationId: cid })
+    instance.synchronizer.reconcileMemoryWithDatabase(reconciliation.pendingPaths)
+    await instance.synchronizer.synchronizeModified(cid)
     await instance.model.backfillTokenMetadata()
   }
 
@@ -286,22 +290,13 @@ export class CodeMapService {
 
   async awaitReadiness(repoPath: string, capability: CodeMapReadinessCapability): Promise<void> {
     const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
+    const existing = instances.get(normalizedPath)
+    if (existing) {
+      if (capability !== 'FILE_INVENTORY') await existing.model.readiness.barrier(capability)
+      return
+    }
     await this.openRepository(normalizedPath)
-    if (capability === 'FILE_INVENTORY' || capability === 'STRUCTURE') {
-      return
-    }
-    if (capability === 'RELATIONSHIPS') {
-      // RELATIONSHIPS está pronto quando:
-      // 1. O repositório está aberto (openRepository garantido acima)
-      // 2. O synchronizer está idle — mudanças pendentes foram processadas e
-      //    updateFileContent já resolveu os relacionamentos para cada arquivo
-      //
-      // Não esperamos backgroundMaintenance completo (backfills de token/symbol/text)
-      // porque esses backfills não afetam a correção dos relacionamentos estruturais.
-      const instance = this.ensureInstance(normalizedPath)
-      await instance.synchronizer.waitForIdle()
-      return
-    }
+    if (capability !== 'FILE_INVENTORY') await this.ensureInstance(normalizedPath).model.readiness.barrier(capability)
   }
 
   async awaitSnapshot(repoPath: string): Promise<void> {
