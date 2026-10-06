@@ -125,7 +125,6 @@ describe('authenticated gateway and local relay', () => {
     expect(typeof state.lastStageLatencyMs).toBe('number')
 
     const stages = recordedEvents.map((e) => e.stage)
-    expect(stages).toContain('desktop-connection-established')
     expect(stages).toContain('desktop-request-received')
     expect(stages).toContain('mcp-request-started')
     expect(stages).toContain('codescope-request-started')
@@ -141,10 +140,12 @@ describe('authenticated gateway and local relay', () => {
       expect(event.durationMs).toBeGreaterThanOrEqual(0)
     }
 
-    const established = recordedEvents.find((e) => e.stage === 'desktop-connection-established')
-    expect(established?.installationId).toBe(a.id)
-    expect(typeof established?.sessionId).toBe('string')
-    expect(established?.sessionId).not.toBe('none')
+    const received = recordedEvents.find((e) => e.stage === 'desktop-request-received')!
+    const delivered = recordedEvents.find((e) => e.stage === 'gateway-response-delivered')!
+    expect(received.sessionId).toBeTruthy()
+    expect(received.sessionId).not.toBe('none')
+    expect(delivered.sessionId).toBe(received.sessionId)
+    expect(delivered.requestId).toBe(received.requestId)
   })
 
   it('preserves functional tool error to client without degrading operational health', async () => {

@@ -427,8 +427,7 @@ describe('R-B15: respiro das toolbars e full-bleed do FileView (Sprint 6.1)', ()
   const viewToolbars: Array<[string, () => string, string]> = [
     ['.cc-container', compressionViewCss, '.cc-container > .vt-root'],
     ['.cs-container', sourceViewCss, '.cs-container > .vt-root'],
-    ['.cdf-container', diffViewCss, '.cdf-container > .vt-root'],
-    ['.cmv-container', codeMapViewCss, '.cmv-container > .vt-root']
+    ['.cdf-container', diffViewCss, '.cdf-container > .vt-root']
   ]
 
   for (const [name, css, selector] of viewToolbars) {
@@ -449,8 +448,12 @@ describe('R-B15: respiro das toolbars e full-bleed do FileView (Sprint 6.1)', ()
     expect(has(compoundDecls(diffViewCss(), '.cdf-container > .ab-root'), 'padding', '0 20px')).toBe(true)
   })
 
-  it('R-B15.8: .cmv-container > .ab-root declara padding: 0 20px', () => {
-    expect(has(compoundDecls(codeMapViewCss(), '.cmv-container > .ab-root'), 'padding', '0 20px')).toBe(true)
+  it('R-B15.8: CodeMap mantém respiro no container e cabeçalho independente', () => {
+    const css = codeMapViewCss()
+    const container = declarationsOf(extractBlock(css, '.cmv-container'))
+    expect(has(container, 'padding', '16px')).toBe(true)
+    expect(has(container, 'gap', '12px')).toBe(true)
+    expect(has(declarationsOf(extractBlock(css, '.cmv-awareness-header')), 'flex-shrink', '0')).toBe(true)
   })
 
   it('R-B15.9: .cs-container > .processing-status-bar declara padding: 0 20px', () => {
@@ -461,8 +464,11 @@ describe('R-B15: respiro das toolbars e full-bleed do FileView (Sprint 6.1)', ()
     expect(has(compoundDecls(diffViewCss(), '.cdf-container > .ss-root'), 'padding', '0 20px')).toBe(true)
   })
 
-  it('R-B15.11: .cmv-content declara padding: 8px 20px 20px', () => {
-    expect(has(declarationsOf(extractBlock(codeMapViewCss(), '.cmv-content')), 'padding', '8px 20px 20px')).toBe(true)
+  it('R-B15.11: conteúdo CodeMap ocupa o espaço interno sem duplicar padding do container', () => {
+    const content = declarationsOf(extractBlock(codeMapViewCss(), '.cmv-content'))
+    expect(content.some(declaration => declaration.startsWith('padding'))).toBe(false)
+    expect(has(content, 'min-height', '0')).toBe(true)
+    expect(has(content, 'overflow', 'hidden')).toBe(true)
   })
 
   it('R-B15.12 (guarda full-bleed): .fcv-container não declara padding', () => {
