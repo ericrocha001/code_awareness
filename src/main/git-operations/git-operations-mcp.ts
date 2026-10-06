@@ -20,7 +20,7 @@ export const GIT_OPERATIONS_TOOLS = [
   tool('manage_gitignore', 'Preview or append explicit .gitignore rules. PREVIEW_ADD is read-only and returns the exact effect plus previewId; ADD requires that previewId and expectedWorktreeRevision. Never deletes files or changes tracking.', { action: choice('PREVIEW_ADD', 'ADD'), rules: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, minItems: 1, maxItems: 100, uniqueItems: true }, expectedWorktreeRevision: revision, expectedPreviewId: revision }, ['action', 'rules']),
   tool('stage_git_changes', 'Stage or unstage explicit literal paths in the active project. Unstage preserves worktree contents.', { mode: choice('STAGE', 'UNSTAGE'), paths: paths(500) }, ['mode', 'paths']),
   tool('commit_git_changes', 'Commit exactly the inspected staged index. Requires expectedHead and expectedIndexRevision; never stages implicitly.', { message: { ...string, maxLength: 10000 }, expectedHead, expectedIndexRevision: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['message', 'expectedHead', 'expectedIndexRevision']),
-  tool('manage_git_branch', 'List, create, switch, rename or safely delete local branches. CREATE requires expectedHead; RENAME requires newBranch. No force operations.', { action: choice('LIST', 'CREATE', 'SWITCH', 'RENAME', 'DELETE'), branch: string, newBranch: string, startPoint: string, expectedHead }, ['action']),
+  tool('manage_git_branch', 'List, create, switch, rename or safely delete local branches. CREATE requires expectedHead; RENAME requires newBranch. SET_UPSTREAM requires branch, remote, remoteBranch and expectedHead; binds only the current branch to an existing remote-tracking branch without network I/O. No force operations.', { action: choice('LIST', 'CREATE', 'SWITCH', 'RENAME', 'DELETE', 'SET_UPSTREAM'), branch: string, newBranch: string, startPoint: string, remote: string, remoteBranch: string, expectedHead }, ['action']),
   tool('merge_git_branch', 'Merge with FF_ONLY by default or explicitly MERGE; return conflicts as state. MERGE requires source and expectedHead. ABORT requires an active merge.', { action: choice('MERGE', 'ABORT'), source: string, expectedHead, mode: choice('FF_ONLY', 'MERGE') }, ['action']),
   tool('sync_git_remote', 'Fetch, pull fast-forward only, or push without force. Defaults to origin/current branch. PUSH and PULL_FF_ONLY require expectedHead.', { action: choice('FETCH', 'PULL_FF_ONLY', 'PUSH'), remote: string, branch: string, expectedHead }, ['action']),
   tool('revert_git_commit', 'Start (default), continue or abort a revert. START requires commit SHA; CONTINUE requires expectedIndexRevision and zero conflicts. All actions require expectedHead.', { action: choice('START', 'CONTINUE', 'ABORT'), commit: { type: 'string', pattern: '^[a-f0-9]{40,64}$' }, expectedHead, expectedIndexRevision: revision }, ['expectedHead']),
@@ -70,7 +70,7 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
     if (!definition || !validate(definition.inputSchema, args)) throw new GitOperationsError('INVALID_ARGUMENT')
     const values = args as Record<string, any>
     const actionFields: Record<string, Record<string, string[]>> = {
-      manage_git_branch: { LIST: [], CREATE: ['branch', 'expectedHead'], SWITCH: ['branch'], RENAME: ['branch', 'newBranch'], DELETE: ['branch'] },
+      manage_git_branch: { LIST: [], CREATE: ['branch', 'expectedHead'], SWITCH: ['branch'], RENAME: ['branch', 'newBranch'], DELETE: ['branch'], SET_UPSTREAM: ['branch', 'remote', 'remoteBranch', 'expectedHead'] },
       merge_git_branch: { MERGE: ['source', 'expectedHead'], ABORT: [] },
       sync_git_remote: { FETCH: [], PUSH: ['expectedHead'], PULL_FF_ONLY: ['expectedHead'] },
       manage_git_shelf: { LIST: [], CREATE: ['paths', 'expectedWorktreeRevision'], RESTORE: ['shelfId', 'expectedHead', 'expectedWorktreeRevision'], DROP: ['shelfId'] },
@@ -80,6 +80,7 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
     const required = actionFields[name]?.[values.action ?? (name === 'revert_git_commit' ? 'START' : '')] ?? []
     if (required.some((field) => !Object.hasOwn(values, field))) throw new GitOperationsError('INVALID_ARGUMENT')
     const allowedFields: Record<string, Record<string, string[]>> = {
+      manage_git_branch: { SET_UPSTREAM: ['action', 'branch', 'remote', 'remoteBranch', 'expectedHead'] },
       manage_git_shelf: { LIST: ['action'], CREATE: ['action', 'paths', 'expectedWorktreeRevision', 'label'], RESTORE: ['action', 'shelfId', 'expectedHead', 'expectedWorktreeRevision'], DROP: ['action', 'shelfId'] },
       manage_gitignore: { PREVIEW_ADD: ['action', 'rules'], ADD: ['action', 'rules', 'expectedWorktreeRevision', 'expectedPreviewId'] },
       revert_git_commit: { START: ['action', 'commit', 'expectedHead'], CONTINUE: ['action', 'expectedHead', 'expectedIndexRevision'], ABORT: ['action', 'expectedHead'] }

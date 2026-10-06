@@ -27,6 +27,7 @@ export type BranchRequest =
   | { action: 'CREATE'; branch: string; startPoint?: string; expectedHead: string | null }
   | { action: 'SWITCH' | 'DELETE'; branch: string }
   | { action: 'RENAME'; branch: string; newBranch: string }
+  | { action: 'SET_UPSTREAM'; branch: string; remote: string; remoteBranch: string; expectedHead: string | null }
 export type MergeRequest = { action: 'ABORT' } | { action: 'MERGE'; source: string; expectedHead: string | null; mode?: 'FF_ONLY' | 'MERGE' }
 export type SyncRequest = { action: 'FETCH'; remote?: string } | { action: 'PUSH' | 'PULL_FF_ONLY'; remote?: string; branch?: string; expectedHead: string | null }
 export type ShelfRequest =
@@ -330,6 +331,16 @@ export class GitOperationsService {
       } else if (request.action === 'SWITCH') await this.git.switchBranch(this.repoRoot, branch)
       else if (request.action === 'DELETE') await this.git.deleteBranch(this.repoRoot, branch)
       else if (request.action === 'RENAME') await this.git.renameBranch(this.repoRoot, branch, await this.branch(request.newBranch))
+      else if (request.action === 'SET_UPSTREAM') {
+        if (branch !== await this.git.getCurrentBranch(this.repoRoot)) fail('GIT_STATE_CHANGED')
+        await this.checkHead(request.expectedHead)
+        const remote = request.remote
+        if (typeof remote !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote) || !await this.git.getRemoteUrl(this.repoRoot, remote)) fail('REMOTE_NOT_FOUND')
+        const remoteBranch = await this.branch(request.remoteBranch)
+        try { await this.git.resolveCommit(this.repoRoot, `refs/remotes/${remote}/${remoteBranch}`) }
+        catch { fail('BRANCH_NOT_FOUND') }
+        await this.git.setBranchUpstream(this.repoRoot, branch, remote, remoteBranch, request.expectedHead)
+      }
       else fail('INVALID_ARGUMENT')
       return this.observeMutation(() => this.getState())
     })

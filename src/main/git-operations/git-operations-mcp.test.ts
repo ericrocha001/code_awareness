@@ -4,10 +4,27 @@ import { isReceiptedGitMutation } from './git-operation-receipts'
 import { GitHubGitTransport } from '../github/github-git-transport'
 import type { GitService } from '../core/git-service'
 import type { GitHubAuthService } from '../github/github-auth-service'
-import { executeGitOperationsTool } from './git-operations-mcp'
+import { executeGitOperationsTool, GIT_OPERATIONS_TOOLS } from './git-operations-mcp'
 import { GitOperationsError, type GitOperationsService } from './git-operations-service'
 
 describe('Git MCP contract', () => {
+  it('requires explicit upstream inputs and operationId without expanding the catalog', async () => {
+    const manageBranch = vi.fn(async () => ({}))
+    const service = { manageBranch, executeReceipted: async (_id: string, _name: string, _args: Record<string, unknown>, mutate: Parameters<GitOperationsService['executeReceipted']>[3]) => mutate() } as unknown as GitOperationsService
+    const args: Record<string, unknown> = { action: 'SET_UPSTREAM', branch: 'main', remote: 'origin', remoteBranch: 'main', expectedHead: 'a'.repeat(40), operationId: randomUUID() }
+    expect(GIT_OPERATIONS_TOOLS).toHaveLength(15)
+    expect((await executeGitOperationsTool(service, 'manage_git_branch', args)).isError).toBeUndefined()
+    expect(manageBranch).toHaveBeenCalledWith({ action: 'SET_UPSTREAM', branch: 'main', remote: 'origin', remoteBranch: 'main', expectedHead: 'a'.repeat(40) })
+    manageBranch.mockClear()
+    for (const key of ['branch', 'remote', 'remoteBranch', 'expectedHead', 'operationId']) {
+      const missing = { ...args }; delete missing[key]
+      expect((await executeGitOperationsTool(service, 'manage_git_branch', missing)).isError).toBe(true)
+    }
+    for (const key of ['command', 'refspec', 'config', 'startPoint', 'newBranch']) {
+      expect((await executeGitOperationsTool(service, 'manage_git_branch', { ...args, [key]: 'forbidden' })).isError).toBe(true)
+    }
+    expect(manageBranch).not.toHaveBeenCalled()
+  })
   it('projects v1.1 typed actions without repository/command inputs and keeps legacy revert dispatch', async () => {
     const service = { executeReceipted: vi.fn(async (_id, _name, _args, mutate) => mutate()), manageShelf: vi.fn(async () => []), analyzeHygiene: vi.fn(async () => ({})), manageGitignore: vi.fn(async () => ({})), getConflict: vi.fn(async () => ({})), resolveConflict: vi.fn(async () => ({})), revert: vi.fn(async () => ({})) }
     const typed = service as unknown as GitOperationsService

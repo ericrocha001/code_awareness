@@ -438,6 +438,11 @@ export class GitService implements FileListingPort {
     await this.runGit(['branch', branch, startPoint], dirPath)
   }
 
+  async setBranchUpstream(dirPath: string, branch: string, remote: string, remoteBranch: string, expectedHead: string | null): Promise<void> {
+    if (await this.getCurrentBranch(dirPath) !== branch || await this.getCurrentCommitHash(dirPath) !== expectedHead) throw new Error('GIT_STATE_CHANGED')
+    await this.runGit(['branch', `--set-upstream-to=refs/remotes/${remote}/${remoteBranch}`, branch], dirPath)
+  }
+
   async switchBranch(dirPath: string, branch: string): Promise<void> {
     await this.runGit(['switch', '--no-guess', branch], dirPath)
   }
