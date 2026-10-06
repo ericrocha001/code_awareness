@@ -14,6 +14,7 @@ afterEach(async () => { for (const root of roots.splice(0)) await cleanupTempRep
 
 async function fixture() {
   const root = await createTempGitRepo(); roots.push(root)
+  writeFile(root, 'base.txt', 'base\\n')
   await stageAll(root); await commit(root, 'base')
   const git = new GitService()
   return { root, service: new GitOperationsService(root, git, new GitHubGitTransport(null, git)) }
