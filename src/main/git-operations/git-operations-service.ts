@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { existsSync, realpathSync } from 'node:fs'
-import { dirname, isAbsolute, relative, resolve } from 'node:path'
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { GitService } from '../core/git-service'
 import type { GitRemoteTransport } from '../core/git-remote-transport'
 import { GitOperationReceipts } from './git-operation-receipts'
@@ -38,6 +38,9 @@ export type ConflictResolution = 'OURS' | 'THEIRS' | 'CONTENT' | 'DELETE'
 export type RevertRequest = { action?: 'START'; commit: string; expectedHead: string | null }
   | { action: 'CONTINUE'; expectedHead: string | null; expectedIndexRevision: string }
   | { action: 'ABORT'; expectedHead: string | null }
+export type GitIgnoreRequest =
+  | { action: 'PREVIEW_ADD'; rules: string[] }
+  | { action: 'ADD'; rules: string[]; expectedWorktreeRevision: string; expectedPreviewId: string }
 
 function isBinary(bytes: Buffer): boolean {
   if (bytes.includes(0)) return true
@@ -151,6 +154,110 @@ export class GitOperationsService {
       stagedCount: changes.filter((c) => c.stagedState).length, unstagedCount: changes.filter((c) => c.unstagedState).length,
       untrackedCount: changes.filter((c) => c.untracked).length, conflictCount: changes.filter((c) => c.conflicted).length,
       operation, indexRevision, worktreeRevision: await this.git.getWorktreeRevision(this.repoRoot) }
+  }
+
+  private normalizeIgnoreRules(values: string[]): string[] {
+    if (!Array.isArray(values) || values.length < 1 || values.length > 100) fail('INVALID_ARGUMENT')
+    return [...new Set(values.map((value) => {
+      if (typeof value !== 'string') fail('INVALID_ARGUMENT')
+      const rule = value.trim().replace(/\\\\/g, '/')
+      if (!rule || rule.length > 500 || /[\\0\\r\\n]/.test(rule) || rule.startsWith('!')) fail('INVALID_ARGUMENT')
+      const pathLike = rule.replace(/^\\/+/, '').replace(/^\\.\\//, '')
+      if (!pathLike || /^[A-Za-z]:/.test(pathLike) || pathLike.split('/').some((part) => part === '..' || part.toLowerCase() === '.git')) fail('INVALID_ARGUMENT')
+      return rule
+    }))]
+  }
+
+  private hygieneDescriptor(path: string): { classification: string; group: string; suggestedRule?: string } {
+    const normalized = path.replace(/\\\\/g, '/')
+    const parts = normalized.split('/')
+    if (normalized.startsWith('.claude/skills/')) return { classification: 'GENERATED_PROJECTION', group: '.claude/skills', suggestedRule: '.claude/skills/' }
+    if (/^\\.code-awareness\\/[^/]+-runtime\\//.test(normalized)) {
+      const group = parts.slice(0, 2).join('/')
+      return { classification: 'GENERATED_RUNTIME', group, suggestedRule: group + '/' }
+    }
+    if (normalized.startsWith('.code-awareness/continuum/rollback-baseline/')) return { classification: 'GENERATED_VALIDATION', group: '.code-awareness/continuum/rollback-baseline', suggestedRule: '.code-awareness/continuum/rollback-baseline/' }
+    if (/^\\.code-awareness\\/continuum\\/[^/]*validation[^/]*\\//.test(normalized)) {
+      const group = parts.slice(0, 3).join('/')
+      return { classification: 'GENERATED_VALIDATION', group, suggestedRule: group + '/' }
+    }
+    if (normalized.endsWith('.log')) return { classification: 'LOG', group: '*.log', suggestedRule: '*.log' }
+    return { classification: 'UNCLASSIFIED', group: parts.length > 1 ? parts.slice(0, 2).join('/') : normalized }
+  }
+
+  private hygieneGroups(paths: string[]) {
+    const groups = new Map<string, { classification: string; group: string; count: number; suggestedRule?: string }>()
+    for (const path of paths) {
+      const descriptor = this.hygieneDescriptor(path)
+      const key = descriptor.classification + ':' + descriptor.group
+      const existing = groups.get(key)
+      if (existing) existing.count++
+      else groups.set(key, { ...descriptor, count: 1 })
+    }
+    return [...groups.values()].sort((a, b) => b.count - a.count || a.group.localeCompare(b.group))
+  }
+
+  async analyzeHygiene() {
+    await this.repository()
+    const changes = await this.getChanges()
+    const untracked = changes.filter((change) => change.untracked).map((change) => change.path)
+    const groups = this.hygieneGroups(untracked)
+    return {
+      dirtyCount: changes.length,
+      trackedDirtyCount: changes.filter((change) => !change.untracked).length,
+      untrackedCount: untracked.length,
+      groups,
+      recommendedRules: [...new Set(groups.map((group) => group.suggestedRule).filter((rule): rule is string => !!rule))]
+    }
+  }
+
+  private async previewGitignore(rules: string[]) {
+    await this.repository()
+    const normalizedRules = this.normalizeIgnoreRules(rules)
+    const beforeRevision = await this.git.getWorktreeRevision(this.repoRoot)
+    const gitignorePath = join(this.repoRoot, '.gitignore')
+    const content = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : ''
+    const present = new Set(content.split(/\\r?\\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')))
+    const alreadyPresent = normalizedRules.filter((rule) => present.has(rule))
+    const candidateRules = normalizedRules.filter((rule) => !present.has(rule))
+    const before = (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot)).map((path) => path.replace(/\\\\/g, '/'))
+    const after = candidateRules.length ? (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot, candidateRules)).map((path) => path.replace(/\\\\/g, '/')) : before
+    const afterSet = new Set(after)
+    const newlyIgnored = before.filter((path) => !afterSet.has(path))
+    const afterRevision = await this.git.getWorktreeRevision(this.repoRoot)
+    if (beforeRevision !== afterRevision) fail('GIT_STATE_CHANGED')
+    const previewId = createHash('sha256').update(JSON.stringify({ worktreeRevision: beforeRevision, candidateRules, newlyIgnored })).digest('hex')
+    return {
+      rules: normalizedRules,
+      candidateRules,
+      alreadyPresent,
+      newlyIgnoredCount: newlyIgnored.length,
+      remainingUntrackedCount: after.length,
+      affectedGroups: this.hygieneGroups(newlyIgnored),
+      worktreeRevision: beforeRevision,
+      previewId
+    }
+  }
+
+  async manageGitignore(request: GitIgnoreRequest) {
+    if (request.action === 'PREVIEW_ADD') return this.previewGitignore(request.rules)
+    return this.serialized(async () => {
+      await this.ready()
+      if (typeof request.expectedWorktreeRevision !== 'string' || !/^[a-f0-9]{64}$/.test(request.expectedWorktreeRevision) || typeof request.expectedPreviewId !== 'string' || !/^[a-f0-9]{64}$/.test(request.expectedPreviewId)) fail('INVALID_ARGUMENT')
+      const preview = await this.previewGitignore(request.rules)
+      if (preview.worktreeRevision !== request.expectedWorktreeRevision || preview.previewId !== request.expectedPreviewId) fail('GIT_STATE_CHANGED')
+      if (!preview.candidateRules.length) return { result: 'NO_CHANGES', addedRules: [], ...preview }
+      if (await this.git.getWorktreeRevision(this.repoRoot) !== request.expectedWorktreeRevision) fail('GIT_STATE_CHANGED')
+      const path = join(this.repoRoot, '.gitignore')
+      const current = existsSync(path) ? readFileSync(path, 'utf8') : ''
+      const newline = current.includes('\\r\\n') ? '\\r\\n' : '\\n'
+      const separator = current.length && !current.endsWith('\\n') && !current.endsWith('\\r') ? newline : ''
+      writeFileSync(path, current + separator + preview.candidateRules.join(newline) + newline, 'utf8')
+      return this.observeMutation(async () => {
+        const state = await this.getState()
+        return { result: 'UPDATED', addedRules: preview.candidateRules, newlyIgnoredCount: preview.newlyIgnoredCount, remainingUntrackedCount: state.untrackedCount, worktreeRevision: state.worktreeRevision }
+      })
+    })
   }
 
   async getDiff(request: { paths: string[]; mode: 'WORKTREE' | 'STAGED' | 'BETWEEN_REFS'; base?: string; head?: string; cursor?: string }) {

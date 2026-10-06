@@ -22,6 +22,7 @@ function canonical(value: unknown): unknown {
 export function isReceiptedGitMutation(name: string, args: Record<string, unknown>): boolean {
   if (['commit_git_changes', 'merge_git_branch', 'revert_git_commit', 'resolve_git_conflict'].includes(name)) return true
   if (['manage_git_branch', 'manage_git_shelf'].includes(name)) return args.action !== 'LIST'
+  if (name === 'manage_gitignore') return args.action === 'ADD'
   return name === 'sync_git_remote' && args.action !== 'FETCH'
 }
 

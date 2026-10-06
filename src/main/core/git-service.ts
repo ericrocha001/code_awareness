@@ -842,6 +842,13 @@ export class GitService implements FileListingPort {
     }
   }
 
+  /** Lista untracked respeitando .gitignore atual e regras adicionais sem persistir mudanças. */
+  async getUntrackedPathsWithAdditionalIgnores(repoPath: string, patterns: string[] = []): Promise<string[]> {
+    const args = ['-c', 'core.quotePath=false', 'ls-files', '--others', '--exclude-standard', '-z', ...patterns.map((pattern) => `--exclude=${pattern}`)]
+    const output = await this.runGit(args, repoPath)
+    return output.split('\\0').filter(Boolean)
+  }
+
   /**
    * Verifica em batch se os paths dados são ignorados pelo Git (`.gitignore` + nested).
    * Usa `git check-ignore --stdin -z` para evitar um processo por path.

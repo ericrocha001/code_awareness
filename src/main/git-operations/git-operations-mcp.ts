@@ -1,5 +1,5 @@
 import type { McpToolDefinition, McpToolResult } from '../mcp/context-navigation-mcp-adapter'
-import { GitOperationsError, type GitOperationsService, type BranchRequest, type MergeRequest, type SyncRequest, type ShelfRequest, type RevertRequest } from './git-operations-service'
+import { GitOperationsError, type GitOperationsService, type BranchRequest, type MergeRequest, type SyncRequest, type ShelfRequest, type RevertRequest, type GitIgnoreRequest } from './git-operations-service'
 import { isReceiptedGitMutation } from './git-operation-receipts'
 import { gitGuidance, operationalFailure } from '../mcp/operational-guidance'
 
@@ -16,6 +16,8 @@ export const GIT_OPERATIONS_TOOLS = [
   tool('get_git_changes', 'Discover changed files of the active project without patches.', { filter: choice('ALL', 'STAGED', 'UNSTAGED', 'UNTRACKED', 'CONFLICTED') }),
   tool('get_git_diff', 'Read a bounded diff for explicit paths. Continue with nextCursor; changed evidence invalidates the cursor. Binary contents are omitted.', { paths: paths(20), mode: choice('WORKTREE', 'STAGED', 'BETWEEN_REFS'), base: string, head: string, cursor: string }, ['paths', 'mode']),
   tool('get_git_history', 'Read bounded commit metadata, optionally for one path, without patches.', { ref: string, limit: { type: 'integer', minimum: 1, maximum: 100 }, path: string }),
+  tool('analyze_git_hygiene', 'Summarize dirty worktree signal by grouped untracked output, tracked dirt and suggested ignore rules without dumping every path.', {}),
+  tool('manage_gitignore', 'Preview or append explicit .gitignore rules. PREVIEW_ADD is read-only and returns the exact effect plus previewId; ADD requires that previewId and expectedWorktreeRevision. Never deletes files or changes tracking.', { action: choice('PREVIEW_ADD', 'ADD'), rules: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, minItems: 1, maxItems: 100, uniqueItems: true }, expectedWorktreeRevision: revision, expectedPreviewId: revision }, ['action', 'rules']),
   tool('stage_git_changes', 'Stage or unstage explicit literal paths in the active project. Unstage preserves worktree contents.', { mode: choice('STAGE', 'UNSTAGE'), paths: paths(500) }, ['mode', 'paths']),
   tool('commit_git_changes', 'Commit exactly the inspected staged index. Requires expectedHead and expectedIndexRevision; never stages implicitly.', { message: { ...string, maxLength: 10000 }, expectedHead, expectedIndexRevision: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['message', 'expectedHead', 'expectedIndexRevision']),
   tool('manage_git_branch', 'List, create, switch, rename or safely delete local branches. CREATE requires expectedHead; RENAME requires newBranch. No force operations.', { action: choice('LIST', 'CREATE', 'SWITCH', 'RENAME', 'DELETE'), branch: string, newBranch: string, startPoint: string, expectedHead }, ['action']),
@@ -27,7 +29,7 @@ export const GIT_OPERATIONS_TOOLS = [
   tool('resolve_git_conflict', 'Resolve only an existing conflicted path using OURS, THEIRS, CONTENT (complete literal text, up to 1 MiB) or DELETE. Requires observed HEAD and conflict revision; content is allowed only for CONTENT. Stages the resolution.', { path: string, resolution: choice('OURS', 'THEIRS', 'CONTENT', 'DELETE'), expectedHead, expectedConflictRevision: revision, content: { type: 'string', maxLength: 1024 * 1024 } }, ['path', 'resolution', 'expectedHead', 'expectedConflictRevision'])
 ]
 
-for (const definition of GIT_OPERATIONS_TOOLS.filter((entry) => ['commit_git_changes', 'manage_git_branch', 'merge_git_branch', 'sync_git_remote', 'revert_git_commit', 'manage_git_shelf', 'resolve_git_conflict'].includes(entry.name))) {
+for (const definition of GIT_OPERATIONS_TOOLS.filter((entry) => ['commit_git_changes', 'manage_git_branch', 'merge_git_branch', 'sync_git_remote', 'revert_git_commit', 'manage_git_shelf', 'manage_gitignore', 'resolve_git_conflict'].includes(entry.name))) {
   (definition.inputSchema.properties as Record<string, unknown>).operationId = { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$', maxLength: 128 }
   definition.description += ' Mutating actions require a caller-created operationId; reuse that same ID to recover a lost acknowledgement, never retry with a new ID blindly.'
 }
@@ -72,12 +74,14 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
       merge_git_branch: { MERGE: ['source', 'expectedHead'], ABORT: [] },
       sync_git_remote: { FETCH: [], PUSH: ['expectedHead'], PULL_FF_ONLY: ['expectedHead'] },
       manage_git_shelf: { LIST: [], CREATE: ['paths', 'expectedWorktreeRevision'], RESTORE: ['shelfId', 'expectedHead', 'expectedWorktreeRevision'], DROP: ['shelfId'] },
+      manage_gitignore: { PREVIEW_ADD: [], ADD: ['expectedWorktreeRevision', 'expectedPreviewId'] },
       revert_git_commit: { START: ['commit'], CONTINUE: ['expectedIndexRevision'], ABORT: [] }
     }
     const required = actionFields[name]?.[values.action ?? (name === 'revert_git_commit' ? 'START' : '')] ?? []
     if (required.some((field) => !Object.hasOwn(values, field))) throw new GitOperationsError('INVALID_ARGUMENT')
     const allowedFields: Record<string, Record<string, string[]>> = {
       manage_git_shelf: { LIST: ['action'], CREATE: ['action', 'paths', 'expectedWorktreeRevision', 'label'], RESTORE: ['action', 'shelfId', 'expectedHead', 'expectedWorktreeRevision'], DROP: ['action', 'shelfId'] },
+      manage_gitignore: { PREVIEW_ADD: ['action', 'rules'], ADD: ['action', 'rules', 'expectedWorktreeRevision', 'expectedPreviewId'] },
       revert_git_commit: { START: ['action', 'commit', 'expectedHead'], CONTINUE: ['action', 'expectedHead', 'expectedIndexRevision'], ABORT: ['action', 'expectedHead'] }
     }
     const allowed = allowedFields[name]?.[values.action ?? 'START']
@@ -91,6 +95,8 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
       case 'get_git_changes': result = await service.getChanges(values.filter); break
       case 'get_git_diff': result = await service.getDiff(values as Parameters<GitOperationsService['getDiff']>[0]); break
       case 'get_git_history': result = await service.getHistory(values); break
+      case 'analyze_git_hygiene': result = await service.analyzeHygiene(); break
+      case 'manage_gitignore': result = await service.manageGitignore(values as GitIgnoreRequest); break
       case 'stage_git_changes': result = await service.stage(values as Parameters<GitOperationsService['stage']>[0]); break
       case 'commit_git_changes': result = await service.commit(values as Parameters<GitOperationsService['commit']>[0]); break
       case 'manage_git_branch': result = await service.manageBranch(values as BranchRequest); break

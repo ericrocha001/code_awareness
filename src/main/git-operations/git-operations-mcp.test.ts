@@ -9,12 +9,15 @@ import { GitOperationsError, type GitOperationsService } from './git-operations-
 
 describe('Git MCP contract', () => {
   it('projects v1.1 typed actions without repository/command inputs and keeps legacy revert dispatch', async () => {
-    const service = { executeReceipted: vi.fn(async (_id, _name, _args, mutate) => mutate()), manageShelf: vi.fn(async () => []), getConflict: vi.fn(async () => ({})), resolveConflict: vi.fn(async () => ({})), revert: vi.fn(async () => ({})) }
+    const service = { executeReceipted: vi.fn(async (_id, _name, _args, mutate) => mutate()), manageShelf: vi.fn(async () => []), analyzeHygiene: vi.fn(async () => ({})), manageGitignore: vi.fn(async () => ({})), getConflict: vi.fn(async () => ({})), resolveConflict: vi.fn(async () => ({})), revert: vi.fn(async () => ({})) }
     const typed = service as unknown as GitOperationsService
     const head = 'a'.repeat(40), revision = 'b'.repeat(64)
     for (const [name, args] of [
       ['manage_git_shelf', { action: 'CREATE', paths: ['file'], expectedWorktreeRevision: revision }],
       ['manage_git_shelf', { action: 'RESTORE', shelfId: 'owned', expectedHead: head, expectedWorktreeRevision: revision }],
+      ['analyze_git_hygiene', {}],
+      ['manage_gitignore', { action: 'PREVIEW_ADD', rules: ['generated/'] }],
+      ['manage_gitignore', { action: 'ADD', rules: ['generated/'], expectedWorktreeRevision: revision, expectedPreviewId: revision }],
       ['get_git_conflict', { path: 'file', side: 'OURS' }],
       ['resolve_git_conflict', { path: 'file', resolution: 'CONTENT', content: '', expectedHead: head, expectedConflictRevision: revision }],
       ['revert_git_commit', { commit: head, expectedHead: head }],
@@ -25,6 +28,8 @@ describe('Git MCP contract', () => {
     for (const [name, args] of [
       ['manage_git_shelf', { action: 'CREATE', paths: ['file'] }],
       ['manage_git_shelf', { action: 'RESTORE', shelfId: 'owned', expectedHead: head }],
+      ['manage_gitignore', { action: 'ADD', rules: ['generated/'], expectedWorktreeRevision: revision }],
+      ['manage_gitignore', { action: 'PREVIEW_ADD', rules: [] }],
       ['get_git_conflict', { path: 'file', cursor: 'stale' }],
       ['resolve_git_conflict', { path: 'file', resolution: 'CONTENT', expectedHead: head, expectedConflictRevision: revision }],
       ['revert_git_commit', { action: 'CONTINUE', expectedHead: head }]
