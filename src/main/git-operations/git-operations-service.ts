@@ -160,24 +160,24 @@ export class GitOperationsService {
     if (!Array.isArray(values) || values.length < 1 || values.length > 100) fail('INVALID_ARGUMENT')
     return [...new Set(values.map((value) => {
       if (typeof value !== 'string') fail('INVALID_ARGUMENT')
-      const rule = value.trim().replace(/\\\\/g, '/')
-      if (!rule || rule.length > 500 || /[\\0\\r\\n]/.test(rule) || rule.startsWith('!')) fail('INVALID_ARGUMENT')
-      const pathLike = rule.replace(/^\\/+/, '').replace(/^\\.\\//, '')
+      const rule = value.trim().replace(/\\/g, '/')
+      if (!rule || rule.length > 500 || rule.includes('\\0') || /[\\r\\n]/.test(rule) || rule.startsWith('!')) fail('INVALID_ARGUMENT')
+      const pathLike = rule.replace(/^\/+/, '').replace(/^\.\//, '')
       if (!pathLike || /^[A-Za-z]:/.test(pathLike) || pathLike.split('/').some((part) => part === '..' || part.toLowerCase() === '.git')) fail('INVALID_ARGUMENT')
       return rule
     }))]
   }
 
   private hygieneDescriptor(path: string): { classification: string; group: string; suggestedRule?: string } {
-    const normalized = path.replace(/\\\\/g, '/')
+    const normalized = path.replace(/\\/g, '/')
     const parts = normalized.split('/')
     if (normalized.startsWith('.claude/skills/')) return { classification: 'GENERATED_PROJECTION', group: '.claude/skills', suggestedRule: '.claude/skills/' }
-    if (/^\\.code-awareness\\/[^/]+-runtime\\//.test(normalized)) {
+    if (/^\.code-awareness\/[^/]+-runtime\//.test(normalized)) {
       const group = parts.slice(0, 2).join('/')
       return { classification: 'GENERATED_RUNTIME', group, suggestedRule: group + '/' }
     }
     if (normalized.startsWith('.code-awareness/continuum/rollback-baseline/')) return { classification: 'GENERATED_VALIDATION', group: '.code-awareness/continuum/rollback-baseline', suggestedRule: '.code-awareness/continuum/rollback-baseline/' }
-    if (/^\\.code-awareness\\/continuum\\/[^/]*validation[^/]*\\//.test(normalized)) {
+    if (/^\.code-awareness\/continuum\/[^/]*validation[^/]*\//.test(normalized)) {
       const group = parts.slice(0, 3).join('/')
       return { classification: 'GENERATED_VALIDATION', group, suggestedRule: group + '/' }
     }
@@ -220,8 +220,8 @@ export class GitOperationsService {
     const present = new Set(content.split(/\\r?\\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')))
     const alreadyPresent = normalizedRules.filter((rule) => present.has(rule))
     const candidateRules = normalizedRules.filter((rule) => !present.has(rule))
-    const before = (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot)).map((path) => path.replace(/\\\\/g, '/'))
-    const after = candidateRules.length ? (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot, candidateRules)).map((path) => path.replace(/\\\\/g, '/')) : before
+    const before = (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot)).map((path) => path.replace(/\\/g, '/'))
+    const after = candidateRules.length ? (await this.git.getUntrackedPathsWithAdditionalIgnores(this.repoRoot, candidateRules)).map((path) => path.replace(/\\/g, '/')) : before
     const afterSet = new Set(after)
     const newlyIgnored = before.filter((path) => !afterSet.has(path))
     const afterRevision = await this.git.getWorktreeRevision(this.repoRoot)
