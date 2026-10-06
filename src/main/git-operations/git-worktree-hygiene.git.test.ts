@@ -14,7 +14,7 @@ afterEach(async () => { for (const root of roots.splice(0)) await cleanupTempRep
 
 async function fixture() {
   const root = await createTempGitRepo(); roots.push(root)
-  writeFile(root, 'base.txt', 'base\\n')
+  writeFile(root, 'base.txt', 'base\n')
   await stageAll(root); await commit(root, 'base')
   const git = new GitService()
   return { root, service: new GitOperationsService(root, git, new GitHubGitTransport(null, git)) }
@@ -24,7 +24,7 @@ const call = (service: GitOperationsService, name: string, args: Record<string, 
   executeGitOperationsTool(service, name, isReceiptedGitMutation(name, args) ? { ...args, operationId: randomUUID() } : args)
 
 describe('Git Operations worktree hygiene', () => {
-  it('groups generated residue and applies previewed .gitignore rules without deleting files', async () => {
+  it('groups generated residue without enumerating it as agent output', async () => {
     const { root, service } = await fixture()
     writeFile(root, '.code-awareness/codemap-ui-runtime/screenshot.png', 'runtime')
     writeFile(root, '.claude/skills/continuum/SKILL.md', 'projection')
@@ -34,11 +34,21 @@ describe('Git Operations worktree hygiene', () => {
     expect(analysis.untrackedCount).toBe(3)
     expect(analysis.groups).toEqual(expect.arrayContaining([
       expect.objectContaining({ classification: 'GENERATED_RUNTIME', group: '.code-awareness/codemap-ui-runtime', count: 1 }),
-      expect.objectContaining({ classification: 'GENERATED_PROJECTION', group: '.claude/skills', count: 1 })
+      expect.objectContaining({ classification: 'GENERATED_PROJECTION', group: '.claude/skills', count: 1 }),
+      expect.objectContaining({ classification: 'UNCLASSIFIED', group: 'keep.txt', count: 1 })
     ]))
+    expect(analysis.recommendedRules).toEqual(expect.arrayContaining(['.code-awareness/codemap-ui-runtime/', '.claude/skills/']))
+  }, 30000)
+
+  it('previews and applies .gitignore rules without deleting generated files', async () => {
+    const { root, service } = await fixture()
+    writeFile(root, '.code-awareness/codemap-ui-runtime/screenshot.png', 'runtime')
+    writeFile(root, '.claude/skills/continuum/SKILL.md', 'projection')
+    writeFile(root, 'keep.txt', 'keep')
 
     const preview = await service.manageGitignore({ action: 'PREVIEW_ADD', rules: ['.code-awareness/codemap-ui-runtime/', '.claude/skills/'] })
-    if (preview.newlyIgnoredCount !== 2 || preview.remainingUntrackedCount !== 1) throw new Error('PREVIEW_MISMATCH ' + JSON.stringify(preview))
+    expect(preview.newlyIgnoredCount).toBe(2)
+    expect(preview.remainingUntrackedCount).toBe(1)
     expect(existsSync(join(root, '.gitignore'))).toBe(false)
 
     const applied = await service.manageGitignore({
@@ -69,8 +79,7 @@ describe('Git Operations worktree hygiene', () => {
       action: 'ADD', rules: preview.rules, expectedWorktreeRevision: preview.worktreeRevision, expectedPreviewId: preview.previewId
     })
     expect(stale.isError).toBe(true)
-    const payload = JSON.parse(stale.content[0].text)
-    if (payload.code !== 'GIT_STATE_CHANGED') throw new Error('STALE_MISMATCH ' + JSON.stringify(payload))
+    expect(JSON.parse(stale.content[0].text)).toMatchObject({ code: 'GIT_STATE_CHANGED' })
     expect(existsSync(join(root, '.gitignore'))).toBe(false)
   }, 30000)
 })
