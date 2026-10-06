@@ -24,6 +24,25 @@ const call = (service: GitOperationsService, name: string, args: Record<string, 
   executeGitOperationsTool(service, name, isReceiptedGitMutation(name, args) ? { ...args, operationId: randomUUID() } : args)
 
 describe('Git Operations worktree hygiene', () => {
+  it.each(['\n', '\r\n'])('preserves existing newline style %j and never duplicates accepted rules', async (newline) => {
+    const { root, service } = await fixture()
+    const original = '# existing' + newline + 'existing/' + newline + 'last-rule'
+    writeFile(root, '.gitignore', original)
+    writeFile(root, 'generated/nested/output.txt', 'preserved')
+    const preview = await service.manageGitignore({ action: 'PREVIEW_ADD', rules: ['existing/', 'generated/'] })
+    if (!('rules' in preview)) throw new Error('Missing preview rules')
+    expect(preview).toMatchObject({ alreadyPresent: ['existing/'], candidateRules: ['generated/'], newlyIgnoredCount: 1, remainingUntrackedCount: 1 })
+    expect(readFileSync(join(root, '.gitignore'), 'utf8')).toBe(original)
+    await service.manageGitignore({ action: 'ADD', rules: preview.rules, expectedWorktreeRevision: preview.worktreeRevision, expectedPreviewId: preview.previewId })
+    const expected = original + newline + 'generated/' + newline
+    expect(readFileSync(join(root, '.gitignore'), 'utf8')).toBe(expected)
+    expect(readFileSync(join(root, 'generated/nested/output.txt'), 'utf8')).toBe('preserved')
+    const again = await service.manageGitignore({ action: 'PREVIEW_ADD', rules: preview.rules })
+    if (!('rules' in again)) throw new Error('Missing preview rules')
+    expect(await service.manageGitignore({ action: 'ADD', rules: again.rules, expectedWorktreeRevision: again.worktreeRevision, expectedPreviewId: again.previewId })).toMatchObject({ result: 'NO_CHANGES' })
+    expect(readFileSync(join(root, '.gitignore'), 'utf8')).toBe(expected)
+  }, 30000)
+
   it('groups generated residue without enumerating it as agent output', async () => {
     const { root, service } = await fixture()
     writeFile(root, '.code-awareness/codemap-ui-runtime/screenshot.png', 'runtime')

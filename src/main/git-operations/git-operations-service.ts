@@ -218,7 +218,7 @@ export class GitOperationsService {
     const beforeRevision = await this.git.getWorktreeRevision(this.repoRoot)
     const gitignorePath = join(this.repoRoot, '.gitignore')
     const content = existsSync(gitignorePath) ? readFileSync(gitignorePath, 'utf8') : ''
-    const present = new Set(content.split(/\\r?\\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')))
+    const present = new Set(content.split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith('#')))
     const alreadyPresent = normalizedRules.filter((rule) => present.has(rule))
     const candidateRules = normalizedRules.filter((rule) => !present.has(rule))
     const before = (await this.getChanges('UNTRACKED')).map((change) => change.path.replace(/\\/g, '/'))
@@ -252,8 +252,8 @@ export class GitOperationsService {
       if (await this.git.getWorktreeRevision(this.repoRoot) !== request.expectedWorktreeRevision) fail('GIT_STATE_CHANGED')
       const path = join(this.repoRoot, '.gitignore')
       const current = existsSync(path) ? readFileSync(path, 'utf8') : ''
-      const newline = current.includes('\\r\\n') ? '\\r\\n' : '\\n'
-      const separator = current.length && !current.endsWith('\\n') && !current.endsWith('\\r') ? newline : ''
+      const newline = current.includes('\r\n') ? '\r\n' : '\n'
+      const separator = current.length && !current.endsWith('\n') && !current.endsWith('\r') ? newline : ''
       writeFileSync(path, current + separator + preview.candidateRules.join(newline) + newline, 'utf8')
       return this.observeMutation(async () => {
         const state = await this.getState()
