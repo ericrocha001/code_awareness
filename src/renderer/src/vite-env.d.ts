@@ -4,10 +4,11 @@
 
 /// <reference types="vite/client" />
 import type { ActiveProjectState } from '../../shared/types/active-project-types'
+import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline } from '../../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
 import type { ChannelState } from '../../shared/types/channel-state-types'
 import type { SystemHealthState } from '../../shared/types/system-health-types'
-import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput } from '../../shared/types/academy-types'
+import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput } from '../../shared/types/academy-types'
 import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../../shared/types/github-types'
 
@@ -16,7 +17,16 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 declare global {
   interface Window {
     codeAwareness: {
+      listContinuumArtifacts: (request: ContinuumListRequest) => Promise<ContinuumTimeline>
+      getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
+      getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
+      onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void
       getAcademySnapshot: () => Promise<AcademySnapshot>
+      getAcademyGitStatus: () => Promise<AcademyGitStatusProjection>
+      syncAcademyGitNow: () => Promise<AcademyGitStatusProjection>
+      bindAcademyGitRepository: (repositoryCatalogId: string) => Promise<AcademyGitStatusProjection>
+      listAcademyGitEligibleRepositories: () => Promise<RepositoryRecord[]>
+      openAcademyGitRepository: () => Promise<boolean>
       getAcademySkill: (id: string) => Promise<AcademySkillDetail>
       getAcademyHistory: (id: string) => Promise<AcademySkillVersion[]>
       createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>) => Promise<AcademySkillDetail>

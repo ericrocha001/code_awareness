@@ -6,6 +6,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { RepoDiscoveryRequest, RepoDiscoveryResult } from '../shared/types/repo-discovery-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
+import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline } from '../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
 import type { ChannelState } from '../shared/types/channel-state-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
@@ -14,6 +15,14 @@ import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
+  listContinuumArtifacts: (request: ContinuumListRequest): Promise<ContinuumTimeline> => ipcRenderer.invoke('continuum:list', request),
+  getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
+  getContinuumArtifact: (repositoryId: string, artifactId: string): Promise<ContinuumSelection> => ipcRenderer.invoke('continuum:get', repositoryId, artifactId),
+  onContinuumChanged: (callback: (change: ContinuumChange) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, change: ContinuumChange) => callback(change)
+    ipcRenderer.on('continuum:changed', listener)
+    return () => { ipcRenderer.removeListener('continuum:changed', listener) }
+  },
   getAcademySnapshot: (): Promise<AcademySnapshot> => ipcRenderer.invoke('academy:snapshot'),
   getAcademySkill: (id: string): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:get', id),
   getAcademyHistory: (id: string): Promise<AcademySkillVersion[]> => ipcRenderer.invoke('academy:history', id),

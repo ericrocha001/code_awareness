@@ -20,6 +20,10 @@ interface LiveRepositorySession extends ActiveRepositorySession {
 }
 export class RepositoryContinuumSession {
   private currentSession: LiveRepositorySession | null = null
+  private readonly listeners = new Set<() => void>()
+  private unsubscribeService?: () => void
+  onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  private changed(): void { for (const listener of this.listeners) { try { listener() } catch (error) { console.error('[Continuum] Session notification failed:', error) } } }
   constructor(private readonly storageBaseDir: string, private readonly catalog: RepositoryContinuumCatalog) {}
 
   activate(repositoryPath: string): IngestionReport {
@@ -38,10 +42,18 @@ export class RepositoryContinuumSession {
       ingestor = new ArtifactIngestor(new ArtifactInbox(repositoryPath), service, locator)
       const report = ingestor.ingestPending()
       this.currentSession = { repositoryId: repository.id, repositoryPath, dbPath, store, service, ingestor }
+      this.unsubscribeService = service.onChanged(() => this.changed())
+      this.changed()
       return report
     } catch (error) { store.close(); throw error }
   }
-  deactivate(): void { const previous = this.currentSession; this.currentSession = null; previous?.store.close() }
+  deactivate(): void {
+    const previous = this.currentSession
+    this.unsubscribeService?.(); this.unsubscribeService = undefined
+    this.currentSession = null
+    previous?.store.close()
+    if (previous) this.changed()
+  }
   getActiveService(): ContinuumService | null { return this.currentSession?.service ?? null }
   getActiveSession(): ActiveRepositorySession | null { return this.currentSession }
   getStorageBaseDir(): string { return this.storageBaseDir }

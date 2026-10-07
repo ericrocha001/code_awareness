@@ -10,6 +10,21 @@ function input(artifactId = 'A', overrides: Partial<CreateArtifactInput> = {}): 
     rawMarkdown: '# Decision\r\n\r\nUnicode ç 日本語 🚀 `code` ${literal}\r\n', createdAt: '2026-10-01T00:00:00.000Z', ...overrides }
 }
 describe('Repository Artifact Store', () => {
+  it('discovers open scalar facets from indexes, preserves value types/counts and removes last occurrences after update', () => {
+    const { store } = setup()
+    const original = store.create(input('A', { metadata: { name: 'A', description: 'A', kind: 'CUSTOM', futureKey: 'blue', count: 4, enabled: false, nullKey: null, arrayKey: ['a'], objectKey: { x: 1 } } }))
+    store.create(input('B', { metadata: { ...original.metadata, name: 'B', count: '4' } }))
+    const facets = store.facets()
+    expect(facets.find(f => f.key === 'futureKey')?.values).toEqual([{ value: 'blue', count: 2 }])
+    expect(facets.find(f => f.key === 'count')?.values).toEqual(expect.arrayContaining([{ value: '4', count: 1 }, { value: 4, count: 1 }]))
+    expect(facets.find(f => f.key === 'enabled')?.values).toEqual([{ value: false, count: 2 }])
+    for (const excluded of ['name', 'description', 'relations', 'nullKey', 'arrayKey', 'objectKey']) expect(facets.map(f => f.key)).not.toContain(excluded)
+    expect(store.list({ metadata: { futureKey: 'blue', count: 4 } }).artifacts.map(a => a.artifactId)).toEqual(['A'])
+    expect(store.list({ metadata: { futureKey: 'blue', count: '4' } }).artifacts.map(a => a.artifactId)).toEqual(['B'])
+    store.update({ artifactId: 'A', expectedRevision: 1, metadata: { name: 'A', description: 'A', kind: 'NEW', brandNew: true }, rawMarkdown: 'Changed' })
+    store.update({ artifactId: 'B', expectedRevision: 1, metadata: { name: 'B', description: 'B', kind: 'NEW' }, rawMarkdown: 'Changed' })
+    expect(store.facets().map(f => f.key)).toEqual(['brandNew', 'kind'])
+  })
   it('persists exact bytes, central/extensible metadata and revision 1 across restart, rejecting a different repository identity', () => {
     const { store, path } = setup(); const created = store.create(input())
     expect(created.revision).toBe(1); expect(created.contentHash).toBe(computeContentHash(created.rawMarkdown))

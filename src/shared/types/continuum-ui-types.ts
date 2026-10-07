@@ -1,0 +1,17 @@
+export type ContinuumScalar = string | number | boolean
+export type ContinuumMetadataValue = null | ContinuumScalar | ContinuumMetadataValue[] | { [key: string]: ContinuumMetadataValue }
+export interface ContinuumFacet { key: string; values: { value: ContinuumScalar; count: number }[] }
+export interface ContinuumListRequest { repositoryId: string; query?: string; metadata?: Record<string, ContinuumScalar>; cursor?: string }
+export interface ContinuumItem { artifactId: string; name: string; description?: string; kind: string; status?: string; updatedAt: string; relationCount: number }
+export interface ContinuumTimeline { repositoryId: string | null; artifacts: ContinuumItem[]; nextCursor?: string }
+export interface ContinuumFacets { repositoryId: string | null; facets: ContinuumFacet[] }
+export interface ContinuumDetail {
+  artifactId: string
+  revision: number
+  metadata: Record<string, ContinuumMetadataValue | undefined>
+  body: string
+  createdAt: string
+  updatedAt: string
+}
+export interface ContinuumSelection { repositoryId: string | null; artifact: ContinuumDetail | null }
+export interface ContinuumChange { repositoryId: string | null }

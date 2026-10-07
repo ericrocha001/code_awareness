@@ -67,6 +67,7 @@ import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-pro
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
 import { RepositoryContinuumSession } from './continuum/project-continuum-session'
+import { registerContinuumHandlers } from './ipc/continuum-handler'
 import { CodeMapSyncMonitor, CodeMapSyncDrilldownProvider } from './system-health/codemap-sync-monitor'
 import { CodeMapLifecycleMonitor } from './system-health/codemap-lifecycle-monitor'
 import { codeScopeExecutionDrilldownProvider } from './system-health/codescope-execution-drilldown'
@@ -320,6 +321,7 @@ app.whenReady().then(async () => {
   )
   academyService.initializeGitSync(academyGitSyncService)
   registerAcademyHandlers(academyService)
+  registerContinuumHandlers(continuumSession)
 
   void (async () => {
     if (academyService.store.list().length === 0) {

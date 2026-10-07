@@ -53,7 +53,10 @@
     "validate": "npm run native:policy:test && npm run native:preflight:test && npm run test:lanes:guard:test && npm run native:doctor && npm run typecheck:test && npm run typecheck && npm run test:node && npm run harness:desktop:test && npm run validate:codemap && npm run validate:context && npm run test:db:adapter && npm run build && npm run native:doctor",
     "harness:desktop-doctor": "node scripts/desktop-runtime.cjs doctor",
     "harness:desktop-profile:migrate": "node scripts/desktop-runtime.cjs migrate",
-    "harness:desktop:test": "node scripts/desktop-runtime.test.cjs"
+    "harness:desktop:test": "node scripts/desktop-runtime.test.cjs",
+    "harness:ui:preflight": "node scripts/ui-visual-validation/harness.cjs preflight",
+    "harness:ui:test": "node --test scripts/ui-visual-validation/harness.test.cjs",
+    "harness:ui:scenario": "node scripts/ui-visual-validation/harness.cjs"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.2",

@@ -18,6 +18,23 @@ describe('Repository coordination, isolation and migration', () => {
     const session = new RepositoryContinuumSession(storage, catalog); cleanup.push(() => session.dispose())
     return { ...f, rootA, rootB, storage, session, identities }
   }
+  it('notifies committed local publications/updates and repository switches without retaining old service subscriptions', () => {
+    const { session, rootA, rootB } = setup()
+    const changes: (string | null)[] = []
+    const unsubscribe = session.onChanged(() => changes.push(session.getActiveSession()?.repositoryId ?? null))
+    session.activate(rootA)
+    const service = session.getActiveService()!
+    const receipt = service.publish(markdown('New', 'arbitrary: true\n'))
+    service.update(receipt.artifactId, 1, markdown('Updated', 'arbitrary: false\n'))
+    expect(changes).toEqual(['catalog-A', 'catalog-A', 'catalog-A'])
+    expect(service.facets().find(f => f.key === 'arbitrary')?.values).toEqual([{ value: false, count: 1 }])
+    expect(() => service.update(receipt.artifactId, 1, markdown('Stale'))).toThrow(/REVISION_CONFLICT/)
+    expect(changes).toHaveLength(3)
+    session.activate(rootB)
+    expect(changes.slice(-2)).toEqual([null, 'catalog-B'])
+    expect(session.getActiveService()!.facets()).toEqual([])
+    unsubscribe(); session.deactivate(); expect(changes).toHaveLength(5)
+  })
   it('migrates each repository separately with exact Markdown, IDs, timestamps/provenance and idempotence after edit/restart', () => {
     const { session, storage, rootA, rootB } = setup()
     const originalEnvelope = legacyEnvelope(rootA)

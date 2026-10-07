@@ -55,7 +55,7 @@ export function validateMarkdown(rawMarkdown: string): void {
   if (typeof rawMarkdown !== 'string' || !rawMarkdown.trim() || /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/.test(rawMarkdown)) throw new Error('INVALID_ARGUMENT: Markdown must be non-empty text')
 }
 
-export function parseArtifactMarkdown(rawMarkdown: string): { metadata: ArtifactMetadata; body: string } {
+export function parseArtifactMarkdown(rawMarkdown: string, legacy = false): { metadata: ArtifactMetadata; body: string } {
   validateMarkdown(rawMarkdown)
   const match = /^(?:\uFEFF)?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(rawMarkdown)
   if (!match) throw new Error('INVALID_ARGUMENT: YAML frontmatter is required')
@@ -63,6 +63,6 @@ export function parseArtifactMarkdown(rawMarkdown: string): { metadata: Artifact
   try { metadata = load(match[1], { schema: JSON_SCHEMA }) } catch (error) { throw new Error(`INVALID_ARGUMENT: invalid YAML: ${(error as Error).message}`) }
   const body = rawMarkdown.slice(match[0].length)
   if (!body.trim()) throw new Error('INVALID_ARGUMENT: Markdown body must not be empty')
-  return { metadata: validateMetadata(metadata), body }
+  return { metadata: validateMetadata(metadata, legacy), body }
 }
 export function relationsOf(metadata: ArtifactMetadata): ArtifactRelation[] { return metadata.relations ?? [] }

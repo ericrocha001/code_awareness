@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continuum-ui-types'
 import { createHash } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -31,6 +32,19 @@ interface DiscoveryRow {
 
 export class ArtifactStore {
   private readonly db: Database.Database
+  facets(): ContinuumFacet[] {
+    const rows = this.db.prepare(`SELECT key, value_json, count(*) AS count FROM artifact_metadata
+      WHERE key NOT IN ('name', 'description', 'relations')
+      AND json_type(value_json) IN ('text', 'integer', 'real', 'true', 'false')
+      GROUP BY key, value_json ORDER BY key, value_json`).all() as { key: string; value_json: string; count: number }[]
+    const groups = new Map<string, ContinuumFacet>()
+    for (const row of rows) {
+      let group = groups.get(row.key)
+      if (!group) { group = { key: row.key, values: [] }; groups.set(row.key, group) }
+      group.values.push({ value: JSON.parse(row.value_json) as ContinuumScalar, count: row.count })
+    }
+    return [...groups.values()]
+  }
   constructor(dbPath: string, readonly repositoryId: string) {
     if (!repositoryId?.trim()) throw new Error('INVALID_ARGUMENT: canonical repositoryId is required')
     mkdirSync(dirname(dbPath), { recursive: true })

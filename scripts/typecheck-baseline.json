@@ -1323,54 +1323,6 @@
     },
     {
       "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
-      "code": 2339,
-      "category": "Error",
-      "message": "Property 'bindAcademyGitRepository' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
-      "count": 1
-    },
-    {
-      "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
-      "code": 2339,
-      "category": "Error",
-      "message": "Property 'getAcademyGitStatus' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
-      "count": 2
-    },
-    {
-      "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
-      "code": 2339,
-      "category": "Error",
-      "message": "Property 'listAcademyGitEligibleRepositories' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
-      "count": 2
-    },
-    {
-      "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
-      "code": 2339,
-      "category": "Error",
-      "message": "Property 'openAcademyGitRepository' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
-      "count": 1
-    },
-    {
-      "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
-      "code": 2339,
-      "category": "Error",
-      "message": "Property 'syncAcademyGitNow' does not exist on type '{ getAcademySnapshot: () => Promise<AcademySnapshot>; getAcademySkill: (id: string) => Promise<AcademySkillDetail>; getAcademyHistory: (id: string) => Promise<...>; ... 128 more ...; dashOneClickXml: (repoPath: string, options?: { ...; } | undefined) => Promise<...>; }'.",
-      "count": 1
-    },
-    {
-      "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyView.tsx",
-      "code": 7006,
-      "category": "Error",
-      "message": "Parameter 'repos' implicitly has an 'any' type.",
-      "count": 1
-    },
-    {
-      "project": "web",
       "file": "src/renderer/src/components/CodeCampaignView/campaignContextUtils.ts",
       "code": 2551,
       "category": "Error",
