@@ -294,15 +294,24 @@ export class GitOperationsService {
     })
   }
 
-  async stage(request: { mode: 'STAGE' | 'UNSTAGE'; paths: string[] }) {
+  async stage(request: { mode: 'STAGE' | 'UNSTAGE'; paths: string[]; expectedIndexRevision: string; expectedWorktreeRevision: string }) {
     return this.serialized(async () => {
       await this.repository()
       const paths = this.paths(request.paths)
-      if (request.mode === 'STAGE') await this.git.stagePaths(this.repoRoot, paths)
-      else if (request.mode === 'UNSTAGE') await this.git.unstagePaths(this.repoRoot, paths)
-      else fail('INVALID_ARGUMENT')
-      const state = await this.getState()
-      return { paths, stagedCount: state.stagedCount, indexRevision: state.indexRevision }
+      if (![request.expectedIndexRevision, request.expectedWorktreeRevision].every((value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) fail('INVALID_ARGUMENT')
+      const expected = { indexRevision: request.expectedIndexRevision, worktreeRevision: request.expectedWorktreeRevision }
+      try {
+        if (request.mode === 'STAGE') await this.git.stagePaths(this.repoRoot, paths, expected)
+        else if (request.mode === 'UNSTAGE') await this.git.unstagePaths(this.repoRoot, paths, expected)
+        else fail('INVALID_ARGUMENT')
+      } catch (error) {
+        if (error instanceof Error && error.message === 'INDEX_MUTATION_FAILED') fail('INDEX_MUTATION_FAILED')
+        throw error
+      }
+      return this.observeMutation(async () => {
+        const state = await this.getState()
+        return { paths, stagedCount: state.stagedCount, indexRevision: state.indexRevision }
+      })
     })
   }
 

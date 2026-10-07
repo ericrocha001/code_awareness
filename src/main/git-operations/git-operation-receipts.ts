@@ -20,7 +20,7 @@ function canonical(value: unknown): unknown {
 }
 
 export function isReceiptedGitMutation(name: string, args: Record<string, unknown>): boolean {
-  if (['commit_git_changes', 'merge_git_branch', 'revert_git_commit', 'resolve_git_conflict'].includes(name)) return true
+  if (['stage_git_changes', 'commit_git_changes', 'merge_git_branch', 'revert_git_commit', 'resolve_git_conflict'].includes(name)) return true
   if (['manage_git_branch', 'manage_git_shelf'].includes(name)) return args.action !== 'LIST'
   if (name === 'manage_gitignore') return args.action === 'ADD'
   return name === 'sync_git_remote' && args.action !== 'FETCH'
@@ -46,6 +46,7 @@ export class GitOperationReceipts {
     const result = await mutate()
     const value = JSON.parse(result.content[0].text)
     const safeFailures = new Set(['INVALID_ARGUMENT', 'INVALID_REF', 'PATH_OUTSIDE_REPOSITORY', 'NOT_GIT_REPOSITORY', 'GIT_STATE_CHANGED', 'CONFLICT_STATE_CHANGED', 'CONFLICT_NOT_FOUND', 'SHELF_NOT_FOUND', 'SHELF_REQUIRES_HEAD', 'NOTHING_TO_SHELVE', 'NOTHING_TO_COMMIT', 'GIT_OPERATION_IN_PROGRESS', 'GIT_OPERATION_NOT_IN_PROGRESS', 'BINARY_CONFLICT_CONTENT_UNSUPPORTED', 'CONFLICT_SIDE_UNAVAILABLE', 'BRANCH_ALREADY_EXISTS', 'BRANCH_NOT_FOUND', 'REMOTE_NOT_FOUND'])
+    if (operation === 'stage_git_changes') safeFailures.add('INDEX_MUTATION_FAILED')
     if (result.isError && !safeFailures.has(value.code)) return operationalFailure({ code: 'OPERATION_OUTCOME_UNKNOWN', operationId, retryability: 'NOT_SAFE', recommendedAction: 'RECONCILE_OPERATION' })
     const completed = { ...receipt, status: result.isError ? 'FAILED' as const : 'COMPLETED' as const, result, completedAt: new Date().toISOString() }
     try { await this.git.completeOperationReceipt(this.root, completed, prepared.sha) }

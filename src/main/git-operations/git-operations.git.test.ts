@@ -40,7 +40,7 @@ describe('project-scoped Git operations with real Git', () => {
     expect((await call('get_git_state')).upstream).toBeNull()
     expect(await call('sync_git_remote', { action: 'FETCH' })).toMatchObject({ result: 'FETCHED' })
     writeFile(root, 'file.txt', 'staged local content\n')
-    await service.stage({ mode: 'STAGE', paths: ['file.txt'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['file.txt'] })
     writeFile(root, 'untracked.txt', 'untracked content\n')
     const before = await call('get_git_state')
     const network = [vi.spyOn(git, 'push'), vi.spyOn(git, 'fetchRemote'), vi.spyOn(git, 'pullFastForward')]
@@ -119,7 +119,7 @@ describe('project-scoped Git operations with real Git', () => {
     writeFile(root, 'file.txt', 'staged\n')
     writeFile(root, 'novo espaço ç.txt', 'untracked\n')
     expect(await service.getState()).toMatchObject({ stagedCount: 0, unstagedCount: 1, untrackedCount: 1 })
-    await service.stage({ mode: 'STAGE', paths: ['file.txt'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['file.txt'] })
     writeFile(root, 'file.txt', 'staged\nunstaged\n')
     expect((await service.getChanges())[0]).toMatchObject({ stagedState: 'M', unstagedState: 'M' })
     expect((await service.getDiff({ paths: ['file.txt'], mode: 'STAGED' })).patch).toContain('+staged')
@@ -127,15 +127,15 @@ describe('project-scoped Git operations with real Git', () => {
     const created = await service.commit({ message: 'inspected', expectedHead: state.head, expectedIndexRevision: state.indexRevision })
     expect(await gitExec(root, ['show', 'HEAD:file.txt'])).toBe('staged\n')
     expect(readFileSync(join(root, 'file.txt'), 'utf8')).toBe('staged\nunstaged\n')
-    await service.stage({ mode: 'STAGE', paths: ['file.txt', 'novo espaço ç.txt'] })
-    await service.stage({ mode: 'UNSTAGE', paths: ['novo espaço ç.txt'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['file.txt', 'novo espaço ç.txt'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'UNSTAGE', paths: ['novo espaço ç.txt'] })
     expect(readFileSync(join(root, 'novo espaço ç.txt'), 'utf8')).toBe('untracked\n')
-    await service.stage({ mode: 'STAGE', paths: ['novo espaço ç.txt'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['novo espaço ç.txt'] })
     const next = await service.getState()
     await service.commit({ message: 'remaining', expectedHead: next.head, expectedIndexRevision: next.indexRevision })
     await service.manageBranch({ action: 'CREATE', branch: 'feature', expectedHead: (await service.getState()).head })
     await service.manageBranch({ action: 'SWITCH', branch: 'feature' })
-    writeFile(root, 'feature.txt', 'feature\n'); await service.stage({ mode: 'STAGE', paths: ['feature.txt'] })
+    writeFile(root, 'feature.txt', 'feature\n'); await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['feature.txt'] })
     const featureState = await service.getState()
     const feature = await service.commit({ message: 'feature', expectedHead: featureState.head, expectedIndexRevision: featureState.indexRevision })
     await service.manageBranch({ action: 'SWITCH', branch: 'main' })
@@ -149,7 +149,7 @@ describe('project-scoped Git operations with real Git', () => {
 
   it('rejects stale index and HEAD without mutating history', async () => {
     const { root, service } = await fixture()
-    writeFile(root, 'file.txt', 'first\n'); await service.stage({ mode: 'STAGE', paths: ['file.txt'] })
+    writeFile(root, 'file.txt', 'first\n'); await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['file.txt'] })
     const observed = await service.getState()
     writeFile(root, 'file.txt', 'other actor\n'); await gitExec(root, ['add', 'file.txt'])
     await expect(service.commit({ message: 'stale', expectedHead: observed.head, expectedIndexRevision: observed.indexRevision })).rejects.toThrow('GIT_STATE_CHANGED')
@@ -175,7 +175,7 @@ describe('project-scoped Git operations with real Git', () => {
     expect(readFileSync(join(root, 'file.txt'), 'utf8')).toBe('main\n')
     await service.merge({ action: 'MERGE', source: 'feature', expectedHead: head, mode: 'MERGE' })
     writeFile(root, 'file.txt', 'resolved\n')
-    await service.stage({ mode: 'STAGE', paths: ['file.txt'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['file.txt'] })
     const resolved = await service.getState()
     const mergeCommit = await service.commit({ message: 'resolve merge', expectedHead: resolved.head, expectedIndexRevision: resolved.indexRevision })
     expect((await service.getHistory({ limit: 1 }))[0].parents).toHaveLength(2)
@@ -192,21 +192,21 @@ describe('project-scoped Git operations with real Git', () => {
     writeFile(root, 'file.txt', 'changed\n')
     await expect(service.getDiff({ paths: ['file.txt'], mode: 'WORKTREE', cursor: page.nextCursor! })).rejects.toThrow('GIT_STATE_CHANGED')
     for (const path of ['../outside', '/absolute', 'C:\\absolute', '.git/config', '.git./config', '.', ':(glob)**']) {
-      await expect(service.stage({ mode: 'STAGE', paths: [path] })).rejects.toThrow('PATH_OUTSIDE_REPOSITORY')
+      await expect(service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: [path] })).rejects.toThrow('PATH_OUTSIDE_REPOSITORY')
     }
     for (const field of ['repoPath', 'cwd', 'command', 'credential', 'force']) {
       expect((await executeGitOperationsTool(service, 'get_git_state', { [field]: 'value' })).isError).toBe(true)
     }
     writeFileSync(join(root, 'binary.bin'), Buffer.from([0, 1, 2, 3]))
-    await service.stage({ mode: 'STAGE', paths: ['binary.bin'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['binary.bin'] })
     expect(await service.getDiff({ mode: 'STAGED', paths: ['binary.bin'] })).toMatchObject({ binary: true })
     expect(JSON.stringify(GIT_OPERATIONS_TOOLS)).not.toMatch(/repoPath|credential|cwd/)
     writeFile(root, 'literal[1].txt', 'literal\n')
-    await service.stage({ mode: 'STAGE', paths: ['literal[1].txt'] })
+    await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['literal[1].txt'] })
     expect((await service.getChanges('STAGED')).map((change) => change.path)).toContain('literal[1].txt')
     const outside = await fixture()
     symlinkSync(outside.root, join(root, 'outside-link'), 'junction')
-    await expect(service.stage({ mode: 'STAGE', paths: ['outside-link/file.txt'] })).rejects.toThrow('PATH_OUTSIDE_REPOSITORY')
+    await expect(service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['outside-link/file.txt'] })).rejects.toThrow('PATH_OUTSIDE_REPOSITORY')
     expect((await service.getDiff({ mode: 'WORKTREE', paths: ['novo.txt'] })).patch).toBe('')
     writeFile(root, 'novo.txt', 'novo\n')
     expect((await service.getDiff({ mode: 'WORKTREE', paths: ['novo.txt'] })).patch).toContain('+novo')
@@ -260,3 +260,8 @@ describe('project-scoped Git operations with real Git', () => {
     expect((await a.service.getState()).head).toBe(localHead)
   }, 60000)
 })
+
+async function stagingRevisions(service: GitOperationsService) {
+  const state = await service.getState()
+  return { expectedIndexRevision: state.indexRevision, expectedWorktreeRevision: state.worktreeRevision }
+}

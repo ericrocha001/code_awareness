@@ -37,7 +37,7 @@ describe('Operational reliability through real MCP HTTP', () => {
     await gitExec(root, ['init', '--bare', remote])
     await gitExec(root, ['remote', 'add', 'origin', remote])
     writeFile(root, 'a.txt', 'new commit\n')
-    await service().stage({ mode: 'STAGE', paths: ['a.txt'] })
+    await service().stage({ ...await stagingRevisions(service()), mode: 'STAGE', paths: ['a.txt'] })
     const state = await service().getState()
     const args = { message: 'receipted commit', expectedHead: state.head, expectedIndexRevision: state.indexRevision, operationId: randomUUID() }
     const commitSpy = vi.spyOn(git, 'commitInspectedIndex')
@@ -168,3 +168,8 @@ describe('Operational reliability through real MCP HTTP', () => {
     expect(await service().manageShelf({ action: 'LIST' })).toEqual([])
   }, 60000)
 })
+
+async function stagingRevisions(service: GitOperationsService) {
+  const state = await service.getState()
+  return { expectedIndexRevision: state.indexRevision, expectedWorktreeRevision: state.worktreeRevision }
+}

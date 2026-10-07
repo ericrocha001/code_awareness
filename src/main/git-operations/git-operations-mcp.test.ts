@@ -8,6 +8,23 @@ import { executeGitOperationsTool, GIT_OPERATIONS_TOOLS } from './git-operations
 import { GitOperationsError, type GitOperationsService } from './git-operations-service'
 
 describe('Git MCP contract', () => {
+  it('requires staging identity and both observed revisions before dispatch', async () => {
+    const stage = vi.fn(async () => ({}))
+    const executeReceipted = vi.fn(async (_id, _name, _args, mutate) => mutate())
+    const service = { stage, executeReceipted } as unknown as GitOperationsService
+    const args = { mode: 'STAGE', paths: ['literal[1].txt'], expectedIndexRevision: 'a'.repeat(64), expectedWorktreeRevision: 'b'.repeat(64), operationId: randomUUID() }
+    const definition = GIT_OPERATIONS_TOOLS.find(tool => tool.name === 'stage_git_changes')!
+    expect(definition.inputSchema.required).toEqual(expect.arrayContaining(['operationId', 'expectedIndexRevision', 'expectedWorktreeRevision']))
+    for (const key of ['mode', 'paths', 'operationId', 'expectedIndexRevision', 'expectedWorktreeRevision']) {
+      const missing: Record<string, unknown> = { ...args }; delete missing[key]
+      expect((await executeGitOperationsTool(service, 'stage_git_changes', missing)).isError).toBe(true)
+    }
+    for (const key of ['operationId', 'expectedIndexRevision', 'expectedWorktreeRevision']) expect((await executeGitOperationsTool(service, 'stage_git_changes', { ...args, [key]: 'invalid value' })).isError).toBe(true)
+    expect(executeReceipted).not.toHaveBeenCalled()
+    expect((await executeGitOperationsTool(service, 'stage_git_changes', args)).isError).toBeUndefined()
+    expect(stage).toHaveBeenCalledWith({ mode: args.mode, paths: args.paths, expectedIndexRevision: args.expectedIndexRevision, expectedWorktreeRevision: args.expectedWorktreeRevision })
+    expect(executeReceipted).toHaveBeenCalledWith(args.operationId, 'stage_git_changes', expect.any(Object), expect.any(Function))
+  })
   it('requires explicit upstream inputs and operationId without expanding the catalog', async () => {
     const manageBranch = vi.fn(async () => ({}))
     const service = { manageBranch, executeReceipted: async (_id: string, _name: string, _args: Record<string, unknown>, mutate: Parameters<GitOperationsService['executeReceipted']>[3]) => mutate() } as unknown as GitOperationsService

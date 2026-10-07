@@ -425,9 +425,11 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['diff-tree', '--root', '--first-parent', '--no-commit-id', '--name-only', '-r', '-z', sha], dirPath)).split('\0').filter(Boolean)
   }
 
-  async unstagePaths(dirPath: string, paths: string[]): Promise<void> {
-    if (await this.hasCommits(dirPath)) await this.runGit(['--literal-pathspecs', 'restore', '--staged', '--', ...paths], dirPath)
-    else await this.runGit(['--literal-pathspecs', 'rm', '--cached', '--ignore-unmatch', '--', ...paths], dirPath)
+  async unstagePaths(dirPath: string, paths: string[], expected?: { indexRevision: string; worktreeRevision: string }): Promise<void> {
+    await this.mutateIndexPaths(dirPath, expected, async (env) => {
+      if (await this.hasCommits(dirPath)) await this.runGit(['--literal-pathspecs', 'restore', '--staged', '--', ...paths], dirPath, { env })
+      else await this.runGit(['--literal-pathspecs', 'rm', '--cached', '--ignore-unmatch', '--', ...paths], dirPath, { env })
+    })
   }
 
   async listBranches(dirPath: string): Promise<string> {
@@ -568,9 +570,27 @@ export class GitService implements FileListingPort {
     await this.runGit(['push', '--', remote, expectedHead ? `${expectedHead}:refs/heads/${branch}` : branch], dirPath, { timeoutMs: 120_000, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } })
   }
 
-  async stagePaths(dirPath: string, relativePaths: string[]): Promise<void> {
+  private async mutateIndexPaths(dirPath: string, expected: { indexRevision: string; worktreeRevision: string } | undefined, mutate: (env: NodeJS.ProcessEnv) => Promise<void>): Promise<void> {
+    try {
+      await this.withLockedIndex(dirPath, async (env) => {
+        const check = async () => {
+          if (expected && (await this.getIndexRevision(dirPath) !== expected.indexRevision || await this.getWorktreeRevision(dirPath) !== expected.worktreeRevision)) throw new Error('GIT_STATE_CHANGED')
+        }
+        await check()
+        await mutate(env)
+        await check()
+      })
+    } catch (error) {
+      if (error instanceof Error && error.message === 'GIT_STATE_CHANGED') throw error
+      throw new Error('INDEX_MUTATION_FAILED')
+    }
+  }
+
+  async stagePaths(dirPath: string, relativePaths: string[], expected?: { indexRevision: string; worktreeRevision: string }): Promise<void> {
     if (relativePaths.length === 0) return
-    await this.runGit(['--literal-pathspecs', '-c', 'core.quotePath=false', 'add', '-A', '--', ...relativePaths], dirPath)
+    await this.mutateIndexPaths(dirPath, expected, async (env) => {
+      await this.runGit(['--literal-pathspecs', '-c', 'core.quotePath=false', 'add', '-A', '--', ...relativePaths], dirPath, { env })
+    })
   }
 
   async hasWorkingTreeChanges(dirPath: string, subPath?: string): Promise<boolean> {

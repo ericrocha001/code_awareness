@@ -102,7 +102,7 @@ describe('Git Operations v1.1 safe shelving', () => {
 
   it('reports completed CREATE and RESTORE even when post-mutation observation fails', async () => {
     const { root, git, service } = await fixture()
-    writeFile(root, 'a.txt', 'staged\n'); await service.stage({ mode: 'STAGE', paths: ['a.txt'] })
+    writeFile(root, 'a.txt', 'staged\n'); await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['a.txt'] })
     writeFile(root, 'a.txt', 'literal ç🙂\r\nunstaged\n')
     writeFile(root, 'new.txt', 'untracked\r\n')
     const bytes = readFileSync(join(root, 'a.txt'))
@@ -170,7 +170,7 @@ describe('Git Operations v1.1 safe shelving', () => {
     const { root, service } = await fixture()
     await gitExec(root, ['mv', 'a.txt', 'renamed.txt'])
     await gitExec(root, ['rm', 'b.txt'])
-    writeFile(root, 'added.txt', 'added staged\n'); await service.stage({ mode: 'STAGE', paths: ['added.txt'] })
+    writeFile(root, 'added.txt', 'added staged\n'); await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['added.txt'] })
     const state = await service.getState()
     const before = await service.getChanges()
     await expect(service.manageShelf({ action: 'CREATE', paths: ['renamed.txt'], expectedWorktreeRevision: state.worktreeRevision })).rejects.toThrow('INVALID_ARGUMENT')
@@ -187,10 +187,10 @@ describe('Git Operations v1.1 safe shelving', () => {
     const { root, service } = await fixture()
     writeFile(root, 'b.txt', 'external stash\n'); await gitExec(root, ['stash', 'push', '-m', 'user-owned'])
     const external = await gitExec(root, ['rev-parse', 'refs/stash'])
-    writeFile(root, 'a.txt', 'staged\n'); await service.stage({ mode: 'STAGE', paths: ['a.txt'] })
+    writeFile(root, 'a.txt', 'staged\n'); await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['a.txt'] })
     const staged = await gitExec(root, ['show', ':a.txt'])
     writeFile(root, 'a.txt', 'staged\nunstaged\r\nç Ω\n')
-    writeFile(root, 'b.txt', 'unselected staged\n'); await service.stage({ mode: 'STAGE', paths: ['b.txt'] })
+    writeFile(root, 'b.txt', 'unselected staged\n'); await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['b.txt'] })
     writeFile(root, 'new[1].txt', 'untracked\r\n')
     const original = readFileSync(join(root, 'a.txt'))
     const before = await service.getState()
@@ -374,3 +374,8 @@ describe('Git Operations v1.1 typed conflicts', () => {
   }, 60000)
 })
 
+
+async function stagingRevisions(service: GitOperationsService) {
+  const state = await service.getState()
+  return { expectedIndexRevision: state.indexRevision, expectedWorktreeRevision: state.worktreeRevision }
+}
