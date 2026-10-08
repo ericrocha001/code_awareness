@@ -907,22 +907,6 @@
     },
     {
       "project": "node",
-      "file": "src/main/git-operations/git-operations-service.ts",
-      "code": 18048,
-      "category": "Error",
-      "message": "'side' is possibly 'undefined'.",
-      "count": 2
-    },
-    {
-      "project": "node",
-      "file": "src/main/git-operations/git-operations-service.ts",
-      "code": 2769,
-      "category": "Error",
-      "message": "No overload matches this call.\n  Overload 1 of 4, '(arrayBuffer: WithImplicitCoercion<ArrayBufferLike>, byteOffset?: number | undefined, length?: number | undefined): Buffer<ArrayBufferLike>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<ArrayBufferLike>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<ArrayBufferLike>'.\n  Overload 2 of 4, '(string: WithImplicitCoercion<string>, encoding?: BufferEncoding | undefined): Buffer<ArrayBuffer>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<string>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<string>'.",
-      "count": 1
-    },
-    {
-      "project": "node",
       "file": "src/main/git-operations/git-operations-v11.git.test.ts",
       "code": 18046,
       "category": "Error",
@@ -1280,22 +1264,6 @@
       "category": "Error",
       "message": "Property 'hasOwn' does not exist on type 'ObjectConstructor'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2022' or later.",
       "count": 3
-    },
-    {
-      "project": "web",
-      "file": "src/main/git-operations/git-operations-service.ts",
-      "code": 18048,
-      "category": "Error",
-      "message": "'side' is possibly 'undefined'.",
-      "count": 2
-    },
-    {
-      "project": "web",
-      "file": "src/main/git-operations/git-operations-service.ts",
-      "code": 2769,
-      "category": "Error",
-      "message": "No overload matches this call.\n  Overload 1 of 4, '(arrayBuffer: WithImplicitCoercion<ArrayBufferLike>, byteOffset?: number | undefined, length?: number | undefined): Buffer<ArrayBufferLike>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<ArrayBufferLike>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<ArrayBufferLike>'.\n  Overload 2 of 4, '(string: WithImplicitCoercion<string>, encoding?: BufferEncoding | undefined): Buffer<ArrayBuffer>', gave the following error.\n    Argument of type 'string | undefined' is not assignable to parameter of type 'WithImplicitCoercion<string>'.\n      Type 'undefined' is not assignable to type 'WithImplicitCoercion<string>'.",
-      "count": 1
     },
     {
       "project": "web",

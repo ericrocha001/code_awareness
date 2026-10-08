@@ -28,6 +28,7 @@ export interface ProofMetrics {
 }
 
 export interface CommandProfile {
+  checkout?: { repositoryId: string; worktreeId: string; generation: string; head: string; issuer: 'VALIDATION_EXECUTION'; runId: string }
   command: string
   args?: string[]
   cwd?: string

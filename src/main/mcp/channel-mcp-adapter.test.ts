@@ -54,11 +54,11 @@ describe('ChannelMcpAdapter', () => {
   })
 
   it('preserves the ordered navigation catalog from before the Channel extraction', () => {
-    expect(createHash('sha256').update(JSON.stringify(contextNavigationMcpTools)).digest('hex')).toBe('92fcf3f0031863ce4557de703ad3865dda44e6e22c91f8de6994dc467dff0f7e')
+    expect(createHash('sha256').update(JSON.stringify(contextNavigationMcpTools.filter(tool => tool.name !== 'inspect_worktree_structure'))).digest('hex')).toBe('92fcf3f0031863ce4557de703ad3865dda44e6e22c91f8de6994dc467dff0f7e')
   })
 
-  it('publishes exactly seven independent progressive capabilities', () => {
-    expect(contextNavigationMcpTools.map((tool) => tool.name)).toEqual(['discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code'])
+  it('publishes eight independent progressive capabilities', () => {
+    expect(contextNavigationMcpTools.map((tool) => tool.name)).toEqual(['inspect_worktree_structure', 'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code'])
     for (const tool of contextNavigationMcpTools) {
       expect(tool.inputSchema.additionalProperties).toBe(false)
       expect(tool.securitySchemes).toEqual([{ type: 'oauth2', scopes: [] }])

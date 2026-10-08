@@ -195,6 +195,7 @@ export interface RepositoryRepository {
 
   /** Busca relacionamentos onde o elemento é fonte (sourceId) ou destino (targetId). */
   getRelationshipsByElement(elementId: string): CodeMapRelationship[]
+  getImporterFiles?(fileId: string, limit: number): CodeMapFile[]
 
   getHierarchyRelationshipsBySourceElement(elementId: string): CodeMapRelationship[]
 

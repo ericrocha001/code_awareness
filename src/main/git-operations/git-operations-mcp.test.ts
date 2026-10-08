@@ -29,7 +29,7 @@ describe('Git MCP contract', () => {
     const manageBranch = vi.fn(async () => ({}))
     const service = { manageBranch, executeReceipted: async (_id: string, _name: string, _args: Record<string, unknown>, mutate: Parameters<GitOperationsService['executeReceipted']>[3]) => mutate() } as unknown as GitOperationsService
     const args: Record<string, unknown> = { action: 'SET_UPSTREAM', branch: 'main', remote: 'origin', remoteBranch: 'main', expectedHead: 'a'.repeat(40), operationId: randomUUID() }
-    expect(GIT_OPERATIONS_TOOLS).toHaveLength(15)
+    expect(GIT_OPERATIONS_TOOLS.filter(tool => tool.name.includes('upstream'))).toHaveLength(0)
     expect((await executeGitOperationsTool(service, 'manage_git_branch', args)).isError).toBeUndefined()
     expect(manageBranch).toHaveBeenCalledWith({ action: 'SET_UPSTREAM', branch: 'main', remote: 'origin', remoteBranch: 'main', expectedHead: 'a'.repeat(40) })
     manageBranch.mockClear()

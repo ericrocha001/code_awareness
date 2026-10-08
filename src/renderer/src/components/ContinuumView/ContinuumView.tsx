@@ -47,7 +47,41 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const listGeneration = useRef(0)
   const path = activeProject?.path ?? null
+  const currentPath = useRef(path)
+  currentPath.current = path
+  const fileInput = useRef<HTMLInputElement>(null)
+  const publicationContext = useRef<{ repositoryId: string; path: string } | null>(null)
+  const publicationBusy = useRef(false)
+  const [publishing, setPublishing] = useState(false)
+  const [publicationMessage, setPublicationMessage] = useState('')
+  const [publicationError, setPublicationError] = useState('')
   const columns = useContinuumColumns(path)
+
+  const chooseMarkdown = () => {
+    if (!repositoryId || !path || publicationBusy.current) return
+    publicationContext.current = { repositoryId, path }
+    fileInput.current?.click()
+  }
+
+  const publishMarkdown = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file || publicationBusy.current) return
+    const context = publicationContext.current
+    publicationBusy.current = true
+    setPublishing(true); setPublicationMessage(''); setPublicationError('')
+    try {
+      if (!/\.md$/i.test(file.name)) throw new Error('Selecione um arquivo .md.')
+      let rawMarkdown: string
+      try {
+        rawMarkdown = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer())
+      } catch { throw new Error('Não foi possível ler o arquivo como UTF-8 válido.') }
+      if (!context || context.path !== currentPath.current) throw new Error('O repositório ativo mudou. Selecione o arquivo novamente.')
+      const receipt = await window.codeAwareness.publishContinuumArtifact({ repositoryId: context.repositoryId, fileName: file.name, rawMarkdown })
+      setPublicationMessage(`Artifact publicado: ${receipt.artifactId}. A busca e os filtros ativos podem ocultá-lo na timeline.`)
+    } catch (reason) { setPublicationError(String(reason)) }
+    finally { publicationBusy.current = false; setPublishing(false) }
+  }
 
   useEffect(() => {
     setRepositoryId(null); setFacets([]); setItems([]); setMetadata({}); setQuery('')
@@ -121,7 +155,11 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
       <div className="continuum-feature-icon"><Infinity size={36} /></div>
       <div className="continuum-feature-title"><h1>CONTINUUM</h1><p>{activeProject?.name ?? 'Contexto durável do repositório'}</p></div>
       <SearchBox value={query} onChange={setQuery} placeholder="Buscar no Continuum…" ariaLabel="Buscar no Continuum" />
+      <button className="continuum-publish" disabled={!path || !repositoryId || publishing} onClick={chooseMarkdown}>{publishing ? 'Publicando…' : 'Publicar Markdown'}</button>
+      <input ref={fileInput} type="file" accept=".md" hidden aria-label="Arquivo Markdown" onChange={publishMarkdown} />
     </header>
+    {publicationMessage && <div className="continuum-publication-feedback" role="status">{publicationMessage}</div>}
+    {publicationError && <div className="continuum-publication-feedback" role="alert">{publicationError}</div>}
     {!path ? <div className="continuum-empty"><Infinity size={38} /><h2>Nenhum repositório ativo</h2><p>Abra um repositório para consultar seu Continuum.</p></div> : <>
       {error && <div className="continuum-error" role="alert">{error}<button onClick={() => setRefresh(value => value + 1)}>Tentar novamente</button></div>}
       <div className="continuum-workspace" ref={columns.workspace} style={columns.style}>

@@ -8,10 +8,29 @@ const expectedHead = { type: ['string', 'null'], pattern: '^[a-f0-9]{40,64}$' }
 const revision = { type: 'string', pattern: '^[a-f0-9]{64}$' }
 const paths = (maxItems: number) => ({ type: 'array', items: string, minItems: 1, maxItems, uniqueItems: true })
 const choice = (...values: string[]) => ({ type: 'string', enum: values })
+const credential = { type: 'string', pattern: '^[a-f0-9]{64}$' }
+const snapshot = { type: 'object', properties: { branch: { type: ['string', 'null'] }, head: expectedHead, indexRevision: revision, worktreeRevision: revision, operation: { type: ['string', 'null'] } }, required: ['branch', 'head', 'indexRevision', 'worktreeRevision', 'operation'], additionalProperties: false }
+const scope = { type: 'object', properties: { operations: { type: 'array', items: choice('STAGE', 'UNSTAGE', 'COMMIT', 'CREATE_BRANCH', 'CREATE_WORKTREE', 'PUSH', 'INTEGRATE', 'CLOSE'), minItems: 1, maxItems: 8 }, paths: { type: 'array', items: string, minItems: 0, maxItems: 500 }, branches: { type: 'array', items: string, minItems: 0, maxItems: 20 }, startPoints: { type: 'array', items: { type: 'string', pattern: '^[a-f0-9]{40,64}$' }, minItems: 0, maxItems: 20 } }, required: ['operations', 'paths', 'branches'], additionalProperties: false }
+const scopedMutation = { worktreeId: revision, leaseId: string, leaseCredential: credential, operationId: { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$' }, snapshot }
 function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []): McpToolDefinition {
   return { name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false }, securitySchemes: [{ type: 'oauth2', scopes: [] }] }
 }
 export const GIT_OPERATIONS_TOOLS = [
+  tool('get_worktree_conflict', 'Read explicit conflict metadata or one bounded conflict side in a discovered worktree.', { worktreeId: revision, path: string, side: choice('BASE', 'OURS', 'THEIRS', 'WORKTREE'), cursor: string }, ['worktreeId', 'path']),
+  tool('resolve_worktree_conflict', 'Resolve one explicitly scoped conflict in a managed integration checkout, against the observed conflict revision. Stages only that resolution under local ownership.', { ...scopedMutation, path: string, resolution: choice('OURS', 'THEIRS', 'CONTENT', 'DELETE'), expectedConflictRevision: revision, content: { type: 'string', maxLength: 1024 * 1024 } }, ['path', 'resolution', 'expectedConflictRevision', ...Object.keys(scopedMutation)]),
+  tool('start_worktree_validation', 'Execute an existing fixed validation profile in a managed clean checkout under explicit local ownership. Proofs bind the actual checkout generation, HEAD, index and dirty contents; accepts no arbitrary command or cwd.', { ...scopedMutation, profileId: string, targets: paths(100), evidenceFor: paths(100) }, ['profileId', ...Object.keys(scopedMutation)]),
+  tool('get_worktree_validation', 'Read the bounded result and genuine proofId of an authorized checkout validation run.', { runId: string }, ['runId']),
+  tool('preview_worktree_integration', 'Bind a read-only integration preview to source and target snapshots, merge base and commits. Reports promotion blockers without changing refs.', { sourceWorktreeId: revision, targetBranch: string }, ['sourceWorktreeId', 'targetBranch']),
+  tool('integrate_worktree', 'APPLY only in a managed integration checkout; conflicts remain isolated there. PROMOTE requires explicit target ownership and genuine validation proofs for the managed integration commit. Never force updates occupied branches.', { ...scopedMutation, action: choice('APPLY', 'PROMOTE'), previewId: string, integrationWorktreeId: revision, proofIds: paths(20) }, ['action', 'previewId', ...Object.keys(scopedMutation)]),
+  tool('publish_worktree', 'Push the explicitly approved current branch and exact inspected HEAD without force. PUBLISHED does not mean integrated.', { ...scopedMutation, branch: string, remote: string }, ['branch', 'remote', ...Object.keys(scopedMutation)]),
+  tool('manage_worktree', 'CREATE a managed worktree on a new explicit branch at an approved exact commit; no directory selector or project switch. CLOSE refuses external, dirty, locked, conflicted or unpreserved worktrees and never force-removes. Both actions require a local grant and operationId.', { ...scopedMutation, action: choice('CREATE', 'CLOSE'), branch: string, startPoint: { type: 'string', pattern: '^[a-f0-9]{40,64}$' }, preservedBranch: string }, ['action', ...Object.keys(scopedMutation)]),
+  tool('handoff_worktree_for_git', 'REQUEST/RECOVER records a pending request for native desktop operator approval; cannot self-approve remotely. ACCEPT requires the private request credential. RELEASE explicitly returns ownership. Pause confirmation is cooperative, not an IDE writer lock. Keep credentials private.', { action: choice('REQUEST', 'RECOVER', 'ACCEPT', 'RELEASE'), worktreeId: revision, snapshot, scope, durationSeconds: { type: 'integer', minimum: 30, maximum: 300 }, requestId: string, requestCredential: credential, leaseId: string, leaseCredential: credential }, ['action']),
+  tool('mutate_worktree', 'Perform STAGE/UNSTAGE explicit paths, COMMIT exactly the inspected index, or CREATE_BRANCH and checkout an exclusive branch after local approval and explicit ACCEPT. Requires scoped lease, fresh snapshot and caller-created operationId; recover with the same ID. No implicit push.', { action: choice('STAGE', 'UNSTAGE', 'COMMIT', 'CREATE_BRANCH'), worktreeId: revision, leaseId: string, leaseCredential: credential, operationId: { type: 'string', pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$' }, snapshot, paths: paths(500), message: { ...string, maxLength: 10000 }, branch: string }, ['action', 'worktreeId', 'leaseId', 'leaseCredential', 'operationId', 'snapshot']),
+  tool('discover_worktrees', 'Discover up to 100 compact Git worktree records in the canonical repository. No source, patches or mutation permission. Discover before selecting an opaque worktreeId; drift rejects continuation.', { cursor: string }),
+  tool('inspect_worktree', 'Inspect one discovered worktree without changing active project, index or HEAD. Git locked is not ownership.', { worktreeId: revision }, ['worktreeId']),
+  tool('get_worktree_changes', 'Page changed path metadata only; no source or patches. Optional literal repository-relative pathPrefixes match a path or directory descendants; categories use OR. Filters apply before pagination. Cursor binds filters, pageSize and Git state; reuse identical arguments. Default/maximum pageSize 100.', { worktreeId: revision, cursor: string, pathPrefixes: paths(20), categories: { type: 'array', items: choice('STAGED', 'UNSTAGED', 'UNTRACKED', 'DELETED', 'CONFLICTED'), minItems: 1, maxItems: 5, uniqueItems: true }, pageSize: { type: 'integer', minimum: 1, maximum: 100 } }, ['worktreeId']),
+  tool('get_worktree_diff', 'Read a bounded patch for explicit paths in one worktree. No directory expansion; stale evidence rejects continuation.', { worktreeId: revision, paths: paths(20), mode: choice('WORKTREE', 'STAGED', 'BETWEEN_REFS'), base: string, head: string, cursor: string }, ['worktreeId', 'paths', 'mode']),
+  tool('read_worktree_file', 'Read one literal UTF-8 interval; maximum 400 lines, 24000 output bytes, 16 MiB input. expectedFileRevision is SHA-256 of this file bytes, returned as fileRevision (revisionKind FILE_BYTES_SHA256); inspect_worktree.worktreeRevision is NOT a file revision. expectedRevision is a deprecated compatible alias; simultaneous unequal values are rejected. Wrong hash returns GIT_STATE_CHANGED with revisionKind. Bounds errors return totalLines/validRange/maxLines, never partial source. Rejects escaping paths, Git metadata and binary files.', { worktreeId: revision, path: string, startLine: { type: 'integer', minimum: 1, maximum: 10000000 }, endLine: { type: 'integer', minimum: 1, maximum: 10000000 }, expectedRevision: revision, expectedFileRevision: revision }, ['worktreeId', 'path', 'startLine', 'endLine']),
   tool('get_git_state', 'Inspect compact Git state of the active project, including HEAD, staged index revision and worktree revision covering dirty contents. No file list or patches.', {}),
   tool('get_git_changes', 'Discover changed files of the active project without patches.', { filter: choice('ALL', 'STAGED', 'UNSTAGED', 'UNTRACKED', 'CONFLICTED') }),
   tool('get_git_diff', 'Read a bounded diff for explicit paths. Continue with nextCursor; changed evidence invalidates the cursor. Binary contents are omitted.', { paths: paths(20), mode: choice('WORKTREE', 'STAGED', 'BETWEEN_REFS'), base: string, head: string, cursor: string }, ['paths', 'mode']),
@@ -53,6 +72,25 @@ export async function executeGitOperationsTool(service: GitOperationsService, na
   const definition = GIT_OPERATIONS_TOOLS.find((entry) => entry.name === name)
   if (!definition || !validate(definition.inputSchema, args)) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
   const { operationId, ...values } = args as Record<string, unknown>
+  if (['mutate_worktree', 'manage_worktree', 'integrate_worktree', 'publish_worktree', 'start_worktree_validation', 'resolve_worktree_conflict'].includes(name)) {
+    const expectedFields: Record<string, string[]> = { STAGE: ['paths'], UNSTAGE: ['paths'], COMMIT: ['message'], CREATE_BRANCH: ['branch'] }
+    if (name === 'manage_worktree') Object.assign(expectedFields, { CREATE: ['branch', 'startPoint'], CLOSE: ['preservedBranch'] })
+    if (name === 'integrate_worktree') Object.assign(expectedFields, { APPLY: ['previewId'], PROMOTE: ['previewId', 'integrationWorktreeId', 'proofIds'] })
+    const extra = name === 'resolve_worktree_conflict' ? ['path', 'resolution', 'expectedConflictRevision'] : name === 'start_worktree_validation' ? ['profileId'] : name === 'publish_worktree' ? ['branch', 'remote'] : expectedFields[String(values.action)]
+    if (!extra || extra.some(key => !Object.prototype.hasOwnProperty.call(values, key)) || ['paths', 'message', 'branch', 'startPoint', 'preservedBranch', 'previewId', 'integrationWorktreeId', 'proofIds', 'remote'].some(key => Object.prototype.hasOwnProperty.call(values, key) && !extra.includes(key))) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
+    try {
+      if (name === 'resolve_worktree_conflict') {
+        if (values.resolution === 'CONTENT' ? typeof values.content !== 'string' : Object.prototype.hasOwnProperty.call(values, 'content')) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
+        return await service.resolveWorktreeConflict(args as Parameters<GitOperationsService['resolveWorktreeConflict']>[0])
+      }
+      if (name === 'start_worktree_validation') return await service.startWorktreeValidation(args as Parameters<GitOperationsService['startWorktreeValidation']>[0])
+      if (name === 'mutate_worktree') return await service.mutateWorktree(args as Parameters<GitOperationsService['mutateWorktree']>[0])
+      if (name === 'integrate_worktree') return await service.integrateWorktree(args as Parameters<GitOperationsService['integrateWorktree']>[0])
+      if (name === 'publish_worktree') return await service.publishWorktree(args as Parameters<GitOperationsService['publishWorktree']>[0])
+      return await service.manageWorktree(args as Parameters<GitOperationsService['manageWorktree']>[0])
+    }
+    catch (error) { return { content: [{ type: 'text', text: JSON.stringify({ code: error instanceof Error ? error.message : 'WORKTREE_OPERATION_FAILED' }) }], isError: true } }
+  }
   if (!isReceiptedGitMutation(name, values)) {
     if (operationId !== undefined) return { content: [{ type: 'text', text: '{"code":"INVALID_ARGUMENT"}' }], isError: true }
     return dispatchGitOperationsTool(service, name, values)
@@ -71,6 +109,7 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
     if (!definition || !validate({ ...definition.inputSchema, required: (definition.inputSchema.required as string[]).filter((key) => key !== 'operationId') }, args)) throw new GitOperationsError('INVALID_ARGUMENT')
     const values = args as Record<string, any>
     const actionFields: Record<string, Record<string, string[]>> = {
+      handoff_worktree_for_git: { REQUEST: ['worktreeId', 'snapshot', 'scope', 'durationSeconds'], RECOVER: ['worktreeId', 'snapshot', 'scope', 'durationSeconds'], ACCEPT: ['requestId', 'requestCredential'], RELEASE: ['worktreeId', 'leaseId', 'leaseCredential'] },
       manage_git_branch: { LIST: [], CREATE: ['branch', 'expectedHead'], SWITCH: ['branch'], RENAME: ['branch', 'newBranch'], DELETE: ['branch'], SET_UPSTREAM: ['branch', 'remote', 'remoteBranch', 'expectedHead'] },
       merge_git_branch: { MERGE: ['source', 'expectedHead'], ABORT: [] },
       sync_git_remote: { FETCH: [], PUSH: ['expectedHead'], PULL_FF_ONLY: ['expectedHead'] },
@@ -81,6 +120,7 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
     const required = actionFields[name]?.[values.action ?? (name === 'revert_git_commit' ? 'START' : '')] ?? []
     if (required.some((field) => !Object.hasOwn(values, field))) throw new GitOperationsError('INVALID_ARGUMENT')
     const allowedFields: Record<string, Record<string, string[]>> = {
+      handoff_worktree_for_git: { REQUEST: ['action', 'worktreeId', 'snapshot', 'scope', 'durationSeconds'], RECOVER: ['action', 'worktreeId', 'snapshot', 'scope', 'durationSeconds'], ACCEPT: ['action', 'requestId', 'requestCredential'], RELEASE: ['action', 'worktreeId', 'leaseId', 'leaseCredential'] },
       manage_git_branch: { SET_UPSTREAM: ['action', 'branch', 'remote', 'remoteBranch', 'expectedHead'] },
       manage_git_shelf: { LIST: ['action'], CREATE: ['action', 'paths', 'expectedWorktreeRevision', 'label'], RESTORE: ['action', 'shelfId', 'expectedHead', 'expectedWorktreeRevision'], DROP: ['action', 'shelfId'] },
       manage_gitignore: { PREVIEW_ADD: ['action', 'rules'], ADD: ['action', 'rules', 'expectedWorktreeRevision', 'expectedPreviewId'] },
@@ -93,6 +133,15 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
     if (name === 'resolve_git_conflict' && (values.resolution === 'CONTENT' ? typeof values.content !== 'string' : Object.hasOwn(values, 'content'))) throw new GitOperationsError('INVALID_ARGUMENT')
     let result: unknown
     switch (name) {
+      case 'get_worktree_conflict': result = await service.getWorktreeConflict(values as Parameters<GitOperationsService['getWorktreeConflict']>[0]); break
+      case 'get_worktree_validation': result = await service.getWorktreeValidation(values.runId); break
+      case 'preview_worktree_integration': result = await service.previewWorktreeIntegration(values as Parameters<GitOperationsService['previewWorktreeIntegration']>[0]); break
+      case 'handoff_worktree_for_git': result = await service.handoffWorktree(values as Parameters<GitOperationsService['handoffWorktree']>[0]); break
+      case 'discover_worktrees': result = await service.discoverWorktrees(values); break
+      case 'inspect_worktree': result = await service.inspectWorktree(values.worktreeId); break
+      case 'get_worktree_changes': result = await service.getWorktreeChanges(values as Parameters<GitOperationsService['getWorktreeChanges']>[0]); break
+      case 'get_worktree_diff': result = await service.getWorktreeDiff(values as Parameters<GitOperationsService['getWorktreeDiff']>[0]); break
+      case 'read_worktree_file': result = await service.readWorktreeFile(values as Parameters<GitOperationsService['readWorktreeFile']>[0]); break
       case 'get_git_state': result = await service.getState(); break
       case 'get_git_changes': result = await service.getChanges(values.filter); break
       case 'get_git_diff': result = await service.getDiff(values as Parameters<GitOperationsService['getDiff']>[0]); break
@@ -112,7 +161,8 @@ async function dispatchGitOperationsTool(service: GitOperationsService, name: st
     return { content: [{ type: 'text', text: JSON.stringify(result) }] }
   } catch (error) {
     const code = error instanceof GitOperationsError ? error.code : 'GIT_OPERATION_FAILED'
-    if (['GIT_STATE_CHANGED', 'CONFLICT_STATE_CHANGED'].includes(code)) return operationalFailure(gitGuidance(code))
-    return { content: [{ type: 'text', text: JSON.stringify({ code }) }], isError: true }
+    const details = error instanceof GitOperationsError ? error.details : undefined
+    if (['GIT_STATE_CHANGED', 'CONFLICT_STATE_CHANGED'].includes(code)) return operationalFailure({ ...gitGuidance(code), ...details })
+    return { content: [{ type: 'text', text: JSON.stringify({ code, ...details }) }], isError: true }
   }
 }

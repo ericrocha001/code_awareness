@@ -58,6 +58,7 @@ function classifyFreshness(
   currentFingerprint: string | null,
   currentInstanceId: string | null
 ): ProofFreshness {
+  if (proof.commandProfile?.checkout) return 'UNVERIFIABLE'
   // If the proof was tied to a specific runtime instance that differs from current
   if (proof.runtimeInstanceId !== null && currentInstanceId !== null) {
     if (proof.runtimeInstanceId !== currentInstanceId) {

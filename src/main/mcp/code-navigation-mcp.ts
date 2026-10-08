@@ -4,6 +4,8 @@ import type { ProjectContextNavigation } from '../core/context/project-context-n
 import { serializeDiscovery, serializeRelationships, serializeInspectFiles, serializeReadCode, serializeReferences, serializeSymbolDependencies, serializeSymbolHierarchy } from '../core/context/context-navigation-serializer'
 
 import type { McpToolDefinition, McpToolResult, McpOAuthSecurityScheme } from './mcp-types'
+import type { WorktreeStructureRequest } from '../git-operations/git-worktree-capture'
+import { GitOperationsError } from '../git-operations/git-operations-service'
 
 const references = { type: 'array', items: { type: 'string', minLength: 1 }, minItems: 1, uniqueItems: true }
 const oauthSecuritySchemes: McpOAuthSecurityScheme[] = [{ type: 'oauth2', scopes: [] }]
@@ -11,6 +13,16 @@ function protectedTool(definition: Omit<McpToolDefinition, 'securitySchemes'>): 
   return { ...definition, securitySchemes: oauthSecuritySchemes }
 }
 export const CODE_NAVIGATION_MCP_TOOLS: McpToolDefinition[] = [
+  protectedTool({
+    name: 'inspect_worktree_structure',
+    description: 'Compare structures and direct import/export changes in 1–10 explicit paths of a previously discovered worktree. Uses merge-base with the canonical HEAD by default, or an exact baseCommit SHA. Reads at most 1 MiB/file and 4 MiB total. Returns versioned ephemeral locations, confidence limits and paged deltas within 24 KB; no source or canonical CodeTargets. Follow nextCursor with the same arguments, or use existing Git reads for details.',
+    inputSchema: { type: 'object', properties: {
+      worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      paths: { type: 'array', items: { type: 'string', minLength: 1, maxLength: 500 }, minItems: 1, maxItems: 10, uniqueItems: true },
+      baseCommit: { type: 'string', pattern: '^(?:[a-f0-9]{40}|[a-f0-9]{64})$' },
+      cursor: { type: 'string', pattern: '^[a-f0-9]{64}:[0-9]+$', maxLength: 90 }
+    }, required: ['worktreeId', 'paths'], additionalProperties: false }
+  }),
   protectedTool({
     name: 'discover_repository',
     description: 'List immediate children of the root or explicitly requested directories. Expand directories progressively.',
@@ -68,7 +80,12 @@ function validateArguments(name: string, args: unknown): Record<string, unknown>
     if (!(key in values)) throw new ContextNavigationError('INVALID_ARGUMENT', 'Missing argument: ' + key)
   }
   for (const [key, value] of Object.entries(values)) {
-    if (key === 'relativePaths' || key === 'targetIds' || key === 'sourceTargetIds') {
+    if (key === 'worktreeId' || key === 'baseCommit' || key === 'cursor') {
+      const schema = properties[key] as { pattern: string; maxLength?: number }
+      if (typeof value !== 'string' || !new RegExp(schema.pattern).test(value) || schema.maxLength && value.length > schema.maxLength) throw new ContextNavigationError('INVALID_ARGUMENT', 'Invalid ' + key)
+    } else if (key === 'paths') {
+      if (!Array.isArray(value) || !value.length || value.length > 10 || value.some(path => typeof path !== 'string' || !path.length || path.length > 500) || new Set(value).size !== value.length) throw new ContextNavigationError('INVALID_ARGUMENT', 'paths must contain 1–10 unique relative paths')
+    } else if (key === 'relativePaths' || key === 'targetIds' || key === 'sourceTargetIds') {
       if (!Array.isArray(value) || !value.length || value.some((entry) => typeof entry !== 'string' || !entry.length) || new Set(value).size !== value.length) {
         throw new ContextNavigationError('INVALID_ARGUMENT', key + ' must be a nonempty array of unique strings')
       }
@@ -123,6 +140,9 @@ export async function executeCodeNavigationTool(navigation: ProjectContextNaviga
       }
 
       switch (name) {
+        case 'inspect_worktree_structure':
+          if (!navigation.inspectWorktreeStructure) throw new GitOperationsError('WORKTREE_STRUCTURE_UNAVAILABLE')
+          return success(JSON.stringify(await navigation.inspectWorktreeStructure(values as unknown as WorktreeStructureRequest)))
         case 'discover_repository':
           return success(
             serializeDiscovery(
@@ -205,6 +225,10 @@ export async function executeCodeNavigationTool(navigation: ProjectContextNaviga
           return failure(new Error(`Unknown tool: ${name}`))
       }
     } catch (error) {
+      if (name === 'inspect_worktree_structure') {
+        const code = error instanceof GitOperationsError || error instanceof ContextNavigationError ? error.code : 'WORKTREE_STRUCTURE_FAILED'
+        return { content: [{ type: 'text', text: JSON.stringify({ code, valid: false, recommendedAction: code === 'GIT_STATE_CHANGED' ? 'Rediscover and retry the same explicit paths without a stale cursor.' : code.includes('LIMIT') ? 'Select fewer or smaller files; use bounded Git reads for details.' : 'Verify the worktree identity, relative paths and exact commit SHA before retrying.' }) }], isError: true }
+      }
       return failure(error)
     }
 }

@@ -1070,6 +1070,17 @@ class RepositoryDatabase implements RepositoryRepository {
     return rows.map(rowToRelationship)
   }
 
+  getImporterFiles(fileId: string, limit: number): CodeMapFile[] {
+    const rows = this.db.prepare(`
+      SELECT DISTINCT f.* FROM relationships r
+      LEFT JOIN elements e ON r.source_kind = 'element' AND e.id = r.source_id
+      JOIN files f ON f.id = CASE WHEN r.source_kind = 'file' THEN r.source_id ELSE e.file_id END
+      WHERE r.type = 'imports' AND r.target_kind = 'file' AND r.target_id = ?
+      ORDER BY f.relative_path LIMIT ?
+    `).all(fileId, limit)
+    return rows.map(rowToFile)
+  }
+
   getHierarchyRelationshipsBySourceElement(elementId: string): CodeMapRelationship[] {
     const rows = this.db.prepare(`
       SELECT * FROM relationships

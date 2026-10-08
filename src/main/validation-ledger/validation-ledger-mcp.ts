@@ -192,6 +192,7 @@ export function executeRecordValidationProof(
 ): McpToolResult {
   const values = validateArgs(args)
   if (!values) return err('INVALID_ARGUMENT: Expected an arguments object')
+  if (values.commandProfile && typeof values.commandProfile === 'object' && 'checkout' in values.commandProfile) return err('INVALID_ARGUMENT: Checkout provenance is issued only by Validation Execution')
 
   const required = ['kind', 'producer', 'status', 'startedAt', 'finishedAt', 'durationMs', 'scope', 'summary']
   for (const field of required) {

@@ -57,4 +57,9 @@ export class RepositoryChangeReadiness {
     const index = phases.indexOf(phase)
     return Promise.all([...this.changes.values()].map((change) => change.waits[index].promise)).then(() => {})
   }
+
+  isReady(phase: RepositoryChangePhase): boolean {
+    const reached = phases.indexOf(phase) + 1
+    return [...this.changes.values()].every(change => !change.failed && change.reached >= reached)
+  }
 }

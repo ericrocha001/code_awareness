@@ -2,7 +2,7 @@
 -T ---
 */
 
-import { app, BrowserWindow, Menu, nativeTheme, shell, safeStorage } from 'electron'
+import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage } from 'electron'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { registerFileHandlers } from './ipc/file-handler'
@@ -45,6 +45,7 @@ import { ContextEngine } from './core/context/context-engine'
 import { DashDiscoveryService } from './core/dash/dash-discovery-service'
 import { ActiveProjectService } from './core/active-project-service'
 import { bindProjectNavigation } from './core/context/project-context-navigation'
+import { WorktreeStructureNavigation } from './core/context/worktree-structure-navigation'
 import { registerActiveProjectHandlers } from './ipc/active-project-handler'
 import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { registerApplicationShutdown } from './application-shutdown'
@@ -90,6 +91,7 @@ import { AcademyGitSyncService } from './academy/git/academy-git-sync-service'
 import { AcademyPluginRepositoryProjection } from './academy/git/academy-plugin-repository-projection'
 import { GitHubGitTransport } from './github/github-git-transport'
 import { GitOperationsService } from './git-operations/git-operations-service'
+import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { GitService } from './core/git-service'
 
@@ -136,6 +138,7 @@ const runtimeRestart = new RuntimeRestartController(
   () => app.quit()
 )
 let activeValidationExecution: ValidationExecution | null = null
+let activeWorktreeValidation: GitWorktreeValidation | null = null
 let diagnosticInstallationId: string | null = null
 let repositoryCatalog: RepositoryCatalogService | null = null
 const traceSink = {
@@ -402,6 +405,8 @@ app.whenReady().then(async () => {
   activeProjects.onBeforeChange(async () => {
     await mcpLifecycle.quiesce()
     await activeValidationExecution?.shutdown()
+    await activeWorktreeValidation?.shutdown()
+    activeWorktreeValidation = null
     activeValidationExecution = null
     continuumSession.deactivate()
   })
@@ -424,8 +429,27 @@ app.whenReady().then(async () => {
       console.error('[Continuum] Session activation failed, continuing without Continuum:', error?.message)
     }
 
-    const navigation = bindProjectNavigation(contextNavigation, project.path)
+    const gitRepositoryId = repositoryCatalog?.findByPath(project.path)?.id
+    const gitProjectRevision = activeProjects?.getState().revision
     activeValidationExecution = new ValidationExecution(project.path, validationLedger, runtimeIdentityProvider)
+    activeWorktreeValidation = gitRepositoryId ? new GitWorktreeValidation(project.path, gitService, {
+      repositoryId: gitRepositoryId,
+      isActive: () => activeProjects?.getState().revision === gitProjectRevision && activeProjects?.getState().project?.id === project.id
+    }, validationLedger, runtimeIdentityProvider) : null
+    const gitOperations = new GitOperationsService(project.path, gitService, gitTransport, gitRepositoryId ? {
+        repositoryId: gitRepositoryId,
+        isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId
+      } : undefined, false, async request => {
+        if (!mainWindow || mainWindow.isDestroyed() || activeProjects?.getState().project?.id !== project.id) return false
+        const response = await dialog.showMessageBox(mainWindow, {
+          type: 'warning', title: 'Ceder controle Git da worktree',
+          message: request.recovery ? 'Reconciliar e conceder novamente o controle desta worktree?' : 'Autorizar temporariamente operações Git nesta worktree?',
+          detail: `${request.path}\nBranch: ${request.snapshot.branch ?? 'detached HEAD'}\nHEAD: ${request.snapshot.head ?? 'sem commit'}\nÍndice: ${request.snapshot.indexRevision}\nWorktree: ${request.snapshot.worktreeRevision}\nOperação Git: ${request.snapshot.operation ?? 'nenhuma'}\nAções: ${request.scope.operations.join(', ')}\nPaths: ${request.scope.paths.join(', ')}\nBranches: ${request.scope.branches.join(', ')}\nCommits de criação: ${(request.scope.startPoints ?? []).join(', ')}\nExpira: ${request.expiresAt}\n\nConfirme somente após interromper o executor e reconciliar operações anteriores. Esta concessão é cooperativa: não impede uma IDE independente de voltar a escrever.`,
+          buttons: ['Manter somente leitura', 'Executor pausado; autorizar este escopo'], defaultId: 0, cancelId: 0, noLink: true
+        })
+        return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
+      }, false, activeWorktreeValidation ?? undefined)
+    const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
     void mcpLifecycle.activateContext({
       projectId: project.id,
       repoRoot: project.path,
@@ -433,7 +457,7 @@ app.whenReady().then(async () => {
       continuum,
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
-      gitOperations: new GitOperationsService(project.path, gitService, gitTransport),
+      gitOperations,
       repositoryFileIngress: new RepositoryFileIngress(project.path),
       runtimeRestart
     })
@@ -532,6 +556,8 @@ registerApplicationShutdown(app, async () => {
   codeMapLifecycleMonitor.dispose()
   await remoteAccess.dispose()
   await activeValidationExecution?.shutdown()
+  await activeWorktreeValidation?.shutdown()
+  activeWorktreeValidation = null
   activeValidationExecution = null
   await activeProjects?.dispose()
   await mcpLifecycle.dispose()

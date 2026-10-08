@@ -53,9 +53,67 @@ export interface GitShelf {
   stash: string
   files: ShelfFile[]
 }
-type GitProcessOptions = { timeoutMs?: number; env?: NodeJS.ProcessEnv; allowExitOne?: boolean; input?: Buffer | string }
+type GitProcessOptions = { timeoutMs?: number; env?: NodeJS.ProcessEnv; allowExitOne?: boolean; input?: Buffer | string; maxOutputBytes?: number }
+
+export interface GitWorktreeReadSnapshot {
+  head: string | null
+  branch: string | null
+  operation: string | null
+  indexRevision: string
+  status: string
+  worktreeRevision: string
+}
 
 export class GitService implements FileListingPort {
+  async readCommitFile(root: string, commit: string, path: string, maxBytes: number): Promise<Buffer | null> {
+    const entry = (await this.runGitBytes(['ls-tree', '-z', commit, '--', `:(literal)${path}`], root, { maxOutputBytes: 4096 })).toString('utf8')
+    if (!entry) return null
+    const match = /^(100644|100755) blob ([a-f0-9]+)\t([^\0]+)\0$/.exec(entry)
+    if (!match || match[3] !== path) throw new Error('WORKTREE_FILE_UNSUPPORTED')
+    return this.runGitBytes(['cat-file', 'blob', match[2]], root, { maxOutputBytes: maxBytes })
+  }
+
+  async getSelectedCommitChanges(root: string, base: string, head: string, paths: string[]): Promise<string> {
+    return (await this.runGitBytes(['diff', '--name-status', '-z', '--no-ext-diff', '--no-textconv', '--find-renames', base, head, '--', ...paths.map(path => `:(literal)${path}`)], root, { maxOutputBytes: 16000 })).toString('utf8')
+  }
+
+  async getCommonDirectory(root: string): Promise<string> {
+    return (await this.runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], root)).trim()
+  }
+
+  async listWorktreeRecords(root: string): Promise<string> {
+    return this.runGit(['worktree', 'list', '--porcelain', '-z'], root)
+  }
+
+  async getWorktreeDirectory(root: string): Promise<string> {
+    return (await this.runGit(['rev-parse', '--absolute-git-dir'], root)).trim()
+  }
+
+  async createAndSwitchBranch(root: string, branch: string): Promise<void> {
+    await this.runGit(['switch', '-c', branch], root)
+  }
+
+  async createWorktree(root: string, destination: string, branch: string, commit: string): Promise<void> {
+    await this.runGit(['worktree', 'add', '-b', branch, destination, commit], root, { timeoutMs: 120000 })
+  }
+
+  async removeWorktree(root: string, destination: string): Promise<void> {
+    await this.runGit(['worktree', 'remove', '--', destination], root, { timeoutMs: 120000 })
+  }
+
+  async isAncestor(root: string, ancestor: string, descendant: string): Promise<boolean> {
+    return (await this.runGit(['merge-base', '--is-ancestor', ancestor, descendant], root, { allowExitOne: true })) === '' &&
+      (await this.runGit(['rev-list', '--count', `${descendant}..${ancestor}`], root)).trim() === '0'
+  }
+
+  async mergeBase(root: string, source: string, target: string): Promise<string> {
+    return (await this.runGit(['merge-base', source, target], root)).trim()
+  }
+
+  async integrationCommits(root: string, source: string, target: string): Promise<string[]> {
+    return (await this.runGit(['rev-list', '--max-count=20', `${target}..${source}`], root)).trim().split('\n').filter(Boolean)
+  }
+
   private receiptRef(operationId: string): string {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(operationId)) throw new Error('INVALID_ARGUMENT')
     return `refs/code-awareness/operation-receipts/${operationId}`
@@ -72,7 +130,7 @@ export class GitService implements FileListingPort {
   }
 
   async prepareOperationReceipt(root: string, receipt: GitOperationReceipt): Promise<{ created: boolean; receipt: GitOperationReceipt; sha: string }> {
-    const gitDir = (await this.runGit(['rev-parse', '--absolute-git-dir'], root)).trim()
+    const gitDir = await this.getCommonDirectory(root)
     const lockPath = join(gitDir, 'code-awareness-operation-receipts.lock')
     let lock: number
     try { lock = openSync(lockPath, 'wx') } catch { throw new Error('RECEIPT_BUSY') }
@@ -114,10 +172,26 @@ export class GitService implements FileListingPort {
     }
   }
 
-  async getWorktreeRevision(dirPath: string): Promise<string> {
+  async getWorktreeRevision(dirPath: string, metadataOnly = false): Promise<string> {
     const head = await this.getCurrentCommitHash(dirPath)
     const index = await this.getIndexRevision(dirPath)
     const status = await this.getOperationsStatus(dirPath)
+    const revision = this.worktreeRevision(dirPath, head, index, status, metadataOnly)
+    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || status !== await this.getOperationsStatus(dirPath)) throw new Error('GIT_STATE_CHANGED')
+    return revision
+  }
+
+  async captureWorktreeReadSnapshot(dirPath: string): Promise<GitWorktreeReadSnapshot> {
+    // A read must match two captures bracketing its effect; this is not a mutation precondition.
+    const [head, indexRevision, status, branch, operation] = await Promise.all([
+      this.getCurrentCommitHash(dirPath), this.getIndexRevision(dirPath), this.getOperationsStatus(dirPath),
+      this.getCurrentBranch(dirPath), this.getGitOperation(dirPath)
+    ])
+    return { head, branch, operation, indexRevision, status,
+      worktreeRevision: this.worktreeRevision(dirPath, head, indexRevision, status, true) }
+  }
+
+  private worktreeRevision(dirPath: string, head: string | null, index: string, status: string, metadataOnly: boolean): string {
     const hash = createHash('sha256').update(JSON.stringify({ head, index, status }))
     const entries = status.split('\0')
     const paths = new Set<string>()
@@ -127,12 +201,17 @@ export class GitService implements FileListingPort {
       if (/[RC]/.test(entries[i].slice(0, 2))) paths.add(entries[++i])
     }
     for (const path of [...paths].sort()) {
+      if (metadataOnly) {
+        let stat: ReturnType<typeof lstatSync> | null = null
+        try { stat = lstatSync(join(dirPath, path)) } catch (error: any) { if (error.code !== 'ENOENT') throw error }
+        hash.update(JSON.stringify({ path, size: stat?.size, mtime: stat?.mtimeMs, ctime: stat?.ctimeMs, mode: stat?.mode, ino: stat?.ino }))
+        continue
+      }
       const bytes = this.workingBytes(dirPath, path)
       const stat = bytes === null ? null : lstatSync(join(dirPath, path))
       const mode = stat?.isSymbolicLink() ? 'SYMLINK' : stat ? stat.mode & 0o111 : null
       hash.update(JSON.stringify({ path, mode, content: bytes === null ? null : createHash('sha256').update(bytes).digest('hex') }))
     }
-    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || status !== await this.getOperationsStatus(dirPath)) throw new Error('GIT_STATE_CHANGED')
     return hash.digest('hex')
   }
 
@@ -405,14 +484,17 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], dirPath)).trim()
   }
 
-  async getOperationsDiff(dirPath: string, paths: string[], mode: 'WORKTREE' | 'STAGED' | 'BETWEEN_REFS', base?: string, head?: string): Promise<string> {
+  async getOperationsDiff(dirPath: string, paths: string[], mode: 'WORKTREE' | 'STAGED' | 'BETWEEN_REFS', base?: string, head?: string, maxOutputBytes?: number): Promise<string> {
     const args = ['--literal-pathspecs', 'diff', '--no-ext-diff', '--no-textconv', '--no-color']
     if (mode === 'STAGED') args.push('--cached')
     if (mode === 'BETWEEN_REFS') args.push(base!, head!)
-    let patch = await this.runGit([...args, '--', ...paths], dirPath)
+    let patch = await this.runGit([...args, '--', ...paths], dirPath, { maxOutputBytes })
     if (mode === 'WORKTREE') {
       const untracked = new Set((await this.runGit(['--literal-pathspecs', 'ls-files', '--others', '--exclude-standard', '-z', '--', ...paths], dirPath)).split('\0').filter(Boolean))
-      for (const path of untracked) patch += await this.runGit(['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--', '/dev/null', path], dirPath, { allowExitOne: true })
+      for (const path of untracked) {
+        patch += await this.runGit(['diff', '--no-index', '--no-ext-diff', '--no-textconv', '--no-color', '--', '/dev/null', path], dirPath, { allowExitOne: true, maxOutputBytes })
+        if (maxOutputBytes && Buffer.byteLength(patch) > maxOutputBytes) throw new Error('GIT_OUTPUT_BYTE_LIMIT')
+      }
     }
     return patch
   }
@@ -492,6 +574,7 @@ export class GitService implements FileListingPort {
   private runGitBytes(args: string[], cwd: string, options?: GitProcessOptions): Promise<Buffer> {
     return new Promise((resolve, reject) => {
       const stdout: Buffer[] = []
+      let outputBytes = 0
       let stderr = ''
       const proc = spawn('git', args, { cwd, shell: false, env: options?.env })
       proc.stderr.setEncoding('utf8')
@@ -502,7 +585,13 @@ export class GitService implements FileListingPort {
         reject(new Error('Git process timed out'))
       }, options?.timeoutMs ?? GIT_TIMEOUT_MS)
 
-      proc.stdout.on('data', (chunk: Buffer) => { stdout.push(chunk) })
+      proc.stdout.on('data', (chunk: Buffer) => {
+        outputBytes += chunk.length
+        if (options?.maxOutputBytes && outputBytes > options.maxOutputBytes) {
+          proc.kill()
+          reject(new Error('GIT_OUTPUT_BYTE_LIMIT'))
+        } else stdout.push(chunk)
+      })
       proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
       proc.stdin.on('error', () => {})
       proc.stdin.end(options?.input)

@@ -23,12 +23,8 @@ import { createRepositoryDatabase, closeRepositoryDatabase } from './repository-
 import type { RepositoryRepository } from './repository-repository'
 import { telemetryService } from './telemetry-service'
 import type { StructureExtractionPort } from './extraction/structure-extraction-port'
-import { TypeScriptStructureExtractor } from './extraction/typescript-extractor'
-import { JavaScriptStructureExtractor } from './extraction/javascript-extractor'
+import { createDefaultExtractors } from './extraction/default-extractors'
 import { extractTextDocument } from './extraction/text-document-extractor'
-import { CssStructureExtractor } from './extraction/css-extractor'
-import { JsonStructureExtractor } from './extraction/json-extractor'
-import { MarkdownStructureExtractor } from './extraction/markdown-extractor'
 import { symbolResolutionFacts } from './symbol-resolution-facts'
 import { RepositoryChangeReadiness } from './repository-change-readiness'
 import { RelationshipResolver } from './relationship-resolver'
@@ -1069,6 +1065,10 @@ export class RepositoryModel {
     return this.db.getElementsByFile(fileId)
   }
 
+  getImporterFiles(fileId: string, limit: number): CodeMapFile[] {
+    return this.db.getImporterFiles?.(fileId, limit) ?? []
+  }
+
   getElementsByRepository(): CodeMapElement[] {
     return this.db.getElementsByRepository(this.repositoryId)
   }
@@ -1888,11 +1888,5 @@ export class RepositoryModel {
 
 /** Fábrica conveniente para criar instâncias de RepositoryModel com o conjunto padrão de extratores. */
 export function createRepositoryModel(repoPath: string, tokenizer: TokenizerPort = getCanonicalTokenizer(), membership?: MembershipPort): RepositoryModel {
-  return new RepositoryModel(repoPath, [
-    new TypeScriptStructureExtractor(),
-    new JavaScriptStructureExtractor(),
-    new CssStructureExtractor(),
-    new JsonStructureExtractor(),
-    new MarkdownStructureExtractor()
-  ], tokenizer, membership)
+  return new RepositoryModel(repoPath, createDefaultExtractors(), tokenizer, membership)
 }

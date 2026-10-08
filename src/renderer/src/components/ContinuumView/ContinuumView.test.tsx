@@ -19,8 +19,67 @@ beforeEach(() => {
     getContinuumFacets: vi.fn(async (path: string) => ({ repositoryId: path === '/A' ? 'catalog-A' : 'catalog-B', facets: path === '/A' ? facets : [] })),
     listContinuumArtifacts: vi.fn(async request => ({ repositoryId: request.repositoryId, artifacts: request.repositoryId === 'catalog-A' ? [{ artifactId: 'one', name: 'First artifact', description: 'Read first', kind: 'NEVER_SEEN_KIND', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0 }] : [] })),
     getContinuumArtifact: vi.fn(async (repositoryId: string, artifactId: string) => ({ repositoryId, artifact: { artifactId, revision: 2, metadata: { name: 'First artifact', kind: 'NEVER_SEEN_KIND', future: { x: ['value'] } }, body, createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-06T18:00:00Z' } })),
-    onContinuumChanged: vi.fn(callback => { receive = callback; return unsubscribe })
+    onContinuumChanged: vi.fn(callback => { receive = callback; return unsubscribe }),
+    publishContinuumArtifact: vi.fn(async () => ({ success: true, artifactId: 'new', revision: 1, updatedAt: 'now' }))
   } as unknown as Window['codeAwareness']
+})
+
+function selectFile(name: string, read: () => Promise<ArrayBuffer>) {
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar Markdown' }))
+  fireEvent.change(screen.getByLabelText('Arquivo Markdown'), { target: { files: [{ name, arrayBuffer: read }] } })
+}
+
+it('publishes exact UTF-8 once, locks concurrent requests and leaves filters/selection to existing change notifications', async () => {
+  let complete!: (value: any) => void
+  vi.mocked(window.codeAwareness.publishContinuumArtifact).mockImplementation(() => new Promise(resolve => { complete = resolve }))
+  render(<ContinuumView activeProject={project} />)
+  fireEvent.click(await screen.findByRole('button', { name: /First artifact/ }))
+  await screen.findByRole('heading', { name: 'Freeform content' })
+  fireEvent.change(screen.getByRole('textbox', { name: 'Buscar no Continuum' }), { target: { value: 'First' } })
+  const text = '\uFEFF---\r\nname: Exact\r\ndescription: Exact\r\nkind: CUSTOM\r\n---\r\nç 日本語 🚀 `${literal}`\r\n'
+  const bytes = new TextEncoder().encode(text).buffer
+  selectFile('exact.md', async () => bytes)
+  await waitFor(() => expect(window.codeAwareness.publishContinuumArtifact).toHaveBeenCalledWith({ repositoryId: 'catalog-A', fileName: 'exact.md', rawMarkdown: text }))
+  expect((screen.getByRole('button', { name: 'Publicando…' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.change(screen.getByLabelText('Arquivo Markdown'), { target: { files: [{ name: 'again.md', arrayBuffer: async () => bytes }] } })
+  await act(async () => complete({ success: true, artifactId: 'new', revision: 1, updatedAt: 'now' }))
+  expect(screen.getByText(/Artifact publicado: new.*filtros/)).toBeTruthy()
+  act(() => receive({ repositoryId: 'catalog-A' }))
+  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: 'First', metadata: {} }))
+  expect(await screen.findByRole('heading', { name: 'Freeform content' })).toBeTruthy()
+  expect(window.codeAwareness.publishContinuumArtifact).toHaveBeenCalledTimes(1)
+})
+
+it('cancel, wrong extension, invalid UTF-8 and read failure do not publish; domain errors have no retry', async () => {
+  render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar Markdown' }))
+  fireEvent.change(screen.getByLabelText('Arquivo Markdown'), { target: { files: [] } })
+  selectFile('bad.txt', async () => new ArrayBuffer(0))
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('.md'))
+  selectFile('bad.md', async () => new Uint8Array([0xc3, 0x28]).buffer)
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('UTF-8'))
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Publicar Markdown' }) as HTMLButtonElement).disabled).toBe(false))
+  selectFile('unreadable.md', async () => { throw new Error('read') })
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('UTF-8'))
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Publicar Markdown' }) as HTMLButtonElement).disabled).toBe(false))
+  expect(window.codeAwareness.publishContinuumArtifact).not.toHaveBeenCalled()
+  vi.mocked(window.codeAwareness.publishContinuumArtifact).mockRejectedValue(new Error('INVALID_ARGUMENT: frontmatter required'))
+  selectFile('invalid.md', async () => new TextEncoder().encode('# Body').buffer)
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('frontmatter'))
+  expect(window.codeAwareness.publishContinuumArtifact).toHaveBeenCalledTimes(1)
+  expect(screen.queryByRole('button', { name: 'Tentar novamente' })).toBeNull()
+})
+
+it('refuses a file read finishing after repository switch', async () => {
+  let finish!: (value: ArrayBuffer) => void
+  const { rerender } = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  selectFile('late.md', () => new Promise(resolve => { finish = resolve }))
+  rerender(<ContinuumView activeProject={{ ...project, path: '/B' }} />)
+  await act(async () => finish(new TextEncoder().encode('# Late').buffer))
+  expect(screen.getByRole('alert').textContent).toContain('repositório ativo mudou')
+  expect(window.codeAwareness.publishContinuumArtifact).not.toHaveBeenCalled()
 })
 afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks() })
 
@@ -70,6 +129,7 @@ it('provides navigation and an empty state without querying another repository',
   expect(NAV_ITEMS.find(item => item.id === 'continuum')?.label).toBe('Continuum')
   render(<ContinuumView activeProject={null} />)
   expect(screen.getByText('Nenhum repositório ativo')).toBeTruthy()
+  expect((screen.getByRole('button', { name: 'Publicar Markdown' }) as HTMLButtonElement).disabled).toBe(true)
   expect(window.codeAwareness.getContinuumFacets).not.toHaveBeenCalled()
   expect(window.codeAwareness.listContinuumArtifacts).not.toHaveBeenCalled()
 })

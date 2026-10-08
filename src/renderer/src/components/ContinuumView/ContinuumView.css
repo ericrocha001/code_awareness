@@ -4,11 +4,14 @@
 .continuum-view button:focus-visible, .continuum-view summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .continuum-header { flex-shrink: 0; display: flex; align-items: center; gap: 16px; padding: 18px 20px; border: 1px solid var(--border-subtle); border-radius: 14px; background: radial-gradient(ellipse at 5% 0%, rgba(57, 99, 235, .12), transparent 65%), linear-gradient(120deg, var(--bg-secondary), color-mix(in srgb, var(--accent) 8%, var(--bg-secondary))); }
 .continuum-feature-icon { display: grid; place-items: center; flex-shrink: 0; width: 58px; height: 58px; border: 1px solid color-mix(in srgb, var(--accent) 50%, var(--border)); border-radius: 14px; color: var(--accent); background: linear-gradient(135deg, rgba(57, 99, 235, .18), color-mix(in srgb, var(--accent) 18%, transparent)); box-shadow: 0 0 24px color-mix(in srgb, var(--accent) 12%, transparent); }
-.continuum-feature-title { min-width: 0; }
+.continuum-feature-title { min-width: 0; flex-shrink: 0; max-width: 220px; }
 .continuum-feature-title h1 { font-size: 25px; letter-spacing: 2px; margin: 0 0 5px; }
-.continuum-feature-title p { margin: 0; color: var(--text-secondary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+.continuum-feature-title p { margin: 0; color: var(--text-secondary); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .continuum-header .sb-root { margin-left: auto; flex: 0 1 620px; max-width: 620px; min-height: 40px; }
 .continuum-header .sb-root:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
+.continuum-publish { flex-shrink: 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); font-size: 12px; }
+.continuum-publish:hover:enabled { background: var(--hover-bg); }
+.continuum-publication-feedback { flex-shrink: 0; font-size: 12px; overflow-wrap: anywhere; }
 .continuum-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(160px, var(--continuum-context-track)) 14px minmax(280px, var(--continuum-timeline-track)) 14px minmax(280px, var(--continuum-inspector-track)); position: relative; }
 .continuum-resizer { min-height: 0; display: flex; justify-content: center; position: relative; z-index: 1; }
 .continuum-resizer .crs-root { width: 14px; }

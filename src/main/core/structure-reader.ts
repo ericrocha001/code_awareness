@@ -1202,7 +1202,8 @@ export function readStructure(
     throw new StructureExtractionError(relativePath, 'traverse', err)
   }
 
-  return { elements, relationships, elementInterfaces, importBindings, exportedConstNewBindings, exportedConstCallBindings, symbolReferences }
+  return { elements, relationships, elementInterfaces, importBindings, exportedConstNewBindings, exportedConstCallBindings, symbolReferences,
+    diagnostics: tree.rootNode.hasError ? ['PARSE_INCOMPLETE'] : [] }
 }
 
 // ─── Construtores internos ───────────────────────────────────────────────────

@@ -12,6 +12,7 @@ export const CODESCOPE_FUNCTIONAL_TOOLS = new Set([
   'discover_repository',
   'get_relationships',
   'inspect_files',
+  'inspect_worktree_structure',
   'get_references',
   'get_symbol_dependencies',
   'get_symbol_hierarchy',

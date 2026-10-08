@@ -49,6 +49,7 @@ export interface StructureExtractionInput {
 }
 
 export interface StructureExtractionResult {
+  diagnostics?: string[]
   elements: CodeMapElement[]
   relationships: CodeMapRelationship[]
   elementInterfaces: Array<{ elementId: string; interfaceNames: string[] }>

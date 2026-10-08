@@ -29,7 +29,7 @@ function setup(script: string, catalog?: unknown) {
     }
   } as unknown as ValidationLedger
   const identity = new RuntimeIdentityProvider({ rootDir: root, includedDirectories: [], includedRootFiles: ['package.json'], mode: 'development' })
-  return { root, proofs, execution: new ValidationExecution(root, ledger, identity, catalog as any) }
+  return { root, proofs, ledger, identity, execution: new ValidationExecution(root, ledger, identity, catalog as any) }
 }
 
 async function terminal(execution: ValidationExecution, runId: string) {
@@ -38,6 +38,20 @@ async function terminal(execution: ValidationExecution, runId: string) {
 }
 
 describe('ValidationExecution', () => {
+  it('binds genuine proofs to checkout identity and rejects checkout drift independently of the primary fingerprint', async () => {
+    const f = setup('node -e "setTimeout(() => process.exit(0), 100)"')
+    let fingerprint = 'checkout-before'
+    const binding = { repositoryId: 'repo', worktreeId: 'worktree', generation: 'generation', head: 'a'.repeat(40) }
+    const execution = new ValidationExecution(f.root, f.ledger, f.identity, undefined, { binding, startFingerprint: fingerprint, fingerprint: async () => fingerprint })
+    const run = execution.start({ profileId: 'typecheck', producer: 'SYSTEM' })
+    expect(await terminal(execution, run.runId)).toMatchObject({ status: 'PASSED' })
+    expect(f.proofs[0]).toMatchObject({ sourceFingerprint: 'checkout-before', commandProfile: { cwd: f.root, checkout: { ...binding, issuer: 'VALIDATION_EXECUTION', runId: run.runId } } })
+    expect(f.proofs[0].deduplicationKey).not.toBe(run.runId)
+    const changed = execution.start({ profileId: 'typecheck', producer: 'SYSTEM' })
+    fingerprint = 'checkout-after'
+    expect(await terminal(execution, changed.runId)).toMatchObject({ status: 'ERROR', diagnostic: 'SOURCE_CHANGED_DURING_VALIDATION' })
+    expect(f.proofs).toHaveLength(2)
+  }, 30000)
   it('follows the active run and bounds waiting by the request deadline', async () => {
     const { execution, proofs } = setup('node -e "setTimeout(() => process.exit(0), 300)"')
     const started = JSON.parse((await executeValidationTool(execution, 'start_validation', { profileId: 'typecheck', producer: 'TESTER' })).content[0].text)

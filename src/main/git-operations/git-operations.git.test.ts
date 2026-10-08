@@ -200,7 +200,10 @@ describe('project-scoped Git operations with real Git', () => {
     writeFileSync(join(root, 'binary.bin'), Buffer.from([0, 1, 2, 3]))
     await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['binary.bin'] })
     expect(await service.getDiff({ mode: 'STAGED', paths: ['binary.bin'] })).toMatchObject({ binary: true })
-    expect(JSON.stringify(GIT_OPERATIONS_TOOLS)).not.toMatch(/repoPath|credential|cwd/)
+    for (const tool of GIT_OPERATIONS_TOOLS) {
+      expect(Object.keys(tool.inputSchema.properties ?? {})).not.toEqual(expect.arrayContaining(['repoPath']))
+      for (const key of ['credential', 'cwd', 'command', 'root', 'repositoryId']) expect(tool.inputSchema.properties).not.toHaveProperty(key)
+    }
     writeFile(root, 'literal[1].txt', 'literal\n')
     await service.stage({ ...await stagingRevisions(service), mode: 'STAGE', paths: ['literal[1].txt'] })
     expect((await service.getChanges('STAGED')).map((change) => change.path)).toContain('literal[1].txt')
@@ -218,7 +221,7 @@ describe('project-scoped Git operations with real Git', () => {
     const navigation = {} as ProjectContextNavigation
     const adapterA = new ChannelMcpAdapter({ projectId: 'a', repoRoot: a.root, navigation, gitOperations: a.service })
     const adapterB = new ChannelMcpAdapter({ projectId: 'b', repoRoot: b.root, navigation, gitOperations: b.service })
-    expect(adapterB.listTools().filter((tool) => GIT_OPERATIONS_TOOLS.some((gitTool) => gitTool.name === tool.name))).toHaveLength(15)
+    expect(adapterB.listTools().filter((tool) => GIT_OPERATIONS_TOOLS.some((gitTool) => gitTool.name === tool.name))).toHaveLength(GIT_OPERATIONS_TOOLS.length)
     expect((await adapterA.callTool('get_git_changes', {})).content[0].text).toContain('only-a')
     expect((await adapterB.callTool('get_git_changes', {})).content[0].text).not.toContain('only-a')
     expect((await adapterB.callTool('stage_git_changes', { paths: ['only-a.txt'], mode: 'STAGE', repoPath: a.root })).isError).toBe(true)

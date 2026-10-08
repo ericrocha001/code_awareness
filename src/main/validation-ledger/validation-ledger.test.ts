@@ -37,6 +37,17 @@ function baseProof(overrides: Partial<RecordProofInput> = {}): RecordProofInput 
 }
 
 describe('Validation Ledger — Permanent Harness', () => {
+  it('preserves checkout provenance and never infers checkout freshness from the primary fingerprint', () => {
+    const identity = new RuntimeIdentityProvider({ rootDir: process.cwd() })
+    const { ledger } = tempLedger(identity)
+    const sourceFingerprint = identity.evaluateFreshness().currentSnapshot.fingerprint
+    const checkout = { repositoryId: 'repo', worktreeId: 'worktree', generation: 'generation', head: 'a'.repeat(40), issuer: 'VALIDATION_EXECUTION' as const, runId: 'run-genuine' }
+    const proof = ledger.recordProof(baseProof({ producer: 'SYSTEM', sourceFingerprint, runtimeInstanceId: identity.getInstanceId(), commandProfile: { command: 'npm run test:node', cwd: 'managed-worktree', checkout } }))
+    expect(ledger.getProof(proof.proofId)?.commandProfile?.checkout).toEqual(checkout)
+    expect(ledger.getProofWithFreshness(proof.proofId)?.freshness).toBe('UNVERIFIABLE')
+    const forged = executeRecordValidationProof(ledger, baseProof({ commandProfile: { command: 'claim', checkout } }))
+    expect(forged.isError).toBe(true)
+  })
   let tempDir: string
   let sourceDir: string
 

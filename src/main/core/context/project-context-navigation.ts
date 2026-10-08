@@ -1,7 +1,9 @@
 import type { InspectFilesOptions, RelationshipOptions, SymbolHierarchyOptions } from '../../../shared/types/context-navigation-types'
 import type { ContextNavigationPort, NavigationInvocationContext } from './context-navigation-port'
+import type { WorktreeStructureNavigation } from './worktree-structure-navigation'
 
 export interface ProjectContextNavigation {
+  inspectWorktreeStructure?: WorktreeStructureNavigation['inspect']
   discoverRepository(relativePaths?: string[], context?: NavigationInvocationContext): ReturnType<ContextNavigationPort['discoverRepository']>
   getRelationships(relativePaths: string[], options?: RelationshipOptions, context?: NavigationInvocationContext): ReturnType<ContextNavigationPort['getRelationships']>
   inspectFiles(relativePaths: string[], options?: InspectFilesOptions, context?: NavigationInvocationContext): ReturnType<ContextNavigationPort['inspectFiles']>
@@ -11,8 +13,9 @@ export interface ProjectContextNavigation {
   readCode(targetIds: string[], context?: NavigationInvocationContext): ReturnType<ContextNavigationPort['readCode']>
 }
 
-export function bindProjectNavigation(navigation: ContextNavigationPort, repoPath: string): ProjectContextNavigation {
+export function bindProjectNavigation(navigation: ContextNavigationPort, repoPath: string, worktreeStructure?: WorktreeStructureNavigation): ProjectContextNavigation {
   return {
+    ...(worktreeStructure ? { inspectWorktreeStructure: request => worktreeStructure.inspect(request) } : {}),
     discoverRepository: (relativePaths, context) =>
       context !== undefined
         ? navigation.discoverRepository(repoPath, relativePaths, context)

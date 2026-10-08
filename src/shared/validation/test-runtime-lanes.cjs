@@ -8,6 +8,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/core/symbol-reference-persistence.e2e.test.ts',
   'src/main/core/context/repo-discovery.e2e.test.ts',
   'src/main/core/context/context-navigation.e2e.test.ts',
+  'src/main/core/context/worktree-structure.e2e.test.ts',
   'src/main/validation-ledger/validation-ledger.test.ts',
   'src/main/continuum/artifact-store.test.ts',
   'src/main/continuum/artifact-ingestor.test.ts',

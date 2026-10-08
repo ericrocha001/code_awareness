@@ -4,7 +4,7 @@
 
 /// <reference types="vite/client" />
 import type { ActiveProjectState } from '../../shared/types/active-project-types'
-import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline } from '../../shared/types/continuum-ui-types'
+import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
 import type { ChannelState } from '../../shared/types/channel-state-types'
 import type { SystemHealthState } from '../../shared/types/system-health-types'
@@ -18,6 +18,7 @@ declare global {
   interface Window {
     codeAwareness: {
       listContinuumArtifacts: (request: ContinuumListRequest) => Promise<ContinuumTimeline>
+      publishContinuumArtifact: (request: ContinuumPublishRequest) => Promise<ContinuumPublishReceipt>
       getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
       getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
       onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void

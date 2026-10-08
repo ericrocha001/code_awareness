@@ -83,6 +83,22 @@ export class CodeMapService {
     return file?.contentHash ?? null
   }
 
+  inspectStructuralReference(repoPath: string, relativePath: string, hash: string): 'MATCH' | 'INCOMPATIBLE' | 'UNAVAILABLE' {
+    const instance = instances.get(repoPath.replace(/\\/g, '/').replace(/\/$/, ''))
+    if (!instance || !instance.model.readiness.isReady('RELATIONSHIPS')) return 'UNAVAILABLE'
+    const file = instance.model.getFileByRelativePath(relativePath)
+    if (!file) return 'UNAVAILABLE'
+    return file.status === 'indexed' && file.contentHash === hash ? 'MATCH' : 'INCOMPATIBLE'
+  }
+
+  getStructuralImporterCandidates(repoPath: string, relativePath: string, hash: string, selectedHashes: Map<string, string>) {
+    if (this.inspectStructuralReference(repoPath, relativePath, hash) !== 'MATCH') return { paths: [] as string[], truncated: false }
+    const model = instances.get(repoPath.replace(/\\/g, '/').replace(/\/$/, ''))!.model
+    const file = model.getFileByRelativePath(relativePath)!
+    const candidates = model.getImporterFiles(file.id, 51)
+    return { paths: candidates.slice(0, 50).filter(candidate => selectedHashes.get(candidate.relativePath) === candidate.contentHash && candidate.status === 'indexed').map(candidate => candidate.relativePath), truncated: candidates.length > 50 }
+  }
+
   async openRepository(
     repoPath: string,
     options?: { periodicScanIntervalMs?: number }

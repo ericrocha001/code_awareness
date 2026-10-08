@@ -42,6 +42,16 @@ function mockNavigation() {
 }
 
 describe('System Health MCP — get_system_health tool', () => {
+  it('recognizes worktree structure as functional navigation without inferring unobserved checkpoints', () => {
+    const core = new SystemHealthCore()
+    for (const event of happyPathEvents()) core.sink.record({ ...event, tool: 'inspect_worktree_structure' })
+    expect(core.getState().lastFunctionalProof?.operation).toBe('inspect_worktree_structure')
+    const failure = new SystemHealthCore()
+    const event = happyPathEvents()[0]
+    failure.sink.record({ ...event, tool: 'inspect_worktree_structure', stage: 'mcp-request-started', status: 'started' })
+    failure.sink.record({ ...event, tool: 'inspect_worktree_structure', stage: 'mcp-response-produced', status: 'error', error: 'REQUEST_TIMEOUT' })
+    expect(failure.getState().lastFailure?.operation).toBe('inspect_worktree_structure')
+  })
   it('appears in the MCP catalog alongside the seven CodeScope tools and runtime identity (9 tools total)', () => {
     const adapter = new ChannelMcpAdapter(mockNavigation(), new SystemHealthCore())
     const tools = adapter.listTools()

@@ -6,7 +6,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { RepoDiscoveryRequest, RepoDiscoveryResult } from '../shared/types/repo-discovery-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
-import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline } from '../shared/types/continuum-ui-types'
+import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
 import type { ChannelState } from '../shared/types/channel-state-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
@@ -16,6 +16,7 @@ import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishR
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   listContinuumArtifacts: (request: ContinuumListRequest): Promise<ContinuumTimeline> => ipcRenderer.invoke('continuum:list', request),
+  publishContinuumArtifact: (request: ContinuumPublishRequest): Promise<ContinuumPublishReceipt> => ipcRenderer.invoke('continuum:publish', request),
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
   getContinuumArtifact: (repositoryId: string, artifactId: string): Promise<ContinuumSelection> => ipcRenderer.invoke('continuum:get', repositoryId, artifactId),
   onContinuumChanged: (callback: (change: ContinuumChange) => void): (() => void) => {

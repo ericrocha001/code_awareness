@@ -152,7 +152,7 @@ export class ChannelMcpAdapter {
 
   listTools(): McpToolDefinition[] {
     const tools = [
-      ...CODE_NAVIGATION_MCP_TOOLS,
+      ...CODE_NAVIGATION_MCP_TOOLS.filter(tool => tool.name !== 'inspect_worktree_structure' || !!this.navigation.inspectWorktreeStructure),
       SYSTEM_HEALTH_MCP_TOOL,
       RUNTIME_IDENTITY_MCP_TOOL,
     ]

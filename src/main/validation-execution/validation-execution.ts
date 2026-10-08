@@ -12,6 +12,11 @@ export class ValidationBusyError extends Error {
 }
 
 export type ValidationRunStatus = 'RUNNING' | 'PASSED' | 'FAILED' | 'ERROR'
+export interface ValidationCheckoutContext {
+  binding: { repositoryId: string; worktreeId: string; generation: string; head: string }
+  startFingerprint: string
+  fingerprint(): Promise<string>
+}
 
 export interface ValidationRun {
   retryAfterMs?: number
@@ -36,6 +41,8 @@ export interface StartValidationInput {
 }
 
 interface ActiveRun {
+  completion?: Promise<void>
+  proofDeduplicationKey: string
   publicRun: ValidationRun
   profile: ValidationProfile
   targets: string[]
@@ -69,7 +76,8 @@ export class ValidationExecution {
     private readonly repoRoot: string,
     private readonly ledger: ValidationLedger,
     private readonly runtimeIdentity: RuntimeIdentityProvider,
-    private readonly catalog = new ValidationProfileCatalog()
+    private readonly catalog = new ValidationProfileCatalog(),
+    private readonly checkout?: ValidationCheckoutContext
   ) {}
 
   listProfiles(): ValidationProfile[] {
@@ -90,13 +98,14 @@ export class ValidationExecution {
       stdio: 'pipe'
     })
     const active: ActiveRun = {
+      proofDeduplicationKey: this.checkout ? `${runId}:${randomUUID()}` : runId,
       publicRun,
       profile: resolved.profile,
       targets: resolved.targets,
       command: resolved.command,
       producer: input.producer,
       evidenceFor: input.evidenceFor ?? [],
-      startFingerprint: this.runtimeIdentity.evaluateFreshness().currentSnapshot.fingerprint,
+      startFingerprint: this.checkout?.startFingerprint ?? this.runtimeIdentity.evaluateFreshness().currentSnapshot.fingerprint,
       child,
       timeout: setTimeout(() => this.finish(active, 'ERROR', undefined, 'VALIDATION_TIMEOUT'), resolved.profile.timeoutMs),
       output
@@ -147,13 +156,19 @@ export class ValidationExecution {
     await this.finish(active, 'ERROR', undefined, 'PROCESS_INTERRUPTED_BY_SHUTDOWN')
   }
 
-  private async finish(active: ActiveRun, requestedStatus: ProofStatus, exitCode?: number, diagnostic?: string): Promise<void> {
+  private finish(active: ActiveRun, requestedStatus: ProofStatus, exitCode?: number, diagnostic?: string): Promise<void> {
+    return active.completion ??= this.complete(active, requestedStatus, exitCode, diagnostic)
+  }
+
+  private async complete(active: ActiveRun, requestedStatus: ProofStatus, exitCode?: number, diagnostic?: string): Promise<void> {
     if (this.active !== active) return
     clearTimeout(active.timeout)
     if (requestedStatus === 'ERROR' && active.child.exitCode === null) active.child.kill()
     const finishedAt = new Date().toISOString()
     const durationMs = Math.max(0, Date.parse(finishedAt) - Date.parse(active.publicRun.startedAt))
-    const endFingerprint = this.runtimeIdentity.evaluateFreshness().currentSnapshot.fingerprint
+    let endFingerprint: string
+    try { endFingerprint = this.checkout ? await this.checkout.fingerprint() : this.runtimeIdentity.evaluateFreshness().currentSnapshot.fingerprint }
+    catch { endFingerprint = 'CHECKOUT_UNAVAILABLE' }
     const sourceChanged = endFingerprint !== active.startFingerprint
     const status: ProofStatus = sourceChanged ? 'ERROR' : requestedStatus
     const finalDiagnostic = sourceChanged ? 'SOURCE_CHANGED_DURING_VALIDATION' : diagnostic
@@ -176,9 +191,9 @@ export class ValidationExecution {
         sourceFingerprint: endFingerprint,
         runtimeInstanceId: this.runtimeIdentity.getInstanceId(),
         summary: finalDiagnostic ? `${summary}: ${finalDiagnostic}` : summary,
-        commandProfile: { command: active.command.displayCommand, cwd: active.command.cwd, exitCode },
+        commandProfile: { command: active.command.displayCommand, cwd: active.command.cwd, exitCode, ...(this.checkout ? { checkout: { ...this.checkout.binding, issuer: 'VALIDATION_EXECUTION' as const, runId: active.publicRun.runId } } : {}) },
         evidenceFor: active.evidenceFor,
-        deduplicationKey: active.publicRun.runId
+        deduplicationKey: active.proofDeduplicationKey
       })
       Object.assign(active.publicRun, { status, finishedAt, durationMs, ...(exitCode !== undefined ? { exitCode } : {}), summary, failures, ...(finalDiagnostic ? { diagnostic: finalDiagnostic } : {}), proofId: proof.proofId })
     } catch (error) {
