@@ -6,7 +6,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/core/codemap-system-acceptance.e2e.test.ts',
   'src/main/core/context-reference.e2e.test.ts',
   'src/main/core/symbol-reference-persistence.e2e.test.ts',
-  'src/main/core/context/repo-discovery.e2e.test.ts',
+  'src/main/core/dash/dash-v2-acceptance.e2e.test.ts',
   'src/main/core/context/context-navigation.e2e.test.ts',
   'src/main/validation-ledger/validation-ledger.test.ts',
   'src/main/continuum/artifact-store.test.ts',

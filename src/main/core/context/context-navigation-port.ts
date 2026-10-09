@@ -13,7 +13,6 @@ import type {
 } from '../../../shared/types/context-navigation-types'
 import type { ExactElementSource } from '../repository-model'
 import type { PersistedSymbolReference } from '../symbol-reference-resolver'
-import type { CodeMapDiscoveryPort } from './repo-discovery'
 
 export interface NavigationInvocationContext {
   deadlineAtMs?: number
@@ -32,7 +31,9 @@ export interface ContextNavigationPort {
   readCode(repoPath: string, targetIds: string[], context?: NavigationInvocationContext): Promise<ReadCodeResult[]>
 }
 
-export interface CodeMapNavigationPort extends CodeMapDiscoveryPort {
+export interface CodeMapNavigationPort {
+  awaitSnapshot(repoPath: string): Promise<void>
+  getRelationships(repoPath: string): CodeMapRelationship[]
   awaitReadiness?(repoPath: string, capability: 'FILE_INVENTORY' | 'STRUCTURE' | 'RELATIONSHIPS' | 'SYMBOL_REFERENCES'): Promise<void>
   getFiles(repoPath: string): CodeMapFile[]
   getElements(repoPath: string): CodeMapElement[]
