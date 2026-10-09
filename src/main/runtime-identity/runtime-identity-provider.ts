@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { captureSourceOrigin, findCanonicalWorktreeId } from './source-origin'
 import type {
   FreshnessState,
   RuntimeFreshnessResult,
@@ -6,7 +7,8 @@ import type {
   RuntimeIdentityPayload,
   RuntimeIdentitySummary,
   SourceDivergence,
-  SourceSnapshot
+  SourceSnapshot,
+  RuntimeSourceOrigin
 } from './runtime-identity-types'
 import { FileSnapshotMap, SourceFingerprintCollector, SourceFingerprintOptions } from './source-fingerprint'
 
@@ -17,6 +19,7 @@ export interface RuntimeIdentityProviderOptions extends SourceFingerprintOptions
   mode?: 'development' | 'production'
   protocolVersion?: string
   collector?: SourceFingerprintCollector
+  packaged?: boolean
   maxListSample?: number
 }
 
@@ -24,6 +27,9 @@ const DEFAULT_PROTOCOL_VERSION = '2025-11-25'
 const DEFAULT_MAX_LIST_SAMPLE = 20
 
 export class RuntimeIdentityProvider {
+  private originBindingStarted = false
+  private sourceOrigin: RuntimeSourceOrigin
+  readonly sourceOriginReady: Promise<void>
   private readonly instanceId: string
   private readonly startedAt: string
   private readonly appVersion: string
@@ -42,8 +48,22 @@ export class RuntimeIdentityProvider {
     this.collector = options.collector ?? new SourceFingerprintCollector(options)
     this.maxListSample = options.maxListSample ?? DEFAULT_MAX_LIST_SAMPLE
 
-    // Capture startup source snapshot deterministically once on initialization
     this.startupSnapshot = this.collector.captureSnapshot()
+    this.sourceOrigin = {
+      status: options.packaged ? 'NOT_APPLICABLE' : 'UNAVAILABLE',
+      sourceRootPath: options.packaged ? null : this.collector.getSourceRootPath(),
+      worktree: null, capturedAt: this.startupSnapshot.capturedAt
+    }
+    this.sourceOriginReady = options.packaged ? Promise.resolve() :
+      captureSourceOrigin(this.collector.getSourceRootPath()).then(origin => { this.sourceOrigin = origin })
+  }
+
+  async bindSourceOrigin(repositories: ReadonlyArray<{ repositoryId: string; rootPath: string }>): Promise<void> {
+    if (this.originBindingStarted) return
+    this.originBindingStarted = true
+    await this.sourceOriginReady
+    const worktree = this.sourceOrigin.worktree
+    if (worktree) worktree.worktreeId = await findCanonicalWorktreeId(worktree.rootPath, repositories)
   }
 
   getInstanceId(): string {
@@ -147,6 +167,7 @@ export class RuntimeIdentityProvider {
   getIdentityPayload(): RuntimeIdentityPayload {
     const { currentSnapshot, freshness } = this.evaluateFreshness()
     return {
+      sourceOrigin: structuredClone(this.sourceOrigin),
       runtime: this.getRuntimeInfo(),
       startupSource: this.getStartupSnapshot(),
       currentSource: currentSnapshot,

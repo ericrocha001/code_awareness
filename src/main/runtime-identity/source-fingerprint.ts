@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, resolve } from 'node:path'
 
 export interface FileSnapshotMap {
   files: Map<string, string>
@@ -91,9 +91,13 @@ export class SourceFingerprintCollector {
   private readonly includedRootFiles: string[]
 
   constructor(options: SourceFingerprintOptions = {}) {
-    this.rootDir = options.rootDir ?? process.cwd()
+    this.rootDir = resolve(options.rootDir ?? process.cwd())
     this.includedDirs = options.includedDirectories ?? DEFAULT_INCLUDED_DIRS
     this.includedRootFiles = options.includedRootFiles ?? DEFAULT_INCLUDED_ROOT_FILES
+  }
+
+  getSourceRootPath(): string {
+    return this.rootDir
   }
 
   captureSnapshot(): FileSnapshotMap {
