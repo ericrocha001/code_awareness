@@ -298,6 +298,12 @@ Para cada prova relevante:
 
 Arquivos relevantes criados, modificados ou removidos.
 
+**Entrega**
+
+Registre de forma curta o estado **observado** da entrega para integração: repositório/branch de origem, HEAD e destino quando disponíveis. Se houver Pull Request, forneça seu link ou número e o estado atual (aberto, em revisão, integrado ou bloqueado). Se ainda não houver PR, informe explicitamente o que foi publicado ou está pendente e o impedimento verificável, sem presumir push, PR ou merge concluídos.
+
+Não repita aqui os testes, o diff ou o resumo de implementação; o handoff mantém uma única fonte de verdade. Consulte `worktree-execution` para o fluxo de PR e suas autorizações.
+
 **Desvios do Plano**
 
 Somente quando existirem.
