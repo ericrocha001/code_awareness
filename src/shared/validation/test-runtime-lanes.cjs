@@ -1,4 +1,5 @@
 const nativeTestFiles = Object.freeze([
+  'src/main/repository-file-ingress/repository-file-editing.e2e.test.ts',
   'src/main/core/codemap-addressability.test.ts',
   'src/main/core/codemap-extraction-contract.test.ts',
   'src/main/core/codemap-startup.e2e.test.ts',
@@ -17,7 +18,9 @@ const nativeTestFiles = Object.freeze([
   'src/main/continuum/continuum-mcp.test.ts',
   'src/main/continuum/artifact-fidelity.test.ts',
   'src/main/academy/academy-store.test.ts',
+  'src/main/academy/academy-local-adapter.test.ts',
   'src/main/academy/academy-sync.test.ts',
+  'src/main/academy/academy-conflicts.test.ts',
   'src/main/academy/academy-mcp.test.ts',
   'src/main/academy/academy-real-migration.test.ts',
   'src/main/academy/academy-acceptance.test.ts',

@@ -60,6 +60,9 @@ import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-pro
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
 import { RepositoryContinuumSession } from './continuum/project-continuum-session'
+import { LocalChannelHost } from './local-agent-channel/local-channel-host'
+import { ContinuumLocalAdapter } from './continuum/local-adapter'
+import { AcademyLocalAdapter } from './academy/local-adapter'
 import { registerContinuumHandlers } from './ipc/continuum-handler'
 import { CodeMapSyncMonitor, CodeMapSyncDrilldownProvider } from './system-health/codemap-sync-monitor'
 import { CodeMapLifecycleMonitor } from './system-health/codemap-lifecycle-monitor'
@@ -85,6 +88,7 @@ import { GitHubGitTransport } from './github/github-git-transport'
 import { GitOperationsService } from './git-operations/git-operations-service'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
+import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { GitService } from './core/git-service'
 
 
@@ -124,6 +128,7 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
   findByPath: path => repositoryCatalog?.findByPath(path) ?? null
 })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
+const localAgentChannel = new LocalChannelHost([new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)], app.getPath('userData'))
 const runtimeRestart = new RuntimeRestartController(
   runtimeIdentityProvider,
   new EnvironmentRestartSupervisorClient(),
@@ -317,6 +322,7 @@ app.whenReady().then(async () => {
   academyService.initializeGitSync(academyGitSyncService)
   registerAcademyHandlers(academyService)
   registerContinuumHandlers(continuumSession)
+  try { await localAgentChannel.start() } catch { console.error('[Local Agent Channel] Unavailable') }
 
   void (async () => {
     if (academyService.store.list().length === 0) {
@@ -433,6 +439,11 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
+    const repositoryFileIngress = new RepositoryFileIngress(project.path, { validateDestination: relative => repositoryFileEditing.assertCreationAllowed(relative) })
+    const repositoryFileEditing = new RepositoryFileEditing(project.path, {
+      ingress: repositoryFileIngress,
+      isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision
+    })
     void mcpLifecycle.activateContext({
       projectId: project.id,
       repoRoot: project.path,
@@ -441,7 +452,8 @@ app.whenReady().then(async () => {
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
-      repositoryFileIngress: new RepositoryFileIngress(project.path),
+      repositoryFileIngress,
+      repositoryFileEditing,
       runtimeRestart
     })
   })
@@ -562,6 +574,7 @@ registerApplicationShutdown(app, async () => {
     console.error('[Main] Erro ao fechar Validation Ledger:', error)
   }
   try {
+    localAgentChannel.dispose()
     continuumSession.dispose()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Continuum Session:', error)

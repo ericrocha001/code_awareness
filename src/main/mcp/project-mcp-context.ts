@@ -5,6 +5,7 @@ import type { RuntimeRestartController } from '../runtime-restart/runtime-restar
 import type { ValidationExecution } from '../validation-execution/validation-execution'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
+import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 
 export interface McpProjectContext {
   projectId: string
@@ -17,4 +18,5 @@ export interface McpProjectContext {
   runtimeRestart?: RuntimeRestartController
   gitOperations?: GitOperationsService
   repositoryFileIngress?: RepositoryFileIngress
+  repositoryFileEditing?: RepositoryFileEditing
 }

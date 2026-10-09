@@ -532,22 +532,46 @@ export class AcademyStore {
   }
 
   createConflict(skillId: string, origin: AcademyVersionOrigin, baseVersion: number | null, pkg: AcademyPackage | null, divergentHash: string, projectId: string | null, projectionPath: string | null): AcademyConflict {
-    const id = randomUUID()
-    const current = this.skillRow(skillId)
-    this.db.prepare('INSERT INTO academy_conflicts VALUES(?,?,?,?,?,?,?,?,?,\'OPEN\',?,NULL)').run(id, skillId, origin, baseVersion, current.current_version, pkg ? JSON.stringify(normalizeAcademyPackage(pkg)) : null, divergentHash, projectId, projectionPath, new Date().toISOString())
-    return this.getConflict(id)
+    return this.db.transaction(() => {
+      const existing = this.db.prepare("SELECT id FROM academy_conflicts WHERE status='OPEN' AND skill_id=? AND origin=? AND project_id IS ? AND projection_path IS ? AND divergent_hash=? ORDER BY rowid LIMIT 1").get(skillId, origin, projectId, projectionPath, divergentHash) as Row | undefined
+      if (existing) return this.getConflict(existing.id)
+      const id = randomUUID()
+      const current = this.skillRow(skillId)
+      this.db.prepare('INSERT INTO academy_conflicts VALUES(?,?,?,?,?,?,?,?,?,\'OPEN\',?,NULL)').run(id, skillId, origin, baseVersion, current.current_version, pkg ? JSON.stringify(normalizeAcademyPackage(pkg)) : null, divergentHash, projectId, projectionPath, new Date().toISOString())
+      return this.getConflict(id)
+    }).immediate()
   }
 
   listConflicts(): AcademyConflict[] {
-    return (this.db.prepare(`SELECT c.*, s.name skill_name FROM academy_conflicts c JOIN academy_skills s ON s.id=c.skill_id WHERE c.status='OPEN' ORDER BY c.created_at DESC`).all() as Row[]).map(conflictFromRow)
+    return this.conflictRows(true).map(conflictFromRow)
+  }
+
+  conflictSummaries(): import('../../shared/types/academy-types').AcademyConflictSummary[] {
+    return this.conflictRows(false).map((row) => {
+      const { divergentPackage: _package, ...conflict } = conflictFromRow(row)
+      const version = this.db.prepare('SELECT version FROM academy_versions WHERE skill_id=? AND package_hash=? ORDER BY version DESC LIMIT 1').get(row.skill_id, row.divergent_hash) as Row | undefined
+      const historicalVersion = version?.version ?? null
+      return { ...conflict, hasDivergentPackage: Boolean(row.has_package), historicalVersion, occurrenceCount: row.occurrences,
+        cause: row.divergent_hash === 'DELETED' || row.divergent_hash.includes('SKILL.md not found') || row.divergent_hash.startsWith('INVALID:SKILL_MD_MISSING') ? 'MISSING' : row.divergent_hash.startsWith('INVALID:') ? 'INVALID' : historicalVersion !== null ? 'HISTORICAL' : 'DIVERGENT' }
+    })
+  }
+
+  private conflictRows(includePackages: boolean): Row[] {
+    return this.db.prepare(`SELECT c.id,c.skill_id,c.origin,c.base_version,s.current_version,c.divergent_hash,c.project_id,c.projection_path,c.status,c.created_at,c.resolved_at,s.name skill_name,
+      ${includePackages ? 'c.divergent_package_json' : 'NULL divergent_package_json'}, c.divergent_package_json IS NOT NULL has_package,
+      (SELECT count(*) FROM academy_conflicts x WHERE x.status='OPEN' AND x.skill_id=c.skill_id AND x.origin=c.origin AND x.project_id IS c.project_id AND x.projection_path IS c.projection_path AND x.divergent_hash=c.divergent_hash) occurrences
+      FROM academy_conflicts c JOIN academy_skills s ON s.id=c.skill_id WHERE c.status='OPEN' AND NOT EXISTS
+      (SELECT 1 FROM academy_conflicts x WHERE x.status='OPEN' AND x.rowid<c.rowid AND x.skill_id=c.skill_id AND x.origin=c.origin AND x.project_id IS c.project_id AND x.projection_path IS c.projection_path AND x.divergent_hash=c.divergent_hash)
+      ORDER BY c.created_at DESC`).all() as Row[]
   }
 
   resolveConflict(id: string): void {
-    const result = this.db.prepare("UPDATE academy_conflicts SET status='RESOLVED', resolved_at=? WHERE id=? AND status='OPEN'").run(new Date().toISOString(), id)
+    const conflict = this.getConflict(id)
+    const result = this.db.prepare("UPDATE academy_conflicts SET status='RESOLVED', resolved_at=? WHERE status='OPEN' AND skill_id=? AND origin=? AND project_id IS ? AND projection_path IS ? AND divergent_hash=?").run(new Date().toISOString(), conflict.skillId, conflict.origin, conflict.projectId, conflict.projectionPath, conflict.divergentHash)
     if (!result.changes) throw new AcademyError('CONFLICT_NOT_FOUND')
   }
 
-  private getConflict(id: string): AcademyConflict {
+  getConflict(id: string): AcademyConflict {
     const row = this.db.prepare('SELECT c.*, s.name skill_name FROM academy_conflicts c JOIN academy_skills s ON s.id=c.skill_id WHERE c.id=?').get(id) as Row | undefined
     if (!row) throw new AcademyError('CONFLICT_NOT_FOUND')
     return conflictFromRow(row)

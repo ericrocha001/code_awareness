@@ -50,6 +50,9 @@ describe('Academy distribution domain', () => {
       expect(states.find((state) => state.target === 'FILESYSTEM_NATIVE')?.status).toBe('DRIFTED')
       expect(states.find((state) => state.target === 'CLAUDE_CODE')).toMatchObject({ status: 'DRIFTED', errorCode: 'FILESYSTEM_NOT_CURRENT' })
       await service.reconcileAll()
+      expect(service.distribution.states(skill.id).some((state) => state.status === 'DRIFTED')).toBe(true)
+      const review = await service.reviewConflict(service.store.listConflicts()[0].id)
+      await service.resolveConflict(review.conflict.id, 'CANONICAL', undefined, { token: review.token, confirmed: true })
       expect(service.distribution.states(skill.id).every((state) => state.status === 'CURRENT')).toBe(true)
     } finally { service.close() }
   })

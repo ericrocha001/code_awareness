@@ -20,6 +20,8 @@ describe('Academy multi-agent acceptance', () => {
       const created = await service.create({ package: { skillMd: md('shared', '# UI v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
       writeFileSync(join(repoA, '.skills/shared/SKILL.md'), md('shared', '# filesystem v2'), 'utf8')
       await service.watcher.ingest(a.id, 'shared')
+      const firstEdit = await service.reviewConflict(service.store.listConflicts()[0].id)
+      await service.resolveConflict(firstEdit.conflict.id, 'DIVERGENT', undefined, { token: firstEdit.token, confirmed: true })
       expect(readFileSync(join(repoB, '.skills/shared/SKILL.md'), 'utf8')).toContain('# filesystem v2')
 
       const mcp = await executeAcademyTool(service, 'update_academy_skill', { skillId: created.id, expectedVersion: 2, package: { skillMd: md('shared', '# MCP v3'), artifacts: { 'guide.md': 'MCP artifact' } } })
@@ -33,7 +35,8 @@ describe('Academy multi-agent acceptance', () => {
       const conflict = service.store.listConflicts()[0]
       expect(conflict.baseVersion).toBe(3)
       expect(service.get(created.id).currentVersion).toBe(4)
-      await service.resolveConflict(conflict.id, 'DIVERGENT')
+      const review = await service.reviewConflict(conflict.id)
+      await service.resolveConflict(conflict.id, 'DIVERGENT', undefined, { token: review.token, confirmed: true })
       expect(service.get(created.id).currentVersion).toBe(5)
 
       const importedDirectory = join(repoA, '.skills/imported')

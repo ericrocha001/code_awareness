@@ -36,7 +36,10 @@ declare global {
       restoreAcademySkill: (id: string, expectedVersion: number) => Promise<AcademySkillDetail>
       setAcademyDestinationEnabled: (id: string, enabled: boolean) => Promise<unknown>
       importAcademyDestination: (id: string) => Promise<AcademyImportItem[]>
-      resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage) => Promise<AcademySkillDetail>
+      reviewAcademyConflict: (id: string, reconciledPackage?: AcademyPackage) => Promise<import('../../shared/types/academy-types').AcademyConflictReview>
+      previewAcademyConflictBatch: () => Promise<import('../../shared/types/academy-types').AcademyConflictBatch>
+      resolveAcademyConflictBatch: (token: string, confirmed: boolean) => Promise<{ resolved: number; remaining: number }>
+      resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage, approval?: { token: string; confirmed: boolean }) => Promise<AcademySkillDetail>
       getAcademyDistributionHealth: () => Promise<AcademyDistributionHealth>
       listAcademyDistributionStates: (skillId?: string) => Promise<AcademyDistributionState[]>
       reconcileAcademyDistribution: (destinationId?: string) => Promise<{ health: AcademyDistributionHealth; states: AcademyDistributionState[] }>

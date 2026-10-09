@@ -45,6 +45,8 @@ import { ACADEMY_MCP_TOOLS, executeAcademyTool } from '../academy/academy-mcp'
 import type { AcademyService } from '../academy/academy-service'
 import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
 import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../repository-file-ingress/repository-file-ingress-mcp'
+import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
+import { REPOSITORY_FILE_EDITING_TOOLS, executeRepositoryFileEditing } from '../repository-file-ingress/repository-file-editing-mcp'
 
 function stableDescriptor(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableDescriptor)
@@ -74,6 +76,7 @@ export class ChannelMcpAdapter {
   private readonly gitOperations: GitOperationsService | undefined
   private readonly academy: AcademyService | undefined
   private readonly repositoryFileIngress?: RepositoryFileIngress
+  private readonly repositoryFileEditing?: RepositoryFileEditing
 
   constructor(
     context: McpProjectContext,
@@ -120,6 +123,7 @@ export class ChannelMcpAdapter {
       this.runtimeRestart = context.runtimeRestart
       this.gitOperations = context.gitOperations
       this.repositoryFileIngress = context.repositoryFileIngress
+      this.repositoryFileEditing = context.repositoryFileEditing
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
     } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
@@ -175,6 +179,7 @@ export class ChannelMcpAdapter {
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
     if (this.repositoryFileIngress) tools.push(IMPORT_REPOSITORY_FILE_TOOL)
+    if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     return tools
   }
@@ -216,6 +221,7 @@ export class ChannelMcpAdapter {
   }
 
   private capabilityForTool(name: string): string | undefined {
+    if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
     if (name === IMPORT_REPOSITORY_FILE_TOOL.name) return 'Repository File Ingress'
     if (CODE_NAVIGATION_MCP_TOOLS.some(tool => tool.name === name)) return 'Code Navigation'
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name)) return 'Git Operations'
@@ -229,6 +235,10 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) {
+      return this.repositoryFileEditing ? executeRepositoryFileEditing(this.repositoryFileEditing, name, args)
+        : { content: [{ type: 'text', text: 'REPOSITORY_FILE_EDITING_UNAVAILABLE' }], isError: true }
+    }
     if (name === IMPORT_REPOSITORY_FILE_TOOL.name) {
       return this.repositoryFileIngress ? executeImportRepositoryFile(this.repositoryFileIngress, args)
         : { content: [{ type: 'text', text: 'REPOSITORY_FILE_INGRESS_UNAVAILABLE' }], isError: true }

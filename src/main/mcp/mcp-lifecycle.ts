@@ -95,6 +95,7 @@ export class McpLifecycle {
       this.requested.runtimeRestart === context.runtimeRestart &&
       this.requested.gitOperations === context.gitOperations &&
       this.requested.repositoryFileIngress === context.repositoryFileIngress &&
+      this.requested.repositoryFileEditing === context.repositoryFileEditing &&
       this.state.status !== 'ERROR' &&
       this.state.status !== 'STOPPING'
     ) {

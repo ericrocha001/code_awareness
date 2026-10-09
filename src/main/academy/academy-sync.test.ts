@@ -77,13 +77,15 @@ describe('Academy projection, import and ingestion', () => {
     service.close()
   })
 
-  it('ingests stabilized filesystem edits and preserves stale concurrent divergence', async () => {
+  it('requires adoption of stabilized filesystem edits and preserves stale concurrent divergence', async () => {
     const data = root(); const repo = root()
     const service = new AcademyService(join(data, 'academy.db'))
     const destination = await service.registerDestination(repo, 'repo')
     const skill = await service.create({ package: { skillMd: text('editable', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
     writeFileSync(join(repo, '.skills/editable/SKILL.md'), text('editable', '# filesystem v2'), 'utf8')
     await service.watcher.ingest(destination.id, 'editable')
+    const edit = await service.reviewConflict(service.store.listConflicts()[0].id)
+    await service.resolveConflict(edit.conflict.id, 'DIVERGENT', undefined, { token: edit.token, confirmed: true })
     expect(service.get(skill.id).currentVersion).toBe(2)
     expect(service.get(skill.id).current.origin).toBe('FILESYSTEM')
     service.store.update({ skillId: skill.id, expectedVersion: 2, package: { skillMd: text('editable', '# canonical v3'), artifacts: {} }, origin: 'MCP' })
@@ -104,6 +106,8 @@ describe('Academy projection, import and ingestion', () => {
     mkdirSync(join(repo, '.skills/artifacts/references'), { recursive: true })
     writeFileSync(join(repo, '.skills/artifacts/references/new.md'), 'new β', 'utf8')
     await service.watcher.ingest(destination.id, 'artifacts')
+    const edit = await service.reviewConflict(service.store.listConflicts()[0].id)
+    await service.resolveConflict(edit.conflict.id, 'DIVERGENT', undefined, { token: edit.token, confirmed: true })
     const changed = service.get(skill.id)
     expect(changed.currentVersion).toBe(2)
     expect(changed.current.package.artifacts).toEqual({ 'references/new.md': 'new β' })
@@ -144,7 +148,7 @@ describe('Academy projection, import and ingestion', () => {
     service.close()
   })
 
-  it('coalesces a burst of watcher events into one filesystem version', async () => {
+  it('coalesces a burst of watcher events into one recoverable divergence', async () => {
     const data = root(); const repo = root()
     const service = new AcademyService(join(data, 'academy.db'))
     await service.registerDestination(repo, 'repo')
@@ -154,8 +158,9 @@ describe('Academy projection, import and ingestion', () => {
     writeFileSync(path, text('burst', '# edit 2'), 'utf8')
     writeFileSync(path, text('burst', '# final'), 'utf8')
     await new Promise((resolve) => setTimeout(resolve, 800))
-    expect(service.get(skill.id).currentVersion).toBe(2)
-    expect(service.get(skill.id).current.package.skillMd).toContain('# final')
+    expect(service.get(skill.id).currentVersion).toBe(1)
+    expect(service.store.listConflicts()).toHaveLength(1)
+    expect(service.store.listConflicts()[0].divergentPackage?.skillMd).toContain('# final')
     service.close()
   })
 })
