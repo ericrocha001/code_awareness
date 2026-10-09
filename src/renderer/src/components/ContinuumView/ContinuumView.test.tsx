@@ -10,8 +10,17 @@ const project = { id: 'workspace-id', path: '/A', name: 'Repository A' }
 let receive: (change: ContinuumChange) => void
 let facets: ContinuumFacet[]
 let body: string
+const intersections = new Map<Element, (entries: { isIntersecting: boolean }[]) => void>()
 const unsubscribe = vi.fn()
 beforeEach(() => {
+  intersections.clear()
+  vi.stubGlobal('IntersectionObserver', class {
+    private targets: Element[] = []
+    constructor(private callback: (entries: { isIntersecting: boolean }[]) => void) {}
+    observe(target: Element) { this.targets.push(target); intersections.set(target, this.callback) }
+    disconnect() { this.targets.forEach(target => intersections.delete(target)) }
+  })
+  HTMLElement.prototype.scrollIntoView = vi.fn()
   facets = [{ key: 'futureUnknownKey', values: [{ value: false, count: 2 }, { value: 'other', count: 1 }] }]
   body = '# Freeform content\n\nAny kind works.'
   unsubscribe.mockClear()
@@ -22,7 +31,8 @@ beforeEach(() => {
     onContinuumChanged: vi.fn(callback => { receive = callback; return unsubscribe }),
     publishContinuumArtifact: vi.fn(async () => ({ success: true, artifactId: 'new', revision: 1, updatedAt: 'now' })),
     publishContinuumVisual: vi.fn(async () => ({ success: true, artifactId: 'visual', revision: 1, updatedAt: 'now' })),
-    getContinuumVisual: vi.fn(async (repositoryId, artifactId) => ({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1, 2]) }))
+    getContinuumVisual: vi.fn(async (repositoryId, artifactId) => ({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1, 2]) })),
+    getContinuumVisualThumbnail: vi.fn(async (repositoryId, artifactId) => ({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1, 2]) }))
   } as unknown as Window['codeAwareness']
 })
 
@@ -134,7 +144,85 @@ it('refuses a file read finishing after repository switch', async () => {
   expect(screen.getByRole('alert').textContent).toContain('repositório ativo mudou')
   expect(window.codeAwareness.publishContinuumArtifact).not.toHaveBeenCalled()
 })
-afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks() })
+afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+it('requests only visible visual projections with two concurrent reads and skips rows leaving the viewport', async () => {
+  const create = vi.fn(() => 'blob:thumbnail'), revoke = vi.fn()
+  vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = revoke })
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => ({ repositoryId: request.repositoryId, nextCursor: 'next', artifacts: Array.from({ length: 20 }, (_, index) => ({ artifactId: `visual-${index}`, name: `Visual ${index}`, kind: 'VISUAL_REFERENCE', updatedAt: '2026-10-09', relationCount: 0 })) }))
+  const finishes: (() => void)[] = []
+  vi.mocked(window.codeAwareness.getContinuumVisualThumbnail).mockImplementation((repositoryId, artifactId) => new Promise(resolve => finishes.push(() => resolve({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1]) }))))
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('Visual 19')
+  expect(window.codeAwareness.getContinuumVisualThumbnail).not.toHaveBeenCalled()
+  const targets = [...intersections.keys()]
+  act(() => targets.slice(0, 5).forEach(target => intersections.get(target)!([{ isIntersecting: true }])))
+  await waitFor(() => expect(finishes).toHaveLength(2))
+  act(() => intersections.get(targets[2])!([{ isIntersecting: false }]))
+  await act(async () => finishes[0]())
+  await waitFor(() => expect(finishes).toHaveLength(3))
+  expect(window.codeAwareness.getContinuumVisualThumbnail).toHaveBeenNthCalledWith(3, 'catalog-A', 'visual-3')
+  expect(window.codeAwareness.getContinuumVisual).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: /Visual 0/ }))
+  expect(window.codeAwareness.getContinuumArtifact).toHaveBeenCalledWith('catalog-A', 'visual-0')
+  view.unmount()
+  await act(async () => finishes.slice(1).forEach(finish => finish()))
+  expect(create).toHaveBeenCalledTimes(1)
+  expect(revoke).toHaveBeenCalledWith('blob:thumbnail')
+  expect(window.codeAwareness.getContinuumVisualThumbnail).toHaveBeenCalledTimes(3)
+})
+
+it('discards late projections on repository switch and leaves selection usable after a thumbnail error', async () => {
+  const create = vi.fn(() => 'blob:thumbnail'), revoke = vi.fn()
+  vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = revoke })
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => ({ repositoryId: request.repositoryId, artifacts: request.repositoryId === 'catalog-A' ? [{ artifactId: 'one', name: 'Visual', kind: 'VISUAL_REFERENCE', updatedAt: '2026-10-09', relationCount: 0 }] : [] }))
+  let finish!: () => void
+  vi.mocked(window.codeAwareness.getContinuumVisualThumbnail).mockImplementationOnce((repositoryId, artifactId) => new Promise(resolve => { finish = () => resolve({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1]) }) }))
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('Visual')
+  act(() => [...intersections.values()][0]([{ isIntersecting: true }]))
+  await waitFor(() => expect(window.codeAwareness.getContinuumVisualThumbnail).toHaveBeenCalledTimes(1))
+  view.rerender(<ContinuumView activeProject={{ ...project, path: '/B' }} />)
+  await act(async () => finish())
+  expect(create).not.toHaveBeenCalled()
+  vi.mocked(window.codeAwareness.getContinuumVisualThumbnail).mockRejectedValueOnce(new Error('corrupt'))
+  const original = vi.mocked(window.codeAwareness.getContinuumArtifact).getMockImplementation()!
+  vi.mocked(window.codeAwareness.getContinuumArtifact).mockImplementation(async (repositoryId, artifactId) => {
+    const result = await original(repositoryId, artifactId)
+    return { ...result, artifact: { ...result.artifact!, metadata: { ...result.artifact!.metadata, kind: 'VISUAL_REFERENCE' } } }
+  })
+  view.rerender(<ContinuumView activeProject={project} />)
+  await screen.findByText('Visual')
+  act(() => [...intersections.values()][0]([{ isIntersecting: true }]))
+  fireEvent.click(screen.getByRole('button', { name: /Visual Referência visual/ }))
+  await screen.findByRole('heading', { name: 'Freeform content' })
+  expect(screen.queryByAltText('Miniatura da referência visual')).toBeNull()
+  await screen.findByAltText('Referência visual canônica')
+  expect(window.codeAwareness.getContinuumVisual).toHaveBeenCalledWith('catalog-A', 'one')
+})
+
+it('refreshes published visuals without an external event, preserves hiding filters and reveals only on explicit action', async () => {
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => ({ repositoryId: request.repositoryId, artifacts: request.query ? [] : [{ artifactId: 'visual', name: 'New visual', kind: 'VISUAL_REFERENCE', updatedAt: '2026-10-09', relationCount: 0 }] }))
+  render(<ContinuumView activeProject={project} />)
+  await screen.findByText('New visual')
+  fireEvent.change(screen.getByRole('textbox', { name: 'Buscar no Continuum' }), { target: { value: 'hidden' } })
+  await screen.findByText('Nenhum artifact encontrado')
+  const before = vi.mocked(window.codeAwareness.listContinuumArtifacts).mock.calls.length
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar WebP' }))
+  fireEvent.change(screen.getByLabelText('Arquivo WebP'), { target: { files: [{ name: 'reference.webp', size: 1, arrayBuffer: async () => new Uint8Array([1]).buffer }] } })
+  fireEvent.change(screen.getByLabelText('Descrição'), { target: { value: 'Description' } })
+  fireEvent.change(screen.getByLabelText('Contexto'), { target: { value: 'Context' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar referência' }))
+  const reveal = await screen.findByRole('button', { name: 'Exibir na timeline' })
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(before + 1)
+  expect(screen.getByRole('textbox', { name: 'Buscar no Continuum' })).toHaveProperty('value', 'hidden')
+  expect(window.codeAwareness.getContinuumArtifact).toHaveBeenCalledWith('catalog-A', 'visual')
+  fireEvent.click(reveal)
+  await screen.findByText('New visual')
+  expect(screen.getByRole('textbox', { name: 'Buscar no Continuum' })).toHaveProperty('value', '')
+  expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalled()
+  expect(window.codeAwareness.getContinuumVisualThumbnail).not.toHaveBeenCalled()
+})
 
 it('resizes adjacent panes, persists on drag end and restores separate widths for each repository', async () => {
   const { container, rerender, unmount } = render(<ContinuumView activeProject={project} />)

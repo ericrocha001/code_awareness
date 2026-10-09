@@ -14,6 +14,25 @@ async function image(lossless = true) {
   return { pixels, data: await sharp(pixels, { raw: { width: 2, height: 2, channels: 4 } }).webp({ lossless }).toBuffer() }
 }
 describe('Visual Continuum persistence and validation', () => {
+  it('projects bounded ephemeral thumbnails without changing canonical bytes and rejects stale contexts or excess work', async () => {
+    const f = setup()
+    const data = await sharp({ create: { width: 1024, height: 768, channels: 4, background: { r: 15, g: 80, b: 140, alpha: 0.5 } } }).webp({ lossless: true }).toBuffer()
+    const receipt = await f.service.publishVisual(visual(), data)
+    const first = f.service.getVisualThumbnail(receipt.artifactId)
+    const second = f.service.getVisualThumbnail(receipt.artifactId)
+    await expect(f.service.getVisualThumbnail(receipt.artifactId)).rejects.toThrow(/VISUAL_THUMBNAIL_BUSY/)
+    const [thumbnail] = await Promise.all([first, second])
+    const info = await sharp(thumbnail).metadata()
+    expect(info).toMatchObject({ format: 'webp', width: 128, height: 96, hasAlpha: true })
+    expect(thumbnail.length).toBeLessThanOrEqual(128 * 1024)
+    expect(f.service.getVisual(receipt.artifactId).data).toEqual(data)
+    let active = true
+    const guarded = new ContinuumService(f.store, undefined, () => active)
+    const pending = guarded.getVisualThumbnail(receipt.artifactId); active = false
+    await expect(pending).rejects.toThrow(/REPOSITORY_CONTEXT_CHANGED/)
+    await expect(f.service.getVisualThumbnail('missing')).rejects.toThrow(/ARTIFACT_NOT_FOUND/)
+    withFixtureDatabase(f.path, db => expect(db.prepare('SELECT count(*) AS n FROM visual_blobs').get()).toEqual({ n: 1 }))
+  })
   it('roundtrips bytes/pixels/alpha across restart, deduplicates and preserves textual revisions', async () => {
     const f = setup(), { data, pixels } = await image()
     const receipt = await f.service.publishVisual(visual(), data)

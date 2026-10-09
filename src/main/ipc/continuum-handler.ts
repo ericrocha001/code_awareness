@@ -43,6 +43,14 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     const visual = service.getVisual(artifactId)
     return { repositoryId, artifactId, mimeType: visual.media.mimeType, data: new Uint8Array(visual.data) }
   })
+  ipcMain.handle('continuum:get-visual-thumbnail', async (_event, repositoryId: string, artifactId: string) => {
+    const service = active(repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    if (typeof artifactId !== 'string' || !artifactId.trim()) throw new Error('INVALID_ARGUMENT')
+    const data = await service.getVisualThumbnail(artifactId)
+    if (active(repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+    return { repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array(data) }
+  })
   ipcMain.handle('continuum:publish', (_event, request: ContinuumPublishRequest): ContinuumPublishReceipt => {
     if (!request || typeof request !== 'object' || typeof request.rawMarkdown !== 'string') throw new Error('INVALID_ARGUMENT: conteúdo Markdown obrigatório')
     const service = active(request.repositoryId)
