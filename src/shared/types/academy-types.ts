@@ -1,6 +1,6 @@
 export type AcademySkillStatus = 'ACTIVE' | 'ARCHIVED'
 export type AcademySkillScope = 'GLOBAL' | 'PROJECT'
-export type AcademyVersionOrigin = 'IMPORT' | 'FILESYSTEM' | 'UI' | 'MCP'
+export type AcademyVersionOrigin = 'IMPORT' | 'FILESYSTEM' | 'UI' | 'MCP' | 'LOCAL_CLI'
 export type AcademyConflictStatus = 'OPEN' | 'RESOLVED'
 export type AcademyDistributionTarget = 'FILESYSTEM_NATIVE' | 'CLAUDE_CODE'
 export type AcademyDistributionStatus = 'CURRENT' | 'PENDING' | 'DRIFTED' | 'MISSING' | 'ERROR'
@@ -75,11 +75,49 @@ export interface AcademyImportItem {
   skillId?: string
 }
 
+export type AcademyConflictSummary = Omit<AcademyConflict, 'divergentPackage'> & {
+  hasDivergentPackage: boolean
+  historicalVersion: number | null
+  occurrenceCount: number
+  cause: 'MISSING' | 'INVALID' | 'HISTORICAL' | 'DIVERGENT'
+}
+
+export interface AcademyConflictReview {
+  conflict: AcademyConflict
+  candidateHash: string | null
+  historicalVersion: number | null
+  cause: AcademyConflictSummary['cause']
+  canonicalHash: string
+  currentVersion: number
+  diskHash: string
+  diff: string
+  token: string
+  safeCanonical: boolean
+  reason: string
+}
+
+export interface AcademyConflictBatch {
+  token: string
+  entries: Array<{ id: string; skillName: string; destination: string | null; reason: string; occurrences: number }>
+  excluded: number
+}
+
 export interface AcademyCreateInput {
   package: AcademyPackage
   scope: AcademySkillScope
   projectIds?: string[]
   origin: AcademyVersionOrigin
+}
+
+export interface AcademyMutationReceipt {
+  state: 'PERSISTED'
+  skillId: string
+  name: string
+  version: number
+  packageHash: string
+  scope: AcademySkillScope
+  projectIds: string[]
+  distribution: { status: 'CONVERGED' | 'DEGRADED' | 'NOT_APPLICABLE' | 'ERROR'; errorCode?: string }
 }
 
 export interface AcademyUpdateInput {
@@ -94,7 +132,7 @@ export interface AcademyUpdateInput {
 export interface AcademySnapshot {
   skills: AcademySkillSummary[]
   destinations: AcademyDestination[]
-  conflicts: AcademyConflict[]
+  conflicts: AcademyConflictSummary[]
 }
 
 export interface AcademyDistributionState {

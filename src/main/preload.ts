@@ -3,8 +3,8 @@
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
-import type { RepoDiscoveryRequest, RepoDiscoveryResult } from '../shared/types/repo-discovery-types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
+import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
@@ -33,7 +33,10 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   restoreAcademySkill: (id: string, expectedVersion: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:restore', id, expectedVersion),
   setAcademyDestinationEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('academy:destination-enabled', id, enabled),
   importAcademyDestination: (id: string): Promise<AcademyImportItem[]> => ipcRenderer.invoke('academy:import-destination', id),
-  resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:resolve-conflict', id, resolution, reconciledPackage),
+  reviewAcademyConflict: (id: string, reconciledPackage?: AcademyPackage) => ipcRenderer.invoke('academy:conflict-review', id, reconciledPackage),
+  previewAcademyConflictBatch: () => ipcRenderer.invoke('academy:conflict-batch-preview'),
+  resolveAcademyConflictBatch: (token: string, confirmed: boolean) => ipcRenderer.invoke('academy:conflict-batch-resolve', token, confirmed),
+  resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage, approval?: { token: string; confirmed: boolean }): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:resolve-conflict', id, resolution, reconciledPackage, approval),
   getAcademyDistributionHealth: (): Promise<AcademyDistributionHealth> => ipcRenderer.invoke('academy:distribution-health'),
   listAcademyDistributionStates: (skillId?: string): Promise<AcademyDistributionState[]> => ipcRenderer.invoke('academy:distribution-states', skillId),
   reconcileAcademyDistribution: (destinationId?: string): Promise<{ health: AcademyDistributionHealth; states: AcademyDistributionState[] }> => ipcRenderer.invoke('academy:distribution-reconcile', destinationId),
@@ -448,55 +451,5 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   },
 
   // ─── Code Dash ─────────────────────────────────────────────────────────────
-  dashParseAndResolve: (
-    input: string,
-    repoPath: string
-  ): Promise<{
-    success: boolean
-    data?: unknown
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('dash:parse-and-resolve', input, repoPath)
-  },
-  dashDiscover: (
-    request: RepoDiscoveryRequest,
-    repoPath: string
-  ): Promise<{ success: boolean; data?: RepoDiscoveryResult; error?: string }> => {
-    return ipcRenderer.invoke('dash:discover', request, repoPath)
-  },
-  dashGenerate: (
-    input: string,
-    repoPath: string,
-    settings?: DashSettings
-  ): Promise<{
-    success: boolean
-    data?: unknown
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('dash:generate', input, repoPath, settings)
-  },
-  dashOneClickXml: (
-    repoPath: string,
-    options?: {
-      removeComments?: boolean
-      removeEmptyLines?: boolean
-      truncateBase64?: boolean
-      persistedSettings?: DashSettings
-    }
-  ): Promise<{
-    success: boolean
-    xml?: string
-    tokenCount?: number
-    error?: string
-    timings?: {
-      listFilesMs: number
-      generateMs: number
-      totalMs: number
-    }
-    metadata?: {
-      fileCount: number
-    }
-  }> => {
-    return ipcRenderer.invoke('dash:one-click-xml', repoPath, options, options?.persistedSettings)
-  }
+  dashExecute: (input: string, repoPath: string): Promise<DashExecutionResult> => ipcRenderer.invoke('dash:execute', input, repoPath)
 })

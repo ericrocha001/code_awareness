@@ -1,11 +1,74 @@
-import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile, rename } from 'node:fs/promises'
+import { createHash, randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { AcademyPackage } from '../../shared/types/academy-types'
-import { AcademyError, normalizeAcademyPackage } from './academy-package'
+import { AcademyError, hashAcademyPackage, normalizeAcademyPackage } from './academy-package'
 
 const decoder = new TextDecoder('utf-8', { fatal: true })
 
+export interface AcademyDiskObservation { hash: string; package: AcademyPackage | null }
+
+export async function observeSkillDirectory(directory: string): Promise<AcademyDiskObservation> {
+  try {
+    const pkg = await readSkillDirectory(directory)
+    return { hash: hashAcademyPackage(pkg), package: pkg }
+  } catch (error: any) {
+    try { await lstat(directory) } catch (missing: any) {
+      if (missing.code === 'ENOENT') return { hash: 'DELETED', package: null }
+      throw missing
+    }
+    const hash = createHash('sha256')
+    const visit = async (path: string): Promise<void> => {
+      for (const entry of (await readdir(path, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
+        const absolute = join(path, entry.name)
+        hash.update(JSON.stringify(relative(directory, absolute)))
+        if (entry.isSymbolicLink()) hash.update('SYMLINK')
+        else if (entry.isDirectory()) await visit(absolute)
+        else if (entry.isFile()) hash.update(await readFile(absolute))
+      }
+    }
+    if ((await lstat(directory)).isSymbolicLink()) hash.update('SYMLINK_ROOT')
+    else await visit(directory)
+    return { hash: `INVALID:${error.code ?? 'PACKAGE'}:${hash.digest('hex')}`, package: null }
+  }
+}
+
+export async function observeStableSkillDirectory(directory: string, delayMs = 250): Promise<AcademyDiskObservation | null> {
+  let previous: AcademyDiskObservation | null = null
+  for (let attempt = 0; attempt < 4; attempt++) {
+    let current: AcademyDiskObservation | null
+    try { current = await observeSkillDirectory(directory) } catch { current = null }
+    if (previous && current?.hash === previous.hash) return current
+    previous = current
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+  }
+  return null
+}
+
+export async function replaceSkillDirectory(directory: string, pkg: AcademyPackage, expectedHash: string): Promise<void> {
+  const staging = join(dirname(directory), `.academy-stage-${randomUUID()}`)
+  const backup = join(dirname(directory), `.academy-backup-${randomUUID()}`)
+  let moved = false
+  try {
+    await writeSkillDirectory(staging, pkg)
+    if ((await observeSkillDirectory(directory)).hash !== expectedHash) throw new AcademyError('PROJECTION_CHANGED')
+    if (expectedHash !== 'DELETED') {
+      await rename(directory, backup)
+      moved = true
+      if ((await observeSkillDirectory(backup)).hash !== expectedHash) throw new AcademyError('PROJECTION_CHANGED')
+    }
+    await rename(staging, directory)
+    if (moved) await rm(backup, { recursive: true, force: true })
+  } catch (error) {
+    if (moved) {
+      try { await rename(backup, directory) } catch { throw new AcademyError('PROJECTION_RECOVERY_REQUIRED', `Preserved original package at ${backup}`) }
+    }
+    throw error
+  } finally { await rm(staging, { recursive: true, force: true }) }
+}
+
 export async function readSkillDirectory(directory: string): Promise<AcademyPackage> {
+  if ((await lstat(directory)).isSymbolicLink()) throw new AcademyError('SYMLINK_NOT_ALLOWED', `Symbolic links are not allowed: ${directory}`)
   const root = await realpath(directory)
   const artifacts: Record<string, string> = {}
   let skillMd: string | null = null

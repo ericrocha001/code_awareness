@@ -5,11 +5,31 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { AcademyService } from './academy-service'
 import { ACADEMY_MCP_TOOLS, executeAcademyTool } from './academy-mcp'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
+import { hashAcademyPackage } from './academy-package'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('Academy MCP administration', () => {
+  it('requires a confirmed review and preserves exact reconciled-content inspection through MCP', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'academy-mcp-review-')); roots.push(root)
+    const service = new AcademyService(join(root, 'academy.db'))
+    const pkg = (body: string) => ({ skillMd: `---\nname: reviewed\ndescription: Reviewed package\n---\n${body}\n`, artifacts: {} })
+    try {
+      const skill = service.store.create({ package: pkg('canonical'), scope: 'GLOBAL', origin: 'UI' })
+      const conflict = service.store.createConflict(skill.id, 'IMPORT', 1, pkg('external'), hashAcademyPackage(pkg('external')), null, null)
+      const listed = await executeAcademyTool(service, 'list_academy_conflicts', {})
+      expect(listed.content[0].text).not.toContain('skillMd')
+      expect((await executeAcademyTool(service, 'resolve_academy_conflict', { conflictId: conflict.id, resolution: 'DIVERGENT' })).isError).toBe(true)
+      const reviewed = await executeAcademyTool(service, 'review_academy_conflict', { conflictId: conflict.id, reconciledPackage: pkg('merged') })
+      const review = JSON.parse(reviewed.content[0].text)
+      expect(review.diff).toContain('+merged')
+      const adopted = await executeAcademyTool(service, 'resolve_academy_conflict', { conflictId: conflict.id, resolution: 'DIVERGENT', reconciledPackage: pkg('merged'), token: review.token, confirmed: true })
+      expect(adopted.isError).toBeUndefined()
+      expect(service.get(skill.id).current.package).toEqual(pkg('merged'))
+      expect(service.history(skill.id)).toHaveLength(2)
+    } finally { service.close() }
+  })
   it('publishes the bounded administration catalog and enforces expectedVersion', async () => {
     const root = mkdtempSync(join(tmpdir(), 'academy-mcp-')); roots.push(root)
     const service = new AcademyService(join(root, 'academy.db'))

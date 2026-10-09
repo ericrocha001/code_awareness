@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import type {
+  AcademyConflictReview,
+  AcademyConflictBatch,
   AcademyDistributionHealth,
   AcademyDistributionState,
   AcademyGitStatusProjection,
@@ -23,6 +25,7 @@ import {
   type AcademyTab
 } from './AcademyPanels'
 import './AcademyView.css'
+import { AcademyConflictInspector } from './AcademyConflicts'
 
 const emptyPackage: AcademyPackage = {
   skillMd: '---\nname: new-skill\ndescription: Describe when this skill should be used.\n---\n\n# New skill\n',
@@ -57,6 +60,9 @@ export const AcademyView: React.FC = () => {
   const [operationsOpen, setOperationsOpen] = useState(false)
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
+  const [conflictReview, setConflictReview] = useState<AcademyConflictReview | null>(null)
+  const [conflictBatch, setConflictBatch] = useState<AcademyConflictBatch | null>(null)
+  const [conflictBusy, setConflictBusy] = useState(false)
 
   const showMessage = (text: string, kind: 'success' | 'error' = 'success') => setMessage({ text, kind })
   const reportError = (error: unknown) => showMessage(error instanceof Error ? error.message : String(error), 'error')
@@ -242,6 +248,38 @@ export const AcademyView: React.FC = () => {
     if (action) await action()
   }
 
+  const requestConflictResolution = (resolution: 'CANONICAL' | 'DIVERGENT') => {
+    if (!conflictReview) return
+    const review = conflictReview
+    setConfirmation({
+      title: resolution === 'CANONICAL' ? 'Manter versão canônica?' : 'Adotar divergência como versão canônica?',
+      description: resolution === 'CANONICAL' ? `Manter v${review.currentVersion} de ${review.conflict.skillName} e sincronizar ${review.conflict.projectionPath ?? 'os destinos aplicáveis'}. O conteúdo local revisado será substituído.` : `O conteúdo divergente inspecionado se tornará uma nova versão canônica de ${review.conflict.skillName} e será distribuído aos destinos aplicáveis.`,
+      confirmLabel: resolution === 'CANONICAL' ? 'Confirmar canônica' : 'Confirmar adoção',
+      destructive: resolution === 'DIVERGENT',
+      action: async () => {
+        setConflictBusy(true)
+        try {
+          const detail = await window.codeAwareness.resolveAcademyConflict(review.conflict.id, resolution, undefined, { token: review.token, confirmed: true })
+          setConflictReview(null)
+          await refresh(resolution === 'DIVERGENT' ? detail.id : undefined)
+        } catch (error) { reportError(error) } finally { setConflictBusy(false) }
+      }
+    })
+  }
+
+  const requestBatchResolution = () => {
+    if (!conflictBatch) return
+    const batch = conflictBatch
+    setConfirmation({ title: 'Confirmar saneamento seguro?', description: `Manter as versões canônicas e resolver ${batch.entries.length} ocorrências certificadas. ${batch.excluded} ocorrências permanecerão para revisão individual.`, confirmLabel: 'Confirmar lote', action: async () => {
+      setConflictBusy(true)
+      try {
+        const result = await window.codeAwareness.resolveAcademyConflictBatch(batch.token, true)
+        showMessage(`${result.resolved} registros resolvidos; ${result.remaining} ocorrências restantes.`)
+        setConflictBatch(null); await refresh()
+      } catch (error) { reportError(error) } finally { setConflictBusy(false) }
+    } })
+  }
+
   return <section className="academy-view">
     <AcademyHeader query={query} status={status} conflictCount={snapshot.conflicts.length} onQueryChange={setQuery} onStatusChange={setStatus} onCreate={createNew} onOpenCatalog={() => setCatalogOpen(true)} onOpenOperations={() => setOperationsOpen(true)} />
     <div className="academy-layout">
@@ -257,10 +295,12 @@ export const AcademyView: React.FC = () => {
         onBindRepository={() => void (async () => { try { setGitStatus(await window.codeAwareness.bindAcademyGitRepository(selectedRepoId)) } catch (error) { reportError(error) } })()}
         onSyncGit={() => void (async () => { try { setGitStatus(await window.codeAwareness.syncAcademyGitNow()); showMessage('Git sincronizado.') } catch (error) { reportError(error) } })()}
         onOpenGit={() => void window.codeAwareness.openAcademyGitRepository()}
-        onResolveConflict={(id, resolution) => void (async () => { try { const detail = await window.codeAwareness.resolveAcademyConflict(id, resolution); await refresh(resolution === 'DIVERGENT' ? detail.id : undefined) } catch (error) { reportError(error) } })()}
+        onReviewConflict={(id) => void (async () => { try { setConflictReview(await window.codeAwareness.reviewAcademyConflict(id)); setConflictBatch(null) } catch (error) { reportError(error) } })()}
+        onPreviewConflictBatch={() => void (async () => { try { setConflictBatch(await window.codeAwareness.previewAcademyConflictBatch()); setConflictReview(null) } catch (error) { reportError(error) } })()}
       />
     </div>
 
+    {(conflictReview || conflictBatch) && <AcademyConflictInspector review={conflictReview} batch={conflictBatch} busy={conflictBusy} onClose={() => { setConflictReview(null); setConflictBatch(null) }} onResolve={requestConflictResolution} onResolveBatch={requestBatchResolution} />}
     {message && <div className={`academy-toast ${message.kind}`} role="status"><span>{message.kind === 'success' ? '✓' : '!'}</span>{message.text}<button aria-label="Fechar mensagem" onClick={() => setMessage(null)}>×</button></div>}
     {artifactDraft && <ArtifactEditor mode={artifactDraft.mode} path={artifactDraft.path} content={artifactDraft.content} onPathChange={(path) => setArtifactDraft({ ...artifactDraft, path })} onContentChange={(content) => setArtifactDraft({ ...artifactDraft, content })} onSave={saveArtifactDraft} onRequestRemove={requestRemoveArtifact} onClose={() => setArtifactDraft(null)} />}
     {destinationsOpen && <DestinationManager destinations={snapshot.destinations} onClose={() => setDestinationsOpen(false)} onToggle={(id, enabled) => void (async () => { try { await window.codeAwareness.setAcademyDestinationEnabled(id, enabled); await refresh(selected?.id) } catch (error) { reportError(error) } })()} onImport={(id) => void (async () => { try { const result = await window.codeAwareness.importAcademyDestination(id); showMessage(`Importação: ${result.filter((item) => item.result === 'IMPORTED').length} importadas, ${result.filter((item) => item.result === 'INVALID').length} inválidas.`); await refresh(selected?.id) } catch (error) { reportError(error) } })()} />}

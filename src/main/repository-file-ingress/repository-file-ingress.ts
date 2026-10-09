@@ -19,7 +19,7 @@ export interface RepositoryFileReceipt {
 export const REPOSITORY_FILE_MAX_BYTES = 32 * 1024 * 1024
 
 export class RepositoryFileIngressError extends Error {
-  constructor(readonly code: 'INVALID_FILE' | 'INVALID_PATH' | 'DESTINATION_CONFLICT' | 'DOWNLOAD_FAILED' | 'FILE_TOO_LARGE' | 'REQUEST_TIMEOUT' | 'FILESYSTEM_FAILED' | 'CLEANUP_FAILED') {
+  constructor(readonly code: 'INVALID_FILE' | 'INVALID_PATH' | 'DESTINATION_CONFLICT' | 'DOWNLOAD_FAILED' | 'FILE_TOO_LARGE' | 'REQUEST_TIMEOUT' | 'FILESYSTEM_FAILED' | 'CLEANUP_FAILED' | 'PROTECTED_PATH' | 'REPOSITORY_CONTEXT_CHANGED') {
     super(code)
     this.name = 'RepositoryFileIngressError'
   }
@@ -33,7 +33,7 @@ function samePath(left: string, right: string): boolean {
   return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 }
 
-function relativeDestination(value: unknown): string {
+export function relativeDestination(value: unknown): string {
   if (typeof value !== 'string' || !value.trim() || path.win32.isAbsolute(value) || path.posix.isAbsolute(value)) throw new RepositoryFileIngressError('INVALID_PATH')
   const segments = value.replace(/\\/g, '/').split('/')
   if (segments.some(segment => segment === '..' || /[\x00-\x1f<>:"|?*]/.test(segment) || /[. ]$/.test(segment) && segment !== '.' || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment))) throw new RepositoryFileIngressError('INVALID_PATH')
@@ -60,7 +60,7 @@ export class RepositoryFileIngress {
   private readonly fetchFile: typeof fetch
   private readonly timeoutMs: number
 
-  constructor(private readonly repositoryRoot: string, options: { fetch?: typeof fetch; timeoutMs?: number } = {}) {
+  constructor(private readonly repositoryRoot: string, private readonly options: { fetch?: typeof fetch; timeoutMs?: number; validateDestination?: (relative: string) => void } = {}) {
     this.root = realpathSync(repositoryRoot)
     this.fetchFile = options.fetch ?? fetch
     this.timeoutMs = options.timeoutMs ?? 15_000
@@ -89,6 +89,7 @@ export class RepositoryFileIngress {
 
   async importFile(file: RepositoryFileDescriptor, destinationPath: string): Promise<RepositoryFileReceipt> {
     const relative = relativeDestination(destinationPath)
+    this.options.validateDestination?.(relative)
     const url = fileUrl(file)
     const destination = path.join(this.root, ...relative.split('/'))
     const parent = path.dirname(destination)
@@ -147,6 +148,8 @@ export class RepositoryFileIngress {
         }
       }
       const sha256 = hash.digest('hex')
+      const declaredSize = response.headers.get('content-length')
+      if (declaredSize !== null && /^\d+$/.test(declaredSize) && Number(declaredSize) !== size) throw new RepositoryFileIngressError('DOWNLOAD_FAILED')
       await handle.sync()
       const temporaryIdentity = await handle.stat()
       await handle.close()
@@ -155,6 +158,7 @@ export class RepositoryFileIngress {
       if (!currentIdentity.isFile() || currentIdentity.isSymbolicLink() || currentIdentity.dev !== temporaryIdentity.dev || currentIdentity.ino !== temporaryIdentity.ino) throw new RepositoryFileIngressError('INVALID_PATH')
       await this.validateParents(parent, false)
       checkBudget()
+      this.options.validateDestination?.(relative)
       try { await link(temporary, destination) } catch (error) {
         if (hasCode(error, 'EEXIST')) throw new RepositoryFileIngressError('DESTINATION_CONFLICT')
         throw error

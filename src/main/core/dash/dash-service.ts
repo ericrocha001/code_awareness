@@ -1,265 +1,55 @@
-/*
--T ---
-*/
-
-import type { DashContextPlan } from '../../../shared/types/dash-types'
-import { estimateTokenCount } from '../../../shared/utils/token-utils'
-import { assembleContext } from './dash-context-assembler'
-import { planExecution } from './dash-execution-planner'
-import { DashFileResolver } from './dash-file-resolver'
+import type { DashExecutionResult, DashResolutionReport } from '../../../shared/types/dash-types'
+import { getCanonicalTokenizer, type TokenizerPort } from '../tokenizer'
+import {
+  materializeDashPacket,
+  serializeDashPacket,
+  type DashPacketSerializer
+} from './dash-context-packet'
+import type { DashMapPort } from './dash-map-port'
+import { DashQueryResolver } from './dash-query-resolver'
 import { parseDashRequest } from './dash-request-parser'
-import { validateDashRequest } from './dash-request-validator'
-import type {
-  ContextProvider,
-  DashExecutionOptions
-} from './providers/context-provider'
-
-export interface DashExecutionResult {
-  success: boolean
-  xml?: string
-  tokenCount?: number
-  metadata?: {
-    requested: number
-    resolved: number
-    generated: number
-    failed: number
-  }
-  timings?: {
-    parseMs: number
-    validateMs: number
-    resolveMs: number
-    planMs: number
-    generateMs: number
-    assembleMs: number
-    totalMs: number
-  }
-  failures?: Array<{ index: number; path: string; reason: string }>
-  error?: string
-}
+import { DashError, validateDashRequest } from './dash-request-validator'
 
 export class DashService {
   constructor(
-    private readonly resolver:
-      | DashFileResolver
-      | ((repoPath: string) => DashFileResolver),
-    private readonly sourceProvider: ContextProvider,
-    private readonly compressionProvider: ContextProvider
+    private readonly map: DashMapPort,
+    private readonly tokenizer: TokenizerPort = getCanonicalTokenizer(),
+    private readonly serialize: DashPacketSerializer = serializeDashPacket
   ) {}
-
-  /**
-   * Executa a orquestração do Code Dash de ponta a ponta a partir de uma entrada bruta de texto.
-   * Inclui instrumentação de timings para observabilidade no processo principal.
-   */
-  public async execute(
-    input: string,
-    repoPath: string,
-    options?: DashExecutionOptions
-  ): Promise<DashExecutionResult> {
-    const totalStart = performance.now()
-
-    // 1. Parsing tolerante
-    const parseStart = performance.now()
-    const parseResult = parseDashRequest(input)
-    const parseMs = performance.now() - parseStart
-    if (!parseResult.success) {
-      return {
-        success: false,
-        error: `Falha no parsing da requisição: ${parseResult.error}`
+  async execute(input: string, repo: string): Promise<DashExecutionResult> {
+    const report: DashResolutionReport = { steps: [] }
+    try {
+      const parsed = parseDashRequest(input)
+      if (!parsed.success) throw new DashError('INVALID_JSON', parsed.error)
+      const validated = validateDashRequest(parsed.request)
+      if (!validated.success) throw new DashError(validated.code, validated.error)
+      const request = validated.request
+      const resolver = new DashQueryResolver(this.map, repo)
+      const sets = await resolver.resolve(request, report)
+      const packet = await materializeDashPacket(request, sets, resolver, this.map, repo)
+      const context = this.serialize(packet)
+      const tokenCount = this.tokenizer.count(context)
+      report.tokenCount = tokenCount
+      if (request.limits && tokenCount > request.limits.maxTokens)
+        throw new DashError(
+          'BUDGET_EXCEEDED',
+          `Context requires ${tokenCount} tokens; limit is ${request.limits.maxTokens}`
+        )
+      return { success: true, context, tokenCount, report }
+    } catch (error) {
+      const failure =
+        error instanceof DashError
+          ? error
+          : new DashError(
+              'EXACT_SOURCE_UNAVAILABLE',
+              error instanceof Error ? error.message : 'Code Map unavailable'
+            )
+      report.error = {
+        code: failure.code,
+        message: failure.message,
+        ...(failure.step ? { step: failure.step } : {})
       }
-    }
-
-    // 2. Validação estrita
-    const validateStart = performance.now()
-    const validationResult = validateDashRequest(parseResult.request)
-    const validateMs = performance.now() - validateStart
-    if (!validationResult.success) {
-      return {
-        success: false,
-        error: `Falha na validação da requisição: ${validationResult.error}`
-      }
-    }
-    const validRequest = validationResult.request
-
-    // 3. Resolução no sistema de arquivos
-    const resolveStart = performance.now()
-    const resolverInstance =
-      typeof this.resolver === 'function'
-        ? this.resolver(repoPath)
-        : this.resolver ?? new DashFileResolver(repoPath)
-
-    const resolution = resolverInstance.resolve(validRequest.items, validRequest)
-    const resolveMs = performance.now() - resolveStart
-
-    // 4. Planejamento determinístico
-    const planStart = performance.now()
-    const plan = planExecution(validRequest, resolution)
-    const planMs = performance.now() - planStart
-
-    // 5. Separação por representação
-    const sourceItems = plan.plannedItems.filter(
-      (it) => it.representation === 'source'
-    )
-    const compressionItems = plan.plannedItems.filter(
-      (it) => it.representation === 'compression'
-    )
-
-    // 6. Execução paralela dos provedores apropriados
-    const execOptions: DashExecutionOptions = {
-      repoPath,
-      signal: options?.signal,
-      settings: options?.settings
-    }
-
-    const generateStart = performance.now()
-    const [sourceResult, compressionResult] = await Promise.all([
-      sourceItems.length > 0
-        ? this.sourceProvider.provide(sourceItems, execOptions)
-        : Promise.resolve({
-            contents: new Map<number, string>(),
-            failures: []
-          }),
-      compressionItems.length > 0
-        ? this.compressionProvider.provide(compressionItems, execOptions)
-        : Promise.resolve({
-            contents: new Map<number, string>(),
-            failures: []
-          })
-    ])
-    const generateMs = performance.now() - generateStart
-
-    // 7. Consolidação de conteúdos
-    const combinedContents = new Map<number, string>()
-    for (const [index, content] of sourceResult.contents) {
-      combinedContents.set(index, content)
-    }
-    for (const [index, content] of compressionResult.contents) {
-      combinedContents.set(index, content)
-    }
-
-    // 8. Consolidação de falhas (resolução + provedores)
-    const allFailures: Array<{ index: number; path: string; reason: string }> = [
-      ...resolution.failures.map((f) => ({
-        index: f.index,
-        path: f.path,
-        reason: f.reason
-      }))
-    ]
-
-    for (const sf of sourceResult.failures) {
-      const origItem = validRequest.items[sf.index]
-      allFailures.push({
-        index: sf.index,
-        path: origItem?.path ?? '',
-        reason: sf.reason
-      })
-    }
-
-    for (const cf of compressionResult.failures) {
-      const origItem = validRequest.items[cf.index]
-      allFailures.push({
-        index: cf.index,
-        path: origItem?.path ?? '',
-        reason: cf.reason
-      })
-    }
-
-    // 9. Montagem do XML canônico
-    const assembleStart = performance.now()
-    const generatedPlannedItems = plan.plannedItems.filter((it) =>
-      combinedContents.has(it.index)
-    )
-
-    const finalPlan: DashContextPlan = {
-      metadata: {
-        requestedCount: validRequest.items.length,
-        resolvedCount: generatedPlannedItems.length,
-        failedCount: allFailures.length
-      },
-      plannedItems: generatedPlannedItems,
-      failures: allFailures.map((f) => ({
-        index: f.index,
-        path: f.path,
-        reason: f.reason as any
-      }))
-    }
-
-    const xml = assembleContext(finalPlan, combinedContents)
-    const assembleMs = performance.now() - assembleStart
-    const totalMs = performance.now() - totalStart
-
-    const tokenCount = estimateTokenCount(xml)
-
-    const timings = {
-      parseMs: Math.round(parseMs),
-      validateMs: Math.round(validateMs),
-      resolveMs: Math.round(resolveMs),
-      planMs: Math.round(planMs),
-      generateMs: Math.round(generateMs),
-      assembleMs: Math.round(assembleMs),
-      totalMs: Math.round(totalMs)
-    }
-
-    console.log(
-      `[DashService] execute completed: parse=${timings.parseMs}ms, ` +
-        `validate=${timings.validateMs}ms, resolve=${timings.resolveMs}ms, ` +
-        `plan=${timings.planMs}ms, generate=${timings.generateMs}ms, ` +
-        `assemble=${timings.assembleMs}ms, total=${timings.totalMs}ms`
-    )
-
-    // 10. Retorno estruturado do resultado
-    return {
-      success: true,
-      xml,
-      tokenCount,
-      metadata: {
-        requested: validRequest.items.length,
-        resolved: plan.plannedItems.length,
-        generated: combinedContents.size,
-        failed: allFailures.length
-      },
-      timings,
-      failures: allFailures
-    }
-  }
-
-  /**
-   * Executa apenas as etapas de parsing, validação e resolução de arquivos sem gerar conteúdo.
-   */
-  public parseAndResolve(
-    input: string,
-    repoPath: string
-  ): {
-    success: boolean
-    data?: import('../../../shared/types/dash-types').DashResolutionReport
-    error?: string
-  } {
-    const parseResult = parseDashRequest(input)
-    if (!parseResult.success) {
-      return {
-        success: false,
-        error: `Falha no parsing da requisição: ${parseResult.error}`
-      }
-    }
-
-    const validationResult = validateDashRequest(parseResult.request)
-    if (!validationResult.success) {
-      return {
-        success: false,
-        error: `Falha na validação da requisição: ${validationResult.error}`
-      }
-    }
-    const validRequest = validationResult.request
-
-    const resolverInstance =
-      typeof this.resolver === 'function'
-        ? this.resolver(repoPath)
-        : this.resolver ?? new DashFileResolver(repoPath)
-
-    const resolution = resolverInstance.resolve(validRequest.items, validRequest)
-
-    return {
-      success: true,
-      data: resolution
+      return { success: false, report }
     }
   }
 }

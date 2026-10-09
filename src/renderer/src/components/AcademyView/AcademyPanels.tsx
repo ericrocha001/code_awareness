@@ -26,7 +26,7 @@ import {
   X
 } from 'lucide-react'
 import type {
-  AcademyConflict,
+  AcademyConflictSummary,
   AcademyDestination,
   AcademyDistributionHealth,
   AcademyDistributionState,
@@ -39,6 +39,7 @@ import type {
   AcademySkillVersion
 } from '../../../../shared/types/academy-types'
 import type { RepositoryRecord } from '../../../../shared/types/repository-catalog-types'
+import { AcademyConflicts } from './AcademyConflicts'
 
 export type AcademyTab = 'skill' | 'overview' | 'history'
 
@@ -242,7 +243,7 @@ interface OperationsRailProps {
   open: boolean
   destinations: AcademyDestination[]
   artifacts: Record<string, string>
-  conflicts: AcademyConflict[]
+  conflicts: AcademyConflictSummary[]
   distribution: AcademyDistributionHealth
   packageDistribution: AcademyPackageDistributionState | null
   openAiPublication: AcademyOpenAiPublicationState | null
@@ -262,18 +263,16 @@ interface OperationsRailProps {
   onBindRepository: () => void
   onSyncGit: () => void
   onOpenGit: () => void
-  onResolveConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT') => void
+  onReviewConflict: (id: string) => void
+  onPreviewConflictBatch: () => void
 }
 
-export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onOpenGit, onResolveConflict }) => {
+export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
   const release = openAiPublication?.selectedRelease
   return <aside className={`academy-operations ${open ? 'is-open' : ''}`} aria-label="Operações da Academy">
     <div className="academy-operations-mobile-header"><strong>Operações</strong><button className="academy-icon-button" aria-label="Fechar operações" onClick={onClose}><X size={18} /></button></div>
     {conflicts.length > 0 && <RailCard icon={<CircleAlert size={18} />} title="Conflitos" count={`${conflicts.length}`} className="academy-conflict-card">
-      {conflicts.map((conflict) => <div className="academy-conflict" key={conflict.id}>
-        <div><strong>{conflict.skillName}</strong><small>{conflict.origin} · v{conflict.currentVersion}</small></div>
-        <div className="academy-inline-actions"><button onClick={() => onResolveConflict(conflict.id, 'CANONICAL')}>Manter canônica</button><button disabled={!conflict.divergentPackage} onClick={() => onResolveConflict(conflict.id, 'DIVERGENT')}>Criar divergente</button></div>
-      </div>)}
+      <AcademyConflicts conflicts={conflicts} destinations={destinations} onReview={onReviewConflict} onPreviewBatch={onPreviewConflictBatch} />
     </RailCard>}
 
     <RailCard icon={<FolderGit2 size={18} />} title="Destinos de Distribuição" count={`${destinations.length}`} action={<button className="academy-card-action" onClick={onOpenDestinations}><Settings2 size={15} />Gerenciar</button>}>

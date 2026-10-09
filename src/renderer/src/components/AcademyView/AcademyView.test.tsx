@@ -150,11 +150,21 @@ it('opens and closes the responsive operations drawer from the compact control',
 })
 
 it('renders actionable conflicts only when they exist', async () => {
+  const conflict = { id: 'conflict-1', skillId: detail.id, skillName: detail.name, origin: 'FILESYSTEM' as const, baseVersion: 1, currentVersion: 2, divergentPackage: detail.current.package, divergentHash: 'divergent', projectId: null, projectionPath: null, status: 'OPEN' as const, createdAt: detail.createdAt, resolvedAt: null }
+  window.codeAwareness.reviewAcademyConflict = vi.fn(async () => ({ conflict, candidateHash: 'candidate', historicalVersion: null, cause: 'DIVERGENT' as const, canonicalHash: 'hash', currentVersion: 2, diskHash: 'disk', diff: '-before\n+after', token: 'review-token', safeCanonical: false, reason: 'Revisão individual' }))
+  const { divergentPackage: _package, ...summary } = conflict
   vi.mocked(window.codeAwareness.getAcademySnapshot).mockResolvedValueOnce({
-    skills: [detail], destinations: [destination], conflicts: [{ id: 'conflict-1', skillId: detail.id, skillName: detail.name, origin: 'FILESYSTEM', baseVersion: 1, currentVersion: 2, divergentPackage: detail.current.package, divergentHash: 'divergent', projectId: null, projectionPath: null, status: 'OPEN', createdAt: detail.createdAt, resolvedAt: null }]
+    skills: [detail], destinations: [destination], conflicts: [{ ...summary, hasDivergentPackage: true, historicalVersion: null, occurrenceCount: 1, cause: 'DIVERGENT' }]
   })
   render(<AcademyView />)
   expect(await screen.findByText('Conflitos')).toBeTruthy()
+  expect(window.codeAwareness.reviewAcademyConflict).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: 'Manter canônica' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Conteúdo divergente 1' }))
+  fireEvent.click(screen.getByRole('button', { name: /alpha.*canônica v2/ }))
+  await screen.findByLabelText('Diferenças entre canônica e divergente')
   fireEvent.click(screen.getByRole('button', { name: 'Manter canônica' }))
-  await waitFor(() => expect(window.codeAwareness.resolveAcademyConflict).toHaveBeenCalledWith('conflict-1', 'CANONICAL'))
+  expect(window.codeAwareness.resolveAcademyConflict).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Confirmar canônica' }))
+  await waitFor(() => expect(window.codeAwareness.resolveAcademyConflict).toHaveBeenCalledWith('conflict-1', 'CANONICAL', undefined, { token: 'review-token', confirmed: true }))
 })

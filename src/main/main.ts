@@ -32,17 +32,9 @@ import { CheckpointService } from './core/checkpoint-service'
 import { CampaignService } from './core/campaign-service'
 import { RestoreService } from './core/restore-service'
 import { GitService } from './core/git-service'
-import { CodeSourceService } from './core/code-source-service'
 import { DashService } from './core/dash/dash-service'
-import { DashFileResolver } from './core/dash/dash-file-resolver'
-import { SourceContextProvider } from './core/dash/providers/source-context-provider'
-import { CompressionContextProvider } from './core/dash/providers/compression-context-provider'
-import { IgnorePolicy } from './core/ignore-policy'
-import { OneClickXmlService } from './core/one-click-xml-service'
-import { RepomixAdapter } from './core/repomix-adapter'
 import { CodeAwarenessIgnoreService } from './core/code-awareness-ignore-service'
 import { ContextEngine } from './core/context/context-engine'
-import { DashDiscoveryService } from './core/dash/dash-discovery-service'
 import { ActiveProjectService } from './core/active-project-service'
 import { bindProjectNavigation } from './core/context/project-context-navigation'
 import { WorktreeStructureNavigation } from './core/context/worktree-structure-navigation'
@@ -68,6 +60,9 @@ import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-pro
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
 import { RepositoryContinuumSession } from './continuum/project-continuum-session'
+import { LocalChannelHost } from './local-agent-channel/local-channel-host'
+import { ContinuumLocalAdapter } from './continuum/local-adapter'
+import { AcademyLocalAdapter } from './academy/local-adapter'
 import { registerContinuumHandlers } from './ipc/continuum-handler'
 import { CodeMapSyncMonitor, CodeMapSyncDrilldownProvider } from './system-health/codemap-sync-monitor'
 import { CodeMapLifecycleMonitor } from './system-health/codemap-lifecycle-monitor'
@@ -93,6 +88,7 @@ import { GitHubGitTransport } from './github/github-git-transport'
 import { GitOperationsService } from './git-operations/git-operations-service'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
+import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { GitService } from './core/git-service'
 
 
@@ -132,6 +128,7 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
   findByPath: path => repositoryCatalog?.findByPath(path) ?? null
 })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
+const localAgentChannel = new LocalChannelHost([new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)], app.getPath('userData'))
 const runtimeRestart = new RuntimeRestartController(
   runtimeIdentityProvider,
   new EnvironmentRestartSupervisorClient(),
@@ -325,6 +322,7 @@ app.whenReady().then(async () => {
   academyService.initializeGitSync(academyGitSyncService)
   registerAcademyHandlers(academyService)
   registerContinuumHandlers(continuumSession)
+  try { await localAgentChannel.start() } catch { console.error('[Local Agent Channel] Unavailable') }
 
   void (async () => {
     if (academyService.store.list().length === 0) {
@@ -389,17 +387,8 @@ app.whenReady().then(async () => {
   const campaignService = new CampaignService(dbAdapter)
   const restoreService = new RestoreService(checkpointService, dbAdapter)
 
-  // Composição do Code Dash com injeção de dependências reais
-  const codeSourceService = new CodeSourceService()
-  const sourceContextProvider = new SourceContextProvider(codeSourceService)
-  const compressionContextProvider = new CompressionContextProvider(compressionService)
-  const dashService = new DashService(
-    (repoPath: string) => new DashFileResolver(repoPath),
-    sourceContextProvider,
-    compressionContextProvider
-  )
+  const dashService = new DashService(codeMapService)
   const contextNavigation = new ContextEngine(codeMapService)
-  const dashDiscoveryService = new DashDiscoveryService(contextNavigation)
   activeProjects = new ActiveProjectService(codeMapService)
   const repositoryRuntime = new RepositoryRuntimeService(repositoryCatalog, codeMapService, activeProjects)
   activeProjects.onBeforeChange(async () => {
@@ -450,6 +439,11 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
+    const repositoryFileIngress = new RepositoryFileIngress(project.path, { validateDestination: relative => repositoryFileEditing.assertCreationAllowed(relative) })
+    const repositoryFileEditing = new RepositoryFileEditing(project.path, {
+      ingress: repositoryFileIngress,
+      isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision
+    })
     void mcpLifecycle.activateContext({
       projectId: project.id,
       repoRoot: project.path,
@@ -458,7 +452,8 @@ app.whenReady().then(async () => {
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
-      repositoryFileIngress: new RepositoryFileIngress(project.path),
+      repositoryFileIngress,
+      repositoryFileEditing,
       runtimeRestart
     })
   })
@@ -490,14 +485,10 @@ app.whenReady().then(async () => {
   })
   remoteAccess.start()
 
-  // Composição do One-Click XML com política de escopo e adapter de Direct Output
-  const repomixAdapterForOneClick = new RepomixAdapter()
   const githubIntegration = new GitHubIntegrationService(
     githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell
   )
   const codeAwarenessIgnoreService = new CodeAwarenessIgnoreService(settingsService)
-  const ignorePolicy = new IgnorePolicy(gitService, settingsService, codeAwarenessIgnoreService)
-  const oneClickXmlService = new OneClickXmlService(ignorePolicy, repomixAdapterForOneClick)
 
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
   registerFileHandlers()
@@ -511,7 +502,7 @@ app.whenReady().then(async () => {
   registerDatabaseHandlers(dbAdapter)
   registerCampaignHandlers(campaignService)
   registerCodeMapHandlers(codeMapService, activeProjects)
-  registerDashHandlers(dashService, oneClickXmlService, dashDiscoveryService)
+  registerDashHandlers(dashService)
 
 
   createWindow()
@@ -583,6 +574,7 @@ registerApplicationShutdown(app, async () => {
     console.error('[Main] Erro ao fechar Validation Ledger:', error)
   }
   try {
+    localAgentChannel.dispose()
     continuumSession.dispose()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Continuum Session:', error)

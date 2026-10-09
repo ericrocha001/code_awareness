@@ -1,0 +1,174 @@
+import { app } from 'electron'
+import { execFileSync, execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { join } from 'node:path'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import assert from 'node:assert/strict'
+import { RepositoryCatalogStore } from '../../src/main/repository-catalog/repository-catalog-store'
+import { RepositoryContinuumSession } from '../../src/main/continuum/project-continuum-session'
+import { LocalChannelHost, LOCAL_MAX_BYTES } from '../../src/main/local-agent-channel/local-channel-host'
+import { ContinuumLocalAdapter } from '../../src/main/continuum/local-adapter'
+import { AcademyLocalAdapter } from '../../src/main/academy/local-adapter'
+import { AcademyService } from '../../src/main/academy/academy-service'
+import { createConnection } from 'node:net'
+import { executePublishArtifact, executeGetArtifact } from '../../src/main/continuum/continuum-mcp'
+
+const run = promisify(execFile)
+process.once('message', async (input: { temporary: string; node: string; cli: string; channelCli: string }) => {
+  let catalog: RepositoryCatalogStore | undefined, session: RepositoryContinuumSession | undefined, channel: LocalChannelHost | undefined, academy: AcademyService | undefined
+  try {
+    mkdirSync(join(input.temporary, 'profile'), { recursive: true })
+    app.setPath('userData', join(input.temporary, 'profile'))
+    await app.whenReady()
+    const root = join(input.temporary, 'checkout'), worktree = join(input.temporary, 'linked'), other = join(input.temporary, 'other')
+    for (const directory of [root, other]) {
+      mkdirSync(directory)
+      execFileSync('git', ['init', directory], { stdio: 'pipe', windowsHide: true })
+      execFileSync('git', ['-C', directory, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'fixture'], { stdio: 'pipe', windowsHide: true })
+    }
+    execFileSync('git', ['-C', root, 'worktree', 'add', '--detach', worktree], { stdio: 'pipe', windowsHide: true })
+    catalog = new RepositoryCatalogStore(join(app.getPath('userData'), 'repositories', 'catalog.db'))
+    const { record } = catalog.upsertLocalCheckout({ path: root, normalizedPath: root.toLowerCase(), name: 'Fixture', status: 'ACTIVE', availability: 'AVAILABLE', gitState: 'GIT' })
+    const { record: second } = catalog.upsertLocalCheckout({ path: other, normalizedPath: other.toLowerCase(), name: 'Other', status: 'ACTIVE', availability: 'AVAILABLE', gitState: 'GIT' })
+    session = new RepositoryContinuumSession(join(app.getPath('userData'), 'continuum'), { findByPath: path => catalog!.findByNormalizedPath(path.toLowerCase()) })
+    session.activate(root)
+    const service = session.getActiveService()!
+    const md = (name: string, kind = 'EXECUTABLE_PLAN', extra = '', body = 'literal ç 漢字 ` ${x} $(cmd)\r\nEND\n') => `---\nname: ${name}\ndescription: Fixture selection\nkind: ${kind}\ndate: 2026-10-08T22:00:00-03:00\n${extra}---\n${body}`
+    const architect = executePublishArtifact(service, { rawMarkdown: md('Canonical Plan') })
+    assert.equal(architect.isError, undefined)
+    const plan = JSON.parse((architect.content[0] as { text: string }).text)
+    service.publish(md('Another Plan'))
+    academy = new AcademyService(join(app.getPath('userData'), 'academy', 'academy.db'))
+    channel = new LocalChannelHost([new ContinuumLocalAdapter(session), new AcademyLocalAdapter(academy)], app.getPath('userData'))
+    await channel.start()
+    const invoke = async (args: string[], cwd = worktree, code?: string, cli = input.cli) => {
+      try {
+        const result = await run(input.node, [cli, ...args, '--profile', app.getPath('userData')], { cwd, windowsHide: true, timeout: 20000, maxBuffer: 20 * 1024 * 1024 })
+        assert.equal(code, undefined, `expected ${code}`)
+        return args.includes('markdown') ? result.stdout : JSON.parse(result.stdout)
+      } catch (error: any) {
+        if (!code) throw error
+        assert.equal(JSON.parse(error.stderr).error.code, code)
+        assert.notEqual(error.code, 0)
+      }
+    }
+    const selected = ['--repository', record.id]
+    const status = await invoke(['status'])
+    assert.equal(status.repository.repositoryId, record.id)
+    const page = await invoke(['list', ...selected, '--filter', JSON.stringify({ kind: 'EXECUTABLE_PLAN', limit: 1 })])
+    assert.equal(page.artifacts.length, 1); assert.ok(page.nextCursor)
+    assert.deepEqual(page, service.list({ kind: 'EXECUTABLE_PLAN', limit: 1 }))
+    assert.ok(!JSON.stringify(page).includes('rawMarkdown'))
+    const next = await invoke(['list', ...selected, '--filter', JSON.stringify({ kind: 'EXECUTABLE_PLAN', limit: 1, cursor: page.nextCursor })])
+    assert.equal(next.artifacts.length, 1); assert.notEqual(next.artifacts[0].artifactId, page.artifacts[0].artifactId)
+    assert.equal(await invoke(['get', ...selected, '--id', plan.artifactId, '--format', 'markdown']), md('Canonical Plan'))
+    await invoke(['get', ...selected, '--id', 'absent'], worktree, 'ARTIFACT_NOT_FOUND')
+    await invoke(['get', '--repository', second.id, '--id', plan.artifactId], worktree, 'REPOSITORY_MISMATCH')
+    await invoke(['get', ...selected, '--id', plan.artifactId], other, 'WORKTREE_UNLINKED')
+    const file = join(worktree, 'handoff.md')
+    const raw = md('Validated Handoff', 'IMPLEMENTATION_HANDOFF', `status: VALIDATED\nrelations:\n  - artifactId: ${plan.artifactId}\n    kind: implements\n`)
+    writeFileSync(file, raw)
+    const receipt = await invoke(['publish', ...selected, '--file', file])
+    assert.equal(receipt.state, 'PERSISTED'); assert.equal(receipt.revision, 1)
+    const remote = executeGetArtifact(service, { artifactId: receipt.artifactId })
+    const handoff = JSON.parse((remote.content[0] as { text: string }).text)
+    assert.equal(handoff.rawMarkdown, raw); assert.deepEqual(handoff.metadata.relations, [{ artifactId: plan.artifactId, kind: 'implements' }])
+    writeFileSync(file, raw.replace('Validated Handoff', 'Updated Handoff'))
+    const updated = await invoke(['update', ...selected, '--id', receipt.artifactId, '--revision', '1', '--file', file])
+    assert.equal(updated.revision, 2)
+    await invoke(['update', ...selected, '--id', receipt.artifactId, '--revision', '1', '--file', file], worktree, 'REVISION_CONFLICT')
+    assert.equal(service.get(receipt.artifactId)!.revision, 2)
+    const related = await invoke(['list', ...selected, '--filter', JSON.stringify({ relatedToArtifactId: plan.artifactId, direction: 'inbound', relationKind: 'implements' })])
+    assert.equal(related.artifacts[0].artifactId, receipt.artifactId)
+    writeFileSync(file, 'invalid'); const before = service.list().artifacts.length
+    await invoke(['publish', ...selected, '--file', file], worktree, 'INVALID_ARGUMENT')
+    assert.equal(service.list().artifacts.length, before)
+    const descriptor = JSON.parse(readFileSync(join(app.getPath('userData'), 'continuum-local', 'endpoint.json'), 'utf8'))
+    const { connect } = require(input.cli)
+    await assert.rejects(connect({ ...descriptor, token: 'wrong' }, { operation: 'status' }), { code: 'UNAUTHORIZED' })
+    const generic = (args: string[], cwd = input.temporary, code?: string) => invoke(args, cwd, code, input.channelCli)
+    const genericDescriptor = JSON.parse(readFileSync(join(app.getPath('userData'), 'local-agent-channel', 'endpoint.json'), 'utf8'))
+    assert.equal(genericDescriptor.endpoint, descriptor.endpoint)
+    assert.equal(genericDescriptor.token, descriptor.token)
+    assert.deepEqual((await generic(['status'])).domains, ['continuum', 'academy'])
+    assert.equal((await generic(['continuum', 'status'], worktree)).repository.repositoryId, record.id)
+    assert.equal(await generic(['continuum', 'get', ...selected, '--id', plan.artifactId, '--format', 'markdown'], worktree), md('Canonical Plan'))
+    writeFileSync(file, raw)
+    const genericHandoff = await generic(['continuum', 'publish', ...selected, '--file', file], worktree)
+    assert.equal(genericHandoff.state, 'PERSISTED')
+    const genericUpdated = await generic(['continuum', 'update', ...selected, '--id', genericHandoff.artifactId, '--revision', '1', '--file', file], worktree)
+    assert.equal(genericUpdated.revision, 2)
+    session.deactivate()
+    assert.deepEqual(await generic(['academy', 'list']), [])
+    await generic(['continuum', 'get', ...selected, '--id', plan.artifactId], worktree, 'REPOSITORY_MISMATCH')
+    const destination = await academy.registerDestination(worktree, 'linked')
+    const otherDestination = await academy.registerDestination(other, 'other'); academy.watcher.stop()
+    const packageFile = join(input.temporary, 'package.json')
+    const skillPackage = (name: string, body = 'literal ç 漢字 ` ${x} $(cmd)\r\n') => ({ skillMd: `---\nname: ${name}\ndescription: Local channel fixture\n---\n${body}`, artifacts: { 'references/usage.md': body } })
+    const skillRaw = skillPackage('local-global')
+    writeFileSync(packageFile, JSON.stringify(skillRaw))
+    const globalSkill = await generic(['academy', 'create', '--scope', 'GLOBAL', '--file', packageFile])
+    assert.equal(globalSkill.state, 'PERSISTED'); assert.equal(globalSkill.distribution.status, 'CONVERGED')
+    assert.equal('package' in globalSkill, false)
+    assert.equal(academy.get(globalSkill.skillId).current.origin, 'LOCAL_CLI')
+    assert.deepEqual((await generic(['academy', 'get', '--id', globalSkill.skillId])).current.package, skillRaw)
+    assert.equal(readFileSync(join(worktree, '.skills/local-global/SKILL.md'), 'utf8'), skillRaw.skillMd)
+    const projectRaw = skillPackage('local-project')
+    writeFileSync(packageFile, JSON.stringify(projectRaw))
+    const projectSkill = await generic(['academy', 'create', '--scope', 'PROJECT', '--projects', JSON.stringify([destination.id]), '--file', packageFile])
+    assert.equal(projectSkill.distribution.status, 'CONVERGED')
+    assert.equal(academy.store.isAssigned(projectSkill.skillId, otherDestination.id), false)
+    writeFileSync(packageFile, JSON.stringify(skillPackage('local-project', 'updated')))
+    const projectUpdated = await generic(['academy', 'update', '--id', projectSkill.skillId, '--version', '1', '--file', packageFile])
+    assert.equal(projectUpdated.version, 2); assert.deepEqual(projectUpdated.projectIds, [destination.id])
+    await generic(['academy', 'update', '--id', projectSkill.skillId, '--version', '1', '--file', packageFile], input.temporary, 'VERSION_CONFLICT')
+    await generic(['academy', 'create', '--scope', 'GLOBAL', '--file', packageFile], input.temporary, 'DUPLICATE_SKILL_NAME')
+    writeFileSync(packageFile, JSON.stringify(skillPackage('invalid-project')))
+    await generic(['academy', 'create', '--scope', 'PROJECT', '--projects', '["absent"]', '--file', packageFile], input.temporary, 'PROJECT_NOT_FOUND')
+    await generic(['academy', 'create', '--scope', 'PROJECT', '--file', packageFile], input.temporary, 'INVALID_ARGUMENT')
+    assert.equal(academy.list().length, 2)
+    mkdirSync(join(worktree, '.claude/skills/blocked'), { recursive: true })
+    writeFileSync(join(worktree, '.claude/skills/blocked/private.md'), 'unmanaged')
+    writeFileSync(packageFile, JSON.stringify(skillPackage('blocked')))
+    const degraded = await generic(['academy', 'create', '--scope', 'GLOBAL', '--file', packageFile])
+    assert.equal(degraded.state, 'PERSISTED'); assert.equal(degraded.distribution.status, 'DEGRADED')
+    assert.ok((await generic(['academy', 'get', '--id', degraded.skillId])).distribution.some((state: { status: string }) => state.status === 'ERROR'))
+    await assert.rejects(connect(genericDescriptor, { domain: 'academy', action: 'archive', args: {} }), { code: 'METHOD_NOT_FOUND' })
+    await assert.rejects(connect(genericDescriptor, { domain: 'academy', action: 'list', args: {}, unexpected: true }), { code: 'INVALID_ARGUMENT' })
+    await assert.rejects(connect({ ...genericDescriptor, token: 'bad' }, { domain: 'academy', action: 'list', args: {} }), { code: 'UNAUTHORIZED' })
+    await assert.rejects(connect({ ...genericDescriptor, protocol: 'wrong' }, { domain: 'academy', action: 'list', args: {} }), { code: 'INVALID_ARGUMENT' })
+    const oversized = createConnection(genericDescriptor.endpoint)
+    const overflow = await new Promise<string>((resolve, reject) => {
+      let response = ''; oversized.setEncoding('utf8'); oversized.once('error', reject)
+      oversized.once('connect', () => oversized.write('x'.repeat(LOCAL_MAX_BYTES + 1)))
+      oversized.on('data', data => { response += data; if (response.endsWith('\n')) resolve(response) })
+    })
+    assert.equal(JSON.parse(overflow).error.code, 'REQUEST_TOO_LARGE'); oversized.destroy()
+    const idle = createConnection(genericDescriptor.endpoint)
+    const idleStart = Date.now()
+    await new Promise<void>((resolve, reject) => { idle.once('error', reject); idle.once('close', () => resolve()) })
+    assert.ok(Date.now() - idleStart >= 14000 && Date.now() - idleStart < 18000)
+    session.activate(root)
+    assert.equal((await generic(['continuum', 'get', ...selected, '--id', plan.artifactId], worktree)).artifactId, plan.artifactId)
+    session.activate(other)
+    await invoke(['get', ...selected, '--id', plan.artifactId], worktree, 'REPOSITORY_MISMATCH')
+    assert.equal(session.getActiveService()!.list().artifacts.length, 0)
+    const oldEndpoint = genericDescriptor.endpoint
+    channel.dispose()
+    await generic(['academy', 'list'], input.temporary, 'APP_UNAVAILABLE')
+    channel = new LocalChannelHost([new ContinuumLocalAdapter(session), new AcademyLocalAdapter(academy)], app.getPath('userData'))
+    await channel.start()
+    const restarted = JSON.parse(readFileSync(join(app.getPath('userData'), 'local-agent-channel', 'endpoint.json'), 'utf8'))
+    assert.notEqual(restarted.endpoint, oldEndpoint); assert.notEqual(restarted.token, genericDescriptor.token)
+    assert.equal((await generic(['academy', 'get', '--id', projectSkill.skillId])).currentVersion, 2)
+    assert.equal((await invoke(['status'])).repository.repositoryId, second.id)
+    channel.dispose()
+    await invoke(['list', ...selected], worktree, 'APP_UNAVAILABLE')
+    await invoke(['get', ...selected, '--id', plan.artifactId], worktree, 'APP_UNAVAILABLE')
+    await invoke(['update', ...selected, '--id', receipt.artifactId, '--revision', '2', '--file', file], worktree, 'APP_UNAVAILABLE')
+    session.dispose(); session.activate(root)
+    assert.equal(session.getActiveService()!.get(receipt.artifactId)!.revision, 2)
+    process.send?.({ success: true, runtime: 'Electron Main', platform: process.platform, transport: process.platform === 'win32' ? 'named pipe' : 'unix socket', proofs: ['linked worktree', 'canonical catalog/store', 'MCP architect / CLI executor', 'literal Unicode/CRLF', 'bounded discovery/pagination', 'revision/relation atomicity', 'invalid no write', 'unauthorized rejection', 'repository isolation', 'app unavailable', 'persistence after reopen', 'single host legacy/new protocols', 'Academy independent of repository', 'LOCAL_CLI origin', 'GLOBAL/PROJECT distribution', 'stale version/collision/invalid scope', 'degraded distribution observable', 'closed schemas/allowlist', 'real frame limit/deadline', 'restart/token rotation'] })
+  } catch (error) { process.send?.({ success: false, error: String(error), stack: error instanceof Error ? error.stack : undefined }); process.exitCode = 1 }
+  finally { channel?.dispose(); session?.dispose(); catalog?.close(); academy?.close(); app.exit(process.exitCode ?? 0) }
+})
