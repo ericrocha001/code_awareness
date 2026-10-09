@@ -28,7 +28,21 @@ export interface RuntimeFreshnessResult {
   divergence?: SourceDivergence
 }
 
+export interface RuntimeSourceOrigin {
+  status: 'GIT_WORKTREE' | 'NON_GIT' | 'UNAVAILABLE' | 'NOT_APPLICABLE'
+  sourceRootPath: string | null
+  worktree: {
+    rootPath: string
+    branch: string | null
+    head: string | null
+    detached: boolean
+    worktreeId: string | null
+  } | null
+  capturedAt: string
+}
+
 export interface RuntimeIdentityPayload {
+  sourceOrigin: RuntimeSourceOrigin
   runtime: RuntimeIdentityInfo
   startupSource: SourceSnapshot
   currentSource: SourceSnapshot

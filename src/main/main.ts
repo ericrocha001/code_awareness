@@ -112,6 +112,7 @@ const channelFunctionalHealth = new ChannelFunctionalHealthMonitor()
 const channelActivity = new ChannelActivityMonitor()
 const runtimeIdentityProvider = new RuntimeIdentityProvider({
   appVersion: app.getVersion(),
+  packaged: app.isPackaged,
   mode: app.isPackaged ? 'production' : 'development'
 })
 const systemHealth = new SystemHealthCore({ runtimeIdentityProvider })
@@ -272,6 +273,7 @@ function createWindow(): void {
 sanitizeEnvironment()
 
 app.whenReady().then(async () => {
+  await runtimeIdentityProvider.sourceOriginReady
   // Força o Electron a seguir o tema do sistema operacional antes de criar a janela
   nativeTheme.themeSource = 'system'
 
@@ -299,6 +301,9 @@ app.whenReady().then(async () => {
   const repositoryCatalogStore = new RepositoryCatalogStore(desktopProfilePaths(app.getPath('userData')).repositoryCatalogPath)
   repositoryCatalog = new RepositoryCatalogService(repositoryCatalogStore, workspaceService, academyService)
   await repositoryCatalog.initialize(settingsService.loadSettings())
+  await runtimeIdentityProvider.bindSourceOrigin(repositoryCatalog.listAvailable().map(record => ({
+    repositoryId: record.id, rootPath: record.localCheckout!.path
+  })))
 
   const academyGitRepositoryPort = {
     resolveRepository: (id: string) => {
