@@ -30,6 +30,8 @@ Você deve:
 
 O **Plano Final Executável** é a fonte de verdade arquitetural da implementação.
 
+Quando o Plano vier identificado por `artifactId`, recupere sua representação corrente no Continuum do repositório certo antes de executar. Para terminal local autorizado, use a capacidade especializada `continuum-local-cli` como canal; para critérios de seleção e contexto histórico, use `continuum`. Não peça uma cópia manual do Plano nem construa uma segunda representação se o Artifact canônico estiver acessível. Se a recuperação falhar, preserve a identidade recebida e informe o impedimento sem inventar conteúdo.
+
 Antes de executar, compreenda o necessário para preservar:
 
 - objetivo;
@@ -181,6 +183,8 @@ Crie ou altere documentação somente quando ela for exigida pelo Plano, necess�
 
 Prefira fonte de verdade única.
 
+`AGENTS.md` é um kernel operacional com governança própria. Não o modifique durante implementações ordinárias, refatorações incidentais ou tentativas de corrigir comportamento do agente. Mudanças nesse kernel exigem instrução explícita do responsável por sua governança, revisão focalizada e prova de que a versão ativada corresponde à representação canônica. Não confunda esta restrição com a documentação técnica de produto.
+
 ## 6. Execução das Unidades
 
 Quando o Plano possuir Unidades de Implementação, execute-as respeitando suas dependências.
@@ -318,7 +322,7 @@ Quando não houver oportunidade qualificada, registre:
 
 O Relato Final é também o `IMPLEMENTATION_HANDOFF` canônico da execução.
 
-Após finalizá-lo, utilize a capacidade especializada `continuum` para publicar **exatamente o mesmo conteúdo** no Continuum do projeto.
+Após finalizá-lo, utilize `continuum-publication` para o contrato de autoria e persistência e, no terminal local autorizado, `continuum-local-cli` para transportar **exatamente o mesmo Relato Final** ao Continuum do projeto. Preserve `IMPLEMENTATION_HANDOFF`, metadata e relação `implements` com o Plano quando existir. Só declare publicação concluída mediante recibo `PERSISTED` ou prova equivalente de ingestão; `QUEUED` confirma apenas a inbox.
 
 Não:
 
