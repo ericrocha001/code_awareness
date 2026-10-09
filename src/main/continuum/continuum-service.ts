@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import sharp from 'sharp'
 import type { Artifact, ArtifactReceipt, CreateArtifactInput, IContinuumService, ListArtifactsFilter, ArtifactPage } from './continuum-types'
 import type { TransportEnvelope } from './artifact-envelope'
 import { ArtifactStore } from './artifact-store'
@@ -9,6 +10,7 @@ import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService {
   private readonly listeners = new Set<() => void>()
+  private thumbnailReads = 0
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private changed(): void { for (const listener of this.listeners) { try { listener() } catch (error) { console.error('[Continuum] Change notification failed:', error) } } }
   facets() { this.reconcile?.(); return this.store.facets() }
@@ -27,6 +29,19 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     return { ...this.receipt(artifact), media }
   }
   getVisual(artifactId: string) { this.assertActive(); this.reconcile?.(); return this.store.getVisual(artifactId) }
+  async getVisualThumbnail(artifactId: string): Promise<Buffer> {
+    if (this.thumbnailReads >= 2) throw new Error('VISUAL_THUMBNAIL_BUSY')
+    this.thumbnailReads++
+    try {
+      const visual = this.getVisual(artifactId)
+      const data = await sharp(visual.data, { failOn: 'warning', limitInputPixels: 16_000_000, sequentialRead: true })
+        .timeout({ seconds: 5 }).resize({ width: 160, height: 96, fit: 'inside', withoutEnlargement: true })
+        .webp({ quality: 80 }).toBuffer()
+      this.assertActive()
+      if (data.length > 128 * 1024) throw new Error('VISUAL_THUMBNAIL_SIZE_LIMIT')
+      return data
+    } finally { this.thumbnailReads-- }
+  }
   private receipt(artifact: Artifact): ArtifactReceipt { return { success: true, artifactId: artifact.artifactId, revision: artifact.revision, updatedAt: artifact.updatedAt } }
   publish(rawMarkdown: string): ArtifactReceipt {
     this.reconcile?.()

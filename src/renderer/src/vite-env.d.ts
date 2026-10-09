@@ -22,6 +22,7 @@ declare global {
       publishContinuumArtifact: (request: ContinuumPublishRequest) => Promise<ContinuumPublishReceipt>
       publishContinuumVisual: (request: ContinuumVisualPublishRequest) => Promise<ContinuumPublishReceipt>
       getContinuumVisual: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
+      getContinuumVisualThumbnail: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
       getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
       getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
       onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void
