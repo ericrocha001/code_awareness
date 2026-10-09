@@ -11,6 +11,14 @@
 .continuum-header .sb-root:focus-within { outline: 2px solid var(--accent); outline-offset: 2px; }
 .continuum-publish { flex-shrink: 0; padding: 10px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); font-size: 12px; }
 .continuum-publish:hover:enabled { background: var(--hover-bg); }
+.continuum-visual-preview { display: block; max-width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--border-subtle); }
+.continuum-visual-publication { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 14px; max-height: 40%; overflow: auto; border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--bg-secondary); }
+.continuum-visual-publication strong, .continuum-visual-publication > div { grid-column: 1 / -1; }
+.continuum-visual-publication label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; min-width: 0; color: var(--text-secondary); }
+.continuum-visual-publication input, .continuum-visual-publication textarea, .continuum-visual-publication select { width: 100%; padding: 8px; color: var(--text-primary); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 8px; }
+.continuum-visual-publication textarea { resize: vertical; min-height: 54px; }
+.continuum-visual-publication button { padding: 8px 12px; margin-right: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); }
+.continuum-visual-publication button[type=submit] { color: var(--accent); }
 .continuum-publication-feedback { flex-shrink: 0; font-size: 12px; overflow-wrap: anywhere; }
 .continuum-workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(160px, var(--continuum-context-track)) 14px minmax(280px, var(--continuum-timeline-track)) 14px minmax(280px, var(--continuum-inspector-track)); position: relative; }
 .continuum-resizer { min-height: 0; display: flex; justify-content: center; position: relative; z-index: 1; }

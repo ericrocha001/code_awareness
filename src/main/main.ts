@@ -449,6 +449,7 @@ app.whenReady().then(async () => {
       repoRoot: project.path,
       navigation,
       continuum,
+      visualContinuum: continuum,
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,

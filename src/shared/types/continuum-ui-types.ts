@@ -17,3 +17,12 @@ export interface ContinuumSelection { repositoryId: string | null; artifact: Con
 export interface ContinuumChange { repositoryId: string | null }
 export interface ContinuumPublishRequest { repositoryId: string; fileName: string; rawMarkdown: string }
 export interface ContinuumPublishReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
+export interface ContinuumVisualPublishRequest {
+  repositoryId: string
+  name: string
+  description: string
+  context: string
+  relations?: { artifactId: string; kind: string }[]
+  data: Uint8Array
+}
+export interface ContinuumVisualSelection { repositoryId: string; artifactId: string; mimeType: 'image/webp'; data: Uint8Array }

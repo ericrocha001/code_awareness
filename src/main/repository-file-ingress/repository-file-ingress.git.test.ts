@@ -1,3 +1,4 @@
+import { textContent } from '../mcp/mcp-test-content'
 import { afterEach, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
@@ -36,7 +37,7 @@ it('imports binary bytes visible through get_git_changes without changing the Gi
   expect(await readFile(path.join(root, args.destinationPath))).toEqual(bytes)
   const changes = await adapter.callTool('get_git_changes', {})
   expect(changes.isError).toBeUndefined()
-  expect(JSON.parse(changes.content[0].text)).toEqual([expect.objectContaining({ path: args.destinationPath, untracked: true, stagedState: null })])
+  expect(JSON.parse(textContent(changes.content[0]))).toEqual([expect.objectContaining({ path: args.destinationPath, untracked: true, stagedState: null })])
   expect(await gitExec(root, ['diff', '--cached', '--name-only'])).toBe('')
   expect(stage).not.toHaveBeenCalled()
   expect(await adapter.callTool('import_repository_file', args)).toEqual({ isError: true, content: [{ type: 'text', text: 'DESTINATION_CONFLICT' }] })

@@ -13,10 +13,27 @@ function timestamp(value: string): string {
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' })
 }
 
-function Inspector({ artifact }: { artifact: ContinuumDetail }) {
+function VisualPreview({ repositoryId, artifactId }: { repositoryId: string; artifactId: string }) {
+  const [url, setUrl] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => {
+    let cancelled = false, objectUrl = ''
+    setUrl(''); setError('')
+    window.codeAwareness.getContinuumVisual(repositoryId, artifactId).then(result => {
+      if (cancelled || result.repositoryId !== repositoryId || result.artifactId !== artifactId) return
+      objectUrl = URL.createObjectURL(new Blob([new Uint8Array(result.data).buffer], { type: result.mimeType }))
+      setUrl(objectUrl)
+    }).catch(reason => { if (!cancelled) setError(String(reason)) })
+    return () => { cancelled = true; if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [repositoryId, artifactId])
+  return error ? <p role="alert">{error}</p> : url ? <img className="continuum-visual-preview" src={url} alt="Referência visual canônica" onError={() => setError('Não foi possível renderizar a referência visual.')} /> : <p role="status">Carregando referência visual…</p>
+}
+
+function Inspector({ artifact, repositoryId, preview }: { artifact: ContinuumDetail; repositoryId: string; preview: boolean }) {
   return <>
     <div className="continuum-detail-heading"><FileText size={24} /><h3>{String(artifact.metadata.name)}</h3></div>
     <p className="continuum-identity">{artifact.artifactId}</p>
+    {preview && artifact.metadata.kind === 'VISUAL_REFERENCE' && <VisualPreview key={`${repositoryId}:${artifact.artifactId}`} repositoryId={repositoryId} artifactId={artifact.artifactId} />}
     <dl className="continuum-metadata">
       {Object.entries(artifact.metadata).filter(([key]) => key !== 'name').map(([key, value]) =>
         <div key={key}><dt>{key}</dt><dd>{typeof value === 'object' ? <pre>{JSON.stringify(value, null, 2)}</pre> : String(value)}</dd></div>)}
@@ -50,6 +67,13 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
   const currentPath = useRef(path)
   currentPath.current = path
   const fileInput = useRef<HTMLInputElement>(null)
+  const visualInput = useRef<HTMLInputElement>(null)
+  const publicationGeneration = useRef(0)
+  const [visualDraft, setVisualDraft] = useState<{ file: File; repositoryId: string; path: string; generation: number } | null>(null)
+  const [visualName, setVisualName] = useState('')
+  const [visualDescription, setVisualDescription] = useState('')
+  const [visualContext, setVisualContext] = useState('')
+  const [visualRelation, setVisualRelation] = useState('')
   const publicationContext = useRef<{ repositoryId: string; path: string } | null>(null)
   const publicationBusy = useRef(false)
   const [publishing, setPublishing] = useState(false)
@@ -61,6 +85,36 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     if (!repositoryId || !path || publicationBusy.current) return
     publicationContext.current = { repositoryId, path }
     fileInput.current?.click()
+  }
+  const chooseVisual = () => {
+    if (!repositoryId || !path || publicationBusy.current) return
+    publicationContext.current = { repositoryId, path }
+    visualInput.current?.click()
+  }
+  const selectVisual = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0], context = publicationContext.current
+    event.target.value = ''
+    if (!file || !context || context.path !== currentPath.current) return
+    setPublicationError(''); setPublicationMessage('')
+    if (!/\.webp$/i.test(file.name) || file.size > 4 * 1024 * 1024) { setPublicationError('Selecione um WebP lossless de até 4 MiB.'); return }
+    setVisualName(file.name.replace(/\.webp$/i, '')); setVisualDescription(''); setVisualContext(''); setVisualRelation('')
+    setVisualDraft({ file, ...context, generation: publicationGeneration.current })
+  }
+  const publishVisual = async (event: React.FormEvent) => {
+    event.preventDefault()
+    if (!visualDraft || publicationBusy.current) return
+    publicationBusy.current = true; setPublishing(true); setPublicationError(''); setPublicationMessage('')
+    try {
+      const data = new Uint8Array(await visualDraft.file.arrayBuffer())
+      if (visualDraft.generation !== publicationGeneration.current || visualDraft.path !== currentPath.current || visualDraft.repositoryId !== repositoryId) throw new Error('O repositório ativo mudou. Selecione o arquivo novamente.')
+      const receipt = await window.codeAwareness.publishContinuumVisual({ repositoryId: visualDraft.repositoryId, name: visualName, description: visualDescription, context: visualContext, data,
+        relations: visualRelation ? [{ artifactId: visualRelation, kind: 'related-to' }] : [] })
+      if (visualDraft.generation === publicationGeneration.current && visualDraft.path === currentPath.current) {
+        setVisualDraft(null); setSelectedId(receipt.artifactId); setInspectorOpen(true)
+        setPublicationMessage(`Artifact publicado: ${receipt.artifactId}. A busca e os filtros ativos podem ocultá-lo na timeline.`)
+      }
+    } catch (reason) { setPublicationError(String(reason)) }
+    finally { publicationBusy.current = false; setPublishing(false) }
   }
 
   const publishMarkdown = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -87,6 +141,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     setRepositoryId(null); setFacets([]); setItems([]); setMetadata({}); setQuery('')
     setSelectedId(null); setArtifact(null); setCursor(undefined); setError(''); setInspectorOpen(false)
     setLoading(false); setFacetsLoading(false)
+    publicationGeneration.current++; setVisualDraft(null); publicationContext.current = null
     listGeneration.current++
   }, [path])
 
@@ -157,7 +212,19 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
       <SearchBox value={query} onChange={setQuery} placeholder="Buscar no Continuum…" ariaLabel="Buscar no Continuum" />
       <button className="continuum-publish" disabled={!path || !repositoryId || publishing} onClick={chooseMarkdown}>{publishing ? 'Publicando…' : 'Publicar Markdown'}</button>
       <input ref={fileInput} type="file" accept=".md" hidden aria-label="Arquivo Markdown" onChange={publishMarkdown} />
+      <button className="continuum-publish" disabled={!path || !repositoryId || publishing} onClick={chooseVisual}>Publicar WebP</button>
+      <input ref={visualInput} type="file" accept=".webp,image/webp" hidden aria-label="Arquivo WebP" onChange={selectVisual} />
     </header>
+    {visualDraft && <form className="continuum-visual-publication" onSubmit={publishVisual}>
+      <strong>{visualDraft.file.name}</strong>
+      <label>Nome<input required value={visualName} onChange={event => setVisualName(event.target.value)} disabled={publishing} /></label>
+      <label>Descrição<input required value={visualDescription} onChange={event => setVisualDescription(event.target.value)} disabled={publishing} /></label>
+      <label>Contexto<textarea required value={visualContext} onChange={event => setVisualContext(event.target.value)} disabled={publishing} /></label>
+      <label>Relacionar a um Artifact<select value={visualRelation} onChange={event => setVisualRelation(event.target.value)} disabled={publishing}>
+        <option value="">Sem relação</option>{items.map(item => <option key={item.artifactId} value={item.artifactId}>{item.name}</option>)}
+      </select></label>
+      <div><button type="submit" disabled={publishing}>{publishing ? 'Publicando…' : 'Publicar referência'}</button><button type="button" disabled={publishing} onClick={() => setVisualDraft(null)}>Cancelar</button></div>
+    </form>}
     {publicationMessage && <div className="continuum-publication-feedback" role="status">{publicationMessage}</div>}
     {publicationError && <div className="continuum-publication-feedback" role="alert">{publicationError}</div>}
     {!path ? <div className="continuum-empty"><Infinity size={38} /><h2>Nenhum repositório ativo</h2><p>Abra um repositório para consultar seu Continuum.</p></div> : <>
@@ -201,7 +268,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
           <div className="continuum-pane-heading"><h2>Inspector</h2><button className="continuum-close" aria-label="Fechar inspector" onClick={() => setInspectorOpen(false)}><X size={17} /></button></div>
           <div className="continuum-pane-scroll" aria-busy={detailLoading}>
             {detailError && <p role="alert">{detailError}</p>}
-            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact ? <Inspector artifact={artifact} /> :
+            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact && repositoryId ? <Inspector artifact={artifact} repositoryId={repositoryId} preview={inspectorOpen} /> :
               <div className="continuum-empty"><FileText size={32} /><h3>Nenhum artifact selecionado</h3><p>Selecione um artifact para ler seu conteúdo e metadata.</p></div>}
           </div>
         </aside>

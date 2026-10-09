@@ -1,3 +1,4 @@
+import { textContent } from '../mcp/mcp-test-content'
 import { describe, expect, it } from 'vitest'
 import { SystemHealthCore } from './system-health-core'
 import { executeGetSystemHealth, SYSTEM_HEALTH_MCP_TOOL, type SystemHealthDiagnosticPayload } from './system-health-mcp'
@@ -84,7 +85,7 @@ describe('System Health MCP — get_system_health tool', () => {
 
     expect(result.isError).toBeUndefined()
     expect(result.content).toHaveLength(1)
-    const payload = JSON.parse(result.content[0].text) as SystemHealthDiagnosticPayload
+    const payload = JSON.parse(textContent(result.content[0])) as SystemHealthDiagnosticPayload
 
     expect(payload.feature).toBe('codescope')
     expect(payload.status).toBe('OPERATIONAL')
@@ -126,7 +127,7 @@ describe('System Health MCP — get_system_health tool', () => {
     const result = await adapter.callTool('get_system_health', { feature: 'codescope' })
 
     expect(result.isError).toBeUndefined()
-    const payload = JSON.parse(result.content[0].text) as SystemHealthDiagnosticPayload
+    const payload = JSON.parse(textContent(result.content[0])) as SystemHealthDiagnosticPayload
 
     expect(payload.status).toBe('DEGRADED')
     expect(payload.firstFailedBoundary).toBe('Relay Inbound')
@@ -352,7 +353,7 @@ describe('System Health MCP — get_system_health tool', () => {
     const result = await adapter.callTool('get_system_health', { feature: 'codescope' })
 
     expect(result.isError).toBeUndefined()
-    const payload = JSON.parse(result.content[0].text) as SystemHealthDiagnosticPayload
+    const payload = JSON.parse(textContent(result.content[0])) as SystemHealthDiagnosticPayload
 
     expect(payload.status).toBe('DEGRADED')
     expect(payload.operation).toBe('discover_repository')
@@ -389,7 +390,7 @@ describe('System Health MCP — get_system_health tool', () => {
     expect(payload.diagnosis.drilldown?.firstBlockedCheckpoint).toBe('MCP Request Dispatched')
     expect(payload.diagnosis.drilldown?.precision).toBe('EXACT')
 
-    const rawPayload = JSON.parse(result.content[0].text) as Record<string, unknown>
+    const rawPayload = JSON.parse(textContent(result.content[0])) as Record<string, unknown>
     expect(rawPayload.suggestedFix).toBeUndefined()
     expect(rawPayload.rootCause).toBeUndefined()
 

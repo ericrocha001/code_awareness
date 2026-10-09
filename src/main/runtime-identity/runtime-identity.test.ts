@@ -1,3 +1,4 @@
+import { textContent } from '../mcp/mcp-test-content'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -157,7 +158,7 @@ describe('Runtime Identity & Freshness — Permanent Harness', () => {
     expect(result.isError).toBeUndefined()
     expect(hangingNavigation.discoverRepository).not.toHaveBeenCalled()
 
-    const parsed = JSON.parse(result.content[0].text)
+    const parsed = JSON.parse(textContent(result.content[0]))
     expect(parsed.runtime.instanceId).toBe(provider.getInstanceId())
     expect(parsed.freshness.state).toBe('MATCH')
   })

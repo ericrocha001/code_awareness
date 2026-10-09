@@ -1,3 +1,4 @@
+import { textContent } from '../../mcp/mcp-test-content'
 import { describe, expect, it, vi } from 'vitest'
 import type { CompressionPort } from '../compression-port'
 import { CodeMapService } from '../code-map-service'
@@ -52,8 +53,8 @@ describe('Context Navigation system acceptance', () => {
       expect(results.every(result => !result.isError)).toBe(true)
       expect(results[0].content).toEqual(expected)
       expect(results[1].content).toEqual(expected)
-      expect(results[2].content[0].text).toBe(serializeInspectFiles(inspected))
-      expect(results[3].content[0].text).toBe(discovery)
+      expect(textContent(results[2].content[0])).toBe(serializeInspectFiles(inspected))
+      expect(textContent(results[3].content[0])).toBe(discovery)
       expect(adapter.getActivityState()).toMatchObject({ activeRequests: 0, peakConcurrentRequests: 4, totalRequests: 4, succeededRequests: 4 })
       for (const concurrency of [2, 4, 8, 16, 24, 32]) {
         const probe = new ChannelMcpAdapter(engine, fixture.repoPath)

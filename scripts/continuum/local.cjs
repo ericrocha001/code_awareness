@@ -7,10 +7,10 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 
 async function main(args = process.argv.slice(2), channel = { directory: 'continuum-local', protocol: 'continuum-local/v1' }) {
   const operation = args.shift()
-  if (!['status', 'list', 'get', 'publish', 'update'].includes(operation)) fail('INVALID_ARGUMENT')
+  if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual'].includes(operation)) fail('INVALID_ARGUMENT')
   const options = {}
   for (let i = 0; i < args.length; i += 2) {
-    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
+    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
     options[args[i]] = args[i + 1]
   }
   const profile = options['--profile'] || (process.platform === 'win32' && process.env.APPDATA ? path.join(process.env.APPDATA, 'code-awareness') : fail('PROFILE_REQUIRED'))
@@ -34,22 +34,34 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
   if (operation === 'list') {
     try { request.filter = options['--filter'] ? JSON.parse(options['--filter']) : {} } catch { fail('INVALID_ARGUMENT') }
   }
-  if (['get', 'update'].includes(operation)) {
+  if (['get', 'update', 'get_visual'].includes(operation)) {
     if (!options['--id']) fail('INVALID_ARGUMENT')
     request.artifactId = options['--id']
   }
-  if (['publish', 'update'].includes(operation)) {
+  if (['publish', 'update', 'publish_visual'].includes(operation)) {
     if (!options['--file']) fail('INVALID_ARGUMENT')
     try {
       if (fs.statSync(options['--file']).size > MAX_BYTES) fail('REQUEST_TOO_LARGE')
       request.rawMarkdown = fs.readFileSync(options['--file'], 'utf8')
     } catch (error) { fail(error.code === 'REQUEST_TOO_LARGE' ? error.code : 'INVALID_ARGUMENT') }
   }
+  if (operation === 'publish_visual') {
+    if (!options['--media']) fail('INVALID_ARGUMENT')
+    request.filePath = path.resolve(options['--media'])
+  }
+  if (operation === 'get_visual' && !options['--output']) fail('INVALID_ARGUMENT')
   if (operation === 'update') {
     request.expectedRevision = Number(options['--revision'])
     if (!Number.isSafeInteger(request.expectedRevision) || request.expectedRevision < 1) fail('INVALID_ARGUMENT')
   }
   const result = await send(request)
+  if (operation === 'get_visual') {
+    const media = result.content?.find(item => item.type === 'image' && item.mimeType === 'image/webp')
+    if (result.isError || !media) fail('VISUAL_MEDIA_UNAVAILABLE')
+    const bytes = Buffer.from(media.data, 'base64')
+    fs.writeFileSync(options['--output'], bytes, { flag: 'wx' })
+    return { success: true, artifactId: request.artifactId, output: path.resolve(options['--output']), bytes: bytes.length }
+  }
   return options['--format'] === 'markdown' ? result.rawMarkdown : result
 }
 

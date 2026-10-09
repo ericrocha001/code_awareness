@@ -1,9 +1,10 @@
 import { BrowserWindow, ipcMain } from 'electron'
 import { posix, win32 } from 'node:path'
 import { dump } from 'js-yaml'
-import type { ContinuumListRequest, ContinuumPublishRequest, ContinuumPublishReceipt } from '../../shared/types/continuum-ui-types'
+import type { ContinuumListRequest, ContinuumPublishRequest, ContinuumPublishReceipt, ContinuumVisualPublishRequest } from '../../shared/types/continuum-ui-types'
 import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
-import { parseArtifactMarkdown, validateMarkdown } from '../continuum/artifact-metadata'
+import { parseArtifactMarkdown, validateMarkdown, visualMarkdown } from '../continuum/artifact-metadata'
+import { VISUAL_MAX_BYTES } from '../continuum/visual-media'
 
 function publicationMarkdown(fileName: unknown, rawMarkdown: string): string {
   if (typeof fileName !== 'string' || !/\.md$/i.test(fileName) ||
@@ -29,6 +30,19 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (typeof repositoryId !== 'string' || !repositoryId) throw new Error('INVALID_ARGUMENT: repositoryId required')
     return session.getActiveSession()?.repositoryId === repositoryId ? session.getActiveService() : null
   }
+  ipcMain.handle('continuum:publish-visual', async (_event, request: ContinuumVisualPublishRequest) => {
+    if (!request || typeof request !== 'object' || !(request.data instanceof Uint8Array) || request.data.byteLength > VISUAL_MAX_BYTES || !(['name', 'description', 'context'] as const).every(key => typeof request[key] === 'string' && request[key].trim())) throw new Error('INVALID_ARGUMENT: referência visual obrigatória')
+    const service = active(request.repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    return service.publishVisual(visualMarkdown(request.name, request.description, request.context, request.relations), request.data)
+  })
+  ipcMain.handle('continuum:get-visual', (_event, repositoryId: string, artifactId: string) => {
+    const service = active(repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    if (typeof artifactId !== 'string' || !artifactId.trim()) throw new Error('INVALID_ARGUMENT')
+    const visual = service.getVisual(artifactId)
+    return { repositoryId, artifactId, mimeType: visual.media.mimeType, data: new Uint8Array(visual.data) }
+  })
   ipcMain.handle('continuum:publish', (_event, request: ContinuumPublishRequest): ContinuumPublishReceipt => {
     if (!request || typeof request !== 'object' || typeof request.rawMarkdown !== 'string') throw new Error('INVALID_ARGUMENT: conteúdo Markdown obrigatório')
     const service = active(request.repositoryId)
@@ -43,7 +57,7 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (request.cursor !== undefined && typeof request.cursor !== 'string') throw new Error('INVALID_ARGUMENT: cursor must be text')
     if (request.metadata !== undefined && (!request.metadata || typeof request.metadata !== 'object' || Array.isArray(request.metadata) ||
       Object.values(request.metadata).some(value => !['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))))) throw new Error('INVALID_ARGUMENT: scalar metadata required')
-    return { repositoryId: request.repositoryId, ...service.list({ query: request.query, metadata: request.metadata, cursor: request.cursor, limit: 30 }) }
+    return { repositoryId: request.repositoryId, ...service.list({ ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30 }) }
   })
   ipcMain.handle('continuum:facets', (_event, repositoryPath: string) => {
     if (typeof repositoryPath !== 'string' || !repositoryPath) throw new Error('INVALID_ARGUMENT: repositoryPath required')

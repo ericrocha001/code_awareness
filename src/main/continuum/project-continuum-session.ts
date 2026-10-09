@@ -37,7 +37,7 @@ export class RepositoryContinuumSession {
     try {
       store.registerLocator(locator)
       let ingestor: ArtifactIngestor | undefined
-      const service = new ContinuumService(store, () => ingestor?.ingestPending())
+      const service = new ContinuumService(store, () => ingestor?.ingestPending(), () => this.currentSession?.store === store)
       migrateLegacyStore(join(this.storageBaseDir, locator, 'continuum.db'), locator, store, service)
       ingestor = new ArtifactIngestor(new ArtifactInbox(repositoryPath), service, locator)
       const report = ingestor.ingestPending()

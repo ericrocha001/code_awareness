@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { lstat, mkdir, open, realpath, link, unlink } from 'node:fs/promises'
 import { realpathSync } from 'node:fs'
 import path from 'node:path'
+import { hostFileUrl } from '../local-agent-channel/host-file-acquisition'
 
 export interface RepositoryFileDescriptor {
   download_url: string
@@ -43,16 +44,7 @@ export function relativeDestination(value: unknown): string {
 }
 
 function fileUrl(value: unknown): URL {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new RepositoryFileIngressError('INVALID_FILE')
-  const file = value as Record<string, unknown>
-  if (Object.keys(file).some(key => !['download_url', 'file_id', 'mime_type', 'file_name'].includes(key)) || typeof file.download_url !== 'string' || typeof file.file_id !== 'string' || !file.file_id.trim() || ['mime_type', 'file_name'].some(key => file[key] !== undefined && typeof file[key] !== 'string')) throw new RepositoryFileIngressError('INVALID_FILE')
-  try {
-    const url = new URL(file.download_url)
-    if (url.protocol !== 'https:' || url.username || url.password) throw new Error()
-    return url
-  } catch {
-    throw new RepositoryFileIngressError('INVALID_FILE')
-  }
+  try { return hostFileUrl(value) } catch { throw new RepositoryFileIngressError('INVALID_FILE') }
 }
 
 export class RepositoryFileIngress {

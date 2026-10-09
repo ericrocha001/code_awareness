@@ -17,8 +17,12 @@ export interface McpToolDefinition {
     openWorldHint?: boolean
   }
 }
-export interface McpToolResult {
-  content: Array<{ type: 'text'; text: string }>
+export type McpTextContent = { type: 'text'; text: string }
+export type McpImageContent = { type: 'image'; mimeType: 'image/webp'; data: string }
+export type McpContent = McpTextContent | McpImageContent
+export type McpMultimodalToolResult = McpToolResult<McpContent>
+export interface McpToolResult<Content = McpTextContent> {
+  content: Content[]
   isError?: true
   postResponse?: () => void | Promise<void>
 }

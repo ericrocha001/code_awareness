@@ -1,3 +1,4 @@
+import { textContent } from '../mcp/mcp-test-content'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -61,7 +62,7 @@ describe('Academy MCP administration', () => {
     expect(adapter.listTools().map((item) => item.name)).toContain('list_academy_skills')
     expect(adapter.listTools().map((item) => item.name)).toContain('prepare_openai_plugin_release')
     const listed = await adapter.callTool('list_academy_skills', {})
-    expect(JSON.parse(listed.content[0].text)).toEqual([])
+    expect(JSON.parse(textContent(listed.content[0]))).toEqual([])
     service.close()
   })
 })

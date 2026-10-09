@@ -1,3 +1,4 @@
+import { textContent } from './mcp-test-content'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -33,9 +34,9 @@ describe('operational MCP capabilities', () => {
       'diagnostic_list_directory', 'diagnostic_read_file', 'diagnostic_find_text', 'request_runtime_restart'
     ]))
     const diagnostic = await adapter.callTool('diagnostic_read_file', { relativePath: 'source.ts', startLine: 1, endLine: 1 })
-    expect(diagnostic.content[0].text).toContain('independent')
+    expect(textContent(diagnostic.content[0])).toContain('independent')
     const profiles = await adapter.callTool('list_validation_profiles', {})
-    expect(profiles.content[0].text).toContain('typecheck')
+    expect(textContent(profiles.content[0])).toContain('typecheck')
     expect(unavailable).not.toHaveBeenCalled()
   })
 })

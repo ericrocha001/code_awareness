@@ -12,6 +12,7 @@ import { AcademyLocalAdapter } from '../../src/main/academy/local-adapter'
 import { AcademyService } from '../../src/main/academy/academy-service'
 import { createConnection } from 'node:net'
 import { executePublishArtifact, executeGetArtifact } from '../../src/main/continuum/continuum-mcp'
+import sharp from 'sharp'
 
 const run = promisify(execFile)
 process.once('message', async (input: { temporary: string; node: string; cli: string; channelCli: string }) => {
@@ -53,6 +54,19 @@ process.once('message', async (input: { temporary: string; node: string; cli: st
       }
     }
     const selected = ['--repository', record.id]
+    const visualFile = join(input.temporary, 'canonical.webp')
+    const visualContext = join(input.temporary, 'visual.md')
+    const visualBytes = await sharp({ create: { width: 2, height: 2, channels: 4, background: '#7852ee' } }).webp({ lossless: true }).toBuffer()
+    writeFileSync(visualFile, visualBytes)
+    writeFileSync(visualContext, md('Canonical Visual', 'VISUAL_REFERENCE'))
+    const visualReceipt = await invoke(['publish_visual', ...selected, '--file', visualContext, '--media', visualFile])
+    assert.equal(visualReceipt.state, 'PERSISTED')
+    const visualOutput = join(input.temporary, 'retrieved.webp')
+    const visualRead = await invoke(['get_visual', ...selected, '--id', visualReceipt.artifactId, '--output', visualOutput])
+    assert.equal(visualRead.success, true)
+    assert.deepEqual(readFileSync(visualOutput), visualBytes)
+    assert.equal(JSON.stringify(visualRead).includes(visualBytes.toString('base64')), false)
+    await invoke(['get_visual', ...selected, '--id', visualReceipt.artifactId, '--output', visualOutput], other, 'WORKTREE_UNLINKED')
     const status = await invoke(['status'])
     assert.equal(status.repository.repositoryId, record.id)
     const page = await invoke(['list', ...selected, '--filter', JSON.stringify({ kind: 'EXECUTABLE_PLAN', limit: 1 })])

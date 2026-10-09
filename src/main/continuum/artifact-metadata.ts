@@ -1,4 +1,4 @@
-import { load, JSON_SCHEMA } from 'js-yaml'
+import { load, dump, JSON_SCHEMA } from 'js-yaml'
 import type { ArtifactMetadata, ArtifactRelation, MetadataValue } from './continuum-types'
 
 export function canonicalJson(value: MetadataValue): string {
@@ -66,3 +66,9 @@ export function parseArtifactMarkdown(rawMarkdown: string, legacy = false): { me
   return { metadata: validateMetadata(metadata, legacy), body }
 }
 export function relationsOf(metadata: ArtifactMetadata): ArtifactRelation[] { return metadata.relations ?? [] }
+
+export function visualMarkdown(name: string, description: string, context: string, relations: unknown = []): string {
+  const rawMarkdown = `---\n${dump({ name, description, kind: 'VISUAL_REFERENCE', date: new Date().toISOString(), relations }, { lineWidth: -1 })}---\n${context}`
+  parseArtifactMarkdown(rawMarkdown)
+  return rawMarkdown
+}

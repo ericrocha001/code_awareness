@@ -1,3 +1,4 @@
+import { textContent } from './mcp-test-content'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChannelMcpAdapter } from './channel-mcp-adapter'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
@@ -19,7 +20,7 @@ describe('Channel composition', () => {
     const b = adapter.callTool('read_code', { targetIds: ['b'] }, { requestId: 'b', deadlineAtMs: Date.now() + 1500 })
     expect(adapter.getActivityState()).toMatchObject({ activeRequests: 2, peakConcurrentRequests: 2 })
     await vi.advanceTimersByTimeAsync(50)
-    expect(JSON.parse((await a).content[0].text).code).toBe('REQUEST_TIMEOUT')
+    expect(JSON.parse(textContent((await a).content[0])).code).toBe('REQUEST_TIMEOUT')
     expect(adapter.getActivityState()).toMatchObject({ activeRequests: 1, totalRequests: 2, timedOutRequests: 1, failedRequests: 0 })
     releases[0]([])
     await vi.advanceTimersByTimeAsync(0)

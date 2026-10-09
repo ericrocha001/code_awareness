@@ -13,7 +13,11 @@ node scripts/continuum/local.cjs get --repository <repositoryId> --id <artifactI
 node scripts/continuum/local.cjs get --repository <repositoryId> --id <artifactId> --format markdown
 node scripts/continuum/local.cjs publish --repository <repositoryId> --file handoff.md
 node scripts/continuum/local.cjs update --repository <repositoryId> --id <artifactId> --revision <revision> --file work-item.md
+node scripts/continuum/local.cjs publish_visual --repository <repositoryId> --file context.md --media reference.webp
+node scripts/continuum/local.cjs get_visual --repository <repositoryId> --id <artifactId> --output retrieved.webp
 ```
+
+`publish_visual` usa contexto Markdown com `kind: VISUAL_REFERENCE`, um único arquivo WebP lossless estático de até 4 MiB, dimensões máximas de 4096 por eixo e 16 megapixels. A mídia é imutável; `update` altera somente o contexto textual sem fornecer metadata `media`. `get_visual` grava o arquivo explicitamente solicitado com criação exclusiva, sem sobrescrever um arquivo existente e sem imprimir pixels/Base64 no terminal. Ambas as operações preservam a identidade de repositório e Worktree.
 
 `list` retorna somente discovery records. Passe os mesmos filtros e `nextCursor` como `cursor` em `--filter` para paginação; relações são um hop. `get` retorna JSON com revisão e Markdown literal; `--format markdown` emite somente o conteúdo, sem newline adicional. Para worktrees sem os scripts, invoque a CLI por seu caminho absoluto no checkout que os contém.
 

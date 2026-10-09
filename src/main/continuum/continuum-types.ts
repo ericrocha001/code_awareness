@@ -59,6 +59,21 @@ export interface UpdateArtifactInput {
   rawMarkdown: string
 }
 export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
+export interface VisualMedia {
+  mimeType: 'image/webp'
+  sha256: string
+  bytes: number
+  width: number
+  height: number
+  lossless: true
+  animated: false
+}
+export interface VisualArtifact { artifact: Artifact; media: VisualMedia; data: Buffer }
+export interface VisualArtifactReceipt extends ArtifactReceipt { media: VisualMedia }
+export interface IVisualContinuumService extends IContinuumService {
+  publishVisual(rawMarkdown: string, data: Uint8Array): Promise<VisualArtifactReceipt>
+  getVisual(artifactId: string): VisualArtifact
+}
 export interface IArtifactReader {
   get(artifactId: string): Artifact | null
   list(filter?: ListArtifactsFilter): ArtifactPage

@@ -4,7 +4,7 @@ const { buildSync } = require('esbuild')
 
 exports.run = async ctx => {
   const backend = path.join(ctx.evidenceDir, 'backend.cjs')
-  buildSync({ stdin: { contents: "export { registerContinuumHandlers } from './src/main/ipc/continuum-handler'; export { RepositoryContinuumSession } from './src/main/continuum/project-continuum-session'", resolveDir: ctx.projectRoot }, bundle: true, outfile: backend, platform: 'node', format: 'cjs', external: ['electron', 'better-sqlite3'] })
+  buildSync({ stdin: { contents: "export { registerContinuumHandlers } from './src/main/ipc/continuum-handler'; export { RepositoryContinuumSession } from './src/main/continuum/project-continuum-session'", resolveDir: ctx.projectRoot }, bundle: true, outfile: backend, platform: 'node', format: 'cjs', alias: { sharp: require.resolve('sharp') }, external: ['electron', 'better-sqlite3', require.resolve('sharp')] })
   const { registerContinuumHandlers, RepositoryContinuumSession } = require(backend)
   const repositoryPath = path.join(ctx.temporary, 'repository-A')
   const otherPath = path.join(ctx.temporary, 'repository-B')
@@ -32,7 +32,7 @@ exports.run = async ctx => {
     await ctx.capture('before-publication')
     ctx.window.webContents.debugger.attach('1.3')
     await ctx.window.webContents.debugger.sendCommand('Page.enable')
-    const chooseFile = async file => {
+    const chooseFile = async (file, selector = '.continuum-publish') => {
       await ctx.window.webContents.debugger.sendCommand('Page.setInterceptFileChooserDialog', { enabled: true })
       const opened = new Promise((resolve, reject) => {
         const timer = setTimeout(() => { ctx.window.webContents.debugger.removeListener('message', listener); reject(new Error('File chooser did not open')) }, 5000)
@@ -41,7 +41,7 @@ exports.run = async ctx => {
         }
         ctx.window.webContents.debugger.on('message', listener)
       })
-      await ctx.click('.continuum-publish')
+      await ctx.click(selector)
       const chooser = await opened
       await ctx.window.webContents.debugger.sendCommand('DOM.setFileInputFiles', { files: [file], backendNodeId: chooser.backendNodeId })
     }
@@ -90,6 +90,45 @@ exports.run = async ctx => {
     ctx.check('Stale renderer identity cannot publish in switched repository', staleRejected && session.getActiveService().list().artifacts.length === 0)
     session.activate(repositoryPath)
     ctx.check('Both publications remain unchanged across restart', session.getActiveService().list().artifacts.length === 2 && session.getActiveService().get(created[0].artifactId).rawMarkdown === text && session.getActiveService().get(imported.artifactId).rawMarkdown === importedArtifact.rawMarkdown)
+    const sharp = require('sharp')
+    const source = fs.readFileSync(path.join(ctx.projectRoot, 'docs/design-system/examples/channel-runtime-v1.png'))
+    const sourceMetadata = await sharp(source).metadata()
+    ctx.check('Explicit curated PNG preparation is static 8-bit RGB', sourceMetadata.depth === 'uchar' && (sourceMetadata.pages || 1) === 1 && ['srgb', 'rgb'].includes(sourceMetadata.space) && !sourceMetadata.icc)
+    const canonical = await sharp(source).webp({ lossless: true, effort: 6 }).toBuffer()
+    ctx.check('Prepared WebP preserves source pixels and alpha exactly', (await sharp(source).ensureAlpha().raw().toBuffer()).equals(await sharp(canonical).ensureAlpha().raw().toBuffer()))
+    const canonicalPath = path.join(ctx.evidenceDir, 'channel-reference.webp')
+    fs.writeFileSync(canonicalPath, canonical)
+    await ctx.waitFor(() => !document.querySelector('.continuum-publish').disabled)
+    await chooseFile(canonicalPath, '.continuum-header button:last-of-type')
+    await ctx.waitFor(() => !!document.querySelector('.continuum-visual-publication'))
+    await ctx.input('.continuum-visual-publication label:nth-of-type(2) input', 'Exemplar visual canônico do Channel')
+    await ctx.input('.continuum-visual-publication textarea', 'Exemplar derivado do Design System, preparado explicitamente em WebP lossless.')
+    await ctx.evaluate(id => {
+      const select = document.querySelector('.continuum-visual-publication select')
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set
+      setter.call(select, id); select.dispatchEvent(new Event('change', { bubbles: true }))
+    }, imported.artifactId)
+    await ctx.capture('visual-publication-light')
+    await ctx.click('.continuum-visual-publication button[type=submit]')
+    await ctx.waitFor(() => document.querySelector('.continuum-visual-preview')?.complete && document.querySelector('.continuum-visual-preview').naturalWidth > 0)
+    const visual = session.getActiveService().list({ kind: 'VISUAL_REFERENCE' }).artifacts[0]
+    ctx.check('UI publication persists exact bytes and semantic relation', !!visual && session.getActiveService().getVisual(visual.artifactId).data.equals(canonical) && session.getActiveService().get(visual.artifactId).metadata.relations[0].artifactId === imported.artifactId)
+    ctx.check('Timeline IPC remains pixel-free', !(await ctx.evaluate(async () => JSON.stringify(await window.codeAwareness.listContinuumArtifacts({ repositoryId: 'acceptance-A' })))).includes(canonical.toString('base64')))
+    await ctx.viewport(1440, 900)
+    await ctx.evaluate(() => { document.body.dataset.theme = 'dark' })
+    await ctx.overflow()
+    await ctx.capture('visual-preview-dark')
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
+    await ctx.viewport(1000, 760)
+    await ctx.overflow()
+    await ctx.capture('visual-preview-light-medium')
+    await ctx.evaluate(() => {
+      document.querySelectorAll('.continuum-item').forEach(item => { if (item.textContent.includes('Publication acceptance')) item.click() })
+    })
+    await ctx.waitFor(() => !document.querySelector('.continuum-visual-preview'))
+    ctx.check('Selecting textual Artifact releases visual preview', await ctx.evaluate(() => !document.querySelector('.continuum-visual-preview')))
+    session.activate(otherPath); session.activate(repositoryPath)
+    ctx.check('Visual bytes survive repository session restart', session.getActiveService().getVisual(visual.artifactId).data.equals(canonical))
   } finally {
     if (ctx.window.webContents.debugger.isAttached()) ctx.window.webContents.debugger.detach()
     unsubscribe(); session.dispose()

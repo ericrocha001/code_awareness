@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
 
 const ok = { content: [{ type: 'text' as const, text: '{}' }] }
-const payload = (result: typeof ok) => JSON.parse(result.content[0].text)
+const payload = (result: import('./mcp-types').McpMultimodalToolResult) => {
+  const first = result.content[0]
+  if (first.type !== 'text') throw new Error('Expected textual MCP content')
+  return JSON.parse(first.text)
+}
 function deferred() {
   let resolve!: (value: typeof ok) => void
   let reject!: (error: Error) => void
