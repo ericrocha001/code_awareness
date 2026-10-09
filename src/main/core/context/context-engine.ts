@@ -1,7 +1,6 @@
 import type { CodeMapElement, CodeMapFile } from '../../../shared/types'
 import { projectFileOutline } from './file-outline'
 import { projectFileRelationships } from './file-relationships'
-import type { RepoDiscoveryLayer, RepoDiscoveryResult } from '../../../shared/types/repo-discovery-types'
 import {
   ContextNavigationError,
   type DiscoverRepositoryResult,
@@ -20,7 +19,6 @@ import {
 } from '../../../shared/types/context-navigation-types'
 import { createFullTargetId, parseCodeTargetId, projectFullTarget } from './code-target'
 import type { CodeMapNavigationPort, ContextNavigationPort, NavigationInvocationContext } from './context-navigation-port'
-import { RepoDiscovery } from './repo-discovery'
 
 function emitTrace(
   context: NavigationInvocationContext | undefined,
@@ -54,15 +52,7 @@ function requireNonEmptyUnique(values: string[], emptyCode: 'EMPTY_SCOPE' | 'EMP
 }
 
 export class ContextEngine implements ContextNavigationPort {
-  private readonly repoDiscovery: RepoDiscovery
-
-  constructor(private readonly codeMap: CodeMapNavigationPort) {
-    this.repoDiscovery = new RepoDiscovery(codeMap)
-  }
-
-  discover(repoPath: string, layer: RepoDiscoveryLayer): Promise<RepoDiscoveryResult> {
-    return this.repoDiscovery.generate(repoPath, layer)
-  }
+  constructor(private readonly codeMap: CodeMapNavigationPort) {}
 
   private async awaitInstrumentedReadiness(
     repoPath: string,

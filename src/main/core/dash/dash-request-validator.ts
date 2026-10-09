@@ -1,228 +1,188 @@
-/*
--T ---
-*/
+import type { DashErrorCode, DashRequest, DashSetType } from '../../../shared/types/dash-types'
+import { DASH_FIELDS, DASH_PROTOCOL_VERSION } from '../../../shared/utils/dash-protocol'
 
-import type {
-  DashFailureReason,
-  DashItem,
-  DashRequest
-} from '../../../shared/types/dash-types'
-import {
-  DASH_PROTOCOL_VERSION,
-  isDashRepresentation
-} from '../../../shared/utils/dash-protocol'
-
-export type DashValidationResult =
+export class DashError extends Error {
+  constructor(
+    public readonly code: DashErrorCode,
+    message: string,
+    public readonly step?: string
+  ) {
+    super(message)
+  }
+}
+const object = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object' && !Array.isArray(v)
+function fail(code: DashErrorCode, message: string): never {
+  throw new DashError(code, message)
+}
+function keys(v: Record<string, unknown>, allowed: readonly string[]) {
+  for (const key of Object.keys(v))
+    if (!allowed.includes(key)) fail('UNKNOWN_FIELD', `Unknown field: ${key}`)
+}
+const strings = (v: unknown): v is string[] =>
+  Array.isArray(v) && v.length > 0 && v.every((x) => typeof x === 'string' && x.trim().length > 0)
+const integer = (v: unknown): v is number =>
+  typeof v === 'number' && Number.isSafeInteger(v) && v >= 0
+const fileFilters = ['path', 'language', 'extension', 'status', 'contextReference']
+const elementFilters = [
+  'name',
+  'kind',
+  'signature',
+  'path',
+  'visibility',
+  'granularity',
+  'retrievable'
+]
+const enums: Record<string, readonly (string | boolean | null)[]> = {
+  status: ['indexed', 'modified'],
+  kind: [
+    'class',
+    'function',
+    'method',
+    'interface',
+    'enum',
+    'typeAlias',
+    'variable',
+    'constant',
+    'import',
+    'export',
+    'property',
+    'parameter',
+    'enumMember',
+    'cssRule',
+    'cssAtRule',
+    'cssCustomProperty',
+    'document',
+    'section'
+  ],
+  visibility: ['public', 'private', 'protected', null],
+  granularity: ['structural', 'member', 'syntax'],
+  retrievable: [true, false]
+}
+export function validateDashRequest(
+  input: unknown
+):
   | { success: true; request: DashRequest }
-  | { success: false; error: string; reason?: DashFailureReason }
-
-function hasUnknownKeys(
-  obj: Record<string, unknown>,
-  allowedKeys: readonly string[]
-): string | null {
-  const keys = Object.keys(obj)
-  const unknownKey = keys.find((key) => !allowedKeys.includes(key))
-  return unknownKey || null
-}
-
-function isAbsolutePath(p: string): boolean {
-  if (p.startsWith('/') || p.startsWith('\\')) {
-    return true
-  }
-  if (/^[a-zA-Z]:/.test(p)) {
-    return true
-  }
-  return false
-}
-
-function hasPathTraversal(p: string): boolean {
-  return p.includes('..')
-}
-
-export function validateDashRequest(input: unknown): DashValidationResult {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) {
-    return {
-      success: false,
-      error: 'Request must be a non-null object',
-      reason: 'invalid_json'
+  | { success: false; code: DashErrorCode; error: string } {
+  try {
+    if (!object(input)) fail('INVALID_STEP', 'Request must be an object')
+    keys(input, ['protocol', 'intent', 'steps', 'emit', 'limits'])
+    if (input.protocol !== DASH_PROTOCOL_VERSION) fail('UNKNOWN_PROTOCOL', 'Expected code-dash/v2')
+    if (input.intent !== undefined && typeof input.intent !== 'string')
+      fail('INVALID_STEP', 'intent must be text')
+    if (!Array.isArray(input.steps) || !input.steps.length || input.steps.length > 100)
+      fail('INVALID_STEP', 'steps must contain 1–100 entries')
+    const types = new Map<string, DashSetType>()
+    for (const step of input.steps) {
+      if (!object(step) || typeof step.id !== 'string' || !step.id.trim())
+        fail('INVALID_STEP', 'Step requires id')
+      if (types.has(step.id)) fail('DUPLICATE_STEP_ID', `Duplicate id: ${step.id}`)
+      if (!object(step.expect)) fail('INVALID_STEP', `Explicit expect required: ${step.id}`)
+      keys(step.expect, ['min', 'max'])
+      if (
+        !integer(step.expect.min) ||
+        !integer(step.expect.max) ||
+        step.expect.min > step.expect.max
+      )
+        fail('INVALID_STEP', 'Invalid cardinality interval')
+      let type: DashSetType
+      if ('find' in step) {
+        keys(step, ['id', 'find', 'where', 'expect'])
+        if (step.find !== 'file' && step.find !== 'element')
+          fail('UNKNOWN_OPERATOR', 'Unknown find entity')
+        if (!object(step.where) || !Object.keys(step.where).length)
+          fail('INVALID_FILTER', 'find requires filters')
+        keys(step.where, step.find === 'file' ? fileFilters : elementFilters)
+        for (const [field, filter] of Object.entries(step.where)) {
+          if (!object(filter) || !Object.keys(filter).length) fail('INVALID_FILTER', 'Empty filter')
+          keys(
+            filter,
+            enums[field]
+              ? ['exact', 'in']
+              : ['exact', 'contains', 'containsAny', 'containsAll', 'startsWith']
+          )
+          for (const [op, value] of Object.entries(filter)) {
+            if (enums[field]) {
+              const values = op === 'in' ? value : [value]
+              if (
+                !Array.isArray(values) ||
+                !values.length ||
+                !values.every((x) => enums[field].includes(x))
+              )
+                fail('INVALID_FILTER', `Invalid ${field}`)
+            } else if (op === 'containsAny' || op === 'containsAll') {
+              if (!strings(value)) fail('INVALID_FILTER', 'Expected nonempty text array')
+            } else if (typeof value !== 'string' || !value.trim())
+              fail('INVALID_FILTER', 'Expected nonempty text')
+          }
+        }
+        type = step.find === 'file' ? 'file-set' : 'element-set'
+      } else if ('follow' in step) {
+        keys(step, ['id', 'from', 'follow', 'expect'])
+        if (typeof step.from !== 'string' || !types.has(step.from))
+          fail('UNKNOWN_STEP_REFERENCE', 'from must reference a previous step')
+        const relation = step.follow
+        if (
+          ![
+            'contains',
+            'containedBy',
+            'imports',
+            'importedBy',
+            'extends',
+            'extendedBy',
+            'implements',
+            'implementedBy',
+            'dependencies',
+            'references'
+          ].includes(String(relation))
+        )
+          fail('UNKNOWN_OPERATOR', 'Unknown follow operator')
+        const source = types.get(step.from)!
+        if (
+          relation === 'imports'
+            ? source === 'reference-set'
+            : relation === 'importedBy'
+              ? source !== 'file-set'
+              : source !== 'element-set'
+        )
+          fail('TYPE_MISMATCH', 'Incompatible follow input')
+        type =
+          relation === 'references'
+            ? 'reference-set'
+            : relation === 'imports' || relation === 'importedBy'
+              ? 'file-set'
+              : 'element-set'
+      } else if ('set' in step) {
+        keys(step, ['id', 'from', 'set', 'expect'])
+        if (!['union', 'intersect', 'subtract'].includes(String(step.set)))
+          fail('UNKNOWN_OPERATOR', 'Unknown set operator')
+        if (!strings(step.from) || step.from.length < 2 || step.from.some((x) => !types.has(x)))
+          fail('UNKNOWN_STEP_REFERENCE', 'set requires at least two previous steps')
+        type = types.get(step.from[0])!
+        if (step.from.some((x) => types.get(x) !== type)) fail('TYPE_MISMATCH', 'Set types differ')
+      } else fail('INVALID_STEP', 'Expected find, follow or set')
+      types.set(step.id, type)
     }
-  }
-
-  const record = input as Record<string, unknown>
-
-  // 1. Validação de campos desconhecidos no top-level
-  const allowedTopKeys = ['protocol', 'output', 'items'] as const
-  const unknownTopKey = hasUnknownKeys(record, allowedTopKeys)
-  if (unknownTopKey) {
-    return {
-      success: false,
-      error: `Unknown field in request root: "${unknownTopKey}"`,
-      reason: 'unknown_field'
+    if (!Array.isArray(input.emit) || !input.emit.length)
+      fail('INVALID_STEP', 'emit must be nonempty')
+    for (const emit of input.emit) {
+      if (!object(emit)) fail('INVALID_STEP', 'Invalid emit')
+      keys(emit, ['from', 'include'])
+      if (typeof emit.from !== 'string' || !types.has(emit.from))
+        fail('UNKNOWN_STEP_REFERENCE', 'Unknown emit step')
+      const fields: readonly string[] = DASH_FIELDS[types.get(emit.from)!]
+      if (!strings(emit.include) || emit.include.some((x) => !fields.includes(x)))
+        fail('TYPE_MISMATCH', 'Invalid projection')
     }
-  }
-
-  // 2. Validação da versão do protocolo
-  if (
-    typeof record.protocol !== 'string' ||
-    record.protocol !== DASH_PROTOCOL_VERSION
-  ) {
-    return {
-      success: false,
-      error: `Invalid or missing protocol. Expected "${DASH_PROTOCOL_VERSION}", received "${String(record.protocol)}"`,
-      reason: 'unknown_protocol'
+    if (input.limits !== undefined) {
+      if (!object(input.limits)) fail('INVALID_STEP', 'Invalid limits')
+      keys(input.limits, ['maxTokens'])
+      if (!integer(input.limits.maxTokens) || input.limits.maxTokens === 0)
+        fail('INVALID_STEP', 'maxTokens must be positive')
     }
-  }
-
-  // 3. Validação do bloco de output
-  if (
-    typeof record.output !== 'object' ||
-    record.output === null ||
-    Array.isArray(record.output)
-  ) {
-    return {
-      success: false,
-      error: 'Field "output" must be a non-null object',
-      reason: 'invalid_format'
-    }
-  }
-
-  const outputRecord = record.output as Record<string, unknown>
-  const allowedOutputKeys = ['format', 'name'] as const
-  const unknownOutputKey = hasUnknownKeys(outputRecord, allowedOutputKeys)
-  if (unknownOutputKey) {
-    return {
-      success: false,
-      error: `Unknown field in "output": "${unknownOutputKey}"`,
-      reason: 'unknown_field'
-    }
-  }
-
-  if (outputRecord.format !== 'xml') {
-    return {
-      success: false,
-      error: `Invalid output format. Expected "xml", received "${String(outputRecord.format)}"`,
-      reason: 'invalid_format'
-    }
-  }
-
-  if (
-    outputRecord.name !== undefined &&
-    typeof outputRecord.name !== 'string'
-  ) {
-    return {
-      success: false,
-      error: 'Field "output.name" must be a string if provided',
-      reason: 'invalid_format'
-    }
-  }
-
-  // 4. Validação do array de itens
-  if (!Array.isArray(record.items)) {
-    return {
-      success: false,
-      error: 'Field "items" must be an array',
-      reason: 'empty_items'
-    }
-  }
-
-  if (record.items.length === 0) {
-    return {
-      success: false,
-      error: 'Field "items" must contain at least one item',
-      reason: 'empty_items'
-    }
-  }
-
-  // 5. Validação individual de cada item e detecção de duplicatas
-  const seenItems = new Set<string>()
-  const allowedItemKeys = ['path', 'representation'] as const
-  const validatedItems: DashItem[] = []
-
-  for (let i = 0; i < record.items.length; i++) {
-    const item = record.items[i]
-    if (typeof item !== 'object' || item === null || Array.isArray(item)) {
-      return {
-        success: false,
-        error: `Item at index ${i} must be a non-null object`,
-        reason: 'invalid_path'
-      }
-    }
-
-    const itemRecord = item as Record<string, unknown>
-    const unknownItemKey = hasUnknownKeys(itemRecord, allowedItemKeys)
-    if (unknownItemKey) {
-      return {
-        success: false,
-        error: `Unknown field in item at index ${i}: "${unknownItemKey}"`,
-        reason: 'unknown_field'
-      }
-    }
-
-    if (
-      typeof itemRecord.path !== 'string' ||
-      itemRecord.path.trim().length === 0
-    ) {
-      return {
-        success: false,
-        error: `Item at index ${i} must have a non-empty "path" string`,
-        reason: 'invalid_path'
-      }
-    }
-
-    const rawPath = itemRecord.path.trim()
-
-    if (isAbsolutePath(rawPath)) {
-      return {
-        success: false,
-        error: `Item at index ${i} has an absolute path: "${rawPath}". Only relative paths are allowed`,
-        reason: 'absolute_path'
-      }
-    }
-
-    if (hasPathTraversal(rawPath)) {
-      return {
-        success: false,
-        error: `Item at index ${i} contains path traversal (".."): "${rawPath}"`,
-        reason: 'path_traversal'
-      }
-    }
-
-    if (!isDashRepresentation(itemRecord.representation)) {
-      return {
-        success: false,
-        error: `Item at index ${i} has invalid representation: "${String(itemRecord.representation)}". Supported: "source", "compression"`,
-        reason: 'invalid_representation'
-      }
-    }
-
-    const normalizedPath = rawPath.replace(/\\/g, '/')
-    const itemKey = `${normalizedPath}::${itemRecord.representation}`
-    if (seenItems.has(itemKey)) {
-      return {
-        success: false,
-        error: `Duplicate item found at index ${i}: path "${rawPath}" with representation "${itemRecord.representation}"`,
-        reason: 'duplicate_item'
-      }
-    }
-    seenItems.add(itemKey)
-
-    validatedItems.push({
-      path: rawPath,
-      representation: itemRecord.representation
-    })
-  }
-
-  return {
-    success: true,
-    request: {
-      protocol: DASH_PROTOCOL_VERSION,
-      output: {
-        format: 'xml',
-        ...(outputRecord.name !== undefined
-          ? { name: outputRecord.name as string }
-          : {})
-      },
-      items: validatedItems
-    }
+    return { success: true, request: input as unknown as DashRequest }
+  } catch (error) {
+    if (!(error instanceof DashError)) throw error
+    return { success: false, code: error.code, error: error.message }
   }
 }

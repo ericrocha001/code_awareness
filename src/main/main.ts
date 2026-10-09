@@ -32,17 +32,9 @@ import { CheckpointService } from './core/checkpoint-service'
 import { CampaignService } from './core/campaign-service'
 import { RestoreService } from './core/restore-service'
 import { GitService } from './core/git-service'
-import { CodeSourceService } from './core/code-source-service'
 import { DashService } from './core/dash/dash-service'
-import { DashFileResolver } from './core/dash/dash-file-resolver'
-import { SourceContextProvider } from './core/dash/providers/source-context-provider'
-import { CompressionContextProvider } from './core/dash/providers/compression-context-provider'
-import { IgnorePolicy } from './core/ignore-policy'
-import { OneClickXmlService } from './core/one-click-xml-service'
-import { RepomixAdapter } from './core/repomix-adapter'
 import { CodeAwarenessIgnoreService } from './core/code-awareness-ignore-service'
 import { ContextEngine } from './core/context/context-engine'
-import { DashDiscoveryService } from './core/dash/dash-discovery-service'
 import { ActiveProjectService } from './core/active-project-service'
 import { bindProjectNavigation } from './core/context/project-context-navigation'
 import { WorktreeStructureNavigation } from './core/context/worktree-structure-navigation'
@@ -389,17 +381,8 @@ app.whenReady().then(async () => {
   const campaignService = new CampaignService(dbAdapter)
   const restoreService = new RestoreService(checkpointService, dbAdapter)
 
-  // Composição do Code Dash com injeção de dependências reais
-  const codeSourceService = new CodeSourceService()
-  const sourceContextProvider = new SourceContextProvider(codeSourceService)
-  const compressionContextProvider = new CompressionContextProvider(compressionService)
-  const dashService = new DashService(
-    (repoPath: string) => new DashFileResolver(repoPath),
-    sourceContextProvider,
-    compressionContextProvider
-  )
+  const dashService = new DashService(codeMapService)
   const contextNavigation = new ContextEngine(codeMapService)
-  const dashDiscoveryService = new DashDiscoveryService(contextNavigation)
   activeProjects = new ActiveProjectService(codeMapService)
   const repositoryRuntime = new RepositoryRuntimeService(repositoryCatalog, codeMapService, activeProjects)
   activeProjects.onBeforeChange(async () => {
@@ -490,14 +473,10 @@ app.whenReady().then(async () => {
   })
   remoteAccess.start()
 
-  // Composição do One-Click XML com política de escopo e adapter de Direct Output
-  const repomixAdapterForOneClick = new RepomixAdapter()
   const githubIntegration = new GitHubIntegrationService(
     githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell
   )
   const codeAwarenessIgnoreService = new CodeAwarenessIgnoreService(settingsService)
-  const ignorePolicy = new IgnorePolicy(gitService, settingsService, codeAwarenessIgnoreService)
-  const oneClickXmlService = new OneClickXmlService(ignorePolicy, repomixAdapterForOneClick)
 
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
   registerFileHandlers()
@@ -511,7 +490,7 @@ app.whenReady().then(async () => {
   registerDatabaseHandlers(dbAdapter)
   registerCampaignHandlers(campaignService)
   registerCodeMapHandlers(codeMapService, activeProjects)
-  registerDashHandlers(dashService, oneClickXmlService, dashDiscoveryService)
+  registerDashHandlers(dashService)
 
 
   createWindow()

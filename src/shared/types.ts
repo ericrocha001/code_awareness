@@ -38,8 +38,6 @@ export interface AppSettings {
   compressionSettings?: CompressionSettings
   // Code Source persistido (opcional — ausente usa defaults)
   sourceSettings?: SourceSettings
-  // Configurações do Code Dash persistidas (opcional — ausente usa defaults)
-  dashSettings?: DashSettings
 }
 
 // ─── Projetos e Diff ────────────────────────────────────────────────────────
@@ -592,19 +590,6 @@ export interface SourceGenerationRequest {
   profile?: SourceProfile
   generationId: number
   sessionKey: string
-}
-
-// ─── Code Dash ───────────────────────────────────────────────────────────────
-
-/**
- * Configurações de economia do Code Dash, persistidas em settings.json.
- * Aplicadas como merge global nos providers Source e Compression, sobrescrevendo
- * apenas os três campos econômicos do profile efetivo de cada item.
- */
-export interface DashSettings {
-  removeComments: boolean
-  removeEmptyLines: boolean
-  truncateBase64: boolean
 }
 
 export * from './types/dash-types'

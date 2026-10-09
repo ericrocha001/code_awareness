@@ -3,8 +3,8 @@
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
-import type { RepoDiscoveryRequest, RepoDiscoveryResult } from '../shared/types/repo-discovery-types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
+import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
@@ -448,55 +448,5 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   },
 
   // ─── Code Dash ─────────────────────────────────────────────────────────────
-  dashParseAndResolve: (
-    input: string,
-    repoPath: string
-  ): Promise<{
-    success: boolean
-    data?: unknown
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('dash:parse-and-resolve', input, repoPath)
-  },
-  dashDiscover: (
-    request: RepoDiscoveryRequest,
-    repoPath: string
-  ): Promise<{ success: boolean; data?: RepoDiscoveryResult; error?: string }> => {
-    return ipcRenderer.invoke('dash:discover', request, repoPath)
-  },
-  dashGenerate: (
-    input: string,
-    repoPath: string,
-    settings?: DashSettings
-  ): Promise<{
-    success: boolean
-    data?: unknown
-    error?: string
-  }> => {
-    return ipcRenderer.invoke('dash:generate', input, repoPath, settings)
-  },
-  dashOneClickXml: (
-    repoPath: string,
-    options?: {
-      removeComments?: boolean
-      removeEmptyLines?: boolean
-      truncateBase64?: boolean
-      persistedSettings?: DashSettings
-    }
-  ): Promise<{
-    success: boolean
-    xml?: string
-    tokenCount?: number
-    error?: string
-    timings?: {
-      listFilesMs: number
-      generateMs: number
-      totalMs: number
-    }
-    metadata?: {
-      fileCount: number
-    }
-  }> => {
-    return ipcRenderer.invoke('dash:one-click-xml', repoPath, options, options?.persistedSettings)
-  }
+  dashExecute: (input: string, repoPath: string): Promise<DashExecutionResult> => ipcRenderer.invoke('dash:execute', input, repoPath)
 })

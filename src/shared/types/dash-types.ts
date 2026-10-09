@@ -1,67 +1,58 @@
-/*
--T ---
-*/
-
-export type DashRepresentation = 'source' | 'compression'
-
-export interface DashItem {
-  path: string
-  representation: DashRepresentation
+export type DashSetType = 'file-set' | 'element-set' | 'reference-set'
+export type DashFollow =
+  | 'contains'
+  | 'containedBy'
+  | 'imports'
+  | 'importedBy'
+  | 'extends'
+  | 'extendedBy'
+  | 'implements'
+  | 'implementedBy'
+  | 'dependencies'
+  | 'references'
+export interface DashExpect {
+  min: number
+  max: number
 }
-
+export type DashFilter = {
+  exact?: string | boolean | null
+  contains?: string
+  containsAny?: string[]
+  containsAll?: string[]
+  startsWith?: string
+  in?: (string | boolean | null)[]
+}
+export type DashStep =
+  | { id: string; find: 'file' | 'element'; where: Record<string, DashFilter>; expect: DashExpect }
+  | { id: string; from: string; follow: DashFollow; expect: DashExpect }
+  | { id: string; from: string[]; set: 'union' | 'intersect' | 'subtract'; expect: DashExpect }
 export interface DashRequest {
-  protocol: string
-  output: {
-    format: 'xml'
-    name?: string
-  }
-  items: DashItem[]
+  protocol: 'code-dash/v2'
+  intent?: string
+  steps: DashStep[]
+  emit: { from: string; include: string[] }[]
+  limits?: { maxTokens: number }
 }
-
-export type DashFailureReason =
-  | 'invalid_json'
-  | 'unknown_protocol'
-  | 'invalid_format'
-  | 'empty_items'
-  | 'invalid_representation'
-  | 'invalid_path'
-  | 'path_traversal'
-  | 'absolute_path'
-  | 'unknown_field'
-  | 'duplicate_item'
-  | 'not_found'
-  | 'ambiguous'
-
-export type DashResolutionStatus = 'resolved' | 'not_found' | 'ambiguous'
-
-export interface DashResolutionFailure {
-  index: number
-  path: string
-  reason: DashFailureReason
-}
-
+export type DashErrorCode =
+  | 'INVALID_JSON'
+  | 'UNKNOWN_PROTOCOL'
+  | 'UNKNOWN_FIELD'
+  | 'INVALID_STEP'
+  | 'DUPLICATE_STEP_ID'
+  | 'UNKNOWN_STEP_REFERENCE'
+  | 'TYPE_MISMATCH'
+  | 'UNKNOWN_OPERATOR'
+  | 'INVALID_FILTER'
+  | 'NOT_FOUND'
+  | 'CARDINALITY_MISMATCH'
+  | 'EXACT_SOURCE_UNAVAILABLE'
+  | 'STALE_SOURCE'
+  | 'BUDGET_EXCEEDED'
 export interface DashResolutionReport {
-  valid: boolean
-  request: DashRequest | null
-  failures: DashResolutionFailure[]
+  steps: { id: string; type: DashSetType; count: number }[]
+  error?: { code: DashErrorCode; message: string; step?: string }
+  tokenCount?: number
 }
-
-export interface DashPlannedItem {
-  index: number
-  path: string
-  representation: DashRepresentation
-  profile?: string
-}
-
-export interface DashPlanMetadata {
-  requestedCount: number
-  resolvedCount: number
-  failedCount: number
-}
-
-export interface DashContextPlan {
-  metadata: DashPlanMetadata
-  plannedItems: DashPlannedItem[]
-  failures: DashResolutionFailure[]
-}
-
+export type DashExecutionResult =
+  | { success: true; context: string; tokenCount: number; report: DashResolutionReport }
+  | { success: false; report: DashResolutionReport }

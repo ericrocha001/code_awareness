@@ -6,7 +6,6 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs'
 import { AppSettings, OutputFormat, ContextEnrichment } from '../../shared/types'
 import { DEFAULT_COMPRESSION_SETTINGS, normalizeCompressionProfile } from './compression-profile'
-import { DEFAULT_DASH_SETTINGS, normalizeDashSettings } from '../../shared/utils/dash-settings'
 import { desktopProfilePaths } from '../desktop-profile'
 
 const DEFAULT_SETTINGS = {
@@ -20,7 +19,6 @@ const DEFAULT_SETTINGS = {
   fileTags: {},
   projectPreferences: {},
   compressionSettings: DEFAULT_COMPRESSION_SETTINGS,
-  dashSettings: DEFAULT_DASH_SETTINGS
 } as AppSettings
 
 export class SettingsService {
@@ -103,13 +101,6 @@ export class SettingsService {
         }
       } else {
         merged.compressionSettings = { ...DEFAULT_COMPRESSION_SETTINGS }
-      }
-
-      // DashSettings: ausente/corrompido → default; presente → normaliza defensivamente
-      if (rest.dashSettings && typeof rest.dashSettings === 'object') {
-        merged.dashSettings = normalizeDashSettings(rest.dashSettings)
-      } else {
-        merged.dashSettings = { ...DEFAULT_DASH_SETTINGS }
       }
 
       return merged as AppSettings

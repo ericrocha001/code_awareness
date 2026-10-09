@@ -82,7 +82,6 @@ describe('CodeScope real repository acceptance', () => {
         })) }
       }) }
 
-      const oldDiscovery = await engine.discover(repoPath, 2)
 
       const mRoot = measureScenario('discover_root', serializedRoot)
       const mExpanded = measureScenario('discover_expanded', serializeDiscovery(explored))
@@ -93,10 +92,8 @@ describe('CodeScope real repository acceptance', () => {
       const serializedRead = serializeReadCode(read)
       const readEnvelope = computeReadCodeEnvelopeOverhead(serializedRead, read.source)
 
-      const oldDiscoveryTokens = measureScenario('old_discovery', JSON.stringify(oldDiscovery)).tokens
       const oldInspectTokens = measureScenario('old_inspect', JSON.stringify(legacyOutline)).tokens
 
-      expect(mRoot.tokens).toBeLessThan(oldDiscoveryTokens / 5)
       expect(mInspect.tokens).toBeLessThan(oldInspectTokens / 5)
 
       for (const output of [serializedRoot, serializeDiscovery(explored), serializeRelationships(relationships), serializedOutline]) {
@@ -109,7 +106,7 @@ describe('CodeScope real repository acceptance', () => {
         `Files: ${files.length}`,
         '',
         `${''.padEnd(30)} ${col('old', 8)} ${col('new', 8)} ${col('reduction', 10)}`,
-        `${'Discovery (root)'.padEnd(30)} ${col(oldDiscoveryTokens, 8)} ${col(mRoot.tokens, 8)} ${col(reductionPercent(oldDiscoveryTokens, mRoot.tokens), 10)}`,
+        `Discovery (root): ${mRoot.tokens} tokens`,
         `${'Inspect (' + paths.length + ' files)'.padEnd(30)} ${col(oldInspectTokens, 8)} ${col(mInspect.tokens, 8)} ${col(reductionPercent(oldInspectTokens, mInspect.tokens), 10)}`,
         '',
         `Navigation Overhead: ${navOverhead.totalTokens} tokens (${navOverhead.totalCharacters} chars)`,

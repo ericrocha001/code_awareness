@@ -12,7 +12,7 @@ import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistribution
 import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../../shared/types/github-types'
 
-import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DashSettings, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag, DashResolutionReport, DashExecutionResult } from '../../shared/types'
+import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag, DashExecutionResult } from '../../shared/types'
 
 declare global {
   interface Window {
@@ -315,56 +315,7 @@ declare global {
       onCodeMapFileIndexed: (callback: (data: { repoPath: string; relativePath: string }) => void) => () => void
 
       // ─── Code Dash ───────────────────────────────────────────────────
-      dashParseAndResolve: (
-        input: string,
-        repoPath: string
-      ) => Promise<{
-        success: boolean
-        data?: DashResolutionReport
-        error?: string
-      }>
-
-      dashDiscover: (
-        request: import('../../shared/types/repo-discovery-types').RepoDiscoveryRequest,
-        repoPath: string
-      ) => Promise<{
-        success: boolean
-        data?: import('../../shared/types/repo-discovery-types').RepoDiscoveryResult
-        error?: string
-      }>
-
-      dashGenerate: (
-        input: string,
-        repoPath: string,
-        settings?: DashSettings
-      ) => Promise<{
-        success: boolean
-        data?: DashExecutionResult
-        error?: string
-      }>
-
-      dashOneClickXml: (
-        repoPath: string,
-        options?: {
-          removeComments?: boolean
-          removeEmptyLines?: boolean
-          truncateBase64?: boolean
-          persistedSettings?: DashSettings
-        }
-      ) => Promise<{
-        success: boolean
-        xml?: string
-        tokenCount?: number
-        error?: string
-        timings?: {
-          listFilesMs: number
-          generateMs: number
-          totalMs: number
-        }
-        metadata?: {
-          fileCount: number
-        }
-      }>
+      dashExecute: (input: string, repoPath: string) => Promise<DashExecutionResult>
     }
   }
 }
