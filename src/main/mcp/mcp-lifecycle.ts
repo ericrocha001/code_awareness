@@ -90,6 +90,7 @@ export class McpLifecycle {
       this.requested.navigation === context.navigation &&
       this.requested.artifactReader === context.artifactReader &&
       this.requested.continuum === context.continuum &&
+      this.requested.visualContinuum === context.visualContinuum &&
       this.requested.validationExecution === context.validationExecution &&
       this.requested.diagnosticSourceAccess === context.diagnosticSourceAccess &&
       this.requested.runtimeRestart === context.runtimeRestart &&

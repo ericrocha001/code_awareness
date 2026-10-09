@@ -8,7 +8,7 @@ const root = resolve(__dirname, '../..')
 const worker = join(temporary, 'worker.cjs')
 const env = { ...process.env, NODE_PATH: join(root, 'node_modules') }; delete env.ELECTRON_RUN_AS_NODE
 try {
-  buildSync({ entryPoints: [join(__dirname, 'e2e-worker.ts')], outfile: worker, bundle: true, platform: 'node', alias: { 'better-sqlite3': require.resolve('better-sqlite3'), 'js-yaml': require.resolve('js-yaml') }, external: ['electron', require.resolve('better-sqlite3'), require.resolve('js-yaml')], logLevel: 'silent' })
+  buildSync({ entryPoints: [join(__dirname, 'e2e-worker.ts')], outfile: worker, bundle: true, platform: 'node', alias: { 'better-sqlite3': require.resolve('better-sqlite3'), 'js-yaml': require.resolve('js-yaml'), 'sharp': require.resolve('sharp') }, external: ['electron', require.resolve('sharp'), require.resolve('better-sqlite3'), require.resolve('js-yaml')], logLevel: 'silent' })
   const child = spawn(require('electron'), [worker], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
   let result, diagnostics = ''
   const timer = setTimeout(() => child.kill(), 180000)

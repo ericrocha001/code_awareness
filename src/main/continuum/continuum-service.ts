@@ -4,13 +4,29 @@ import type { TransportEnvelope } from './artifact-envelope'
 import { ArtifactStore } from './artifact-store'
 import { parseArtifactMarkdown } from './artifact-metadata'
 import { legacyInput } from './legacy-artifact-migrator'
+import { validateVisualMedia } from './visual-media'
+import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
 
-export class ContinuumService implements IContinuumService {
+export class ContinuumService implements IContinuumService, IVisualContinuumService {
   private readonly listeners = new Set<() => void>()
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private changed(): void { for (const listener of this.listeners) { try { listener() } catch (error) { console.error('[Continuum] Change notification failed:', error) } } }
   facets() { this.reconcile?.(); return this.store.facets() }
-  constructor(private readonly store: ArtifactStore, private readonly reconcile?: () => void) {}
+  constructor(private readonly store: ArtifactStore, private readonly reconcile?: () => void, private readonly isActive: () => boolean = () => true) {}
+  assertActive(): void { if (!this.isActive()) throw new Error('REPOSITORY_CONTEXT_CHANGED') }
+  async publishVisual(rawMarkdown: string, input: Uint8Array): Promise<VisualArtifactReceipt> {
+    this.assertActive()
+    this.reconcile?.()
+    const { metadata } = parseArtifactMarkdown(rawMarkdown)
+    if (metadata.kind !== 'VISUAL_REFERENCE' || metadata.media !== undefined) throw new Error('RESERVED_VISUAL_METADATA')
+    const data = Buffer.from(input)
+    const media = await validateVisualMedia(data)
+    this.assertActive()
+    const artifact = this.store.createVisual({ artifactId: 'artifact-' + randomUUID(), rawMarkdown, metadata }, data, media)
+    this.changed()
+    return { ...this.receipt(artifact), media }
+  }
+  getVisual(artifactId: string) { this.assertActive(); this.reconcile?.(); return this.store.getVisual(artifactId) }
   private receipt(artifact: Artifact): ArtifactReceipt { return { success: true, artifactId: artifact.artifactId, revision: artifact.revision, updatedAt: artifact.updatedAt } }
   publish(rawMarkdown: string): ArtifactReceipt {
     this.reconcile?.()

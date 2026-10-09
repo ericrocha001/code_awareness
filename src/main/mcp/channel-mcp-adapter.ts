@@ -7,7 +7,7 @@ import { GIT_OPERATIONS_TOOLS, executeGitOperationsTool } from '../git-operation
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
 import { bindProjectNavigation, type ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { CODE_NAVIGATION_MCP_TOOLS, executeCodeNavigationTool } from './code-navigation-mcp'
-import type { McpToolDefinition, McpToolResult } from './mcp-types'
+import type { McpToolDefinition, McpMultimodalToolResult as McpToolResult } from './mcp-types'
 export type { McpToolDefinition, McpToolResult, McpOAuthSecurityScheme } from './mcp-types'
 
 import { SYSTEM_HEALTH_MCP_TOOL, executeGetSystemHealth } from '../system-health/system-health-mcp'
@@ -33,6 +33,8 @@ import {
   executePublishArtifact,
   executeUpdateArtifact
 } from '../continuum/continuum-mcp'
+import { GET_VISUAL_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, executeGetVisualArtifact, executePublishVisualArtifact } from '../continuum/continuum-mcp'
+import type { IVisualContinuumService } from '../continuum/continuum-types'
 import type { IArtifactReader, IContinuumService } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
 import { VALIDATION_EXECUTION_TOOLS, executeValidationTool } from '../validation-execution/validation-execution-mcp'
@@ -70,6 +72,7 @@ export class ChannelMcpAdapter {
   private readonly validationLedger: ValidationLedger | undefined
   private readonly artifactReader: IArtifactReader | undefined
   private readonly continuum?: IContinuumService
+  private readonly visualContinuum?: IVisualContinuumService
   private readonly validationExecution: ValidationExecution | undefined
   private readonly diagnosticSourceAccess: DiagnosticSourceAccess | undefined
   private readonly runtimeRestart: RuntimeRestartController | undefined
@@ -117,6 +120,7 @@ export class ChannelMcpAdapter {
       this.runtimeIdentity = (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ?? this.systemHealth?.getRuntimeIdentityProvider()
       this.validationLedger = runtimeIdentityOrLedger as ValidationLedger | undefined
       this.continuum = context.continuum
+      this.visualContinuum = context.visualContinuum
       this.artifactReader = context.continuum ?? context.artifactReader
       this.validationExecution = context.validationExecution
       this.diagnosticSourceAccess = context.diagnosticSourceAccess
@@ -174,6 +178,7 @@ export class ChannelMcpAdapter {
       )
     }
     if (this.continuum) tools.push(PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL)
+    if (this.visualContinuum) tools.push(PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL)
     if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
@@ -212,9 +217,11 @@ export class ChannelMcpAdapter {
       record('error', error instanceof Error ? error.name : 'EXECUTION_FAILED')
       throw error
     }
-    record(result.isError ? 'error' : 'success', result.isError && result.content.some(entry => /\bREQUEST_TIMEOUT\b/.test(entry.text)) ? 'REQUEST_TIMEOUT' : undefined)
+    record(result.isError ? 'error' : 'success', result.isError && result.content.some(entry => entry.type === 'text' && /\bREQUEST_TIMEOUT\b/.test(entry.text)) ? 'REQUEST_TIMEOUT' : undefined)
     if (name === 'get_system_health' && !result.isError) {
-      const health = JSON.parse(result.content[0].text)
+      const first = result.content[0]
+      if (first.type !== 'text') throw new Error('INVALID_HEALTH_CONTENT')
+      const health = JSON.parse(first.text)
       return { ...result, content: [{ type: 'text', text: JSON.stringify({ ...health, workloadGovernor: this.governor.snapshot(), activeRunId: this.validationExecution?.getActiveRunId() ?? null }) }] }
     }
     return result
@@ -227,7 +234,7 @@ export class ChannelMcpAdapter {
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name)) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
-    if ([LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL].some(tool => tool.name === name)) return 'Continuum'
+    if ([LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
     if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name) return 'Runtime Identity/Restart'
     if (name === SYSTEM_HEALTH_MCP_TOOL.name) return 'System Health'
@@ -235,6 +242,10 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (name === 'get_visual_artifact' || name === 'publish_visual_artifact') {
+      if (!this.visualContinuum) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
+      return name === 'get_visual_artifact' ? executeGetVisualArtifact(this.visualContinuum, args) : executePublishVisualArtifact(this.visualContinuum, args, { timeoutMs: Math.max(1, Math.min(10_000, (invocationContext?.deadlineAtMs ?? Date.now() + 15_000) - Date.now() - 5500)) })
+    }
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) {
       return this.repositoryFileEditing ? executeRepositoryFileEditing(this.repositoryFileEditing, name, args)
         : { content: [{ type: 'text', text: 'REPOSITORY_FILE_EDITING_UNAVAILABLE' }], isError: true }

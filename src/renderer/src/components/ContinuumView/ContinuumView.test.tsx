@@ -20,8 +20,61 @@ beforeEach(() => {
     listContinuumArtifacts: vi.fn(async request => ({ repositoryId: request.repositoryId, artifacts: request.repositoryId === 'catalog-A' ? [{ artifactId: 'one', name: 'First artifact', description: 'Read first', kind: 'NEVER_SEEN_KIND', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0 }] : [] })),
     getContinuumArtifact: vi.fn(async (repositoryId: string, artifactId: string) => ({ repositoryId, artifact: { artifactId, revision: 2, metadata: { name: 'First artifact', kind: 'NEVER_SEEN_KIND', future: { x: ['value'] } }, body, createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-10-06T18:00:00Z' } })),
     onContinuumChanged: vi.fn(callback => { receive = callback; return unsubscribe }),
-    publishContinuumArtifact: vi.fn(async () => ({ success: true, artifactId: 'new', revision: 1, updatedAt: 'now' }))
+    publishContinuumArtifact: vi.fn(async () => ({ success: true, artifactId: 'new', revision: 1, updatedAt: 'now' })),
+    publishContinuumVisual: vi.fn(async () => ({ success: true, artifactId: 'visual', revision: 1, updatedAt: 'now' })),
+    getContinuumVisual: vi.fn(async (repositoryId, artifactId) => ({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1, 2]) }))
   } as unknown as Window['codeAwareness']
+})
+
+it('publishes only after explicit visual context submission, with optional relation and scoped binary IPC', async () => {
+  render(<ContinuumView activeProject={project} />)
+  await screen.findByRole('button', { name: /First artifact/ })
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar WebP' }))
+  const data = new Uint8Array([1, 2, 3])
+  fireEvent.change(screen.getByLabelText('Arquivo WebP'), { target: { files: [{ name: 'reference.webp', size: 3, arrayBuffer: async () => data.buffer }] } })
+  expect(window.codeAwareness.publishContinuumVisual).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Descrição'), { target: { value: 'Durable visual' } })
+  fireEvent.change(screen.getByLabelText('Contexto'), { target: { value: 'Normative reference' } })
+  fireEvent.change(screen.getByLabelText('Relacionar a um Artifact'), { target: { value: 'one' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar referência' }))
+  await waitFor(() => expect(window.codeAwareness.publishContinuumVisual).toHaveBeenCalledWith({ repositoryId: 'catalog-A', name: 'reference', description: 'Durable visual', context: 'Normative reference', data, relations: [{ artifactId: 'one', kind: 'related-to' }] }))
+  expect(window.codeAwareness.publishContinuumArtifact).not.toHaveBeenCalled()
+})
+
+it('loads visual bytes only on selection and revokes preview URLs when repository changes', async () => {
+  const create = vi.fn(() => 'blob:visual'), revoke = vi.fn()
+  vi.stubGlobal('URL', class extends URL { static createObjectURL = create; static revokeObjectURL = revoke })
+  const original = vi.mocked(window.codeAwareness.getContinuumArtifact).getMockImplementation()!
+  vi.mocked(window.codeAwareness.getContinuumArtifact).mockImplementation(async (repositoryId, artifactId) => {
+    const result = await original(repositoryId, artifactId)
+    return { ...result, artifact: { ...result.artifact!, metadata: { ...result.artifact!.metadata, kind: 'VISUAL_REFERENCE' } } }
+  })
+  const view = render(<ContinuumView activeProject={project} />)
+  const item = await screen.findByRole('button', { name: /First artifact/ })
+  expect(window.codeAwareness.getContinuumVisual).not.toHaveBeenCalled()
+  fireEvent.click(item)
+  await screen.findByAltText('Referência visual canônica')
+  expect(window.codeAwareness.getContinuumVisual).toHaveBeenCalledWith('catalog-A', 'one')
+  view.rerender(<ContinuumView activeProject={{ ...project, path: '/B' }} />)
+  await waitFor(() => expect(revoke).toHaveBeenCalledWith('blob:visual'))
+  expect(screen.queryByAltText('Referência visual canônica')).toBeNull()
+  vi.unstubAllGlobals()
+})
+
+it('rejects an in-flight visual file read even when selection leaves and returns to the same repository', async () => {
+  let finish!: (value: ArrayBuffer) => void
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByRole('button', { name: /First artifact/ })
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar WebP' }))
+  fireEvent.change(screen.getByLabelText('Arquivo WebP'), { target: { files: [{ name: 'reference.webp', size: 3, arrayBuffer: () => new Promise(resolve => { finish = resolve }) }] } })
+  fireEvent.change(screen.getByLabelText('Descrição'), { target: { value: 'Durable visual' } })
+  fireEvent.change(screen.getByLabelText('Contexto'), { target: { value: 'Normative reference' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Publicar referência' }))
+  view.rerender(<ContinuumView activeProject={{ ...project, path: '/B' }} />)
+  await waitFor(() => expect(window.codeAwareness.getContinuumFacets).toHaveBeenCalledWith('/B'))
+  view.rerender(<ContinuumView activeProject={project} />)
+  await act(async () => finish(new Uint8Array([1, 2, 3]).buffer))
+  expect(window.codeAwareness.publishContinuumVisual).not.toHaveBeenCalled()
 })
 
 function selectFile(name: string, read: () => Promise<ArrayBuffer>) {

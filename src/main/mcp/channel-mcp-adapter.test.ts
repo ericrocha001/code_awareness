@@ -1,3 +1,4 @@
+import { textContent } from './mcp-test-content'
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { ContextNavigationError } from '../../shared/types/context-navigation-types'
@@ -88,8 +89,8 @@ describe('ChannelMcpAdapter', () => {
     expect(navigation.getReferences).not.toHaveBeenCalled()
     expect(navigation.getSymbolDependencies).not.toHaveBeenCalled()
     expect(navigation.getSymbolHierarchy).not.toHaveBeenCalled()
-    expect((await adapter.callTool('get_relationships', { relativePaths: ['src/a.ts'] })).content[0].text).toBe('[src/a.ts]\n\nOUT\nsrc/b.ts\n\nIN\nsrc/c.ts')
-    expect((await adapter.callTool('inspect_files', { relativePaths: ['src/a.ts'] })).content[0].text).toBe('[src/a.ts]\n\nclass Example t:ASNFZ4mrze8\n  run t:AAAAAAAAAAA')
+    expect(textContent((await adapter.callTool('get_relationships', { relativePaths: ['src/a.ts'] })).content[0])).toBe('[src/a.ts]\n\nOUT\nsrc/b.ts\n\nIN\nsrc/c.ts')
+    expect(textContent((await adapter.callTool('inspect_files', { relativePaths: ['src/a.ts'] })).content[0])).toBe('[src/a.ts]\n\nclass Example t:ASNFZ4mrze8\n  run t:AAAAAAAAAAA')
     const code = await adapter.callTool('read_code', { targetIds: ['t:AAAAAAAAAAA', 't:ASNFZ4mrze8'] })
     expect(code.content).toEqual(['t:AAAAAAAAAAA', 't:ASNFZ4mrze8'].map((id) => ({ type: 'text', text: '[' + id + ' src/a.ts]\n\nfunction run() {\r\n  return "ação 日本語"\r\n}\r\n' })))
     const references = await adapter.callTool('get_references', { targetIds: ['t:ASNFZ4mrze8', 't:BBBBBBBBBBB'] })
@@ -141,7 +142,7 @@ describe('ChannelMcpAdapter', () => {
     const navigation = createNavigation()
     const result = await new ChannelMcpAdapter(navigation, 'repo').callTool(name as string, args)
     expect(result.isError).toBe(true)
-    expect(result.content[0].text).toMatch(/^INVALID_ARGUMENT:/)
+    expect(textContent(result.content[0])).toMatch(/^INVALID_ARGUMENT:/)
     for (const operation of Object.values(navigation)) expect(operation).not.toHaveBeenCalled()
   })
 
@@ -190,82 +191,82 @@ describe('ChannelMcpAdapter', () => {
     const discResult = await navigation.discoverRepository('repo', undefined)
     const expectedDiscovery = serializeDiscovery(discResult)
     const mcpDisc = await adapter.callTool('discover_repository', {})
-    expect(mcpDisc.content[0].text).toBe(expectedDiscovery)
-    expect(mcpDisc.content[0].text).not.toMatch(/\\"/)
-    expect(mcpDisc.content[0].text).not.toMatch(/^\{|^\[\{/)
+    expect(textContent(mcpDisc.content[0])).toBe(expectedDiscovery)
+    expect(textContent(mcpDisc.content[0])).not.toMatch(/\\"/)
+    expect(textContent(mcpDisc.content[0])).not.toMatch(/^\{|^\[\{/)
 
     const relResult = await navigation.getRelationships('repo', ['src/a.ts'], {})
     const expectedRel = serializeRelationships(relResult)
     const mcpRel = await adapter.callTool('get_relationships', { relativePaths: ['src/a.ts'] })
-    expect(mcpRel.content[0].text).toBe(expectedRel)
-    expect(mcpRel.content[0].text).not.toMatch(/\\"/)
-    expect(mcpRel.content[0].text).not.toMatch(/^\{|^\[\{/)
+    expect(textContent(mcpRel.content[0])).toBe(expectedRel)
+    expect(textContent(mcpRel.content[0])).not.toMatch(/\\"/)
+    expect(textContent(mcpRel.content[0])).not.toMatch(/^\{|^\[\{/)
 
     const inspResult = await navigation.inspectFiles('repo', ['src/a.ts'], {})
     const expectedInspect = serializeInspectFiles(inspResult)
     const mcpInsp = await adapter.callTool('inspect_files', { relativePaths: ['src/a.ts'] })
-    expect(mcpInsp.content[0].text).toBe(expectedInspect)
-    expect(mcpInsp.content[0].text).not.toMatch(/\\"/)
-    expect(mcpInsp.content[0].text).not.toMatch(/^\{|^\[\{/)
+    expect(textContent(mcpInsp.content[0])).toBe(expectedInspect)
+    expect(textContent(mcpInsp.content[0])).not.toMatch(/\\"/)
+    expect(textContent(mcpInsp.content[0])).not.toMatch(/^\{|^\[\{/)
 
     const readResults = await navigation.readCode('repo', ['t:AAAAAAAAAAA'])
     const expectedRead = serializeReadCode(readResults[0])
     const mcpRead = await adapter.callTool('read_code', { targetIds: ['t:AAAAAAAAAAA'] })
-    expect(mcpRead.content[0].text).toBe(expectedRead)
-    expect(mcpRead.content[0].text).not.toMatch(/\\"/)
-    expect(mcpRead.content[0].text).not.toMatch(/^\{|^\[\{/)
+    expect(textContent(mcpRead.content[0])).toBe(expectedRead)
+    expect(textContent(mcpRead.content[0])).not.toMatch(/\\"/)
+    expect(textContent(mcpRead.content[0])).not.toMatch(/^\{|^\[\{/)
 
     const referencesResult = await navigation.getReferences('repo', ['t:AAAAAAAAAAA', 't:BBBBBBBBBBB'])
     const expectedReferences = serializeReferences(referencesResult)
     const mcpReferences = await adapter.callTool('get_references', { targetIds: ['t:AAAAAAAAAAA', 't:BBBBBBBBBBB'] })
     expect(mcpReferences.content).toEqual([{ type: 'text', text: expectedReferences }])
-    expect(mcpReferences.content[0].text).not.toMatch(/\\"/)
-    expect(mcpReferences.content[0].text).not.toMatch(/^\{|^\[\{/)
+    expect(textContent(mcpReferences.content[0])).not.toMatch(/\\"/)
+    expect(textContent(mcpReferences.content[0])).not.toMatch(/^\{|^\[\{/)
 
     const dependenciesResult = await navigation.getSymbolDependencies('repo', ['t:AAAAAAAAAAA', 't:BBBBBBBBBBB'])
     const expectedDependencies = serializeSymbolDependencies(dependenciesResult)
     const mcpDependencies = await adapter.callTool('get_symbol_dependencies', { sourceTargetIds: ['t:AAAAAAAAAAA', 't:BBBBBBBBBBB'] })
     expect(mcpDependencies.content).toEqual([{ type: 'text', text: expectedDependencies }])
-    expect(mcpDependencies.content[0].text).not.toMatch(/\\"/)
-    expect(mcpDependencies.content[0].text).not.toMatch(/^\{|^\[\{/)
+    expect(textContent(mcpDependencies.content[0])).not.toMatch(/\\"/)
+    expect(textContent(mcpDependencies.content[0])).not.toMatch(/^\{|^\[\{/)
 
     const hierarchyResult = await navigation.getSymbolHierarchy('repo', ['t:AAAAAAAAAAA', 't:BBBBBBBBBBB'], {})
     const expectedHierarchy = serializeSymbolHierarchy(hierarchyResult)
     const mcpHierarchy = await adapter.callTool('get_symbol_hierarchy', { targetIds: ['t:AAAAAAAAAAA', 't:BBBBBBBBBBB'] })
     expect(mcpHierarchy.content).toEqual([{ type: 'text', text: expectedHierarchy }])
-    expect(mcpHierarchy.content[0].text).not.toMatch(/\\"/)
-    expect(mcpHierarchy.content[0].text).not.toMatch(/^\{|^\[\{/)
+    expect(textContent(mcpHierarchy.content[0])).not.toMatch(/\\"/)
+    expect(textContent(mcpHierarchy.content[0])).not.toMatch(/^\{|^\[\{/)
   })
 
   it('navigates hierarchy in both directions through public MCP tools without reading source early', async () => {
     const fixture = createEfficiencyFixture()
     const adapter = new ChannelMcpAdapter(fixture.engine, fixture.repoPath)
     const inspected = await adapter.callTool('inspect_files', { relativePaths: ['src/service.ts', 'src/types.ts'] })
-    const service = inspected.content[0].text.match(/class DataService (t:[A-Za-z0-9_-]{11})/)?.[1]
-    const contract = inspected.content[0].text.match(/interface ServiceConfig (t:[A-Za-z0-9_-]{11})/)?.[1]
+    const service = textContent(inspected.content[0]).match(/class DataService (t:[A-Za-z0-9_-]{11})/)?.[1]
+    const contract = textContent(inspected.content[0]).match(/interface ServiceConfig (t:[A-Za-z0-9_-]{11})/)?.[1]
     expect(service).toBeDefined()
     expect(contract).toBeDefined()
 
     const up = await adapter.callTool('get_symbol_hierarchy', { targetIds: [service!] })
-    expect(up.content[0].text).toBe(serializeSymbolHierarchy(await fixture.engine.getSymbolHierarchy(fixture.repoPath, [service!])))
-    expect(up.content[0].text).toContain(contract!)
+    expect(textContent(up.content[0])).toBe(serializeSymbolHierarchy(await fixture.engine.getSymbolHierarchy(fixture.repoPath, [service!])))
+    expect(textContent(up.content[0])).toContain(contract!)
     const contractReferences = await adapter.callTool('get_references', { targetIds: [contract!] })
-    expect(contractReferences.content[0].text).toContain('t:')
+    expect(textContent(contractReferences.content[0])).toContain('t:')
 
     const down = await adapter.callTool('get_symbol_hierarchy', { targetIds: [contract!], direction: 'down' })
-    expect(down.content[0].text).toBe(serializeSymbolHierarchy(await fixture.engine.getSymbolHierarchy(fixture.repoPath, [contract!], { direction: 'down' })))
-    expect(down.content[0].text).toContain(service!)
+    expect(textContent(down.content[0])).toBe(serializeSymbolHierarchy(await fixture.engine.getSymbolHierarchy(fixture.repoPath, [contract!], { direction: 'down' })))
+    expect(textContent(down.content[0])).toContain(service!)
     const dependencies = await adapter.callTool('get_symbol_dependencies', { sourceTargetIds: [service!] })
     expect(dependencies.isError).toBeUndefined()
     expect(fixture.getSourceReadsCount()).toBe(0)
 
     const read = await adapter.callTool('read_code', { targetIds: [service!] })
-    expect(read.content[0].text).toContain('class DataService')
+    expect(textContent(read.content[0])).toContain('class DataService')
     expect(fixture.getSourceReadsCount()).toBe(1)
 
     const rejectedInternalId = await adapter.callTool('get_symbol_hierarchy', { targetIds: ['0000000000000001'] })
     expect(rejectedInternalId).toMatchObject({ isError: true })
-    expect(rejectedInternalId.content[0].text).toMatch(/^INVALID_TARGET:/)
+    expect(textContent(rejectedInternalId.content[0])).toMatch(/^INVALID_TARGET:/)
   })
 
   it('navigates inspect to references to source code through public MCP tools without reading source early', async () => {
@@ -273,7 +274,7 @@ describe('ChannelMcpAdapter', () => {
     const adapter = new ChannelMcpAdapter(fixture.engine, fixture.repoPath)
 
     const inspected = await adapter.callTool('inspect_files', { relativePaths: ['src/service.ts'] })
-    const target = inspected.content[0].text.match(/class DataService (t:[A-Za-z0-9_-]{11})/)?.[1]
+    const target = textContent(inspected.content[0]).match(/class DataService (t:[A-Za-z0-9_-]{11})/)?.[1]
     expect(target).toBeDefined()
 
     const references = await adapter.callTool('get_references', { targetIds: [target!] })
@@ -281,10 +282,10 @@ describe('ChannelMcpAdapter', () => {
     expect(references.content).toEqual([{ type: 'text', text: serializeReferences(coreResult) }])
     expect(fixture.getSourceReadsCount()).toBe(0)
 
-    const sourceTarget = references.content[0].text.match(/ (t:[A-Za-z0-9_-]{11})$/m)?.[1]
+    const sourceTarget = textContent(references.content[0]).match(/ (t:[A-Za-z0-9_-]{11})$/m)?.[1]
     expect(sourceTarget).toBeDefined()
     const read = await adapter.callTool('read_code', { targetIds: [sourceTarget!] })
-    expect(read.content[0].text).toContain('function startApp')
+    expect(textContent(read.content[0])).toContain('function startApp')
     expect(fixture.getSourceReadsCount()).toBe(1)
   })
 
@@ -292,26 +293,26 @@ describe('ChannelMcpAdapter', () => {
     const fixture = createEfficiencyFixture()
     const adapter = new ChannelMcpAdapter(fixture.engine, fixture.repoPath)
     const inspected = await adapter.callTool('inspect_files', { relativePaths: ['src/app.ts'] })
-    const sourceTarget = inspected.content[0].text.match(/function startApp (t:[A-Za-z0-9_-]{11})/)?.[1]
+    const sourceTarget = textContent(inspected.content[0]).match(/function startApp (t:[A-Za-z0-9_-]{11})/)?.[1]
     expect(sourceTarget).toBeDefined()
 
     const dependencies = await adapter.callTool('get_symbol_dependencies', { sourceTargetIds: [sourceTarget!] })
     const coreResult = await fixture.engine.getSymbolDependencies(fixture.repoPath, [sourceTarget!])
     expect(dependencies.content).toEqual([{ type: 'text', text: serializeSymbolDependencies(coreResult) }])
     expect(fixture.getSourceReadsCount()).toBe(0)
-    const dependencyTarget = dependencies.content[0].text.match(/\b(t:[A-Za-z0-9_-]{11}) src\/service\.ts$/m)?.[1]
+    const dependencyTarget = textContent(dependencies.content[0]).match(/\b(t:[A-Za-z0-9_-]{11}) src\/service\.ts$/m)?.[1]
     expect(dependencyTarget).toBeDefined()
 
     const inbound = await adapter.callTool('get_references', { targetIds: [dependencyTarget!] })
-    expect(inbound.content[0].text).toContain(sourceTarget!)
+    expect(textContent(inbound.content[0])).toContain(sourceTarget!)
     expect(fixture.getSourceReadsCount()).toBe(0)
 
     const read = await adapter.callTool('read_code', { targetIds: [dependencyTarget!] })
-    expect(read.content[0].text).toContain('class DataService')
+    expect(textContent(read.content[0])).toContain('class DataService')
     expect(fixture.getSourceReadsCount()).toBe(1)
 
     const rejectedInternalId = await adapter.callTool('get_symbol_dependencies', { sourceTargetIds: ['0000000000000001'] })
     expect(rejectedInternalId).toMatchObject({ isError: true })
-    expect(rejectedInternalId.content[0].text).toMatch(/^INVALID_TARGET:/)
+    expect(textContent(rejectedInternalId.content[0])).toMatch(/^INVALID_TARGET:/)
   })
 })

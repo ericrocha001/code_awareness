@@ -1,3 +1,4 @@
+import { textContent } from '../mcp/mcp-test-content'
 import { mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -222,8 +223,8 @@ describe('project-scoped Git operations with real Git', () => {
     const adapterA = new ChannelMcpAdapter({ projectId: 'a', repoRoot: a.root, navigation, gitOperations: a.service })
     const adapterB = new ChannelMcpAdapter({ projectId: 'b', repoRoot: b.root, navigation, gitOperations: b.service })
     expect(adapterB.listTools().filter((tool) => GIT_OPERATIONS_TOOLS.some((gitTool) => gitTool.name === tool.name))).toHaveLength(GIT_OPERATIONS_TOOLS.length)
-    expect((await adapterA.callTool('get_git_changes', {})).content[0].text).toContain('only-a')
-    expect((await adapterB.callTool('get_git_changes', {})).content[0].text).not.toContain('only-a')
+    expect(textContent((await adapterA.callTool('get_git_changes', {})).content[0])).toContain('only-a')
+    expect(textContent((await adapterB.callTool('get_git_changes', {})).content[0])).not.toContain('only-a')
     expect((await adapterB.callTool('stage_git_changes', { paths: ['only-a.txt'], mode: 'STAGE', repoPath: a.root })).isError).toBe(true)
     expect((await a.service.getState()).untrackedCount).toBe(1)
     const lifecycle = new McpLifecycle({ createContextServer: (context) => createMcpHttpServer(new ChannelMcpAdapter(context), () => {}), log: () => {} })

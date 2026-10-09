@@ -1,6 +1,8 @@
 import Database from 'better-sqlite3'
 import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continuum-ui-types'
 import { createHash } from 'node:crypto'
+import { inspectWebP, mediaHash } from './visual-media'
+import type { VisualMedia, VisualArtifact } from './continuum-types'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Artifact, ArtifactDiscoveryRecord, ArtifactPage, CreateArtifactInput, UpdateArtifactInput, ListArtifactsFilter, MetadataValue } from './continuum-types'
@@ -102,6 +104,16 @@ export class ArtifactStore {
       );
       CREATE TABLE IF NOT EXISTS legacy_migrations (source TEXT PRIMARY KEY, completed_at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS repository_locators (locator TEXT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS visual_blobs (
+        sha256 TEXT PRIMARY KEY, data BLOB NOT NULL, descriptor_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS artifact_media (
+        artifact_id TEXT PRIMARY KEY REFERENCES artifacts(artifact_id), sha256 TEXT NOT NULL REFERENCES visual_blobs(sha256)
+      );
+      CREATE TRIGGER IF NOT EXISTS media_no_update BEFORE UPDATE ON artifact_media
+        BEGIN SELECT RAISE(ABORT, 'Immutable media association'); END;
+      CREATE TRIGGER IF NOT EXISTS media_no_delete BEFORE DELETE ON artifact_media
+        BEGIN SELECT RAISE(ABORT, 'Immutable media association'); END;
     `)
   }
 
@@ -111,7 +123,8 @@ export class ArtifactStore {
       contentHash: row.content_hash, provenance: JSON.parse(row.provenance_json) }
   }
 
-  private validate(input: CreateArtifactInput, legacy: boolean): CreateArtifactInput {
+  private validate(input: CreateArtifactInput, legacy: boolean, visual = false): CreateArtifactInput {
+    if (input.metadata.media !== undefined || (!visual && input.metadata.kind === 'VISUAL_REFERENCE')) throw new Error('RESERVED_VISUAL_METADATA')
     if (typeof input.artifactId !== 'string' || !input.artifactId.trim()) throw new Error('INVALID_ARGUMENT: artifactId is required')
     if (legacy) {
       if (typeof input.rawMarkdown !== 'string') throw new Error('INVALID_ARGUMENT: legacy Markdown must be a string')
@@ -135,8 +148,9 @@ export class ArtifactStore {
     this.db.prepare('INSERT INTO artifact_revisions(artifact_id, revision, snapshot_json) VALUES (?, ?, ?)').run(artifact.artifactId, artifact.revision, JSON.stringify(artifact))
   }
 
-  private createInsideTransaction(input: CreateArtifactInput, legacy = false): Artifact {
-    input = this.validate(input, legacy)
+  private createInsideTransaction(input: CreateArtifactInput, legacy = false, media?: VisualMedia): Artifact {
+    input = this.validate(input, legacy, !!media)
+    if (media) input = { ...input, metadata: { ...input.metadata, kind: 'VISUAL_REFERENCE', media: { ...media } } }
     if (this.db.prepare('SELECT 1 FROM artifacts WHERE artifact_id = ?').get(input.artifactId)) throw new ArtifactIdentityConflictError(input.artifactId)
     const now = new Date().toISOString()
     const artifact: Artifact = { artifactId: input.artifactId, revision: 1, metadata: input.metadata,
@@ -152,13 +166,43 @@ export class ArtifactStore {
   }
   create(input: CreateArtifactInput): Artifact { return this.db.transaction(() => this.createInsideTransaction(input)).immediate() }
 
+  createVisual(input: CreateArtifactInput, data: Buffer, media: VisualMedia): Artifact {
+    if (input.metadata.kind !== 'VISUAL_REFERENCE') throw new Error('RESERVED_VISUAL_METADATA')
+    const dimensions = inspectWebP(data)
+    if (media.sha256 !== mediaHash(data) || media.bytes !== data.length || dimensions.width !== media.width || dimensions.height !== media.height || media.mimeType !== 'image/webp' || media.lossless !== true || media.animated !== false) throw new Error('VISUAL_INTEGRITY_ERROR')
+    return this.db.transaction(() => {
+      const artifact = this.createInsideTransaction(input, false, media)
+      this.db.prepare('INSERT OR IGNORE INTO visual_blobs VALUES (?, ?, ?)').run(media.sha256, data, JSON.stringify(media))
+      this.db.prepare('INSERT INTO artifact_media VALUES (?, ?)').run(artifact.artifactId, media.sha256)
+      this.getVisual(artifact.artifactId)
+      return artifact
+    }).immediate()
+  }
+
+  getVisual(artifactId: string): VisualArtifact {
+    const artifact = this.get(artifactId)
+    if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
+    const row = this.db.prepare(`SELECT b.sha256, b.data, b.descriptor_json FROM artifact_media m
+      JOIN visual_blobs b ON b.sha256 = m.sha256 WHERE m.artifact_id = ?`).get(artifactId) as { sha256: string; data: Buffer; descriptor_json: string } | undefined
+    if (!row) throw new Error('VISUAL_MEDIA_NOT_FOUND')
+    try {
+      const media = JSON.parse(row.descriptor_json) as VisualMedia
+      const dimensions = inspectWebP(row.data)
+      if (artifact.metadata.kind !== 'VISUAL_REFERENCE' || media.mimeType !== 'image/webp' || media.lossless !== true || media.animated !== false || media.sha256 !== row.sha256 || mediaHash(row.data) !== row.sha256 || media.bytes !== row.data.length || dimensions.width !== media.width || dimensions.height !== media.height || canonicalJson(artifact.metadata.media as MetadataValue) !== canonicalJson(media as unknown as MetadataValue)) throw new Error()
+      return { artifact, media, data: row.data }
+    } catch { throw new Error('VISUAL_INTEGRITY_ERROR') }
+  }
+
   update(input: UpdateArtifactInput): Artifact {
     if (!Number.isInteger(input.expectedRevision) || input.expectedRevision < 1) throw new Error('INVALID_ARGUMENT: expectedRevision must be an integer >= 1')
     return this.db.transaction(() => {
       const current = this.get(input.artifactId)
       if (!current) throw new Error('ARTIFACT_NOT_FOUND: ' + input.artifactId)
       if (current.revision !== input.expectedRevision) throw new ArtifactRevisionConflictError(input.artifactId, current.revision)
-      const checked = this.validate(input, false)
+      const visual = current.metadata.kind === 'VISUAL_REFERENCE'
+      if (visual && input.metadata.kind !== 'VISUAL_REFERENCE') throw new Error('IMMUTABLE_VISUAL_KIND')
+      const checked = this.validate(input, false, visual)
+      if (visual) checked.metadata = { ...checked.metadata, media: current.metadata.media }
       const artifact: Artifact = { ...current, metadata: checked.metadata, rawMarkdown: checked.rawMarkdown,
         revision: current.revision + 1, updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString(),
         contentHash: computeContentHash(checked.rawMarkdown) }

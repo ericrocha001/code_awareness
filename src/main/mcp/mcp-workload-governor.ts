@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { McpToolResult } from './mcp-types'
+import type { McpMultimodalToolResult as McpToolResult } from './mcp-types'
 import { CODE_NAVIGATION_MCP_TOOLS } from './code-navigation-mcp'
 import { MCP_REQUEST_BUDGET_MS, operationalFailure } from './operational-guidance'
 import { isReceiptedGitMutation } from '../git-operations/git-operation-receipts'
@@ -48,7 +48,7 @@ export class McpWorkloadGovernor {
     const work = Promise.resolve().then(execute).then((result) => {
       if (result.isError) {
         this.record(lane, 'EXECUTION_FAILED', operationId)
-        if (result.content.some((entry) => /REQUEST_TIMEOUT|CHANNEL_DEGRADED/.test(entry.text))) degrade()
+        if (result.content.some((entry) => entry.type === 'text' && /REQUEST_TIMEOUT|CHANNEL_DEGRADED/.test(entry.text))) degrade()
         else if (state.halfOpen) degrade()
       } else {
         if (state.halfOpen) this.record(lane, 'RECOVERED', operationId)

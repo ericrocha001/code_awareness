@@ -6,6 +6,7 @@ import type { ValidationExecution } from '../validation-execution/validation-exe
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
+import type { IVisualContinuumService } from '../continuum/continuum-types'
 
 export interface McpProjectContext {
   projectId: string
@@ -13,6 +14,7 @@ export interface McpProjectContext {
   navigation: ProjectContextNavigation
   artifactReader?: IArtifactReader
   continuum?: IContinuumService
+  visualContinuum?: IVisualContinuumService
   validationExecution?: ValidationExecution
   diagnosticSourceAccess?: DiagnosticSourceAccess
   runtimeRestart?: RuntimeRestartController

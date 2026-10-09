@@ -7,6 +7,7 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
+import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
 import type { ChannelState } from '../shared/types/channel-state-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
@@ -17,6 +18,8 @@ import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishR
 contextBridge.exposeInMainWorld('codeAwareness', {
   listContinuumArtifacts: (request: ContinuumListRequest): Promise<ContinuumTimeline> => ipcRenderer.invoke('continuum:list', request),
   publishContinuumArtifact: (request: ContinuumPublishRequest): Promise<ContinuumPublishReceipt> => ipcRenderer.invoke('continuum:publish', request),
+  publishContinuumVisual: (request: ContinuumVisualPublishRequest): Promise<ContinuumPublishReceipt> => ipcRenderer.invoke('continuum:publish-visual', request),
+  getContinuumVisual: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual', repositoryId, artifactId),
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
   getContinuumArtifact: (repositoryId: string, artifactId: string): Promise<ContinuumSelection> => ipcRenderer.invoke('continuum:get', repositoryId, artifactId),
   onContinuumChanged: (callback: (change: ContinuumChange) => void): (() => void) => {
