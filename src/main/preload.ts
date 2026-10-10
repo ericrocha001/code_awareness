@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   publishContinuumArtifact: (request: ContinuumPublishRequest): Promise<ContinuumPublishReceipt> => ipcRenderer.invoke('continuum:publish', request),
   publishContinuumVisual: (request: ContinuumVisualPublishRequest): Promise<ContinuumPublishReceipt> => ipcRenderer.invoke('continuum:publish-visual', request),
   getContinuumVisual: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual', repositoryId, artifactId),
+  getContinuumVisualThumbnail: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual-thumbnail', repositoryId, artifactId),
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
   getContinuumArtifact: (repositoryId: string, artifactId: string): Promise<ContinuumSelection> => ipcRenderer.invoke('continuum:get', repositoryId, artifactId),
   onContinuumChanged: (callback: (change: ContinuumChange) => void): (() => void) => {

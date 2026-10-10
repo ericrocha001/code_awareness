@@ -69,6 +69,10 @@
 .continuum-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; flex: 1; text-align: center; padding: 32px 16px; gap: 12px; color: var(--text-secondary); }
 .continuum-empty svg { color: var(--accent); }.continuum-empty h2, .continuum-empty h3 { margin: 0; color: var(--text-primary); font-size: 15px; }.continuum-empty p { margin: 0; font-size: 12px; line-height: 1.6; }
 .continuum-hint { color: var(--text-secondary); font-size: 12px; }
+.continuum-thumbnail { width: 112px; height: 68px; flex: 0 0 112px; display: flex; align-items: center; justify-content: center; border: 1px solid var(--border-subtle); border-radius: 6px; background: var(--bg-primary); color: var(--text-secondary); overflow: hidden; }
+.continuum-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
+.continuum-badge svg { vertical-align: middle; }
+.continuum-publication-feedback button { margin-left: 12px; color: var(--accent); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
 .continuum-load-more, .continuum-error button { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); }
 .continuum-load-more { display: block; margin: 16px auto; }
 .continuum-error { display: flex; gap: 12px; align-items: center; color: var(--text-primary); font-size: 12px; overflow-wrap: anywhere; }

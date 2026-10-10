@@ -1,11 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react'
-import { Infinity, FileText, X } from 'lucide-react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
 import Markdown from 'markdown-to-jsx'
 import type { ActiveProject } from '../../../../shared/types/active-project-types'
 import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar } from '../../../../shared/types/continuum-ui-types'
 import { SearchBox } from '../shared/SearchBox/SearchBox'
 import { ColumnResizer } from '../shared/ColumnResizer/ColumnResizer'
 import { useContinuumColumns } from './useContinuumColumns'
+import { VisualThumbnail, thumbnailQueue } from './VisualThumbnail'
 import './ContinuumView.css'
 
 function timestamp(value: string): string {
@@ -79,6 +80,10 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
   const [publishing, setPublishing] = useState(false)
   const [publicationMessage, setPublicationMessage] = useState('')
   const [publicationError, setPublicationError] = useState('')
+  const [publishedVisualId, setPublishedVisualId] = useState<string | null>(null)
+  const [revealId, setRevealId] = useState<string | null>(null)
+  const timelineScroll = useRef<HTMLDivElement>(null)
+  const enqueueThumbnail = useMemo(() => thumbnailQueue(), [])
   const columns = useContinuumColumns(path)
 
   const chooseMarkdown = () => {
@@ -111,7 +116,8 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
         relations: visualRelation ? [{ artifactId: visualRelation, kind: 'related-to' }] : [] })
       if (visualDraft.generation === publicationGeneration.current && visualDraft.path === currentPath.current) {
         setVisualDraft(null); setSelectedId(receipt.artifactId); setInspectorOpen(true)
-        setPublicationMessage(`Artifact publicado: ${receipt.artifactId}. A busca e os filtros ativos podem ocultá-lo na timeline.`)
+        setPublishedVisualId(receipt.artifactId); setRevealId(receipt.artifactId); setRefresh(value => value + 1)
+        setPublicationMessage(`Artifact publicado: ${receipt.artifactId}.`)
       }
     } catch (reason) { setPublicationError(String(reason)) }
     finally { publicationBusy.current = false; setPublishing(false) }
@@ -142,6 +148,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     setSelectedId(null); setArtifact(null); setCursor(undefined); setError(''); setInspectorOpen(false)
     setLoading(false); setFacetsLoading(false)
     publicationGeneration.current++; setVisualDraft(null); publicationContext.current = null
+    setPublishedVisualId(null); setRevealId(null); setPublicationMessage(''); setPublicationError('')
     listGeneration.current++
   }, [path])
 
@@ -205,6 +212,12 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     finally { if (generation === listGeneration.current) setLoading(false) }
   }
 
+  useEffect(() => {
+    if (!revealId || loading) return
+    const row = Array.from(timelineScroll.current?.querySelectorAll<HTMLButtonElement>('[data-artifact-id]') ?? []).find(element => element.dataset.artifactId === revealId)
+    if (row) { row.scrollIntoView({ block: 'nearest' }); setRevealId(null) }
+  }, [revealId, items, loading])
+
   return <div className="continuum-view">
     <header className="continuum-header">
       <div className="continuum-feature-icon"><Infinity size={36} /></div>
@@ -225,7 +238,12 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
       </select></label>
       <div><button type="submit" disabled={publishing}>{publishing ? 'Publicando…' : 'Publicar referência'}</button><button type="button" disabled={publishing} onClick={() => setVisualDraft(null)}>Cancelar</button></div>
     </form>}
-    {publicationMessage && <div className="continuum-publication-feedback" role="status">{publicationMessage}</div>}
+    {publicationMessage && <div className="continuum-publication-feedback" role="status">{publicationMessage}
+      {publishedVisualId && !loading && !items.some(item => item.artifactId === publishedVisualId) && <>
+        <span> A busca ou os filtros podem ocultar a referência.</span>
+        <button onClick={() => { setQuery(''); setMetadata({}); setRevealId(publishedVisualId); setRefresh(value => value + 1) }}>Exibir na timeline</button>
+      </>}
+    </div>}
     {publicationError && <div className="continuum-publication-feedback" role="alert">{publicationError}</div>}
     {!path ? <div className="continuum-empty"><Infinity size={38} /><h2>Nenhum repositório ativo</h2><p>Abra um repositório para consultar seu Continuum.</p></div> : <>
       {error && <div className="continuum-error" role="alert">{error}<button onClick={() => setRefresh(value => value + 1)}>Tentar novamente</button></div>}
@@ -247,15 +265,16 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
         <div className="continuum-resizer continuum-context-resizer"><ColumnResizer onDrag={columns.dragContext} onDragEnd={columns.persist} /></div>
         <section className="continuum-pane continuum-timeline" aria-label="Continuum">
           <div className="continuum-pane-heading"><h2>Continuum</h2><span>{items.length} artifacts{cursor ? '+' : ''}</span></div>
-          <div className="continuum-pane-scroll" aria-busy={loading}>
+          <div className="continuum-pane-scroll" aria-busy={loading} ref={timelineScroll}>
             {loading && <p role="status" className="continuum-hint">Carregando artifacts…</p>}
-            {items.map((item, index) => <React.Fragment key={item.artifactId}>
+            {items.map((item, index) => <React.Fragment key={`${repositoryId}:${item.artifactId}`}>
               {(index === 0 || new Date(items[index - 1].updatedAt).toDateString() !== new Date(item.updatedAt).toDateString()) &&
                 <div className="continuum-date">{new Date(item.updatedAt).toLocaleDateString(undefined, { dateStyle: 'long' })}</div>}
-              <button className={`continuum-item${selectedId === item.artifactId ? ' selected' : ''}`} aria-pressed={selectedId === item.artifactId}
+              <button data-artifact-id={item.artifactId} className={`continuum-item${selectedId === item.artifactId ? ' selected' : ''}`} aria-pressed={selectedId === item.artifactId}
                 onClick={() => { setSelectedId(item.artifactId); setInspectorOpen(true) }}>
-                <span className="continuum-node" /><FileText size={19} />
-                <span className="continuum-item-content"><strong>{item.name}</strong><span className="continuum-badge">{item.kind}</span>
+                <span className="continuum-node" />{item.kind === 'VISUAL_REFERENCE' && repositoryId
+                  ? <VisualThumbnail repositoryId={repositoryId} artifactId={item.artifactId} root={timelineScroll} enqueue={enqueueThumbnail} /> : <FileText size={19} />}
+                <span className="continuum-item-content"><strong>{item.name}</strong><span className="continuum-badge">{item.kind === 'VISUAL_REFERENCE' ? <><ImageIcon size={13} aria-hidden="true" /> Referência visual</> : item.kind}</span>
                   {item.description && <span className="continuum-description">{item.description}</span>}<time dateTime={item.updatedAt}>{timestamp(item.updatedAt)}</time></span>
               </button>
             </React.Fragment>)}
