@@ -74,14 +74,20 @@ function validateTestRuntimeLanes(options = {}) {
   return errors
 }
 
+const { validateGitPartition } = require('./git-lane-guard.cjs')
+
 function run() {
   const errors = validateTestRuntimeLanes()
+  const gitGuard = validateGitPartition()
+  if (!gitGuard.valid) {
+    errors.push(...gitGuard.errors)
+  }
   if (errors.length > 0) {
     console.error('TEST_RUNTIME_POLICY_INVALID')
     for (const error of errors) console.error(`- ${error}`)
     process.exit(1)
   }
-  console.log(`Test Runtime Policy PASS (${nativeTestFiles.length} native suites)`)
+  console.log(`Test Runtime Policy PASS (${nativeTestFiles.length} native suites, ${gitGuard.allFiles.length} git suites partitioned)`)
 }
 
 if (require.main === module) run()
