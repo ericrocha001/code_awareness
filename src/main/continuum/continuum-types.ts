@@ -1,3 +1,4 @@
+import type { ContinuumPeriod } from '../../shared/types/continuum-ui-types'
 export type MetadataValue = null | boolean | number | string | MetadataValue[] | { [key: string]: MetadataValue }
 export interface ArtifactRelation { artifactId: string; kind: string }
 export interface ArtifactMetadata {
@@ -33,6 +34,7 @@ export interface ListArtifactsFilter {
   kind?: string
   status?: string
   metadata?: Record<string, MetadataValue>
+  periods?: Record<string, ContinuumPeriod>
   metadataKeys?: string[]
   relatedToArtifactId?: string
   relationKind?: string

@@ -104,3 +104,43 @@ describe('Repository Artifact Store', () => {
     expect(() => store.list({ kind: 'OTHER', cursor: store.list({ limit: 1 }).nextCursor })).toThrow(/cursor/)
   })
 })
+
+it('aggregates lexical ISO periods compactly and filters before pagination without changing exact metadata', () => {
+  const { store } = setup()
+  for (let i = 0; i < 65; i++) store.create(input(`period-${i}`, { metadata: { name: 'Period', description: 'Period fixture', kind: 'DECISION', status: i % 2 ? 'PENDING' : 'DONE', occurred: `2026-10-31T23:${String(i % 60).padStart(2, '0')}:00-03:00`, other: '2025-12-31' } }))
+  const extras = ['2026-11-01T00:00:00+14:00', '2025-12-31T23:30:00-03:00', '2027-01-01T00:00:00+14:00', '2024-02-29', '2026-02-29', '2026-10-31junk', '2026-10-31T24:00:00Z', '2026-10-31T23:00:00+99:00', 'plain']
+  extras.forEach((occurred, i) => store.create(input(`extra-${i}`, { metadata: { name: 'Extra', description: 'Extra fixture', kind: 'OTHER', occurred } })))
+  const facet = store.facets().find(f => f.key === 'occurred')!
+  expect(facet.years).toEqual([
+    { year: 2027, count: 1, months: [{ month: 1, count: 1 }] },
+    { year: 2026, count: 66, months: [{ month: 11, count: 1 }, { month: 10, count: 65 }] },
+    { year: 2025, count: 1, months: [{ month: 12, count: 1 }] },
+    { year: 2024, count: 1, months: [{ month: 2, count: 1 }] }
+  ])
+  expect(facet.values.map(v => v.value)).toEqual(expect.arrayContaining(extras.slice(4)))
+  expect(JSON.stringify(facet).length).toBeLessThan(1000)
+  const periods = { occurred: { year: 2026, month: 10 } }
+  const page = store.list({ periods, limit: 30 })
+  expect(page.artifacts).toHaveLength(30)
+  const second = store.list({ periods, limit: 30, cursor: page.nextCursor })
+  const third = store.list({ periods, limit: 30, cursor: second.nextCursor })
+  expect(new Set([...page.artifacts, ...second.artifacts, ...third.artifacts].map(a => a.artifactId)).size).toBe(65)
+  expect(store.list({ periods: { occurred: { year: 2026 } }, limit: 100 }).artifacts).toHaveLength(66)
+  expect(store.list({ periods, metadata: { status: 'DONE' }, kind: 'DECISION', query: 'Period', limit: 100 }).artifacts).toHaveLength(33)
+  expect(store.list({ periods: { ...periods, other: { year: 2025, month: 12 } }, limit: 100 }).artifacts).toHaveLength(65)
+  expect(() => store.list({ periods: { occurred: { year: 2026, month: 11 } }, cursor: page.nextCursor })).toThrow(/cursor/)
+  expect(() => store.list({ periods, metadata: { occurred: extras[0] } })).toThrow(/conflicting/)
+  expect(store.list({ metadata: { occurred: extras[4] } }).artifacts).toHaveLength(1)
+  expect(store.get('period-0')!.metadata.occurred).toBe('2026-10-31T23:00:00-03:00')
+  const other = fixture('catalog-B'); cleanup.push(other.close)
+  expect(other.store.facets()).toEqual([])
+  expect(other.store.list({ periods }).artifacts).toEqual([])
+  expect(() => other.store.list({ periods, cursor: page.nextCursor })).toThrow(/cursor/)
+})
+
+it('keeps the facet boundary bounded for one thousand distinct timestamps without projecting Markdown', () => {
+  const { store } = setup()
+  for (let i = 0; i < 1000; i++) store.create(input(`scale-${i}`, { metadata: { name: 'Scale', description: 'Scale fixture', kind: 'SCALE', arbitraryDate: `2026-10-11T12:00:00.${String(i).padStart(3, '0')}Z` } }))
+  expect(store.facets().find(f => f.key === 'arbitraryDate')).toEqual({ key: 'arbitraryDate', values: [], years: [{ year: 2026, count: 1000, months: [{ month: 10, count: 1000 }] }] })
+  expect(JSON.stringify(store.facets()).length).toBeLessThan(300)
+})

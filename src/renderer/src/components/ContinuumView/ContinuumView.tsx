@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
 import Markdown from 'markdown-to-jsx'
 import type { ActiveProject } from '../../../../shared/types/active-project-types'
-import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar } from '../../../../shared/types/continuum-ui-types'
+import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar, ContinuumPeriod } from '../../../../shared/types/continuum-ui-types'
 import { SearchBox } from '../shared/SearchBox/SearchBox'
 import { ColumnResizer } from '../shared/ColumnResizer/ColumnResizer'
 import { useContinuumColumns } from './useContinuumColumns'
@@ -52,6 +52,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
   const [items, setItems] = useState<ContinuumItem[]>([])
   const [query, setQuery] = useState('')
   const [metadata, setMetadata] = useState<Record<string, ContinuumScalar>>({})
+  const [periods, setPeriods] = useState<Record<string, ContinuumPeriod>>({})
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [artifact, setArtifact] = useState<ContinuumDetail | null>(null)
   const [cursor, setCursor] = useState<string | undefined>()
@@ -144,7 +145,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
   }
 
   useEffect(() => {
-    setRepositoryId(null); setFacets([]); setItems([]); setMetadata({}); setQuery('')
+    setRepositoryId(null); setFacets([]); setItems([]); setMetadata({}); setPeriods({}); setQuery('')
     setSelectedId(null); setArtifact(null); setCursor(undefined); setError(''); setInspectorOpen(false)
     setLoading(false); setFacetsLoading(false)
     publicationGeneration.current++; setVisualDraft(null); publicationContext.current = null
@@ -159,11 +160,17 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     if (!path) return
     setFacetsLoading(true)
     window.codeAwareness.getContinuumFacets(path).then(result => {
-      if (cancelled) return
+      if (cancelled || currentPath.current !== path) return
       setRepositoryId(result.repositoryId); setFacets(result.facets); setError('')
       setMetadata(previous => {
         const valid = Object.fromEntries(Object.entries(previous).filter(([key, value]) =>
           result.facets.some(facet => facet.key === key && facet.values.some(entry => entry.value === value))))
+        return Object.keys(valid).length === Object.keys(previous).length ? previous : valid
+      })
+      setPeriods(previous => {
+        const valid = Object.fromEntries(Object.entries(previous).filter(([key, period]) => result.facets.some(facet =>
+          facet.key === key && facet.years?.some(year => year.year === period.year &&
+            (period.month === undefined || year.months.some(month => month.month === period.month))))))
         return Object.keys(valid).length === Object.keys(previous).length ? previous : valid
       })
       if (!result.repositoryId) { setItems([]); setSelectedId(null); setArtifact(null); setCursor(undefined) }
@@ -178,14 +185,14 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     setItems([]); setCursor(undefined)
     if (!repositoryId) return
     setLoading(true)
-    window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata }).then(result => {
-      if (cancelled || generation !== listGeneration.current) return
+    window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(Object.keys(periods).length ? { periods } : {}) }).then(result => {
+      if (cancelled || currentPath.current !== path || generation !== listGeneration.current) return
       setItems(result.repositoryId === repositoryId ? result.artifacts : [])
       setCursor(result.nextCursor); setError('')
     }).catch(reason => { if (!cancelled) setError(String(reason)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [repositoryId, query, metadata, refresh])
+  }, [repositoryId, query, metadata, periods, refresh])
 
   useEffect(() => {
     let cancelled = false
@@ -193,19 +200,29 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     if (!repositoryId || !selectedId) return
     setDetailLoading(true)
     window.codeAwareness.getContinuumArtifact(repositoryId, selectedId).then(result => {
-      if (!cancelled) setArtifact(result.repositoryId === repositoryId ? result.artifact : null)
+      if (!cancelled && currentPath.current === path) setArtifact(result.repositoryId === repositoryId ? result.artifact : null)
     }).catch(reason => { if (!cancelled) setDetailError(String(reason)) })
       .finally(() => { if (!cancelled) setDetailLoading(false) })
     return () => { cancelled = true }
   }, [repositoryId, selectedId, refresh])
+
+  const choosePeriod = (key: string, period: ContinuumPeriod) => {
+    setMetadata(previous => { const next = { ...previous }; delete next[key]; return next })
+    setPeriods(previous => {
+      const next = { ...previous }
+      if (previous[key]?.year === period.year && previous[key]?.month === period.month) delete next[key]
+      else next[key] = period
+      return next
+    })
+  }
 
   const loadMore = async () => {
     if (!repositoryId || !cursor || loading) return
     const generation = listGeneration.current
     setLoading(true)
     try {
-      const result = await window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, cursor })
-      if (generation !== listGeneration.current || result.repositoryId !== repositoryId) return
+      const result = await window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(Object.keys(periods).length ? { periods } : {}), cursor })
+      if (currentPath.current !== path || generation !== listGeneration.current || result.repositoryId !== repositoryId) return
       setItems(previous => [...previous, ...result.artifacts.filter(item => !previous.some(old => old.artifactId === item.artifactId))])
       setCursor(result.nextCursor); setError('')
     } catch (reason) { if (generation === listGeneration.current) setError(String(reason)) }
@@ -241,7 +258,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     {publicationMessage && <div className="continuum-publication-feedback" role="status">{publicationMessage}
       {publishedVisualId && !loading && !items.some(item => item.artifactId === publishedVisualId) && <>
         <span> A busca ou os filtros podem ocultar a referência.</span>
-        <button onClick={() => { setQuery(''); setMetadata({}); setRevealId(publishedVisualId); setRefresh(value => value + 1) }}>Exibir na timeline</button>
+        <button onClick={() => { setQuery(''); setMetadata({}); setPeriods({}); setRevealId(publishedVisualId); setRefresh(value => value + 1) }}>Exibir na timeline</button>
       </>}
     </div>}
     {publicationError && <div className="continuum-publication-feedback" role="alert">{publicationError}</div>}
@@ -249,13 +266,25 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
       {error && <div className="continuum-error" role="alert">{error}<button onClick={() => setRefresh(value => value + 1)}>Tentar novamente</button></div>}
       <div className="continuum-workspace" ref={columns.workspace} style={columns.style}>
         <aside className="continuum-pane continuum-context" aria-label="Context">
-          <div className="continuum-pane-heading"><h2>Context</h2><button disabled={!Object.keys(metadata).length} onClick={() => setMetadata({})}>Limpar</button></div>
+          <div className="continuum-pane-heading"><h2>Context</h2><button disabled={!Object.keys(metadata).length && !Object.keys(periods).length} onClick={() => { setMetadata({}); setPeriods({}) }}>Limpar</button></div>
           <div className="continuum-pane-scroll">
             {facets.map(facet => <details key={facet.key} open><summary title={facet.key}>{facet.key}</summary>
-              <div className="continuum-facet-values">{facet.values.map(entry => {
+              <div className="continuum-facet-values">
+                {facet.years?.map(year => <div className="continuum-facet-year" key={year.year}>
+                  <button aria-label={`${facet.key} ${year.year}`} aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === undefined}
+                    onClick={() => choosePeriod(facet.key, { year: year.year })}><span>{year.year}</span><small>{year.count}</small></button>
+                  <details open><summary aria-label={`Meses de ${facet.key} ${year.year}`}>Meses</summary>
+                  <div className="continuum-facet-months">{year.months.map(month => <button key={month.month}
+                    aria-label={`${facet.key} ${year.year}-${String(month.month).padStart(2, '0')}`}
+                    aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === month.month}
+                    onClick={() => choosePeriod(facet.key, { year: year.year, month: month.month })}>
+                    <span>{new Intl.DateTimeFormat('pt-BR', { month: 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(2000, month.month - 1, 1)))}</span><small>{month.count}</small>
+                  </button>)}</div></details>
+                </div>)}
+                {facet.values.map(entry => {
                 const selected = metadata[facet.key] === entry.value
                 return <button key={JSON.stringify(entry.value)} aria-pressed={selected} title={`${typeof entry.value}: ${String(entry.value)}`}
-                  onClick={() => setMetadata(previous => { const next = { ...previous }; if (selected) delete next[facet.key]; else next[facet.key] = entry.value; return next })}>
+                  onClick={() => { setPeriods(previous => { const next = { ...previous }; delete next[facet.key]; return next }); setMetadata(previous => { const next = { ...previous }; if (selected) delete next[facet.key]; else next[facet.key] = entry.value; return next }) }}>
                   <span>{String(entry.value)}</span><small>{entry.count}</small></button>
               })}</div>
             </details>)}
@@ -278,7 +307,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
                   {item.description && <span className="continuum-description">{item.description}</span>}<time dateTime={item.updatedAt}>{timestamp(item.updatedAt)}</time></span>
               </button>
             </React.Fragment>)}
-            {!loading && !items.length && <div className="continuum-empty"><Infinity size={32} /><h3>{repositoryId ? 'Nenhum artifact encontrado' : 'Continuum indisponível'}</h3><p>{query || Object.keys(metadata).length ? 'Ajuste a busca ou os filtros.' : 'O contexto deste repositório aparecerá aqui.'}</p></div>}
+            {!loading && !items.length && <div className="continuum-empty"><Infinity size={32} /><h3>{repositoryId ? 'Nenhum artifact encontrado' : 'Continuum indisponível'}</h3><p>{query || Object.keys(metadata).length || Object.keys(periods).length ? 'Ajuste a busca ou os filtros.' : 'O contexto deste repositório aparecerá aqui.'}</p></div>}
             {cursor && <button className="continuum-load-more" disabled={loading} onClick={loadMore}>Carregar mais</button>}
           </div>
         </section>
