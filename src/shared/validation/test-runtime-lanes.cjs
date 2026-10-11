@@ -12,6 +12,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/core/context/worktree-structure.e2e.test.ts',
   'src/main/validation-ledger/validation-ledger.test.ts',
   'src/main/continuum/artifact-store.test.ts',
+  'src/main/continuum/artifact-graph.test.ts',
   'src/main/continuum/visual-artifact.test.ts',
   'src/main/continuum/visual-mcp.test.ts',
   'src/main/continuum/artifact-ingestor.test.ts',

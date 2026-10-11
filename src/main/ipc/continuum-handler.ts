@@ -1,4 +1,5 @@
 import { validatePeriods } from '../continuum/temporal-metadata'
+import type { ContinuumGraphRequest } from '../../shared/types/continuum-graph-types'
 import { BrowserWindow, ipcMain } from 'electron'
 import { posix, win32 } from 'node:path'
 import { dump } from 'js-yaml'
@@ -68,6 +69,15 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
       Object.values(request.metadata).some(value => !['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))))) throw new Error('INVALID_ARGUMENT: scalar metadata required')
     validatePeriods(request.periods, request.metadata)
     return { repositoryId: request.repositoryId, ...service.list({ ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.periods !== undefined ? { periods: request.periods } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30 }) }
+  })
+  ipcMain.handle('continuum:graph', (_event, request: ContinuumGraphRequest) => {
+    if (!request || typeof request !== 'object') throw new Error('INVALID_ARGUMENT: graph request required')
+    const service = active(request.repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    const { repositoryId, ...query } = request
+    const result = service.graph(query)
+    if (active(repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+    return result
   })
   ipcMain.handle('continuum:facets', (_event, repositoryPath: string) => {
     if (typeof repositoryPath !== 'string' || !repositoryPath) throw new Error('INVALID_ARGUMENT: repositoryPath required')
