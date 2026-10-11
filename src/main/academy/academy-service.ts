@@ -98,7 +98,7 @@ export class AcademyService {
       await this.reconcileAll()
       const destinations = this.store.listDestinations().filter(destination => destination.enabled && this.store.isAssigned(value.id, destination.id))
       const states = this.distribution.states(value.id).filter(state => destinations.some(destination => destination.id === state.destinationId))
-      receipt.distribution.status = destinations.length === 0 ? 'NOT_APPLICABLE' : states.length === destinations.length * 2 && states.every(state => state.status === 'CURRENT' && state.canonicalVersion === value.currentVersion && state.distributedHash === value.current.packageHash) ? 'CONVERGED' : 'DEGRADED'
+      receipt.distribution.status = destinations.length === 0 ? 'NOT_APPLICABLE' : states.length === destinations.length * this.distribution.health().targets.length && states.every(state => state.status === 'CURRENT' && state.canonicalVersion === value.currentVersion && state.distributedHash === value.current.packageHash) ? 'CONVERGED' : 'DEGRADED'
     } catch {
       receipt.distribution = { status: 'ERROR', errorCode: 'RECONCILIATION_FAILED' }
       this.emitCanonicalChange()

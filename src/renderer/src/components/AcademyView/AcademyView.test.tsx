@@ -23,7 +23,7 @@ beforeEach(() => {
     createAcademySkill: vi.fn(async () => detail), updateAcademySkill: vi.fn(async () => ({ ...detail, currentVersion: 2, current: { ...detail.current, version: 2 } })),
     archiveAcademySkill: vi.fn(async () => ({ ...detail, status: 'ARCHIVED' })), restoreAcademySkill: vi.fn(async () => detail),
     setAcademyDestinationEnabled: vi.fn(), importAcademyDestination: vi.fn(async () => []), resolveAcademyConflict: vi.fn(async () => detail),
-    getAcademyDistributionHealth: vi.fn(async () => ({ targets: [{ target: 'FILESYSTEM_NATIVE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }, { target: 'CLAUDE_CODE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }] })),
+    getAcademyDistributionHealth: vi.fn(async () => ({ targets: [{ target: 'FILESYSTEM_NATIVE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }, { target: 'CLAUDE_CODE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }, { target: 'ANTIGRAVITY', convergence: 'DEGRADED', current: 0, pending: 0, drifted: 0, missing: 0, error: 1, lastReconciledAt: detail.updatedAt }] })),
     listAcademyDistributionStates: vi.fn(async () => []), reconcileAcademyDistribution: vi.fn(async () => ({ health: { targets: [] }, states: [] })),
     bootstrapAcademyOpenAiPlugin: vi.fn(), getAcademyOpenAiPublicationState: vi.fn(async () => ({
       profile: { name: 'academy-skills', displayName: 'Academy Skills', description: 'Skills', author: {}, openAiInterface: {}, logoPath: null, publishedVersion: '0.1.3', deletionSemantics: 'UNKNOWN', deletionSemanticsEvidence: null, createdAt: detail.createdAt, updatedAt: detail.updatedAt },
@@ -167,4 +167,12 @@ it('renders actionable conflicts only when they exist', async () => {
   expect(window.codeAwareness.resolveAcademyConflict).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: 'Confirmar canônica' }))
   await waitFor(() => expect(window.codeAwareness.resolveAcademyConflict).toHaveBeenCalledWith('conflict-1', 'CANONICAL', undefined, { token: 'review-token', confirmed: true }))
+})
+
+it('shows independent Antigravity health alongside the existing distribution targets', async () => {
+  render(<AcademyView />)
+  expect(await screen.findByText('Antigravity')).toBeTruthy()
+  expect(screen.getByText('Claude code')).toBeTruthy()
+  expect(screen.getByText('Filesystem native')).toBeTruthy()
+  expect(screen.getByText('0 current · 1 error')).toBeTruthy()
 })

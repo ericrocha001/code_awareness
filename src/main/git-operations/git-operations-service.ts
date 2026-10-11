@@ -702,6 +702,7 @@ export class GitOperationsService {
     const normalized = path.replace(/\\/g, '/')
     const parts = normalized.split('/')
     if (normalized.startsWith('.claude/skills/')) return { classification: 'GENERATED_PROJECTION', group: '.claude/skills', suggestedRule: '.claude/skills/' }
+    if (normalized.startsWith('.agents/skills/')) return { classification: 'GENERATED_PROJECTION', group: '.agents/skills', suggestedRule: '.agents/skills/' }
     if (/^\.code-awareness\/[^/]+-runtime\//.test(normalized)) {
       const group = parts.slice(0, 2).join('/')
       return { classification: 'GENERATED_RUNTIME', group, suggestedRule: group + '/' }

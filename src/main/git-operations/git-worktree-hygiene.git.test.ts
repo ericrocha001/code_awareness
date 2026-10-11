@@ -59,6 +59,20 @@ describe('Git Operations worktree hygiene', () => {
     expect(analysis.recommendedRules).toEqual(expect.arrayContaining(['.code-awareness/codemap-ui-runtime/', '.claude/skills/']))
   }, 30000)
 
+  it('classifies only Antigravity skill projections and preserves adjacent agent configuration', async () => {
+    const { root, service } = await fixture()
+    writeFile(root, '.agents/skills/continuum/SKILL.md', 'projection')
+    writeFile(root, '.agents/config.json', '{}')
+    const analysis = await service.analyzeHygiene()
+    expect(analysis.groups).toEqual(expect.arrayContaining([
+      expect.objectContaining({ classification: 'GENERATED_PROJECTION', group: '.agents/skills', count: 1 })
+    ]))
+    expect(analysis.recommendedRules).toContain('.agents/skills/')
+    expect(analysis.recommendedRules).not.toContain('.agents/')
+    const preview = await service.manageGitignore({ action: 'PREVIEW_ADD', rules: ['.agents/skills/'] })
+    expect(preview).toMatchObject({ newlyIgnoredCount: 1, remainingUntrackedCount: 1 })
+  }, 30000)
+
   it('previews and applies .gitignore rules without deleting generated files', async () => {
     const { root, service } = await fixture()
     writeFile(root, '.code-awareness/codemap-ui-runtime/screenshot.png', 'runtime')
