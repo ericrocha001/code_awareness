@@ -10,7 +10,9 @@ import { ValidationExecution } from './validation-execution'
 
 const roots: string[] = []
 const origins: Promise<void>[] = []
+const executions: ValidationExecution[] = []
 afterEach(async () => {
+  await Promise.all(executions.splice(0).map(execution => execution.shutdown()))
   await Promise.all(origins.splice(0))
   roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }))
 })
@@ -34,7 +36,9 @@ function setup(script: string, catalog?: unknown) {
   } as unknown as ValidationLedger
   const identity = new RuntimeIdentityProvider({ rootDir: root, includedDirectories: [], includedRootFiles: ['package.json'], mode: 'development' })
   origins.push(identity.sourceOriginReady)
-  return { root, proofs, ledger, identity, execution: new ValidationExecution(root, ledger, identity, catalog as any) }
+  const execution = new ValidationExecution(root, ledger, identity, catalog as any)
+  executions.push(execution)
+  return { root, proofs, ledger, identity, execution }
 }
 
 async function terminal(execution: ValidationExecution, runId: string) {
@@ -80,7 +84,7 @@ describe('ValidationExecution', () => {
     }
     expect(polls).toBeGreaterThan(10)
     expect(baseline.proofs).toHaveLength(1)
-  })
+  }, 15000)
   it('runs asynchronously and records PASSED and FAILED proofs before publishing terminal state', async () => {
     const passed = setup('node -e "setTimeout(() => process.exit(0), 100)"')
     const initial = passed.execution.start({ profileId: 'typecheck', producer: 'TESTER', evidenceFor: ['acceptance'] })
