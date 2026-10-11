@@ -1,16 +1,18 @@
 import type { AcademyDistributionHealth, AcademyDistributionState, AcademyDistributionTarget, AcademySkillDetail } from '../../../shared/types/academy-types'
 import type { AcademyStore } from '../academy-store'
 import { ClaudeCodeDistributionAdapter } from './claude-code-distribution-adapter'
+import { AntigravityDistributionAdapter } from './antigravity-distribution-adapter'
 import type { AcademyDistributionAdapter, AcademyDistributionAdapterResult } from './distribution-adapter'
 import { FilesystemNativeDistributionAdapter } from './filesystem-native-distribution-adapter'
 
-const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE']
+const CONSUMERS: AcademyDistributionTarget[] = ['CLAUDE_CODE', 'ANTIGRAVITY']
+const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', ...CONSUMERS]
 
 export class AcademyDistributionService {
   private readonly adapters: Map<AcademyDistributionTarget, AcademyDistributionAdapter>
 
   constructor(private readonly store: AcademyStore, adapters?: AcademyDistributionAdapter[]) {
-    this.adapters = new Map((adapters ?? [new FilesystemNativeDistributionAdapter(store), new ClaudeCodeDistributionAdapter()]).map((adapter) => [adapter.target, adapter]))
+    this.adapters = new Map((adapters ?? [new FilesystemNativeDistributionAdapter(store), new ClaudeCodeDistributionAdapter(), new AntigravityDistributionAdapter()]).map((adapter) => [adapter.target, adapter]))
   }
 
   async reconcileAll(): Promise<void> {
@@ -30,16 +32,16 @@ export class AcademyDistributionService {
 
       const filesystem = await this.run('FILESYSTEM_NATIVE', 'reconcile', skill, destination.id)
       if (filesystem.status !== 'CURRENT') {
-        this.persist(skill, destination.id, 'CLAUDE_CODE', {
+        for (const target of CONSUMERS) this.persist(skill, destination.id, target, {
           status: filesystem.status === 'ERROR' ? 'ERROR' : filesystem.status,
           distributedVersion: filesystem.distributedVersion,
           distributedHash: filesystem.distributedHash,
-          errorCode: 'FILESYSTEM_NOT_CURRENT', errorMessage: 'Claude Code distribution waits for the .skills projection to converge.',
+          errorCode: 'FILESYSTEM_NOT_CURRENT', errorMessage: 'Skill bridge distribution waits for the .skills projection to converge.',
           exposureName: skill.name, linkMechanism: null
         })
         continue
       }
-      await this.run('CLAUDE_CODE', 'reconcile', skill, destination.id)
+      for (const target of CONSUMERS) await this.run(target, 'reconcile', skill, destination.id)
     }
   }
 
@@ -49,8 +51,10 @@ export class AcademyDistributionService {
         const skill = this.store.get(summary.id)
         if (!this.store.isAssigned(skill.id, destination.id)) continue
         const filesystem = await this.run('FILESYSTEM_NATIVE', 'inspect', skill, destination.id)
-        if (filesystem.status === 'CURRENT') await this.run('CLAUDE_CODE', 'inspect', skill, destination.id)
-        else this.persist(skill, destination.id, 'CLAUDE_CODE', { ...filesystem, errorCode: 'FILESYSTEM_NOT_CURRENT', errorMessage: 'Claude Code distribution waits for the .skills projection to converge.', exposureName: skill.name, linkMechanism: null })
+        for (const target of CONSUMERS) {
+          if (filesystem.status === 'CURRENT') await this.run(target, 'inspect', skill, destination.id)
+          else this.persist(skill, destination.id, target, { ...filesystem, errorCode: 'FILESYSTEM_NOT_CURRENT', errorMessage: 'Skill bridge distribution waits for the .skills projection to converge.', exposureName: skill.name, linkMechanism: null })
+        }
       }
     }
   }
