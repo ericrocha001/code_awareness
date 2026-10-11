@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci-windows:
+    name: ci-windows
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Select npm
+        run: npm install --global npm@10.9.4
+      - name: Install dependencies and prepare native runtime
+        run: npm ci
+      - name: Typecheck baseline gate
+        run: npm run typecheck
+      - name: Node tests
+        run: npm run test:node
+      - name: Real Git tests
+        run: npm run test:git
+      - name: Electron native tests
+        run: npm run test:native
+      - name: Build and native bundle guard
+        run: npm run build
