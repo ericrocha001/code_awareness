@@ -1,4 +1,6 @@
 import { metadataPeriod, validatePeriods } from './temporal-metadata'
+import { ArtifactGraph } from './artifact-graph'
+import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import Database from 'better-sqlite3'
 import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continuum-ui-types'
 import { createHash } from 'node:crypto'
@@ -35,6 +37,9 @@ interface DiscoveryRow {
 
 export class ArtifactStore {
   private readonly db: Database.Database
+  private readonly graphIndex: ArtifactGraph
+  graph(query: ContinuumGraphQuery = {}) { return this.graphIndex.query(query, filter => this.list(filter)) }
+  backfillReferences(limit = 100) { return this.graphIndex.backfill(limit) }
   facets(): ContinuumFacet[] {
     const rows = this.db.prepare(`SELECT key, CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END AS value_json,
       metadata_year(value_json) AS year, metadata_month(value_json) AS month, count(*) AS count FROM artifact_metadata
@@ -71,6 +76,7 @@ export class ArtifactStore {
       if (scope && scope.repository_id !== repositoryId) throw new Error('REPOSITORY_SCOPE_MISMATCH: Store belongs to another repository')
       this.db.prepare('INSERT OR IGNORE INTO repository_scope VALUES (1, ?)').run(repositoryId)
       this.ensureSchema()
+      this.graphIndex = new ArtifactGraph(this.db, repositoryId)
     } catch (error) { this.db.close(); throw error }
   }
 
@@ -158,6 +164,7 @@ export class ArtifactStore {
     const insert = this.db.prepare('INSERT INTO artifact_metadata(artifact_id, key, value_json) VALUES (?, ?, ?)')
     for (const [key, value] of Object.entries(artifact.metadata)) if (value !== undefined) insert.run(artifact.artifactId, key, canonicalJson(value as MetadataValue))
     this.db.prepare('INSERT INTO artifact_revisions(artifact_id, revision, snapshot_json) VALUES (?, ?, ?)').run(artifact.artifactId, artifact.revision, JSON.stringify(artifact))
+    this.graphIndex.project(artifact)
   }
 
   private createInsideTransaction(input: CreateArtifactInput, legacy = false, media?: VisualMedia): Artifact {

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
+import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import sharp from 'sharp'
-import type { Artifact, ArtifactReceipt, CreateArtifactInput, IContinuumService, ListArtifactsFilter, ArtifactPage } from './continuum-types'
+import type { Artifact, ArtifactReceipt, CreateArtifactInput, IContinuumService, ListArtifactsFilter, ArtifactPage, IArtifactGraphReader } from './continuum-types'
 import type { TransportEnvelope } from './artifact-envelope'
 import { ArtifactStore } from './artifact-store'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -8,7 +9,7 @@ import { legacyInput } from './legacy-artifact-migrator'
 import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
 
-export class ContinuumService implements IContinuumService, IVisualContinuumService {
+export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader {
   private readonly listeners = new Set<() => void>()
   private thumbnailReads = 0
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
@@ -16,6 +17,13 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   facets() { this.reconcile?.(); return this.store.facets() }
   constructor(private readonly store: ArtifactStore, private readonly reconcile?: () => void, private readonly isActive: () => boolean = () => true) {}
   assertActive(): void { if (!this.isActive()) throw new Error('REPOSITORY_CONTEXT_CHANGED') }
+  graph(query: ContinuumGraphQuery = {}) {
+    this.assertActive()
+    this.reconcile?.()
+    const result = this.store.graph(query)
+    this.assertActive()
+    return result
+  }
   async publishVisual(rawMarkdown: string, input: Uint8Array): Promise<VisualArtifactReceipt> {
     this.assertActive()
     this.reconcile?.()

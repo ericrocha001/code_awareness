@@ -14,6 +14,17 @@ async function image(lossless = true) {
   return { pixels, data: await sharp(pixels, { raw: { width: 2, height: 2, channels: 4 } }).webp({ lossless }).toBuffer() }
 }
 describe('Visual Continuum persistence and validation', () => {
+  it('projects references from visual text and removes them after a textual update without changing media', async () => {
+    const f = setup(), { data } = await image()
+    const target = f.service.publish(markdown('Target'))
+    const text = visual() + '\nSee `' + target.artifactId + '`'
+    const receipt = await f.service.publishVisual(text, data)
+    expect(f.service.graph({ artifactIds: [receipt.artifactId], expand: true }).edges).toMatchObject([{ targetId: target.artifactId, nature: 'DERIVED' }])
+    expect(f.service.get(receipt.artifactId)!.rawMarkdown).toBe(text)
+    f.service.update(receipt.artifactId, 1, visual())
+    expect(f.service.graph().edges).toEqual([])
+    expect(f.service.getVisual(receipt.artifactId).data).toEqual(data)
+  })
   it('projects bounded ephemeral thumbnails without changing canonical bytes and rejects stale contexts or excess work', async () => {
     const f = setup()
     const data = await sharp({ create: { width: 1024, height: 768, channels: 4, background: { r: 15, g: 80, b: 140, alpha: 0.5 } } }).webp({ lossless: true }).toBuffer()
