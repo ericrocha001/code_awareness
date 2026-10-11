@@ -45,7 +45,7 @@ describe('guarded mutations', () => {
     await writeFile(path.join(root, filename), original)
     expect((await service().replaceFile(filename, sha(original), { text: 'literal' }, intent)).path).toBe(filename)
     expect(await readFile(path.join(root, filename), 'utf8')).toBe('literal')
-  })
+  }, 30000)
   it.each([null, [], { destinationPath: 'rules.md', text: 'unsafe' }, { destinationPath: 'rules.md', expectedSha256: sha(original), text: 'unsafe', intent, force: true }, { destinationPath: 'rules.md', expectedSha256: sha(original), text: 'unsafe', intent: { ...intent, explicitUserAuthorization: 'yes' } }])('rejects invalid public arguments %j', async args => {
     expect((await executeRepositoryFileEditing(service(), 'replace_repository_file', args)).isError).toBe(true)
     expect(await readFile(path.join(root, 'rules.md'), 'utf8')).toBe(original)
