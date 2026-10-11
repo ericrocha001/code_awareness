@@ -7,6 +7,18 @@ import { parseArtifactMarkdown } from '../continuum/artifact-metadata'
 const { handlers, send } = vi.hoisted(() => ({ handlers: new Map<string, Function>(), send: vi.fn() }))
 vi.mock('electron', () => ({ ipcMain: { handle: (key: string, handler: Function) => handlers.set(key, handler) }, BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false, webContents: { send } }] } }))
 beforeEach(() => { handlers.clear(); send.mockClear() })
+it('scopes suggestions and rejects a result if reconciliation changes the active repository', () => {
+  let current = 'A'
+  const suggestions = vi.fn(() => ({ repositoryId: 'A', suggestions: [] }))
+  const service = { suggestions }
+  registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: current }), getActiveService: () => service, onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
+  const read = (request: unknown) => handlers.get('continuum:suggestions')!({}, request)
+  expect(() => read({ repositoryId: 'B', artifactId: 'source' })).toThrow(/REPOSITORY_UNAVAILABLE/)
+  expect(read({ repositoryId: 'A', artifactId: 'source', limit: 2 })).toEqual({ repositoryId: 'A', suggestions: [] })
+  expect(suggestions).toHaveBeenCalledWith({ artifactId: 'source', limit: 2 })
+  suggestions.mockImplementation(() => { current = 'B'; return { repositoryId: 'A', suggestions: [] } })
+  expect(() => read({ repositoryId: 'A', artifactId: 'source' })).toThrow(/REPOSITORY_CONTEXT_CHANGED/)
+})
 it('scopes graph requests and cancels stale results when the repository changes during reconciliation', () => {
   let current = 'A'
   const graph = vi.fn(() => ({ repositoryId: 'A', nodes: [], edges: [] }))
@@ -41,7 +53,7 @@ it('exposes scoped reads and publication, resolves catalog identity and separate
   const service = { list: vi.fn(() => ({ artifacts: [{ artifactId: 'a', name: 'A' }], nextCursor: 'cursor' })), facets: vi.fn(() => [{ key: 'unknown', values: [{ value: false, count: 1 }] }]),
     get: vi.fn(() => ({ artifactId: 'a', revision: 2, metadata: { name: 'A', kind: 'UNSEEN' }, createdAt: 'created', updatedAt: 'updated', rawMarkdown: '---\nname: A\ndescription: Read A\nkind: UNSEEN\n---\n# Body\nç 🚀' })) }
   registerContinuumHandlers({ getActiveSession: () => current, getActiveService: () => current ? service : null, onChanged: (listener: () => void) => { changed = listener; return () => {} } } as unknown as RepositoryContinuumSession)
-  expect([...handlers.keys()].sort()).toEqual(['continuum:facets', 'continuum:get', 'continuum:get-visual', 'continuum:get-visual-thumbnail', 'continuum:graph', 'continuum:list', 'continuum:publish', 'continuum:publish-visual'])
+  expect([...handlers.keys()].sort()).toEqual(['continuum:facets', 'continuum:get', 'continuum:get-visual', 'continuum:get-visual-thumbnail', 'continuum:graph', 'continuum:list', 'continuum:publish', 'continuum:publish-visual', 'continuum:suggestions'])
   const read = (channel: string, ...args: unknown[]) => handlers.get(channel)!({}, ...args)
   expect(read('continuum:facets', '/A')).toMatchObject({ repositoryId: 'catalog-A', facets: [{ key: 'unknown' }] })
   expect(read('continuum:facets', '/B')).toEqual({ repositoryId: null, facets: [] })

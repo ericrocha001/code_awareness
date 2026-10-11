@@ -7,7 +7,7 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 
 async function main(args = process.argv.slice(2), channel = { directory: 'continuum-local', protocol: 'continuum-local/v1' }) {
   const operation = args.shift()
-  if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual'].includes(operation)) fail('INVALID_ARGUMENT')
+  if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual', 'suggestions'].includes(operation)) fail('INVALID_ARGUMENT')
   const options = {}
   for (let i = 0; i < args.length; i += 2) {
     if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
@@ -33,6 +33,14 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
   const request = { operation, repositoryId: options['--repository'], worktreeId: worktree.worktreeId }
   if (operation === 'list') {
     try { request.filter = options['--filter'] ? JSON.parse(options['--filter']) : {} } catch { fail('INVALID_ARGUMENT') }
+  }
+  if (operation === 'suggestions') {
+    if (!options['--id']) fail('INVALID_ARGUMENT')
+    try {
+      const query = options['--filter'] ? JSON.parse(options['--filter']) : {}
+      if (!query || typeof query !== 'object' || Array.isArray(query) || 'artifactId' in query) fail('INVALID_ARGUMENT')
+      request.query = { ...query, artifactId: options['--id'] }
+    } catch { fail('INVALID_ARGUMENT') }
   }
   if (['get', 'update', 'get_visual'].includes(operation)) {
     if (!options['--id']) fail('INVALID_ARGUMENT')

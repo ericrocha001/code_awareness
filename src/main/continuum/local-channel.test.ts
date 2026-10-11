@@ -39,6 +39,9 @@ describe('Continuum local transport boundaries', () => {
     expect((await request({ operation: 'status', protocol: 'wrong' })).error.code).toBe('INVALID_ARGUMENT')
     expect((await request({ operation: 'status' })).result).toEqual({ available: true, repository: null })
     expect((await request({ operation: 'list', repositoryId: 'wrong' })).error.code).toBe('NO_ACTIVE_REPOSITORY')
+    expect((await request({ operation: 'suggestions', repositoryId: 'A', worktreeId: 'w', query: { artifactId: 'source' }, token: 'invalid' })).error.code).toBe('UNAUTHORIZED')
+    expect((await request({ operation: 'suggestions', repositoryId: 'A', worktreeId: 'w', query: { artifactId: 'source', includeBody: true } })).error.code).toBe('INVALID_ARGUMENT')
+    expect((await request({ operation: 'suggestions', repositoryId: 'A', worktreeId: 'w', query: { artifactId: 'source' } })).error.code).toBe('NO_ACTIVE_REPOSITORY')
   })
   it('rejects a repository switch during worktree validation before committing', async () => {
     const { request, publish, switchRepository } = await setup({ repositoryId: 'A', repositoryPath: profile })
@@ -48,6 +51,7 @@ describe('Continuum local transport boundaries', () => {
     expect(mocks.discover).not.toHaveBeenCalled()
     expect((await request({ operation: 'publish', repositoryId: 'A', worktreeId: 'w', rawMarkdown: 'raw' })).error.code).toBe('REPOSITORY_MISMATCH')
     expect(publish).not.toHaveBeenCalled()
+    expect((await request({ operation: 'suggestions', repositoryId: 'A', worktreeId: 'w', query: { artifactId: 'source' } })).error.code).toBe('NO_ACTIVE_REPOSITORY')
   })
   it('bounds frame size and removes endpoint discovery and open connections on shutdown', async () => {
     const { descriptor } = await setup()

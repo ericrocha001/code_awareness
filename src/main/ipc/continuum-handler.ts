@@ -1,5 +1,6 @@
 import { validatePeriods } from '../continuum/temporal-metadata'
 import type { ContinuumGraphRequest } from '../../shared/types/continuum-graph-types'
+import type { ContinuumSuggestionRequest } from '../../shared/types/continuum-suggestion-types'
 import { BrowserWindow, ipcMain } from 'electron'
 import { posix, win32 } from 'node:path'
 import { dump } from 'js-yaml'
@@ -76,6 +77,15 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
     const { repositoryId, ...query } = request
     const result = service.graph(query)
+    if (active(repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+    return result
+  })
+  ipcMain.handle('continuum:suggestions', (_event, request: ContinuumSuggestionRequest) => {
+    if (!request || typeof request !== 'object') throw new Error('INVALID_ARGUMENT: suggestion request required')
+    const service = active(request.repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    const { repositoryId, ...query } = request
+    const result = service.suggestions(query)
     if (active(repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
     return result
   })
