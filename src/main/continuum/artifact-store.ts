@@ -1,3 +1,4 @@
+import { metadataPeriod, validatePeriods } from './temporal-metadata'
 import Database from 'better-sqlite3'
 import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continuum-ui-types'
 import { createHash } from 'node:crypto'
@@ -35,15 +36,23 @@ interface DiscoveryRow {
 export class ArtifactStore {
   private readonly db: Database.Database
   facets(): ContinuumFacet[] {
-    const rows = this.db.prepare(`SELECT key, value_json, count(*) AS count FROM artifact_metadata
+    const rows = this.db.prepare(`SELECT key, CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END AS value_json,
+      metadata_year(value_json) AS year, metadata_month(value_json) AS month, count(*) AS count FROM artifact_metadata
       WHERE key NOT IN ('name', 'description', 'relations')
       AND json_type(value_json) IN ('text', 'integer', 'real', 'true', 'false')
-      GROUP BY key, value_json ORDER BY key, value_json`).all() as { key: string; value_json: string; count: number }[]
+      GROUP BY key, metadata_year(value_json), metadata_month(value_json), CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END ORDER BY key, year DESC, month DESC, value_json`).all() as { key: string; value_json: string; year: number | null; month: number | null; count: number }[]
     const groups = new Map<string, ContinuumFacet>()
     for (const row of rows) {
       let group = groups.get(row.key)
       if (!group) { group = { key: row.key, values: [] }; groups.set(row.key, group) }
-      group.values.push({ value: JSON.parse(row.value_json) as ContinuumScalar, count: row.count })
+      if (row.year === null) group.values.push({ value: JSON.parse(row.value_json) as ContinuumScalar, count: row.count })
+      else {
+        group.years ??= []
+        let year = group.years.find(entry => entry.year === row.year)
+        if (!year) { year = { year: row.year, count: 0, months: [] }; group.years.push(year) }
+        year.count += row.count
+        year.months.push({ month: row.month!, count: row.count })
+      }
     }
     return [...groups.values()]
   }
@@ -51,6 +60,9 @@ export class ArtifactStore {
     if (!repositoryId?.trim()) throw new Error('INVALID_ARGUMENT: canonical repositoryId is required')
     mkdirSync(dirname(dbPath), { recursive: true })
     this.db = new Database(dbPath)
+    const period = (json: unknown) => metadataPeriod(JSON.parse(String(json)))
+    this.db.function('metadata_year', { deterministic: true }, json => period(json)?.year ?? null)
+    this.db.function('metadata_month', { deterministic: true }, json => period(json)?.month ?? null)
     try {
       this.db.pragma('journal_mode = WAL')
       this.db.pragma('foreign_keys = ON')
@@ -221,6 +233,7 @@ export class ArtifactStore {
   }
 
   list(filter: ListArtifactsFilter = {}): ArtifactPage {
+    validatePeriods(filter.periods, filter.metadata)
     const limit = filter.limit ?? 20
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('INVALID_ARGUMENT: limit must be 1-100')
     if (filter.direction && !['inbound', 'outbound', 'both'].includes(filter.direction)) throw new Error('INVALID_ARGUMENT: invalid direction')
@@ -236,6 +249,11 @@ export class ArtifactStore {
     for (const [key, value] of Object.entries(filter.metadata ?? {})) {
       clauses.push('a.artifact_id IN (SELECT artifact_id FROM artifact_metadata WHERE key = ? AND value_json = ?)')
       params.push(key, canonicalJson(normalizeMetadataValue(value)))
+    }
+    for (const [key, period] of Object.entries(filter.periods ?? {})) {
+      clauses.push(`a.artifact_id IN (SELECT artifact_id FROM artifact_metadata WHERE key = ? AND metadata_year(value_json) = ?${period.month !== undefined ? ' AND metadata_month(value_json) = ?' : ''})`)
+      params.push(key, period.year)
+      if (period.month !== undefined) params.push(period.month)
     }
     for (const [key, operator] of [['updatedAfter', '>='], ['updatedBefore', '<=']] as const) {
       if (filter[key]) {

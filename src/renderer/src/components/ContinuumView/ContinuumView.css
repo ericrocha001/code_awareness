@@ -88,3 +88,7 @@
   .continuum-feature-title h1 { font-size: 20px; }.continuum-workspace { grid-template-columns: 140px minmax(0, 1fr); gap: 8px; }.continuum-inspector { width: 100%; }
   .continuum-context-resizer { display: none; }
 }
+
+.continuum-facet-year { min-width: 0; }
+.continuum-facet-year > button { width: 100%; }
+.continuum-facet-months { padding-left: 12px; display: flex; flex-direction: column; gap: 3px; }

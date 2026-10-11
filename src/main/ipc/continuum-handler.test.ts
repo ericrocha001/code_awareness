@@ -1,3 +1,4 @@
+import { metadataPeriod } from '../continuum/temporal-metadata'
 import { beforeEach, expect, it, vi } from 'vitest'
 import { registerContinuumHandlers } from './continuum-handler'
 import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
@@ -92,4 +93,20 @@ it('adds only default metadata to body-only files, preserving BOM, whitespace an
   }
   for (const invalid of ['', ' \r\n\t', '\uFEFF', '# invalid\0body']) expect(() => invoke('valid.md', invalid)).toThrow(/Markdown/)
   expect(texts).toHaveLength(1)
+})
+
+it('validates temporal UI selections strictly and forwards typed periods to the canonical service', () => {
+  const list = vi.fn(() => ({ artifacts: [] }))
+  registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }), getActiveService: () => ({ list }), onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
+  const read = (request: unknown) => handlers.get('continuum:list')!({}, request)
+  read({ repositoryId: 'A', periods: { arbitraryKey: { year: 2026, month: 10 } }, metadata: { kind: 'PLAN' } })
+  expect(list).toHaveBeenCalledWith({ periods: { arbitraryKey: { year: 2026, month: 10 } }, metadata: { kind: 'PLAN' }, limit: 30 })
+  for (const periods of [[], null, { date: {} }, { date: { year: '2026' } }, { date: { year: 2026, month: 0 } }, { date: { year: 2026, month: 13 } }, { date: { year: 2026.5 } }, { date: { year: 10000 } }, { date: { year: 2026, extra: true } }, { '': { year: 2026 } }, { constructor: { year: 2026 } }]) expect(() => read({ repositoryId: 'A', periods })).toThrow(/INVALID_ARGUMENT/)
+  expect(() => read({ repositoryId: 'A', periods: { date: { year: 2026 } }, metadata: { date: '2026-10-11' } })).toThrow(/conflicting/)
+})
+
+it('recognizes only complete calendar and time-valid ISO strings, preserving their literal year and month', () => {
+  for (const value of ['2026-10-31', '2026-10-31T23:59', '2026-10-31T23:59:59.123Z', '2026-10-31T23:59:59-03:00', '2026-10-31T23:59:59+14:00']) expect(metadataPeriod(value)).toEqual({ year: 2026, month: 10 })
+  for (const value of ['2026-02-29', '1900-02-29', '2026-04-31', '2026-00-01', '2026-13-01', '2026-01-00', '2026-01-01junk', '2026-01-01T', '2026-01-01T12:60', '2026-01-01T24:00', '2026-01-01T12:00:60Z', '2026-01-01T12:00+01:60', '2026-01-01T12:00+24:00', 2026, null]) expect(metadataPeriod(value)).toBeNull()
+  expect(metadataPeriod('2000-02-29')).toEqual({ year: 2000, month: 2 })
 })
