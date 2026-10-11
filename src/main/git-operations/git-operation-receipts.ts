@@ -48,6 +48,7 @@ export class GitOperationReceipts {
     const value = JSON.parse(result.content[0].text)
     const safeFailures = new Set(['INVALID_ARGUMENT', 'INVALID_REF', 'PATH_OUTSIDE_REPOSITORY', 'NOT_GIT_REPOSITORY', 'GIT_STATE_CHANGED', 'CONFLICT_STATE_CHANGED', 'CONFLICT_NOT_FOUND', 'SHELF_NOT_FOUND', 'SHELF_REQUIRES_HEAD', 'NOTHING_TO_SHELVE', 'NOTHING_TO_COMMIT', 'GIT_OPERATION_IN_PROGRESS', 'GIT_OPERATION_NOT_IN_PROGRESS', 'BINARY_CONFLICT_CONTENT_UNSUPPORTED', 'CONFLICT_SIDE_UNAVAILABLE', 'BRANCH_ALREADY_EXISTS', 'BRANCH_NOT_FOUND', 'REMOTE_NOT_FOUND'])
     if (operation === 'stage_git_changes') safeFailures.add('INDEX_MUTATION_FAILED')
+    if (operation === 'sync_git_remote' && args.action === 'PULL_FF_ONLY') safeFailures.add('DIRTY_WORKTREE')
     safeFailures.add('WORKTREE_TRANSACTION_BUSY')
     safeFailures.add('WORKTREE_OWNERSHIP_REQUIRED')
     safeFailures.add('WORKTREE_BRANCH_OCCUPIED')
