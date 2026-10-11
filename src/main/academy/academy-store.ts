@@ -53,7 +53,7 @@ export class AcademyStore {
       CREATE TABLE IF NOT EXISTS academy_distribution_states (
         skill_id TEXT NOT NULL REFERENCES academy_skills(id) ON DELETE CASCADE,
         destination_id TEXT NOT NULL REFERENCES academy_destinations(id) ON DELETE CASCADE,
-        target TEXT NOT NULL CHECK(target IN ('FILESYSTEM_NATIVE','CLAUDE_CODE')),
+        target TEXT NOT NULL CHECK(target IN ('FILESYSTEM_NATIVE','CLAUDE_CODE','ANTIGRAVITY')),
         canonical_version INTEGER NOT NULL, canonical_hash TEXT NOT NULL,
         distributed_version INTEGER, distributed_hash TEXT,
         status TEXT NOT NULL CHECK(status IN ('CURRENT','PENDING','DRIFTED','MISSING','ERROR')),
@@ -110,8 +110,25 @@ export class AcademyStore {
         updated_at TEXT NOT NULL
       );
     `)
+    this.migrateDistributionTargets()
     const projectionColumns = this.db.prepare('PRAGMA table_info(academy_projections)').all() as Row[]
     if (!projectionColumns.some((column) => column.name === 'skill_name')) this.db.exec('ALTER TABLE academy_projections ADD COLUMN skill_name TEXT')
+  }
+
+  private migrateDistributionTargets(): void {
+    const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='academy_distribution_states'").get() as Row
+    if (schema.sql.includes("'ANTIGRAVITY'")) return
+    const indexes = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='academy_distribution_states' AND sql IS NOT NULL").all() as Row[]
+    this.db.transaction(() => {
+      this.db.exec(schema.sql.replace('academy_distribution_states', 'academy_distribution_states_migration').replace("'FILESYSTEM_NATIVE','CLAUDE_CODE'", "'FILESYSTEM_NATIVE','CLAUDE_CODE','ANTIGRAVITY'"))
+      this.db.exec(`
+        INSERT INTO academy_distribution_states_migration SELECT * FROM academy_distribution_states;
+        DROP TABLE academy_distribution_states;
+        ALTER TABLE academy_distribution_states_migration RENAME TO academy_distribution_states;
+      `)
+      for (const index of indexes) this.db.exec(index.sql)
+      if ((this.db.pragma('foreign_key_check') as Row[]).length) throw new Error('ACADEMY_DISTRIBUTION_MIGRATION_INTEGRITY')
+    })()
   }
 
   close(): void { this.db.close() }

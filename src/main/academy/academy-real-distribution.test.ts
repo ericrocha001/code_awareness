@@ -20,7 +20,7 @@ describe.skipIf(!enabled)('Academy real project distribution migration', () => {
       const destinations = service.store.listDestinations().filter((item) => item.enabled)
       const applicable = destinations.flatMap((item) => service.list('ACTIVE').filter((skill) => service.store.isAssigned(skill.id, item.id)).map((skill) => ({ destination: item, skill })))
       const states = service.distribution.states()
-      expect(states).toHaveLength(applicable.length * 2)
+      expect(states).toHaveLength(applicable.length * 3)
       expect(states.every((state) => state.status === 'CURRENT')).toBe(true)
       for (const item of applicable) {
         const physical = join(item.destination.path, '.skills', item.skill.name)

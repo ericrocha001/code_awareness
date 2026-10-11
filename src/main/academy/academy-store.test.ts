@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AcademyStore } from './academy-store'
+import Database from 'better-sqlite3'
 
 const roots: string[] = []
 const pkg = (name = 'alpha', body = '# Alpha') => ({ skillMd: `---\nname: ${name}\ndescription: Skill ${name}\n---\n\n${body}\n`, artifacts: { 'references/guide.md': 'Olá β' } })
@@ -15,6 +16,36 @@ const open = () => {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('AcademyStore', () => {
+  it('migrates legacy distribution states atomically and preserves indexes, foreign keys and restart persistence', () => {
+    const store = open()
+    const path = store.databasePath
+    const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+    const destination = store.upsertDestination('C:/legacy-project', 'legacy')
+    const state = { skillId: skill.id, destinationId: destination.id, target: 'CLAUDE_CODE' as const, canonicalVersion: 1, canonicalHash: skill.current.packageHash, distributedVersion: 1, distributedHash: skill.current.packageHash, status: 'CURRENT' as const, errorCode: null, errorMessage: null, exposureName: skill.name, linkMechanism: 'JUNCTION' as const }
+    store.setDistributionState(state)
+    const before = store.listDistributionStates()
+    store.close()
+    const legacy = new Database(path)
+    const schema = legacy.prepare("SELECT sql FROM sqlite_master WHERE name='academy_distribution_states'").get() as { sql: string }
+    legacy.exec(schema.sql.replace('academy_distribution_states', 'legacy_states').replace(",'ANTIGRAVITY'", ''))
+    legacy.exec('INSERT INTO legacy_states SELECT * FROM academy_distribution_states; DROP TABLE academy_distribution_states; ALTER TABLE legacy_states RENAME TO academy_distribution_states; CREATE INDEX distribution_status ON academy_distribution_states(status)')
+    legacy.close()
+    const migrated = new AcademyStore(path)
+    expect(migrated.listDistributionStates()).toEqual(before)
+    migrated.setDistributionState({ ...state, target: 'ANTIGRAVITY' })
+    const after = migrated.listDistributionStates()
+    migrated.close()
+    const reopened = new AcademyStore(path)
+    expect(reopened.listDistributionStates()).toEqual(after)
+    reopened.close()
+    const database = new Database(path)
+    expect(database.pragma('foreign_key_check')).toEqual([])
+    expect(database.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }])
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE name='distribution_status'").get()).toEqual({ name: 'distribution_status' })
+    database.pragma('foreign_keys = ON')
+    expect(() => database.prepare("UPDATE academy_distribution_states SET skill_id='missing'").run()).toThrow()
+    database.close()
+  })
   it('creates immutable versions and survives reopen', () => {
     const store = open()
     const dbPath = store.databasePath
