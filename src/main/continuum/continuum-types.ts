@@ -1,6 +1,8 @@
 import type { ContinuumPeriod } from '../../shared/types/continuum-ui-types'
 import type { ContinuumGraph, ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 export interface IArtifactGraphReader { graph(query?: ContinuumGraphQuery): ContinuumGraph }
+import type { ContinuumSuggestionQuery, ContinuumSuggestions } from '../../shared/types/continuum-suggestion-types'
+export interface IArtifactSuggestionReader { suggestions(query: ContinuumSuggestionQuery): ContinuumSuggestions }
 export type MetadataValue = null | boolean | number | string | MetadataValue[] | { [key: string]: MetadataValue }
 export interface ArtifactRelation { artifactId: string; kind: string }
 export interface ArtifactMetadata {

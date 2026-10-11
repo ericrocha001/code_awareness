@@ -4,6 +4,7 @@ import { operation, type LocalChannelAdapter, type LocalRequestContext } from '.
 import { object, text, integer } from '../local-agent-channel/request-validation'
 import type { RepositoryContinuumSession } from './project-continuum-session'
 import type { ListArtifactsFilter } from './continuum-types'
+import { validateSuggestionQuery } from './artifact-suggestions'
 import { open } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { VISUAL_MAX_BYTES } from './visual-media'
@@ -19,6 +20,10 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
       return { value, repositoryId: value.repositoryId, worktreeId: value.worktreeId }
     }
     this.operations = {
+      suggestions: operation(input => {
+        const request = selection(input, ['query'])
+        return { ...request, query: validateSuggestionQuery(request.value.query) }
+      }, async (request, context) => (await this.service(request, context)).suggestions(request.query)),
       publish_visual: operation(input => {
         const request = selection(input, ['rawMarkdown', 'filePath'])
         return { ...request, rawMarkdown: text(request.value.rawMarkdown), filePath: text(request.value.filePath) }
