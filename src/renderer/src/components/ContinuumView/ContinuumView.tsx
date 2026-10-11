@@ -273,12 +273,12 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
                 {facet.years?.map(year => <div className="continuum-facet-year" key={year.year}>
                   <button aria-label={`${facet.key} ${year.year}`} aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === undefined}
                     onClick={() => choosePeriod(facet.key, { year: year.year })}><span>{year.year}</span><small>{year.count}</small></button>
-                  <details open><summary aria-label={`Meses de ${facet.key} ${year.year}`}>Meses</summary>
+                  <details open><summary aria-label={`months for ${facet.key} ${year.year}`}>months</summary>
                   <div className="continuum-facet-months">{year.months.map(month => <button key={month.month}
                     aria-label={`${facet.key} ${year.year}-${String(month.month).padStart(2, '0')}`}
                     aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === month.month}
                     onClick={() => choosePeriod(facet.key, { year: year.year, month: month.month })}>
-                    <span>{new Intl.DateTimeFormat('pt-BR', { month: 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(2000, month.month - 1, 1)))}</span><small>{month.count}</small>
+                    <span>{new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(2000, month.month - 1, 1))).toLowerCase()}</span><small>{month.count}</small>
                   </button>)}</div></details>
                 </div>)}
                 {facet.values.map(entry => {
