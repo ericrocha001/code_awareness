@@ -31,6 +31,50 @@ async function fixture() {
 }
 
 describe('Operational reliability through real MCP HTTP', () => {
+  it('persists dirty pull refusals without changing local state and permits clean fast-forward', async () => {
+    const { root, git, service } = await fixture()
+    const remote = mkdtempSync(join(tmpdir(), 'dirty-pull-remote-')); roots.push(remote)
+    const upstream = await createTempGitRepo(); roots.push(upstream)
+    await gitExec(root, ['branch', '-M', 'main'])
+    await gitExec(root, ['init', '--bare', remote])
+    await gitExec(root, ['remote', 'add', 'origin', remote])
+    await gitExec(root, ['push', '-u', 'origin', 'main'])
+    await gitExec(upstream, ['remote', 'add', 'origin', remote])
+    await gitExec(upstream, ['fetch', 'origin'])
+    await gitExec(upstream, ['checkout', '-B', 'main', 'origin/main'])
+    writeFile(upstream, 'remote.txt', 'remote advance\n')
+    await stageAll(upstream); await commit(upstream, 'advance main')
+    await gitExec(upstream, ['push', 'origin', 'main'])
+    await service().sync({ action: 'FETCH' })
+    const head = await git.getCurrentCommitHash(root)
+    const remoteHead = await git.getCurrentCommitHash(upstream)
+    expect(remoteHead).not.toBe(head)
+    writeFile(root, 'a.txt', 'local ç🙂\r\n')
+    const bytes = readFileSync(join(root, 'a.txt'))
+    const index = readFileSync(join(root, '.git', 'index'))
+    const pull = vi.spyOn(git, 'pullFastForward')
+    const args = { action: 'PULL_FF_ONLY', expectedHead: head, operationId: randomUUID() }
+    const first = await executeGitOperationsTool(service(), 'sync_git_remote', args)
+    expect(first.isError).toBe(true)
+    expect(JSON.parse(first.content[0].text)).toMatchObject({ code: 'DIRTY_WORKTREE', operationId: args.operationId, replayed: false })
+    expect((await git.readOperationReceipt(root, args.operationId))?.receipt.status).toBe('FAILED')
+    const replay = await executeGitOperationsTool(service(), 'sync_git_remote', args)
+    expect(replay.isError).toBe(true)
+    expect(JSON.parse(replay.content[0].text)).toEqual({ ...JSON.parse(first.content[0].text), replayed: true })
+    expect(pull).not.toHaveBeenCalled()
+    expect(await git.getCurrentCommitHash(root)).toBe(head)
+    expect(readFileSync(join(root, '.git', 'index'))).toEqual(index)
+    expect(readFileSync(join(root, 'a.txt'))).toEqual(bytes)
+    const stale = { ...args, expectedHead: remoteHead, operationId: randomUUID() }
+    expect(JSON.parse((await executeGitOperationsTool(service(), 'sync_git_remote', stale)).content[0].text)).toMatchObject({ code: 'GIT_STATE_CHANGED', replayed: false })
+    await gitExec(root, ['restore', 'a.txt'])
+    const clean = { ...args, operationId: randomUUID() }
+    expect(JSON.parse((await executeGitOperationsTool(service(), 'sync_git_remote', clean)).content[0].text)).toMatchObject({ head: remoteHead, replayed: false })
+    expect(await git.getCurrentCommitHash(root)).toBe(remoteHead)
+    expect((await git.readOperationReceipt(root, clean.operationId))?.receipt.status).toBe('COMPLETED')
+    expect(JSON.parse((await executeGitOperationsTool(service(), 'sync_git_remote', args)).content[0].text)).toMatchObject({ code: 'DIRTY_WORKTREE', replayed: true })
+  }, 60000)
+
   it('replays commit and push once without publishing receipt refs', async () => {
     const { root, git, service } = await fixture()
     const remote = mkdtempSync(join(tmpdir(), 'receipt-remote-')); roots.push(remote)
@@ -53,6 +97,20 @@ describe('Operational reliability through real MCP HTTP', () => {
     expect(JSON.parse((await executeGitOperationsTool(service(), 'sync_git_remote', push)).content[0].text)).toMatchObject({ pushedHead: first.sha, replayed: true })
     expect(pushSpy).toHaveBeenCalledTimes(1)
     expect((await gitExec(remote, ['for-each-ref', '--format=%(refname)', 'refs/code-awareness/'])).trim()).toBe('')
+  }, 60000)
+
+  it.each([
+    { action: 'PUSH', code: 'DIRTY_WORKTREE' },
+    { action: 'PULL_FF_ONLY', code: 'GIT_OPERATION_FAILED' }
+  ])('keeps uncertain sync failure $action/$code PREPARED', async ({ action, code }) => {
+    const { root, git, service } = await fixture()
+    const operationId = randomUUID()
+    const args = { action }
+    const mutate = vi.fn(async () => ({ content: [{ type: 'text' as const, text: JSON.stringify({ code }) }], isError: true as const }))
+    expect(JSON.parse((await service().executeReceipted(operationId, 'sync_git_remote', args, mutate)).content[0].text)).toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN' })
+    expect((await git.readOperationReceipt(root, operationId))?.receipt.status).toBe('PREPARED')
+    expect(JSON.parse((await service().executeReceipted(operationId, 'sync_git_remote', args, mutate)).content[0].text)).toMatchObject({ code: 'OPERATION_OUTCOME_UNKNOWN' })
+    expect(mutate).toHaveBeenCalledTimes(1)
   }, 60000)
 
   it('keeps post-mutation observation failures PREPARED instead of recording a precommit failure', async () => {
