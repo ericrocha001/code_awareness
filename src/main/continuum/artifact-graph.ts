@@ -5,7 +5,8 @@ import { extractArtifactReferences, REFERENCE_INDEX_VERSION } from './artifact-r
 
 export class ArtifactGraph {
   constructor(private readonly db: Database.Database, private readonly repositoryId: string) {
-    db.exec(`
+    db.transaction(() => {
+      db.exec(`
       CREATE TABLE IF NOT EXISTS artifact_reference_sources (
         source_id TEXT PRIMARY KEY REFERENCES artifacts(artifact_id), source_revision INTEGER NOT NULL,
         source_hash TEXT NOT NULL, resolver_version INTEGER NOT NULL
@@ -17,7 +18,8 @@ export class ArtifactGraph {
       CREATE INDEX IF NOT EXISTS references_target ON artifact_references(target_id, source_id);
       CREATE TABLE IF NOT EXISTS artifact_graph_state (id INTEGER PRIMARY KEY CHECK(id = 1), revision INTEGER NOT NULL);
       INSERT OR IGNORE INTO artifact_graph_state VALUES (1, 0);
-      CREATE VIEW IF NOT EXISTS artifact_graph_edges AS
+      `)
+      const definition = `CREATE VIEW artifact_graph_edges AS
         SELECT r.source_id, r.target_id, r.kind, 'DECLARED' AS nature, 'metadata.relations' AS origin,
           a.revision AS source_revision, a.content_hash AS source_hash
         FROM artifact_relations r JOIN artifacts a ON a.artifact_id = r.source_id
@@ -26,8 +28,14 @@ export class ArtifactGraph {
           s.source_revision, s.source_hash
         FROM artifact_references r JOIN artifact_reference_sources s ON s.source_id = r.source_id
           JOIN artifacts a ON a.artifact_id = r.source_id JOIN artifacts t ON t.artifact_id = r.target_id
-        WHERE s.source_revision = a.revision AND s.source_hash = a.content_hash AND s.resolver_version = ${REFERENCE_INDEX_VERSION};
-    `)
+        WHERE s.source_revision = a.revision AND s.source_hash = a.content_hash AND s.resolver_version = ${REFERENCE_INDEX_VERSION}`
+      const current = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'artifact_graph_edges'").get() as { sql: string } | undefined
+      if (current?.sql.trim() !== definition.trim()) {
+        db.exec('DROP VIEW IF EXISTS artifact_graph_edges')
+        db.exec(definition)
+        if (current) db.prepare('UPDATE artifact_graph_state SET revision = revision + 1 WHERE id = 1').run()
+      }
+    }).immediate()
   }
 
   project(artifact: Pick<Artifact, 'artifactId' | 'revision' | 'contentHash' | 'rawMarkdown'>): void {

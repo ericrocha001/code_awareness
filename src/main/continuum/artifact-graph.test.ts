@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest'
 import { ArtifactStore } from './artifact-store'
 import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
-import { extractArtifactReferences } from './artifact-references'
+import { extractArtifactReferences, REFERENCE_INDEX_VERSION } from './artifact-references'
 import { ContinuumService } from './continuum-service'
 
 const A = 'artifact-11111111-1111-4111-8111-111111111111'
@@ -136,4 +136,80 @@ it('filters edge direction relative to seeds even when opposite edges share the 
   store.create(input(A, B)); store.create(input(B, A))
   expect(store.graph({ artifactIds: [A], expand: true, direction: 'outbound' }).edges.map(e => e.sourceId)).toEqual([A])
   expect(store.graph({ artifactIds: [A], expand: true, direction: 'inbound' }).edges.map(e => e.targetId)).toEqual([A])
+})
+
+it('migrates an older persisted view atomically, hides stale references and preserves documents across idempotent reopen', () => {
+  const { store, path } = setup()
+  store.create(input(B))
+  store.create(input(A, B, { relations: [{ artifactId: B, kind: 'implements' }] }))
+  for (let i = 0; i < 105; i++) store.create(input('legacy-' + i, B))
+  const originals = [store.get(A), store.get(B)]
+  const previousRevision = store.graph().revision
+  store.close()
+  withFixtureDatabase(path, db => {
+    const view = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'view' AND name = 'artifact_graph_edges'").get() as { sql: string }
+    db.transaction(() => {
+      db.exec('DROP VIEW artifact_graph_edges')
+      db.exec(view.sql.replace(`s.resolver_version = ${REFERENCE_INDEX_VERSION}`, `s.resolver_version = ${REFERENCE_INDEX_VERSION - 1}`))
+      db.prepare('UPDATE artifact_reference_sources SET resolver_version = ?').run(REFERENCE_INDEX_VERSION - 1)
+    })()
+  }, false)
+  const reopened = withFixtureDatabase(path, db => {
+    const existingReader = db.prepare("SELECT count(*) AS n FROM artifact_graph_edges WHERE nature = 'DERIVED'")
+    expect(existingReader.get()).toEqual({ n: 106 })
+    const current = new ArtifactStore(path, 'catalog-A')
+    closes.push(() => current.close())
+    expect(existingReader.get()).toEqual({ n: 0 })
+    return current
+  })
+  withFixtureDatabase(path, db => {
+    expect(db.prepare("SELECT count(*) AS n FROM artifact_graph_edges WHERE nature = 'DERIVED'").get()).toEqual({ n: 0 })
+    expect(db.prepare("SELECT count(*) AS n FROM artifact_graph_edges WHERE nature = 'DECLARED'").get()).toEqual({ n: 1 })
+    expect((db.prepare('SELECT revision FROM artifact_graph_state').get() as { revision: number }).revision).toBeGreaterThan(previousRevision)
+  })
+  const partial = reopened.graph({ artifactIds: [A, B] })
+  expect(partial.freshness).toBe('BACKFILL_PENDING')
+  expect(partial.edges.map(edge => edge.nature)).toEqual(['DECLARED', 'DERIVED'])
+  withFixtureDatabase(path, db => {
+    expect(db.prepare(`SELECT count(*) AS n FROM artifact_graph_edges e JOIN artifact_reference_sources s ON e.source_id = s.source_id
+      WHERE e.nature = 'DERIVED' AND s.resolver_version <> ?`).get(REFERENCE_INDEX_VERSION)).toEqual({ n: 0 })
+  })
+  const complete = reopened.graph({ artifactIds: [B] })
+  expect(complete.freshness).toBe('CURRENT')
+  expect(complete.nodes[0].incomingDegree).toBe(107)
+  expect([reopened.get(A), reopened.get(B)]).toEqual(originals)
+  expect(() => reopened.graph({ expectedRevision: previousRevision })).toThrow(/GRAPH_REVISION_CONFLICT/)
+  const stableSchema = withFixtureDatabase(path, db => db.pragma('schema_version', { simple: true }))
+  const concurrent = new ArtifactStore(path, 'catalog-A'); closes.push(() => concurrent.close())
+  expect(concurrent.graph().revision).toBe(complete.revision)
+  expect(reopened.graph().revision).toBe(complete.revision)
+  expect(withFixtureDatabase(path, db => db.pragma('schema_version', { simple: true }))).toBe(stableSchema)
+  withFixtureDatabase(path, db => {
+    expect(db.prepare('SELECT count(*) AS n FROM artifact_revisions').get()).toEqual({ n: 107 })
+  })
+})
+
+it('rolls back view replacement and graph revision together when schema reconciliation fails', () => {
+  const { store, path } = setup()
+  store.create(input(B)); store.create(input(A, B))
+  const original = store.get(A)
+  const revision = store.graph().revision
+  store.close()
+  const oldDefinition = withFixtureDatabase(path, db => {
+    const view = db.prepare("SELECT sql FROM sqlite_master WHERE name = 'artifact_graph_edges'").get() as { sql: string }
+    const older = view.sql.replace(`s.resolver_version = ${REFERENCE_INDEX_VERSION}`, `s.resolver_version = ${REFERENCE_INDEX_VERSION - 1}`)
+    db.exec('DROP VIEW artifact_graph_edges')
+    db.exec(older)
+    db.exec("CREATE TRIGGER reject_graph_migration BEFORE UPDATE ON artifact_graph_state BEGIN SELECT RAISE(ABORT, 'migration rejected'); END")
+    return older
+  }, false)
+  expect(() => new ArtifactStore(path, 'catalog-A')).toThrow(/migration rejected/)
+  withFixtureDatabase(path, db => {
+    expect(db.prepare("SELECT sql FROM sqlite_master WHERE name = 'artifact_graph_edges'").get()).toEqual({ sql: oldDefinition })
+    expect(db.prepare('SELECT revision FROM artifact_graph_state').get()).toEqual({ revision })
+    db.exec('DROP TRIGGER reject_graph_migration')
+  }, false)
+  const reopened = new ArtifactStore(path, 'catalog-A'); closes.push(() => reopened.close())
+  expect(reopened.get(A)).toEqual(original)
+  expect(reopened.graph().edges).toHaveLength(1)
 })
