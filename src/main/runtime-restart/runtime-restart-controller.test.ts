@@ -7,13 +7,18 @@ import { executeRequestRuntimeRestart } from './runtime-restart-mcp'
 import { RuntimeRestartController, type RestartSupervisorClient } from './runtime-restart-controller'
 
 const roots: string[] = []
-afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
+const origins: Promise<void>[] = []
+afterEach(async () => {
+  await Promise.all(origins.splice(0))
+  roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }))
+})
 
 function identity(mode: 'development' | 'production', changed: boolean) {
   const root = mkdtempSync(join(tmpdir(), 'runtime-restart-'))
   roots.push(root)
   writeFileSync(join(root, 'package.json'), '{"version":1}')
   const provider = new RuntimeIdentityProvider({ rootDir: root, includedDirectories: [], includedRootFiles: ['package.json'], mode })
+  origins.push(provider.sourceOriginReady)
   if (changed) writeFileSync(join(root, 'package.json'), '{"version":2}')
   return provider
 }

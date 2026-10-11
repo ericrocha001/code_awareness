@@ -3,7 +3,7 @@
 */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { writeFileSync, chmodSync, existsSync, readFileSync, unlinkSync } from 'fs'
+import { writeFileSync, chmodSync, existsSync, readFileSync, unlinkSync, statSync, utimesSync } from 'fs'
 import * as fsPromises from 'fs/promises'
 import { join } from 'path'
 import { createHash } from 'crypto'
@@ -1042,7 +1042,9 @@ describe('RestoreService — Bateria de Testes de Integração', () => {
         const plan = previewResult.plan
 
         // 2. Modifica o estado do disco após o preview (invalida o stateHash do plano)
+        const previousMtime = statSync(join(repoPath, 'a.ts')).mtimeMs
         writeFile(repoPath, 'a.ts', 'v3')
+        utimesSync(join(repoPath, 'a.ts'), new Date(), new Date(previousMtime + 2000))
 
         // 3. Tenta executar com o plano antigo
         const result = await restoreService.execute(repoPath, cp1.id, {

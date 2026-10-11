@@ -4,7 +4,8 @@
 
 import { describe, it, expect } from 'vitest'
 import { readdirSync, readFileSync, statSync } from 'fs'
-import { join } from 'path'
+import { join, relative } from 'path'
+import { nativeTestFiles } from '../../shared/validation/test-runtime-lanes.cjs'
 
 function findTestFiles(dir: string): string[] {
   const results: string[] = []
@@ -24,7 +25,7 @@ function findTestFiles(dir: string): string[] {
 describe('Database Runtime Boundary — Isolamento de Persistência', () => {
   it('descobre dinamicamente os testes de domínio e garante que nenhum importe SQLite nativo', () => {
     const srcDir = join(process.cwd(), 'src')
-    const testFiles = findTestFiles(srcDir)
+    const testFiles = findTestFiles(srcDir).filter(file => !nativeTestFiles.includes(relative(process.cwd(), file).replaceAll('\\', '/')))
 
     // Proteção contra regressão silenciosa
     expect(testFiles.length).toBeGreaterThan(0)
