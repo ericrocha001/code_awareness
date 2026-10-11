@@ -11,7 +11,7 @@ export default defineConfig({
       '**/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build}.config.*',
       '**/*.e2e.test.ts',
       '**/*.git.test.ts',
-      'scripts/*.test.cjs',
+      'scripts/**/*.test.cjs',
       ...nativeTestFiles
     ]
   }

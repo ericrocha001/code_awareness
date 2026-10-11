@@ -28,6 +28,13 @@ jobs:
           cache: npm
       - name: Select npm
         run: npm install --global npm@10.9.4
+      - name: Use canonical Windows temporary paths
+        shell: pwsh
+        run: |
+          $temporaryPath = Join-Path $env:RUNNER_TEMP 'code-awareness'
+          New-Item -ItemType Directory -Path $temporaryPath -Force | Out-Null
+          "TEMP=$temporaryPath" >> $env:GITHUB_ENV
+          "TMP=$temporaryPath" >> $env:GITHUB_ENV
       - name: Install dependencies and prepare native runtime
         run: npm ci
       - name: Typecheck baseline gate

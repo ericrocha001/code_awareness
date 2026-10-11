@@ -9,7 +9,11 @@ import { executeValidationTool } from './validation-execution-mcp'
 import { ValidationExecution } from './validation-execution'
 
 const roots: string[] = []
-afterEach(() => roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true })))
+const origins: Promise<void>[] = []
+afterEach(async () => {
+  await Promise.all(origins.splice(0))
+  roots.splice(0).forEach((root) => rmSync(root, { recursive: true, force: true }))
+})
 
 function repository(script: string): string {
   const root = mkdtempSync(join(tmpdir(), 'validation-execution-'))
@@ -29,6 +33,7 @@ function setup(script: string, catalog?: unknown) {
     }
   } as unknown as ValidationLedger
   const identity = new RuntimeIdentityProvider({ rootDir: root, includedDirectories: [], includedRootFiles: ['package.json'], mode: 'development' })
+  origins.push(identity.sourceOriginReady)
   return { root, proofs, ledger, identity, execution: new ValidationExecution(root, ledger, identity, catalog as any) }
 }
 
