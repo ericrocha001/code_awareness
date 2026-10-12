@@ -4,7 +4,7 @@
 
 import { Home, Flag, FileText, Archive, Zap, GitBranch, Bookmark, Map, Radio, BookOpen, Infinity, type LucideIcon } from 'lucide-react'
 
-export type NavId = 'home' | 'academy' | 'continuum' | 'campaigns' | 'codebase' | 'compression' | 'dash' | 'diff' | 'journey' | 'code-map' | 'channel'
+export type NavId = 'home' | 'academy' | 'continuum' | 'campaigns' | 'codebase' | 'compression' | 'dash' | 'diff' | 'journey' | 'code-map' | 'channel' | 'git-management'
 export type Tab = NavId
 
 export interface NavItem {
@@ -24,6 +24,7 @@ export const NAV_ITEMS: NavItem[] = [
   { id: 'compression', label: 'Code Compression', icon: '🗜', lucideIcon: Archive },
   { id: 'dash', label: 'Code Dash', icon: 'codicon-zap', lucideIcon: Zap },
   { id: 'diff', label: 'Code Diff', icon: '🔀', lucideIcon: GitBranch },
+  { id: 'git-management', label: 'Git Management', icon: '⑂', lucideIcon: GitBranch },
   { id: 'journey', label: 'Code Journey', icon: '📋', lucideIcon: Bookmark },
   { id: 'code-map', label: 'Code Map', icon: '🗺️', lucideIcon: Map }
 ]

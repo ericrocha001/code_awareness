@@ -15,6 +15,7 @@ import { HomeView } from "./components/HomeView/HomeView";
 import { ChannelView } from "./components/ChannelView/ChannelView";
 import { AcademyView } from "./components/AcademyView/AcademyView";
 import { ContinuumView } from "./components/ContinuumView/ContinuumView";
+import { GitManagementView } from "./components/GitManagementView/GitManagementView";
 
 
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
@@ -31,7 +32,8 @@ export const App: React.FC = () => {
   useTheme();
 
   const [activeTab, setActiveTab] = useState<Tab>("home");
-  const [{ project: activeProject }, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
+  const [activeProjectState, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
+  const { project: activeProject } = activeProjectState;
   const selectionRequest = useRef(0);
   const [statusMessage, setStatusMessage] = useState<{
     text: string;
@@ -161,6 +163,7 @@ export const App: React.FC = () => {
       />
 
       <main className="app-main">
+        {activeTab === "git-management" && <GitManagementView key={`${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} />}
         {activeTab === "channel" && <ChannelView />}
         {activeTab === "academy" && <AcademyView />}
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} />}

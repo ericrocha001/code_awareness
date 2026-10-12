@@ -4,13 +4,14 @@ import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, re
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { GitService, GitWorktreeReadSnapshot } from '../core/git-service'
 import type { GitRemoteTransport } from '../core/git-remote-transport'
-import { GitOperationReceipts } from './git-operation-receipts'
+import { GitOperationReceipts, type LegacyGitReceiptResult } from './git-operation-receipts'
 import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import { GitWorktreeRegistry, type WorktreeIdentity, type WorktreeRecord } from './git-worktree-registry'
 import { assertNoWorktreeGrant, GitWorktreeOwnership, ownershipDigest, withWorktreeTransaction, type WorktreeApprovalPort, type WorktreeIntent, type WorktreeObservation, type WorktreeScope, type WorktreeSnapshot } from './git-worktree-ownership'
 import { GitWorktreeLifecycle } from './git-worktree-lifecycle'
 import { GitWorktreeIntegration, type WorktreeIntegrationPreview } from './git-worktree-integration'
 import type { CapturedText, WorktreeStructureCapture, WorktreeStructureRequest } from './git-worktree-capture'
+import type { GitDecoration, GitHistoryPage, GitCommitDetail, GitCommitFile, GitPatch, GitOperationalResult, GitMutationRequest } from '../../shared/types/git-management-types'
 
 export class GitOperationsError extends Error {
   constructor(readonly code: string, readonly details?: { revisionKind?: 'FILE_BYTES_SHA256'; totalLines?: number; validRange?: { startLine: number; endLine: number } | null; maxLines?: number }) { super(code) }
@@ -68,9 +69,47 @@ function isBinary(bytes: Buffer): boolean {
 }
 
 export class GitOperationsService {
-  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<McpToolResult>): Promise<McpToolResult> {
+  async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>): Promise<LegacyGitReceiptResult> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
     return new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate)
+  }
+  async executeManagementMutation(request: GitMutationRequest, assertCurrent: () => void): Promise<GitOperationalResult> {
+    const { operation, snapshot, operationId } = request
+    let name: string, args: Record<string, unknown>
+    if (operation.action === 'STAGE' || operation.action === 'UNSTAGE') {
+      name = 'stage_git_changes'; args = { mode: operation.action, paths: operation.paths, expectedIndexRevision: snapshot.indexRevision, expectedWorktreeRevision: snapshot.worktreeRevision }
+    } else if (operation.action === 'COMMIT') {
+      name = 'commit_git_changes'; args = { message: operation.message, expectedHead: snapshot.head, expectedIndexRevision: snapshot.indexRevision }
+    } else if (operation.action === 'CREATE' || operation.action === 'SWITCH') {
+      name = 'manage_git_branch'; args = { action: operation.action, branch: operation.branch, ...(operation.action === 'CREATE' ? { expectedHead: snapshot.head } : {}) }
+    } else {
+      name = 'sync_git_remote'; args = { action: operation.action, ...(operation.action === 'FETCH' ? {} : { expectedHead: snapshot.head }) }
+    }
+    const guard = async () => {
+      assertCurrent()
+      const current = await this.getState()
+      if (current.head !== snapshot.head || current.branch !== snapshot.branch || current.indexRevision !== snapshot.indexRevision || current.worktreeRevision !== snapshot.worktreeRevision || current.operation !== snapshot.operation) fail('GIT_STATE_CHANGED')
+      assertCurrent()
+    }
+    try {
+      if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
+      return await new GitOperationReceipts(this.repoRoot, this.git).executeResult(operationId, name, args, async () => {
+        try {
+          let value: unknown
+          if (operation.action === 'STAGE' || operation.action === 'UNSTAGE') value = await this.stage(args as Parameters<GitOperationsService['stage']>[0], guard)
+          else if (operation.action === 'COMMIT') value = await this.commit(args as Parameters<GitOperationsService['commit']>[0], guard)
+          else if (operation.action === 'CREATE' || operation.action === 'SWITCH') value = await this.manageBranch(args as BranchRequest, guard)
+          else value = await this.sync(args as SyncRequest, guard)
+          return { value: value as Record<string, unknown> }
+        } catch (error) {
+          const code = error instanceof GitOperationsError ? error.code : this.normalizeError(error).code
+          return { value: { code, ...(['GIT_STATE_CHANGED', 'CONFLICT_STATE_CHANGED'].includes(code) ? { retryability: 'AFTER_STATE_REFRESH', recommendedAction: 'REFRESH_STATE' } : {}) }, isError: true }
+        }
+      })
+    } catch (error) {
+      const code = error instanceof Error && ['RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED'].includes(error.message) ? error.message : 'RECEIPT_UNAVAILABLE'
+      return { value: { code, operationId, retryability: 'SAME_OPERATION_ID', retryAfterMs: 2000, recommendedAction: 'RECOVER_SAME_OPERATION' }, isError: true }
+    }
   }
   private pending: Promise<unknown> = Promise.resolve()
   readonly worktrees: GitWorktreeRegistry | undefined
@@ -593,7 +632,7 @@ export class GitOperationsService {
     if (error instanceof GitOperationsError) return error
     const message = error instanceof Error ? error.message : ''
     if (['WORKTREE_TRANSACTION_BUSY', 'WORKTREE_OWNERSHIP_REQUIRED'].includes(message)) return new GitOperationsError(message)
-    for (const code of ['GIT_STATE_CHANGED', 'NOTHING_TO_COMMIT', 'SHELF_NOT_FOUND', 'SHELF_REQUIRES_HEAD', 'CONFLICT_STATE_CHANGED', 'CONFLICT_SIDE_UNAVAILABLE', 'UNSUPPORTED_GIT_PATH']) if (message === code) return new GitOperationsError(code)
+    for (const code of ['PROJECT_CONTEXT_CHANGED', 'GIT_STATE_CHANGED', 'NOTHING_TO_COMMIT', 'SHELF_NOT_FOUND', 'SHELF_REQUIRES_HEAD', 'CONFLICT_STATE_CHANGED', 'CONFLICT_SIDE_UNAVAILABLE', 'UNSUPPORTED_GIT_PATH']) if (message === code) return new GitOperationsError(code)
     const text = message.toLowerCase()
     const codes: Array<[string[], string]> = [
       [['not a git repository'], 'NOT_GIT_REPOSITORY'],
@@ -823,12 +862,103 @@ export class GitOperationsService {
     })
   }
 
-  async stage(request: { mode: 'STAGE' | 'UNSTAGE'; paths: string[]; expectedIndexRevision: string; expectedWorktreeRevision: string }) {
+  async getGraphHistory(request: { limit?: number; cursor?: string; contextKey?: string }): Promise<GitHistoryPage> {
+    await this.repository()
+    const limit = request.limit ?? 50
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) fail('INVALID_ARGUMENT')
+    const observe = async () => {
+      const refs = await this.git.getBranchReferences(this.repoRoot)
+      const head = await this.git.getCurrentCommitHash(this.repoRoot)
+      const branch = await this.git.getCurrentBranch(this.repoRoot)
+      return { refs, head, branch, snapshot: createHash('sha256').update(JSON.stringify({ refs, head, branch, contextKey: request.contextKey })).digest('hex') }
+    }
+    const before = await observe()
+    let offset = 0
+    if (request.cursor) {
+      const parts = request.cursor.split(':')
+      if (parts.length !== 2 || parts[0] !== before.snapshot) fail('GIT_STATE_CHANGED')
+      offset = Number(parts[1])
+      if (!Number.isSafeInteger(offset) || offset < 0) fail('INVALID_ARGUMENT')
+    }
+    const refs: GitDecoration[] = before.refs.trimEnd().split('\n').filter(Boolean).flatMap(line => {
+      const [ref, sha, symbolic, upstream] = line.split('\0')
+      if (symbolic) return []
+      return [{ ref, sha, name: ref.replace(/^refs\/(heads|remotes)\//, ''), kind: ref.startsWith('refs/heads/') ? 'LOCAL' as const : 'REMOTE' as const, upstream: upstream || null }]
+    })
+    if (before.head) refs.push({ ref: 'HEAD', name: before.branch ? 'HEAD' : 'HEAD (detached)', kind: 'HEAD', sha: before.head, upstream: null })
+    const tips = [...new Set(refs.map(ref => ref.sha))].sort()
+    const rows = (await this.git.getBranchHistory(this.repoRoot, tips, offset, limit + 1)).trimEnd().split('\n').filter(Boolean)
+    if ((await observe()).snapshot !== before.snapshot) fail('GIT_STATE_CHANGED')
+    const nodes = rows.slice(0, limit).map(line => {
+      const [sha, parents, author, timestamp, subject] = line.split('\0')
+      return { sha, parents: parents.split(' ').filter(Boolean), author, timestamp, subject, decorations: refs.filter(ref => ref.sha === sha) }
+    })
+    const present = new Set(nodes.map(node => node.sha))
+    return { snapshot: before.snapshot, head: before.head, branch: before.branch, refs, nodes,
+      pendingParents: [...new Set(nodes.flatMap(node => node.parents).filter(parent => !present.has(parent)))],
+      nextCursor: rows.length > limit ? `${before.snapshot}:${offset + limit}` : null }
+  }
+
+  async getManagementOverview() {
+    const state = await this.getState()
+    const changes = await this.getChanges()
+    const after = await this.getState()
+    if (state.head !== after.head || state.branch !== after.branch || state.indexRevision !== after.indexRevision || state.worktreeRevision !== after.worktreeRevision) fail('GIT_STATE_CHANGED')
+    return { state, changes }
+  }
+
+  async getCommitDetail(request: { sha: string; cursor?: string }): Promise<GitCommitDetail> {
+    if (typeof request.sha !== 'string' || !/^[a-f0-9]{40,64}$/.test(request.sha)) fail('INVALID_REF')
+    const [commit] = await this.getHistory({ ref: request.sha, limit: 1 })
+    const base = commit.parents[0] ?? null
+    let raw: string
+    try { raw = await this.git.getCommitFileStatus(this.repoRoot, commit.sha, base) }
+    catch (error) { if (error instanceof Error && error.message === 'GIT_OUTPUT_BYTE_LIMIT') fail('DIFF_TOO_LARGE'); throw error }
+    const entries = raw.split('\0'), files: GitCommitFile[] = []
+    for (let index = 0; index < entries.length && entries[index];) {
+      const status = entries[index++], first = entries[index++]
+      files.push(/^[RC]/.test(status) ? { status, previousPath: first, path: entries[index++] } : { status, path: first })
+    }
+    const revision = createHash('sha256').update(commit.sha + raw).digest('hex')
+    const offset = this.pageOffset(request.cursor, revision, files.length)
+    return { commit: { ...commit, decorations: [] }, base, comparison: !base ? 'ROOT' : commit.parents.length > 1 ? 'FIRST_PARENT' : 'PARENT', files: files.slice(offset, offset + 100), nextCursor: files.length > offset + 100 ? `${revision}:${offset + 100}` : null }
+  }
+
+  private pageOffset(cursor: string | undefined, revision: string, length: number): number {
+    if (!cursor) return 0
+    const [expected, position, extra] = cursor.split(':')
+    if (expected !== revision) fail('GIT_STATE_CHANGED')
+    const offset = Number(position)
+    if (extra !== undefined || !Number.isSafeInteger(offset) || offset < 0 || offset > length) fail('INVALID_ARGUMENT')
+    return offset
+  }
+
+  async getManagementPatch(request: { path: string; mode: 'WORKTREE' | 'STAGED' | 'COMMIT'; sha?: string; cursor?: string }): Promise<GitPatch> {
+    await this.repository()
+    const paths = this.paths([request.path])
+    let patch: string
+    try {
+      if (request.mode === 'COMMIT') {
+        if (!request.sha || !/^[a-f0-9]{40,64}$/.test(request.sha)) fail('INVALID_REF')
+        const [commit] = await this.getHistory({ ref: request.sha, limit: 1 })
+        patch = commit.parents.length ? await this.git.getOperationsDiff(this.repoRoot, paths, 'BETWEEN_REFS', commit.parents[0], commit.sha, 512000) : await this.git.getRootCommitPatch(this.repoRoot, commit.sha, paths)
+      } else {
+        if (!['WORKTREE', 'STAGED'].includes(request.mode)) fail('INVALID_ARGUMENT')
+        patch = await this.git.getOperationsDiff(this.repoRoot, paths, request.mode, undefined, undefined, 512000)
+      }
+    } catch (error) { if (error instanceof Error && error.message === 'GIT_OUTPUT_BYTE_LIMIT') fail('DIFF_TOO_LARGE'); throw error }
+    const revision = createHash('sha256').update(JSON.stringify({ path: request.path, mode: request.mode, sha: request.sha, patch })).digest('hex')
+    const offset = this.pageOffset(request.cursor, revision, patch.length), end = Math.min(offset + 24000, patch.length)
+    return { patch: patch.slice(offset, end), binary: /Binary files .* differ|GIT binary patch/.test(patch), truncated: end < patch.length, nextCursor: end < patch.length ? `${revision}:${end}` : null, revision }
+  }
+
+  async stage(request: { mode: 'STAGE' | 'UNSTAGE'; paths: string[]; expectedIndexRevision: string; expectedWorktreeRevision: string }, guard?: () => Promise<void>) {
     return this.serialized(async () => {
       await this.repository()
       const paths = this.paths(request.paths)
       if (![request.expectedIndexRevision, request.expectedWorktreeRevision].every((value) => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value))) fail('INVALID_ARGUMENT')
       const expected = { indexRevision: request.expectedIndexRevision, worktreeRevision: request.expectedWorktreeRevision }
+      await guard?.()
       try {
         if (request.mode === 'STAGE') await this.git.stagePaths(this.repoRoot, paths, expected)
         else if (request.mode === 'UNSTAGE') await this.git.unstagePaths(this.repoRoot, paths, expected)
@@ -844,18 +974,19 @@ export class GitOperationsService {
     })
   }
 
-  async commit(request: { message: string; expectedHead: string | null; expectedIndexRevision: string }) {
+  async commit(request: { message: string; expectedHead: string | null; expectedIndexRevision: string }, guard?: () => Promise<void>) {
     return this.serialized(async () => {
       await this.ready(true)
       await this.checkHead(request.expectedHead)
       if ((await this.getChanges('CONFLICTED')).length) fail('MERGE_CONFLICT')
       if (typeof request.message !== 'string' || !request.message.trim() || request.message.length > 10000 || request.message.includes('\0')) fail('INVALID_ARGUMENT')
+      await guard?.()
       const sha = await this.git.commitInspectedIndex(this.repoRoot, request.message, request.expectedHead, request.expectedIndexRevision)
       return this.observeMutation(async () => ({ sha, parent: request.expectedHead, branch: await this.git.getCurrentBranch(this.repoRoot), message: request.message, paths: await this.git.getCommittedPaths(this.repoRoot, sha) }))
     })
   }
 
-  async manageBranch(request: BranchRequest) {
+  async manageBranch(request: BranchRequest, guard?: () => Promise<void>) {
     return this.serialized(async () => {
       await this.repository()
       if (request.action === 'LIST') return (await this.git.listBranches(this.repoRoot)).trimEnd().split('\n').filter(Boolean).map((line) => {
@@ -863,7 +994,7 @@ export class GitOperationsService {
       })
       await this.ready()
       const branch = await this.branch(request.branch)
-      if (request.action === 'RENAME' || request.action === 'DELETE') {
+      if (request.action === 'RENAME' || request.action === 'DELETE' || request.action === 'SWITCH') {
         const fields = (await this.git.listWorktreeRecords(this.repoRoot)).split('\0\0').filter(Boolean)
         if (fields.some(group => {
           const parts = group.split('\0')
@@ -872,6 +1003,7 @@ export class GitOperationsService {
           return !sameRoot && parts.includes('branch refs/heads/' + branch)
         })) fail('WORKTREE_BRANCH_OCCUPIED')
       }
+      await guard?.()
       if (request.action === 'CREATE') {
         await this.checkHead(request.expectedHead)
         await this.git.createBranch(this.repoRoot, branch, await this.ref(request.startPoint ?? 'HEAD'))
@@ -919,12 +1051,13 @@ export class GitOperationsService {
     })
   }
 
-  async sync(request: SyncRequest) {
+  async sync(request: SyncRequest, guard?: () => Promise<void>) {
     return this.serialized(async () => {
       await this.ready()
       const remote = request.remote ?? 'origin'
       if (typeof remote !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(remote)) fail('REMOTE_NOT_FOUND')
       if (!await this.git.getRemoteUrl(this.repoRoot, remote)) fail('REMOTE_NOT_FOUND')
+      await guard?.()
       if (request.action === 'FETCH') {
         if (this.transport.fetch) await this.transport.fetch(this.repoRoot, remote)
         else await this.git.fetchRemote(this.repoRoot, remote)
