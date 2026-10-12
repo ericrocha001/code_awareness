@@ -36,7 +36,8 @@ describe('Repository writing through Electron Main MCP on a real checkout', () =
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('Missing server port')
     const rpc = async (method: string, params: unknown) => {
-      const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
+      // Synchronous ACL commands can outlive an idle pooled socket before its close event is processed.
+      const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', connection: 'close' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
       return (await response.json() as { result: any }).result
     }
     const call = (name: string, args: unknown) => rpc('tools/call', { name, arguments: args })
