@@ -17,7 +17,7 @@ T ---
       CSP minima: style_src 'unsafe-inline' necessario para estilos inline do React.
       Offline-first: sem fontes externas; usa a pilha de fontes do sistema definida em index.css.
     -->
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; connect-src 'self' ws://localhost:5173;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' blob:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; connect-src 'self' ws://localhost:5173;" />
   </head>
   <body>
     <div id="root"></div>
