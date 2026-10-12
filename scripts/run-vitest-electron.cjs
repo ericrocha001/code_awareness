@@ -30,7 +30,7 @@ function resolveVitestCli() {
   return cliPath
 }
 
-function runCli() {
+async function runCli() {
   let electronPath
   let vitestCli
 
@@ -43,7 +43,17 @@ function runCli() {
     process.exit(1)
   }
 
-  const result = spawnSync(electronPath, [vitestCli, ...process.argv.slice(2)], {
+  const args = process.argv.slice(2)
+  const human = args.includes('--human') || !args.includes('run') || process.env.CODE_AWARENESS_TEST_CAPTURE === '1'
+  const parameters = [vitestCli, ...args.filter(arg => arg !== '--human')]
+  if (!human) {
+    const { run, project } = require('./test-output.cjs')
+    const receipt = await run(electronPath, parameters, { cwd: projectRoot, env: { ELECTRON_RUN_AS_NODE: '1' } })
+    console.log(project(receipt))
+    process.exitCode = receipt.state === 'PASS' ? 0 : receipt.exitCode || 1
+    return
+  }
+  const result = spawnSync(electronPath, parameters, {
     cwd: projectRoot,
     env: {
       ...process.env,
@@ -62,5 +72,5 @@ function runCli() {
 }
 
 if (require.main === module) {
-  runCli()
+  runCli().catch(error => { console.error(error.message); process.exitCode = 1 })
 }

@@ -9,9 +9,11 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
   const evidenceDir = path.resolve(output || path.join(projectRoot, '.code-awareness/visual-validation', runId))
   const receipt = { status: 'FAIL', scenario, runId, checks: [], captures: [], evidenceDir }
   let temporary, child, timer
+  const logFiles = []
   try {
     if (!/^[a-z0-9-]+$/i.test(scenario)) throw Object.assign(new Error('Scenario must be a filename stem'), { code: 'SCENARIO_INVALID' })
-    fs.mkdirSync(evidenceDir, { recursive: true })
+    require('../test-output.cjs').protectDirectory(evidenceDir)
+    for (const name of ['runtime.log', 'runtime.stdout.log', 'runtime.stderr.log']) logFiles.push(fs.openSync(path.join(evidenceDir, name), 'wx', 0o600))
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ca-ui-visual-'))
     const config = { projectRoot, evidenceDir, temporary, scenario: path.resolve(__dirname, 'scenarios', `${scenario}.cjs`) }
     fs.writeFileSync(path.join(temporary, 'config.json'), JSON.stringify(config))
@@ -19,13 +21,18 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
     const result = await new Promise((resolve, reject) => {
       child = spawn(executable || require('electron'), [path.join(__dirname, 'worker.cjs'), path.join(temporary, 'config.json')], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
       receipt.processId = child.pid
-      let log = '', received
-      for (const stream of [child.stdout, child.stderr]) stream.on('data', data => { log = (log + data).slice(-16000) })
+      let received
+      for (const [index, stream] of [child.stdout, child.stderr].entries()) stream.on('data', data => {
+        try {
+          for (const fd of [logFiles[0], logFiles[index + 1]]) {
+            let offset = 0
+            while (offset < data.length) offset += fs.writeSync(fd, data, offset, data.length - offset)
+          }
+        } catch (error) { child.kill(); reject(Object.assign(error, { code: 'OUTPUT_UNWRITABLE' })) }
+      })
       child.on('message', message => { received = message })
       child.on('error', error => reject(Object.assign(error, { code: 'ELECTRON_START_FAILED' })))
-      child.on('exit', code => {
-        try { fs.writeFileSync(path.join(evidenceDir, 'runtime.log'), log) }
-        catch (error) { reject(Object.assign(error, { code: 'OUTPUT_UNWRITABLE' })); return }
+      child.on('close', code => {
         if (received) resolve(received)
         else reject(Object.assign(new Error(`Electron exited ${code}`), { code: 'ELECTRON_EXIT_WITHOUT_RECEIPT' }))
       })
@@ -45,11 +52,12 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
     receipt.status = 'FAIL'; receipt.reason = error.code || 'HARNESS_FAILED'; receipt.message = error.message
   } finally {
     clearTimeout(timer)
-    if (child && child.exitCode === null && !child.signalCode && child.pid) await new Promise(resolve => { child.once('exit', resolve); child.kill(); setTimeout(resolve, 3000).unref() })
+    if (child && child.exitCode === null && !child.signalCode && child.pid) await new Promise(resolve => { child.once('close', resolve); child.kill(); setTimeout(resolve, 3000).unref() })
     if (child?.pid) {
       try { process.kill(child.pid, 0); receipt.status = 'FAIL'; receipt.reason = 'TEARDOWN_FAILED' }
       catch (error) { if (error.code !== 'ESRCH') { receipt.status = 'FAIL'; receipt.reason = 'TEARDOWN_UNVERIFIED' } }
     }
+    for (const fd of logFiles) fs.closeSync(fd)
     if (temporary && !['TEARDOWN_FAILED', 'TEARDOWN_UNVERIFIED'].includes(receipt.reason)) {
       try { fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); receipt.cleanup = 'PASS' }
       catch (error) { receipt.status = 'FAIL'; receipt.reason = 'CLEANUP_FAILED'; receipt.message = error.message }
