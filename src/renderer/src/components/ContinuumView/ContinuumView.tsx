@@ -8,6 +8,7 @@ import { ColumnResizer } from '../shared/ColumnResizer/ColumnResizer'
 import { useContinuumColumns } from './useContinuumColumns'
 import { VisualThumbnail, thumbnailQueue } from './VisualThumbnail'
 import './ContinuumView.css'
+const ContinuumGraph = React.lazy(() => import('./ContinuumGraph').then(module => ({ default: module.ContinuumGraph })))
 
 function timestamp(value: string): string {
   const date = new Date(value)
@@ -47,6 +48,7 @@ function Inspector({ artifact, repositoryId, preview }: { artifact: ContinuumDet
 }
 
 export function ContinuumView({ activeProject }: { activeProject: ActiveProject | null }) {
+  const [view, setView] = useState<'timeline' | 'graph'>('timeline')
   const [repositoryId, setRepositoryId] = useState<string | null>(null)
   const [facets, setFacets] = useState<ContinuumFacet[]>([])
   const [items, setItems] = useState<ContinuumItem[]>([])
@@ -67,6 +69,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
   const listGeneration = useRef(0)
   const path = activeProject?.path ?? null
   const currentPath = useRef(path)
+  const boundPath = useRef<string | null>(null)
   currentPath.current = path
   const fileInput = useRef<HTMLInputElement>(null)
   const visualInput = useRef<HTMLInputElement>(null)
@@ -161,6 +164,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     setFacetsLoading(true)
     window.codeAwareness.getContinuumFacets(path).then(result => {
       if (cancelled || currentPath.current !== path) return
+      boundPath.current = path
       setRepositoryId(result.repositoryId); setFacets(result.facets); setError('')
       setMetadata(previous => {
         const valid = Object.fromEntries(Object.entries(previous).filter(([key, value]) =>
@@ -293,8 +297,16 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
         </aside>
         <div className="continuum-resizer continuum-context-resizer"><ColumnResizer onDrag={columns.dragContext} onDragEnd={columns.persist} /></div>
         <section className="continuum-pane continuum-timeline" aria-label="Continuum">
-          <div className="continuum-pane-heading"><h2>Continuum</h2><span>{items.length} artifacts{cursor ? '+' : ''}</span></div>
-          <div className="continuum-pane-scroll" aria-busy={loading} ref={timelineScroll}>
+          <div className="continuum-pane-heading"><h2>Continuum</h2><div className="continuum-view-switch" role="tablist" aria-label="Visualização do Continuum">
+            {(['timeline', 'graph'] as const).map(mode => <button key={mode} role="tab" tabIndex={view === mode ? 0 : -1} aria-selected={view === mode} onClick={() => setView(mode)} onKeyDown={event => {
+              if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+              event.preventDefault(); setView(mode === 'timeline' ? 'graph' : 'timeline')
+              const buttons = event.currentTarget.parentElement!.querySelectorAll<HTMLButtonElement>('button')
+              buttons[mode === 'timeline' ? 1 : 0].focus()
+            }}>{mode === 'timeline' ? 'Timeline' : 'Graph'}</button>)}
+          </div></div>
+          {view === 'graph' && repositoryId && boundPath.current === path && <React.Suspense fallback={<p role="status">Carregando Graph…</p>}><ContinuumGraph key={`${path}:${repositoryId}`} repositoryId={repositoryId} query={query} metadata={metadata} periods={periods} refresh={refresh} selectedId={selectedId} onSelect={id => { setSelectedId(id); setInspectorOpen(true) }} /></React.Suspense>}
+          <div className="continuum-pane-scroll" hidden={view !== 'timeline'} aria-busy={loading} ref={timelineScroll}>
             {loading && <p role="status" className="continuum-hint">Carregando artifacts…</p>}
             {items.map((item, index) => <React.Fragment key={`${repositoryId}:${item.artifactId}`}>
               {(index === 0 || new Date(items[index - 1].updatedAt).toDateString() !== new Date(item.updatedAt).toDateString()) &&
@@ -316,7 +328,7 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
           <div className="continuum-pane-heading"><h2>Inspector</h2><button className="continuum-close" aria-label="Fechar inspector" onClick={() => setInspectorOpen(false)}><X size={17} /></button></div>
           <div className="continuum-pane-scroll" aria-busy={detailLoading}>
             {detailError && <p role="alert">{detailError}</p>}
-            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact && repositoryId ? <Inspector artifact={artifact} repositoryId={repositoryId} preview={inspectorOpen} /> :
+            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact && repositoryId && boundPath.current === path ? <Inspector artifact={artifact} repositoryId={repositoryId} preview={inspectorOpen} /> :
               <div className="continuum-empty"><FileText size={32} /><h3>Nenhum artifact selecionado</h3><p>Selecione um artifact para ler seu conteúdo e metadata.</p></div>}
           </div>
         </aside>

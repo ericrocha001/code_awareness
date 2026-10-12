@@ -78,7 +78,7 @@
 .continuum-error { display: flex; gap: 12px; align-items: center; color: var(--text-primary); font-size: 12px; overflow-wrap: anywhere; }
 .continuum-close { display: none; }
 @container (max-width: 1000px) {
-  .continuum-workspace { grid-template-columns: minmax(160px, var(--continuum-context-track)) 14px minmax(280px, var(--continuum-timeline-track)); }
+  .continuum-workspace { grid-template-columns: minmax(160px, var(--continuum-medium-context-track)) 14px minmax(280px, var(--continuum-medium-timeline-track)); }
   .continuum-inspector-resizer { display: none; }
   .continuum-inspector { display: none; position: absolute; inset: 0 0 0 auto; width: min(480px, 75%); z-index: 2; background: var(--bg-secondary); box-shadow: -12px 0 32px rgba(0,0,0,.25); }
   .continuum-inspector.open { display: flex; }.continuum-close { display: block; }
@@ -90,5 +90,9 @@
 }
 
 .continuum-facet-year { min-width: 0; }
+.continuum-view, .continuum-view *, .continuum-view *::before, .continuum-view *::after { box-sizing: border-box; }
 .continuum-facet-year > button { width: 100%; }
 .continuum-facet-months { padding-left: 12px; display: flex; flex-direction: column; gap: 3px; }
+.continuum-view-switch { display: flex; gap: 4px; }
+.continuum-view-switch button { padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--text-secondary); background: var(--bg-primary); }
+.continuum-view-switch button[aria-selected=true] { color: var(--text-primary); border-color: var(--accent); background: var(--selected-bg); }

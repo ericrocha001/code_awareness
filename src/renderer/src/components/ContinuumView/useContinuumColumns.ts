@@ -50,6 +50,8 @@ export function useContinuumColumns(path: string | null) {
   const style = {
     '--continuum-context-track': `${split.context}fr`,
     '--continuum-timeline-track': `${split.timeline}fr`,
+    '--continuum-medium-context-track': `${split.context / (split.context + split.timeline)}fr`,
+    '--continuum-medium-timeline-track': `${split.timeline / (split.context + split.timeline)}fr`,
     '--continuum-inspector-track': `${1 - split.context - split.timeline}fr`
   } as CSSProperties
   return { workspace, style, dragContext, dragInspector, persist }
