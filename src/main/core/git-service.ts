@@ -503,6 +503,24 @@ export class GitService implements FileListingPort {
     return this.runGit(['--literal-pathspecs', 'log', `--max-count=${limit}`, '--format=%H%x00%P%x00%an%x00%aI%x00%s', ref, '--', ...(path ? [path] : [])], dirPath)
   }
 
+  async getBranchReferences(root: string): Promise<string> {
+    return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(upstream:short)', 'refs/heads/', 'refs/remotes/'], root)
+  }
+
+  async getBranchHistory(root: string, tips: string[], offset: number, limit: number): Promise<string> {
+    if (!tips.length) return ''
+    return this.runGit(['log', '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, '--format=%H%x00%P%x00%an%x00%aI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000 })
+  }
+
+  async getCommitFileStatus(root: string, sha: string, parent: string | null): Promise<string> {
+    const args = parent ? ['diff', parent, sha] : ['diff-tree', '--root', '--no-commit-id', '-r', sha]
+    return this.runGit([...args, '--no-ext-diff', '--no-textconv', '--name-status', '--find-renames', '-z', '--'], root, { maxOutputBytes: 512000 })
+  }
+
+  async getRootCommitPatch(root: string, sha: string, paths: string[]): Promise<string> {
+    return this.runGit(['--literal-pathspecs', 'show', '--format=', '--root', '--no-ext-diff', '--no-textconv', '--no-color', sha, '--', ...paths], root, { maxOutputBytes: 512000 })
+  }
+
   async getCommittedPaths(dirPath: string, sha: string): Promise<string[]> {
     return (await this.runGit(['diff-tree', '--root', '--first-parent', '--no-commit-id', '--name-only', '-r', '-z', sha], dirPath)).split('\0').filter(Boolean)
   }
