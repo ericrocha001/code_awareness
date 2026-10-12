@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
+import type { ContinuumSuggestionQuery } from '../../shared/types/continuum-suggestion-types'
 import sharp from 'sharp'
-import type { Artifact, ArtifactReceipt, CreateArtifactInput, IContinuumService, ListArtifactsFilter, ArtifactPage, IArtifactGraphReader } from './continuum-types'
+import type { Artifact, ArtifactReceipt, CreateArtifactInput, IContinuumService, ListArtifactsFilter, ArtifactPage, IArtifactGraphReader, IArtifactSuggestionReader } from './continuum-types'
 import type { TransportEnvelope } from './artifact-envelope'
 import { ArtifactStore } from './artifact-store'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -9,7 +10,7 @@ import { legacyInput } from './legacy-artifact-migrator'
 import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
 
-export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader {
+export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
   private readonly listeners = new Set<() => void>()
   private thumbnailReads = 0
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
@@ -17,6 +18,14 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   facets() { this.reconcile?.(); return this.store.facets() }
   constructor(private readonly store: ArtifactStore, private readonly reconcile?: () => void, private readonly isActive: () => boolean = () => true) {}
   assertActive(): void { if (!this.isActive()) throw new Error('REPOSITORY_CONTEXT_CHANGED') }
+  suggestions(query: ContinuumSuggestionQuery) {
+    this.assertActive()
+    this.reconcile?.()
+    this.assertActive()
+    const result = this.store.suggestions(query)
+    this.assertActive()
+    return result
+  }
   graph(query: ContinuumGraphQuery = {}) {
     this.assertActive()
     this.reconcile?.()

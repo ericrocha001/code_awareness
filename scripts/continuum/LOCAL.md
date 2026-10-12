@@ -10,12 +10,17 @@ Execute a CLI de dentro do checkout cadastrado ou de uma worktree Git vinculada 
 node scripts/continuum/local.cjs status
 node scripts/continuum/local.cjs list --repository <repositoryId> --filter '{"kind":"EXECUTABLE_PLAN","limit":10}'
 node scripts/continuum/local.cjs get --repository <repositoryId> --id <artifactId>
+node scripts/continuum/local.cjs suggestions --repository <repositoryId> --id <artifactId> --filter '{"limit":5}'
 node scripts/continuum/local.cjs get --repository <repositoryId> --id <artifactId> --format markdown
 node scripts/continuum/local.cjs publish --repository <repositoryId> --file handoff.md
 node scripts/continuum/local.cjs update --repository <repositoryId> --id <artifactId> --revision <revision> --file work-item.md
 node scripts/continuum/local.cjs publish_visual --repository <repositoryId> --file context.md --media reference.webp
 node scripts/continuum/local.cjs get_visual --repository <repositoryId> --id <artifactId> --output retrieved.webp
 ```
+
+`suggestions` consulta um Artifact explícito sem adquirir corpos Markdown. Retorna até 10 candidatas `SUGGESTED` (padrão 5), com razões limitadas e score de evidência relativo, nunca probabilidade de verdade. Examina no máximo 100 candidatas; `truncated` e `BACKFILL_PENDING` indicam limites da aquisição, e resultado vazio não prova ausência de relações. Não existe promoção automática: confira o alvo com `get` e, quando houver decisão explícita, acrescente `metadata.relations` pelo `update` CAS existente.
+
+`--filter` aceita `limit`, `expectedSourceRevision` e `expectedGraphRevision`. A resposta inclui revisão da origem, revisão do grafo e versões da projeção/índice para detectar obsolescência. Repositório, Worktree e autenticação passam pelas mesmas verificações dos demais comandos. O comando também está disponível como `node scripts/local-agent/local.cjs continuum suggestions ...`.
 
 `publish_visual` usa contexto Markdown com `kind: VISUAL_REFERENCE`, um único arquivo WebP lossless estático de até 4 MiB, dimensões máximas de 4096 por eixo e 16 megapixels. A mídia é imutável; `update` altera somente o contexto textual sem fornecer metadata `media`. `get_visual` grava o arquivo explicitamente solicitado com criação exclusiva, sem sobrescrever um arquivo existente e sem imprimir pixels/Base64 no terminal. Ambas as operações preservam a identidade de repositório e Worktree.
 

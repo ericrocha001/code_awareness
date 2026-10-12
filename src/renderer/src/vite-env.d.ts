@@ -7,6 +7,7 @@ import type { ActiveProjectState } from '../../shared/types/active-project-types
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../../shared/types/git-management-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../../shared/types/continuum-ui-types'
 import type { ContinuumGraphRequest, ContinuumGraph } from '../../shared/types/continuum-graph-types'
+import type { ContinuumSuggestionRequest, ContinuumSuggestions } from '../../shared/types/continuum-suggestion-types'
 import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '../../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
 import type { ChannelState } from '../../shared/types/channel-state-types'
@@ -27,6 +28,7 @@ declare global {
       mutateGitManagement: (request: GitMutationRequest) => Promise<GitManagementResult<GitOperationalResult>>
       listContinuumArtifacts: (request: ContinuumListRequest) => Promise<ContinuumTimeline>
       getContinuumGraph: (request: ContinuumGraphRequest) => Promise<ContinuumGraph>
+      getContinuumSuggestions: (request: ContinuumSuggestionRequest) => Promise<ContinuumSuggestions>
       publishContinuumArtifact: (request: ContinuumPublishRequest) => Promise<ContinuumPublishReceipt>
       publishContinuumVisual: (request: ContinuumVisualPublishRequest) => Promise<ContinuumPublishReceipt>
       getContinuumVisual: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>

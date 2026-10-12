@@ -1,5 +1,7 @@
 import { metadataPeriod, validatePeriods } from './temporal-metadata'
 import { ArtifactGraph } from './artifact-graph'
+import { ArtifactSuggestions } from './artifact-suggestions'
+import type { ContinuumSuggestionQuery } from '../../shared/types/continuum-suggestion-types'
 import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import Database from 'better-sqlite3'
 import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continuum-ui-types'
@@ -38,6 +40,7 @@ interface DiscoveryRow {
 export class ArtifactStore {
   private readonly db: Database.Database
   private readonly graphIndex: ArtifactGraph
+  suggestions(query: ContinuumSuggestionQuery) { return new ArtifactSuggestions(this.db, this.repositoryId).query(query) }
   graph(query: ContinuumGraphQuery = {}) { return this.graphIndex.query(query, filter => this.list(filter)) }
   backfillReferences(limit = 100) { return this.graphIndex.backfill(limit) }
   facets(): ContinuumFacet[] {
