@@ -110,6 +110,25 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['merge-base', source, target], root)).trim()
   }
 
+  async getChangedPathsBetweenCommits(root: string, base: string, head: string): Promise<string[]> {
+    if (![base, head].every(value => /^[a-f0-9]{40,64}$/.test(value))) throw new Error('INVALID_ARGUMENT')
+    const raw = (await this.runGitBytes(['diff', '--name-status', '-z', '--no-ext-diff', '--no-textconv', '--find-renames', base, head, '--'], root, { maxOutputBytes: 2 * 1024 * 1024 })).toString('utf8').split('\0')
+    const paths = new Set<string>()
+    for (let i = 0; i < raw.length && raw[i];) {
+      const status = raw[i++]
+      const path = raw[i++]
+      if (!path) throw new Error('GIT_PATH_OUTPUT_INVALID')
+      paths.add(path)
+      if (/^[RC]/.test(status)) {
+        const destination = raw[i++]
+        if (!destination) throw new Error('GIT_PATH_OUTPUT_INVALID')
+        paths.add(destination)
+      }
+      if (paths.size > 10000) throw new Error('GIT_PATH_LIMIT')
+    }
+    return [...paths].sort()
+  }
+
   async integrationCommits(root: string, source: string, target: string): Promise<string[]> {
     return (await this.runGit(['rev-list', '--max-count=20', `${target}..${source}`], root)).trim().split('\n').filter(Boolean)
   }
@@ -184,7 +203,7 @@ export class GitService implements FileListingPort {
   async captureWorktreeReadSnapshot(dirPath: string): Promise<GitWorktreeReadSnapshot> {
     // A read must match two captures bracketing its effect; this is not a mutation precondition.
     const [head, indexRevision, status, branch, operation] = await Promise.all([
-      this.getCurrentCommitHash(dirPath), this.getIndexRevision(dirPath), this.getOperationsStatus(dirPath),
+      this.getCurrentCommitHash(dirPath), this.getIndexRevision(dirPath), this.getOperationsStatus(dirPath, true),
       this.getCurrentBranch(dirPath), this.getGitOperation(dirPath)
     ])
     return { head, branch, operation, indexRevision, status,
@@ -452,8 +471,9 @@ export class GitService implements FileListingPort {
       if (temporary) rmSync(temporary, { recursive: true, force: true })
     }
   }
-  async getOperationsStatus(dirPath: string): Promise<string> {
-    return this.runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], dirPath)
+  async getOperationsStatus(dirPath: string, readOnly = false): Promise<string> {
+    return this.runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], dirPath,
+      readOnly ? { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } } : undefined)
   }
 
   async getIndexRevision(dirPath: string): Promise<string> {

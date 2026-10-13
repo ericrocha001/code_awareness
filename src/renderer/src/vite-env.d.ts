@@ -4,6 +4,7 @@
 
 /// <reference types="vite/client" />
 import type { ActiveProjectState } from '../../shared/types/active-project-types'
+import type { OrchestrationRequest, OrchestrationResult, OrchestrationOverview, WorktreePair } from '../../shared/types/work-orchestration-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../../shared/types/git-management-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../../shared/types/continuum-ui-types'
 import type { ContinuumGraphRequest, ContinuumGraph } from '../../shared/types/continuum-graph-types'
@@ -21,6 +22,7 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 declare global {
   interface Window {
     codeAwareness: {
+      getWorkOrchestration: (request: OrchestrationRequest) => Promise<OrchestrationResult<OrchestrationOverview | WorktreePair>>
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>
       getGitManagementOverview: (context: GitManagementContext) => Promise<GitManagementResult<GitOverview>>
       getGitManagementCommit: (request: GitCommitRequest) => Promise<GitManagementResult<GitCommitDetail>>

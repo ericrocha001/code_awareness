@@ -401,6 +401,32 @@ export class GitOperationsService {
     })
   }
 
+  async getCoordinationSnapshot(worktreeId: string) {
+    return this.readWorktree(worktreeId, async (service, snapshot, record) => {
+      const changes = service.parseChanges(snapshot.status)
+      const paths = [...new Set(changes.flatMap(change => change.previousPath ? [change.path, change.previousPath] : [change.path]))].sort()
+      if (paths.length > 10000) fail('GIT_PATH_LIMIT')
+      return { record, snapshot: { head: snapshot.head, branch: snapshot.branch, operation: snapshot.operation,
+        indexRevision: snapshot.indexRevision, worktreeRevision: snapshot.worktreeRevision }, paths,
+        stagedCount: changes.filter(c => c.stagedState).length, unstagedCount: changes.filter(c => c.unstagedState).length,
+        untrackedCount: changes.filter(c => c.untracked).length, conflictCount: changes.filter(c => c.conflicted).length,
+        reference: realpathSync(await this.git.getWorktreeDirectory(record.path)) === realpathSync(await this.git.getCommonDirectory(record.path)) }
+    })
+  }
+
+  async getCoordinationCommitPaths(leftHead: string, rightHead: string) {
+    if (![leftHead, rightHead].every(value => /^[a-f0-9]{40,64}$/.test(value))) fail('INVALID_ARGUMENT')
+    let base: string
+    try { base = await this.git.mergeBase(this.repoRoot, leftHead, rightHead) }
+    catch { fail('MERGE_BASE_UNAVAILABLE') }
+    if (!base) fail('MERGE_BASE_UNAVAILABLE')
+    const [left, right] = await Promise.all([
+      this.git.getChangedPathsBetweenCommits(this.repoRoot, base, leftHead),
+      this.git.getChangedPathsBetweenCommits(this.repoRoot, base, rightHead)
+    ])
+    return { base, left, right }
+  }
+
   async selectWorktree(worktreeId: string) {
     if (!this.worktrees) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     try {
