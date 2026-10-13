@@ -1,5 +1,6 @@
 import type { GitHubRepositoryIdentity, GitHubRepositoryVisibility } from '../../shared/types/repository-catalog-types'
 import type { GitHubUserProjection } from '../../shared/types/github-types'
+import type { PullRequestMergeability } from '../../shared/types/git-evidence-types'
 import { GITHUB_API_BASE_URL, GITHUB_API_VERSION, GITHUB_USER_AGENT } from './github-config'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 
@@ -25,6 +26,18 @@ export class GitHubApiClient {
     const value = await this.request<any>('/user')
     if (!value || value.id == null || typeof value.login !== 'string') throw malformed()
     return { id: String(value.id), login: value.login, avatarUrl: typeof value.avatar_url === 'string' ? value.avatar_url : '' }
+  }
+
+  async inspectPullRequestMergeability(fullName: string, prNumber: number): Promise<PullRequestMergeability> {
+    if (!Number.isSafeInteger(prNumber) || prNumber <= 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fullName)) throw malformed()
+    const value = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${prNumber}`, { signal: AbortSignal.timeout(10_000) })
+    const validRef = (ref: any) => ref && typeof ref.ref === 'string' && /^[a-f0-9]{40,64}$/.test(ref.sha)
+    if (!value || value.number !== prNumber || !['open', 'closed'].includes(value.state) || typeof value.draft !== 'boolean' || !validRef(value.base) || !validRef(value.head)) throw malformed()
+    return { status: 'OBSERVED', source: 'GITHUB_REST', repository: fullName, prNumber, state: value.state, draft: value.draft,
+      base: { ref: value.base.ref, sha: value.base.sha }, head: { ref: value.head.ref, sha: value.head.sha },
+      mergeability: value.mergeable === true ? 'MERGEABLE' : value.mergeable === false ? 'NOT_MERGEABLE' : 'UNKNOWN',
+      conflict: value.mergeable === false && value.mergeable_state === 'dirty' ? 'CONFLICT_CONFIRMED' : 'NOT_CONFIRMED',
+      ...(typeof value.mergeable_state === 'string' ? { providerStatus: value.mergeable_state } : {}), observedAt: new Date().toISOString() }
   }
 
   async listInstallations(): Promise<GitHubInstallation[]> {
@@ -76,7 +89,8 @@ export class GitHubApiClient {
           ...(init?.headers ?? {})
         }
       })
-    } catch {
+    } catch (error) {
+      if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) throw new GitHubIntegrationError('TIMEOUT', githubErrorMessage('TIMEOUT'))
       throw new GitHubIntegrationError('NETWORK_ERROR', githubErrorMessage('NETWORK_ERROR'))
     }
     if (!response.ok) throw responseError(response)
@@ -113,6 +127,7 @@ function nextLink(header: string | null): string | null {
 }
 
 function responseError(response: Response): GitHubIntegrationError {
+  if (response.status === 429) return new GitHubIntegrationError('RATE_LIMITED', githubErrorMessage('RATE_LIMITED'))
   if (response.status === 401) return new GitHubIntegrationError('REAUTH_REQUIRED', githubErrorMessage('REAUTH_REQUIRED'))
   if (response.status === 404) return new GitHubIntegrationError('REPOSITORY_NOT_FOUND', githubErrorMessage('REPOSITORY_NOT_FOUND'))
   if (response.status === 422) return new GitHubIntegrationError('REPOSITORY_NAME_CONFLICT', githubErrorMessage('REPOSITORY_NAME_CONFLICT'))

@@ -95,6 +95,7 @@ export class McpLifecycle {
       this.requested.diagnosticSourceAccess === context.diagnosticSourceAccess &&
       this.requested.runtimeRestart === context.runtimeRestart &&
       this.requested.gitOperations === context.gitOperations &&
+      this.requested.githubIntegration === context.githubIntegration &&
       this.requested.repositoryFileIngress === context.repositoryFileIngress &&
       this.requested.repositoryFileEditing === context.repositoryFileEditing &&
       this.state.status !== 'ERROR' &&

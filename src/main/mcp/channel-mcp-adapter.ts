@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
 import { ChannelActivityMonitor } from './channel-activity-monitor'
 import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
@@ -77,6 +78,7 @@ export class ChannelMcpAdapter {
   private readonly diagnosticSourceAccess: DiagnosticSourceAccess | undefined
   private readonly runtimeRestart: RuntimeRestartController | undefined
   private readonly gitOperations: GitOperationsService | undefined
+  private readonly githubContext?: Pick<McpProjectContext, 'githubIntegration' | 'repoRoot'>
   private readonly academy: AcademyService | undefined
   private readonly repositoryFileIngress?: RepositoryFileIngress
   private readonly repositoryFileEditing?: RepositoryFileEditing
@@ -126,6 +128,7 @@ export class ChannelMcpAdapter {
       this.diagnosticSourceAccess = context.diagnosticSourceAccess
       this.runtimeRestart = context.runtimeRestart
       this.gitOperations = context.gitOperations
+      this.githubContext = { githubIntegration: context.githubIntegration, repoRoot: context.repoRoot }
       this.repositoryFileIngress = context.repositoryFileIngress
       this.repositoryFileEditing = context.repositoryFileEditing
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
@@ -183,6 +186,7 @@ export class ChannelMcpAdapter {
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
+    if (this.githubContext?.githubIntegration) tools.push(INSPECT_PULL_REQUEST_MERGEABILITY_TOOL)
     if (this.repositoryFileIngress) tools.push(IMPORT_REPOSITORY_FILE_TOOL)
     if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
@@ -257,6 +261,9 @@ export class ChannelMcpAdapter {
     if (GIT_OPERATIONS_TOOLS.some((tool) => tool.name === name)) {
       return this.gitOperations ? executeGitOperationsTool(this.gitOperations, name, args)
         : { content: [{ type: 'text', text: 'GIT_OPERATIONS_UNAVAILABLE' }], isError: true }
+    }
+    if (name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name && this.githubContext?.githubIntegration) {
+      return executeInspectPullRequestMergeability(this.githubContext.githubIntegration, this.githubContext.repoRoot, args)
     }
     if (ACADEMY_MCP_TOOLS.some((tool) => tool.name === name)) {
       return this.academy

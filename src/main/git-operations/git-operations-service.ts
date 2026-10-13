@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import type { RemoteEvidence } from '../../shared/types/git-evidence-types'
 import ignore from 'ignore'
 import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -712,17 +713,42 @@ export class GitOperationsService {
     return changes
   }
 
-  async getState() {
+  async getState(remoteCheck: 'NONE' | 'VERIFY' = 'NONE') {
     const [changes, branch, head, upstream, operation, indexRevision] = await Promise.all([
       this.getChanges(), this.git.getCurrentBranch(this.repoRoot), this.git.getCurrentCommitHash(this.repoRoot),
       this.git.getUpstreamState(this.repoRoot), this.git.getGitOperation(this.repoRoot), this.git.getIndexRevision(this.repoRoot)
     ])
-    return { repositoryState: 'GIT', branch, head,
+    const remoteEvidence: RemoteEvidence = remoteCheck === 'VERIFY' ? await this.verifyRemote(head) : { status: 'NOT_CHECKED', source: 'LOCAL_TRACKING' }
+    return { repositoryState: 'GIT', branch, head, remoteEvidence,
       ...upstream, dirty: changes.length > 0,
       stagedCount: changes.filter((c) => c.stagedState).length, unstagedCount: changes.filter((c) => c.unstagedState).length,
       untrackedCount: changes.filter((c) => c.untracked).length, conflictCount: changes.filter((c) => c.conflicted).length,
       operation, indexRevision, worktreeRevision: await this.git.getWorktreeRevision(this.repoRoot, this.readOnlyWorktree),
       ...(this.readOnlyWorktree ? { worktreeRevisionKind: 'GIT_STATUS_FILE_METADATA' } : {}) }
+  }
+
+  private async verifyRemote(localHead: string | null): Promise<RemoteEvidence> {
+    const unavailable = (reason: Extract<RemoteEvidence, { status: 'UNAVAILABLE' }>['reason']): RemoteEvidence =>
+      ({ status: 'UNAVAILABLE', source: 'GIT_LS_REMOTE', reason, observedAt: new Date().toISOString() })
+    try {
+      const upstream = await this.git.getUpstreamReference(this.repoRoot)
+      if (!upstream) return unavailable('NO_UPSTREAM')
+      const remoteHead = this.transport.readRemoteHead
+        ? await this.transport.readRemoteHead(this.repoRoot, upstream.remote, upstream.ref)
+        : await this.git.readRemoteHead(this.repoRoot, upstream.remote, upstream.ref)
+      if (!remoteHead) return unavailable('REMOTE_REF_MISSING')
+      const remoteCounts = localHead === remoteHead ? { ahead: 0, behind: 0 }
+        : localHead ? await this.git.compareCommits(this.repoRoot, localHead, remoteHead) : null
+      return { status: 'VERIFIED', source: 'GIT_LS_REMOTE', ...upstream, localHead, remoteHead,
+        observedAt: new Date().toISOString(), tracking: upstream.trackingHead === remoteHead ? 'TRACKING_CURRENT' : 'TRACKING_STALE',
+        relationship: localHead === remoteHead ? 'IN_SYNC' : !remoteCounts ? 'UNKNOWN'
+          : remoteCounts.ahead > 0 && remoteCounts.behind > 0 ? 'DIVERGED' : remoteCounts.ahead > 0 ? 'AHEAD' : 'BEHIND', remoteCounts }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : ''
+      return unavailable(message === 'REMOTE_MISSING' || message === 'INVALID_REMOTE_RESPONSE' ? message
+        : /timed out|timeout/i.test(message) ? 'TIMEOUT'
+        : /authentication|permission denied|access denied|could not read Username|403|401/i.test(message) ? 'ACCESS_DENIED' : 'NETWORK_ERROR')
+    }
   }
 
   private normalizeIgnoreRules(values: string[]): string[] {

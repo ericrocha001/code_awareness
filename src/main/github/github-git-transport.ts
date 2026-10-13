@@ -18,6 +18,10 @@ export class GitHubGitTransport implements GitRemoteTransport {
     await this.git.fetchRemote(repoPath, remote, await this.tokenFor(repoPath, remote))
   }
 
+  async readRemoteHead(repoPath: string, remote: string, ref: string): Promise<string | null> {
+    return this.git.readRemoteHead(repoPath, remote, ref, await this.tokenFor(repoPath, remote))
+  }
+
   async pullFastForward(repoPath: string, remote: string, branch: string): Promise<void> {
     await this.git.pullFastForward(repoPath, remote, branch, await this.tokenFor(repoPath, remote))
   }

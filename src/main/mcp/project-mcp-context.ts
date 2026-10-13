@@ -4,6 +4,7 @@ import type { DiagnosticSourceAccess } from '../diagnostic-source-access/diagnos
 import type { RuntimeRestartController } from '../runtime-restart/runtime-restart-controller'
 import type { ValidationExecution } from '../validation-execution/validation-execution'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
+import type { GitHubIntegrationService } from '../github/github-integration-service'
 import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 import type { IVisualContinuumService } from '../continuum/continuum-types'
@@ -19,6 +20,7 @@ export interface McpProjectContext {
   diagnosticSourceAccess?: DiagnosticSourceAccess
   runtimeRestart?: RuntimeRestartController
   gitOperations?: GitOperationsService
+  githubIntegration?: GitHubIntegrationService
   repositoryFileIngress?: RepositoryFileIngress
   repositoryFileEditing?: RepositoryFileEditing
 }
