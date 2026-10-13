@@ -88,6 +88,7 @@ import { GitHubGitTransport } from './github/github-git-transport'
 import { GitOperationsService } from './git-operations/git-operations-service'
 import { GitManagementController, registerGitManagementHandlers } from './ipc/git-management-handler'
 import { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './ipc/work-orchestration-handler'
+import { orchestrationContinuumReader } from './ipc/orchestration-continuum-reader'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
@@ -452,7 +453,7 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     gitManagement.bind(gitOperations)
-    workOrchestration.bind(gitOperations)
+    workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
     const repositoryFileIngress = new RepositoryFileIngress(project.path, { validateDestination: relative => repositoryFileEditing.assertCreationAllowed(relative) })
     const repositoryFileEditing = new RepositoryFileEditing(project.path, {

@@ -420,6 +420,11 @@ export class GitOperationsService {
     })
   }
 
+  async getCoordinationIdentity(worktreeId: string) {
+    if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    return { repositoryId: this.worktreeRepositoryId!, record: await this.worktrees!.revalidateSelection(worktreeId) }
+  }
+
   async getCoordinationCommitPaths(leftHead: string, rightHead: string) {
     if (![leftHead, rightHead].every(value => /^[a-f0-9]{40,64}$/.test(value))) fail('INVALID_ARGUMENT')
     let base: string

@@ -4,6 +4,7 @@ import type { ActiveProjectState } from '../../../../shared/types/active-project
 import type { ObservableWorktree, OrchestrationData, OrchestrationOverview, OrchestrationRequest, OrchestrationResult, WorktreePair } from '../../../../shared/types/work-orchestration-types'
 import './WorkOrchestrationView.css'
 import { LocalChangesInspector } from './LocalChangesInspector'
+import { WorktreeDocumentContext } from './WorktreeDocumentContext'
 import { categoryLabel, reasonLabel } from './work-orchestration-labels'
 import type { LocalChangeCategory } from '../../../../shared/types/local-change-types'
 
@@ -32,7 +33,7 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
   const resumeVisible = useRef<() => void>(() => {})
   activeNow.current = active
   const choose = (value: Selection) => { selection.current = value; setSelected(value) }
-  const query = useCallback((extra: Pick<OrchestrationRequest, 'worktree' | 'pair' | 'changes'> = {}) => {
+  const query = useCallback((extra: Pick<OrchestrationRequest, 'worktree' | 'pair' | 'changes' | 'documents'> = {}) => {
     const request = { context: { projectId: projectId!, revision }, ...extra }, key = JSON.stringify(request)
     const existing = pending.current.get(key)
     if (existing) return existing
@@ -202,6 +203,7 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
         {tree && <><h3>{label(tree)}</h3><p>{tree.reason ? reasonLabel(tree.reason) : (tree.observation === 'NOT_OBSERVED' ? 'Estado não observado' : 'Última observação do estado')}</p><dl><dt>Caminho</dt><dd>{tree.path}</dd><dt>HEAD</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd></dl>
           <div className="wo-context-compare"><label>Comparar com…<select aria-label="Comparar com outra worktree" value={compareWith} onChange={e => setCompareWith(e.target.value)}><option value="">Escolha outra worktree</option>{ordered.filter(w => w.worktreeId !== tree.worktreeId).map(w => <option key={w.worktreeId} value={w.worktreeId}>{label(w)} · {w.path}</option>)}</select></label><button disabled={reading || refreshing || !compareWith} onClick={() => void inspect({ pair: { leftId: tree.worktreeId, rightId: compareWith } })}>Comparar</button></div>
           <details><summary>Identidade da worktree</summary><dl><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd></dl></details></>}
+        {tree && <WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} />}
         {tree && <><p>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</p>{tree.localChanges && <p>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</p>}<LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} /></>}
         {pair && <><h3>{pairLabel[pair.category]}</h3><p>{pair.reason ? reasonLabel(pair.reason) : `${pair.totalPaths} ${pair.totalPaths === 1 ? 'caminho em comum verificado' : 'caminhos em comum verificados'}`}</p><dl><dt>Merge-base do par</dt><dd>{pair.base ?? 'Indisponível'}</dd><dt>Esquerda</dt><dd>{label(pair.left)}</dd><dt>Direita</dt><dd>{label(pair.right)}</dd></dl><ul className="wo-paths" aria-label="Caminhos em comum">{pair.paths.map(path => <li key={path}>{path}</li>)}</ul>
           {pair.nextCursor && <button disabled={reading || refreshing} onClick={() => void inspect({ pair: { leftId: pair.left.worktreeId, rightId: pair.right.worktreeId, cursor: pair.nextCursor! } })}>Mais caminhos ({pair.paths.length}/{pair.totalPaths})</button>}

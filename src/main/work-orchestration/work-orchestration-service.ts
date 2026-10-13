@@ -1,8 +1,10 @@
 import { createHash } from 'node:crypto'
+import { readWorktreeDocumentContext, type OrchestrationContinuumReader } from './worktree-document-context'
+import type { WorktreeDocumentRequest } from '../../shared/types/worktree-document-context-types'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { ObservableWorktree, OrchestrationOverview, WorktreePair, WorktreeObservation, OrchestrationRequest, LocalChangesPage } from '../../shared/types/work-orchestration-types'
 
-export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'> & Partial<Pick<GitOperationsService, 'getWorktreeChanges'>>
+export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'> & Partial<Pick<GitOperationsService, 'getWorktreeChanges' | 'getCoordinationIdentity'>>
 type Observation = Awaited<ReturnType<OrchestrationGitReader['getCoordinationSnapshot']>>
 const reason = (error: unknown) => error instanceof Error ? error.message : 'GIT_READ_UNAVAILABLE'
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -11,7 +13,12 @@ const project = ({ record, paths: _paths, ...observation }: Observation): Observ
 
 export class WorkOrchestrationService {
   private known: Awaited<ReturnType<WorkOrchestrationService['records']>> | null = null
-  constructor(private readonly git: OrchestrationGitReader) {}
+  constructor(private readonly git: OrchestrationGitReader, private readonly continuum?: OrchestrationContinuumReader) {}
+
+  async documents(request: WorktreeDocumentRequest) {
+    if (!this.git.getCoordinationIdentity) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+    return readWorktreeDocumentContext({ getCoordinationIdentity: id => this.git.getCoordinationIdentity!(id) }, this.continuum, request)
+  }
 
   private async records() {
     const first = await this.git.discoverCoordinationWorktrees()
