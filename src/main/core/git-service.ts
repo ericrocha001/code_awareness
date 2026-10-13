@@ -575,6 +575,42 @@ export class GitService implements FileListingPort {
     else await execute({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
   }
 
+  async getUpstreamReference(dirPath: string): Promise<{ remote: string; ref: string; trackingHead: string | null } | null> {
+    const branch = await this.getCurrentBranch(dirPath)
+    if (!branch) return null
+    let remote: string, ref: string
+    try {
+      remote = (await this.runGit(['config', '--get', `branch.${branch}.remote`], dirPath)).trim()
+      ref = (await this.runGit(['config', '--get', `branch.${branch}.merge`], dirPath)).trim()
+    } catch { return null }
+    if (!remote || remote === '.' || remote.startsWith('-') || /[\s\0]/.test(remote)) return null
+    await this.runGit(['check-ref-format', ref], dirPath)
+    if (!ref.startsWith('refs/heads/')) return null
+    let trackingHead: string | null = null
+    try { trackingHead = await this.resolveCommit(dirPath, '@{upstream}') } catch {}
+    return { remote, ref, trackingHead }
+  }
+
+  async readRemoteHead(dirPath: string, remote: string, ref: string, token?: string): Promise<string | null> {
+    if (!(await this.getRemoteUrl(dirPath, remote))) throw new Error('REMOTE_MISSING')
+    await this.runGit(['check-ref-format', ref], dirPath)
+    const execute = (env?: NodeJS.ProcessEnv) => this.runGit(['ls-remote', '--refs', '--', remote, ref], dirPath,
+      { timeoutMs: 10_000, maxOutputBytes: 4096, env })
+    const output = token ? await this.withEphemeralCredential(token, execute)
+      : await execute({ ...process.env, GIT_TERMINAL_PROMPT: '0' })
+    const entry = output.trim().split(/\s+/)
+    if (!output.trim()) return null
+    if (!/^[a-f0-9]{40,64}$/.test(entry[0]) || entry[1] !== ref || entry.length !== 2) throw new Error('INVALID_REMOTE_RESPONSE')
+    return entry[0]
+  }
+
+  async compareCommits(dirPath: string, localHead: string, remoteHead: string): Promise<{ ahead: number; behind: number } | null> {
+    try {
+      const counts = (await this.runGit(['rev-list', '--left-right', '--count', `${localHead}...${remoteHead}`], dirPath)).trim().split(/\s+/).map(Number)
+      return counts.length === 2 && counts.every(Number.isSafeInteger) ? { ahead: counts[0], behind: counts[1] } : null
+    } catch { return null }
+  }
+
   async pullFastForward(dirPath: string, remote: string, branch: string, token?: string): Promise<void> {
     const execute = (env?: NodeJS.ProcessEnv) => this.runGit(['pull', '--ff-only', '--', remote, branch], dirPath, { timeoutMs: 120_000, env })
     if (token) await this.withEphemeralCredential(token, execute)

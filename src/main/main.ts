@@ -469,6 +469,7 @@ app.whenReady().then(async () => {
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
+      githubIntegration,
       repositoryFileIngress,
       repositoryFileEditing,
       runtimeRestart

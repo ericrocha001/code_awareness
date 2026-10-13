@@ -22,6 +22,7 @@ export function githubErrorMessage(code: GitHubErrorCode): string {
     PERMISSION_DENIED: 'The GitHub App does not have permission for this operation.',
     RATE_LIMITED: 'GitHub rate limit reached. Try again later.',
     NETWORK_ERROR: 'GitHub is currently unavailable.',
+    TIMEOUT: 'GitHub request timed out.',
     REPOSITORY_NOT_FOUND: 'GitHub repository was not found.',
     REPOSITORY_NAME_CONFLICT: 'A GitHub repository with this name already exists.',
     LOCAL_PATH_CONFLICT: 'The local destination already exists.',
@@ -38,7 +39,7 @@ export function githubErrorMessage(code: GitHubErrorCode): string {
 function isGitHubErrorCode(value: string): value is GitHubErrorCode {
   return value in {
     CONFIGURATION_REQUIRED: 1, NOT_CONNECTED: 1, REAUTH_REQUIRED: 1, INSTALLATION_REQUIRED: 1,
-    PERMISSION_DENIED: 1, RATE_LIMITED: 1, NETWORK_ERROR: 1, REPOSITORY_NOT_FOUND: 1,
+    PERMISSION_DENIED: 1, RATE_LIMITED: 1, NETWORK_ERROR: 1, TIMEOUT: 1, REPOSITORY_NOT_FOUND: 1,
     REPOSITORY_NAME_CONFLICT: 1, LOCAL_PATH_CONFLICT: 1, REMOTE_CONFLICT: 1,
     GIT_OPERATION_FAILED: 1, SECURE_STORAGE_UNAVAILABLE: 1, AUTHORIZATION_DENIED: 1,
     AUTHORIZATION_EXPIRED: 1, AUTHORIZATION_CANCELLED: 1
