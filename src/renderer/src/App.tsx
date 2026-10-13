@@ -16,7 +16,7 @@ import { ChannelView } from "./components/ChannelView/ChannelView";
 import { AcademyView } from "./components/AcademyView/AcademyView";
 import { ContinuumView } from "./components/ContinuumView/ContinuumView";
 import { GitManagementView } from "./components/GitManagementView/GitManagementView";
-import { WorkOrchestrationView } from "./components/WorkOrchestrationView/WorkOrchestrationView";
+import { WorkOrchestrationTab } from "./components/WorkOrchestrationView/WorkOrchestrationTab";
 
 
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
@@ -164,8 +164,8 @@ export const App: React.FC = () => {
       />
 
       <main className="app-main">
-        {activeTab === "git-management" && <GitManagementView key={`${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} />}
-        {activeTab === "work-orchestration" && <WorkOrchestrationView key={`${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} navigateGit={() => setActiveTab("git-management")} />}
+        {activeTab === "git-management" && <GitManagementView key={`git-management:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} />}
+        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} />
         {activeTab === "channel" && <ChannelView />}
         {activeTab === "academy" && <AcademyView />}
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} />}

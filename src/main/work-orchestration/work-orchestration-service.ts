@@ -1,64 +1,48 @@
 import { createHash } from 'node:crypto'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
-import type { ObservableWorktree, OrchestrationOverview, WorktreePair } from '../../shared/types/work-orchestration-types'
+import type { ObservableWorktree, OrchestrationOverview, WorktreePair, WorktreeObservation } from '../../shared/types/work-orchestration-types'
 
-export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'>
+export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'>
 type Observation = Awaited<ReturnType<OrchestrationGitReader['getCoordinationSnapshot']>>
 const reason = (error: unknown) => error instanceof Error ? error.message : 'GIT_READ_UNAVAILABLE'
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const changed = (a: Observation, b: Observation) => a.record.generation !== b.record.generation || digest(a.snapshot) !== digest(b.snapshot)
-const project = ({ record, paths: _paths, ...observation }: Observation): ObservableWorktree => ({ ...record, ...observation, head: observation.snapshot.head, branch: observation.snapshot.branch, reason: null })
+const project = ({ record, paths: _paths, ...observation }: Observation): ObservableWorktree => ({ ...record, ...observation, head: observation.snapshot.head, branch: observation.snapshot.branch, observation: 'VERIFIED', reason: null })
 
 export class WorkOrchestrationService {
   constructor(private readonly git: OrchestrationGitReader) {}
 
-  private async inventory() {
-    const first = await this.git.discoverWorktrees()
+  private async records() {
+    const first = await this.git.discoverCoordinationWorktrees()
     const records = [...first.worktrees]
     let cursor = first.nextCursor
     while (cursor) {
-      const page = await this.git.discoverWorktrees({ cursor })
+      const page = await this.git.discoverCoordinationWorktrees({ cursor })
       if (page.repositoryId !== first.repositoryId) throw new Error('WORKTREE_REPOSITORY_CHANGED')
       records.push(...page.worktrees)
       cursor = page.nextCursor
     }
-    return { repositoryId: first.repositoryId, records }
+    return { repositoryId: first.repositoryId, records, revision: first.revision }
   }
 
-  async overview(): Promise<OrchestrationOverview> {
-    const { repositoryId, records } = await this.inventory()
-    const observations = new Map<string, Observation>()
-    const worktrees: ObservableWorktree[] = []
-    for (const record of records) {
-      try {
-        const observed = await this.git.getCoordinationSnapshot(record.worktreeId)
-        observations.set(record.worktreeId, observed)
-        worktrees.push(project(observed))
-      } catch (error) {
-        worktrees.push({ ...record, reference: false, snapshot: null, stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictCount: 0, reason: reason(error) })
-      }
+  async inventory(): Promise<OrchestrationOverview> {
+    const { repositoryId, records, revision } = await this.records()
+    return { repositoryId, revision, observedAt: new Date().toISOString(), inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', pairs: [],
+      worktrees: records.map(record => ({ ...record, head: record.head && !/^0+$/.test(record.head) ? record.head : null,
+        snapshot: null, observation: 'NOT_OBSERVED', stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null,
+        reason: record.missing ? 'WORKTREE_MISSING' : record.prunable ? 'WORKTREE_PRUNABLE' : null })) }
+  }
+
+  async observe(worktreeId: string): Promise<WorktreeObservation> {
+    const { repositoryId, records } = await this.records()
+    const record = records.find(record => record.worktreeId === worktreeId)
+    if (!record) throw new Error('WORKTREE_NOT_DISCOVERED')
+    try {
+      return { repositoryId, worktree: project(await this.git.getCoordinationSnapshot(worktreeId)), observedAt: new Date().toISOString() }
+    } catch (error) {
+      return { repositoryId, observedAt: new Date().toISOString(), worktree: { ...record, snapshot: null, observation: 'UNAVAILABLE',
+        stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null, reason: reason(error) } }
     }
-    const secondary = worktrees.filter(w => !w.reference)
-    const budgetExceeded = worktrees.filter(w => !w.missing && !w.prunable).length > 12
-    const pairs: WorktreePair[] = []
-    if (!budgetExceeded) {
-      for (let i = 0; i < secondary.length; i++) for (let j = i + 1; j < secondary.length; j++) {
-        pairs.push(this.page(await this.compare(repositoryId, secondary[i], secondary[j], observations)))
-      }
-    }
-    const stale = new Map<string, string>()
-    for (const [id, observed] of observations) {
-      try {
-        if (changed(observed, await this.git.getCoordinationSnapshot(id))) stale.set(id, 'GIT_STATE_CHANGED')
-      } catch (error) { stale.set(id, reason(error)) }
-    }
-    for (const worktree of worktrees) if (stale.has(worktree.worktreeId)) worktree.reason = stale.get(worktree.worktreeId)!
-    for (const pair of pairs) if (stale.has(pair.left.worktreeId) || stale.has(pair.right.worktreeId)) {
-      pair.category = 'STALE'; pair.reason = 'GIT_STATE_CHANGED'; pair.paths = []; pair.totalPaths = 0; pair.nextCursor = null
-    }
-    const incomplete = budgetExceeded || worktrees.some(w => w.reason) || pairs.some(p => ['STALE', 'INDETERMINATE'].includes(p.category))
-    return { repositoryId, worktrees, pairs, coverage: incomplete ? 'PARTIAL' : 'COMPLETE',
-      reason: budgetExceeded ? 'PAIR_BUDGET_EXCEEDED' : incomplete ? 'READ_INCOMPLETE' : null, automaticLimit: 12 }
   }
 
   private async compare(repositoryId: string, left: ObservableWorktree, right: ObservableWorktree, observations: Map<string, Observation>): Promise<WorktreePair> {
@@ -93,7 +77,7 @@ export class WorkOrchestrationService {
 
   async pair(leftId: string, rightId: string, cursor?: string): Promise<WorktreePair> {
     if (leftId === rightId) throw new Error('INVALID_ARGUMENT')
-    const { repositoryId, records } = await this.inventory()
+    const { repositoryId, records } = await this.records()
     if (![leftId, rightId].every(id => records.some(r => r.worktreeId === id))) throw new Error('WORKTREE_NOT_DISCOVERED')
     const observations = new Map<string, Observation>()
     const sides: ObservableWorktree[] = []

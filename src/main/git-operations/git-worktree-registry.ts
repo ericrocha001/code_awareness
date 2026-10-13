@@ -102,4 +102,9 @@ export class GitWorktreeRegistry {
     if (prior.common !== next.common || prior.admin !== next.admin || prior.physical !== next.physical) fail('WORKTREE_IDENTITY_MISMATCH')
     return current
   }
+
+  isReference(worktreeId: string): boolean {
+    const observed = this.observed.get(worktreeId)
+    return !!observed?.admin && observed.admin === observed.common
+  }
 }

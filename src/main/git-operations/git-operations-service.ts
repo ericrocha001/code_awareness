@@ -401,6 +401,11 @@ export class GitOperationsService {
     })
   }
 
+  async discoverCoordinationWorktrees(request: { cursor?: string } = {}) {
+    const page = await this.discoverWorktrees(request)
+    return { ...page, worktrees: page.worktrees.map(record => ({ ...record, reference: this.worktrees!.isReference(record.worktreeId) })) }
+  }
+
   async getCoordinationSnapshot(worktreeId: string) {
     return this.readWorktree(worktreeId, async (service, snapshot, record) => {
       const changes = service.parseChanges(snapshot.status)

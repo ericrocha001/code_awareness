@@ -11,10 +11,11 @@ export interface ObservableWorktree {
   prunable: boolean
   reference: boolean
   snapshot: { head: string | null; branch: string | null; operation: string | null; indexRevision: string; worktreeRevision: string } | null
-  stagedCount: number
-  unstagedCount: number
-  untrackedCount: number
-  conflictCount: number
+  observation: 'NOT_OBSERVED' | 'VERIFIED' | 'UNAVAILABLE' | 'STALE'
+  stagedCount: number | null
+  unstagedCount: number | null
+  untrackedCount: number | null
+  conflictCount: number | null
   reason: string | null
 }
 export interface WorktreePair {
@@ -33,12 +34,20 @@ export interface OrchestrationOverview {
   repositoryId: string
   worktrees: ObservableWorktree[]
   pairs: WorktreePair[]
-  coverage: 'COMPLETE' | 'PARTIAL'
-  reason: string | null
-  automaticLimit: number
+  inventoryCoverage: 'COMPLETE'
+  relationsCoverage: 'NOT_EVALUATED' | 'PARTIAL' | 'COMPLETE' | 'STALE'
+  observedAt: string
+  revision: string
+}
+export interface WorktreeObservation {
+  repositoryId: string
+  worktree: ObservableWorktree
+  observedAt: string
 }
 export interface OrchestrationRequest {
   context: OrchestrationContext
   pair?: { leftId: string; rightId: string; cursor?: string }
+  worktree?: { worktreeId: string }
 }
+export type OrchestrationData = OrchestrationOverview | WorktreePair | WorktreeObservation
 export type OrchestrationResult<T> = { success: true; context: OrchestrationContext; data: T } | { success: false; code: string }

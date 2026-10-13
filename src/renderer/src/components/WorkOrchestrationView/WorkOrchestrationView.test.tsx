@@ -2,29 +2,106 @@
 import React from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { WorkOrchestrationView } from './WorkOrchestrationView'
-import type { OrchestrationOverview, OrchestrationResult } from '../../../../shared/types/work-orchestration-types'
+import { WorkOrchestrationTab } from './WorkOrchestrationTab'
+import { orderWorktrees } from './WorkOrchestrationView'
+import type { ObservableWorktree, OrchestrationOverview, OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../../../../shared/types/work-orchestration-types'
 afterEach(cleanup)
-const data: OrchestrationOverview = { repositoryId: 'repo', worktrees: [], pairs: [], coverage: 'PARTIAL', reason: 'PAIR_BUDGET_EXCEEDED', automaticLimit: 12 }
-it('discards a delayed old project response and clears selection on project change', async () => {
-  let complete!: (result: OrchestrationResult<OrchestrationOverview>) => void
-  const read = vi.fn().mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
-    .mockResolvedValue({ success: true, context: { projectId: 'b', revision: 2 }, data })
-  window.codeAwareness = { getWorkOrchestration: read } as any
-  const view = render(<WorkOrchestrationView state={{ project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }} navigateGit={vi.fn()} />)
-  view.rerender(<WorkOrchestrationView state={{ project: { id: 'b', path: '/b', name: 'B' }, revision: 2 }} navigateGit={vi.fn()} />)
-  await screen.findByText(/Partial coverage/)
-  complete({ success: true, context: { projectId: 'a', revision: 1 }, data: { ...data, coverage: 'COMPLETE', reason: null } })
-  await waitFor(() => expect(screen.queryByText(/Partial coverage/)).not.toBeNull())
+const state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }
+const tree = (i: number): ObservableWorktree => ({ worktreeId: i.toString(16).padStart(64, '0'), generation: 'g1', path: `/repository/tree-${i}`, branch: i ? `work-${i.toString().padStart(3, '0')}` : 'zzz-reference', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false, reference: i === 0, snapshot: null, observation: 'NOT_OBSERVED', stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null, reason: null })
+const inventory = (count = 21): OrchestrationOverview => ({ repositoryId: 'repo', worktrees: Array.from({ length: count }, (_, i) => tree(i)), pairs: [], inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', observedAt: '2026-10-13T04:00:00Z', revision: 'r1' })
+const success = (data: OrchestrationData, context = { projectId: 'a', revision: 1 }): OrchestrationResult<OrchestrationData> => ({ success: true, context, data })
+const observe = (w: ObservableWorktree) => success({ repositoryId: 'repo', observedAt: 'now', worktree: { ...w, observation: 'VERIFIED', stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictCount: 0, snapshot: { head: w.head, branch: w.branch, operation: null, indexRevision: 'i', worktreeRevision: 'w' } } })
+const install = (read: ReturnType<typeof vi.fn>) => { window.codeAwareness = { getWorkOrchestration: read, mutateGitManagement: vi.fn() } as any }
+it('lazily mounts once under StrictMode, restores filter/selection and performs zero reads on tab toggles', async () => {
+  const read = vi.fn(async (request: OrchestrationRequest) => request.worktree ? observe(tree(1)) : success(inventory()))
+  install(read)
+  const view = render(<React.StrictMode><WorkOrchestrationTab state={state} active={false} /></React.StrictMode>)
+  expect(read).not.toHaveBeenCalled()
+  view.rerender(<React.StrictMode><WorkOrchestrationTab state={state} active /></React.StrictMode>)
+  await screen.findByText('Inventory complete · 21 discovered')
+  expect(read).toHaveBeenCalledTimes(1)
+  expect(screen.queryByText(/Locally clean/)).toBeNull()
+  fireEvent.change(screen.getByLabelText('Filter worktrees'), { target: { value: 'work-001' } })
+  fireEvent.click(screen.getByText('work-001'))
+  await screen.findByText('Last status observation')
+  expect(read).toHaveBeenCalledTimes(2)
+  for (let i = 0; i < 3; i++) {
+    view.rerender(<React.StrictMode><WorkOrchestrationTab state={state} active={false} /></React.StrictMode>)
+    expect(view.container.querySelector('.wo-tab')?.hasAttribute('hidden')).toBe(true)
+    view.rerender(<React.StrictMode><WorkOrchestrationTab state={state} active /></React.StrictMode>)
+  }
+  expect(read).toHaveBeenCalledTimes(2)
+  expect((screen.getByLabelText('Filter worktrees') as HTMLInputElement).value).toBe('work-001')
+  expect(screen.getByLabelText('Worktree inspector')).not.toBeNull()
+  expect(screen.queryByText(/Git Management/)).toBeNull()
+})
+it('retains old content on refresh failure and clears a replaced selection after explicit refresh', async () => {
+  let finish!: (value: OrchestrationResult<OrchestrationData>) => void
+  let inventories = 0
+  const read = vi.fn((request: OrchestrationRequest) => request.worktree ? Promise.resolve(observe(tree(1))) : ++inventories === 1 ? Promise.resolve(success(inventory())) : new Promise(resolve => { finish = resolve }))
+  install(read)
+  render(<WorkOrchestrationTab state={state} active />)
+  await screen.findByText('Inventory complete · 21 discovered')
+  fireEvent.click(screen.getByText('work-001')); await screen.findByText('Last status observation')
+  fireEvent.click(screen.getByText('Refresh'))
+  expect(screen.getByText(/displaying the previous observation/)).not.toBeNull()
+  expect(document.querySelectorAll('.wo-tree')).toHaveLength(21)
+  finish({ success: false, code: 'GIT_READ_UNAVAILABLE' })
+  await screen.findByText(/Last inventory observation.*Not revalidated/)
+  expect(screen.getByLabelText('Worktree inspector')).not.toBeNull()
+  fireEvent.click(screen.getByText('Refresh'))
+  const data = inventory(); data.worktrees[1].generation = 'replacement'
+  finish(success(data))
+  await screen.findByText(/removed or replaced/)
+  expect(screen.queryByLabelText('Worktree inspector')).toBeNull()
+})
+it('discards a delayed inventory after a project/revision change', async () => {
+  let finish!: (value: OrchestrationResult<OrchestrationData>) => void
+  const read = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve })).mockResolvedValue(success(inventory(1), { projectId: 'b', revision: 2 }))
+  install(read)
+  const view = render(<WorkOrchestrationTab key="a:1" state={state} active />)
+  view.rerender(<WorkOrchestrationTab key="b:2" state={{ project: { id: 'b', path: '/b', name: 'B' }, revision: 2 }} active />)
+  await screen.findByText('Inventory complete · 1 discovered')
+  finish(success(inventory(21)))
+  await waitFor(() => expect(document.querySelectorAll('.wo-tree')).toHaveLength(1))
   expect(read.mock.calls[1][0].context).toEqual({ projectId: 'b', revision: 2 })
 })
-it('shows uncertainty explicitly, performs real refresh and navigates via Shell without mutations', async () => {
-  const read = vi.fn().mockResolvedValue({ success: true, context: { projectId: 'a', revision: 1 }, data })
-  const mutation = vi.fn(), navigate = vi.fn()
-  window.codeAwareness = { getWorkOrchestration: read, mutateGitManagement: mutation } as any
-  render(<WorkOrchestrationView state={{ project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }} navigateGit={navigate} />)
-  await screen.findByText(/Partial coverage/)
-  expect(screen.queryByText(/No path overlap/)).toBeNull()
-  fireEvent.click(screen.getByText('Refresh')); await waitFor(() => expect(read).toHaveBeenCalledTimes(2))
-  fireEvent.click(screen.getByText('Open Git Management')); expect(navigate).toHaveBeenCalledOnce(); expect(mutation).not.toHaveBeenCalled()
+it('deduplicates concurrent selected inspections without observing the other records', async () => {
+  let finish!: (value: OrchestrationResult<OrchestrationData>) => void
+  const read = vi.fn((request: OrchestrationRequest) => request.worktree ? new Promise(resolve => { finish = resolve }) : Promise.resolve(success(inventory(101))))
+  install(read)
+  render(<WorkOrchestrationTab state={state} active />)
+  await screen.findByText('Inventory complete · 101 discovered')
+  const row = screen.getByText('work-001')
+  fireEvent.click(row); fireEvent.click(row)
+  expect(read).toHaveBeenCalledTimes(2)
+  finish(observe(tree(1))); await screen.findByText('Last status observation')
+  expect(document.querySelectorAll('.wo-tree')).toHaveLength(101)
+  fireEvent.change(screen.getByLabelText('Filter worktrees'), { target: { value: 'work-100' } })
+  expect(document.querySelectorAll('.wo-tree')).toHaveLength(1)
+  expect(screen.getByText('work-100')).not.toBeNull()
+})
+it('sorts the reference by identity, then branches and detached paths deterministically', () => {
+  const a = tree(1), b = { ...tree(2), branch: null, detached: true }, reference = tree(0)
+  expect(orderWorktrees([a, b, reference])).toEqual([reference, b, a])
+  expect(orderWorktrees([reference, b, a])).toEqual([reference, b, a])
+})
+
+it('marks both the pair evidence and relationship signals stale after failed revalidation', async () => {
+  let inventories = 0
+  const read = vi.fn(async (request: OrchestrationRequest) => {
+    if (request.worktree) return observe(tree(1))
+    if (request.pair) return success({ repositoryId: 'repo', left: tree(1), right: tree(0), base: 'a'.repeat(40), category: 'NO_PATH_OVERLAP', reason: null, totalPaths: 0, paths: [], revision: 'r-pair', nextCursor: null })
+    return ++inventories === 1 ? success(inventory()) : { success: false, code: 'GIT_READ_UNAVAILABLE' }
+  })
+  install(read)
+  render(<WorkOrchestrationTab state={state} active />)
+  await screen.findByText('Inventory complete · 21 discovered')
+  fireEvent.click(screen.getByText('work-001')); await screen.findByText('Last status observation')
+  fireEvent.change(screen.getByLabelText('Compare with worktree'), { target: { value: tree(0).worktreeId } })
+  fireEvent.click(screen.getByText('Compare')); await screen.findByText('No path overlap verified')
+  fireEvent.click(screen.getByText('Refresh'))
+  await screen.findByText(/Relationships stale/)
+  expect(document.querySelector('.wo-pair')?.textContent).toContain('Stale observation')
+  expect(screen.queryByText('No path overlap verified')).toBeNull()
 })
