@@ -11,7 +11,7 @@ export class GitHubGitTransport implements GitRemoteTransport {
   private async tokenFor(repoPath: string, remote: string): Promise<string | undefined> {
     const url = await this.git.getRemoteUrl(repoPath, remote)
     if (!url || !/^https:\/\/github\.com\//i.test(url) || !this.auth) return undefined
-    try { return await this.auth.getValidAccessToken() || undefined } catch { return undefined }
+    return await this.auth.getValidAccessToken() || undefined
   }
 
   async fetch(repoPath: string, remote: string): Promise<void> {
@@ -27,16 +27,10 @@ export class GitHubGitTransport implements GitRemoteTransport {
   }
 
   async push(repoPath: string, branch: string, remote = 'origin', expectedHead?: string): Promise<void> {
-    if (this.auth) {
-      try {
-        const token = await this.tokenFor(repoPath, remote)
-        if (token) {
-          await this.git.pushAuthenticated(repoPath, remote, branch, token, expectedHead)
-          return
-        }
-      } catch {
-        // Fall back to ambient Git authentication if OAuth App is not configured
-      }
+    const token = await this.tokenFor(repoPath, remote)
+    if (token) {
+      await this.git.pushAuthenticated(repoPath, remote, branch, token, expectedHead)
+      return
     }
     await this.git.push(repoPath, remote, branch, expectedHead)
   }

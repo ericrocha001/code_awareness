@@ -63,6 +63,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   revealAcademyOpenAiPackage: (releaseId: string): Promise<boolean> => ipcRenderer.invoke('academy:openai-reveal', releaseId),
   getAcademyGitStatus: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-status'),
   syncAcademyGitNow: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-sync-now'),
+  resolveAcademyGitConflict: (expectedRemoteHead: string | null, expectedDesiredTree: string): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-resolve-conflict', expectedRemoteHead, expectedDesiredTree),
   bindAcademyGitRepository: (repositoryCatalogId: string): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-bind', repositoryCatalogId),
   listAcademyGitEligibleRepositories: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('academy:git-eligible-repos'),
   openAcademyGitRepository: (): Promise<boolean> => ipcRenderer.invoke('academy:git-open-repo'),

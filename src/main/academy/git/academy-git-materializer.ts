@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, lstatSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AcademyPackage } from '../../../shared/types/academy-types'
@@ -12,6 +12,18 @@ export interface AcademyGitSnapshotEntry {
   version: number
   packageHash: string
   package: AcademyPackage
+}
+
+export function assertPublicationPaths(root: string, paths: string[]): void {
+  for (const path of paths) {
+    let parent = root
+    for (const part of path.split('/')) {
+      parent = join(parent, part)
+      try {
+        if (lstatSync(parent).isSymbolicLink()) throw new Error('PUBLICATION_SYMLINK_NOT_ALLOWED')
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+    }
+  }
 }
 
 export function computeGitSnapshotHash(entries: Array<Omit<AcademyGitSnapshotEntry, 'package'>>): string {

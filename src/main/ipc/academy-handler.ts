@@ -54,6 +54,11 @@ export function registerAcademyHandlers(service: AcademyService): void {
     if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED')
     return service.gitSync.bindRepository(repositoryCatalogId)
   })
+  ipcMain.handle('academy:git-resolve-conflict', async (_event, expectedRemoteHead: string | null, expectedDesiredTree: string) => {
+    if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED')
+    if ((expectedRemoteHead !== null && !/^[a-f0-9]{40,64}$/.test(expectedRemoteHead)) || typeof expectedDesiredTree !== 'string') throw new Error('INVALID_ARGUMENT')
+    return service.gitSync.resolveManagedConflict(expectedRemoteHead, expectedDesiredTree)
+  })
   ipcMain.handle('academy:git-eligible-repos', () => {
     return service.gitSync?.listEligibleRepositories() ?? []
   })

@@ -293,8 +293,17 @@ export const AcademyView: React.FC = () => {
         onRevealRelease={() => { const release = openAiPublication?.selectedRelease; if (release) void window.codeAwareness.revealAcademyOpenAiPackage(release.id) }}
         onConfirmUpload={requestConfirmOpenAiUpload}
         onBindRepository={() => void (async () => { try { setGitStatus(await window.codeAwareness.bindAcademyGitRepository(selectedRepoId)) } catch (error) { reportError(error) } })()}
-        onSyncGit={() => void (async () => { try { setGitStatus(await window.codeAwareness.syncAcademyGitNow()); showMessage('Git sincronizado.') } catch (error) { reportError(error) } })()}
+        onSyncGit={() => void (async () => { try { const result = await window.codeAwareness.syncAcademyGitNow(); setGitStatus(result); showMessage(result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'Git sincronizado.' : result.lastError ?? 'Verificação remota pendente.', result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'success' : 'error') } catch (error) { reportError(error) } })()}
         onOpenGit={() => void window.codeAwareness.openAcademyGitRepository()}
+        onResolveGitConflict={() => {
+          const state = gitStatus?.publication
+          if (!state || state.desiredTree === null || state.phase !== 'CONFLICT') return
+          setConfirmation({ title: 'Publicar versão canônica?', description: `O conteúdo remoto em ${state.conflictPaths.join(', ')} será substituído pela versão da Academy em um novo commit. O histórico será preservado.`, confirmLabel: 'Publicar versão canônica', destructive: true, action: async () => {
+            const result = await window.codeAwareness.resolveAcademyGitConflict(state.remoteHead, state.desiredTree!)
+            setGitStatus(result)
+            showMessage(result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'Git sincronizado.' : result.lastError ?? 'Verificação remota pendente.', result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'success' : 'error')
+          } })
+        }}
         onReviewConflict={(id) => void (async () => { try { setConflictReview(await window.codeAwareness.reviewAcademyConflict(id)); setConflictBatch(null) } catch (error) { reportError(error) } })()}
         onPreviewConflictBatch={() => void (async () => { try { setConflictBatch(await window.codeAwareness.previewAcademyConflictBatch()); setConflictReview(null) } catch (error) { reportError(error) } })()}
       />

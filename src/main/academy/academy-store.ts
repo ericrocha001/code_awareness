@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import Database from 'better-sqlite3'
+import type { AcademyGitPublicationState } from '../../shared/types/academy-types'
 import type { AcademyConflict, AcademyCreateInput, AcademyDestination, AcademyDistributionState, AcademyDistributionStatus, AcademyDistributionTarget, AcademyGitProfile, AcademyGitSyncState, AcademyMarketplaceState, AcademyMarketplaceTakeoverStatus, AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiRelease, AcademyOpenAiReleaseStatus, AcademyPackage, AcademyPluginPackageRevision, AcademySkillDetail, AcademySkillScope, AcademySkillStatus, AcademySkillSummary, AcademySkillVersion, AcademyUpdateInput, AcademyVersionOrigin } from '../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
 
@@ -108,6 +109,9 @@ export class AcademyStore {
         sync_state TEXT NOT NULL CHECK(sync_state IN ('UNCONFIGURED','SYNCED','DIRTY','SYNCING','PUSH_PENDING','LOCAL_DRIFT','REMOTE_DIVERGED','ERROR')),
         last_error TEXT,
         updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS academy_git_publication (
+        destination_key TEXT PRIMARY KEY, state_json TEXT NOT NULL
       );
     `)
     this.migrateDistributionTargets()
@@ -472,6 +476,15 @@ export class AcademyStore {
   getGitProfile(): AcademyGitProfile | null {
     const row = this.db.prepare('SELECT * FROM academy_git_profile WHERE id=?').get('academy-git-profile') as Row | undefined
     return row ? gitProfileFromRow(row) : null
+  }
+
+  getGitPublication(destinationKey: string): AcademyGitPublicationState | null {
+    const row = this.db.prepare('SELECT state_json FROM academy_git_publication WHERE destination_key=?').get(destinationKey) as Row | undefined
+    return row ? JSON.parse(row.state_json) : null
+  }
+
+  saveGitPublication(state: AcademyGitPublicationState): void {
+    this.db.prepare('INSERT INTO academy_git_publication VALUES (?, ?) ON CONFLICT(destination_key) DO UPDATE SET state_json=excluded.state_json').run(state.destinationKey, JSON.stringify(state))
   }
 
   saveGitProfile(profile: Omit<AcademyGitProfile, 'updatedAt'>): AcademyGitProfile {

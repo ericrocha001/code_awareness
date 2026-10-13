@@ -65,6 +65,57 @@ export interface GitWorktreeReadSnapshot {
 }
 
 export class GitService implements FileListingPort {
+  async initializePublicationRepository(root: string, remoteUrl: string): Promise<void> {
+    mkdirSync(root, { recursive: true })
+    if (!existsSync(join(root, '.git'))) {
+      await this.runGit(['init'], root)
+      await this.addRemote(root, 'origin', remoteUrl)
+    }
+    if (await this.getRemoteUrl(root) !== remoteUrl) throw new Error('PUBLICATION_DESTINATION_MISMATCH')
+  }
+
+  async readManagedTree(root: string, ref: string, paths: string[]): Promise<string> {
+    return this.runGit(['ls-tree', '-r', '-z', ref, '--', ...paths.map(path => `:(literal)${path}`)], root)
+  }
+
+  async createPublicationBranch(root: string, branch: string, ref: string | null): Promise<void> {
+    await this.validateBranch(root, branch)
+    await this.runGit(ref ? ['switch', '-c', branch, ref] : ['switch', '--orphan', branch], root)
+  }
+
+  async writeIndexTree(root: string): Promise<string> {
+    return (await this.runGit(['write-tree'], root)).trim()
+  }
+
+  async resolveTree(root: string, ref: string): Promise<string> {
+    return (await this.runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{tree}`], root)).trim()
+  }
+
+  async readPublicationHead(root: string): Promise<string | null> {
+    const branch = (await this.runGit(['symbolic-ref', '--short', 'HEAD'], root)).trim()
+    const head = (await this.runGit(['for-each-ref', '--format=%(objectname)', `refs/heads/${branch}`], root)).trim()
+    return head || null
+  }
+
+  async mergePublication(root: string, ref: string, managedResolution?: string[]): Promise<void> {
+    try {
+      await this.runGit(['-c', 'user.name=Code Awareness', '-c', 'user.email=code-awareness@local', 'merge', '--no-edit', ref], root)
+    } catch (error) {
+      if (await this.getGitOperation(root) !== 'MERGE') throw error
+      const conflicts = (await this.runGit(['diff', '--name-only', '--diff-filter=U', '-z'], root)).split('\0').filter(Boolean)
+      if (!managedResolution || !conflicts.length || conflicts.some(path => !managedResolution.some(managed => path === managed || path.startsWith(`${managed}/`)))) {
+        await this.abortMerge(root)
+        throw error
+      }
+      await this.runGit(['--literal-pathspecs', 'restore', `--source=${ref}`, '--staged', '--worktree', '--', ...conflicts], root)
+      await this.commitInspectedIndex(root, 'Academy: reconcile managed publication history', await this.resolveCommit(root, 'HEAD'), await this.getIndexRevision(root))
+    }
+  }
+
+  async preserveLegacyCommits(root: string, legacyPath: string, head: string): Promise<void> {
+    await this.runGit(['fetch', '--', legacyPath, `${head}:refs/academy/legacy-pending`], root)
+  }
+
   async readCommitFile(root: string, commit: string, path: string, maxBytes: number): Promise<Buffer | null> {
     const entry = (await this.runGitBytes(['ls-tree', '-z', commit, '--', `:(literal)${path}`], root, { maxOutputBytes: 4096 })).toString('utf8')
     if (!entry) return null

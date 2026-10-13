@@ -44,6 +44,30 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+it('requires confirmation and forwards an empty canonical projection with observed conflict preconditions', async () => {
+  const current = await window.codeAwareness.getAcademyGitStatus()
+  const conflict = { ...current, syncState: 'REMOTE_DIVERGED' as const, publication: { destinationKey: 'destination', checkoutPath: 'C:/publication', baselineTree: null, desiredRevision: 'revision', desiredTree: '', localHead: null, remoteHead: 'a'.repeat(40), verifiedAt: null, operationId: null, pendingCommit: null, legacyPendingHead: null, migrationComplete: true, conflictPaths: ['skills/alpha/SKILL.md'], phase: 'CONFLICT' as const } }
+  vi.mocked(window.codeAwareness.getAcademyGitStatus).mockResolvedValue(conflict)
+  window.codeAwareness.resolveAcademyGitConflict = vi.fn(async () => conflict)
+  render(<AcademyView />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Publicar versão canônica' }))
+  expect(window.codeAwareness.resolveAcademyGitConflict).not.toHaveBeenCalled()
+  const dialog = await screen.findByRole('alertdialog')
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Publicar versão canônica' }))
+  await waitFor(() => expect(window.codeAwareness.resolveAcademyGitConflict).toHaveBeenCalledWith('a'.repeat(40), ''))
+  expect(screen.queryByText('Git sincronizado.')).toBeNull()
+})
+
+it.each(['ERROR', 'PUSH_PENDING', 'REMOTE_DIVERGED', 'SYNCING'])('does not announce successful Git publication for %s', async (syncState) => {
+  vi.mocked(window.codeAwareness.syncAcademyGitNow).mockResolvedValue({ profile: null, repository: null, syncState: syncState as any, lastSyncAt: null, lastCommitSha: null, lastError: 'Publication pending' })
+  render(<AcademyView />)
+  const button = await screen.findByRole('button', { name: 'Sync Now' })
+  fireEvent.click(button)
+  expect((await screen.findAllByText('Publication pending')).length).toBeGreaterThan(0)
+  expect(screen.queryByText('Git sincronizado.')).toBeNull()
+  expect(screen.getByRole('status').className).toContain('error')
+})
+
 const selectAlpha = async () => {
   fireEvent.click(await screen.findByRole('button', { name: /alpha/i }))
   await screen.findByRole('button', { name: 'Editar' })

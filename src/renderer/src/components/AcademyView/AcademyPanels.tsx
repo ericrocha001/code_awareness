@@ -262,12 +262,13 @@ interface OperationsRailProps {
   onConfirmUpload: () => void
   onBindRepository: () => void
   onSyncGit: () => void
+  onResolveGitConflict: () => void
   onOpenGit: () => void
   onReviewConflict: (id: string) => void
   onPreviewConflictBatch: () => void
 }
 
-export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
+export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
   const release = openAiPublication?.selectedRelease
   return <aside className={`academy-operations ${open ? 'is-open' : ''}`} aria-label="Operações da Academy">
     <div className="academy-operations-mobile-header"><strong>Operações</strong><button className="academy-icon-button" aria-label="Fechar operações" onClick={onClose}><X size={18} /></button></div>
@@ -293,7 +294,7 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinatio
       <div className="academy-distribution-summary">
         <div><span className="academy-summary-icon"><Box size={17} /></span><span><strong>Academy Skills</strong><small>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version} · ${packageDistribution.skillCount} Skills` : 'Pacote não disponível'}</small></span><StatusBadge tone="success">PACKAGE</StatusBadge></div>
         {distribution.targets.map((target) => <div key={target.target}><span className="academy-summary-icon"><Cloud size={17} /></span><span><strong>{friendlyState(target.target)}</strong><small>{target.current} current · {target.error} error</small></span><StatusBadge tone={target.convergence === 'CONVERGED' ? 'success' : 'warning'}>{target.convergence}</StatusBadge></div>)}
-        <div><span className="academy-summary-icon"><GitBranch size={17} /></span><span><strong>Repositório Git</strong><small>{packageDistribution?.git.repository?.fullName ?? 'Não configurado'}</small></span><StatusBadge tone={packageDistribution?.git.syncState === 'SYNCED' ? 'success' : 'warning'}>{packageDistribution?.git.syncState ?? 'UNCONFIGURED'}</StatusBadge></div>
+        <div><span className="academy-summary-icon"><GitBranch size={17} /></span><span><strong>Repositório Git</strong><small>{gitStatus?.repository?.fullName ?? packageDistribution?.git.repository?.fullName ?? 'Não configurado'}</small></span><StatusBadge tone={(gitStatus?.syncState ?? packageDistribution?.git.syncState) === 'SYNCED' ? 'success' : 'warning'}>{gitStatus?.syncState ?? packageDistribution?.git.syncState ?? 'UNCONFIGURED'}</StatusBadge></div>
         <div><span className="academy-summary-icon"><Package size={17} /></span><span><strong>Marketplace</strong><small>{packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'Git Managed' : packageDistribution?.marketplace.mode === 'SOURCE_AVAILABLE' ? 'Source Available' : 'Pending Evidence'}</small></span><StatusBadge tone={packageDistribution?.marketplace.mode === 'PENDING_EVIDENCE' ? 'warning' : 'info'}>{packageDistribution?.marketplace.mode === 'PENDING_EVIDENCE' ? 'PENDING' : 'AVAILABLE'}</StatusBadge></div>
       </div>
     </RailCard>
@@ -302,7 +303,7 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinatio
       <div className="academy-git-summary"><div><strong>{gitStatus?.repository?.fullName ?? 'Não configurado'}</strong><small>{gitStatus?.repository ? `${gitStatus.repository.branch} · ${gitStatus.lastCommitSha?.slice(0, 8) ?? 'sem commit'}` : 'Vincule um repository elegível'}</small></div><StatusBadge tone={gitStatus?.syncState === 'SYNCED' ? 'success' : gitStatus?.syncState === 'ERROR' ? 'danger' : 'warning'}>{gitStatus?.syncState ?? 'UNCONFIGURED'}</StatusBadge></div>
       {gitStatus?.lastError && <p className="academy-inline-error">{gitStatus.lastError}</p>}
       {!gitStatus?.repository && eligibleRepos.length > 0 && <div className="academy-git-bind"><select aria-label="Repository da Academy" value={selectedRepoId} onChange={(event) => onSelectedRepoChange(event.target.value)}>{eligibleRepos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select><button onClick={onBindRepository}>Vincular</button></div>}
-      {gitStatus?.repository && <><small className="academy-muted">Último sync: {formatDate(gitStatus.lastSyncAt)}</small><div className="academy-inline-actions"><button onClick={onSyncGit}>Sync Now</button><button onClick={onOpenGit}>Abrir no Explorer</button></div></>}
+      {gitStatus?.repository && <><small className="academy-muted">Última confirmação remota: {formatDate(gitStatus.lastSyncAt)} · {gitStatus.publication?.remoteHead?.slice(0, 8) ?? 'sem observação'}</small><small className="academy-muted">{gitStatus.publication?.phase ?? 'Migração pendente'}</small>{Boolean(gitStatus.publication?.conflictPaths.length) && <small>Conflito protegido: {gitStatus.publication?.conflictPaths.join(', ')}</small>}<div className="academy-inline-actions"><button data-academy-action="sync-git" onClick={onSyncGit}>Sync Now</button>{gitStatus.publication?.phase === 'CONFLICT' && <button data-academy-action="resolve-git" onClick={onResolveGitConflict}>Publicar versão canônica</button>}<button onClick={onOpenGit}>Abrir no Explorer</button></div></>}
     </RailCard>
 
     <RailCard icon={<Cloud size={18} />} title="Hosted ZIP fallback" className="academy-fallback-card">

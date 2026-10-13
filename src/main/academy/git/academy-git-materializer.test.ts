@@ -1,8 +1,8 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
-import { AcademyGitMaterializer, computeGitSnapshotHash, validateGitSnapshot } from './academy-git-materializer'
+import { AcademyGitMaterializer, assertPublicationPaths, computeGitSnapshotHash, validateGitSnapshot } from './academy-git-materializer'
 import type { AcademyGitSnapshotEntry } from './academy-git-materializer'
 import { hashAcademyPackage } from '../academy-package'
 
@@ -32,6 +32,11 @@ afterEach(() => {
 })
 
 describe('AcademyGitMaterializer', () => {
+  it('rejects dangling links in managed parents before projection can write outside its checkout', () => {
+    const directory = root()
+    symlinkSync(join(directory, 'missing-target'), join(directory, 'assets'), process.platform === 'win32' ? 'junction' : 'dir')
+    expect(() => assertPublicationPaths(directory, ['assets/logo.png'])).toThrow('PUBLICATION_SYMLINK_NOT_ALLOWED')
+  })
   it('materializes skills deterministically under skills/ without touching external files', async () => {
     const repo = root()
     // External files that must never be touched
