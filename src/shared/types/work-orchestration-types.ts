@@ -1,3 +1,4 @@
+import type { LocalChange, LocalChangeSummary } from './local-change-types'
 export interface OrchestrationContext { projectId: string; revision: number }
 export interface ObservableWorktree {
   worktreeId: string
@@ -11,7 +12,10 @@ export interface ObservableWorktree {
   prunable: boolean
   reference: boolean
   snapshot: { head: string | null; branch: string | null; operation: string | null; indexRevision: string; worktreeRevision: string } | null
-  observation: 'NOT_OBSERVED' | 'VERIFIED' | 'UNAVAILABLE' | 'STALE'
+  observation: 'NOT_OBSERVED' | 'LAST_KNOWN' | 'REVALIDATING' | 'VERIFIED' | 'UNAVAILABLE' | 'STALE'
+  localChanges?: LocalChangeSummary
+  observedAt?: string
+  snapshotRevision?: string
   stagedCount: number | null
   unstagedCount: number | null
   untrackedCount: number | null
@@ -48,6 +52,17 @@ export interface OrchestrationRequest {
   context: OrchestrationContext
   pair?: { leftId: string; rightId: string; cursor?: string }
   worktree?: { worktreeId: string }
+  changes?: { worktreeId: string; generation: string; snapshotRevision: string; cursor?: string; pathPrefix?: string }
 }
-export type OrchestrationData = OrchestrationOverview | WorktreePair | WorktreeObservation
+export interface LocalChangesPage {
+  repositoryId: string
+  worktreeId: string
+  generation: string
+  snapshotRevision: string
+  changes: LocalChange[]
+  totalCount: number
+  revision: string
+  nextCursor: string | null
+}
+export type OrchestrationData = OrchestrationOverview | WorktreePair | WorktreeObservation | LocalChangesPage
 export type OrchestrationResult<T> = { success: true; context: OrchestrationContext; data: T } | { success: false; code: string }

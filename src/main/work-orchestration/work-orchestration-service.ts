@@ -1,15 +1,16 @@
 import { createHash } from 'node:crypto'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
-import type { ObservableWorktree, OrchestrationOverview, WorktreePair, WorktreeObservation } from '../../shared/types/work-orchestration-types'
+import type { ObservableWorktree, OrchestrationOverview, WorktreePair, WorktreeObservation, OrchestrationRequest, LocalChangesPage } from '../../shared/types/work-orchestration-types'
 
-export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'>
+export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'> & Partial<Pick<GitOperationsService, 'getWorktreeChanges'>>
 type Observation = Awaited<ReturnType<OrchestrationGitReader['getCoordinationSnapshot']>>
 const reason = (error: unknown) => error instanceof Error ? error.message : 'GIT_READ_UNAVAILABLE'
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const changed = (a: Observation, b: Observation) => a.record.generation !== b.record.generation || digest(a.snapshot) !== digest(b.snapshot)
-const project = ({ record, paths: _paths, ...observation }: Observation): ObservableWorktree => ({ ...record, ...observation, head: observation.snapshot.head, branch: observation.snapshot.branch, observation: 'VERIFIED', reason: null })
+const project = ({ record, paths: _paths, ...observation }: Observation): ObservableWorktree => ({ ...record, ...observation, snapshotRevision: digest(observation.snapshot), head: observation.snapshot.head, branch: observation.snapshot.branch, observation: 'VERIFIED', reason: null })
 
 export class WorkOrchestrationService {
+  private known: Awaited<ReturnType<WorkOrchestrationService['records']>> | null = null
   constructor(private readonly git: OrchestrationGitReader) {}
 
   private async records() {
@@ -27,6 +28,7 @@ export class WorkOrchestrationService {
 
   async inventory(): Promise<OrchestrationOverview> {
     const { repositoryId, records, revision } = await this.records()
+    this.known = { repositoryId, records, revision }
     return { repositoryId, revision, observedAt: new Date().toISOString(), inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', pairs: [],
       worktrees: records.map(record => ({ ...record, head: record.head && !/^0+$/.test(record.head) ? record.head : null,
         snapshot: null, observation: 'NOT_OBSERVED', stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null,
@@ -34,15 +36,27 @@ export class WorkOrchestrationService {
   }
 
   async observe(worktreeId: string): Promise<WorktreeObservation> {
-    const { repositoryId, records } = await this.records()
+    const { repositoryId, records } = this.known ?? await this.records()
     const record = records.find(record => record.worktreeId === worktreeId)
     if (!record) throw new Error('WORKTREE_NOT_DISCOVERED')
     try {
-      return { repositoryId, worktree: project(await this.git.getCoordinationSnapshot(worktreeId)), observedAt: new Date().toISOString() }
+      const worktree = project(await this.git.getCoordinationSnapshot(worktreeId)), observedAt = new Date().toISOString()
+      return { repositoryId, worktree: { ...worktree, observedAt }, observedAt }
     } catch (error) {
       return { repositoryId, observedAt: new Date().toISOString(), worktree: { ...record, snapshot: null, observation: 'UNAVAILABLE',
         stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null, reason: reason(error) } }
     }
+  }
+
+  async changes(request: NonNullable<OrchestrationRequest['changes']>): Promise<LocalChangesPage> {
+    const { repositoryId, records } = this.known ?? await this.records()
+    if (!records.some(record => record.worktreeId === request.worktreeId && record.generation === request.generation)) throw new Error('WORKTREE_STALE')
+    if (!this.git.getWorktreeChanges) throw new Error('GIT_READ_UNAVAILABLE')
+    const page = await this.git.getWorktreeChanges({ worktreeId: request.worktreeId, pageSize: 50, cursor: request.cursor,
+      pathPrefixes: request.pathPrefix ? [request.pathPrefix] : undefined })
+    if (page.generation !== request.generation || digest(page.snapshot) !== request.snapshotRevision) throw new Error('GIT_STATE_CHANGED')
+    return { repositoryId, worktreeId: page.worktreeId, generation: page.generation, snapshotRevision: request.snapshotRevision,
+      changes: page.changes, totalCount: page.totalCount, revision: page.revision, nextCursor: page.nextCursor }
   }
 
   private async compare(repositoryId: string, left: ObservableWorktree, right: ObservableWorktree, observations: Map<string, Observation>): Promise<WorktreePair> {

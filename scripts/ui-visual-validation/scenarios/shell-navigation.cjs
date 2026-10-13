@@ -45,6 +45,8 @@ exports.run = async ctx => {
     await ctx.load(page); await ctx.viewport(1440, 900)
     const navigate = async label => { await ctx.evaluate(label => { document.querySelector('[data-nav-target]')?.removeAttribute('data-nav-target'); [...document.querySelectorAll('.global-sidebar-nav-item')].find(button => button.textContent.trim() === label).setAttribute('data-nav-target', '') }, label); await ctx.click('[data-nav-target]'); await ctx.waitFor(label => document.querySelector('[aria-current="page"]')?.textContent.trim() === label, label) }
     await navigate('Work Orchestration'); await ctx.waitFor(() => document.querySelector('.wo-toolbar').textContent.includes('1 discovered'))
+    await ctx.waitFor(() => document.querySelector('.wo-tree')?.textContent.includes('Verified observation'))
+    const retainedReads = reads
     for (let cycle = 0; cycle < 3; cycle++) for (const label of ['Git Management', 'Work Orchestration', 'Code Source', 'Channel', 'Home']) {
       await navigate(label)
       ctx.check(`${cycle}:${label}: only the active panel visible`, await ctx.evaluate(label => {
@@ -52,7 +54,7 @@ exports.run = async ctx => {
         return panels.length === 1 && document.querySelectorAll('.wo-tab').length === 1 && document.querySelectorAll('.wo-view').length === 1 && document.querySelectorAll('.gm-view').length === (label === 'Git Management' ? 1 : 0)
       }, label))
     }
-    ctx.check('Retained Orchestration performs no extra reads', reads === 1)
+    ctx.check('Retained Orchestration performs no extra reads', reads === retainedReads)
     ctx.check('No duplicate-key runtime warnings', !errors.some(message => /same key/.test(message)))
     await navigate('Git Management'); await ctx.waitFor(() => document.querySelector('.gm-view')?.textContent.includes('1 commits')); await ctx.capture('single-git-management-dark'); await ctx.overflow()
     await navigate('Work Orchestration'); await ctx.capture('single-work-orchestration-dark')

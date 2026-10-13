@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { summarizeLocalChanges } from './local-change-summary'
 import ignore from 'ignore'
 import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
@@ -411,7 +412,7 @@ export class GitOperationsService {
       const changes = service.parseChanges(snapshot.status)
       const paths = [...new Set(changes.flatMap(change => change.previousPath ? [change.path, change.previousPath] : [change.path]))].sort()
       if (paths.length > 10000) fail('GIT_PATH_LIMIT')
-      return { record, snapshot: { head: snapshot.head, branch: snapshot.branch, operation: snapshot.operation,
+      return { record, localChanges: summarizeLocalChanges(changes), snapshot: { head: snapshot.head, branch: snapshot.branch, operation: snapshot.operation,
         indexRevision: snapshot.indexRevision, worktreeRevision: snapshot.worktreeRevision }, paths,
         stagedCount: changes.filter(c => c.stagedState).length, unstagedCount: changes.filter(c => c.unstagedState).length,
         untrackedCount: changes.filter(c => c.untracked).length, conflictCount: changes.filter(c => c.conflicted).length,
@@ -459,7 +460,7 @@ export class GitOperationsService {
   }
 
   async getWorktreeChanges(request: { worktreeId: string; cursor?: string; pathPrefixes?: string[]; categories?: Array<'STAGED' | 'UNSTAGED' | 'UNTRACKED' | 'DELETED' | 'CONFLICTED'>; pageSize?: number }) {
-    return this.readWorktree(request.worktreeId, async (service, state) => {
+    return this.readWorktree(request.worktreeId, async (service, state, record) => {
       const prefixes = request.pathPrefixes === undefined ? [] : service.paths(request.pathPrefixes, 20).sort()
       if (prefixes.some(path => /[*?\[\]]/.test(path))) fail('INVALID_ARGUMENT')
       const categories = [...new Set(request.categories ?? [])].sort()
@@ -479,7 +480,9 @@ export class GitOperationsService {
         if (!Number.isSafeInteger(offset) || offset < 0 || offset > changes.length) fail('INVALID_ARGUMENT')
       }
       const end = Math.min(offset + pageSize, changes.length)
-      return { worktreeId: request.worktreeId, changes: changes.slice(offset, end), revision, nextCursor: end < changes.length ? `${revision}:${end}` : null }
+      return { worktreeId: request.worktreeId, generation: record.generation,
+        snapshot: { head: state.head, branch: state.branch, operation: state.operation, indexRevision: state.indexRevision, worktreeRevision: state.worktreeRevision },
+        totalCount: changes.length, changes: changes.slice(offset, end), revision, nextCursor: end < changes.length ? `${revision}:${end}` : null }
     })
   }
 
