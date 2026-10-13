@@ -20,7 +20,8 @@ exports.run = async ctx => {
   const root = path.join(ctx.temporary, 'repository'), other = path.join(ctx.temporary, 'other')
   for (const dir of [root, other]) {
     fs.mkdirSync(dir); git(dir, ['init']); git(dir, ['config', 'user.name', 'Acceptance']); git(dir, ['config', 'user.email', 'acceptance@example.test'])
-    fs.writeFileSync(path.join(dir, 'shared.txt'), 'base\n'); git(dir, ['add', '.']); git(dir, ['commit', '-m', 'base'])
+    for (const file of ['shared.txt', 'modified.txt', 'deleted.txt', 'rename.txt']) fs.writeFileSync(path.join(dir, file), 'base\n')
+    git(dir, ['add', '.']); git(dir, ['commit', '-m', 'base'])
   }
   git(root, ['branch', '-m', 'zzz-reference'])
   const a = path.join(ctx.temporary, 'feature-with-a-long-path'), b = path.join(ctx.temporary, 'detached-work')
@@ -37,6 +38,8 @@ exports.run = async ctx => {
   const snapshot = reader.getCoordinationSnapshot.bind(reader), interval = reader.getCoordinationCommitPaths.bind(reader)
   reader.getCoordinationSnapshot = async (...args) => { snapshots++; running++; maximum=Math.max(maximum,running); const start=performance.now(); try { return await snapshot(...args) } finally { observations.push({id:args[0],ms:performance.now()-start}); running-- } }
   reader.getCoordinationCommitPaths = async (...args) => { commits++; return interval(...args) }
+  const details = [], changes = reader.getWorktreeChanges.bind(reader)
+  reader.getWorktreeChanges = async request => { const start = performance.now(), before = gitCalls; try { return await changes(request) } finally { details.push({ request, ms: performance.now() - start, gitCalls: gitCalls - before }) } }
   const controller = new WorkOrchestrationController(projects), management = new GitManagementController(projects)
   controller.bind(reader); management.bind(reader)
   let baseline
@@ -85,7 +88,14 @@ exports.run = async ctx => {
     const page = path.join(ctx.temporary, 'index.html')
     fs.writeFileSync(page, `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`)
     fs.writeFileSync(path.join(a, 'added.txt'), 'staged\n'); git(a, ['add', 'added.txt']); fs.writeFileSync(path.join(a, 'added.txt'), 'unstaged\n')
+    fs.writeFileSync(path.join(a, 'modified.txt'), 'modified\n'); fs.unlinkSync(path.join(a, 'deleted.txt')); git(a, ['mv', 'rename.txt', 'renamed.txt'])
     for (let i = 0; i < 55; i++) fs.writeFileSync(path.join(a, `new-${i}.txt`), 'untracked\n')
+    const detachedHead = git(b, ['rev-parse', 'HEAD'])
+    git(b, ['checkout', '-b', 'conflict-side', git(root, ['rev-parse', 'HEAD'])])
+    fs.writeFileSync(path.join(b, 'shared.txt'), 'conflicting side\n'); git(b, ['add', 'shared.txt']); git(b, ['commit', '-m', 'conflicting side'])
+    git(b, ['checkout', '--detach', detachedHead])
+    const merge = spawnSync('git', ['merge', 'conflict-side'], { cwd: b, encoding: 'utf8', windowsHide: true })
+    if (merge.status !== 1) throw new Error('Expected an unresolved real Git conflict')
     const before = { refs: git(a, ['show-ref']), index: fs.readFileSync(path.join(await serviceGit.getWorktreeDirectory(a), 'index')).toString('hex') }
     const started = performance.now()
     await ctx.window.loadFile(page, { query: { repositoryPath: root } }); await ctx.viewport(1440, 900)
@@ -112,30 +122,47 @@ exports.run = async ctx => {
       return
     }
     await filter('feature/'); await select('feature/')
-    await wait(() => !!document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths'))
-    ctx.check('Unique paths differ from stage counters', await ctx.evaluate(() => document.querySelector('.wo-inspector').textContent.includes('56 caminhos locais únicos') && document.querySelector('.wo-inspector').textContent.includes('1 staged · 1 unstaged · 55 não rastreados')))
-    ctx.check('First detail page bounded and exact staged flags', await ctx.evaluate(() => document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths').children.length === 50 && document.querySelector('[aria-label="Caminhos com alterações locais"]').textContent.includes('Staged: A · Unstaged: M')))
-    await ctx.evaluate(() => document.querySelector('[aria-label="Caminhos com alterações locais"]').scrollIntoView({block:'start'})); await ctx.capture('local-paths-dark')
+    await wait(() => !!document.querySelector('[aria-label="Arquivos alterados"] .wo-paths'))
+    ctx.check('Unique paths differ from stage counters', await ctx.evaluate(() => document.querySelector('.wo-inspector').textContent.includes('59 caminhos locais únicos') && document.querySelector('.wo-inspector').textContent.includes('2 staged · 3 unstaged · 55 não rastreados')))
+    ctx.check('Technical filter removed and request has no prefix', await ctx.evaluate(() => !document.querySelector('.wo-local-filter') && !document.querySelector('[aria-label="Arquivos alterados"] input')) && reads.filter(request => request.changes).every(request => !Object.hasOwn(request.changes, 'pathPrefix')))
+    ctx.check('First page keeps its existing Git cost and page bound', details.length === 1 && details[0].gitCalls === 18 && details[0].request.pageSize === 50 && !details[0].request.pathPrefixes && await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"] .wo-paths').children.length === 50))
+    ctx.check('Human labels retain both Git states and local categories', await ctx.evaluate(() => {
+      const rows = [...document.querySelectorAll('.wo-local-changes li')], row = path => rows.find(item => item.querySelector('strong').textContent === path)
+      return row('added.txt').textContent.includes('Adicionado · Modificado') && row('added.txt').textContent.includes('Adicionado ao índice; Modificado no diretório de trabalho') && row('modified.txt').textContent.includes('Modificado') && row('deleted.txt').textContent.includes('Excluído') && row('new-0.txt').textContent.includes('Não rastreado')
+    }))
+    await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"]').scrollIntoView({block:'start'})); await ctx.capture('local-paths-dark')
+    const beforeEvidence = reads.length
+    await ctx.evaluate(() => { const row = [...document.querySelectorAll('.wo-local-changes li')].find(item => item.querySelector('strong').textContent === 'added.txt'); row.querySelector('summary').setAttribute('data-evidence',''); row.querySelector('summary').scrollIntoView({block:'center'}) }); await ctx.click('[data-evidence]')
+    ctx.check('Original Git evidence expands without reads', reads.length === beforeEvidence && await ctx.evaluate(() => document.querySelector('[data-evidence]').parentElement.open && document.querySelector('[data-evidence]').parentElement.textContent.includes('Staged: A · Unstaged: M')))
+    await ctx.capture('original-git-evidence-dark')
     const clickText = async text => { await ctx.evaluate(text => { document.querySelector('[data-local-action]')?.removeAttribute('data-local-action'); const button = [...document.querySelectorAll('.wo-inspector button')].find(button => button.textContent === text); button.setAttribute('data-local-action',''); button.scrollIntoView({block:'center'}) }, text); await ctx.click('[data-local-action]') }
-    await clickText('Próxima página'); await wait(() => document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths')?.children.length === 6)
+    await clickText('Próxima página'); await wait(() => document.querySelector('[aria-label="Arquivos alterados"] .wo-paths')?.children.length === 9)
+    ctx.check('Rename keeps readable label and origin', await ctx.evaluate(() => [...document.querySelectorAll('.wo-local-changes li')].some(item => item.textContent.includes('renamed.txt') && item.textContent.includes('Renomeado') && item.textContent.includes('Origem: rename.txt'))))
+    await ctx.evaluate(() => [...document.querySelectorAll('.wo-local-changes li')].find(item => item.querySelector('strong').textContent === 'renamed.txt').scrollIntoView({block:'center'}))
     await ctx.capture('local-page-two-dark')
     fs.writeFileSync(path.join(a, 'external.txt'), 'external\n')
-    await clickText('Página anterior'); await wait(() => document.querySelector('[aria-label="Caminhos com alterações locais"]').textContent.includes('O estado Git mudou'))
-    ctx.check('External write rejects stale details', await ctx.evaluate(() => !document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths')))
+    await clickText('Página anterior'); await wait(() => document.querySelector('[aria-label="Arquivos alterados"]').textContent.includes('O estado Git mudou'))
+    ctx.check('External write rejects stale details', await ctx.evaluate(() => !document.querySelector('[aria-label="Arquivos alterados"] .wo-paths')))
     await ctx.capture('stale-local-page-dark')
-    await clickText('Revalidar worktree'); await wait(() => document.querySelector('.wo-inspector').textContent.includes('57 caminhos locais únicos') && !!document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths'))
-    await ctx.evaluate(() => document.querySelector('.wo-local-filter').scrollIntoView({block:'center'})); await ctx.input('[aria-label="Filtrar prefixo dos caminhos locais"]', 'added.txt'); await ctx.click('.wo-local-filter button')
-    await wait(() => document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths')?.children.length === 1)
+    await clickText('Revalidar worktree'); await wait(() => document.querySelector('.wo-inspector').textContent.includes('60 caminhos locais únicos') && !!document.querySelector('[aria-label="Arquivos alterados"] .wo-paths'))
+    await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"]').scrollIntoView({block:'start'}))
     await ctx.evaluate(() => { document.body.dataset.theme = 'light' }); await ctx.viewport(1120, 800)
-    await ctx.capture('local-path-filter-medium-light'); await ctx.overflow()
+    await ctx.capture('local-files-medium-light'); await ctx.overflow()
     await ctx.evaluate(() => document.querySelector('.wo-inspector').focus()); ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Tab',modifiers:['shift']}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Tab',modifiers:['shift']})
     await ctx.waitFor(() => document.activeElement.textContent === 'Revalidar worktree')
     ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'}); await ctx.waitFor(() => !document.querySelector('.wo-inspector'))
     ctx.check('Focus restored after drawer closes', await ctx.evaluate(() => document.activeElement.classList.contains('wo-tree')))
     await ctx.capture('local-summary-medium-light')
+    await filter('Detached HEAD'); await select('Detached HEAD'); await wait(() => document.querySelector('.wo-local-changes li')?.textContent.includes('Em conflito'))
+    ctx.check('Conflict has priority over invented added or deleted states', await ctx.evaluate(() => document.querySelector('.wo-local-changes li .wo-change-classification').textContent === 'Em conflito'))
+    await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"]').scrollIntoView({block:'start'})); await ctx.capture('conflict-files-medium-light')
+    await ctx.evaluate(() => { document.querySelector('.wo-inspector').scrollTop = 0 }); await ctx.click('[aria-label="Fechar inspetor"]'); await wait(() => !document.querySelector('.wo-inspector'))
+    await filter('zzz-reference'); await select('zzz-reference'); await wait(() => document.querySelector('[aria-label="Arquivos alterados"]').textContent.includes('Nenhuma alteração local nesta observação.'))
+    await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"]').scrollIntoView({block:'start'})); await ctx.capture('empty-files-medium-light')
+    await ctx.evaluate(() => { document.querySelector('.wo-inspector').scrollTop = 0 }); await ctx.click('[aria-label="Fechar inspetor"]'); await wait(() => !document.querySelector('.wo-inspector'))
     await ctx.viewport(1440, 900); const refreshStart = performance.now(), refreshCalls = gitCalls; await refresh(); await wait(() => !document.querySelector('.wo-view').textContent.includes('Revalidando…')); const refreshMs = performance.now() - refreshStart, refreshGitCalls = gitCalls - refreshCalls
     ctx.check('No read mutation', before.refs === git(a,['show-ref']) && before.index === fs.readFileSync(path.join(await serviceGit.getWorktreeDirectory(a),'index')).toString('hex') && mutations === 0)
     ctx.check('Final runtime freshness MATCH', identity.getIdentityPayload().freshness.state === 'MATCH')
-    fs.writeFileSync(path.join(ctx.evidenceDir,'local-signals-measurements.json'),JSON.stringify({fixture:21,inventoryMs,inventoryGitCalls,visibleMs,visibleReads,visibleGitCalls,navigationMs,navigationReads,refreshMs,refreshGitCalls,idleReads:0,maximum,observations,reads,stats:stats()},null,2))
+    fs.writeFileSync(path.join(ctx.evidenceDir,'local-signals-measurements.json'),JSON.stringify({fixture:21,inventoryMs,inventoryGitCalls,visibleMs,visibleReads,visibleGitCalls,navigationMs,navigationReads,refreshMs,refreshGitCalls,idleReads:0,maximum,observations,details,reads,stats:stats()},null,2))
   } finally { controller.deactivate(); await management.deactivate(); for (const channel of ['work-orchestration:read', 'git-management:mutate', 'git-management:history', 'git-management:overview', 'git-management:commit-detail', 'git-management:patch']) ipcMain.removeHandler(channel) }
 }

@@ -1,10 +1,11 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { reasonLabel } from './work-orchestration-labels'
+import { presentLocalChange } from './local-change-presentation'
 import type { LocalChangesPage, ObservableWorktree, OrchestrationData, OrchestrationRequest, OrchestrationResult } from '../../../../shared/types/work-orchestration-types'
 
 type Query = (extra: Pick<OrchestrationRequest, 'changes'>) => Promise<OrchestrationResult<OrchestrationData>>
 export function LocalChangesInspector({ tree, query, revalidate, stale }: { tree: ObservableWorktree; query: Query; revalidate: () => void; stale: () => void }) {
-  const [page, setPage] = useState<LocalChangesPage | null>(null), [prefix, setPrefix] = useState('')
+  const [page, setPage] = useState<LocalChangesPage | null>(null)
   const [error, setError] = useState(''), [loading, setLoading] = useState(false)
   const [cursors, setCursors] = useState<Array<string | undefined>>([undefined])
   const sequence = useRef(0)
@@ -13,7 +14,7 @@ export function LocalChangesInspector({ tree, query, revalidate, stale }: { tree
     if (!tree.snapshotRevision || tree.observation !== 'VERIFIED') { setPage(null); setLoading(false); return }
     setLoading(true); setError(''); setPage(null)
     try {
-      const result = await query({ changes: { worktreeId: tree.worktreeId, generation: tree.generation, snapshotRevision: tree.snapshotRevision, cursor, pathPrefix: prefix || undefined } })
+      const result = await query({ changes: { worktreeId: tree.worktreeId, generation: tree.generation, snapshotRevision: tree.snapshotRevision, cursor } })
       if (ticket !== sequence.current) return
       if (!result.success) throw new Error(result.code)
       if (!('changes' in result.data) || result.data.generation !== tree.generation || result.data.snapshotRevision !== tree.snapshotRevision) throw new Error('WORKTREE_STALE')
@@ -22,17 +23,23 @@ export function LocalChangesInspector({ tree, query, revalidate, stale }: { tree
     finally { if (ticket === sequence.current) setLoading(false) }
   }
   useEffect(() => { setCursors([undefined]); void read(); return () => { sequence.current++ } }, [tree.worktreeId, tree.generation, tree.snapshotRevision, tree.observation])
-  return <section aria-label="Caminhos com alterações locais"><h3>Caminhos com alterações locais</h3>
-    <form className="wo-local-filter" onSubmit={event => { event.preventDefault(); setCursors([undefined]); void read() }}>
-      <input aria-label="Filtrar prefixo dos caminhos locais" placeholder="Arquivo exato ou prefixo de diretório" value={prefix} onChange={event => setPrefix(event.target.value)} />
-      <button disabled={loading || tree.observation !== 'VERIFIED'}>Filtrar</button>
-    </form>
-    {loading && <p role="status">Lendo caminhos locais…</p>}
-    {error && <p role="alert" className="wo-warning">{error === 'INVALID_ARGUMENT' ? 'Use um arquivo exato ou prefixo de diretório do repositório, sem curingas.' : `Obsoleto ou indisponível · ${reasonLabel(error)}`}</p>}
-    {page && <><p>{page.totalCount} {page.totalCount === 1 ? 'caminho encontrado' : 'caminhos encontrados'} · página {cursors.length}</p><ul className="wo-paths">{page.changes.map(change => <li key={change.path}>
-      <strong>{change.path}</strong>{change.previousPath && <div>Origem: {change.previousPath}</div>}
-      <div>{change.conflicted ? 'Em conflito · ' : change.untracked ? 'Não rastreado · ' : ''}Staged: {change.stagedState ?? '—'} · Unstaged: {change.unstagedState ?? '—'}</div>
-    </li>)}</ul>
+  return <section aria-label="Arquivos alterados"><h3>Arquivos alterados</h3>
+    {loading && <p role="status">Lendo arquivos alterados…</p>}
+    {error && <p role="alert" className="wo-warning">Obsoleto ou indisponível · {reasonLabel(error)}</p>}
+    {page && <><p>{page.totalCount} {page.totalCount === 1 ? 'arquivo' : 'arquivos'} · página {cursors.length}</p>
+      {!page.totalCount && <p>Nenhuma alteração local nesta observação.</p>}
+      <ul className="wo-paths wo-local-changes">{page.changes.map(change => {
+        const presentation = presentLocalChange(change)
+        return <li key={change.path} className={change.conflicted ? 'wo-local-conflict' : undefined}>
+          <strong>{change.path}</strong><div className="wo-change-classification">{presentation.classification}</div>
+          {change.previousPath && <div>Origem: {change.previousPath}</div>}
+          <div className="wo-change-description">{presentation.description}</div>
+          <details className="wo-change-evidence"><summary>Estado Git original</summary>
+            <div>Staged: {change.stagedState ?? '—'} · Unstaged: {change.unstagedState ?? '—'}</div>
+            <div>Não rastreado: {change.untracked ? 'sim' : 'não'} · Em conflito: {change.conflicted ? 'sim' : 'não'}</div>
+          </details>
+        </li>
+      })}</ul>
       {cursors.length > 1 && <button disabled={loading} onClick={() => { const previous = cursors.slice(0, -1); setCursors(previous); void read(previous[previous.length - 1]) }}>Página anterior</button>}
       {page.nextCursor && <button disabled={loading} onClick={() => { setCursors([...cursors, page.nextCursor!]); void read(page.nextCursor!) }}>Próxima página</button>}
     </>}

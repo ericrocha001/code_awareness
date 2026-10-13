@@ -45,7 +45,7 @@ it('marks failed details stale, allows revalidation and restores the original ro
   await screen.findByText(/Obsoleto ou indisponível/)
   expect(screen.getByText('Revalidar worktree').hasAttribute('disabled')).toBe(false)
   fireEvent.click(screen.getByText('Revalidar worktree'))
-  await screen.findByText('0 caminhos encontrados · página 1')
+  await screen.findByText('0 arquivos · página 1')
   fireEvent.keyDown(screen.getByLabelText('Inspetor de worktree'), { key: 'Escape' })
   expect(document.activeElement).toBe(row)
 })

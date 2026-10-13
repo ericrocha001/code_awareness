@@ -25,8 +25,7 @@
 .wo-path { grid-column:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; color:var(--text-secondary); }
 .wo-state { grid-column:2; grid-row:1 / 3; align-self:center; font-size:12px; color:var(--text-secondary); }
 .wo-state { max-width:400px; overflow-wrap:anywhere; }
-.wo-local-filter { display:flex; gap:6px; }
-.wo-local-filter input { width:100%; }
+
 .wo-exception { border-left:3px solid var(--color-warning) !important; }
 .wo-tree[aria-pressed=true] { border-color:var(--accent); }
 .wo-badge { color:var(--text-secondary); font-size:10px; border:1px solid var(--border); padding:2px 5px; border-radius:4px; margin-left:8px; }
@@ -47,6 +46,10 @@
 .wo-inspector dd { margin:5px 0 0; overflow-wrap:anywhere; font-family:var(--font-mono,monospace); line-height:1.6; }
 .wo-paths { list-style:none; padding:0; font-family:var(--font-mono,monospace); font-size:12px; }
 .wo-paths li { padding:7px 0; border-bottom:1px solid var(--border); overflow-wrap:anywhere; }
+.wo-local-changes .wo-change-classification { font-weight:600; margin:5px 0; }
+.wo-local-changes .wo-change-description { color:var(--text-secondary); line-height:1.5; }
+.wo-local-changes .wo-change-evidence { margin-top:7px; }
+.wo-local-conflict .wo-change-classification { color:var(--color-warning); }
 .wo-empty { color:var(--text-secondary); padding:20px 24px; font-size:13px; }
 .wo-footnote { margin-top:16px; line-height:1.6; }
 @container (max-width:1000px) { .wo-inspector { position:absolute; right:0; top:0; bottom:0; width:min(420px,90%); z-index:5; box-shadow:-12px 0 32px #0003; } .wo-tree { grid-template-columns:minmax(0,1fr); } .wo-state { grid-column:1; grid-row:auto; } }

@@ -20,7 +20,7 @@ it('keeps exactly one visible panel and one retained Orchestration view while sw
   } as any
   render(<React.StrictMode><App /></React.StrictMode>)
   fireEvent.click(screen.getByText('work-orchestration'))
-  await screen.findByText('Inventory complete · 0 discovered')
+  await screen.findByText('Inventário completo · 0 descobertas')
   for (let i = 0; i < 3; i++) for (const tab of ['git-management', 'work-orchestration', 'codebase', 'channel', 'home']) {
     fireEvent.click(screen.getByText(tab))
     expect(document.querySelectorAll('.wo-view')).toHaveLength(1)
