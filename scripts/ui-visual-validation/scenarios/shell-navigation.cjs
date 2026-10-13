@@ -44,8 +44,8 @@ exports.run = async ctx => {
     fs.writeFileSync(page, `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`)
     await ctx.load(page); await ctx.viewport(1440, 900)
     const navigate = async label => { await ctx.evaluate(label => { document.querySelector('[data-nav-target]')?.removeAttribute('data-nav-target'); [...document.querySelectorAll('.global-sidebar-nav-item')].find(button => button.textContent.trim() === label).setAttribute('data-nav-target', '') }, label); await ctx.click('[data-nav-target]'); await ctx.waitFor(label => document.querySelector('[aria-current="page"]')?.textContent.trim() === label, label) }
-    await navigate('Work Orchestration'); await ctx.waitFor(() => document.querySelector('.wo-toolbar').textContent.includes('1 discovered'))
-    await ctx.waitFor(() => document.querySelector('.wo-tree')?.textContent.includes('Verified observation'))
+    await navigate('Work Orchestration'); await ctx.waitFor(() => document.querySelector('.wo-toolbar').textContent.includes('1 descoberta'))
+    await ctx.waitFor(() => document.querySelector('.wo-tree')?.textContent.includes('Observação verificada'))
     const retainedReads = reads
     for (let cycle = 0; cycle < 3; cycle++) for (const label of ['Git Management', 'Work Orchestration', 'Code Source', 'Channel', 'Home']) {
       await navigate(label)

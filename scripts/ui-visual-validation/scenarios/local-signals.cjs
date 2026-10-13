@@ -70,10 +70,10 @@ exports.run = async ctx => {
     await ctx.click('[data-nav-target]')
     await ctx.waitFor(name => name === 'Work Orchestration' ? !document.querySelector('.wo-tab').hidden : document.querySelector('.wo-tab').hidden, name)
   }
-  const filter = async text => { await ctx.evaluate(text => { const input = document.querySelector('[aria-label="Filter worktrees"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, text); input.dispatchEvent(new Event('input', { bubbles: true })) }, text) }
+  const filter = async text => { await ctx.evaluate(text => { const input = document.querySelector('[aria-label="Filtrar worktrees"]'); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, text); input.dispatchEvent(new Event('input', { bubbles: true })) }, text) }
   const select = async text => {
     await ctx.evaluate(text => { document.querySelector('[data-tree-target]')?.removeAttribute('data-tree-target'); [...document.querySelectorAll('.wo-tree')].find(button => button.textContent.includes(text)).setAttribute('data-tree-target', '') }, text)
-    await ctx.click('[data-tree-target]'); await wait(() => document.querySelector('.wo-inspector')?.textContent.includes('Last status observation') && !document.querySelector('.wo-inspector').textContent.includes('Reading selected'))
+    await ctx.click('[data-tree-target]'); await wait(() => document.querySelector('.wo-inspector')?.textContent.includes('Última observação do estado') && !document.querySelector('.wo-inspector').textContent.includes('Lendo a worktree selecionada'))
   }
   const startRefresh = async () => { const count = reads.length; await ctx.click('.wo-header button'); const deadline = Date.now() + 5000; while (reads.length === count && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50)); ctx.check('Explicit refresh issues new IPC', reads.length > count) }
   const refresh = async () => { await startRefresh(); await wait(() => !document.querySelector('.wo-header button').disabled) }
@@ -95,7 +95,7 @@ exports.run = async ctx => {
     const inventoryGitCalls = gitCalls
     ctx.check('Inventory precedes completed local observations and never evaluates pairs', observations.length === 0 && commits === 0)
     await wait(() => !document.querySelector('.wo-header button').disabled)
-    await wait(() => [...document.querySelectorAll('.wo-tree')].filter(button => button.getBoundingClientRect().bottom > document.querySelector('.wo-content').getBoundingClientRect().top && button.getBoundingClientRect().top < document.querySelector('.wo-content').getBoundingClientRect().bottom).every(button => !/Revalidating|not observed/.test(button.textContent)))
+    await wait(() => [...document.querySelectorAll('.wo-tree')].filter(button => button.getBoundingClientRect().bottom > document.querySelector('.wo-content').getBoundingClientRect().top && button.getBoundingClientRect().top < document.querySelector('.wo-content').getBoundingClientRect().bottom).every(button => !/Revalidando|não observado/.test(button.textContent)))
     const visibleMs = performance.now() - started, visibleReads = snapshots
     const visibleGitCalls = gitCalls
     ctx.check('Only visible worktrees observed with bounded concurrency', snapshots > 0 && snapshots < 21 && maximum <= 2)
@@ -104,36 +104,36 @@ exports.run = async ctx => {
     const navigationStart = performance.now()
     await navigate('Home'); await navigate('Work Orchestration')
     const navigationReads = reads.length - idle, navigationMs = performance.now() - navigationStart
-    ctx.check('Return restores last-known summaries without reads', navigationReads === 0 && await ctx.evaluate(() => document.querySelector('.wo-view').textContent.includes('Last known')))
+    ctx.check('Return restores last-known summaries without reads', navigationReads === 0 && await ctx.evaluate(() => document.querySelector('.wo-view').textContent.includes('Último estado conhecido')))
     if (baseline) {
       await ctx.capture('baseline-visible-local-signals-dark')
-      await filter('feature/'); const refreshStart = performance.now(), refreshCalls = gitCalls; await refresh(); await wait(() => !document.querySelector('.wo-view').textContent.includes('Revalidating…'))
+      await filter('feature/'); const refreshStart = performance.now(), refreshCalls = gitCalls; await refresh(); await wait(() => !document.querySelector('.wo-view').textContent.includes('Revalidando…'))
       fs.writeFileSync(path.join(ctx.evidenceDir,'local-signals-measurements.json'),JSON.stringify({fixture:21,baseline:'existing reader with identical new UI projection',inventoryMs,inventoryGitCalls,visibleMs,visibleReads,visibleGitCalls,navigationMs,navigationReads,refreshMs:performance.now()-refreshStart,refreshGitCalls:gitCalls-refreshCalls,idleReads:0,maximum,observations,reads,stats:stats()},null,2))
       return
     }
     await filter('feature/'); await select('feature/')
-    await wait(() => !!document.querySelector('[aria-label="Local change paths"] .wo-paths'))
-    ctx.check('Unique paths differ from stage counters', await ctx.evaluate(() => document.querySelector('.wo-inspector').textContent.includes('56 unique local paths') && document.querySelector('.wo-inspector').textContent.includes('1 staged · 1 unstaged · 55 untracked')))
-    ctx.check('First detail page bounded and exact staged flags', await ctx.evaluate(() => document.querySelector('[aria-label="Local change paths"] .wo-paths').children.length === 50 && document.querySelector('[aria-label="Local change paths"]').textContent.includes('Staged: A · Unstaged: M')))
-    await ctx.evaluate(() => document.querySelector('[aria-label="Local change paths"]').scrollIntoView({block:'start'})); await ctx.capture('local-paths-dark')
+    await wait(() => !!document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths'))
+    ctx.check('Unique paths differ from stage counters', await ctx.evaluate(() => document.querySelector('.wo-inspector').textContent.includes('56 caminhos locais únicos') && document.querySelector('.wo-inspector').textContent.includes('1 staged · 1 unstaged · 55 não rastreados')))
+    ctx.check('First detail page bounded and exact staged flags', await ctx.evaluate(() => document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths').children.length === 50 && document.querySelector('[aria-label="Caminhos com alterações locais"]').textContent.includes('Staged: A · Unstaged: M')))
+    await ctx.evaluate(() => document.querySelector('[aria-label="Caminhos com alterações locais"]').scrollIntoView({block:'start'})); await ctx.capture('local-paths-dark')
     const clickText = async text => { await ctx.evaluate(text => { document.querySelector('[data-local-action]')?.removeAttribute('data-local-action'); const button = [...document.querySelectorAll('.wo-inspector button')].find(button => button.textContent === text); button.setAttribute('data-local-action',''); button.scrollIntoView({block:'center'}) }, text); await ctx.click('[data-local-action]') }
-    await clickText('Next page'); await wait(() => document.querySelector('[aria-label="Local change paths"] .wo-paths')?.children.length === 6)
+    await clickText('Próxima página'); await wait(() => document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths')?.children.length === 6)
     await ctx.capture('local-page-two-dark')
     fs.writeFileSync(path.join(a, 'external.txt'), 'external\n')
-    await clickText('Previous page'); await wait(() => document.querySelector('[aria-label="Local change paths"]').textContent.includes('GIT_STATE_CHANGED'))
-    ctx.check('External write rejects stale details', await ctx.evaluate(() => !document.querySelector('[aria-label="Local change paths"] .wo-paths')))
+    await clickText('Página anterior'); await wait(() => document.querySelector('[aria-label="Caminhos com alterações locais"]').textContent.includes('O estado Git mudou'))
+    ctx.check('External write rejects stale details', await ctx.evaluate(() => !document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths')))
     await ctx.capture('stale-local-page-dark')
-    await clickText('Revalidate worktree'); await wait(() => document.querySelector('.wo-inspector').textContent.includes('57 unique local paths') && !!document.querySelector('[aria-label="Local change paths"] .wo-paths'))
-    await ctx.evaluate(() => document.querySelector('.wo-local-filter').scrollIntoView({block:'center'})); await ctx.input('[aria-label="Filter local path prefix"]', 'added.txt'); await ctx.click('.wo-local-filter button')
-    await wait(() => document.querySelector('[aria-label="Local change paths"] .wo-paths')?.children.length === 1)
+    await clickText('Revalidar worktree'); await wait(() => document.querySelector('.wo-inspector').textContent.includes('57 caminhos locais únicos') && !!document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths'))
+    await ctx.evaluate(() => document.querySelector('.wo-local-filter').scrollIntoView({block:'center'})); await ctx.input('[aria-label="Filtrar prefixo dos caminhos locais"]', 'added.txt'); await ctx.click('.wo-local-filter button')
+    await wait(() => document.querySelector('[aria-label="Caminhos com alterações locais"] .wo-paths')?.children.length === 1)
     await ctx.evaluate(() => { document.body.dataset.theme = 'light' }); await ctx.viewport(1120, 800)
     await ctx.capture('local-path-filter-medium-light'); await ctx.overflow()
     await ctx.evaluate(() => document.querySelector('.wo-inspector').focus()); ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Tab',modifiers:['shift']}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Tab',modifiers:['shift']})
-    await ctx.waitFor(() => document.activeElement.textContent === 'Revalidate worktree')
+    await ctx.waitFor(() => document.activeElement.textContent === 'Revalidar worktree')
     ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'}); await ctx.waitFor(() => !document.querySelector('.wo-inspector'))
     ctx.check('Focus restored after drawer closes', await ctx.evaluate(() => document.activeElement.classList.contains('wo-tree')))
     await ctx.capture('local-summary-medium-light')
-    await ctx.viewport(1440, 900); const refreshStart = performance.now(), refreshCalls = gitCalls; await refresh(); await wait(() => !document.querySelector('.wo-view').textContent.includes('Revalidating…')); const refreshMs = performance.now() - refreshStart, refreshGitCalls = gitCalls - refreshCalls
+    await ctx.viewport(1440, 900); const refreshStart = performance.now(), refreshCalls = gitCalls; await refresh(); await wait(() => !document.querySelector('.wo-view').textContent.includes('Revalidando…')); const refreshMs = performance.now() - refreshStart, refreshGitCalls = gitCalls - refreshCalls
     ctx.check('No read mutation', before.refs === git(a,['show-ref']) && before.index === fs.readFileSync(path.join(await serviceGit.getWorktreeDirectory(a),'index')).toString('hex') && mutations === 0)
     ctx.check('Final runtime freshness MATCH', identity.getIdentityPayload().freshness.state === 'MATCH')
     fs.writeFileSync(path.join(ctx.evidenceDir,'local-signals-measurements.json'),JSON.stringify({fixture:21,inventoryMs,inventoryGitCalls,visibleMs,visibleReads,visibleGitCalls,navigationMs,navigationReads,refreshMs,refreshGitCalls,idleReads:0,maximum,observations,reads,stats:stats()},null,2))

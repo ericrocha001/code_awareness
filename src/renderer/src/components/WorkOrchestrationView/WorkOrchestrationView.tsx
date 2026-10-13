@@ -4,10 +4,12 @@ import type { ActiveProjectState } from '../../../../shared/types/active-project
 import type { ObservableWorktree, OrchestrationData, OrchestrationOverview, OrchestrationRequest, OrchestrationResult, WorktreePair } from '../../../../shared/types/work-orchestration-types'
 import './WorkOrchestrationView.css'
 import { LocalChangesInspector } from './LocalChangesInspector'
+import { categoryLabel, reasonLabel } from './work-orchestration-labels'
+import type { LocalChangeCategory } from '../../../../shared/types/local-change-types'
 
-const label = (w: ObservableWorktree) => w.branch ?? (w.head ? 'Detached HEAD' : 'No HEAD')
-const pairLabel = { PATH_OVERLAP: 'Path overlap', NO_PATH_OVERLAP: 'No path overlap verified', INDETERMINATE: 'Indeterminate', STALE: 'Stale observation' }
-const phaseLabel = { NOT_OBSERVED: 'Not observed', LAST_KNOWN: 'Last known', REVALIDATING: 'Revalidating', VERIFIED: 'Verified observation', UNAVAILABLE: 'Unavailable', STALE: 'Stale observation' }
+const label = (w: ObservableWorktree) => w.branch ?? (w.head ? 'Detached HEAD' : 'Sem HEAD')
+const pairLabel = { PATH_OVERLAP: 'Sobreposição de caminhos', NO_PATH_OVERLAP: 'Nenhuma sobreposição de caminhos verificada', INDETERMINATE: 'Indeterminado', STALE: 'Observação obsoleta' }
+const phaseLabel = { NOT_OBSERVED: 'Não observado', LAST_KNOWN: 'Último estado conhecido', REVALIDATING: 'Revalidando', VERIFIED: 'Observação verificada', UNAVAILABLE: 'Indisponível', STALE: 'Observação obsoleta' }
 export function orderWorktrees(worktrees: ObservableWorktree[]): ObservableWorktree[] {
   const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0
   return [...worktrees].sort((a, b) => Number(b.reference) - Number(a.reference) || compare(a.branch ?? a.path, b.branch ?? b.path) || compare(a.path, b.path) || compare(a.worktreeId, b.worktreeId))
@@ -49,7 +51,7 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
       choose(append && old && 'category' in old && old.revision === data.revision ? { ...data, paths: [...old.paths, ...data.paths] } : data)
       setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(w => [data.left, data.right].find(side => side.worktreeId === w.worktreeId && side.generation === w.generation) ?? w),
         pairs: [...previous.pairs.filter(p => p.left.worktreeId !== data.left.worktreeId || p.right.worktreeId !== data.right.worktreeId), data], relationsCoverage: data.category === 'STALE' ? 'STALE' : 'PARTIAL' })
-    } else throw new Error('Unexpected response')
+    } else throw new Error('Resposta inesperada')
   }
   const refresh = useCallback(() => {
     if (refreshPending.current || !projectId) return refreshPending.current
@@ -60,7 +62,7 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
       try {
         const result = await query()
         if (!alive.current || epoch.current !== request) return
-        if (!result.success || !('worktrees' in result.data)) throw new Error(result.success ? 'Unexpected response' : result.code)
+        if (!result.success || !('worktrees' in result.data)) throw new Error(result.success ? 'Resposta inesperada' : result.code)
         const inventory = result.data
         if (repository.current && repository.current !== inventory.repositoryId) choose(null)
         repository.current = inventory.repositoryId; setOverview(inventory); setUnvalidated(false)
@@ -68,7 +70,7 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
         if (old && intent.current === refreshIntent) {
           const sides = 'category' in old ? [old.left, old.right] : [old]
           if (!sides.every(side => inventory.worktrees.some(w => w.worktreeId === side.worktreeId && w.generation === side.generation))) {
-            choose(null); setCompareWith(''); setError('The selected worktree was removed or replaced.'); return
+            choose(null); setCompareWith(''); setError('A worktree selecionada foi removida ou substituída.'); return
           }
           choose('category' in old ? { ...old, category: 'STALE', reason: 'REVALIDATING' } : inventory.worktrees.find(w => w.worktreeId === old.worktreeId)!)
           const observed = await query('category' in old ? { pair: { leftId: old.left.worktreeId, rightId: old.right.worktreeId } } : { worktree: { worktreeId: old.worktreeId } })
@@ -78,7 +80,7 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
         }
       } catch (failure) {
         if (alive.current && epoch.current === request) {
-          setError(failure instanceof Error ? failure.message : 'Read unavailable'); setUnvalidated(true)
+          setError(failure instanceof Error ? failure.message : 'Leitura indisponível'); setUnvalidated(true)
           setOverview(previous => previous && { ...previous, relationsCoverage: previous.pairs.length ? 'STALE' : 'NOT_EVALUATED',
             worktrees: previous.worktrees.map(tree => tree.snapshot ? { ...tree, observation: 'STALE' } : tree),
             pairs: previous.pairs.map(pair => ({ ...pair, category: 'STALE', reason: 'REVALIDATION_FAILED', nextCursor: null })) })
@@ -160,7 +162,7 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
       applyObservation(result.data, !!extra.pair?.cursor)
     } catch (failure) {
       if (alive.current && intent.current === request && epoch.current === currentEpoch) {
-        const previous = selection.current, reason = failure instanceof Error ? failure.message : 'Read unavailable'
+        const previous = selection.current, reason = failure instanceof Error ? failure.message : 'Leitura indisponível'
         if (previous && 'category' in previous) applyObservation({ ...previous, category: 'STALE', reason, nextCursor: null })
         else if (previous) applyObservation({ repositoryId: repository.current!, observedAt: new Date().toISOString(), worktree: { ...previous, observation: 'UNAVAILABLE', snapshot: null, reason } })
         setError(reason)
@@ -172,38 +174,38 @@ export function WorkOrchestrationView({ state, active = true }: { state: ActiveP
   const signals = overview?.pairs.filter(p => p.category !== 'NO_PATH_OVERLAP') ?? []
   const pair = selected && 'category' in selected ? selected : null, tree = selected && 'worktreeId' in selected ? selected : null
   return <section className="wo-view" aria-label="Work Orchestration">
-    <header className="wo-header"><div><h1><GitBranch size={20} /> Work Orchestration</h1><p>{state.project?.name ?? 'No active project'} · Worktree panorama</p></div><button onClick={() => void refresh()} disabled={refreshing || !projectId}><RefreshCw size={15} /> Refresh</button></header>
-    {!projectId ? <p className="wo-empty">Select a project to discover its worktrees.</p> : <>
-      <div className="wo-toolbar"><input aria-label="Filter worktrees" placeholder="Filter branch or path" value={filter} onChange={e => setFilter(e.target.value)} />{overview && <span>Inventory complete · {overview.worktrees.length} discovered</span>}</div>
-      <p className="wo-notice wo-freshness" role="status">{refreshing ? overview ? 'Updating inventory · displaying the previous observation' : 'Discovering worktrees…' : overview ? `Last inventory observation · ${new Date(overview.observedAt).toLocaleString()}${unvalidated ? ' · Not revalidated' : ''}` : 'Inventory not available'}</p>
-      {error && <p className="wo-notice wo-warning" role="alert">{error}</p>}
-      {overview && <p className="wo-notice wo-relations">{overview.relationsCoverage === 'NOT_EVALUATED' ? 'Relationships not evaluated · Select a worktree to compare.' : overview.relationsCoverage === 'STALE' ? 'Relationships stale · Compare again to revalidate.' : 'Relationships partially evaluated · Only selected pairs have been compared.'}</p>}
+    <header className="wo-header"><div><h1><GitBranch size={20} /> Work Orchestration</h1><p>{state.project?.name ?? 'Nenhum projeto ativo'} · Panorama de worktrees</p></div><button onClick={() => void refresh()} disabled={refreshing || !projectId}><RefreshCw size={15} /> Atualizar</button></header>
+    {!projectId ? <p className="wo-empty">Selecione um projeto para descobrir suas worktrees.</p> : <>
+      <div className="wo-toolbar"><input aria-label="Filtrar worktrees" placeholder="Filtrar por branch ou caminho" value={filter} onChange={e => setFilter(e.target.value)} />{overview && <span>Inventário completo · {overview.worktrees.length} {overview.worktrees.length === 1 ? 'descoberta' : 'descobertas'}</span>}</div>
+      <p className="wo-notice wo-freshness" role="status">{refreshing ? overview ? 'Atualizando inventário · exibindo a observação anterior' : 'Descobrindo worktrees…' : overview ? `Última observação do inventário · ${new Date(overview.observedAt).toLocaleString('pt-BR')}${unvalidated ? ' · Não revalidado' : ''}` : 'Inventário indisponível'}</p>
+      {error && <p className="wo-notice wo-warning" role="alert">{reasonLabel(error)}</p>}
+      {overview && <p className="wo-notice wo-relations">{overview.relationsCoverage === 'NOT_EVALUATED' ? 'Relações não avaliadas · Selecione uma worktree para comparar.' : overview.relationsCoverage === 'STALE' ? 'Relações obsoletas · Compare novamente para revalidar.' : 'Relações parcialmente avaliadas · Somente os pares selecionados foram comparados.'}</p>}
       <div className="wo-workspace"><main className="wo-content" ref={content}>
         <div className="wo-section-heading"><h2>Worktrees</h2></div>
-        {overview && !overview.worktrees.length && <p className="wo-empty">No registered worktrees.</p>}
-        {overview && !!overview.worktrees.length && !worktrees.length && <p className="wo-empty">No matching worktrees.</p>}
+        {overview && !overview.worktrees.length && <p className="wo-empty">Nenhuma worktree registrada.</p>}
+        {overview && !!overview.worktrees.length && !worktrees.length && <p className="wo-empty">Nenhuma worktree encontrada.</p>}
         <div className="wo-trees">{worktrees.map(w => <button data-worktree-id={w.worktreeId} disabled={refreshing} className={`wo-tree ${w.reason || w.conflictCount || w.snapshot?.operation ? 'wo-exception' : ''}`} key={w.worktreeId} onClick={() => void inspect({ worktree: { worktreeId: w.worktreeId } }, w)} aria-pressed={tree?.worktreeId === w.worktreeId}>
-          <span className="wo-tree-title">{label(w)} {w.reference && <span className="wo-badge">Main · reference</span>}</span><span className="wo-path" title={w.path}>{w.path}</span>
-          <span className="wo-state">{w.observation === 'NOT_OBSERVED' ? w.reason ?? 'Status not observed' : w.observation === 'REVALIDATING' ? 'Revalidating…' : w.reason ? `${phaseLabel[w.observation]} · ${w.reason}` : `${phaseLabel[w.observation]} · ${w.localChanges ? w.localChanges.total ? `${w.localChanges.total} local paths · ${Object.entries(w.localChanges.categories).filter(([, count]) => count).map(([category, count]) => `${count} ${category}`).join(' · ')}` : 'Locally clean' : `${w.stagedCount} staged · ${w.unstagedCount} unstaged · ${w.untrackedCount} untracked`}`}</span>
+          <span className="wo-tree-title">{label(w)} {w.reference && <span className="wo-badge">Principal · referência</span>}</span><span className="wo-path" title={w.path}>{w.path}</span>
+          <span className="wo-state">{w.observation === 'NOT_OBSERVED' ? w.reason ? reasonLabel(w.reason) : 'Estado não observado' : w.observation === 'REVALIDATING' ? 'Revalidando…' : w.reason ? `${phaseLabel[w.observation]} · ${reasonLabel(w.reason)}` : `${phaseLabel[w.observation]} · ${w.localChanges ? w.localChanges.total ? `${w.localChanges.total} ${w.localChanges.total === 1 ? 'caminho local' : 'caminhos locais'} · ${Object.entries(w.localChanges.categories).filter(([, count]) => count).map(([category, count]) => `${count} ${categoryLabel(category as LocalChangeCategory, count)}`).join(' · ')}` : 'Sem alterações locais' : `${w.stagedCount} staged · ${w.unstagedCount} unstaged · ${w.untrackedCount} não rastreados`}`}</span>
         </button>)}</div>
-        {!!signals.length && <><div className="wo-section-heading"><h2>Path signals</h2></div><div className="wo-pairs">{signals.map(p => <button disabled={refreshing} key={`${p.left.worktreeId}:${p.right.worktreeId}`} className="wo-pair wo-exception" onClick={() => { returnFocus.current = document.activeElement as HTMLElement; choose(p) }}><span>{label(p.left)} ↔ {label(p.right)}</span><strong>{pairLabel[p.category]}{p.category === 'PATH_OVERLAP' ? ` · ${p.totalPaths} paths` : ''}</strong></button>)}</div></>}
+        {!!signals.length && <><div className="wo-section-heading"><h2>Sinais de caminhos</h2></div><div className="wo-pairs">{signals.map(p => <button disabled={refreshing} key={`${p.left.worktreeId}:${p.right.worktreeId}`} className="wo-pair wo-exception" onClick={() => { returnFocus.current = document.activeElement as HTMLElement; choose(p) }}><span>{label(p.left)} ↔ {label(p.right)}</span><strong>{pairLabel[p.category]}{p.category === 'PATH_OVERLAP' ? ` · ${p.totalPaths} ${p.totalPaths === 1 ? 'caminho' : 'caminhos'}` : ''}</strong></button>)}</div></>}
       </main>
-      {selected && <aside className="wo-inspector" ref={inspector} tabIndex={-1} aria-label="Worktree inspector" onKeyDown={e => {
+      {selected && <aside className="wo-inspector" ref={inspector} tabIndex={-1} aria-label="Inspetor de worktree" onKeyDown={e => {
         if (e.key === 'Escape') close()
         if (e.key === 'Tab' && e.currentTarget.parentElement!.clientWidth <= 1000) {
           const controls = [...e.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), summary')], first = controls[0], last = controls[controls.length - 1]
           if (e.shiftKey && (document.activeElement === first || document.activeElement === e.currentTarget)) { e.preventDefault(); last?.focus() }
           else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus() }
         }
-      }}><div className="wo-section-heading"><h2>{pair ? 'Pair evidence' : 'Worktree detail'}</h2><button aria-label="Close inspector" onClick={close}><X size={16} /></button></div>
-        {reading && <p role="status">Reading selected work…</p>}{unvalidated && <p className="wo-warning">Previous observation · not revalidated</p>}
-        {tree && <><h3>{label(tree)}</h3><p>{tree.reason ?? (tree.observation === 'NOT_OBSERVED' ? 'Status not observed' : 'Last status observation')}</p><dl><dt>Path</dt><dd>{tree.path}</dd><dt>HEAD</dt><dd>{tree.head ?? 'Unavailable'}</dd><dt>Local changes</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} untracked · ${tree.conflictCount} conflicted` : 'Not verified'}</dd></dl>
-          <div className="wo-context-compare"><label>Compare with…<select aria-label="Compare with worktree" value={compareWith} onChange={e => setCompareWith(e.target.value)}><option value="">Choose another worktree</option>{ordered.filter(w => w.worktreeId !== tree.worktreeId).map(w => <option key={w.worktreeId} value={w.worktreeId}>{label(w)} · {w.path}</option>)}</select></label><button disabled={reading || refreshing || !compareWith} onClick={() => void inspect({ pair: { leftId: tree.worktreeId, rightId: compareWith } })}>Compare</button></div>
-          <details><summary>Worktree identity</summary><dl><dt>Repository / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Generation</dt><dd>{tree.generation}</dd></dl></details></>}
-        {tree && <><p>{tree.observedAt ? `Observed at ${new Date(tree.observedAt).toLocaleString()} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</p>{tree.localChanges && <p>{tree.localChanges.total} unique local paths</p>}<LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} /></>}
-        {pair && <><h3>{pairLabel[pair.category]}</h3><p>{pair.reason ?? `${pair.totalPaths} common ${pair.totalPaths === 1 ? 'path' : 'paths'} verified`}</p><dl><dt>Pair merge-base</dt><dd>{pair.base ?? 'Unavailable'}</dd><dt>Left</dt><dd>{label(pair.left)}</dd><dt>Right</dt><dd>{label(pair.right)}</dd></dl><ul className="wo-paths" aria-label="Common paths">{pair.paths.map(path => <li key={path}>{path}</li>)}</ul>
-          {pair.nextCursor && <button disabled={reading || refreshing} onClick={() => void inspect({ pair: { leftId: pair.left.worktreeId, rightId: pair.right.worktreeId, cursor: pair.nextCursor! } })}>More paths ({pair.paths.length}/{pair.totalPaths})</button>}
-          <button disabled={reading || refreshing} onClick={() => void inspect({ pair: { leftId: pair.left.worktreeId, rightId: pair.right.worktreeId } })}>Revalidate pair</button><details><summary>Observation identities and revisions</summary><dl><dt>Repository</dt><dd>{pair.repositoryId}</dd>{[pair.left, pair.right].map((w, i) => <React.Fragment key={w.worktreeId}><dt>{i ? 'Right' : 'Left'}</dt><dd>{w.path}<br />Worktree ID: {w.worktreeId}<br />HEAD: {w.snapshot?.head ?? 'Unavailable'}<br />Generation: {w.generation}<br />Index: {w.snapshot?.indexRevision ?? 'Unavailable'}<br />Worktree: {w.snapshot?.worktreeRevision ?? 'Unavailable'}</dd></React.Fragment>)}</dl></details><p className="wo-footnote">Same paths indicate overlapping changes, not merge conflicts or merge order. Local revision uses status and file metadata; no global atomic snapshot.</p></>}
+      }}><div className="wo-section-heading"><h2>{pair ? 'Evidências do par' : 'Detalhes da worktree'}</h2><button aria-label="Fechar inspetor" onClick={close}><X size={16} /></button></div>
+        {reading && <p role="status">Lendo a worktree selecionada…</p>}{unvalidated && <p className="wo-warning">Observação anterior · não revalidada</p>}
+        {tree && <><h3>{label(tree)}</h3><p>{tree.reason ? reasonLabel(tree.reason) : (tree.observation === 'NOT_OBSERVED' ? 'Estado não observado' : 'Última observação do estado')}</p><dl><dt>Caminho</dt><dd>{tree.path}</dd><dt>HEAD</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd></dl>
+          <div className="wo-context-compare"><label>Comparar com…<select aria-label="Comparar com outra worktree" value={compareWith} onChange={e => setCompareWith(e.target.value)}><option value="">Escolha outra worktree</option>{ordered.filter(w => w.worktreeId !== tree.worktreeId).map(w => <option key={w.worktreeId} value={w.worktreeId}>{label(w)} · {w.path}</option>)}</select></label><button disabled={reading || refreshing || !compareWith} onClick={() => void inspect({ pair: { leftId: tree.worktreeId, rightId: compareWith } })}>Comparar</button></div>
+          <details><summary>Identidade da worktree</summary><dl><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd></dl></details></>}
+        {tree && <><p>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</p>{tree.localChanges && <p>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</p>}<LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} /></>}
+        {pair && <><h3>{pairLabel[pair.category]}</h3><p>{pair.reason ? reasonLabel(pair.reason) : `${pair.totalPaths} ${pair.totalPaths === 1 ? 'caminho em comum verificado' : 'caminhos em comum verificados'}`}</p><dl><dt>Merge-base do par</dt><dd>{pair.base ?? 'Indisponível'}</dd><dt>Esquerda</dt><dd>{label(pair.left)}</dd><dt>Direita</dt><dd>{label(pair.right)}</dd></dl><ul className="wo-paths" aria-label="Caminhos em comum">{pair.paths.map(path => <li key={path}>{path}</li>)}</ul>
+          {pair.nextCursor && <button disabled={reading || refreshing} onClick={() => void inspect({ pair: { leftId: pair.left.worktreeId, rightId: pair.right.worktreeId, cursor: pair.nextCursor! } })}>Mais caminhos ({pair.paths.length}/{pair.totalPaths})</button>}
+          <button disabled={reading || refreshing} onClick={() => void inspect({ pair: { leftId: pair.left.worktreeId, rightId: pair.right.worktreeId } })}>Revalidar par</button><details><summary>Identidades e revisões da observação</summary><dl><dt>Repositório</dt><dd>{pair.repositoryId}</dd>{[pair.left, pair.right].map((w, i) => <React.Fragment key={w.worktreeId}><dt>{i ? 'Direita' : 'Esquerda'}</dt><dd>{w.path}<br />ID da worktree: {w.worktreeId}<br />HEAD: {w.snapshot?.head ?? 'Indisponível'}<br />Geração: {w.generation}<br />Índice: {w.snapshot?.indexRevision ?? 'Indisponível'}<br />Worktree: {w.snapshot?.worktreeRevision ?? 'Indisponível'}</dd></React.Fragment>)}</dl></details><p className="wo-footnote">Caminhos em comum indicam sobreposição de alterações, não conflitos de merge nem ordem de integração. A revisão local usa o estado Git e os metadados dos arquivos; não há snapshot atômico global.</p></>}
       </aside>}
       </div></>}
   </section>
