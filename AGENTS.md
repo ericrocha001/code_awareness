@@ -26,6 +26,8 @@ Você deve:
 
 > **Implementação concluída significa implementação validada.**
 
+As Skills disponíveis no projeto podem ser descobertas em `.skills/`, pelo caminho `.skills/<nome-da-skill>/SKILL.md`. Quando a IDE não oferecer descoberta automática, consulte os nomes e a `description` das Skills nessa pasta e carregue somente as aplicáveis à tarefa. A pasta é uma projeção local da Academy, não uma fonte canônica independente; não duplique o conteúdo das Skills neste kernel.
+
 ## 2. Plano Final e Escopo
 
 O **Plano Final Executável** é a fonte de verdade arquitetural da implementação.
