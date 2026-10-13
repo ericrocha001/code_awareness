@@ -19,7 +19,7 @@ try {
   child.on('exit', code => {
     clearTimeout(timer)
     if (result?.success) {
-      const unavailable = spawnSync(process.execPath, [join(__dirname, 'local.cjs'), 'status', '--profile', join(temporary, 'profile')], { encoding: 'utf8', windowsHide: true })
+      const unavailable = spawnSync(process.execPath, [join(__dirname, 'local.cjs'), 'status', '--profile', join(temporary, 'appData', 'code-awareness')], { encoding: 'utf8', windowsHide: true })
       if (unavailable.status !== 1 || !unavailable.stderr.includes('APP_UNAVAILABLE')) result = { success: false, error: 'Channel survived Electron process exit' }
       else result.proofs.push('Electron exited / channel unavailable')
     }

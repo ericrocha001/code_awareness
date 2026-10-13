@@ -1,6 +1,7 @@
 import { join, resolve } from 'node:path'
 
-export const DESKTOP_APP_NAME = 'code-awareness'
+import { DESKTOP_APP_NAME, desktopUserData } from '../shared/desktop-profile.cjs'
+export { DESKTOP_APP_NAME }
 
 interface DesktopApplication {
   getName(): string
@@ -8,7 +9,7 @@ interface DesktopApplication {
 }
 
 export function canonicalDesktopProfile(appData: string) {
-  return desktopProfilePaths(join(appData, DESKTOP_APP_NAME))
+  return desktopProfilePaths(desktopUserData(appData))
 }
 
 export function desktopProfilePaths(userData: string) {
