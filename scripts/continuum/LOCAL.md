@@ -37,3 +37,7 @@ Prova de integração isolada em Electron Main, SQLite e named pipe reais:
 ```powershell
 node scripts/continuum/local-e2e.cjs
 ```
+
+## Diagnóstico compartilhado
+
+A entrada legada preserva `APP_UNAVAILABLE` e exit code não zero, acrescentando `stage` e `reason` ao erro. Perfil, descriptor e conexão são diagnosticados pela mesma implementação da CLI nova. Consulte `scripts/local-agent/LOCAL.md` para remediação e autorização pontual no Codex Windows; `--profile` permanece um override explícito e não concede permissão ao pipe.

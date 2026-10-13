@@ -37,3 +37,11 @@ node scripts/local-agent/e2e.cjs
 ```
 
 O E2E usa Electron Main, named pipe, catálogos/Stores nativos e destinos temporários reais. Inclui as duas CLIs, domínio Academy sem repositório, scope, versões, distribuição convergente/degradada, recusas, timeout, restart e persistência. `scripts/continuum/local-e2e.cjs` conserva o comando legado como entrada para a mesma aceitação.
+
+## Perfil e diagnóstico no Windows
+
+O Main e as CLIs compartilham a definição `src/shared/desktop-profile.cjs`: o perfil padrão é `%APPDATA%\code-awareness`. O Main mantém o `userData` efetivo do Electron; esta alteração não move dados nem inicia outro Store. O bootstrap registra `appName` e `profileMatchesDefault`, sem caminho ou segredo. Para um perfil desktop explicitamente personalizado, use `--profile` com o `userData` autorizado. Não selecione perfis por varredura de descriptors.
+
+Falhas preservam o código principal e exit code não zero. Campos adicionais `stage` e `reason` distinguem `profile/PROFILE_NOT_FOUND`, `descriptor/DESCRIPTOR_NOT_FOUND`, `DESCRIPTOR_INVALID`, `PROTOCOL_INCOMPATIBLE`, `ENDPOINT_INVALID`, `connect/PIPE_NOT_FOUND`, `CONNECTION_REFUSED` e `ACCESS_DENIED`. Timeout usa `IPC_TIMEOUT` com estágio `connect` ou `response`; encerramento prematuro usa `IPC_CLOSED/PREMATURE_CLOSE`. Ausência de descriptor não prova que o aplicativo esteja desligado: confira o perfil e o diagnóstico de startup do Main (`profile`, `authorization`, `listen`, `descriptor`). Nenhuma falha gera retry automático.
+
+No Codex Windows, `APP_UNAVAILABLE` com `stage: connect` e `reason: ACCESS_DENIED` indica restrição do token/sandbox. Solicite uma aprovação pontual oficial do executor para o comando necessário, mantendo as demais proteções. Compare `status` em PowerShell normal e no Codex autorizado, na mesma Worktree, e confirme `repositoryId` antes de ler Continuum. Se a aprovação não estiver disponível, reporte bloqueio de autorização. Não altere ACLs, copie tokens ou abra outro transporte. Um `--profile` correto não concede acesso ao pipe.

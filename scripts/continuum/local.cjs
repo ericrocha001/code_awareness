@@ -1,6 +1,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 const { connect } = require('../local-agent/client.cjs')
+const { readDescriptor, publicError } = require('../local-agent/discovery.cjs')
 const { execFileSync } = require('node:child_process')
 const MAX_BYTES = 8 * 1024 * 1024
 const fail = code => { throw Object.assign(new Error(code), { code }) }
@@ -13,11 +14,7 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
     if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
     options[args[i]] = args[i + 1]
   }
-  const profile = options['--profile'] || (process.platform === 'win32' && process.env.APPDATA ? path.join(process.env.APPDATA, 'code-awareness') : fail('PROFILE_REQUIRED'))
-  let descriptor
-  try { descriptor = JSON.parse(fs.readFileSync(path.join(profile, channel.directory, 'endpoint.json'), 'utf8')) } catch { fail('APP_UNAVAILABLE') }
-  if (descriptor.protocol !== channel.protocol || typeof descriptor.endpoint !== 'string' || typeof descriptor.token !== 'string') fail('APP_UNAVAILABLE')
-  if (process.platform === 'win32' && !/^\\\\\.\\pipe\\code-awareness-continuum-[a-f0-9]{48}$/.test(descriptor.endpoint)) fail('APP_UNAVAILABLE')
+  const descriptor = readDescriptor(options['--profile'], channel)
   if (options['--format'] && !['json', 'markdown'].includes(options['--format'])) fail('INVALID_ARGUMENT')
   if (options['--format'] === 'markdown' && operation !== 'get') fail('INVALID_ARGUMENT')
   const send = payload => connect(descriptor, channel.protocol === 'continuum-local/v1' ? payload : { domain: 'continuum', action: payload.operation, args: Object.fromEntries(Object.entries(payload).filter(([key]) => key !== 'operation')) })
@@ -74,6 +71,6 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
 }
 
 if (require.main === module) main().then(result => process.stdout.write(typeof result === 'string' ? result : JSON.stringify(result) + '\n')).catch(error => {
-  process.stderr.write(JSON.stringify({ error: { code: error.code || 'INVALID_ARGUMENT' } }) + '\n'); process.exitCode = 1
+  process.stderr.write(JSON.stringify({ error: publicError(error) }) + '\n'); process.exitCode = 1
 })
 module.exports = { main, connect }

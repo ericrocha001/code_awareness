@@ -13,13 +13,17 @@ import { AcademyService } from '../../src/main/academy/academy-service'
 import { createConnection } from 'node:net'
 import { executePublishArtifact, executeGetArtifact } from '../../src/main/continuum/continuum-mcp'
 import sharp from 'sharp'
+import { canonicalDesktopProfile } from '../../src/main/desktop-profile'
 
 const run = promisify(execFile)
 process.once('message', async (input: { temporary: string; node: string; cli: string; channelCli: string }) => {
   let catalog: RepositoryCatalogStore | undefined, session: RepositoryContinuumSession | undefined, channel: LocalChannelHost | undefined, academy: AcademyService | undefined
   try {
-    mkdirSync(join(input.temporary, 'profile'), { recursive: true })
-    app.setPath('userData', join(input.temporary, 'profile'))
+    const appData = join(input.temporary, 'appData')
+    const profile = canonicalDesktopProfile(appData)
+    mkdirSync(profile.userData, { recursive: true })
+    app.setPath('appData', appData)
+    app.setPath('userData', profile.userData)
     await app.whenReady()
     const root = join(input.temporary, 'checkout'), worktree = join(input.temporary, 'linked'), other = join(input.temporary, 'other')
     for (const directory of [root, other]) {
@@ -42,6 +46,12 @@ process.once('message', async (input: { temporary: string; node: string; cli: st
     academy = new AcademyService(join(app.getPath('userData'), 'academy', 'academy.db'))
     channel = new LocalChannelHost([new ContinuumLocalAdapter(session), new AcademyLocalAdapter(academy)], app.getPath('userData'))
     await channel.start()
+    if (process.platform === 'win32') {
+      for (const [cli, args] of [[input.cli, ['status']], [input.channelCli, ['status']], [input.channelCli, ['continuum', 'status']]] as const) {
+        const result = await run(input.node, [cli, ...args], { cwd: worktree, env: { ...process.env, APPDATA: appData }, windowsHide: true, timeout: 20000 })
+        assert.equal(JSON.parse(result.stdout).available, true)
+      }
+    }
     const invoke = async (args: string[], cwd = worktree, code?: string, cli = input.cli) => {
       try {
         const result = await run(input.node, [cli, ...args, '--profile', app.getPath('userData')], { cwd, windowsHide: true, timeout: 20000, maxBuffer: 20 * 1024 * 1024 })
