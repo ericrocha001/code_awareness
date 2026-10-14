@@ -1,9 +1,12 @@
 import type { LocalChange, LocalChangeSummary } from './local-change-types'
 import type { WorktreeDocumentContext, WorktreeDocumentRequest } from './worktree-document-context-types'
+import type { WorktreeCreationEstimate } from './worktree-creation-types'
+import type { OrchestrationAttention } from './work-orchestration-attention-types'
 export interface OrchestrationContext { projectId: string; revision: number }
 export interface ObservableWorktree {
   worktreeId: string
   generation: string
+  creation?: WorktreeCreationEstimate
   path: string
   branch: string | null
   head: string | null
@@ -55,6 +58,7 @@ export interface OrchestrationRequest {
   worktree?: { worktreeId: string }
   changes?: { worktreeId: string; generation: string; snapshotRevision: string; cursor?: string; pathPrefix?: string }
   documents?: WorktreeDocumentRequest
+  attention?: true
 }
 export interface LocalChangesPage {
   repositoryId: string
@@ -66,5 +70,5 @@ export interface LocalChangesPage {
   revision: string
   nextCursor: string | null
 }
-export type OrchestrationData = OrchestrationOverview | WorktreePair | WorktreeObservation | LocalChangesPage | WorktreeDocumentContext
+export type OrchestrationData = OrchestrationOverview | WorktreePair | WorktreeObservation | LocalChangesPage | WorktreeDocumentContext | OrchestrationAttention
 export type OrchestrationResult<T> = { success: true; context: OrchestrationContext; data: T } | { success: false; code: string }

@@ -17,6 +17,7 @@ import { AcademyView } from "./components/AcademyView/AcademyView";
 import { ContinuumView } from "./components/ContinuumView/ContinuumView";
 import { GitManagementView } from "./components/GitManagementView/GitManagementView";
 import { WorkOrchestrationTab } from "./components/WorkOrchestrationView/WorkOrchestrationTab";
+import { useOrchestrationAttention } from './components/WorkOrchestrationView/useOrchestrationAttention';
 
 
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
@@ -35,6 +36,7 @@ export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [activeProjectState, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
   const { project: activeProject } = activeProjectState;
+  const orchestration = useOrchestrationAttention(activeProjectState, activeTab === 'work-orchestration');
   const selectionRequest = useRef(0);
   const [statusMessage, setStatusMessage] = useState<{
     text: string;
@@ -152,6 +154,7 @@ export const App: React.FC = () => {
         isSidebarOpen={sidebarPreferences.sidebarOpen}
         setIsSidebarOpen={updateSidebarOpen}
         activeTab={activeTab}
+        orchestrationAlerts={orchestration.unseen}
         setActiveTab={setActiveTab}
         activeProject={activeProject}
         onSelectRepository={setActiveRepository}
@@ -165,7 +168,7 @@ export const App: React.FC = () => {
 
       <main className="app-main">
         {activeTab === "git-management" && <GitManagementView key={`git-management:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} />}
-        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} />
+        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} attention={orchestration.attention} />
         {activeTab === "channel" && <ChannelView />}
         {activeTab === "academy" && <AcademyView />}
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} />}

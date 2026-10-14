@@ -13,14 +13,35 @@ const project = ({ record, paths: _paths, ...observation }: Observation): Observ
 
 export class WorkOrchestrationService {
   private known: Awaited<ReturnType<WorkOrchestrationService['records']>> | null = null
+  private pendingRecords: Promise<Awaited<ReturnType<WorkOrchestrationService['readRecords']>>> | null = null
+  private readonly pendingSnapshots = new Map<string, Promise<Observation>>()
+  private readers = 0
+  private readonly waitingReaders: Array<() => void> = []
   constructor(private readonly git: OrchestrationGitReader, private readonly continuum?: OrchestrationContinuumReader) {}
+
+  async withReadBudget<T>(read: () => Promise<T>): Promise<T> {
+    if (this.readers >= 2) await new Promise<void>(resolve => this.waitingReaders.push(resolve))
+    else this.readers++
+    try { return await read() }
+    finally { const next = this.waitingReaders.shift(); if (next) next(); else this.readers-- }
+  }
+  coordinationSnapshot(id: string): Promise<Observation> {
+    const existing = this.pendingSnapshots.get(id)
+    if (existing) return existing
+    const read = this.withReadBudget(() => this.git.getCoordinationSnapshot(id)).finally(() => { this.pendingSnapshots.delete(id) })
+    this.pendingSnapshots.set(id, read)
+    return read
+  }
 
   async documents(request: WorktreeDocumentRequest) {
     if (!this.git.getCoordinationIdentity) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
     return readWorktreeDocumentContext({ getCoordinationIdentity: id => this.git.getCoordinationIdentity!(id) }, this.continuum, request)
   }
 
-  private async records() {
+  private records() {
+    return this.pendingRecords ??= this.readRecords().finally(() => { this.pendingRecords = null })
+  }
+  private async readRecords() {
     const first = await this.git.discoverCoordinationWorktrees()
     const records = [...first.worktrees]
     let cursor = first.nextCursor
@@ -47,7 +68,7 @@ export class WorkOrchestrationService {
     const record = records.find(record => record.worktreeId === worktreeId)
     if (!record) throw new Error('WORKTREE_NOT_DISCOVERED')
     try {
-      const worktree = project(await this.git.getCoordinationSnapshot(worktreeId)), observedAt = new Date().toISOString()
+      const worktree = project(await this.coordinationSnapshot(worktreeId)), observedAt = new Date().toISOString()
       return { repositoryId, worktree: { ...worktree, observedAt }, observedAt }
     } catch (error) {
       return { repositoryId, observedAt: new Date().toISOString(), worktree: { ...record, snapshot: null, observation: 'UNAVAILABLE',
@@ -59,8 +80,8 @@ export class WorkOrchestrationService {
     const { repositoryId, records } = this.known ?? await this.records()
     if (!records.some(record => record.worktreeId === request.worktreeId && record.generation === request.generation)) throw new Error('WORKTREE_STALE')
     if (!this.git.getWorktreeChanges) throw new Error('GIT_READ_UNAVAILABLE')
-    const page = await this.git.getWorktreeChanges({ worktreeId: request.worktreeId, pageSize: 50, cursor: request.cursor,
-      pathPrefixes: request.pathPrefix ? [request.pathPrefix] : undefined })
+    const page = await this.withReadBudget(() => this.git.getWorktreeChanges!({ worktreeId: request.worktreeId, pageSize: 50, cursor: request.cursor,
+      pathPrefixes: request.pathPrefix ? [request.pathPrefix] : undefined }))
     if (page.generation !== request.generation || digest(page.snapshot) !== request.snapshotRevision) throw new Error('GIT_STATE_CHANGED')
     return { repositoryId, worktreeId: page.worktreeId, generation: page.generation, snapshotRevision: request.snapshotRevision,
       changes: page.changes, totalCount: page.totalCount, revision: page.revision, nextCursor: page.nextCursor }
@@ -103,13 +124,13 @@ export class WorkOrchestrationService {
     const observations = new Map<string, Observation>()
     const sides: ObservableWorktree[] = []
     for (const id of [leftId, rightId]) {
-      const observed = await this.git.getCoordinationSnapshot(id)
+      const observed = await this.coordinationSnapshot(id)
       observations.set(id, observed); sides.push(project(observed))
     }
     const pair = await this.compare(repositoryId, sides[0], sides[1], observations)
     for (const [id, observed] of observations) {
       try {
-        if (changed(observed, await this.git.getCoordinationSnapshot(id))) throw new Error('GIT_STATE_CHANGED')
+        if (changed(observed, await this.coordinationSnapshot(id))) throw new Error('GIT_STATE_CHANGED')
       } catch (error) {
         pair.category = 'STALE'; pair.reason = reason(error); pair.paths = []; pair.totalPaths = 0; pair.nextCursor = null
       }

@@ -4,15 +4,32 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { WorkOrchestrationTab } from './WorkOrchestrationTab'
 import { orderWorktrees } from './WorkOrchestrationView'
+import { WorkOrchestrationView } from './WorkOrchestrationView'
 import { LocalChangesInspector } from './LocalChangesInspector'
 import type { ObservableWorktree, OrchestrationOverview, OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../../../../shared/types/work-orchestration-types'
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }
-const tree = (i: number): ObservableWorktree => ({ worktreeId: i.toString(16).padStart(64, '0'), generation: 'g1', path: `/repository/tree-${i}`, branch: i ? `work-${i.toString().padStart(3, '0')}` : 'zzz-reference', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false, reference: i === 0, snapshot: null, observation: 'NOT_OBSERVED', stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null, reason: null })
+const tree = (i: number): ObservableWorktree => ({ worktreeId: i.toString(16).padStart(64, '0'), generation: 'g1', path: `/repository/tree-${i.toString().padStart(3, '0')}`, branch: i ? `work-${i.toString().padStart(3, '0')}` : 'zzz-reference', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false, reference: i === 0, snapshot: null, observation: 'NOT_OBSERVED', stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null, reason: null })
 const inventory = (count = 21): OrchestrationOverview => ({ repositoryId: 'repo', worktrees: Array.from({ length: count }, (_, i) => tree(i)), pairs: [], inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', observedAt: '2026-10-13T04:00:00Z', revision: 'r1' })
 const success = (data: OrchestrationData, context = { projectId: 'a', revision: 1 }): OrchestrationResult<OrchestrationData> => ({ success: true, context, data })
 const observe = (w: ObservableWorktree) => success({ repositoryId: 'repo', observedAt: 'now', worktree: { ...w, observation: 'VERIFIED', stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictCount: 0, snapshot: { head: w.head, branch: w.branch, operation: null, indexRevision: 'i', worktreeRevision: 'w' } } })
 const install = (read: ReturnType<typeof vi.fn>) => { window.codeAwareness = { getWorkOrchestration: read, mutateGitManagement: vi.fn() } as any }
+it('reveals already discovered evidence at its chronological position while preserving the filter', async () => {
+  const read = vi.fn(async () => success(inventory(3)))
+  install(read)
+  const attention = { repositoryId: 'repo', coverage: 'PARTIAL', known: 3, observed: 3, paused: false, cadenceMs: 30000, pending: [], alerts: [{ id: 'signal', state: 'CURRENT', provider: tree(1).worktreeId, consumer: tree(2).worktreeId, providerGeneration: 'g1', consumerGeneration: 'g1', base: 'base', providerRevision: 'p', consumerRevision: 'c', verifiedAt: '2026-10-13T00:00:00Z', evidence: [{ symbol: 'service', contractPath: 's.ts', consumerPath: 'c.ts', contractLine: 1, consumerLine: 2, signature: 'new', previousSignature: 'old' }] }] } as any
+  render(<WorkOrchestrationView state={state} attention={attention} />)
+  await screen.findByText('Inventário completo · 3 descobertas')
+  fireEvent.change(screen.getByLabelText('Filtrar worktrees'), { target: { value: 'work-001' } })
+  expect(document.querySelectorAll('.wo-tree')).toHaveLength(1)
+  fireEvent.click(screen.getByText('Ver evidência'))
+  expect((screen.getByLabelText('Filtrar worktrees') as HTMLInputElement).value).toBe('work-001')
+  expect([...document.querySelectorAll('.wo-tree')].map(row => row.getAttribute('data-worktree-id'))).toEqual([tree(1).worktreeId, tree(2).worktreeId])
+  expect(screen.getByLabelText('Evidência de interferência estrutural')).toBeTruthy()
+  expect(read).toHaveBeenCalledTimes(1)
+  fireEvent.click(screen.getByLabelText('Fechar inspetor'))
+  expect(document.querySelectorAll('.wo-tree')).toHaveLength(1)
+})
 it('discards an old detail page after the selected snapshot changes', async () => {
   const selected: ObservableWorktree = { ...tree(1), observation: 'VERIFIED', snapshotRevision: 'a'.repeat(64) }
   let finish!: (value: OrchestrationResult<OrchestrationData>) => void
@@ -144,10 +161,17 @@ it('deduplicates concurrent selected inspections without observing the other rec
   expect(document.querySelectorAll('.wo-tree')).toHaveLength(1)
   expect(screen.getByText('work-100')).not.toBeNull()
 })
-it('sorts the reference by identity, then branches and detached paths deterministically', () => {
+it('keeps the reference first and undated paths deterministic, independent of branches', () => {
   const a = tree(1), b = { ...tree(2), branch: null, detached: true }, reference = tree(0)
-  expect(orderWorktrees([a, b, reference])).toEqual([reference, b, a])
-  expect(orderWorktrees([reference, b, a])).toEqual([reference, b, a])
+  expect(orderWorktrees([a, b, reference])).toEqual([reference, a, b])
+  expect(orderWorktrees([reference, b, a])).toEqual([reference, a, b])
+})
+it('orders creation estimates without moving rows for HEAD, status or branch changes', () => {
+  const old = { ...tree(1), creation: { at: '2026-01-01T00:00:00Z', quality: 'ESTIMATED' as const, source: 'ADMIN_DIRECTORY_BIRTHTIME' as const } }
+  const recent = { ...tree(2), creation: { ...old.creation, at: '2026-10-13T00:00:00Z' } }, unknown = tree(3), reference = tree(0)
+  const ordered = orderWorktrees([unknown, old, reference, recent]).map(w => w.worktreeId)
+  expect(ordered).toEqual([reference.worktreeId, recent.worktreeId, old.worktreeId, unknown.worktreeId])
+  expect(orderWorktrees([{ ...recent, head: 'f'.repeat(40), branch: 'aaa' }, { ...old, stagedCount: 42, observation: 'VERIFIED' }, unknown, reference]).map(w => w.worktreeId)).toEqual(ordered)
 })
 
 it('marks both the pair evidence and relationship signals stale after failed revalidation', async () => {

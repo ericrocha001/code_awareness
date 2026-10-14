@@ -30,7 +30,7 @@ exports.run = async ctx => {
     buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')], bundle: true, outfile: preload, platform: 'node', format: 'cjs', external: ['electron'] }); ctx.window.webContents.session.setPreloads([preload])
     const plugin = { name: 'unrelated-feature-fixtures', setup(build) {
       build.onResolve({ filter: /components\// }, args => {
-        if (!args.importer.endsWith(`${path.sep}App.tsx`) || /GitManagementView|WorkOrchestrationTab/.test(args.path)) return
+        if (!args.importer.endsWith(`${path.sep}App.tsx`) || /GitManagementView|WorkOrchestrationView/.test(args.path)) return
         return { path: args.path.split('/').pop(), namespace: 'shell-fixture' }
       })
       build.onLoad({ filter: /.*/, namespace: 'shell-fixture' }, args => {

@@ -714,7 +714,8 @@ export function readStructure(
   repositoryId: string,
   relativePath: string,
   extension: string,
-  content: string
+  content: string,
+  includeContractDeclarations = false
 ): StructureReaderResult {
   // Verifica suporte da linguagem via extensão
   const language = getLanguageForExtension(extension)
@@ -744,6 +745,7 @@ export function readStructure(
   const exportedConstNewBindings: ExportedConstNewBinding[] = []
   const exportedConstCallBindings: ExportedConstCallBinding[] = []
   const symbolReferences: SymbolReferenceCandidate[] = []
+  const contractDeclarations: Array<{ elementId: string; declaration: string; implementationHash: string }> = []
   const seenSymbolOccurrences = new Set<string>()
 
   // Usa relativePath como fileId placeholder — será substituído pelo Repository Model (Sprint 5)
@@ -1173,6 +1175,16 @@ export function readStructure(
 
     if (element) {
       elements.push(element)
+      if (includeContractDeclarations && ['function', 'method', 'class', 'interface', 'typeAlias', 'property'].includes(element.kind)) {
+        const excluded = new Set([node.childForFieldName?.('body')?.id, element.kind === 'property' ? node.childForFieldName?.('value')?.id : undefined].filter(value => value !== undefined))
+        const tokens = (part: any): string[] => {
+          if (part.type === 'comment') return []
+          if (!part.childCount) return [part.text]
+          return Array.from({ length: part.childCount }, (_, i) => part.child(i)).filter(Boolean).flatMap(tokens)
+        }
+        const declaration = Array.from({ length: node.childCount }, (_, i) => node.child(i)).filter(child => child && !excluded.has(child.id)).flatMap(tokens).join(' ')
+        contractDeclarations.push({ elementId: element.id, declaration, implementationHash: createHash('sha256').update(tokens(node).join(' ')).digest('hex') })
+      }
 
       // Relacionamento contains: pai → filho
       if (parentElementId) {
@@ -1203,6 +1215,7 @@ export function readStructure(
   }
 
   return { elements, relationships, elementInterfaces, importBindings, exportedConstNewBindings, exportedConstCallBindings, symbolReferences,
+    ...(includeContractDeclarations ? { contractDeclarations } : {}),
     diagnostics: tree.rootNode.hasError ? ['PARSE_INCOMPLETE'] : [] }
 }
 

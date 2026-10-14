@@ -3,25 +3,48 @@ import type { ActiveProjectService } from '../core/active-project-service'
 import { WorkOrchestrationService, type OrchestrationGitReader } from '../work-orchestration/work-orchestration-service'
 import type { OrchestrationContinuumReader } from '../work-orchestration/worktree-document-context'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../../shared/types/work-orchestration-types'
+import type { WorktreeContractNavigation } from '../core/context/worktree-contract-navigation'
+import type { OrchestrationAttentionChange } from '../../shared/types/work-orchestration-attention-types'
+import { SelectiveContractDiscovery } from '../work-orchestration/structural-discovery'
+import { Workline } from '../work-orchestration/workline'
 
 export class WorkOrchestrationController {
   private active: { service: WorkOrchestrationService; projectId: string; revision: number } | null = null
-  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>) {}
-  bind(git: OrchestrationGitReader | null, continuum?: OrchestrationContinuumReader): void {
+  private workline: Workline | null = null
+  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly changed?: (change: OrchestrationAttentionChange) => void) {}
+  bind(git: OrchestrationGitReader | null, continuum?: OrchestrationContinuumReader, navigation?: WorktreeContractNavigation): void {
+    this.deactivate()
     const state = this.projects.getState()
     this.active = git && state.project ? { service: new WorkOrchestrationService(git, continuum), projectId: state.project.id, revision: state.revision } : null
+    if (this.active && git && navigation) {
+      const selected = this.active
+      const current = () => this.active === selected && !!this.workline?.isCurrent()
+      const coordinated: OrchestrationGitReader = { discoverCoordinationWorktrees: request => git.discoverCoordinationWorktrees(request),
+        getCoordinationCommitPaths: (left, right) => git.getCoordinationCommitPaths(left, right), getCoordinationSnapshot: id => selected.service.coordinationSnapshot(id) }
+      const budgeted = { inspect: (request: Parameters<WorktreeContractNavigation['inspect']>[0]) => selected.service.withReadBudget(() => {
+        if (!current()) throw new Error('ORCHESTRATION_PAUSED')
+        return navigation.inspect(request)
+      }), confirm: navigation.confirm.bind(navigation) }
+      const engine = new SelectiveContractDiscovery(coordinated, budgeted, current)
+      this.workline = new Workline(() => selected.service.inventory(), engine, attention => {
+        if (this.active === selected) this.changed?.({ context: { projectId: selected.projectId, revision: selected.revision }, attention })
+      })
+      this.workline.start()
+    }
   }
-  deactivate(): void { this.active = null }
+  deactivate(): void { this.workline?.stop(); this.workline = null; this.active = null }
+  pause(paused: boolean) { this.workline?.pause(paused) }
   async read(request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> {
     const context = request?.context
     const pair = request?.pair
     const worktree = request?.worktree
     const changes = request?.changes
     const documents = request?.documents
-    if (!request || Object.keys(request).some(k => !['context', 'pair', 'worktree', 'changes', 'documents'].includes(k)) || !context ||
+    const attention = request?.attention
+    if (!request || Object.keys(request).some(k => !['context', 'pair', 'worktree', 'changes', 'documents', 'attention'].includes(k)) || !context ||
       Object.keys(context).some(k => !['projectId', 'revision'].includes(k)) || typeof context.projectId !== 'string' || !context.projectId ||
       !Number.isSafeInteger(context.revision) || context.revision < 0 ||
-      ([pair, worktree, changes, documents].filter(value => value !== undefined).length > 1) ||
+      ([pair, worktree, changes, documents, attention].filter(value => value !== undefined).length > 1) || (attention !== undefined && attention !== true) ||
       (documents !== undefined && (!documents || Object.keys(documents).some(k => !['worktreeId', 'generation', 'mode', 'artifactId', 'cursor'].includes(k)) ||
         typeof documents.worktreeId !== 'string' || !/^[a-f0-9]{64}$/.test(documents.worktreeId) || typeof documents.generation !== 'string' || !documents.generation ||
         !['EXACT', 'HISTORICAL', 'RELATED'].includes(documents.mode) || (documents.cursor !== undefined && (typeof documents.cursor !== 'string' || documents.mode === 'RELATED')) ||
@@ -41,6 +64,7 @@ export class WorkOrchestrationController {
         selected.projectId === context.projectId && selected.revision === context.revision
     }
     if (!current()) return { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
+    if (attention) return this.workline ? { success: true, context, data: this.workline.snapshot() } : { success: false, code: 'ORCHESTRATION_UNAVAILABLE' }
     try {
       const data = documents ? await selected!.service.documents(documents) : changes ? await selected!.service.changes(changes) : pair ? await selected!.service.pair(pair.leftId, pair.rightId, pair.cursor) : worktree ? await selected!.service.observe(worktree.worktreeId) : await selected!.service.inventory()
       return current() ? { success: true, context, data } : { success: false, code: 'PROJECT_CONTEXT_CHANGED' }

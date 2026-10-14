@@ -7,6 +7,7 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../shared/types/work-orchestration-types'
+import type { OrchestrationAttentionChange } from '../shared/types/work-orchestration-attention-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../shared/types/git-management-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
 import type { ContinuumGraphRequest, ContinuumGraph } from '../shared/types/continuum-graph-types'
@@ -21,6 +22,11 @@ import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishR
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   getWorkOrchestration: (request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> => ipcRenderer.invoke('work-orchestration:read', request),
+  onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, change: OrchestrationAttentionChange) => callback(change)
+    ipcRenderer.on('work-orchestration:changed', listener)
+    return () => { ipcRenderer.removeListener('work-orchestration:changed', listener) }
+  },
   getGitManagementHistory: (request: GitHistoryRequest): Promise<GitManagementResult<GitHistoryPage>> => ipcRenderer.invoke('git-management:history', request),
   getGitManagementOverview: (context: GitManagementContext): Promise<GitManagementResult<GitOverview>> => ipcRenderer.invoke('git-management:overview', context),
   getGitManagementCommit: (request: GitCommitRequest): Promise<GitManagementResult<GitCommitDetail>> => ipcRenderer.invoke('git-management:commit-detail', request),

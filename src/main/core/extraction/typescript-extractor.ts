@@ -13,6 +13,6 @@ export class TypeScriptStructureExtractor implements StructureExtractionPort {
   }
 
   extract(input: StructureExtractionInput): StructureExtractionResult {
-    return readStructure(input.repositoryId, input.relativePath, input.extension, input.content)
+    return readStructure(input.repositoryId, input.relativePath, input.extension, input.content, input.includeContractDeclarations)
   }
 }
