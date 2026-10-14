@@ -89,6 +89,13 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['rev-parse', '--absolute-git-dir'], root)).trim()
   }
 
+  async getRepositoryDirectories(root: string): Promise<{ common: string; admin: string }> {
+    const directories = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-common-dir', '--absolute-git-dir'], root)).trim().split('\n')
+    if (directories.length === 2) return { common: directories[0], admin: directories[1] }
+    const [common, admin] = await Promise.all([this.getCommonDirectory(root), this.getWorktreeDirectory(root)])
+    return { common, admin }
+  }
+
   async createAndSwitchBranch(root: string, branch: string): Promise<void> {
     await this.runGit(['switch', '-c', branch], root)
   }
@@ -202,12 +209,21 @@ export class GitService implements FileListingPort {
 
   async captureWorktreeReadSnapshot(dirPath: string): Promise<GitWorktreeReadSnapshot> {
     // A read must match two captures bracketing its effect; this is not a mutation precondition.
-    const [head, indexRevision, status, branch, operation] = await Promise.all([
-      this.getCurrentCommitHash(dirPath), this.getIndexRevision(dirPath), this.getOperationsStatus(dirPath, true),
-      this.getCurrentBranch(dirPath), this.getGitOperation(dirPath)
+    const [identity, indexRevision, status] = await Promise.all([
+      this.captureSnapshotIdentity(dirPath), this.getIndexRevision(dirPath), this.getOperationsStatus(dirPath, true)
     ])
+    const { head, branch, operation } = identity
     return { head, branch, operation, indexRevision, status,
       worktreeRevision: this.worktreeRevision(dirPath, head, indexRevision, status, true) }
+  }
+
+  private async captureSnapshotIdentity(dirPath: string): Promise<{ head: string | null; branch: string | null; operation: string | null }> {
+    let identity: RegExpExecArray | null = null
+    try { identity = /^([\s\S]+)\n([a-f0-9]{40,64})\n(HEAD|refs\/heads\/[^\r\n]+)\n$/.exec(await this.runGit(['rev-parse', '--absolute-git-dir', 'HEAD', '--symbolic-full-name', 'HEAD'], dirPath)) }
+    catch { }
+    if (identity) return { head: identity[2], branch: identity[3] === 'HEAD' ? null : identity[3].slice(11), operation: this.operationFromDirectory(identity[1].trim()) }
+    const [head, branch, operation] = await Promise.all([this.getCurrentCommitHash(dirPath), this.getCurrentBranch(dirPath), this.getGitOperation(dirPath)])
+    return { head, branch, operation }
   }
 
   private worktreeRevision(dirPath: string, head: string | null, index: string, status: string, metadataOnly: boolean): string {
@@ -482,6 +498,10 @@ export class GitService implements FileListingPort {
 
   async getGitOperation(dirPath: string): Promise<string | null> {
     const gitDir = (await this.runGit(['rev-parse', '--absolute-git-dir'], dirPath)).trim()
+    return this.operationFromDirectory(gitDir)
+  }
+
+  private operationFromDirectory(gitDir: string): string | null {
     for (const [file, operation] of [['rebase-merge', 'REBASE'], ['rebase-apply', 'REBASE'], ['MERGE_HEAD', 'MERGE'], ['CHERRY_PICK_HEAD', 'CHERRY_PICK'], ['REVERT_HEAD', 'REVERT']] as const) {
       if (existsSync(join(gitDir, file))) return operation
     }

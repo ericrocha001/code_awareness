@@ -63,7 +63,7 @@ export class GitWorktreeRegistry {
     let creation: WorktreeCreationEstimate = { at: null, quality: 'UNKNOWN', source: null }
     if (!missing) {
       physical = realpathSync(path)
-      const [worktreeCommon, worktreeAdmin] = await Promise.all([this.git.getCommonDirectory(physical), this.git.getWorktreeDirectory(physical)])
+      const { common: worktreeCommon, admin: worktreeAdmin } = await this.git.getRepositoryDirectories(physical)
       if (realpathSync(worktreeCommon) !== common) fail('WORKTREE_IDENTITY_MISMATCH')
       admin = realpathSync(worktreeAdmin)
       const stats = statSync(admin, { bigint: true })

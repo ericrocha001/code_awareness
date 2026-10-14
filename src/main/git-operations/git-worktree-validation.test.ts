@@ -22,7 +22,7 @@ it('keeps interrupted checkout validation blocked until explicit local reconcili
   writeFileSync(join(workspace, 'run.cjs'), 'setTimeout(() => process.exit(0), 300)')
   const head = 'a'.repeat(40), index = 'b'.repeat(64)
   const revision = () => createHash('sha256').update(readFileSync(source)).digest('hex')
-  const git = { getCommonDirectory: async () => common, getWorktreeDirectory: async () => admin,
+  const git = { getCommonDirectory: async () => common, getWorktreeDirectory: async () => admin, getRepositoryDirectories: async () => ({ common, admin }),
     listWorktreeRecords: async () => `worktree ${workspace}\0HEAD ${head}\0branch refs/heads/integration\0\0`,
     getIndexRevision: async () => index, getWorktreeRevision: async () => revision() } as unknown as GitService
   const identity = { repositoryId: 'repository', isActive: () => true }

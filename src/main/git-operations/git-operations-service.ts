@@ -416,7 +416,7 @@ export class GitOperationsService {
         indexRevision: snapshot.indexRevision, worktreeRevision: snapshot.worktreeRevision }, paths,
         stagedCount: changes.filter(c => c.stagedState).length, unstagedCount: changes.filter(c => c.unstagedState).length,
         untrackedCount: changes.filter(c => c.untracked).length, conflictCount: changes.filter(c => c.conflicted).length,
-        reference: realpathSync(await this.git.getWorktreeDirectory(record.path)) === realpathSync(await this.git.getCommonDirectory(record.path)) }
+        reference: this.worktrees!.isReference(worktreeId) }
     })
   }
 
