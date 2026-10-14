@@ -27,7 +27,7 @@ it('discovers 1, 21 and 101 real worktrees without snapshots or pair analysis, m
   const started = performance.now()
   const inventory = await service.inventory()
   const inventoryMs = performance.now() - started
-  expect(inventory).toMatchObject({ inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', pairs: [] })
+  expect(inventory).toMatchObject({ inventoryCoverage: 'COMPLETE' })
   expect(inventory.worktrees).toHaveLength(21)
   expect(inventory.worktrees.filter(w => w.reference)).toHaveLength(1)
   expect(inventory.worktrees.every(w => w.observation === 'NOT_OBSERVED' && w.snapshot === null && w.stagedCount === null)).toBe(true)

@@ -10,7 +10,7 @@ import type { ObservableWorktree, OrchestrationOverview, OrchestrationRequest, O
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 const state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }
 const tree = (i: number): ObservableWorktree => ({ worktreeId: i.toString(16).padStart(64, '0'), generation: 'g1', path: `/repository/tree-${i.toString().padStart(3, '0')}`, branch: i ? `work-${i.toString().padStart(3, '0')}` : 'zzz-reference', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false, reference: i === 0, snapshot: null, observation: 'NOT_OBSERVED', stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null, reason: null })
-const inventory = (count = 21): OrchestrationOverview => ({ repositoryId: 'repo', worktrees: Array.from({ length: count }, (_, i) => tree(i)), pairs: [], inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', observedAt: '2026-10-13T04:00:00Z', revision: 'r1' })
+const inventory = (count = 21): OrchestrationOverview => ({ repositoryId: 'repo', worktrees: Array.from({ length: count }, (_, i) => tree(i)), inventoryCoverage: 'COMPLETE', observedAt: '2026-10-13T04:00:00Z', revision: 'r1' })
 const success = (data: OrchestrationData, context = { projectId: 'a', revision: 1 }): OrchestrationResult<OrchestrationData> => ({ success: true, context, data })
 const observe = (w: ObservableWorktree) => success({ repositoryId: 'repo', observedAt: 'now', worktree: { ...w, observation: 'VERIFIED', stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictCount: 0, snapshot: { head: w.head, branch: w.branch, operation: null, indexRevision: 'i', worktreeRevision: 'w' } } })
 const install = (read: ReturnType<typeof vi.fn>) => { window.codeAwareness = { getWorkOrchestration: read, mutateGitManagement: vi.fn() } as any }
@@ -174,21 +174,33 @@ it('orders creation estimates without moving rows for HEAD, status or branch cha
   expect(orderWorktrees([{ ...recent, head: 'f'.repeat(40), branch: 'aaa' }, { ...old, stagedCount: 42, observation: 'VERIFIED' }, unknown, reference]).map(w => w.worktreeId)).toEqual(ordered)
 })
 
-it('marks both the pair evidence and relationship signals stale after failed revalidation', async () => {
+it('wraps keyboard focus to a visible control while document details are closed and local reads are pending', async () => {
+  const read = vi.fn((request: OrchestrationRequest) => request.changes ? new Promise<any>(() => {}) : Promise.resolve(request.worktree ? observe({ ...tree(1), snapshotRevision: 'r' }) : success(inventory())))
+  install(read)
+  render(<WorkOrchestrationTab state={state} active />)
+  await screen.findByText('Inventário completo · 21 descobertas')
+  fireEvent.click(screen.getByText('work-001')); await screen.findByText('Última observação do estado')
+  const panel = screen.getByLabelText('Inspetor de worktree')
+  await screen.findByText('Lendo arquivos alterados…')
+  Object.defineProperty(panel.parentElement, 'clientWidth', { value: 896 })
+  panel.focus(); fireEvent.keyDown(panel, { key: 'Tab', shiftKey: true })
+  expect(document.activeElement).toBe(screen.getByText('Contexto documentado'))
+})
+it('omits manual comparison and preserves individual inspection on failed revalidation', async () => {
   let inventories = 0
   const read = vi.fn(async (request: OrchestrationRequest) => {
     if (request.worktree) return observe(tree(1))
-    if (request.pair) return success({ repositoryId: 'repo', left: tree(1), right: tree(0), base: 'a'.repeat(40), category: 'NO_PATH_OVERLAP', reason: null, totalPaths: 0, paths: [], revision: 'r-pair', nextCursor: null })
     return ++inventories === 1 ? success(inventory()) : { success: false, code: 'GIT_READ_UNAVAILABLE' }
   })
   install(read)
   render(<WorkOrchestrationTab state={state} active />)
   await screen.findByText('Inventário completo · 21 descobertas')
   fireEvent.click(screen.getByText('work-001')); await screen.findByText('Última observação do estado')
-  fireEvent.change(screen.getByLabelText('Comparar com outra worktree'), { target: { value: tree(0).worktreeId } })
-  fireEvent.click(screen.getByText('Comparar')); await screen.findByText('Nenhuma sobreposição de caminhos verificada')
+  expect(screen.queryByLabelText('Comparar com outra worktree')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Comparar' })).toBeNull()
+  expect(document.querySelector('.wo-pair, .wo-relations')).toBeNull()
   fireEvent.click(screen.getByText('Atualizar'))
-  await screen.findByText(/Relações obsoletas/)
-  expect(document.querySelector('.wo-pair')?.textContent).toContain('Observação obsoleta')
-  expect(screen.queryByText('Nenhuma sobreposição de caminhos verificada')).toBeNull()
+  await screen.findByText('Observação anterior · não revalidada')
+  expect(screen.getByLabelText('Inspetor de worktree')).toBeTruthy()
+  expect(read.mock.calls.every(([request]) => !('pair' in request))).toBe(true)
 })

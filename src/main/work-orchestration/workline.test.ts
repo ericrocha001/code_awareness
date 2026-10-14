@@ -2,7 +2,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { Workline } from './workline'
 import type { OrchestrationOverview, ObservableWorktree } from '../../shared/types/work-orchestration-types'
 const record = (i: number): ObservableWorktree => ({ worktreeId: String(i), generation: 'g', path: '/r/' + i, branch: 'w' + i, head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false, reference: i === 0, snapshot: null, observation: 'NOT_OBSERVED', reason: null, stagedCount: null, unstagedCount: null, untrackedCount: null, conflictCount: null })
-const inventory = (count: number): OrchestrationOverview => ({ repositoryId: 'repo', worktrees: Array.from({ length: count }, (_, i) => record(i)), pairs: [], inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', revision: 'r', observedAt: 'now' })
+const inventory = (count: number): OrchestrationOverview => ({ repositoryId: 'repo', worktrees: Array.from({ length: count }, (_, i) => record(i)), inventoryCoverage: 'COMPLETE', revision: 'r', observedAt: 'now' })
 function driver() {
   return { captures: new Map(), pending: new Map(), stats: { observations: 0, captures: 0, extractions: 0, bytes: 0, confirmedPairs: 0 },
     observe: vi.fn(async (_id: string, _head: string) => false), investigate: vi.fn(async () => [] as any[]), remove: vi.fn(), invalidate: vi.fn() }

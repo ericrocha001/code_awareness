@@ -16,7 +16,7 @@ it('keeps exactly one visible panel and one retained Orchestration view while sw
   window.codeAwareness = {
     getPendingDeepLink: async () => null, onDeepLink: () => () => {}, onActiveProjectChanged: () => () => {},
     getActiveProject: async () => ({ project: { id: 'a', name: 'A', path: '/a' }, revision: 1 }),
-    getWorkOrchestration: vi.fn(async () => ({ success: true, context: { projectId: 'a', revision: 1 }, data: { repositoryId: 'repo', worktrees: [], pairs: [], inventoryCoverage: 'COMPLETE', relationsCoverage: 'NOT_EVALUATED', observedAt: '2026-10-13T00:00:00Z', revision: 'r' } }))
+    getWorkOrchestration: vi.fn(async () => ({ success: true, context: { projectId: 'a', revision: 1 }, data: { repositoryId: 'repo', worktrees: [], inventoryCoverage: 'COMPLETE', observedAt: '2026-10-13T00:00:00Z', revision: 'r' } }))
   } as any
   render(<React.StrictMode><App /></React.StrictMode>)
   fireEvent.click(screen.getByText('work-orchestration'))

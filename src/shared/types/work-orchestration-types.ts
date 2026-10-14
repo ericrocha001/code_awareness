@@ -26,24 +26,10 @@ export interface ObservableWorktree {
   conflictCount: number | null
   reason: string | null
 }
-export interface WorktreePair {
-  repositoryId: string
-  left: ObservableWorktree
-  right: ObservableWorktree
-  base: string | null
-  category: 'PATH_OVERLAP' | 'NO_PATH_OVERLAP' | 'INDETERMINATE' | 'STALE'
-  reason: string | null
-  totalPaths: number
-  paths: string[]
-  revision: string
-  nextCursor: string | null
-}
 export interface OrchestrationOverview {
   repositoryId: string
   worktrees: ObservableWorktree[]
-  pairs: WorktreePair[]
   inventoryCoverage: 'COMPLETE'
-  relationsCoverage: 'NOT_EVALUATED' | 'PARTIAL' | 'COMPLETE' | 'STALE'
   observedAt: string
   revision: string
 }
@@ -54,7 +40,6 @@ export interface WorktreeObservation {
 }
 export interface OrchestrationRequest {
   context: OrchestrationContext
-  pair?: { leftId: string; rightId: string; cursor?: string }
   worktree?: { worktreeId: string }
   changes?: { worktreeId: string; generation: string; snapshotRevision: string; cursor?: string; pathPrefix?: string }
   documents?: WorktreeDocumentRequest
@@ -70,5 +55,5 @@ export interface LocalChangesPage {
   revision: string
   nextCursor: string | null
 }
-export type OrchestrationData = OrchestrationOverview | WorktreePair | WorktreeObservation | LocalChangesPage | WorktreeDocumentContext | OrchestrationAttention
+export type OrchestrationData = OrchestrationOverview | WorktreeObservation | LocalChangesPage | WorktreeDocumentContext | OrchestrationAttention
 export type OrchestrationResult<T> = { success: true; context: OrchestrationContext; data: T } | { success: false; code: string }
