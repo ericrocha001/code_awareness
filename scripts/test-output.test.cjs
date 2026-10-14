@@ -12,6 +12,8 @@ test('noisy success preserves bytes, reduces presentation by at least 80%, and n
   assert.equal(receipt.state, 'PASS')
   assert.equal(receipt.exitCode, 0)
   assert.equal(receipt.counts, undefined)
+  assert.equal(receipt.processState, 'PASS')
+  assert.equal(receipt.validation.state, 'NOT_APPLICABLE')
   assert.ok(Buffer.byteLength(summary) <= limits.success)
   assert.ok(Buffer.byteLength(summary) / full.length < 0.2)
   console.log(JSON.stringify({ measurement: 'UTF-8 bytes', raw: full.length, presented: Buffer.byteLength(summary), reduction: 1 - Buffer.byteLength(summary) / full.length }))
@@ -90,4 +92,60 @@ test('deadline terminates descendant processes and records verified tree cleanup
   assert.equal(receipt.cleanupWarning, undefined)
   const pid = Number(fs.readFileSync(path.join(receipt.directory, 'stdout.log'), 'utf8').match(/DESCENDANT=(\d+)/)[1])
   assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
+})
+
+test('test evidence distinguishes skipped, executed, unknown and failed summaries without losing logs', async () => {
+  const cases = [
+    ['Tests  3 skipped (3)', 'INSUFFICIENT'],
+    ['Tests  0 passed (0)', 'INSUFFICIENT'],
+    ['Tests  2 passed | 1 skipped | 1 todo (4)', 'SUFFICIENT'],
+    ['Tests  2 failed (2)', 'FAILED'],
+    ['Tests  unknown', 'UNKNOWN'],
+    ['Tests  2 passed (3)', 'UNKNOWN'],
+    ['Tests  1 passed | 1 passed (2)', 'UNKNOWN'],
+    ['Test Files  2 passed (2)', 'UNKNOWN'],
+    ['Tests  1 passed (1)\nTests  2 skipped (2)', 'INSUFFICIENT'],
+    ['Tests  1 passed (1)\nTests  unknown', 'UNKNOWN'],
+    ['no summary', 'UNKNOWN']
+  ]
+  for (const [output, expected] of cases) {
+    const source = `const s=${JSON.stringify(output)};process.stdout.write(s.slice(0,3));setTimeout(()=>process.stdout.write(s.slice(3)),20)`
+    const receipt = await run(process.execPath, ['-e', source], { expectTests: true })
+    assert.equal(receipt.exitCode, 0)
+    assert.equal(receipt.processState, 'PASS')
+    assert.equal(receipt.validation.state, expected, output)
+    assert.equal(receipt.state, expected === 'SUFFICIENT' ? 'PASS' : expected === 'FAILED' ? 'FAIL' : expected)
+    assert.equal(fs.readFileSync(path.join(receipt.directory, 'stdout.log'), 'utf8'), output)
+    assert.equal(JSON.parse(project(receipt)).validation.state, expected)
+    assert.equal((await observe(receipt.id)).state, receipt.state)
+    assert.equal(JSON.parse(fs.readFileSync(path.join(receipt.directory, 'receipt.json'), 'utf8')).validation.state, expected)
+  }
+})
+
+test('Vitest summaries activate the evidence gate through composed commands', async () => {
+  const receipt = await run(process.execPath, ['-e', "console.error('\\x1b[33mTests  1 skipped (1)\\x1b[0m')"])
+  assert.equal(receipt.state, 'INSUFFICIENT')
+  assert.equal(receipt.validation.state, 'INSUFFICIENT')
+})
+
+test('CLI makes insufficient and unknown evidence nonzero while preserving process exit', () => {
+  const { spawnSync } = require('node:child_process')
+  for (const output of ['Tests  1 skipped (1)', 'unknown summary', 'Tests  1 passed (1)']) {
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'test-output.cjs'), 'run', '--expect-tests', '--', 'node', '-e', `console.log(${JSON.stringify(output)})`], { encoding: 'utf8', env: { ...process.env, CODE_AWARENESS_TEST_CAPTURE: '' } })
+    assert.equal(result.status, output.includes('passed') ? 0 : 1, result.stderr)
+    const receipt = JSON.parse(result.stdout)
+    assert.equal(receipt.exitCode, 0)
+    assert.equal(receipt.processState, 'PASS')
+  }
+})
+
+test('direct Vitest invocation without summaries remains unknown', async () => {
+  const directory = path.resolve(__dirname, '../.code-awareness/capability-proof')
+  fs.mkdirSync(directory, { recursive: true })
+  const fixture = path.join(directory, 'vitest.mjs')
+  fs.writeFileSync(fixture, 'console.log("unrecognized reporter output")')
+  const receipt = await run(process.execPath, [fixture, 'run'])
+  assert.equal(receipt.processState, 'PASS')
+  assert.equal(receipt.state, 'UNKNOWN')
+  assert.equal(receipt.validation.state, 'UNKNOWN')
 })

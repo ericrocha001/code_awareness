@@ -9,6 +9,31 @@ const root = path.resolve(__dirname, '..')
 const evidenceRoot = path.join(root, '.code-awareness', 'test-output')
 const limits = { success: 900, failure: 3500 }
 
+function parseTestCounts(summary) {
+  const match = summary.match(/^(.+?)\s+\((\d+)\)$/)
+  if (!match) return null
+  const counts = { passed: 0, failed: 0, skipped: 0, todo: 0 }
+  const seen = new Set()
+  for (const part of match[1].split('|')) {
+    const entry = part.trim().match(/^(\d+) (passed|failed|skipped|todo)$/)
+    if (!entry || seen.has(entry[2])) return null
+    seen.add(entry[2]); counts[entry[2]] = Number(entry[1])
+  }
+  const total = Number(match[2])
+  if (![total, ...Object.values(counts)].every(Number.isSafeInteger) || Object.values(counts).reduce((a, b) => a + b, 0) !== total) return null
+  return { ...counts, total, executed: counts.passed + counts.failed }
+}
+
+function testEvidence(expected, summaries, processState) {
+  if (!expected) return { state: 'NOT_APPLICABLE' }
+  const runs = summaries.map(parseTestCounts)
+  if (processState !== 'PASS') return { state: 'UNKNOWN', reason: 'Process did not complete successfully.' }
+  if (!runs.length || runs.some(counts => counts === null)) return { state: 'UNKNOWN', reason: 'Reliable test counts unavailable.' }
+  if (runs.some(counts => counts.failed > 0)) return { state: 'FAILED', runs }
+  if (runs.some(counts => counts.executed === 0)) return { state: 'INSUFFICIENT', runs, reason: 'A test run executed zero tests.' }
+  return { state: 'SUFFICIENT', runs }
+}
+
 function bounded(value, bytes) {
   let result = String(value)
   if (Buffer.byteLength(result) <= bytes) return result
@@ -31,6 +56,11 @@ function project(receipt) {
     signal: receipt.signal, durationMs: receipt.durationMs,
     command: bounded(receipt.command.join(' '), 150),
     evidence: receipt.directory
+  }
+  if (receipt.processState) summary.processState = receipt.processState
+  if (receipt.validation) {
+    summary.validation = { state: receipt.validation.state }
+    if (receipt.validation.runs) summary.validation.executed = receipt.validation.runs.reduce((sum, counts) => sum + counts.executed, 0)
   }
   if (receipt.counts) summary.counts = receipt.counts
   if (receipt.state !== 'PASS') summary.diagnostic = bounded(receipt.diagnostic || 'See full logs.', 2100)
@@ -64,6 +94,8 @@ async function run(command, args = [], options = {}) {
   const directory = path.join(options.evidenceRoot || evidenceRoot, id)
   protectDirectory(directory)
   const files = ['stdout.log', 'stderr.log'].map(name => fs.openSync(path.join(directory, name), 'wx', 0o600))
+  const expectTests = options.expectTests || [command, ...args].some(value => /(?:^|[/\\])vitest(?:\.mjs|[/\\]dist[/\\]cli\.js)?$/.test(value))
+  const testSummaries = []
   const receipt = { id, command: [command, ...args], cwd: options.cwd || root, directory, startedAt: new Date(started).toISOString(), state: 'RUNNING', pid: null }
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
@@ -106,6 +138,7 @@ async function run(command, args = [], options = {}) {
         }
         const match = text.match(/^\s*(Tests|Test Files)\s+(.+)$/)
         if (match) { receipt.counts ||= {}; receipt.counts[match[1]] = bounded(match[2], 100) }
+        if (match?.[1] === 'Tests') testSummaries.push(match[2])
       }
       stream.on('data', chunk => {
         try {
@@ -143,6 +176,12 @@ async function run(command, args = [], options = {}) {
     for (const fd of files) fs.closeSync(fd)
   }
   receipt.durationMs = Date.now() - started
+  receipt.processState = receipt.state
+  receipt.validation = testEvidence(expectTests || testSummaries.length > 0, testSummaries, receipt.processState)
+  if (receipt.processState === 'PASS' && !['SUFFICIENT', 'NOT_APPLICABLE'].includes(receipt.validation.state)) {
+    receipt.state = receipt.validation.state === 'FAILED' ? 'FAIL' : receipt.validation.state
+    receipt.diagnostic = receipt.validation.reason || 'Test summary reports failures.'
+  }
   save()
   return receipt
 }
@@ -230,11 +269,12 @@ async function cli() {
     if (receipt.state === 'RUNNING') throw new Error('Cannot clean running evidence')
     fs.rmSync(directory, { recursive: true }); console.log(JSON.stringify({ removed: id })); return
   }
-  if (action !== 'run') throw new Error('Use run [--human] [--timeout-ms N] -- command args; inspect id; clean id')
-  let human = false; let timeoutMs
+  if (action !== 'run') throw new Error('Use run [--human] [--expect-tests] [--timeout-ms N] -- command args; inspect id; clean id')
+  let human = false; let timeoutMs; let expectTests = false
   while (args[0] !== '--') {
     const flag = args.shift()
     if (flag === '--human') human = true
+    else if (flag === '--expect-tests') expectTests = true
     else if (flag === '--timeout-ms') { timeoutMs = Number(args.shift()); if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error('Invalid timeout') }
     else throw new Error('Invalid run option')
   }
@@ -248,7 +288,7 @@ async function cli() {
     if (result.error) console.error(result.error.message)
     return
   }
-  const receipt = await run(executable, parameters, { timeoutMs })
+  const receipt = await run(executable, parameters, { timeoutMs, expectTests })
   console.log(project(receipt))
   process.exitCode = receipt.state === 'PASS' ? 0 : receipt.exitCode || 1
 }
