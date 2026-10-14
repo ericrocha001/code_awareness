@@ -9,6 +9,7 @@ import { categoryLabel, reasonLabel } from './work-orchestration-labels'
 import type { LocalChangeCategory } from '../../../../shared/types/local-change-types'
 import type { OrchestrationAttention, StructuralAlert } from '../../../../shared/types/work-orchestration-attention-types'
 import { StructuralEvidence } from './StructuralEvidence'
+import { OperationalRecommendation } from './OperationalRecommendation'
 
 const label = (w: ObservableWorktree) => w.branch ?? (w.head ? 'Detached HEAD' : 'Sem HEAD')
 const pairLabel = { PATH_OVERLAP: 'Sobreposição de caminhos', NO_PATH_OVERLAP: 'Nenhuma sobreposição de caminhos verificada', INDETERMINATE: 'Indeterminado', STALE: 'Observação obsoleta' }
@@ -200,7 +201,7 @@ export function WorkOrchestrationView({ state, active = true, attention }: { sta
       {attention && <section className="wo-attention" aria-label="Atenção necessária"><h2>Atenção necessária</h2>
         <p>Cobertura {attention.coverage === 'UNAVAILABLE' ? 'indisponível' : attention.coverage === 'PENDING' ? 'pendente' : 'parcial'} · {attention.observed}/{attention.known} worktrees observadas{attention.paused ? ' · reconciliação suspensa' : ` · intervalo mínimo ${Math.ceil(attention.cadenceMs / 1000)} s`}. Ausência de alerta não comprova segurança.</p>
         <p>Escopo seletivo TypeScript/JavaScript: declarações exportadas e ligações relativas diretas resolvidas. Reexport, aliases e escopo não observado permanecem incertos.</p>
-        {attention.alerts.map(alert => <div key={alert.id} className="wo-attention-item"><strong>Possível interferência de contrato{alert.state === 'STALE' ? ' · obsoleta' : ''}</strong><span>{alert.evidence.map(e => e.symbol).join(', ')}</span><button onClick={() => showEvidence(alert)}>Ver evidência</button></div>)}
+        {attention.alerts.map(alert => <div key={alert.id} className="wo-attention-item"><div><strong>Possível interferência de contrato{alert.state === 'STALE' ? ' · obsoleta' : ''}</strong><OperationalRecommendation recommendation={alert.recommendation} provider={overview?.worktrees.find(w => w.worktreeId === alert.provider)?.branch ?? 'worktree do contrato'} consumer={overview?.worktrees.find(w => w.worktreeId === alert.consumer)?.branch ?? 'worktree consumidora'} /></div><button onClick={() => showEvidence(alert)}>Ver evidência</button></div>)}
         {!attention.alerts.length && <p>Nenhum alerta confirmado nesta cobertura.</p>}
         {!!attention.pending.length && <details><summary>{attention.pending.length} worktrees com observação ou investigação pendente</summary><ul className="wo-paths">{attention.pending.map(p => <li key={p.worktreeId}>{overview?.worktrees.find(w => w.worktreeId === p.worktreeId)?.branch ?? p.worktreeId} · {p.reason}</li>)}</ul></details>}
       </section>}

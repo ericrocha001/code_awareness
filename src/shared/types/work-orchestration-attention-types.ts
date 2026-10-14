@@ -1,4 +1,17 @@
+export interface OperationalRecommendation {
+  action: 'REVIEW_CONTRACT_COMPATIBILITY' | 'REVALIDATE_EVIDENCE'
+  reason: 'DIRECT_CONTRACT_CONSUMER' | 'EVIDENCE_NOT_CURRENT'
+  repositoryId: string
+  alertId: string
+  providerGeneration: string
+  consumerGeneration: string
+  providerRevision: string
+  consumerRevision: string
+  symbols: string[]
+  symbolCount: number
+}
 export interface StructuralAlert {
+  repositoryId?: string
   id: string
   category: 'POTENTIAL_STRUCTURAL_INTERFERENCE'
   state: 'CURRENT' | 'STALE'
@@ -10,6 +23,7 @@ export interface StructuralAlert {
   consumerRevision: string
   base: string
   verifiedAt: string
+  recommendation?: OperationalRecommendation
   evidence: Array<{ contractPath: string; consumerPath: string; symbol: string; contractLine: number; consumerLine: number; signature: string; previousSignature: string; binding: 'RESOLVED_DIRECT' }>
 }
 export interface OrchestrationAttention {

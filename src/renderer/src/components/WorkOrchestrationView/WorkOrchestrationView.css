@@ -31,6 +31,10 @@
 .wo-attention h2 { margin:0; font-size:13px; }
 .wo-attention-item { display:flex; gap:12px; align-items:center; padding:8px 0; }
 .wo-attention-item button { margin-left:auto; }
+.wo-attention-item > div { min-width:0; overflow-wrap:anywhere; }
+.wo-attention-item button { flex-shrink:0; }
+.wo-recommendation p { margin:6px 0; line-height:1.5; }
+.wo-recommendation-reason,.wo-recommendation-limit { color:var(--text-secondary); font-size:12px; }
 .wo-structural-evidence { border-bottom:1px solid var(--border); padding-bottom:14px; }
 .wo-timeline-notice { color:var(--text-secondary); font-size:12px; padding:0 24px; }
 .wo-exception { border-left:3px solid var(--color-warning) !important; }

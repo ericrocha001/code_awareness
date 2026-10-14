@@ -11,20 +11,21 @@ import { SelectiveContractDiscovery } from './structural-discovery'
 import { selectWorklineBatch } from './workline-priority'
 import type { CoordinationReference } from '../git-operations/git-coordination-evidence'
 import type { ObservableWorktree } from '../../shared/types/work-orchestration-types'
+import { recommendOperation } from './operational-recommendations'
 
 const roots: string[] = []
 afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await cleanupTempRepo(root) })
 async function fixture() {
   const root = await createTempGitRepo(), parent = mkdtempSync(join(tmpdir(), 'workline-history-')); roots.push(root, parent)
   await gitExec(root, ['branch', '-m', 'technical-reference'])
-  writeFileSync(join(root, 'service.ts'), 'export function service(value: number): number { return value }\n')
-  writeFileSync(join(root, 'consumer.ts'), 'import { service } from "./service"\nexport function consume() { return service(1) }\n')
+  writeFileSync(join(root, 'service.ts'), 'export function service(value: number): number { return value }\nexport function helper(value: number): number { return value }\n')
+  writeFileSync(join(root, 'consumer.ts'), 'import { service, helper } from "./service"\nexport function consume() { return service(1) + helper(1) }\n')
   await stageAll(root); await commit(root, 'base')
   const paths = ['ancestral', 'exclusive', 'local', 'consumer'].map(name => join(parent, name))
   for (let n = 0; n < paths.length; n++) await gitExec(root, ['worktree', 'add', '-b', `w-${n}`, paths[n]])
-  writeFileSync(join(paths[1], 'service.ts'), 'export function service(value: string): string { return value }\n')
+  writeFileSync(join(paths[1], 'service.ts'), 'export function service(value: string): string { return value }\nexport function helper(value: string): string { return value }\n')
   await stageAll(paths[1]); await commit(paths[1], 'exclusive public contract')
-  writeFileSync(join(paths[3], 'consumer.ts'), 'import { service } from "./service"\nexport function consume() { return service(2) }\n')
+  writeFileSync(join(paths[3], 'consumer.ts'), 'import { service, helper } from "./service"\nexport function consume() { return service(2) + helper(2) }\n')
   await gitExec(root, ['commit', '--allow-empty', '-m', 'reference history'])
   const git = new GitService(); let active = true
   const reader = new GitOperationsService(root, git, new GitHubGitTransport(null, git), { repositoryId: 'history', isActive: () => active })
@@ -49,6 +50,15 @@ it('reuses canonical history without new commands and changes a real qualified s
   expect(selected[0].reason).toBe('HISTORICAL_DIVERGENCE_TIE')
   const findings = await f.engine.investigate(1)
   expect(findings).toHaveLength(1); expect(findings[0].consumer).toBe(f.d.worktreeId)
+  const finding = findings[0], alert = { ...finding, id: 'real', repositoryId: 'history', category: 'POTENTIAL_STRUCTURAL_INTERFERENCE' as const, state: 'CURRENT' as const, verifiedAt: new Date().toISOString() }
+  const context = { repositoryId: 'history', available: true, participants: new Map([[finding.provider, { generation: finding.providerGeneration, revision: finding.providerRevision }], [finding.consumer, { generation: finding.consumerGeneration, revision: finding.consumerRevision }]]) }
+  const calls = comparisons.mock.calls.length
+  expect(recommendOperation(alert, context)).toMatchObject({ action: 'REVIEW_CONTRACT_COMPATIBILITY', symbolCount: 2 })
+  expect(recommendOperation(alert, context)!.symbols.sort()).toEqual(['helper', 'service'])
+  expect(recommendOperation({ ...alert, state: 'STALE' }, context)?.action).toBe('REVALIDATE_EVIDENCE')
+  context.participants.set(finding.consumer, { generation: 'reset', revision: finding.consumerRevision })
+  expect(recommendOperation(alert, context)?.action).toBe('REVALIDATE_EVIDENCE')
+  expect(comparisons).toHaveBeenCalledTimes(calls)
 }, 90000)
 it('distinguishes first observation, actual local changes and reference-only changes', async () => {
   const f = await fixture()

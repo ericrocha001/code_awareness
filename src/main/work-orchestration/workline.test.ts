@@ -8,6 +8,25 @@ function driver() {
     observe: vi.fn(async (_id: string, _head: string) => false), investigate: vi.fn(async () => [] as any[]), remove: vi.fn(), invalidate: vi.fn() }
 }
 afterEach(() => { vi.useRealTimers() })
+it('withdraws the decision on local revision and generation drift without reading Git', async () => {
+  vi.useFakeTimers()
+  const data = inventory(3), engine = { ...driver(), observedStates: new Map<string, any>() }
+  for (const r of data.worktrees) engine.observedStates.set(r.worktreeId, { repositoryId: 'repo', generation: 'g', localRevision: 'local', head: r.head })
+  const finding = { provider: '1', consumer: '2', providerGeneration: 'g', consumerGeneration: 'g', providerRevision: 'p1', consumerRevision: 'c1', base: 'base', evidence: [{ contractPath: 's.ts', consumerPath: 'c.ts', symbol: 's', contractLine: 1, consumerLine: 2, signature: 'new', previousSignature: 'old', binding: 'RESOLVED_DIRECT' }] }
+  engine.investigate.mockResolvedValueOnce([finding])
+  const line = new Workline(async () => data, engine as any, vi.fn(), () => 1000)
+  line.start(); await line.runOnce()
+  const calls = engine.observe.mock.calls.length
+  expect(line.snapshot().alerts[0].recommendation?.action).toBe('REVIEW_CONTRACT_COMPATIBILITY')
+  engine.observedStates.get('2').localRevision = 'new'
+  expect(line.snapshot().alerts[0].recommendation?.action).toBe('REVALIDATE_EVIDENCE')
+  engine.observedStates.get('2').localRevision = 'local'; data.worktrees[1].generation = 'reset'
+  expect(line.snapshot().alerts[0].recommendation?.action).toBe('REVALIDATE_EVIDENCE')
+  data.worktrees[1].generation = 'g'; line.pause(true)
+  expect(line.snapshot().alerts[0].recommendation?.action).toBe('REVALIDATE_EVIDENCE')
+  expect(engine.observe).toHaveBeenCalledTimes(calls)
+  line.stop()
+})
 it('budgets each cycle and observes every old worktree without requiring the tab', async () => {
   vi.useFakeTimers()
   const engine = driver(), data = inventory(101)

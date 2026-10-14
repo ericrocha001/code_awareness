@@ -4,9 +4,11 @@ import type { OrchestrationAttention, StructuralAlert } from '../../shared/types
 import type { SelectiveContractDiscovery } from './structural-discovery'
 import { selectWorklineBatch, type WorklineChoice } from './workline-priority'
 import type { CoordinationReference } from '../git-operations/git-coordination-evidence'
+import { recommendOperation } from './operational-recommendations'
 
 export class Workline {
   private readonly alerts = new Map<string, StructuralAlert>()
+  private readonly recommendationSources = new Map<string, { providerRevision: string; consumerRevision: string; referenceHead: string }>()
   private records: ObservableWorktree[] = []
   private readonly observed = new Map<string, number>()
   private readonly attempted = new Map<string, number>()
@@ -33,7 +35,16 @@ export class Workline {
   isCurrent = () => !this.stopped && !this.paused
   selection() { return this.choices.map(choice => ({ worktreeId: choice.record.worktreeId, reason: choice.reason })) }
   snapshot(): OrchestrationAttention {
-    return { repositoryId: this.repositoryId, alerts: [...this.alerts.values()].map(a => ({ ...a, evidence: a.evidence.map(e => ({ ...e })) })), coverage: this.unavailable ? 'UNAVAILABLE' : this.observed.size ? 'PARTIAL' : 'PENDING',
+    const records = new Map(this.records.map(r => [r.worktreeId, r]))
+    const alerts = [...this.alerts.values()].map(a => {
+      const source = this.recommendationSources.get(a.id), participants = new Map<string, { generation: string; revision: string }>()
+      for (const [id, generation, revision, localRevision] of [[a.provider, a.providerGeneration, a.providerRevision, source?.providerRevision], [a.consumer, a.consumerGeneration, a.consumerRevision, source?.consumerRevision]]) {
+        const record = records.get(id!), fact = this.engine.observedStates?.get(id!)
+        if (source?.referenceHead === this.reference?.head && record && record.generation === generation && !record.missing && !record.prunable && fact?.repositoryId === this.repositoryId && fact.generation === generation && fact.localRevision === localRevision) participants.set(id!, { generation: generation!, revision: revision! })
+      }
+      return { ...a, evidence: a.evidence.map(e => ({ ...e })), recommendation: recommendOperation(a, { repositoryId: this.repositoryId, available: !this.paused && !this.stopped && !this.unavailable && this.observed.size > 0, participants }) }
+    })
+    return { repositoryId: this.repositoryId, alerts, coverage: this.unavailable ? 'UNAVAILABLE' : this.observed.size ? 'PARTIAL' : 'PENDING',
       paused: this.paused, known: this.records.length, observed: this.observed.size,
       pending: this.records.filter(r => !this.observed.has(r.worktreeId) || this.engine.pending.has(r.worktreeId)).map(r => ({ worktreeId: r.worktreeId, reason: this.engine.pending.get(r.worktreeId) ?? 'NOT_OBSERVED' })),
       checkedAt: this.checkedAt, cadenceMs: Math.max(this.cadenceMs, this.cycleMs * 2), inventoryCadenceMs: this.inventoryCadenceMs, cycleMs: this.cycleMs, budget: this.budget, stats: { ...this.engine.stats } }
@@ -96,8 +107,9 @@ export class Workline {
       for (const finding of findings) {
         const id = createHash('sha256').update(JSON.stringify([finding.provider, finding.providerGeneration, finding.consumer, finding.consumerGeneration, finding.evidence.map(e => [e.contractPath, e.consumerPath, e.symbol])])).digest('hex')
         if (this.alerts.size >= this.budget.alerts && !this.alerts.has(id)) { this.engine.pending.set(finding.consumer, 'ALERT_BUDGET'); continue }
-        this.alerts.set(id, { ...finding, id, category: 'POTENTIAL_STRUCTURAL_INTERFERENCE', state: 'CURRENT', verifiedAt: new Date(this.now()).toISOString(),
+        this.alerts.set(id, { ...finding, repositoryId: this.repositoryId!, id, category: 'POTENTIAL_STRUCTURAL_INTERFERENCE', state: 'CURRENT', verifiedAt: new Date(this.now()).toISOString(),
           evidence: finding.evidence.map(e => ({ ...e, signature: e.signature.length > 200 ? e.signature.slice(0, 199) + '…' : e.signature, previousSignature: e.previousSignature.length > 200 ? e.previousSignature.slice(0, 199) + '…' : e.previousSignature })) })
+        this.recommendationSources.set(id, { providerRevision: this.engine.observedStates?.get(finding.provider)?.localRevision ?? '', consumerRevision: this.engine.observedStates?.get(finding.consumer)?.localRevision ?? '', referenceHead: this.reference?.head ?? '' })
       }
       this.unavailable = false; this.checkedAt = new Date(this.now()).toISOString()
     } catch { if (current()) { this.unavailable = true; for (const alert of this.alerts.values()) alert.state = 'STALE' } }
