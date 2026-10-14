@@ -113,6 +113,34 @@ export class GitService implements FileListingPort {
       (await this.runGit(['rev-list', '--count', `${descendant}..${ancestor}`], root)).trim() === '0'
   }
 
+  async getReachableCommitPage(root: string, head: string, reference: string | null, offset: number, limit: number): Promise<string[]> {
+    if (![head, ...(reference ? [reference] : [])].every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha)) ||
+      !Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 101) throw new Error('INVALID_ARGUMENT')
+    const args = ['rev-list', '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, `${head}^{commit}`, ...(reference ? ['--not', `${reference}^{commit}`] : []), '--']
+    return (await this.runGit(args, root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })).trim().split('\n').filter(Boolean)
+  }
+
+  async getCommitTopologyRevision(root: string): Promise<string> {
+    const common = await this.getCommonDirectory(root)
+    const files = ['shallow', 'info/grafts'].map(name => {
+      const file = join(common, name)
+      if (!existsSync(file)) return ''
+      if (statSync(file).size > 65536) throw new Error('COMMIT_GRAPH_UNAVAILABLE')
+      return readFileSync(file, 'utf8')
+    })
+    const replacements = await this.runGit(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/replace/'], root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })
+    if (files.some(value => value.trim()) || replacements.trim()) throw new Error('COMMIT_GRAPH_UNAVAILABLE')
+    return createHash('sha256').update(JSON.stringify([files, replacements])).digest('hex')
+  }
+
+  async isCommitReachable(root: string, commit: string, head: string): Promise<boolean> {
+    if (![commit, head].every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    return (await this.runGit(['merge-base', commit, head], root, { allowExitOne: true, maxOutputBytes: 256, env: this.localReadEnvironment() })).trim() === commit
+  }
+  private localReadEnvironment(): NodeJS.ProcessEnv {
+    return { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }
+  }
+
   async mergeBase(root: string, source: string, target: string): Promise<string> {
     return (await this.runGit(['merge-base', source, target], root)).trim()
   }
@@ -520,8 +548,8 @@ export class GitService implements FileListingPort {
     await this.runGit(['check-ref-format', '--branch', branch], dirPath)
   }
 
-  async resolveCommit(dirPath: string, ref: string): Promise<string> {
-    return (await this.runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], dirPath)).trim()
+  async resolveCommit(dirPath: string, ref: string, options?: { noLazyFetch: true }): Promise<string> {
+    return (await this.runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], dirPath, options ? { env: this.localReadEnvironment() } : undefined)).trim()
   }
 
   async getOperationsDiff(dirPath: string, paths: string[], mode: 'WORKTREE' | 'STAGED' | 'BETWEEN_REFS', base?: string, head?: string, maxOutputBytes?: number): Promise<string> {

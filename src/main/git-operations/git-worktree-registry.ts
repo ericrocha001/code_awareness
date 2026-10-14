@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { existsSync, realpathSync, statSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import type { GitService } from '../core/git-service'
 import type { WorktreeCreationEstimate } from '../../shared/types/worktree-creation-types'
 import { estimateWorktreeCreation } from './worktree-creation'
@@ -40,20 +40,47 @@ export class GitWorktreeRegistry {
     return common
   }
 
-  async discover(): Promise<{ repositoryId: string; worktrees: WorktreeRecord[] }> {
+  async discover(options?: { reuseValidatedDirectories: true }): Promise<{ repositoryId: string; worktrees: WorktreeRecord[] }> {
     const common = await this.commonDirectory()
     const raw = await this.git.listWorktreeRecords(this.root)
     const groups = raw.split('\0\0').filter(Boolean)
     const worktrees: WorktreeRecord[] = []
     for (let offset = 0; offset < groups.length; offset += 8) {
-      const batch = await Promise.all(groups.slice(offset, offset + 8).map(group => this.readRecord(group, common)))
+      const batch = await Promise.all(groups.slice(offset, offset + 8).map(group => this.readRecord(group, common, options?.reuseValidatedDirectories)))
       worktrees.push(...batch)
     }
     if (!this.identity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
     return { repositoryId: this.identity.repositoryId, worktrees }
   }
 
-  private async readRecord(group: string, common: string): Promise<WorktreeRecord> {
+  private validatedDirectories(physical: string, path: string, common: string): { common: string; admin: string } | null {
+    if (process.env.GIT_DIR || process.env.GIT_COMMON_DIR || process.env.GIT_WORK_TREE) return null
+    const prior = [...this.observed.values()].reverse().find(value => value.physical === physical && value.record.path === resolve(path) && value.common === common)
+    if (!prior) return null
+    try {
+      const pointer = join(physical, '.git')
+      let admin: string
+      if (statSync(pointer).isDirectory()) admin = realpathSync(pointer)
+      else {
+        if (statSync(pointer).size > 65536) return null
+        const match = /^gitdir: ([^\r\n]+)\r?\n?$/.exec(readFileSync(pointer, 'utf8'))
+        if (!match) return null
+        admin = realpathSync(resolve(physical, match[1]))
+      }
+      if (admin !== prior.admin) return null
+      const commonPointer = join(admin, 'commondir')
+      let actualCommon = admin
+      if (existsSync(commonPointer)) {
+        if (statSync(commonPointer).size > 65536) return null
+        const value = readFileSync(commonPointer, 'utf8').replace(/\r?\n$/, '')
+        if (!value || /[\r\n]/.test(value)) return null
+        actualCommon = realpathSync(resolve(admin, value))
+      }
+      return actualCommon === common ? { common, admin } : null
+    } catch { return null }
+  }
+
+  private async readRecord(group: string, common: string, reuseValidatedDirectories = false): Promise<WorktreeRecord> {
     const fields = group.split('\0').filter(Boolean)
     const field = (key: string) => fields.find(value => value.startsWith(key + ' '))?.slice(key.length + 1)
     const path = field('worktree')
@@ -63,7 +90,7 @@ export class GitWorktreeRegistry {
     let creation: WorktreeCreationEstimate = { at: null, quality: 'UNKNOWN', source: null }
     if (!missing) {
       physical = realpathSync(path)
-      const { common: worktreeCommon, admin: worktreeAdmin } = await this.git.getRepositoryDirectories(physical)
+      const { common: worktreeCommon, admin: worktreeAdmin } = reuseValidatedDirectories && this.validatedDirectories(physical, path, common) || await this.git.getRepositoryDirectories(physical)
       if (realpathSync(worktreeCommon) !== common) fail('WORKTREE_IDENTITY_MISMATCH')
       admin = realpathSync(worktreeAdmin)
       const stats = statSync(admin, { bigint: true })

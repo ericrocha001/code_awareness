@@ -4,7 +4,7 @@ import type { WorktreeDocumentRequest } from '../../shared/types/worktree-docume
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { ObservableWorktree, OrchestrationOverview, WorktreeObservation, OrchestrationRequest, LocalChangesPage } from '../../shared/types/work-orchestration-types'
 
-export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'> & Partial<Pick<GitOperationsService, 'getWorktreeChanges' | 'getCoordinationIdentity'>>
+export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'> & Partial<Pick<GitOperationsService, 'getWorktreeChanges' | 'getCoordinationIdentity' | 'getWorktreeCommits' | 'getCommitWorktrees'>>
 type Observation = Awaited<ReturnType<OrchestrationGitReader['getCoordinationSnapshot']>>
 const reason = (error: unknown) => error instanceof Error ? error.message : 'GIT_READ_UNAVAILABLE'
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')

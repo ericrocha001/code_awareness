@@ -9,6 +9,8 @@ import { GitOperationReceipts, type LegacyGitReceiptResult } from './git-operati
 import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import { GitWorktreeRegistry, type WorktreeIdentity, type WorktreeRecord } from './git-worktree-registry'
 import type { CoordinationHistory } from './git-coordination-evidence'
+import { GitCommitCorrelation } from './git-commit-correlation'
+import type { GitWorktreeCommitsQuery, GitCommitWorktreesQuery } from '../../shared/types/git-commit-correlation-types'
 import { assertNoWorktreeGrant, GitWorktreeOwnership, ownershipDigest, withWorktreeTransaction, type WorktreeApprovalPort, type WorktreeIntent, type WorktreeObservation, type WorktreeScope, type WorktreeSnapshot } from './git-worktree-ownership'
 import { GitWorktreeLifecycle } from './git-worktree-lifecycle'
 import { GitWorktreeIntegration, type WorktreeIntegrationPreview } from './git-worktree-integration'
@@ -118,6 +120,8 @@ export class GitOperationsService {
   readonly ownership: GitWorktreeOwnership | undefined
   private readonly worktreeRepositoryId: string | undefined
   private readonly coordinationIdentity: WorktreeIdentity | undefined
+  private commitCorrelation: GitCommitCorrelation | undefined
+  private pendingCorrelation: Promise<unknown> = Promise.resolve()
   constructor(private readonly repoRoot: string, private readonly git: GitService, private readonly transport: GitRemoteTransport, identity?: WorktreeIdentity, private readonly readOnlyWorktree = false, approval?: WorktreeApprovalPort, private readonly transactionAlreadyHeld = false, private readonly worktreeValidation?: WorktreeValidationPort) {
     this.worktreeRepositoryId = identity?.repositoryId
     this.coordinationIdentity = identity
@@ -426,6 +430,24 @@ export class GitOperationsService {
   async getCoordinationIdentity(worktreeId: string) {
     if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     return { repositoryId: this.worktreeRepositoryId!, record: await this.worktrees!.revalidateSelection(worktreeId) }
+  }
+
+  private correlation() {
+    if (!this.worktrees || !this.coordinationIdentity) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    return this.commitCorrelation ??= new GitCommitCorrelation(this.repoRoot, this.git, this.worktrees!, this.coordinationIdentity!)
+  }
+  private withCorrelationRead<T>(read: (provider: GitCommitCorrelation) => Promise<T>): Promise<T> {
+    const result = this.pendingCorrelation.then(() => read(this.correlation())).catch(error => fail(error instanceof Error ? error.message : 'GIT_READ_UNAVAILABLE'))
+    this.pendingCorrelation = result.then(() => undefined, () => undefined)
+    return result
+  }
+  getWorktreeCommits(query: GitWorktreeCommitsQuery) {
+    const request = { ...query }
+    return this.withCorrelationRead(provider => provider.worktreeCommits(request))
+  }
+  getCommitWorktrees(query: GitCommitWorktreesQuery) {
+    const request = { ...query }
+    return this.withCorrelationRead(provider => provider.commitWorktrees(request))
   }
 
   async getCoordinationCommitPaths(leftHead: string, rightHead: string): Promise<{ base: string; left: string[]; right: string[]; history?: CoordinationHistory }> {

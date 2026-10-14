@@ -8,6 +8,7 @@ import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../shared/types/work-orchestration-types'
 import type { OrchestrationAttentionChange } from '../shared/types/work-orchestration-attention-types'
+import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../shared/types/git-commit-correlation-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../shared/types/git-management-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
 import type { ContinuumGraphRequest, ContinuumGraph } from '../shared/types/continuum-graph-types'
@@ -27,6 +28,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     ipcRenderer.on('work-orchestration:changed', listener)
     return () => { ipcRenderer.removeListener('work-orchestration:changed', listener) }
   },
+  getGitCommitCorrelation: (request: GitCommitCorrelationRequest): Promise<GitManagementResult<GitCommitCorrelationPage>> => ipcRenderer.invoke('git-operations:correlation', request),
   getGitManagementHistory: (request: GitHistoryRequest): Promise<GitManagementResult<GitHistoryPage>> => ipcRenderer.invoke('git-management:history', request),
   getGitManagementOverview: (context: GitManagementContext): Promise<GitManagementResult<GitOverview>> => ipcRenderer.invoke('git-management:overview', context),
   getGitManagementCommit: (request: GitCommitRequest): Promise<GitManagementResult<GitCommitDetail>> => ipcRenderer.invoke('git-management:commit-detail', request),
