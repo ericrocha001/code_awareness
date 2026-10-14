@@ -53,3 +53,27 @@ it('honors the time budget and leaves explicit pending coverage on failed reads'
   expect(line.snapshot().pending.some(p => p.reason === 'GIT_STATE_CHANGED')).toBe(true)
   line.stop()
 })
+
+it('rejects an unavailable reference after inventory refresh instead of reusing its old HEAD', async () => {
+  vi.useFakeTimers()
+  const data = inventory(3), engine = { ...driver(), observedStates: new Map<string, any>() }
+  let now = 1000
+  engine.observe.mockImplementation(async id => { if (id === '0') engine.observedStates.set(id, { generation: 'g', head: data.worktrees[0].head }); return false })
+  const line = new Workline(async () => data, engine as any, vi.fn(), () => now)
+  line.start(); await line.runOnce()
+  const calls = engine.observe.mock.calls.length
+  data.worktrees[0].head = null; now += line.inventoryCadenceMs
+  await line.runOnce()
+  expect(engine.observe).toHaveBeenCalledTimes(calls)
+  expect(line.snapshot().coverage).toBe('UNAVAILABLE')
+  line.stop()
+})
+
+it('restarts with a fresh inventory and no previous observation claims', async () => {
+  vi.useFakeTimers()
+  const engine = driver(), load = vi.fn(async () => inventory(3)), line = new Workline(load, engine as any, vi.fn(), () => 1000)
+  line.start(); await line.runOnce(); line.stop(); line.start()
+  expect(line.snapshot()).toMatchObject({ known: 0, observed: 0, coverage: 'PENDING' })
+  await line.runOnce(); expect(load).toHaveBeenCalledTimes(2); expect(engine.invalidate).toHaveBeenCalled()
+  line.stop()
+})

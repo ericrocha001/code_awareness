@@ -8,6 +8,7 @@ import type { GitRemoteTransport } from '../core/git-remote-transport'
 import { GitOperationReceipts, type LegacyGitReceiptResult } from './git-operation-receipts'
 import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import { GitWorktreeRegistry, type WorktreeIdentity, type WorktreeRecord } from './git-worktree-registry'
+import type { CoordinationHistory } from './git-coordination-evidence'
 import { assertNoWorktreeGrant, GitWorktreeOwnership, ownershipDigest, withWorktreeTransaction, type WorktreeApprovalPort, type WorktreeIntent, type WorktreeObservation, type WorktreeScope, type WorktreeSnapshot } from './git-worktree-ownership'
 import { GitWorktreeLifecycle } from './git-worktree-lifecycle'
 import { GitWorktreeIntegration, type WorktreeIntegrationPreview } from './git-worktree-integration'
@@ -116,8 +117,10 @@ export class GitOperationsService {
   readonly worktrees: GitWorktreeRegistry | undefined
   readonly ownership: GitWorktreeOwnership | undefined
   private readonly worktreeRepositoryId: string | undefined
+  private readonly coordinationIdentity: WorktreeIdentity | undefined
   constructor(private readonly repoRoot: string, private readonly git: GitService, private readonly transport: GitRemoteTransport, identity?: WorktreeIdentity, private readonly readOnlyWorktree = false, approval?: WorktreeApprovalPort, private readonly transactionAlreadyHeld = false, private readonly worktreeValidation?: WorktreeValidationPort) {
     this.worktreeRepositoryId = identity?.repositoryId
+    this.coordinationIdentity = identity
     if (identity) this.worktrees = new GitWorktreeRegistry(repoRoot, git, identity)
     if (identity && approval) this.ownership = new GitWorktreeOwnership(async id => {
       const { record, service } = await this.selectWorktree(id)
@@ -425,7 +428,8 @@ export class GitOperationsService {
     return { repositoryId: this.worktreeRepositoryId!, record: await this.worktrees!.revalidateSelection(worktreeId) }
   }
 
-  async getCoordinationCommitPaths(leftHead: string, rightHead: string) {
+  async getCoordinationCommitPaths(leftHead: string, rightHead: string): Promise<{ base: string; left: string[]; right: string[]; history?: CoordinationHistory }> {
+    if (this.coordinationIdentity && !this.coordinationIdentity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
     if (![leftHead, rightHead].every(value => /^[a-f0-9]{40,64}$/.test(value))) fail('INVALID_ARGUMENT')
     let base: string
     try { base = await this.git.mergeBase(this.repoRoot, leftHead, rightHead) }
@@ -435,7 +439,9 @@ export class GitOperationsService {
       this.git.getChangedPathsBetweenCommits(this.repoRoot, base, leftHead),
       this.git.getChangedPathsBetweenCommits(this.repoRoot, base, rightHead)
     ])
-    return { base, left, right }
+    if (this.coordinationIdentity && !this.coordinationIdentity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
+    return { base, left, right, history: { repositoryId: this.worktreeRepositoryId, referenceHead: leftHead, head: rightHead, base,
+      relation: base === rightHead ? 'HEAD_INCLUDED' : 'EXCLUSIVE_COMMITS', provenance: 'EXACT_MERGE_BASE' } }
   }
 
   async selectWorktree(worktreeId: string) {

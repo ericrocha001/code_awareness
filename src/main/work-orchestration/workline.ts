@@ -2,12 +2,18 @@ import { createHash } from 'node:crypto'
 import type { OrchestrationOverview, ObservableWorktree } from '../../shared/types/work-orchestration-types'
 import type { OrchestrationAttention, StructuralAlert } from '../../shared/types/work-orchestration-attention-types'
 import type { SelectiveContractDiscovery } from './structural-discovery'
+import { selectWorklineBatch, type WorklineChoice } from './workline-priority'
+import type { CoordinationReference } from '../git-operations/git-coordination-evidence'
 
 export class Workline {
   private readonly alerts = new Map<string, StructuralAlert>()
   private records: ObservableWorktree[] = []
   private readonly observed = new Map<string, number>()
   private readonly attempted = new Map<string, number>()
+  private readonly attemptedRound = new Map<string, number>()
+  private round = 0
+  private choices: WorklineChoice[] = []
+  private reference: CoordinationReference | null = null
   private timer: ReturnType<typeof setTimeout> | null = null
   private epoch = 0
   private running = false
@@ -25,14 +31,18 @@ export class Workline {
     private readonly changed: (state: OrchestrationAttention) => void, private readonly now: () => number = Date.now) {}
 
   isCurrent = () => !this.stopped && !this.paused
+  selection() { return this.choices.map(choice => ({ worktreeId: choice.record.worktreeId, reason: choice.reason })) }
   snapshot(): OrchestrationAttention {
     return { repositoryId: this.repositoryId, alerts: [...this.alerts.values()].map(a => ({ ...a, evidence: a.evidence.map(e => ({ ...e })) })), coverage: this.unavailable ? 'UNAVAILABLE' : this.observed.size ? 'PARTIAL' : 'PENDING',
       paused: this.paused, known: this.records.length, observed: this.observed.size,
       pending: this.records.filter(r => !this.observed.has(r.worktreeId) || this.engine.pending.has(r.worktreeId)).map(r => ({ worktreeId: r.worktreeId, reason: this.engine.pending.get(r.worktreeId) ?? 'NOT_OBSERVED' })),
       checkedAt: this.checkedAt, cadenceMs: Math.max(this.cadenceMs, this.cycleMs * 2), inventoryCadenceMs: this.inventoryCadenceMs, cycleMs: this.cycleMs, budget: this.budget, stats: { ...this.engine.stats } }
   }
-  start() { this.stopped = false; this.schedule(1000) }
-  stop() { this.stopped = true; this.epoch++; if (this.timer) clearTimeout(this.timer); this.timer = null }
+  start() {
+    if (this.stopped) { this.records = []; this.reference = null; this.observed.clear(); this.attempted.clear(); this.attemptedRound.clear(); this.choices = [] }
+    this.stopped = false; this.schedule(1000)
+  }
+  stop() { this.stopped = true; this.epoch++; this.engine.invalidate(); for (const alert of this.alerts.values()) alert.state = 'STALE'; if (this.timer) clearTimeout(this.timer); this.timer = null }
   pause(value: boolean) {
     this.paused = value; this.epoch++
     if (this.timer) clearTimeout(this.timer); this.timer = null
@@ -53,26 +63,31 @@ export class Workline {
         const inventory = await this.inventory()
         if (!current()) return this.snapshot()
         this.repositoryId = inventory.repositoryId; this.inventoryAt = this.now(); this.records = inventory.worktrees
+        const reference = this.records.find(r => r.reference)
+        this.reference = reference?.head ? { repositoryId: inventory.repositoryId, worktreeId: reference.worktreeId, generation: reference.generation, head: reference.head } : null
         const ids = new Set(this.records.map(r => r.worktreeId))
-        for (const id of new Set([...this.observed.keys(), ...this.engine.captures.keys()])) if (!ids.has(id)) { this.observed.delete(id); this.attempted.delete(id); this.engine.remove(id); this.stale(id) }
+        for (const id of new Set([...this.observed.keys(), ...this.engine.captures.keys()])) if (!ids.has(id)) { this.observed.delete(id); this.attempted.delete(id); this.attemptedRound.delete(id); this.engine.remove(id); this.stale(id) }
       }
-      const head = this.records.find(r => r.reference)?.head
+      const reference = this.reference, head = reference?.head
       if (!head) throw new Error('HEAD_UNAVAILABLE')
       const observationStarted = this.now()
       const eligible = this.records.filter(r => !r.missing && !r.prunable)
-      const fair = [...eligible].sort((a, b) => (this.attempted.get(a.worktreeId) ?? -1) - (this.attempted.get(b.worktreeId) ?? -1) || a.worktreeId.localeCompare(b.worktreeId))
-      const score = (r: ObservableWorktree) => this.engine.pending.get(r.worktreeId) === 'PAIR_BUDGET' ? Number.MAX_SAFE_INTEGER :
-        !this.observed.has(r.worktreeId) && r.creation?.quality === 'ESTIMATED' ? Date.parse(r.creation.at ?? '') || 0 : 0
-      const priority = [...eligible].filter(r => score(r) > 0).sort((a, b) => score(b) - score(a))[0]
-      const batch = [...new Map([...(priority ? [priority] : []), ...fair].map(r => [r.worktreeId, r])).values()].slice(0, this.budget.observations)
-      for (const record of batch) {
+      const structural = new Set([...this.engine.pending].filter(([, reason]) => reason === 'PAIR_BUDGET').map(([id]) => id))
+      const eligibleIds = new Set(eligible.map(r => r.worktreeId))
+      for (const alert of this.alerts.values()) if (alert.state === 'STALE' && eligibleIds.has(alert.provider) && eligibleIds.has(alert.consumer)) { structural.add(alert.provider); structural.add(alert.consumer) }
+      this.choices = selectWorklineBatch(eligible, { reference: reference!, facts: this.engine.observedStates ?? new Map(), attempted: this.attempted, attemptedRound: this.attemptedRound,
+        observed: this.observed, structural, pending: this.engine.pending, round: ++this.round, now: this.now(), inventoryAt: this.inventoryAt, cadenceMs: this.cadenceMs, budget: this.budget.observations })
+      for (const { record } of this.choices) {
         if (!current() || this.now() - observationStarted >= this.budget.timeMs) break
         this.attempted.set(record.worktreeId, this.now())
+        this.attemptedRound.set(record.worktreeId, this.round)
         try {
-          const changed = await this.engine.observe(record.worktreeId, head)
+          const changed = await this.engine.observe(record.worktreeId, head, reference!)
           if (!current()) return this.snapshot()
           if (changed) this.stale(record.worktreeId)
           this.observed.set(record.worktreeId, this.now())
+          const local = this.engine.observedStates?.get(record.worktreeId)
+          if (record.reference && local?.generation === record.generation) this.reference = { ...reference!, head: local.head }
         } catch (error) { if (!current()) return this.snapshot(); this.engine.remove(record.worktreeId); this.engine.pending.set(record.worktreeId, error instanceof Error ? error.message : 'UNAVAILABLE'); this.stale(record.worktreeId) }
       }
       if (!current()) return this.snapshot()
