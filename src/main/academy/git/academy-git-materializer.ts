@@ -4,7 +4,7 @@ import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { AcademyPackage } from '../../../shared/types/academy-types'
 import { AcademyError, normalizeAcademyPackage, parseSkillMetadata } from '../academy-package'
-import { removeSkillDirectory, writeSkillDirectory } from '../academy-filesystem'
+import { assertAcademyPathHasNoLinks, listSkillFilesWithoutLinks, removeSkillDirectory, writeSkillDirectory } from '../academy-filesystem'
 
 export interface AcademyGitSnapshotEntry {
   skillId: string
@@ -12,6 +12,15 @@ export interface AcademyGitSnapshotEntry {
   version: number
   packageHash: string
   package: AcademyPackage
+}
+
+export function assertPublicationPaths(root: string, paths: string[]): void {
+  for (const path of paths) {
+    try { assertAcademyPathHasNoLinks(join(root, path)) } catch (error) {
+      if ((error as AcademyError).code === 'SYMLINK_NOT_ALLOWED') throw new Error('PUBLICATION_SYMLINK_NOT_ALLOWED')
+      throw error
+    }
+  }
 }
 
 export function computeGitSnapshotHash(entries: Array<Omit<AcademyGitSnapshotEntry, 'package'>>): string {
@@ -52,6 +61,8 @@ export class AcademyGitMaterializer {
     removed: string[]
   }> {
     const skillsDir = join(repoRoot, 'skills')
+    validateGitSnapshot(entries)
+    listSkillFilesWithoutLinks(skillsDir)
     const activeNames = new Set(entries.map((e) => e.name))
     const existingDirs = existsSync(skillsDir)
       ? (await readdir(skillsDir, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name)

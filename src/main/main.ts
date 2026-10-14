@@ -324,7 +324,7 @@ app.whenReady().then(async () => {
     academyGitRepositoryPort,
     academyService,
     academyPluginProjection,
-    { packageRevisions: academyService.packageRevisions }
+    { packageRevisions: academyService.packageRevisions, publicationRoot: join(app.getPath('userData'), 'academy', 'github-publication') }
   )
   academyService.initializeGitSync(academyGitSyncService)
   registerAcademyHandlers(academyService)

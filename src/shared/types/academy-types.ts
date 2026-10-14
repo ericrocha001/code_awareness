@@ -289,6 +289,7 @@ export interface AcademyGitProfile {
 }
 
 export interface AcademyGitStatusProjection {
+  publication?: AcademyGitPublicationState | null
   profile: AcademyGitProfile | null
   repository: {
     id: string
@@ -302,4 +303,24 @@ export interface AcademyGitStatusProjection {
   lastSyncAt: string | null
   lastCommitSha: string | null
   lastError: string | null
+}
+
+export interface AcademyGitPublicationState {
+  destinationKey: string
+  checkoutPath: string
+  baselineTree: string | null
+  desiredRevision: string | null
+  desiredTree: string | null
+  localHead: string | null
+  remoteHead: string | null
+  verifiedAt: string | null
+  operationId: string | null
+  pendingCommit: string | null
+  operationTree?: string | null
+  authorizedRemoteHead?: string | null
+  authorizedDesiredTree?: string | null
+  legacyPendingHead: string | null
+  migrationComplete: boolean
+  conflictPaths: string[]
+  phase: 'RECONCILING' | 'CONFIRMED' | 'PUSH_PENDING' | 'REMOTE_UNAVAILABLE' | 'CONFLICT' | 'ERROR'
 }

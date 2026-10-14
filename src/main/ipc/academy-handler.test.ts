@@ -8,6 +8,17 @@ import { registerAcademyHandlers } from './academy-handler'
 
 beforeEach(() => handle.mockClear())
 
+it('routes conflict resolution with observation preconditions and rejects malformed identities', async () => {
+  const resolveManagedConflict = vi.fn(async () => ({ syncState: 'REMOTE_DIVERGED' }))
+  registerAcademyHandlers({ gitSync: { resolveManagedConflict } } as any)
+  const handlers = new Map(handle.mock.calls.map(([channel, handler]) => [channel, handler]))
+  const resolve = handlers.get('academy:git-resolve-conflict')!
+  expect(await resolve({}, 'a'.repeat(40), 'tree')).toEqual({ syncState: 'REMOTE_DIVERGED' })
+  expect(resolveManagedConflict).toHaveBeenCalledWith('a'.repeat(40), 'tree')
+  await expect(resolve({}, 'invalid', 'tree')).rejects.toThrow('INVALID_ARGUMENT')
+  expect(resolveManagedConflict).toHaveBeenCalledTimes(1)
+})
+
 it('registers the bounded Academy IPC surface and stamps UI origin server-side', async () => {
   const service = {
     snapshot: vi.fn(), get: vi.fn(), history: vi.fn(), create: vi.fn(async (value) => value), update: vi.fn(async (value) => value),

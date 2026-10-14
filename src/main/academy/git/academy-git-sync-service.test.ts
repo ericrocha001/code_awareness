@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -6,549 +6,268 @@ import { AcademyStore } from '../academy-store'
 import { AcademyGitMaterializer } from './academy-git-materializer'
 import { AcademyGitSyncService } from './academy-git-sync-service'
 import { AcademyPluginRepositoryProjection } from './academy-plugin-repository-projection'
-import type { GitRemoteTransport, AcademyGitRepositoryPort } from './academy-git-sync-service'
-import type { RepositoryRecord } from '../../../shared/types/repository-catalog-types'
+import type { GitRemoteTransport } from './academy-git-sync-service'
 import { GitService } from '../../core/git-service'
-import { createTempGitRepo, cleanupTempRepo } from '../../core/git-test-helpers'
+import { gitExec, writeFile } from '../../core/git-test-helpers'
+import type { RepositoryRecord } from '../../../shared/types/repository-catalog-types'
 
 const roots: string[] = []
-const root = () => {
-  const value = mkdtempSync(join(tmpdir(), 'academy-sync-svc-'))
-  roots.push(value)
-  return value
+const stores: AcademyStore[] = []
+afterEach(() => { vi.restoreAllMocks(); for (const store of stores.splice(0)) store.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+const pkg = (text = 'canonical') => ({ skillMd: `---\nname: alpha\ndescription: Test skill\n---\n${text}\n`, artifacts: {} })
+
+async function fixture() {
+  const root = mkdtempSync(join(tmpdir(), 'academy-github-v2-')); roots.push(root)
+  const remote = join(root, 'remote.git')
+  await gitExec(root, ['init', '--bare', remote])
+  const human = join(root, 'human')
+  await gitExec(root, ['clone', remote, human])
+  await gitExec(human, ['switch', '-c', 'main'])
+  await gitExec(human, ['config', 'user.name', 'Test'])
+  await gitExec(human, ['config', 'user.email', 'test@example.com'])
+  const databasePath = join(root, 'data', 'academy.db')
+  let store = new AcademyStore(databasePath); stores.push(store)
+  const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+  writeFile(human, 'skills/alpha/SKILL.md', pkg().skillMd)
+  writeFile(human, 'README.md', 'human documentation')
+  await gitExec(human, ['add', '.']); await gitExec(human, ['commit', '-m', 'baseline'])
+  await gitExec(human, ['push', '-u', 'origin', 'main'])
+  const external = join(root, 'external')
+  await gitExec(root, ['clone', '--branch', 'main', remote, external])
+  await gitExec(external, ['config', 'user.name', 'External'])
+  await gitExec(external, ['config', 'user.email', 'external@example.com'])
+  const git = new GitService()
+  const transport: GitRemoteTransport = {
+    fetch: (path, origin) => git.fetchRemote(path, origin),
+    readRemoteHead: (path, origin, ref) => git.readRemoteHead(path, origin, ref),
+    push: (path, branch, origin = 'origin', head) => git.push(path, origin, branch, head)
+  }
+  const record = { id: 'destination', name: 'Academy', status: 'ACTIVE',
+    localCheckout: { path: human, availability: 'AVAILABLE', gitState: 'GIT' },
+    github: { repositoryId: 'github-id', name: 'Academy', fullName: 'test/academy', ownerId: 'owner-id', ownerLogin: 'test', visibility: 'PRIVATE', cloneUrl: remote, htmlUrl: 'https://github.com/test/academy', accessState: 'AVAILABLE', lastSeenAt: new Date().toISOString() },
+    createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as RepositoryRecord
+  const port = { resolveRepository: () => record, findByGitHubId: () => record, listEligibleRepositories: () => [record] }
+  const service = () => new AcademyGitSyncService(store, new AcademyGitMaterializer(), git, transport, port)
+  const sync = service()
+  const bound = await sync.bindRepository(record.id)
+  expect(bound.syncState, bound.lastError ?? '').toBe('SYNCED')
+  const update = (text: string) => store.update({ skillId: skill.id, expectedVersion: store.get(skill.id).currentVersion, package: pkg(text), scope: 'GLOBAL', origin: 'UI' })
+  const externalCommit = async (path: string, content: string) => {
+    writeFile(external, path, content); await gitExec(external, ['add', '.']); await gitExec(external, ['commit', '-m', path]); await gitExec(external, ['push', 'origin', 'main'])
+    return git.resolveCommit(external, 'HEAD')
+  }
+  const restart = () => {
+    stores.splice(stores.indexOf(store), 1); store.close()
+    store = new AcademyStore(databasePath); stores.push(store)
+    return service()
+  }
+  return { root, human, external, remote, get store() { return store }, skill, git, transport, record, port, sync, service, restart, update, externalCommit }
 }
 
-afterEach(async () => {
-  for (const dir of roots.splice(0)) {
-    try { rmSync(dir, { recursive: true, force: true }) } catch {}
-  }
-})
-
-describe('AcademyGitSyncService', () => {
-  it('coordinates bind -> materialize -> commit -> push -> SYNCED', async () => {
-    const dataDir = root()
-    const store = new AcademyStore(join(dataDir, 'academy.db'))
-    const repoPath = await createTempGitRepo()
-    roots.push(repoPath)
-
-    // Create initial commit in repo
-    const git = new GitService()
-    writeFileSync(join(repoPath, 'README.md'), '# Initial')
-    await git.stagePaths(repoPath, ['README.md'])
-    await git.commit(repoPath, 'initial repo commit')
-
-    // Create a GLOBAL + ACTIVE skill in Academy
-    store.create({
-      package: {
-        skillMd: '---\nname: my-skill\ndescription: A test skill\n---\n# My Skill Content\n',
-        artifacts: {}
-      },
-      scope: 'GLOBAL',
-      origin: 'UI'
+describe('isolated Academy GitHub reconciliation', () => {
+  it.each(['checkout', 'projection'])('rejects an unsafe Skill junction in the %s without commit, push or canonical mutation', async (area) => {
+    const f = await fixture()
+    f.update('security regression')
+    const state = f.sync.getStatus().publication!
+    const targetRoot = area === 'checkout' ? state.checkoutPath : join(state.checkoutPath, '..', 'projection')
+    const peerRoot = area === 'checkout' ? join(state.checkoutPath, '..', 'projection') : state.checkoutPath
+    const peerSkill = readFileSync(join(peerRoot, 'skills', 'alpha', 'SKILL.md'), 'utf8')
+    const target = join(targetRoot, 'skills', 'alpha')
+    const external = join(f.root, 'external-sentinel')
+    mkdirSync(external)
+    writeFileSync(join(external, 'sentinel.txt'), 'preserve external sentinel')
+    writeFileSync(join(external, 'SKILL.md'), 'external skill')
+    rmSync(target, { recursive: true })
+    symlinkSync(external, target, process.platform === 'win32' ? 'junction' : 'dir')
+    const head = await f.git.resolveCommit(state.checkoutPath, 'HEAD')
+    const canonical = f.store.get(f.skill.id)
+    const push = vi.spyOn(f.transport, 'push')
+    const commit = vi.spyOn(f.git, 'commitInspectedIndex')
+    const result = await f.sync.syncNow()
+    expect(result.syncState).toBe('ERROR')
+    expect(result.lastError).toContain('Unsafe Academy mutation path')
+    expect(commit).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
+    expect(await f.git.resolveCommit(state.checkoutPath, 'HEAD')).toBe(head)
+    expect(f.store.get(f.skill.id)).toEqual(canonical)
+    expect(readFileSync(join(external, 'sentinel.txt'), 'utf8')).toBe('preserve external sentinel')
+    expect(readFileSync(join(external, 'SKILL.md'), 'utf8')).toBe('external skill')
+    expect(readFileSync(join(peerRoot, 'skills', 'alpha', 'SKILL.md'), 'utf8')).toBe(peerSkill)
+  }, 60000)
+  it('recovers interruption during materialization without a duplicate commit', async () => {
+    const f = await fixture()
+    f.update('interrupted')
+    const materialize = AcademyGitMaterializer.prototype.materialize
+    const spy = vi.spyOn(AcademyGitMaterializer.prototype, 'materialize').mockImplementation(async function (this: AcademyGitMaterializer, path, entries) {
+      const result = await materialize.call(this, path, entries)
+      if (path.endsWith('checkout')) throw new Error('interrupted after materialization')
+      return result
     })
+    expect((await f.sync.syncNow()).syncState).toBe('ERROR')
+    spy.mockRestore()
+    const resumed = await f.restart().syncNow()
+    expect(resumed.syncState, resumed.lastError ?? '').toBe('SYNCED')
+    expect((await gitExec(resumed.repository!.checkoutPath, ['log', '--format=%s'])).split('\n').filter(line => line.startsWith('Academy sync:'))).toHaveLength(1)
+  }, 60000)
 
-    const pushedBranches: string[] = []
-    const mockTransport: GitRemoteTransport = {
-      push: async (rPath, branch) => {
-        pushedBranches.push(`${rPath}:${branch}`)
-      }
+  it('publishes plugin, logo and marketplace together while leaving ZIP publication separate', async () => {
+    const f = await fixture()
+    const logo = join(f.root, 'logo.png')
+    const png = Buffer.alloc(24); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(512, 16); png.writeUInt32BE(512, 20); writeFileSync(logo, png)
+    f.store.createOpenAiPluginProfile({ name: 'academy-skills', displayName: 'Academy Skills', description: 'Procedural skills', author: { name: 'Academy' }, openAiInterface: { displayName: 'Academy Skills', shortDescription: 'Skills', longDescription: 'Curated procedural skills', developerName: 'Academy', category: 'Productivity', capabilities: ['Interactive'], defaultPrompt: ['Help me code'] }, logoPath: logo, publishedVersion: '0.1.3', deletionSemantics: 'UNKNOWN', deletionSemanticsEvidence: null })
+    f.store.saveMarketplaceTakeoverState({ takeoverStatus: 'TAKEOVER_UNSUPPORTED', observedPluginId: null, evidence: 'Distinct source' })
+    const service = new AcademyGitSyncService(f.store, new AcademyGitMaterializer(), f.git, f.transport, f.port, undefined, new AcademyPluginRepositoryProjection())
+    const result = await service.syncNow()
+    expect(result.syncState, result.lastError ?? '').toBe('SYNCED')
+    const root = result.repository!.checkoutPath
+    for (const path of ['plugin.json', 'assets/logo.png', '.agents/plugins/marketplace.json']) expect(await f.git.readCommitFile(root, result.publication!.remoteHead!, path, 10000)).not.toBeNull()
+    expect(await f.git.readManagedTree(root, result.publication!.remoteHead!, ['skills', 'plugin.json', 'assets/logo.png', '.agents/plugins/marketplace.json'])).toBe(result.publication!.desiredTree)
+    const validation = vi.spyOn(AcademyPluginRepositoryProjection.prototype, 'validate').mockRejectedValue(new Error('invalid plugin'))
+    f.update('invalid projection')
+    const failed = await service.syncNow()
+    expect(failed.syncState).toBe('ERROR')
+    expect(failed.lastError).toContain('invalid plugin')
+    validation.mockRestore()
+  }, 60000)
+
+  it('publishes canonical changes without touching human HEAD, index, consumers or unstaged files', async () => {
+    const f = await fixture()
+    const head = await f.git.resolveCommit(f.human, 'HEAD')
+    writeFile(f.human, 'third-party.txt', 'staged'); await gitExec(f.human, ['add', 'third-party.txt'])
+    writeFile(f.human, 'skills/alpha/SKILL.md', 'human draft')
+    writeFile(f.human, '.skills/consumer/SKILL.md', 'consumer')
+    const index = await f.git.getIndexRevision(f.human)
+    f.update('version 2')
+    const result = await f.sync.syncNow()
+    expect(result.syncState, result.lastError ?? '').toBe('SYNCED')
+    expect(result.publication?.verifiedAt).toBeTruthy()
+    expect(await f.git.resolveCommit(f.human, 'HEAD')).toBe(head)
+    expect(await f.git.getIndexRevision(f.human)).toBe(index)
+    expect(readFileSync(join(f.human, 'skills/alpha/SKILL.md'), 'utf8')).toBe('human draft')
+    expect(existsSync(join(f.human, '.skills/consumer/SKILL.md'))).toBe(true)
+    expect(await f.git.readCommitFile(result.repository!.checkoutPath, result.publication!.remoteHead!, 'third-party.txt', 100)).toBeNull()
+  }, 60000)
+
+  it('recovers the temporary-skill/history incident and remains idempotent after restart', async () => {
+    const f = await fixture()
+    const baseline = await f.git.resolveCommit(f.external, 'HEAD')
+    const added = await f.externalCommit('skills/temporary/SKILL.md', 'temporary')
+    rmSync(join(f.external, 'skills/temporary'), { recursive: true })
+    await gitExec(f.external, ['add', '.']); await gitExec(f.external, ['commit', '-m', 'remove temporary']); await gitExec(f.external, ['push'])
+    f.update('new canonical')
+    const docs = await f.externalCommit('README.md', 'external documentation')
+    const result = await f.sync.syncNow()
+    expect(result.syncState, result.lastError ?? '').toBe('SYNCED')
+    const root = result.repository!.checkoutPath
+    for (const commit of [baseline, added, docs]) expect(await f.git.isAncestor(root, commit, result.publication!.remoteHead!)).toBe(true)
+    expect((await f.git.readCommitFile(root, result.publication!.remoteHead!, 'README.md', 100))?.toString()).toBe('external documentation')
+    expect(await f.git.readManagedTree(root, result.publication!.remoteHead!, ['skills'])).toBe(result.publication!.desiredTree)
+    const restarted = f.restart()
+    await restarted.recoverOnStartup()
+    expect(restarted.getStatus().publication?.localHead).toBe(result.publication!.localHead)
+  }, 60000)
+
+  it('adopts external history with identical managed content without a publication commit', async () => {
+    const f = await fixture()
+    const docs = await f.externalCommit('README.md', 'changed documentation')
+    const result = await f.sync.syncNow()
+    expect(result.syncState, result.lastError ?? '').toBe('SYNCED')
+    expect(result.publication?.localHead).toBe(docs)
+    expect(result.publication?.remoteHead).toBe(docs)
+  }, 60000)
+
+  it('protects incompatible remote content without changing SQLite or pushing', async () => {
+    const f = await fixture()
+    const changed = await f.externalCommit('skills/alpha/SKILL.md', pkg('external incompatible').skillMd)
+    f.update('canonical different')
+    const push = vi.spyOn(f.transport, 'push')
+    const result = await f.sync.syncNow()
+    expect(result.syncState).toBe('REMOTE_DIVERGED')
+    expect(result.publication?.phase).toBe('CONFLICT')
+    expect(push).not.toHaveBeenCalled()
+    expect(result.publication?.remoteHead).toBe(changed)
+    expect(f.store.get(f.skill.id).current.package).toEqual(pkg('canonical different'))
+    const resolved = await f.sync.resolveManagedConflict(changed, result.publication!.desiredTree!)
+    expect(resolved.syncState, resolved.lastError ?? '').toBe('SYNCED')
+    expect(await f.git.isAncestor(resolved.repository!.checkoutPath, changed, resolved.publication!.remoteHead!)).toBe(true)
+  }, 60000)
+
+  it('rejects stale conflict authorization and refuses adoption without a proven baseline', async () => {
+    const f = await fixture()
+    const changed = await f.externalCommit('skills/alpha/SKILL.md', pkg('external').skillMd)
+    const state = f.sync.getStatus().publication!
+    f.store.saveGitPublication({ ...state, baselineTree: null })
+    const conflict = await f.sync.syncNow()
+    expect(conflict.publication?.phase).toBe('CONFLICT')
+    await f.externalCommit('skills/alpha/SKILL.md', pkg('newer external').skillMd)
+    const result = await f.sync.resolveManagedConflict(changed, conflict.publication!.desiredTree!)
+    expect(result.publication?.phase).toBe('CONFLICT')
+    expect(f.store.get(f.skill.id).current.package).toEqual(pkg())
+  }, 60000)
+
+  it('recovers a persisted commit after failed push and incorporates compatible divergent histories', async () => {
+    const f = await fixture()
+    f.update('pending')
+    const push = f.transport.push
+    f.transport.push = async () => { throw new Error('offline') }
+    const pending = await f.sync.syncNow()
+    expect(pending.syncState).toBe('PUSH_PENDING')
+    expect(pending.publication?.pendingCommit).toBeTruthy()
+    const docs = await f.externalCommit('README.md', 'concurrent docs')
+    f.transport.push = push
+    const resumed = await f.restart().syncNow()
+    expect(resumed.syncState, resumed.lastError ?? '').toBe('SYNCED')
+    for (const commit of [docs, pending.publication!.pendingCommit!]) expect(await f.git.isAncestor(resumed.repository!.checkoutPath, commit, resumed.publication!.remoteHead!)).toBe(true)
+    expect((await gitExec(resumed.repository!.checkoutPath, ['log', '--format=%s'])).split('\n').filter(line => line.startsWith('Academy sync:'))).toHaveLength(1)
+  }, 60000)
+
+  it('recognizes a successful push with lost confirmation and preserves concurrent writer commits', async () => {
+    const f = await fixture()
+    f.update('race')
+    const push = f.transport.push
+    let calls = 0
+    f.transport.push = async (...args) => {
+      calls++
+      if (calls === 1) await f.externalCommit('README.md', 'writer raced')
+      await push(...args)
+      throw new Error('confirmation lost')
     }
+    const result = await f.sync.syncNow()
+    expect(result.syncState, result.lastError ?? '').toBe('SYNCED')
+    expect(calls).toBe(2)
+    expect((await f.git.readCommitFile(result.repository!.checkoutPath, result.publication!.remoteHead!, 'README.md', 100))?.toString()).toBe('writer raced')
+  }, 60000)
 
-    const mockRepoRecord: RepositoryRecord = {
-      id: 'repo-cat-1',
-      name: 'Academy',
-      status: 'ACTIVE',
-      localCheckout: {
-        path: repoPath,
-        availability: 'AVAILABLE',
-        gitState: 'GIT'
-      },
-      github: {
-        repositoryId: 'gh-1234',
-        name: 'Academy',
-        fullName: 'ericrocha001/Academy',
-        owner: 'ericrocha001',
-        visibility: 'PUBLIC',
-        cloneUrl: 'https://github.com/ericrocha001/Academy.git',
-        htmlUrl: 'https://github.com/ericrocha001/Academy',
-        accessState: 'AVAILABLE',
-        lastSeenAt: new Date().toISOString()
-      },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
+  it('reports unavailable remote without a fresh success and resumes independently of human checkout availability', async () => {
+    const f = await fixture()
+    const verified = f.sync.getStatus().lastSyncAt
+    const fetch = f.transport.fetch!
+    f.transport.fetch = async () => { throw new Error('network unavailable') }
+    const unavailable = await f.sync.syncNow()
+    expect(unavailable.syncState).not.toBe('SYNCED')
+    expect(unavailable.publication?.phase).toBe('REMOTE_UNAVAILABLE')
+    expect(unavailable.lastSyncAt).toBe(verified)
+    f.transport.fetch = fetch
+    f.record.localCheckout = null
+    f.update('independent')
+    expect((await f.service().syncNow()).syncState).toBe('SYNCED')
+  }, 60000)
 
-    const mockRepoPort: AcademyGitRepositoryPort = {
-      resolveRepository: (id) => (id === 'repo-cat-1' ? mockRepoRecord : null),
-      findByGitHubId: (ghId) => (ghId === 'gh-1234' ? mockRepoRecord : null),
-      listEligibleRepositories: () => [mockRepoRecord]
-    }
-
-    const materializer = new AcademyGitMaterializer()
-    const syncService = new AcademyGitSyncService(
-      store,
-      materializer,
-      git,
-      mockTransport,
-      mockRepoPort
-    )
-
-    // Bind
-    const boundStatus = await syncService.bindRepository('repo-cat-1')
-    expect(boundStatus.syncState).toBe('SYNCED')
-    expect(pushedBranches).toHaveLength(1)
-    expect(existsSync(join(repoPath, 'skills/my-skill/SKILL.md'))).toBe(true)
-
-    // Working tree is clean in skills
-    expect(await git.hasWorkingTreeChanges(repoPath, 'skills')).toBe(false)
-
-    // Commit exists
-    const headCommit = await git.getCurrentCommitHash(repoPath)
-    expect(boundStatus.lastCommitSha).toBe(headCommit)
-    expect(boundStatus.profile?.lastPushedCommitSha).toBe(headCommit)
-
-    store.close()
-  })
-
-  it('preserves commit when push fails (offline -> PUSH_PENDING) and pushes existing commit on retry', async () => {
-    const dataDir = root()
-    const store = new AcademyStore(join(dataDir, 'academy.db'))
-    const repoPath = await createTempGitRepo()
-    roots.push(repoPath)
-
-    const git = new GitService()
-    writeFileSync(join(repoPath, 'README.md'), '# Initial')
-    await git.stagePaths(repoPath, ['README.md'])
-    await git.commit(repoPath, 'initial')
-
-    store.create({
-      package: {
-        skillMd: '---\nname: offline-skill\ndescription: Test offline\n---\n# Offline Skill\n',
-        artifacts: {}
-      },
-      scope: 'GLOBAL',
-      origin: 'UI'
-    })
-
-    let shouldFailPush = true
-    const pushCalls: string[] = []
-    const mockTransport: GitRemoteTransport = {
-      push: async (_rPath, branch) => {
-        pushCalls.push(branch)
-        if (shouldFailPush) {
-          throw new Error('Network error: Could not resolve host github.com')
-        }
-      }
-    }
-
-    const mockRepoRecord: RepositoryRecord = {
-      id: 'repo-1',
-      name: 'Academy',
-      status: 'ACTIVE',
-      localCheckout: { path: repoPath, availability: 'AVAILABLE', gitState: 'GIT' },
-      github: {
-        repositoryId: 'gh-1',
-        name: 'Academy',
-        fullName: 'ericrocha001/Academy',
-        owner: 'ericrocha001',
-        visibility: 'PUBLIC',
-        cloneUrl: 'https://github.com/ericrocha001/Academy.git',
-        htmlUrl: 'https://github.com/ericrocha001/Academy',
-        accessState: 'AVAILABLE',
-        lastSeenAt: new Date().toISOString()
-      },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    const mockRepoPort: AcademyGitRepositoryPort = {
-      resolveRepository: () => mockRepoRecord,
-      findByGitHubId: () => mockRepoRecord,
-      listEligibleRepositories: () => [mockRepoRecord]
-    }
-
-    const syncService = new AcademyGitSyncService(
-      store,
-      new AcademyGitMaterializer(),
-      git,
-      mockTransport,
-      mockRepoPort
-    )
-
-    // Bind with failing push
-    const status1 = await syncService.bindRepository('repo-1')
-    expect(status1.syncState).toBe('PUSH_PENDING')
-    expect(status1.lastCommitSha).toBeDefined()
-    expect(status1.profile?.lastPushedCommitSha).toBeNull()
-
-    const createdCommit = status1.lastCommitSha
-
-    // Retry while online: same commit should be pushed, no new commit created!
-    shouldFailPush = false
-    const status2 = await syncService.syncNow()
-    expect(status2.syncState).toBe('SYNCED')
-    expect(status2.lastCommitSha).toBe(createdCommit)
-    expect(status2.profile?.lastPushedCommitSha).toBe(createdCommit)
-
-    // Current HEAD is still the same commit
-    const currentHead = await git.getCurrentCommitHash(repoPath)
-    expect(currentHead).toBe(createdCommit)
-
-    store.close()
-  })
-
-  it('detects uncommitted LOCAL_DRIFT in skills/ and refuses to overwrite', async () => {
-    const dataDir = root()
-    const store = new AcademyStore(join(dataDir, 'academy.db'))
-    const repoPath = await createTempGitRepo()
-    roots.push(repoPath)
-
-    const git = new GitService()
-    writeFileSync(join(repoPath, 'README.md'), '# Initial')
-    await git.stagePaths(repoPath, ['README.md'])
-    await git.commit(repoPath, 'initial')
-
-    store.create({
-      package: {
-        skillMd: '---\nname: drift-skill\ndescription: Test drift\n---\n# Drift\n',
-        artifacts: {}
-      },
-      scope: 'GLOBAL',
-      origin: 'UI'
-    })
-
-    const mockRepoRecord: RepositoryRecord = {
-      id: 'repo-1',
-      name: 'Academy',
-      status: 'ACTIVE',
-      localCheckout: { path: repoPath, availability: 'AVAILABLE', gitState: 'GIT' },
-      github: {
-        repositoryId: 'gh-1',
-        name: 'Academy',
-        fullName: 'ericrocha001/Academy',
-        owner: 'ericrocha001',
-        visibility: 'PUBLIC',
-        cloneUrl: 'https://github.com/ericrocha001/Academy.git',
-        htmlUrl: 'https://github.com/ericrocha001/Academy',
-        accessState: 'AVAILABLE',
-        lastSeenAt: new Date().toISOString()
-      },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    const syncService = new AcademyGitSyncService(
-      store,
-      new AcademyGitMaterializer(),
-      git,
-      { push: async () => {} },
-      {
-        resolveRepository: () => mockRepoRecord,
-        findByGitHubId: () => mockRepoRecord,
-        listEligibleRepositories: () => [mockRepoRecord]
-      }
-    )
-
-    // First sync
-    await syncService.bindRepository('repo-1')
-
-    // Human makes uncommitted manual change inside skills/
-    writeFileSync(join(repoPath, 'skills/drift-skill/SKILL.md'), '# Manual Drift')
-
-    // Next sync attempts to run
-    const driftStatus = await syncService.syncNow()
-    expect(driftStatus.syncState).toBe('LOCAL_DRIFT')
-
-    // Content was preserved and not overwritten!
-    expect(readFileSync(join(repoPath, 'skills/drift-skill/SKILL.md'), 'utf8')).toBe('# Manual Drift')
-
-    store.close()
-  })
-
-  it('detects REMOTE_DIVERGED when push is rejected as non-fast-forward', async () => {
-    const dataDir = root()
-    const store = new AcademyStore(join(dataDir, 'academy.db'))
-    const repoPath = await createTempGitRepo()
-    roots.push(repoPath)
-
-    const git = new GitService()
-    writeFileSync(join(repoPath, 'README.md'), '# Initial')
-    await git.stagePaths(repoPath, ['README.md'])
-    await git.commit(repoPath, 'initial')
-
-    store.create({
-      package: {
-        skillMd: '---\nname: diverged-skill\ndescription: Test divergence\n---\n# Content\n',
-        artifacts: {}
-      },
-      scope: 'GLOBAL',
-      origin: 'UI'
-    })
-
-    const mockRepoRecord: RepositoryRecord = {
-      id: 'repo-1',
-      name: 'Academy',
-      status: 'ACTIVE',
-      localCheckout: { path: repoPath, availability: 'AVAILABLE', gitState: 'GIT' },
-      github: {
-        repositoryId: 'gh-1',
-        name: 'Academy',
-        fullName: 'ericrocha001/Academy',
-        owner: 'ericrocha001',
-        visibility: 'PUBLIC',
-        cloneUrl: 'https://github.com/ericrocha001/Academy.git',
-        htmlUrl: 'https://github.com/ericrocha001/Academy',
-        accessState: 'AVAILABLE',
-        lastSeenAt: new Date().toISOString()
-      },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    const mockTransport: GitRemoteTransport = {
-      push: async () => {
-        throw new Error('Updates were rejected because the remote contains work that you do not have locally (non-fast-forward)')
-      }
-    }
-
-    const syncService = new AcademyGitSyncService(
-      store,
-      new AcademyGitMaterializer(),
-      git,
-      mockTransport,
-      {
-        resolveRepository: () => mockRepoRecord,
-        findByGitHubId: () => mockRepoRecord,
-        listEligibleRepositories: () => [mockRepoRecord]
-      }
-    )
-
-    const status = await syncService.bindRepository('repo-1')
-    expect(status.syncState).toBe('REMOTE_DIVERGED')
-
-    store.close()
-  })
-
-  it('syncs complete agent plugin (skills/ + plugin.json + assets/logo.png) within managed boundary', async () => {
-    const dataDir = root()
-    const store = new AcademyStore(join(dataDir, 'academy.db'))
-    const repoPath = await createTempGitRepo()
-    roots.push(repoPath)
-
-    const git = new GitService()
-    writeFileSync(join(repoPath, 'README.md'), '# Academy Repository')
-    writeFileSync(join(repoPath, 'unmanaged.txt'), 'do not touch')
-    await git.stagePaths(repoPath, ['README.md', 'unmanaged.txt'])
-    await git.commit(repoPath, 'initial')
-
-    // Create skill
-    store.create({
-      package: {
-        skillMd: '---\nname: plugin-skill\ndescription: Test skill for plugin\n---\n# Content\n',
-        artifacts: {}
-      },
-      scope: 'GLOBAL',
-      origin: 'UI'
-    })
-
-    // Create valid 512x512 PNG logo in temp dir
-    const logoSource = join(dataDir, 'logo.png')
-    const pngBuf = Buffer.alloc(24)
-    Buffer.from('89504e470d0a1a0a', 'hex').copy(pngBuf)
-    pngBuf.writeUInt32BE(512, 16)
-    pngBuf.writeUInt32BE(512, 20)
-    writeFileSync(logoSource, pngBuf)
-
-    // Create OpenAI plugin profile
-    store.createOpenAiPluginProfile({
-      name: 'academy-skills',
-      displayName: 'Academy Skills',
-      description: 'Autonomous procedural knowledge for agents',
-      author: { name: 'Academy Team' },
-      openAiInterface: {
-        displayName: 'Academy Skills',
-        shortDescription: 'Procedural skills for agents',
-        longDescription: 'Curated skills maintained canonically by Academy',
-        developerName: 'Academy',
-        category: 'Productivity',
-        capabilities: ['Interactive'],
-        defaultPrompt: ['Help me write code']
-      },
-      logoPath: logoSource,
-      publishedVersion: '0.1.3',
-      deletionSemantics: 'UNKNOWN',
-      deletionSemanticsEvidence: null
-    })
-    store.saveMarketplaceTakeoverState({ takeoverStatus: 'TAKEOVER_UNSUPPORTED', observedPluginId: null, evidence: 'Probe created a distinct source identity.' })
-
-    const mockRepoRecord: RepositoryRecord = {
-      id: 'repo-plugin-1',
-      name: 'Academy',
-      status: 'ACTIVE',
-      localCheckout: { path: repoPath, availability: 'AVAILABLE', gitState: 'GIT' },
-      github: {
-        repositoryId: 'gh-p1',
-        name: 'Academy',
-        fullName: 'ericrocha001/Academy',
-        owner: 'ericrocha001',
-        visibility: 'PUBLIC',
-        cloneUrl: 'https://github.com/ericrocha001/Academy.git',
-        htmlUrl: 'https://github.com/ericrocha001/Academy',
-        accessState: 'AVAILABLE',
-        lastSeenAt: new Date().toISOString()
-      },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    const pushed: string[] = []
-    const syncService = new AcademyGitSyncService(
-      store,
-      new AcademyGitMaterializer(),
-      git,
-      { push: async () => { pushed.push('pushed') } },
-      {
-        resolveRepository: () => mockRepoRecord,
-        findByGitHubId: () => mockRepoRecord,
-        listEligibleRepositories: () => [mockRepoRecord]
-      },
-      undefined,
-      new AcademyPluginRepositoryProjection()
-    )
-
-    const status = await syncService.bindRepository('repo-plugin-1')
-    expect(status.syncState).toBe('SYNCED')
-    expect(pushed).toHaveLength(1)
-
-    // Check materialized files
-    expect(existsSync(join(repoPath, 'skills', 'plugin-skill', 'SKILL.md'))).toBe(true)
-    expect(existsSync(join(repoPath, 'plugin.json'))).toBe(true)
-    expect(existsSync(join(repoPath, 'assets', 'logo.png'))).toBe(true)
-    expect(existsSync(join(repoPath, '.agents', 'plugins', 'marketplace.json'))).toBe(true)
-
-    // Check manifest content
-    const manifest = JSON.parse(readFileSync(join(repoPath, 'plugin.json'), 'utf8'))
-    expect(manifest.name).toBe('academy-skills')
-    expect(manifest.version).toBe('0.1.3')
-    expect(manifest.extensions['com.openai'].interface.logo).toBe('./assets/logo.png')
-    const marketplace = readFileSync(join(repoPath, '.agents', 'plugins', 'marketplace.json'), 'utf8')
-    expect(marketplace).not.toContain('plugins_')
-
-    // Check unmanaged files are completely untouched
-    expect(readFileSync(join(repoPath, 'README.md'), 'utf8')).toBe('# Academy Repository')
-    expect(readFileSync(join(repoPath, 'unmanaged.txt'), 'utf8')).toBe('do not touch')
-
-    // Verify git status: working tree is clean
-    const hasAnyChanges = await git.hasWorkingTreeChanges(repoPath, '.')
-    expect(hasAnyChanges).toBe(false)
-
-    // Now test managed boundary with untracked file
-    writeFileSync(join(repoPath, 'arbitrary-file.txt'), 'untracked human content')
-
-    // Update skill to trigger new sync
-    const skill = store.list('ACTIVE')[0]
-    store.update({
-      skillId: skill.id,
-      expectedVersion: skill.currentVersion,
-      package: {
-        skillMd: '---\nname: plugin-skill\ndescription: Updated skill\n---\n# Updated Content\n',
-        artifacts: {}
-      },
-      origin: 'UI'
-    })
-
-    const updatedStatus = await syncService.syncNow()
-    expect(updatedStatus.syncState).toBe('SYNCED')
-
-    // arbitrary-file.txt must NOT have been staged or committed — it remains untracked!
-    const untrackedStillThere = existsSync(join(repoPath, 'arbitrary-file.txt'))
-    expect(untrackedStillThere).toBe(true)
-    const hasUncommittedArbitrary = await git.hasWorkingTreeChanges(repoPath, 'arbitrary-file.txt')
-    expect(hasUncommittedArbitrary).toBe(true) // Git still sees it as untracked, was not staged
-
-    store.close()
-  }, 20000)
-
-  it('fails sync when plugin projection validation fails', async () => {
-    const dataDir = root()
-    const store = new AcademyStore(join(dataDir, 'academy.db'))
-    const repoPath = await createTempGitRepo()
-    roots.push(repoPath)
-
-    const git = new GitService()
-    writeFileSync(join(repoPath, 'README.md'), '# Initial')
-    await git.stagePaths(repoPath, ['README.md'])
-    await git.commit(repoPath, 'initial')
-
-    store.create({
-      package: {
-        skillMd: '---\nname: valid-skill\ndescription: Test\n---\n# Valid\n',
-        artifacts: {}
-      },
-      scope: 'GLOBAL',
-      origin: 'UI'
-    })
-
-    // Configure profile with non-existent logo
-    store.createOpenAiPluginProfile({
-      name: 'academy-skills',
-      displayName: 'Academy Skills',
-      description: 'Test',
-      author: { name: 'Academy' },
-      openAiInterface: {
-        displayName: 'Academy Skills',
-        shortDescription: 'Desc',
-        longDescription: 'Long',
-        developerName: 'Dev',
-        category: 'Productivity',
-        capabilities: ['Interactive'],
-        defaultPrompt: ['Prompt']
-      },
-      logoPath: join(dataDir, 'does-not-exist.png'),
-      publishedVersion: '0.1.3',
-      deletionSemantics: 'UNKNOWN',
-      deletionSemanticsEvidence: null
-    })
-    store.saveMarketplaceTakeoverState({ takeoverStatus: 'TAKEOVER_UNSUPPORTED', observedPluginId: null, evidence: 'Probe created a distinct source identity.' })
-
-    const mockRepoRecord: RepositoryRecord = {
-      id: 'repo-fail-1',
-      name: 'Academy',
-      status: 'ACTIVE',
-      localCheckout: { path: repoPath, availability: 'AVAILABLE', gitState: 'GIT' },
-      github: {
-        repositoryId: 'gh-f1',
-        name: 'Academy',
-        fullName: 'ericrocha001/Academy',
-        owner: 'ericrocha001',
-        visibility: 'PUBLIC',
-        cloneUrl: 'https://github.com/ericrocha001/Academy.git',
-        htmlUrl: 'https://github.com/ericrocha001/Academy',
-        accessState: 'AVAILABLE',
-        lastSeenAt: new Date().toISOString()
-      },
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    }
-
-    const syncService = new AcademyGitSyncService(
-      store,
-      new AcademyGitMaterializer(),
-      git,
-      { push: async () => {} },
-      {
-        resolveRepository: () => mockRepoRecord,
-        findByGitHubId: () => mockRepoRecord,
-        listEligibleRepositories: () => [mockRepoRecord]
-      },
-      undefined,
-      new AcademyPluginRepositoryProjection()
-    )
-
-    const status = await syncService.bindRepository('repo-fail-1')
-    expect(status.syncState).toBe('ERROR')
-    expect(status.lastError).toContain('Plugin validation failed')
-
-    store.close()
-  }, 20000)
+  it('migrates legacy LOCAL_DRIFT from proven convergence and preserves incompatible unpublished commits', async () => {
+    const f = await fixture()
+    const old = f.store.getGitProfile()!
+    const head = await f.git.resolveCommit(f.human, 'HEAD')
+    const state = f.sync.getStatus().publication!
+    f.store.saveGitPublication({ ...state, migrationComplete: false, baselineTree: null })
+    f.store.saveGitProfile({ ...old, syncState: 'LOCAL_DRIFT', lastPushedCommitSha: head })
+    expect((await f.service().syncNow()).syncState).toBe('SYNCED')
+    writeFile(f.human, 'skills/alpha/SKILL.md', pkg('unpublished legacy').skillMd)
+    await gitExec(f.human, ['add', '.']); await gitExec(f.human, ['commit', '-m', 'unpublished work'])
+    const legacy = await f.git.resolveCommit(f.human, 'HEAD')
+    f.store.saveGitPublication({ ...f.sync.getStatus().publication!, migrationComplete: false })
+    const blocked = await f.service().syncNow()
+    expect(blocked.publication?.phase).toBe('CONFLICT')
+    expect(await f.git.resolveCommit(blocked.repository!.checkoutPath, 'refs/academy/legacy-pending')).toBe(legacy)
+    expect(await f.git.resolveCommit(f.human, 'HEAD')).toBe(legacy)
+  }, 60000)
 })
