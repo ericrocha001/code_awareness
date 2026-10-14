@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
-import { mkdir, rm } from 'node:fs/promises'
+import { existsSync, rmSync } from 'node:fs'
+import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { AcademyGitPublicationState, AcademyGitStatusProjection } from '../../../shared/types/academy-types'
 import type { RepositoryRecord } from '../../../shared/types/repository-catalog-types'
@@ -8,6 +8,7 @@ import type { GitService } from '../../core/git-service'
 import type { GitRemoteTransport } from '../../core/git-remote-transport'
 import type { AcademyStore } from '../academy-store'
 import { AcademyGitMaterializer, assertPublicationPaths, computeGitSnapshotHash, validateGitSnapshot } from './academy-git-materializer'
+import { listSkillFilesWithoutLinks } from '../academy-filesystem'
 import type { AcademyGitSnapshotEntry } from './academy-git-materializer'
 import type { AcademyPluginRepositoryProjection } from './academy-plugin-repository-projection'
 import { AcademyMarketplaceProjection } from './academy-marketplace-projection'
@@ -150,26 +151,38 @@ export class AcademyGitSyncService {
         return { skillId: d.id, name: d.name, version: d.currentVersion, packageHash: d.current.packageHash, package: d.current.package }
       })
       validateGitSnapshot(entries, { isPublic: record.github.visibility === 'PUBLIC' })
+      for (const destination of [projection, root]) {
+        assertPublicationPaths(destination, [...paths, '.git'])
+        listSkillFilesWithoutLinks(join(destination, 'skills'))
+      }
       const revision = openAi ? this.packageRevisions.resolveCurrent() : null
       const inputRevision = computeGitSnapshotHash(entries)
       const project = async (destination: string) => {
         assertPublicationPaths(destination, paths)
         await this.materializer.materialize(destination, entries)
         if (openAi && this.pluginProjection && revision) {
-          if (!openAi.logoPath) await rm(join(destination, 'assets', 'logo.png'), { force: true })
+          if (!openAi.logoPath) {
+            assertPublicationPaths(destination, ['assets/logo.png'])
+            rmSync(join(destination, 'assets', 'logo.png'), { force: true })
+          }
           const snapshot = entries.map(e => ({ skillId: e.skillId, name: e.name, academyVersion: e.version, packageHash: e.packageHash }))
           await this.pluginProjection.project(destination, openAi, snapshot, revision)
           await this.marketplaceProjection.project(destination, record, profile, openAi, this.store.getMarketplaceState())
           await this.pluginProjection.validate(destination, openAi, snapshot)
         }
       }
+      assertPublicationPaths(projection, [...paths, '.git'])
+      listSkillFilesWithoutLinks(join(projection, 'skills'))
       await mkdir(projection, { recursive: true })
+      assertPublicationPaths(projection, [...paths, '.git'])
       await this.git.initializePublicationRepository(projection, record.github.cloneUrl)
       await project(projection)
       await this.git.stagePaths(projection, ['.'])
       const desired = await this.git.readManagedTree(projection, await this.git.writeIndexTree(projection), paths)
       state.desiredRevision = revision?.contentFingerprint ?? computeGitSnapshotHash(entries)
       state.desiredTree = desired; save()
+      assertPublicationPaths(root, [...paths, '.git'])
+      listSkillFilesWithoutLinks(join(root, 'skills'))
       await this.git.initializePublicationRepository(root, record.github.cloneUrl)
       if (!this.transport.fetch || !this.transport.readRemoteHead) throw new Error('REMOTE_OBSERVATION_UNSUPPORTED')
       const observe = async () => {

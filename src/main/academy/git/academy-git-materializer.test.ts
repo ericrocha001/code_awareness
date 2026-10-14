@@ -1,10 +1,21 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcademyGitMaterializer, assertPublicationPaths, computeGitSnapshotHash, validateGitSnapshot } from './academy-git-materializer'
 import type { AcademyGitSnapshotEntry } from './academy-git-materializer'
 import { hashAcademyPackage } from '../academy-package'
+import { removeSkillDirectory, writeSkillDirectory } from '../academy-filesystem'
+
+const { afterMkdir } = vi.hoisted(() => ({ afterMkdir: vi.fn() }))
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>()
+  return { ...original, mkdirSync: (...args: Parameters<typeof original.mkdirSync>) => {
+    const result = original.mkdirSync(...args)
+    afterMkdir(args[0])
+    return result
+  } }
+})
 
 const roots: string[] = []
 const root = () => {
@@ -28,10 +39,60 @@ const makeSkill = (name: string, body = '# Skill Body', artifacts: Record<string
 }
 
 afterEach(() => {
+  vi.restoreAllMocks()
+  afterMkdir.mockReset()
   for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true })
 })
 
 describe('AcademyGitMaterializer', () => {
+  it.each(['alpha', 'alpha/ref'])('rejects a junction at skills/%s and preserves the external package and sentinel', async (link) => {
+    const repo = root(), external = root()
+    const target = join(repo, 'skills', link)
+    mkdirSync(join(target, '..'), { recursive: true })
+    writeFileSync(join(external, 'sentinel.txt'), 'preserve sentinel')
+    writeFileSync(join(external, 'SKILL.md'), 'external skill')
+    symlinkSync(external, target, process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(new AcademyGitMaterializer().materialize(repo, [makeSkill('alpha', '# Canonical', { 'ref/doc.md': 'canonical doc' })])).rejects.toMatchObject({ code: 'SYMLINK_NOT_ALLOWED' })
+    expect(readFileSync(join(external, 'sentinel.txt'), 'utf8')).toBe('preserve sentinel')
+    expect(readFileSync(join(external, 'SKILL.md'), 'utf8')).toBe('external skill')
+    expect(existsSync(join(external, 'doc.md'))).toBe(false)
+  })
+
+  it('rejects a linked Skill root when the filesystem writer is called directly', async () => {
+    const directory = root(), external = root()
+    writeFileSync(join(external, 'sentinel.txt'), 'preserve')
+    symlinkSync(external, join(directory, 'alpha'), process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(writeSkillDirectory(join(directory, 'alpha'), makeSkill('alpha').package)).rejects.toMatchObject({ code: 'SYMLINK_NOT_ALLOWED' })
+    expect(readFileSync(join(external, 'sentinel.txt'), 'utf8')).toBe('preserve')
+    expect(existsSync(join(external, 'SKILL.md'))).toBe(false)
+  })
+  it('rejects a junction in an obsolete Skill before deleting or updating any existing package', async () => {
+    const repo = root(), external = root()
+    mkdirSync(join(repo, 'skills', 'safe'), { recursive: true })
+    mkdirSync(join(repo, 'skills', 'obsolete'), { recursive: true })
+    writeFileSync(join(repo, 'skills', 'safe', 'SKILL.md'), 'existing safe package')
+    writeFileSync(join(external, 'sentinel.txt'), 'preserve')
+    symlinkSync(external, join(repo, 'skills', 'obsolete', 'ref'), process.platform === 'win32' ? 'junction' : 'dir')
+    await expect(new AcademyGitMaterializer().materialize(repo, [makeSkill('safe')])).rejects.toMatchObject({ code: 'SYMLINK_NOT_ALLOWED' })
+    await expect(removeSkillDirectory(join(repo, 'skills', 'obsolete'))).rejects.toMatchObject({ code: 'SYMLINK_NOT_ALLOWED' })
+    expect(readFileSync(join(external, 'sentinel.txt'), 'utf8')).toBe('preserve')
+    expect(readFileSync(join(repo, 'skills', 'safe', 'SKILL.md'), 'utf8')).toBe('existing safe package')
+  })
+  it('rechecks a Skill root replaced after inspection and before the effective write', async () => {
+    const directory = root(), external = root()
+    const skillPath = join(directory, 'alpha')
+    mkdirSync(skillPath)
+    writeFileSync(join(external, 'sentinel.txt'), 'preserve')
+    afterMkdir.mockImplementation((path) => {
+      if (String(path) === skillPath) {
+        rmSync(skillPath, { recursive: true })
+        symlinkSync(external, skillPath, process.platform === 'win32' ? 'junction' : 'dir')
+      }
+    })
+    await expect(writeSkillDirectory(skillPath, makeSkill('alpha').package)).rejects.toMatchObject({ code: 'SYMLINK_NOT_ALLOWED' })
+    expect(readFileSync(join(external, 'sentinel.txt'), 'utf8')).toBe('preserve')
+    expect(existsSync(join(external, 'SKILL.md'))).toBe(false)
+  })
   it('rejects dangling links in managed parents before projection can write outside its checkout', () => {
     const directory = root()
     symlinkSync(join(directory, 'missing-target'), join(directory, 'assets'), process.platform === 'win32' ? 'junction' : 'dir')

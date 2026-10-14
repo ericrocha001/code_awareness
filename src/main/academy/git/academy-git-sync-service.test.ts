@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -65,6 +65,35 @@ async function fixture() {
 }
 
 describe('isolated Academy GitHub reconciliation', () => {
+  it.each(['checkout', 'projection'])('rejects an unsafe Skill junction in the %s without commit, push or canonical mutation', async (area) => {
+    const f = await fixture()
+    f.update('security regression')
+    const state = f.sync.getStatus().publication!
+    const targetRoot = area === 'checkout' ? state.checkoutPath : join(state.checkoutPath, '..', 'projection')
+    const peerRoot = area === 'checkout' ? join(state.checkoutPath, '..', 'projection') : state.checkoutPath
+    const peerSkill = readFileSync(join(peerRoot, 'skills', 'alpha', 'SKILL.md'), 'utf8')
+    const target = join(targetRoot, 'skills', 'alpha')
+    const external = join(f.root, 'external-sentinel')
+    mkdirSync(external)
+    writeFileSync(join(external, 'sentinel.txt'), 'preserve external sentinel')
+    writeFileSync(join(external, 'SKILL.md'), 'external skill')
+    rmSync(target, { recursive: true })
+    symlinkSync(external, target, process.platform === 'win32' ? 'junction' : 'dir')
+    const head = await f.git.resolveCommit(state.checkoutPath, 'HEAD')
+    const canonical = f.store.get(f.skill.id)
+    const push = vi.spyOn(f.transport, 'push')
+    const commit = vi.spyOn(f.git, 'commitInspectedIndex')
+    const result = await f.sync.syncNow()
+    expect(result.syncState).toBe('ERROR')
+    expect(result.lastError).toContain('Unsafe Academy mutation path')
+    expect(commit).not.toHaveBeenCalled()
+    expect(push).not.toHaveBeenCalled()
+    expect(await f.git.resolveCommit(state.checkoutPath, 'HEAD')).toBe(head)
+    expect(f.store.get(f.skill.id)).toEqual(canonical)
+    expect(readFileSync(join(external, 'sentinel.txt'), 'utf8')).toBe('preserve external sentinel')
+    expect(readFileSync(join(external, 'SKILL.md'), 'utf8')).toBe('external skill')
+    expect(readFileSync(join(peerRoot, 'skills', 'alpha', 'SKILL.md'), 'utf8')).toBe(peerSkill)
+  }, 60000)
   it('recovers interruption during materialization without a duplicate commit', async () => {
     const f = await fixture()
     f.update('interrupted')
