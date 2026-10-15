@@ -77,7 +77,7 @@ exports.run = async ctx => {
   const select = async text => {
     await ctx.evaluate(text => { document.querySelector('[data-tree-target]')?.removeAttribute('data-tree-target'); [...document.querySelectorAll('.wo-tree')].find(button => button.textContent.includes(text)).setAttribute('data-tree-target', '') }, text)
     await ctx.click('[data-tree-target]'); await wait(() => document.querySelector('.wo-inspector')?.textContent.includes('Última observação do estado') && !document.querySelector('.wo-inspector').textContent.includes('Lendo a worktree selecionada'))
-    await ctx.evaluate(() => { const summary = [...document.querySelectorAll('.wo-inspector summary')].find(s => s.textContent === 'Arquivos alterados'); summary.scrollIntoView({block:'center'}); summary.setAttribute('data-files-disclosure','') })
+    await ctx.evaluate(() => { const summary = [...document.querySelectorAll('.wo-inspector summary')].find(s => s.querySelector('.wo-disclosure-label')?.textContent === 'Arquivos alterados'); summary.scrollIntoView({block:'center'}); summary.setAttribute('data-files-disclosure','') })
     await ctx.click('[data-files-disclosure]')
   }
   const startRefresh = async () => { const count = reads.length; await ctx.click('.wo-header button'); const deadline = Date.now() + 5000; while (reads.length === count && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50)); ctx.check('Explicit refresh issues new IPC', reads.length > count) }
@@ -151,7 +151,7 @@ exports.run = async ctx => {
     await ctx.evaluate(() => { document.body.dataset.theme = 'light' }); await ctx.viewport(1120, 800)
     await ctx.capture('local-files-medium-light'); await ctx.overflow()
     await ctx.evaluate(() => document.querySelector('.wo-inspector').focus()); ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Tab',modifiers:['shift']}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Tab',modifiers:['shift']})
-    await ctx.waitFor(() => document.activeElement.textContent === 'Contexto documentado')
+    await ctx.waitFor(() => document.activeElement.textContent === 'Identidade técnica')
     ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'}); await ctx.waitFor(() => !document.querySelector('.wo-inspector'))
     ctx.check('Focus restored after drawer closes', await ctx.evaluate(() => document.activeElement.classList.contains('wo-tree')))
     await ctx.capture('local-summary-medium-light')

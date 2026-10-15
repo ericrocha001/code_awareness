@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { FileText } from 'lucide-react'
+import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import type { ObservableWorktree, OrchestrationData, OrchestrationRequest, OrchestrationResult } from '../../../../shared/types/work-orchestration-types'
 import type { WorktreeDocumentContext as Context, WorktreeDocumentRequest } from '../../../../shared/types/worktree-document-context-types'
 
@@ -43,8 +45,8 @@ export function WorktreeDocumentContext({ tree, query }: { tree: ObservableWorkt
     </li>)}</ul>
     {context.coverage === 'PARTIAL' && <p>Cobertura parcial · consulte o Continuum para aprofundar.</p>}
   </section>
-  return <details ref={panel} className="wo-document-context" onToggle={event => { if (event.target === event.currentTarget && event.currentTarget.open && !consulted.current) void read({ mode: 'EXACT' }) }}>
-    <summary>Contexto documentado</summary>
+  return <details ref={panel} className="wo-document-context wo-disclosure" onToggle={event => { if (event.target === event.currentTarget && event.currentTarget.open && !consulted.current) void read({ mode: 'EXACT' }) }}>
+    <summary><WorktreeSectionTitle icon={FileText} meta={data ? `${data.artifacts.length} nesta página` : 'Sob demanda'}>Contexto documentado</WorktreeSectionTitle></summary>
     <p>Associação documental não comprova atividade de agente, tarefa atual nem integração Git.</p>
     {!consulted.current && <p>Não consultado</p>}
     {loading && <p role="status">Consultando o Continuum…</p>}

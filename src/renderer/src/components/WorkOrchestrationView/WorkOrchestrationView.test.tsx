@@ -22,7 +22,7 @@ it('shows actual coverage separately from inventory and keeps missing investigat
   await screen.findByText('Inventário completo · 3 descobertas')
   expect(screen.getByText('1/3')).toBeTruthy()
   expect(screen.getByText('Nenhuma interferência confirmada no escopo observado')).toBeTruthy()
-  expect(screen.getByText(/Cobertura pendente/)).toBeTruthy()
+  expect(screen.getAllByText(/Cobertura pendente/)[0]).toBeTruthy()
   expect(document.querySelector('.wo-project select')).toBeNull()
   view.rerender(<WorkOrchestrationView state={state} />)
   expect(screen.getByText('Investigação indisponível')).toBeTruthy()
@@ -38,7 +38,7 @@ it('resets file disclosure on selection change and reads only the expanded selec
   files.open = true; fireEvent(files, new Event('toggle'))
   await screen.findByText('0 arquivos · página 1')
   fireEvent.click(screen.getByText('work-002'))
-  await waitFor(() => expect(screen.getAllByText('Arquivos alterados').find(element => element.tagName === 'SUMMARY')?.closest('details')?.open).toBe(false))
+  await waitFor(() => expect(screen.getByText('Arquivos alterados').closest('details')?.open).toBe(false))
   expect(read.mock.calls.filter(([request]) => request.changes)).toHaveLength(1)
 })
 it('reveals already discovered evidence at its chronological position while preserving the filter', async () => {
@@ -216,7 +216,7 @@ it('wraps keyboard focus to a visible control while document details are closed 
   await screen.findByText('Lendo arquivos alterados…')
   Object.defineProperty(panel.parentElement, 'clientWidth', { value: 896 })
   panel.focus(); fireEvent.keyDown(panel, { key: 'Tab', shiftKey: true })
-  expect(document.activeElement).toBe(screen.getByText('Contexto documentado'))
+  expect(document.activeElement).toBe(screen.getByText('Identidade técnica').closest('summary'))
 })
 it('omits manual comparison and preserves individual inspection on failed revalidation', async () => {
   let inventories = 0

@@ -1,15 +1,17 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { GitBranch, RefreshCw, X, FolderOpen, Layers3, Clock3, ScanEye, Search } from 'lucide-react'
+import { GitBranch, RefreshCw, X, FolderOpen, Layers3, Clock3, ScanEye, Search, Fingerprint, FileText, Terminal } from 'lucide-react'
 import type { ActiveProjectState } from '../../../../shared/types/active-project-types'
 import type { ObservableWorktree, OrchestrationData, OrchestrationOverview, OrchestrationRequest, OrchestrationResult } from '../../../../shared/types/work-orchestration-types'
 import './WorkOrchestrationView.css'
 import { LocalChangesInspector } from './LocalChangesInspector'
 import { WorktreeDocumentContext } from './WorktreeDocumentContext'
-import { categoryLabel, reasonLabel } from './work-orchestration-labels'
+import { reasonLabel } from './work-orchestration-labels'
 import type { LocalChangeCategory } from '../../../../shared/types/local-change-types'
 import type { OrchestrationAttention, StructuralAlert } from '../../../../shared/types/work-orchestration-attention-types'
 import { StructuralEvidence } from './StructuralEvidence'
 import { WorkOrchestrationAttention } from './WorkOrchestrationAttention'
+import { WorktreeStatusBadges } from './WorktreeStatusBadges'
+import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import { WorktreeIntegrationDetails } from './WorktreeIntegrationDetails'
 import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 
@@ -191,14 +193,14 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
       {error && <p className="wo-notice wo-warning" role="alert">{reasonLabel(error)}</p>}
       <WorkOrchestrationAttention attention={attention} worktrees={overview?.worktrees ?? []} onEvidence={showEvidence} />
       <div className="wo-workspace"><main className="wo-content" ref={content}>
-        <div className="wo-timeline-header"><div><h2><GitBranch size={20} aria-hidden="true" /> Timeline de worktrees</h2><p className="wo-timeline-notice">Timeline por criação estimada · principal como referência · datas desconhecidas ao final. Alterações Git não reordenam as worktrees.</p></div><label className="wo-search"><Search size={17} aria-hidden="true" /><input aria-label="Filtrar worktrees" placeholder="Filtrar por branch ou caminho" value={filter} onChange={e => { setRevealedWorktree(null); setFilter(e.target.value) }} /></label></div>
+        <div className="wo-timeline-header"><div><h2><GitBranch size={20} aria-hidden="true" /> Timeline de worktrees</h2><p className="wo-timeline-notice">Timeline por criação estimada. A principal é referência visual.</p></div><label className="wo-search"><Search size={17} aria-hidden="true" /><input aria-label="Filtrar worktrees" placeholder="Filtrar por branch ou caminho" value={filter} onChange={e => { setRevealedWorktree(null); setFilter(e.target.value) }} /></label></div>
         {overview && <p className="wo-inventory-label">Inventário completo · {overview.worktrees.length} {overview.worktrees.length === 1 ? 'descoberta' : 'descobertas'}</p>}
         {overview && !overview.worktrees.length && <p className="wo-empty">Nenhuma worktree registrada.</p>}
         {overview && !!overview.worktrees.length && !worktrees.length && <p className="wo-empty">Nenhuma worktree encontrada.</p>}
         <div className="wo-trees">{worktrees.map((w, i) => <React.Fragment key={w.worktreeId}>{(i === 0 || dateGroup(w) !== dateGroup(worktrees[i - 1])) && <h3 className="wo-date-group">{dateGroup(w)}</h3>}<button data-worktree-id={w.worktreeId} disabled={refreshing} className={`wo-tree ${w.reason || w.conflictCount || w.snapshot?.operation ? 'wo-exception' : ''}`} onClick={() => void inspect({ worktree: { worktreeId: w.worktreeId } }, w)} aria-pressed={tree?.worktreeId === w.worktreeId}>
           <GitBranch className="wo-row-icon" size={22} aria-hidden="true" /><span className="wo-tree-title">{label(w)} {w.reference && <span className="wo-badge">Principal · referência</span>}</span><span className="wo-path" title={w.path}>{w.path}</span>
           <span className="wo-created">{w.reference ? 'Checkout principal · referência' : createdTime(w) ? `Criação estimada: ${new Date(createdTime(w)).toLocaleString('pt-BR')}` : 'Data indisponível'}</span>
-          <span className="wo-state">{w.observation === 'NOT_OBSERVED' ? w.reason ? reasonLabel(w.reason) : 'Estado não observado' : w.observation === 'REVALIDATING' ? 'Revalidando…' : w.reason ? `${phaseLabel[w.observation]} · ${reasonLabel(w.reason)}` : `${w.observation === 'VERIFIED' ? '' : `${phaseLabel[w.observation]} · `}${w.localChanges ? w.localChanges.total ? `${w.localChanges.total} ${w.localChanges.total === 1 ? 'caminho local' : 'caminhos locais'} · ${Object.entries(w.localChanges.categories).filter(([, count]) => count).map(([category, count]) => `${count} ${categoryLabel(category as LocalChangeCategory, count)}`).join(' · ')}` : 'Sem alterações locais' : `${w.stagedCount} staged · ${w.unstagedCount} unstaged · ${w.untrackedCount} não rastreados`}`}</span>
+          <span className="wo-state"><WorktreeStatusBadges tree={w} /></span>
         </button></React.Fragment>)}</div>
       </main>
       {selected && <aside className="wo-inspector" ref={inspector} tabIndex={-1} aria-label="Inspetor de worktree" onKeyDown={e => {
@@ -214,12 +216,15 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
       }}><div className="wo-section-heading"><h2>Detalhes da worktree</h2><button aria-label="Fechar inspetor" onClick={close}><X size={16} /></button></div>
         {reading && <p role="status">Lendo a worktree selecionada…</p>}{unvalidated && <p className="wo-warning">Observação anterior · não revalidada</p>}
         {structuralAlert && tree?.worktreeId === structuralAlert.consumer && <StructuralEvidence alert={structuralAlert} providerName={label(overview?.worktrees.find(w => w.worktreeId === structuralAlert.provider) ?? tree)} consumerName={label(tree)} />}
-        {tree && <><h3 className="wo-selected-title"><GitBranch size={24} aria-hidden="true" />{label(tree)}</h3><p>{tree.reason ? reasonLabel(tree.reason) : (tree.observation === 'NOT_OBSERVED' ? 'Estado não observado' : 'Última observação do estado')}</p><details><summary>Identidade técnica</summary><dl><dt>Caminho</dt><dd>{tree.path}</dd><dt>HEAD</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd></dl></details>
-          <details><summary>Identidade da worktree</summary><dl><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd></dl></details></>}
-        {tree && <><p>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</p>{tree.localChanges && <p>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</p>}<details key={`changes:${tree.worktreeId}:${tree.generation}`} onToggle={event => { if (event.target === event.currentTarget) setChangesOpen(event.currentTarget.open) }}><summary>Arquivos alterados</summary>{changesOpen && <LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} />}</details></>}
-        {tree && <WorktreeIntegrationDetails key={`integration:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }} onCommit={onCommit} />}
-        {tree && <WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} />}
-
+        {tree && <>
+          <div className="wo-selected-identity"><span className="wo-selected-icon"><GitBranch size={28} aria-hidden="true" /></span><div><h3 className="wo-selected-title" title={label(tree)}>{label(tree)}</h3><WorktreeStatusBadges tree={tree} /></div></div>
+          <p className="wo-observation-context">{tree.reason ? reasonLabel(tree.reason) : tree.observation === 'NOT_OBSERVED' ? 'Estado não observado' : 'Última observação do estado'}</p>
+          <details className="wo-identity wo-disclosure" key={tree.worktreeId} open><summary><WorktreeSectionTitle icon={Fingerprint}>Identidade</WorktreeSectionTitle></summary><dl className="wo-identity-grid"><dt>Caminho</dt><dd title={tree.path}>{tree.path.split('\\').join('/').split('/').slice(-3).join('/')}</dd><dt>HEAD</dt><dd title={tree.head ?? undefined}>{tree.head?.slice(0, 12) ?? 'Indisponível'}</dd></dl></details>
+          <details className="wo-files wo-disclosure" key={`changes:${tree.worktreeId}:${tree.generation}`} onToggle={event => { if (event.target === event.currentTarget) setChangesOpen(event.currentTarget.open) }}><summary><WorktreeSectionTitle icon={FileText} meta={tree.observation === 'VERIFIED' && tree.localChanges ? `${tree.localChanges.total} ${tree.localChanges.total === 1 ? 'arquivo' : 'arquivos'}` : 'Sob demanda'}>Arquivos alterados</WorktreeSectionTitle></summary>{changesOpen && <LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} />}</details>
+          <WorktreeIntegrationDetails key={`integration:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }} onCommit={onCommit}><WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} /></WorktreeIntegrationDetails>
+          <div className="wo-observation-receipt"><Clock3 size={16} aria-hidden="true" /><span>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</span></div>
+          <details className="wo-technical wo-disclosure"><summary><WorktreeSectionTitle icon={Terminal}>Identidade técnica</WorktreeSectionTitle></summary><dl><dt>Caminho completo</dt><dd>{tree.path}</dd><dt>HEAD completo</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd>{tree.localChanges && <><dt>Caminhos únicos</dt><dd>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</dd></>}</dl></details>
+        </>}
       </aside>}
       </div></>}
   </section>
