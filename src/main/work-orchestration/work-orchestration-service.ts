@@ -36,9 +36,9 @@ export class WorkOrchestrationService {
     if (!this.git.getCoordinationIdentity) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
     return readWorktreeDocumentContext({ getCoordinationIdentity: id => this.git.getCoordinationIdentity!(id) }, this.continuum, request)
   }
-  async timeline(request: NonNullable<OrchestrationRequest['timeline']>, contextKey: string) {
+  async timeline(request: NonNullable<OrchestrationRequest['timeline']>) {
     if (!this.git.getWorktreeTimeline) throw new Error('TIMELINE_UNAVAILABLE')
-    return this.withReadBudget(async () => { const timeline = await this.git.getWorktreeTimeline!({ ...request, contextKey }); return { repositoryId: timeline.repositoryId, timeline } })
+    return this.withReadBudget(async () => { const timeline = await this.git.getWorktreeTimeline!({ ...request }); return { repositoryId: timeline.repositoryId, timeline } })
   }
   async integration(request: NonNullable<OrchestrationRequest['integration']>) {
     if (!this.git.evaluateWorktreeIntegration) throw new Error('INTEGRATION_EVIDENCE_UNAVAILABLE')

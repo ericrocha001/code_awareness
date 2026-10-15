@@ -2,8 +2,7 @@ import type { LocalChange, LocalChangeSummary } from './local-change-types'
 import type { WorktreeDocumentContext, WorktreeDocumentRequest } from './worktree-document-context-types'
 import type { WorktreeCreationEstimate } from './worktree-creation-types'
 import type { OrchestrationAttention } from './work-orchestration-attention-types'
-import type { GitWorktreeCommitsQuery } from './git-commit-correlation-types'
-import type { WorktreeTimelinePage, IntegrationEvidenceRequest, IntegrationEvidence } from './worktree-integration-evidence-types'
+import type { WorktreeTimelinePage, WorktreeTimelineQuery, IntegrationEvidenceRequest, IntegrationEvidence } from './worktree-integration-evidence-types'
 export interface OrchestrationContext { projectId: string; revision: number }
 export interface ObservableWorktree {
   worktreeId: string
@@ -46,7 +45,7 @@ export interface OrchestrationRequest {
   changes?: { worktreeId: string; generation: string; snapshotRevision: string; cursor?: string; pathPrefix?: string }
   documents?: WorktreeDocumentRequest
   attention?: true
-  timeline?: Omit<GitWorktreeCommitsQuery, 'contextKey'>
+  timeline?: WorktreeTimelineQuery
   integration?: IntegrationEvidenceRequest
 }
 export interface LocalChangesPage {

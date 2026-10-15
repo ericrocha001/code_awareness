@@ -4,7 +4,7 @@
 
 import { spawn } from 'child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import { closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { DiffFileStatus } from '../../shared/types'
@@ -120,14 +120,57 @@ export class GitService implements FileListingPort {
     return (await this.runGit(args, root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })).trim().split('\n').filter(Boolean)
   }
 
-  async getCommitPageMetadata(root: string, shas: string[]) {
+  async readHeadReflog(root: string) {
+    const admin = realpathSync(await this.getWorktreeDirectory(root))
+    const file = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'logs/HEAD'], root, { env: this.localReadEnvironment(), maxOutputBytes: 16384 })).trim()
+    const expected = join(admin, 'logs', 'HEAD')
+    const empty = { admin, revision: 'MISSING', exists: false, bytes: 0, truncated: false, malformed: 0, records: [] as Array<{ oldSha: string; sha: string; message: string; eventAt: string; sequence: number }> }
+    if (!existsSync(file)) return empty
+    if (realpathSync(file) !== realpathSync(expected) || realpathSync(file) !== expected) throw new Error('WORKTREE_IDENTITY_MISMATCH')
+    const descriptor = openSync(file, 'r')
+    try {
+      const stat = fstatSync(descriptor)
+      if (!stat.isFile()) throw new Error('HEAD_REFLOG_UNAVAILABLE')
+      const offset = Math.max(0, stat.size - 1048576), bytes = Buffer.alloc(stat.size - offset)
+      const read = readSync(descriptor, bytes, 0, bytes.length, offset)
+      if (read !== bytes.length) throw new Error('GIT_STATE_CHANGED')
+      let lines = bytes.toString('utf8').split('\n')
+      if (offset) lines.shift()
+      if (lines.at(-1) === '') lines.pop()
+      const truncated = offset > 0 || lines.length > 2000
+      lines = lines.slice(-2000)
+      let malformed = 0
+      const records = lines.flatMap((line, sequence) => {
+        const match = /^([a-f0-9]{40}|[a-f0-9]{64}) ([a-f0-9]{40}|[a-f0-9]{64}) .+ (-?\d+) ([+-]\d{4})\t(.*)$/.exec(line)
+        const time = match ? Number(match[3]) * 1000 : NaN
+        if (!match || !Number.isFinite(time) || Math.abs(time) > 8640000000000000 || line.length > 16384) { malformed++; return [] }
+        return [{ oldSha: match[1], sha: match[2], eventAt: new Date(time).toISOString(), message: match[5], sequence }]
+      })
+      return { admin, exists: true, bytes: read, truncated, malformed, records, revision: createHash('sha256').update(bytes).update(String(stat.size)).digest('hex') }
+    } finally { closeSync(descriptor) }
+  }
+
+  async getCommitOperationObjects(root: string, shas: string[]) {
+    if (shas.length > 1000 || !shas.every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
     if (!shas.length) return []
-    if (shas.length > 100 || !shas.every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
-    const raw = await this.runGit(['show', '--no-patch', '--format=%H%x00%cI%x00%s%x00', ...shas, '--'], root, { maxOutputBytes: 262144, env: this.localReadEnvironment() })
-    const fields = raw.split('\0'), result: Array<{ sha: string; committerDate: string; title: string }> = []
-    for (let i = 0; i + 2 < fields.length; i += 3) result.push({ sha: fields[i].trim(), committerDate: fields[i + 1], title: fields[i + 2] })
-    if (result.length !== shas.length || result.some((row, i) => row.sha !== shas[i] || !Number.isFinite(Date.parse(row.committerDate)))) throw new Error('COMMIT_METADATA_UNAVAILABLE')
-    return result
+    const checked = await this.runGit(['cat-file', '--batch-check=%(objectname) %(objecttype)'], root, { input: shas.join('\n') + '\n', env: this.localReadEnvironment(), maxOutputBytes: 262144 })
+    const valid = checked.trim().split('\n').filter(line => line.endsWith(' commit')).map(line => line.split(' ')[0])
+    const rows: Array<{ sha: string; parents: string[]; title: string }> = []
+    for (let offset = 0; offset < valid.length; offset += 100) {
+      const selected = valid.slice(offset, offset + 100)
+      const raw = await this.runGit(['show', '--no-patch', '--format=%H%x00%P%x00%s%x00', ...selected, '--'], root, { env: this.localReadEnvironment(), maxOutputBytes: 262144 })
+      const fields = raw.split('\0')
+      for (let i = 0; i + 2 < fields.length; i += 3) rows.push({ sha: fields[i].trim(), parents: fields[i + 1].split(' ').filter(Boolean), title: fields[i + 2].slice(0, 240) })
+    }
+    if (rows.length !== valid.length || rows.some((row, i) => row.sha !== valid[i])) throw new Error('COMMIT_METADATA_UNAVAILABLE')
+    return rows
+  }
+
+  async getUnreachableOperationCommits(root: string, head: string, shas: string[]) {
+    if (shas.length > 500 || ![head, ...shas].every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    if (!shas.length) return []
+    const raw = await this.runGit(['rev-list', '--stdin'], root, { input: shas.join('\n') + '\n^' + head + '\n', env: this.localReadEnvironment(), maxOutputBytes: 1048576 })
+    return raw.trim().split('\n').filter(Boolean)
   }
 
   async getCommitTopologyRevision(root: string): Promise<string> {

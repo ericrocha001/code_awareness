@@ -1,7 +1,21 @@
-import type { GitWorktreeCommitsPage } from './git-commit-correlation-types'
 export interface CommitNavigationIntent { projectId: string; revision: number; commitSha: string; requestId: string }
-export interface WorktreeTimelinePage extends Omit<GitWorktreeCommitsPage, 'items'> {
-  items: Array<GitWorktreeCommitsPage['items'][number] & { title: string; committerDate: string }>
+export interface WorktreeTimelineQuery { worktreeId: string; generation: string }
+export type LocalCommitOperation = 'COMMIT' | 'INITIAL_COMMIT' | 'AMEND' | 'CHERRY_PICK' | 'REBASE_PICK'
+export interface WorktreeTimelinePage {
+  repositoryId: string
+  worktreeId: string
+  generation: string
+  head: string | null
+  source: 'HEAD_REFLOG'
+  revision: string
+  observedAt: string
+  coverage: 'COMPLETE_OBSERVED_SINCE_CREATION' | 'PARTIAL' | 'UNAVAILABLE' | 'EMPTY_VERIFIED'
+  reasons: string[]
+  observedEvents: number
+  identifiedCount: number
+  omitted: number
+  truncated: boolean
+  items: Array<{ sha: string; title: string; reachability: 'HEAD_CURRENT' | 'REACHABLE' | 'NOT_REACHABLE' | 'UNKNOWN'; events: Array<{ operation: LocalCommitOperation; eventAt: string; sequence: number }> }>
 }
 export interface IntegrationEvidenceRequest {
   worktreeId: string

@@ -1,3 +1,4 @@
+import { readWorktreeProvenance } from './git-worktree-provenance'
 import { createHash } from 'node:crypto'
 import { summarizeLocalChanges } from './local-change-summary'
 import ignore from 'ignore'
@@ -517,15 +518,9 @@ export class GitOperationsService {
     const request = { ...query }
     return this.withCorrelationRead(provider => provider.worktreeCommits(request))
   }
-  getWorktreeTimeline(query: GitWorktreeCommitsQuery) {
+  getWorktreeTimeline(query: import('../../shared/types/worktree-integration-evidence-types').WorktreeTimelineQuery) {
     const request = { ...query }
-    return this.withCorrelationRead(async provider => {
-      const page = await provider.worktreeCommits(request, 'date')
-      const metadata = await this.git.getCommitPageMetadata(this.repoRoot, page.items.map(item => item.sha))
-      const verified = await provider.worktreeCommits(request, 'date')
-      if (verified.revision !== page.revision) fail('GIT_STATE_CHANGED')
-      return { ...page, items: page.items.map((item, i) => ({ ...item, title: metadata[i].title, committerDate: metadata[i].committerDate })) }
-    })
+    return this.withCorrelationRead(() => readWorktreeProvenance(this.git, this.worktrees!, this.coordinationIdentity!, request))
   }
   getCommitWorktrees(query: GitCommitWorktreesQuery) {
     const request = { ...query }

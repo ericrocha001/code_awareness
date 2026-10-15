@@ -22,19 +22,6 @@ async function fixture() {
   const records = (await service.discoverCoordinationWorktrees()).worktrees, record = records.find(r => r.path === a)!, detached = records.find(r => r.path === b)!
   return { root, parent, a, b, base, head, git, service, record, detached, records, deactivate: () => { active = false } }
 }
-it('enriches date-ordered timeline pages in one batch and invalidates their continuation after reset', async () => {
-  const f = await fixture(), metadata = vi.spyOn(f.git, 'getCommitPageMetadata'), query = { worktreeId: f.record.worktreeId, generation: f.record.generation, limit: 1 }
-  const first = await f.service.getWorktreeTimeline(query)
-  expect(first.items[0]).toMatchObject({ sha: f.head, title: 'a two', relation: 'HEAD_EXACT' })
-  expect(Number.isFinite(Date.parse(first.items[0].committerDate))).toBe(true)
-  expect(metadata).toHaveBeenCalledTimes(1)
-  const next = await f.service.getWorktreeTimeline({ ...query, cursor: first.nextCursor! })
-  expect(next.items[0].title).toBe('a one')
-  const detached = await f.service.getWorktreeTimeline({ worktreeId: f.detached.worktreeId, generation: f.detached.generation })
-  expect(detached.worktree.detached).toBe(true)
-  await gitExec(f.a, ['reset', '--hard', f.base])
-  await expect(f.service.getWorktreeTimeline({ ...query, cursor: first.nextCursor! })).rejects.toMatchObject({ code: 'GIT_STATE_CHANGED' })
-}, 30000)
 it('diagnoses explicit targets without preview writes and separates operational blockers from missing evidence', async () => {
   const f = await fixture(), query = { worktreeId: f.record.worktreeId, generation: f.record.generation, targetBranch: 'reference' }
   const snapshot = await f.git.captureWorktreeReadSnapshot(f.root)
