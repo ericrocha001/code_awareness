@@ -1,6 +1,7 @@
 import type { GitHubRepositoryIdentity, GitHubRepositoryVisibility } from '../../shared/types/repository-catalog-types'
 import type { GitHubUserProjection } from '../../shared/types/github-types'
 import type { PullRequestMergeability } from '../../shared/types/git-evidence-types'
+import type { PullRequestDeliveryEvidence } from '../../shared/types/worktree-removal-types'
 import { GITHUB_API_BASE_URL, GITHUB_API_VERSION, GITHUB_USER_AGENT } from './github-config'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 
@@ -21,6 +22,19 @@ export class GitHubApiClient {
     private readonly tokenProvider: () => Promise<string>,
     private readonly fetcher: typeof fetch = fetch
   ) {}
+
+  async inspectPullRequestDelivery(fullName: string, prNumber: number): Promise<PullRequestDeliveryEvidence> {
+    if (!Number.isSafeInteger(prNumber) || prNumber <= 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fullName)) throw malformed()
+    const value = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${prNumber}`, { signal: AbortSignal.timeout(10_000) })
+    const validRef = (ref: any) => ref && typeof ref.ref === 'string' && /^[a-f0-9]{40,64}$/.test(ref.sha) && Number.isSafeInteger(ref.repo?.id) && ref.repo.id > 0
+    if (!value || value.number !== prNumber || !Number.isSafeInteger(value.id) || value.id <= 0 ||
+      !['open', 'closed'].includes(value.state) || typeof value.merged !== 'boolean' || !validRef(value.head) || !validRef(value.base) ||
+      value.base.repo.full_name?.toLowerCase() !== fullName.toLowerCase() ||
+      (value.merged ? value.state !== 'closed' || typeof value.merged_at !== 'string' || !Number.isFinite(Date.parse(value.merged_at)) || !/^[a-f0-9]{40,64}$/.test(value.merge_commit_sha) : value.merged_at !== null)) throw malformed()
+    return { status: 'OBSERVED', source: 'GITHUB_REST', delivery: { repositoryId: String(value.base.repo.id), repository: fullName.toLowerCase(),
+      prNumber, prId: String(value.id), sourceRepositoryId: String(value.head.repo.id), sourceBranch: value.head.ref, head: value.head.sha, targetBranch: value.base.ref },
+      state: value.state, merged: value.merged, mergedAt: value.merged_at, mergeCommit: value.merged ? value.merge_commit_sha : null, observedAt: new Date().toISOString() }
+  }
 
   async getUser(): Promise<GitHubUserProjection> {
     const value = await this.request<any>('/user')

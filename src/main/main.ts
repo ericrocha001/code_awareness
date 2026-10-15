@@ -409,6 +409,8 @@ app.whenReady().then(async () => {
   registerGitManagementHandlers(gitManagement)
   const workOrchestration = new WorkOrchestrationController(activeProjects, change => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:changed', change)
+  }, revision => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:removed', revision)
   })
   registerWorkOrchestrationHandlers(workOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
@@ -466,6 +468,42 @@ app.whenReady().then(async () => {
       }, false, activeWorktreeValidation ?? undefined)
     gitManagement.bind(gitOperations)
     workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession), new WorktreeContractNavigation(gitOperations))
+    if (gitRepositoryId) {
+      gitOperations.configureRemoval({ sourceRoot: app.getAppPath(),
+        isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision,
+        delivery: prNumber => githubIntegration.inspectPullRequestDelivery(project.path, prNumber),
+        approveRecovery: async preview => {
+          if (!mainWindow || mainWindow.isDestroyed()) return false
+          const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Reconciliar recibo de remoção',
+            message: 'Reconciliar locks deixados por um executor encerrado?', detail: `${preview.path}\nA recuperação só remove locks cujo processo esteja comprovadamente encerrado. Não repete a exclusão nem concede controle a outro executor.`,
+            buttons: ['Cancelar', 'Reconciliar este recibo'], defaultId: 0, cancelId: 0, noLink: true })
+          return result.response === 1 && activeProjects?.getState().revision === gitProjectRevision
+        },
+        approvePolicy: async () => {
+          if (!mainWindow || mainWindow.isDestroyed()) return false
+          const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Limpeza automática',
+            message: 'Habilitar limpeza automática neste repositório?', detail: 'Somente WorkTrees gerenciadas e inscritas individualmente, com liberação explícita do proprietário e entrega verificada, poderão ser removidas. WorkTrees existentes não são inscritas automaticamente. A revogação cancela todas as inscrições.',
+            buttons: ['Cancelar', 'Habilitar'], defaultId: 0, cancelId: 0, noLink: true })
+          return result.response === 1 && activeProjects?.getState().revision === gitProjectRevision
+        },
+        approveAutomatic: async preview => {
+          if (!mainWindow || mainWindow.isDestroyed()) return false
+          const result = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Inscrever WorkTree na limpeza automática',
+            message: 'Autorizar a remoção desta WorkTree depois do merge verificado?',
+            detail: `${preview.path}\nHEAD: ${preview.head}\nPR: ${preview.intent.delivery?.repository} #${preview.intent.delivery?.prNumber}\nDestino: ${preview.intent.delivery?.targetBranch}\n\nConfirme que você é o proprietário ou operador legítimo e encerrou/liberou esta sessão. A autorização vale exclusivamente para esta identidade e conteúdo, enquanto a política permanecer habilitada. Revogue antes de retomar a escrita. Nenhuma alteração local ou arquivo ignorado será descartado automaticamente.`,
+            buttons: ['Cancelar', 'Sessão liberada; autorizar remoção pós-merge'], defaultId: 0, cancelId: 0, noLink: true })
+          return result.response === 1 && activeProjects?.getState().revision === gitProjectRevision
+        },
+        approve: async (preview, consent) => {
+          if (!mainWindow || mainWindow.isDestroyed() || activeProjects?.getState().revision !== gitProjectRevision) return false
+          const response = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Remover WorkTree',
+            message: 'Confirma a liberação e remoção permanente desta WorkTree?',
+            detail: `${preview.path}\nBranch preservada: ${preview.preservedRef}\nHEAD: ${preview.head}\nRevisão: ${preview.fingerprint}\nArquivos autorizados para descarte: ${consent.discardPaths.length}\n\nConfirme somente se você é o proprietário ou operador legítimo, encerrou a sessão na IDE e não há escritor concorrente. A branch e os registros de evidência permanecem; os arquivos locais aprovados serão perdidos.`,
+            buttons: ['Cancelar', 'Sessão liberada; remover esta WorkTree'], defaultId: 0, cancelId: 0, noLink: true })
+          return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
+        } })
+      workOrchestration.bindRemoval(gitOperations)
+    }
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
     const repositoryFileIngress = new RepositoryFileIngress(project.path, { validateDestination: relative => repositoryFileEditing.assertCreationAllowed(relative) })
     const repositoryFileEditing = new RepositoryFileEditing(project.path, {

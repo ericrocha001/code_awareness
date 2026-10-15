@@ -6,6 +6,7 @@
 import type { ActiveProjectState } from '../../shared/types/active-project-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../../shared/types/work-orchestration-types'
 import type { OrchestrationAttentionChange } from '../../shared/types/work-orchestration-attention-types'
+import type { RemovalRequest, RemovalResponse } from '../../shared/types/worktree-removal-types'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../../shared/types/git-management-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../../shared/types/continuum-ui-types'
@@ -24,6 +25,8 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 declare global {
   interface Window {
     codeAwareness: {
+      manageWorktreeRemoval: (request: RemovalRequest) => Promise<RemovalResponse>
+      onWorktreeRemoved: (callback: (revision: number) => void) => () => void
       getWorkOrchestration: (request: OrchestrationRequest) => Promise<OrchestrationResult<OrchestrationData>>
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>

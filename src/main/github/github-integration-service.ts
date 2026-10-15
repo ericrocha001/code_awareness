@@ -7,6 +7,7 @@ import type { GitHubAuthService, PendingGitHubAuthorization } from './github-aut
 import type { GitHubProductConfig } from './github-config'
 import type { GitHubConnectionMetadata, GitHubCredentialStore } from './github-credential-store'
 import { GitHubIntegrationError, githubErrorMessage, toGitHubIntegrationError } from './github-errors'
+import type { PullRequestDeliveryEvidence } from '../../shared/types/worktree-removal-types'
 
 export interface ExternalUrlOpener { openExternal(url: string): Promise<unknown> }
 
@@ -50,6 +51,22 @@ export class GitHubIntegrationService {
     } catch (error) {
       return { status: 'UNAVAILABLE' as const, source: 'GITHUB_REST' as const, prNumber,
         reason: toGitHubIntegrationError(error).code, observedAt: new Date().toISOString() }
+    }
+  }
+
+  async inspectPullRequestDelivery(repoPath: string, prNumber: number): Promise<PullRequestDeliveryEvidence> {
+    try {
+      this.requireConfigured()
+      if (!this.auth!.hasCredentials()) throw new GitHubIntegrationError('NOT_CONNECTED', githubErrorMessage('NOT_CONNECTED'))
+      const remote = await this.git.getRemoteUrl(repoPath)
+      const fullName = remote ? normalizeGitHubOrigin(remote) : null
+      const record = this.catalog.findByPath(repoPath)
+      if (!fullName || record?.github && record.github.fullName.toLowerCase() !== fullName.toLowerCase()) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+      const evidence = await this.api!.inspectPullRequestDelivery(fullName, prNumber)
+      if (evidence.status === 'OBSERVED' && record?.github && record.github.repositoryId !== evidence.delivery.repositoryId) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+      return evidence
+    } catch (error) {
+      return { status: 'UNAVAILABLE', source: 'GITHUB_REST', reason: toGitHubIntegrationError(error).code, observedAt: new Date().toISOString() }
     }
   }
 

@@ -80,7 +80,7 @@ export async function withWorktreeTransaction<T>(commonDirectory: string, admini
   }
 }
 
-function reconcileAbandonedLocks(observation: WorktreeObservation): boolean {
+export function reconcileAbandonedLocks(observation: Pick<WorktreeObservation, 'commonDirectory' | 'administrativeDirectory' | 'worktreeId'>): boolean {
   const guard = join(observation.commonDirectory, 'code-awareness-reconciliation.lock')
   let descriptor: number
   try { descriptor = openSync(guard, 'wx', 0o600) } catch { fail('WORKTREE_TRANSACTION_BUSY') }

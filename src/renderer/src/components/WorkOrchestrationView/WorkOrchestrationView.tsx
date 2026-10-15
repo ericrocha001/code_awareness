@@ -13,6 +13,7 @@ import { WorkOrchestrationAttention } from './WorkOrchestrationAttention'
 import { WorktreeStatusBadges } from './WorktreeStatusBadges'
 import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import { WorktreeIntegrationDetails } from './WorktreeIntegrationDetails'
+import { WorktreeRemovalDetails } from './WorktreeRemovalDetails'
 import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 
 const label = (w: ObservableWorktree) => w.branch ?? (w.head ? 'Detached HEAD' : 'Sem HEAD')
@@ -42,6 +43,7 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
   const content = useRef<HTMLElement>(null), activeNow = useRef(active)
   const automaticReads = useRef(0), attempted = useRef(new Set<string>())
   const resumeVisible = useRef<() => void>(() => {})
+  const removalInvalidated = useRef(false)
   activeNow.current = active
   const choose = (value: Selection) => { selection.current = value; setSelected(value) }
   const query = useCallback((extra: Pick<OrchestrationRequest, 'worktree' | 'changes' | 'documents'> = {}) => {
@@ -97,6 +99,14 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
     refreshPending.current = promise
     return promise
   }, [projectId, query])
+  useEffect(() => window.codeAwareness.onWorktreeRemoved?.(observedRevision => {
+    if (observedRevision !== revision) return
+    removalInvalidated.current = true
+    if (activeNow.current) { removalInvalidated.current = false; void refresh() }
+  }), [revision, refresh])
+  useEffect(() => {
+    if (active && removalInvalidated.current) { removalInvalidated.current = false; void refresh() }
+  }, [active, refresh])
   useEffect(() => {
     alive.current = true
     const context = `${projectId}:${revision}`
@@ -222,6 +232,7 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
           <details className="wo-identity wo-disclosure" key={tree.worktreeId} open><summary><WorktreeSectionTitle icon={Fingerprint}>Identidade</WorktreeSectionTitle></summary><dl className="wo-identity-grid"><dt>Caminho</dt><dd title={tree.path}>{tree.path.split('\\').join('/').split('/').slice(-3).join('/')}</dd><dt>HEAD</dt><dd title={tree.head ?? undefined}>{tree.head?.slice(0, 12) ?? 'Indisponível'}</dd></dl></details>
           <details className="wo-files wo-disclosure" key={`changes:${tree.worktreeId}:${tree.generation}`} onToggle={event => { if (event.target === event.currentTarget) setChangesOpen(event.currentTarget.open) }}><summary><WorktreeSectionTitle icon={FileText} meta={tree.observation === 'VERIFIED' && tree.localChanges ? `${tree.localChanges.total} ${tree.localChanges.total === 1 ? 'arquivo' : 'arquivos'}` : 'Sob demanda'}>Arquivos alterados</WorktreeSectionTitle></summary>{changesOpen && <LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} />}</details>
           <WorktreeIntegrationDetails key={`integration:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }} onCommit={onCommit}><WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} /></WorktreeIntegrationDetails>
+          <WorktreeRemovalDetails key={`removal:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }} removed={() => { choose(null); void refresh() }} />
           <div className="wo-observation-receipt"><Clock3 size={16} aria-hidden="true" /><span>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</span></div>
           <details className="wo-technical wo-disclosure"><summary><WorktreeSectionTitle icon={Terminal}>Identidade técnica</WorktreeSectionTitle></summary><dl><dt>Caminho completo</dt><dd>{tree.path}</dd><dt>HEAD completo</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd>{tree.localChanges && <><dt>Caminhos únicos</dt><dd>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</dd></>}</dl></details>
         </>}

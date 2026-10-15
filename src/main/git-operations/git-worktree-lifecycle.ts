@@ -1,7 +1,25 @@
 import { randomUUID } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { WorktreeRecord } from './git-worktree-registry'
+import type { RemovalPreview, RemovalReceipt } from '../../shared/types/worktree-removal-types'
+
+export interface AutomaticRemovalPolicy {
+  repositoryId: string
+  enabled: boolean
+  revision: string
+  enrollments: Array<{ preview: RemovalPreview; workspaceRevision: string; policyRevision: string; operatorReleaseConfirmedAt: string; lastResult?: { state: string; code?: string; observedAt: string } }>
+}
+
+export interface StoredRemoval {
+  administrativeDirectory: string
+  preview: RemovalPreview
+  revision: string
+  state: 'PREPARED' | 'CANCELLED' | 'EXECUTING' | 'CLOSED' | 'UNKNOWN' | 'BLOCKED'
+  operationId?: string
+  consentDigest?: string
+  receipt?: RemovalReceipt
+}
 
 export interface ManagedWorktree extends WorktreeRecord {
   repositoryId: string
@@ -12,6 +30,48 @@ export interface ManagedWorktree extends WorktreeRecord {
 
 export class GitWorktreeLifecycle {
   constructor(private readonly common: string) {}
+
+  removalPolicy(repositoryId: string): AutomaticRemovalPolicy {
+    const file = join(this.common, 'code-awareness-worktree-removal-policy.json')
+    if (!existsSync(file)) return { repositoryId, enabled: false, revision: 'DEFAULT_OFF', enrollments: [] }
+    const policy = JSON.parse(readFileSync(file, 'utf8')) as AutomaticRemovalPolicy
+    if (policy.repositoryId !== repositoryId) throw new Error('WORKTREE_IDENTITY_MISMATCH')
+    return policy
+  }
+
+  saveRemovalPolicy(policy: AutomaticRemovalPolicy): void {
+    const file = join(this.common, 'code-awareness-worktree-removal-policy.json'), temporary = file + '.' + randomUUID() + '.tmp'
+    writeFileSync(temporary, JSON.stringify(policy), { flag: 'wx', mode: 0o600 })
+    renameSync(temporary, file)
+  }
+
+  private removalFile(id: string, create = false): string {
+    if (!/^[a-f0-9-]{36}$/.test(id)) throw new Error('INVALID_ARGUMENT')
+    const directory = join(this.common, 'code-awareness-worktree-removals')
+    if (create) mkdirSync(directory, { recursive: true })
+    return join(directory, id + '.json')
+  }
+
+  removal(id: string): StoredRemoval {
+    return JSON.parse(readFileSync(this.removalFile(id), 'utf8')) as StoredRemoval
+  }
+
+  pendingRemoval(repositoryId: string, worktreeId: string, generation: string): StoredRemoval | undefined {
+    const directory = join(this.common, 'code-awareness-worktree-removals')
+    if (!existsSync(directory)) return
+    const files = readdirSync(directory).filter(name => /^[a-f0-9-]{36}\.json$/.test(name))
+    if (files.length > 10000) throw new Error('REMOVAL_RECEIPT_CAPACITY')
+    return files.map(name => this.removal(name.slice(0, -5))).filter(record => record.preview.repositoryId === repositoryId &&
+      record.preview.worktreeId === worktreeId && record.preview.generation === generation && record.operationId && ['EXECUTING', 'UNKNOWN'].includes(record.state))
+      .sort((a, b) => b.preview.observedAt.localeCompare(a.preview.observedAt))[0]
+  }
+
+  saveRemoval(removal: StoredRemoval): void {
+    const file = this.removalFile(removal.preview.preparationId, true)
+    const temporary = file + '.' + randomUUID() + '.tmp'
+    writeFileSync(temporary, JSON.stringify(removal), { flag: 'wx', mode: 0o600 })
+    renameSync(temporary, file)
+  }
 
   destination(): string {
     const directory = join(this.common, 'code-awareness-workspaces')

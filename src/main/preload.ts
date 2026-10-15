@@ -8,6 +8,7 @@ import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../shared/types/work-orchestration-types'
 import type { OrchestrationAttentionChange } from '../shared/types/work-orchestration-attention-types'
+import type { RemovalRequest, RemovalResponse } from '../shared/types/worktree-removal-types'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../shared/types/git-commit-correlation-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../shared/types/git-management-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
@@ -22,6 +23,12 @@ import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
+  manageWorktreeRemoval: (request: RemovalRequest): Promise<RemovalResponse> => ipcRenderer.invoke('work-orchestration:removal', request),
+  onWorktreeRemoved: (callback: (revision: number) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, revision: number) => callback(revision)
+    ipcRenderer.on('work-orchestration:removed', listener)
+    return () => { ipcRenderer.removeListener('work-orchestration:removed', listener) }
+  },
   getWorkOrchestration: (request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> => ipcRenderer.invoke('work-orchestration:read', request),
   onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, change: OrchestrationAttentionChange) => callback(change)

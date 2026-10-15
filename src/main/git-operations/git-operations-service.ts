@@ -15,6 +15,8 @@ import { GitCommitCorrelation } from './git-commit-correlation'
 import type { GitWorktreeCommitsQuery, GitCommitWorktreesQuery } from '../../shared/types/git-commit-correlation-types'
 import { assertNoWorktreeGrant, GitWorktreeOwnership, ownershipDigest, withWorktreeTransaction, type WorktreeApprovalPort, type WorktreeIntent, type WorktreeObservation, type WorktreeScope, type WorktreeSnapshot } from './git-worktree-ownership'
 import { GitWorktreeLifecycle } from './git-worktree-lifecycle'
+import { GitWorktreeRemoval, type WorktreeRemovalPorts } from './git-worktree-removal'
+import type { RemovalConsent, RemovalIntent } from '../../shared/types/worktree-removal-types'
 import { GitWorktreeIntegration, type WorktreeIntegrationPreview } from './git-worktree-integration'
 import type { CapturedText, WorktreeStructureCapture, WorktreeStructureRequest } from './git-worktree-capture'
 import type { GitDecoration, GitHistoryPage, GitCommitDetail, GitCommitFile, GitPatch, GitOperationalResult, GitMutationRequest } from '../../shared/types/git-management-types'
@@ -76,6 +78,23 @@ function isBinary(bytes: Buffer): boolean {
 }
 
 export class GitOperationsService {
+  private removal: GitWorktreeRemoval | undefined
+  configureRemoval(ports: WorktreeRemovalPorts): void {
+    if (!this.worktreeRepositoryId || !this.worktrees || this.readOnlyWorktree) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    this.removal = new GitWorktreeRemoval(this.repoRoot, this.worktreeRepositoryId!, this.git, this, ports)
+  }
+  private removalService(): GitWorktreeRemoval {
+    if (!this.removal) fail('REMOVAL_UNAVAILABLE')
+    return this.removal!
+  }
+  prepareRemoval(id: string, generation: string, intent: RemovalIntent, prNumber?: number) { return this.removalService().prepareRemoval(id, generation, intent, prNumber) }
+  cancelPreparation(id: string) { return this.removalService().cancelPreparation(id) }
+  executeRemoval(id: string, operationId: string, consent: RemovalConsent) { return this.removalService().executeRemoval(id, operationId, consent) }
+  reconcileRemovalReceipt(id: string, operationId: string) { return this.removalService().reconcileReceipt(id, operationId) }
+  removalPolicy(enabled?: boolean) { return this.removalService().policy(enabled) }
+  enrollAutomaticRemoval(id: string, consent: RemovalConsent) { return this.removalService().enrollAutomatic(id, consent) }
+  reconcileAutomaticRemoval() { return this.removalService().reconcileAutomatic() }
+  recoverWorktreeRemoval(id: string, generation: string) { return this.removalService().recover(id, generation) }
   async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>): Promise<LegacyGitReceiptResult> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
     return new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate)

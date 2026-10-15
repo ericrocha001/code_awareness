@@ -7,11 +7,45 @@ import type { WorktreeContractNavigation } from '../core/context/worktree-contra
 import type { OrchestrationAttentionChange } from '../../shared/types/work-orchestration-attention-types'
 import { SelectiveContractDiscovery } from '../work-orchestration/structural-discovery'
 import { Workline } from '../work-orchestration/workline'
+import type { GitOperationsService } from '../git-operations/git-operations-service'
+import type { RemovalRequest, RemovalResponse } from '../../shared/types/worktree-removal-types'
+import { validRemovalRequest } from './worktree-removal-validation'
 
 export class WorkOrchestrationController {
+  private removal: GitOperationsService | null = null
+  private removalTimer: ReturnType<typeof setInterval> | null = null
+  private suspended = false
+  async reconcileRemoval(): Promise<void> {
+    const git = this.removal
+    if (!git || this.suspended) return
+    const receipts = await git.reconcileAutomaticRemoval()
+    if (this.removal === git && receipts.some(receipt => receipt.state === 'CLOSED')) this.removed?.(this.projects.getState().revision)
+  }
+  bindRemoval(git: GitOperationsService): void {
+    this.removal = git
+    this.removalTimer = setInterval(() => {
+      if (this.removal !== git || this.suspended) return
+      void this.reconcileRemoval().catch(() => {})
+    }, 60000)
+    this.removalTimer.unref?.()
+  }
+  async remove(request: RemovalRequest): Promise<RemovalResponse> {
+    if (!validRemovalRequest(request)) return { success: false, code: 'INVALID_ARGUMENT' }
+    const selected = this.removal, state = this.projects.getState(), context = request.context
+    const current = () => this.removal === selected && this.projects.getState().revision === context.revision && this.projects.getState().project?.id === context.projectId
+    if (!selected || state.revision !== context.revision || state.project?.id !== context.projectId) return { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
+    try {
+      const op = request.operation
+      const data = op.action === 'RECOVER' ? await selected.recoverWorktreeRemoval(op.worktreeId, op.generation) : op.action === 'POLICY' ? await selected.removalPolicy(op.enabled) : op.action === 'ENROLL' ? await selected.enrollAutomaticRemoval(op.preparationId, op.consent) : op.action === 'PREPARE' ? await selected.prepareRemoval(op.worktreeId, op.generation, op.intent, op.prNumber) :
+        op.action === 'CANCEL' ? await selected.cancelPreparation(op.preparationId) :
+        op.action === 'RECONCILE' ? await selected.reconcileRemovalReceipt(op.preparationId, op.operationId) :
+        await selected.executeRemoval(op.preparationId, op.operationId, op.consent)
+      return current() ? { success: true, data } : { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
+    } catch (error) { return { success: false, code: current() && error instanceof Error ? error.message : 'PROJECT_CONTEXT_CHANGED' } }
+  }
   private active: { service: WorkOrchestrationService; projectId: string; revision: number } | null = null
   private workline: Workline | null = null
-  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly changed?: (change: OrchestrationAttentionChange) => void) {}
+  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly changed?: (change: OrchestrationAttentionChange) => void, private readonly removed?: (revision: number) => void) {}
   bind(git: OrchestrationGitReader | null, continuum?: OrchestrationContinuumReader, navigation?: WorktreeContractNavigation): void {
     this.deactivate()
     const state = this.projects.getState()
@@ -32,8 +66,8 @@ export class WorkOrchestrationController {
       this.workline.start()
     }
   }
-  deactivate(): void { this.workline?.stop(); this.workline = null; this.active = null }
-  pause(paused: boolean) { this.workline?.pause(paused) }
+  deactivate(): void { this.workline?.stop(); this.workline = null; this.active = null; this.removal = null; if (this.removalTimer) clearInterval(this.removalTimer); this.removalTimer = null }
+  pause(paused: boolean) { this.suspended = paused; this.workline?.pause(paused) }
   async read(request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> {
     const context = request?.context
     const worktree = request?.worktree
@@ -73,5 +107,6 @@ export class WorkOrchestrationController {
   }
 }
 export function registerWorkOrchestrationHandlers(controller: WorkOrchestrationController): void {
+  ipcMain.handle('work-orchestration:removal', (_event, request: RemovalRequest) => controller.remove(request))
   ipcMain.handle('work-orchestration:read', (_event, request: OrchestrationRequest) => controller.read(request))
 }

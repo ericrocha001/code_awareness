@@ -137,3 +137,30 @@
 @container (max-width:500px) { .wo-metrics svg { display:none; } .wo-header { gap:8px; } .wo-header button { padding:8px; } .wo-header h1 { font-size:19px; } .wo-attention-emblem { display:none; } .wo-attention-scope { margin-left:0; } .wo-metrics>div { padding:0 9px; } }
 @media (max-height:650px) { .wo-view { padding:10px; gap:6px; } .wo-feature-icon { width:44px; height:44px; } .wo-attention { max-height:125px; } .wo-metrics { padding:6px 0; } }
 @media (prefers-reduced-motion:reduce) { .wo-disclosure-chevron { transition:none; } }
+.wo-removal label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+  line-height: 1.5;
+}
+.wo-removal label:has(input[type="checkbox"]) {
+  flex-direction: row;
+  align-items: flex-start;
+}
+.wo-removal input[type="checkbox"] { flex: 0 0 auto; margin-top: 3px; }
+.wo-removal textarea, .wo-removal input[type="number"], .wo-removal select {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+}
+.wo-removal textarea { min-height: 80px; resize: vertical; }
+.wo-removal p { line-height: 1.5; overflow-wrap: anywhere; }
+.wo-removal ul { max-height: 220px; overflow: auto; overflow-wrap: anywhere; padding-left: 18px; }
+.wo-removal button { margin: 4px 6px 4px 0; white-space: normal; }

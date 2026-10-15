@@ -159,6 +159,21 @@ export class GitService implements FileListingPort {
     await this.runGit(['worktree', 'remove', '--', destination], root, { timeoutMs: 120000 })
   }
 
+  async removeReviewedWorktree(root: string, destination: string, discardReviewedContent: boolean): Promise<void> {
+    await this.runGit(['worktree', 'remove', ...(discardReviewedContent ? ['--force'] : []), '--', destination], root, { timeoutMs: 120000 })
+  }
+
+  async readRemovalPaths(root: string): Promise<{ tracked: string[]; ignored: string[]; hasSubmodules: boolean; hiddenChangesPossible: boolean }> {
+    const [tracked, ignored, index, flags] = await Promise.all([
+      this.runGit(['ls-files', '-z'], root, { env: this.localReadEnvironment() }),
+      this.runGit(['ls-files', '--others', '--ignored', '--exclude-standard', '-z'], root, { env: this.localReadEnvironment() }),
+      this.runGit(['ls-files', '--stage', '-z'], root, { env: this.localReadEnvironment() }),
+      this.runGit(['ls-files', '-v', '-z'], root, { env: this.localReadEnvironment() })
+    ])
+    return { tracked: tracked.split('\0').filter(Boolean), ignored: ignored.split('\0').filter(Boolean), hasSubmodules: index.split('\0').some(entry => entry.startsWith('160000 ')),
+      hiddenChangesPossible: flags.split('\0').some(entry => /^[a-zS] /.test(entry)) }
+  }
+
   async isAncestor(root: string, ancestor: string, descendant: string): Promise<boolean> {
     return (await this.runGit(['merge-base', '--is-ancestor', ancestor, descendant], root, { allowExitOne: true })) === '' &&
       (await this.runGit(['rev-list', '--count', `${descendant}..${ancestor}`], root)).trim() === '0'
