@@ -14,6 +14,33 @@ const inventory = (count = 21): OrchestrationOverview => ({ repositoryId: 'repo'
 const success = (data: OrchestrationData, context = { projectId: 'a', revision: 1 }): OrchestrationResult<OrchestrationData> => ({ success: true, context, data })
 const observe = (w: ObservableWorktree) => success({ repositoryId: 'repo', observedAt: 'now', worktree: { ...w, observation: 'VERIFIED', stagedCount: 0, unstagedCount: 0, untrackedCount: 0, conflictCount: 0, snapshot: { head: w.head, branch: w.branch, operation: null, indexRevision: 'i', worktreeRevision: 'w' } } })
 const install = (read: ReturnType<typeof vi.fn>) => { window.codeAwareness = { getWorkOrchestration: read, mutateGitManagement: vi.fn() } as any }
+it('shows actual coverage separately from inventory and keeps missing investigation explicit', async () => {
+  const read = vi.fn(async () => success(inventory(3)))
+  install(read)
+  const attention = { repositoryId: 'repo', coverage: 'PENDING', known: 3, observed: 1, paused: false, cadenceMs: 30000, pending: [{ worktreeId: tree(2).worktreeId, reason: 'PENDING' }], alerts: [] } as any
+  const view = render(<WorkOrchestrationView state={state} attention={attention} />)
+  await screen.findByText('Inventário completo · 3 descobertas')
+  expect(screen.getByText('1/3')).toBeTruthy()
+  expect(screen.getByText('Nenhuma interferência confirmada no escopo observado')).toBeTruthy()
+  expect(screen.getByText(/Cobertura pendente/)).toBeTruthy()
+  expect(document.querySelector('.wo-project select')).toBeNull()
+  view.rerender(<WorkOrchestrationView state={state} />)
+  expect(screen.getByText('Investigação indisponível')).toBeTruthy()
+  expect(screen.queryByText('1/3')).toBeNull()
+})
+it('resets file disclosure on selection change and reads only the expanded selection', async () => {
+  const read = vi.fn(async (request: OrchestrationRequest) => request.worktree ? observe({ ...tree(Number.parseInt(request.worktree.worktreeId, 16)), snapshotRevision: 'snapshot' }) : request.changes ? success({ repositoryId: 'repo', ...request.changes, changes: [], totalCount: 0, revision: 'page', nextCursor: null }) : success(inventory(3)))
+  install(read); render(<WorkOrchestrationView state={state} />)
+  await screen.findByText('work-001'); fireEvent.click(screen.getByText('work-001'))
+  await screen.findByText('Última observação do estado')
+  expect(read.mock.calls.some(([request]) => request.changes)).toBe(false)
+  const files = screen.getByText('Arquivos alterados').closest('details')!
+  files.open = true; fireEvent(files, new Event('toggle'))
+  await screen.findByText('0 arquivos · página 1')
+  fireEvent.click(screen.getByText('work-002'))
+  await waitFor(() => expect(screen.getAllByText('Arquivos alterados').find(element => element.tagName === 'SUMMARY')?.closest('details')?.open).toBe(false))
+  expect(read.mock.calls.filter(([request]) => request.changes)).toHaveLength(1)
+})
 it('reveals already discovered evidence at its chronological position while preserving the filter', async () => {
   const read = vi.fn(async () => success(inventory(3)))
   install(read)
@@ -59,6 +86,9 @@ it('marks failed details stale, allows revalidation and restores the original ro
   await screen.findByText('Inventário completo · 21 descobertas')
   const row = screen.getByText('work-001').closest('button')!
   row.focus(); fireEvent.click(row)
+  const files = screen.getByText('Arquivos alterados').closest('details')!
+  expect(read.mock.calls.some(([request]) => request.changes)).toBe(false)
+  files.open = true; fireEvent(files, new Event('toggle'))
   await screen.findByText(/Obsoleto ou indisponível/)
   expect(screen.getByText('Revalidar worktree').hasAttribute('disabled')).toBe(false)
   fireEvent.click(screen.getByText('Revalidar worktree'))
@@ -181,6 +211,8 @@ it('wraps keyboard focus to a visible control while document details are closed 
   await screen.findByText('Inventário completo · 21 descobertas')
   fireEvent.click(screen.getByText('work-001')); await screen.findByText('Última observação do estado')
   const panel = screen.getByLabelText('Inspetor de worktree')
+  const files = screen.getByText('Arquivos alterados').closest('details')!
+  files.open = true; fireEvent(files, new Event('toggle'))
   await screen.findByText('Lendo arquivos alterados…')
   Object.defineProperty(panel.parentElement, 'clientWidth', { value: 896 })
   panel.focus(); fireEvent.keyDown(panel, { key: 'Tab', shiftKey: true })

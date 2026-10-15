@@ -1,0 +1,52 @@
+const fs=require('node:fs')
+const path=require('node:path')
+const {buildSync}=require('esbuild')
+exports.run=async ctx=>{
+ buildSync({entryPoints:[path.join(__dirname,'work-orchestration-redesign-fixture.tsx')],bundle:true,outfile:path.join(ctx.temporary,'fixture.js'),platform:'browser',jsx:'automatic',define:{'process.env.NODE_ENV':'"production"'},loader:{'.woff':'file','.woff2':'file','.ttf':'file'}})
+ const csp=/<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]+)"/.exec(fs.readFileSync(path.join(ctx.projectRoot,'src/renderer/index.html'),'utf8'))[1]
+ const capture=async name=>{
+  ctx.check(name+': fixed header remains visible',await ctx.evaluate(()=>document.querySelector('.wo-header').getBoundingClientRect().top>=0&&document.querySelector('.wo-view').scrollTop===0&&document.documentElement.scrollTop===0&&document.body.scrollTop===0))
+  await ctx.capture(name)
+ }
+ const page=path.join(ctx.temporary,'index.html')
+ fs.writeFileSync(page,`<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`)
+ await ctx.load(page);await ctx.viewport(1440,900);await ctx.waitFor(()=>document.querySelectorAll('.wo-tree').length===30)
+ const order=await ctx.evaluate(()=>[...document.querySelectorAll('.wo-tree')].map(w=>w.dataset.worktreeId).join(','))
+ ctx.check('Partial coverage and honest empty attention',await ctx.evaluate(()=>document.querySelector('.wo-metrics').textContent.includes('5/30')&&document.querySelector('.wo-attention').textContent.includes('no escopo observado')))
+ await ctx.click('[data-worktree-id="1"]');await ctx.waitFor(()=>document.querySelector('.wo-inspector')&&!document.querySelector('.wo-inspector').textContent.includes('Lendo a worktree'))
+ ctx.check('Deep files are lazy',await ctx.evaluate(()=>!window.fixtureReads.some(r=>r.changes||r.documents||r.timeline)))
+ await capture('wide-dark-selected')
+ await ctx.evaluate(()=>document.querySelector('.wo-inspector').scrollTop=0)
+ await ctx.click('.wo-integration>summary');await capture('wide-dark-integration-open')
+ for(const [width,height,name] of [[1440,900,'wide'],[1050,800,'medium'],[480,760,'narrow']]){
+  await ctx.viewport(width,height)
+  for(const theme of ['dark','light']){
+   await ctx.evaluate(theme=>document.body.dataset.theme=theme,theme)
+   await ctx.overflow()
+   ctx.check(`${name} ${theme}: no global vertical scroll`,await ctx.evaluate(()=>document.documentElement.scrollHeight<=innerHeight))
+   await capture(`${name}-${theme}-inspector`)
+  }
+ }
+ ctx.window.webContents.focus();ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'});ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'});await ctx.waitFor(()=>!document.querySelector('.wo-inspector'))
+ ctx.check('Escape restores row focus',await ctx.evaluate(()=>document.activeElement.dataset.worktreeId==='1'))
+ await ctx.viewport(1440,900)
+ await ctx.evaluate(()=>window.fixtureMode('issue'));await ctx.waitFor(()=>!!document.querySelector('.wo-attention--issue'))
+ await capture('wide-light-issue');await ctx.click('.wo-attention-item button');await ctx.waitFor(()=>!!document.querySelector('[aria-label="Evidência de interferência estrutural"]'))
+ ctx.check('Alert navigation retains chronology',order===await ctx.evaluate(()=>[...document.querySelectorAll('.wo-tree')].map(w=>w.dataset.worktreeId).join(',')))
+ await capture('wide-light-alert-evidence')
+ await ctx.evaluate(()=>window.fixtureMode('stale'));await ctx.waitFor(()=>document.querySelector('.wo-attention').textContent.includes('obsoleta'));await capture('wide-light-stale')
+ await ctx.evaluate(()=>window.fixtureMode('unavailable'));await ctx.waitFor(()=>document.querySelector('.wo-attention').textContent.includes('indisponível'));await capture('wide-light-unavailable')
+ await ctx.click('[aria-label="Fechar inspetor"]')
+ await ctx.input('[aria-label="Filtrar worktrees"]','feature-12');await ctx.waitFor(()=>document.querySelectorAll('.wo-tree').length===1)
+ ctx.check('Branch search',await ctx.evaluate(()=>document.querySelector('.wo-tree').textContent.includes('feature-12')))
+ await capture('wide-light-search')
+ await ctx.evaluate(()=>{window.fixtureDelay=true})
+ await ctx.click('.wo-tree');await ctx.waitFor(()=>document.querySelector('.wo-inspector')?.textContent.includes('Lendo a worktree selecionada'))
+ await capture('wide-light-working')
+ await ctx.evaluate(()=>{window.fixtureDelay=false;window.fixtureRelease()});await ctx.waitFor(()=>!document.querySelector('.wo-inspector')?.textContent.includes('Lendo a worktree selecionada'))
+ await ctx.evaluate(()=>{const panel=document.querySelector('.wo-inspector');const summary=[...panel.querySelectorAll('summary')].find(s=>s.textContent==='Arquivos alterados');summary.scrollIntoView({block:'center'});summary.setAttribute('data-files-summary','')})
+ await ctx.click('[data-files-summary]');await ctx.waitFor(()=>!!document.querySelector('[aria-label="Arquivos alterados"]'))
+ ctx.check('Opening files issues one read',await ctx.evaluate(()=>window.fixtureReads.filter(r=>r.changes).length===1))
+ ctx.check('Deep focus never scrolls the fixed feature header',await ctx.evaluate(()=>document.querySelector('.wo-view').scrollTop===0&&document.querySelector('.wo-header').getBoundingClientRect().top>=0))
+ await capture('wide-light-files')
+}
