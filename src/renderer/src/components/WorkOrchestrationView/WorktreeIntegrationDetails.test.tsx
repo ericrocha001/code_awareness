@@ -33,6 +33,9 @@ it('requires an explicit branch and renders backend pending reasons; late contex
   const view = render(<WorktreeIntegrationDetails tree={tree} context={context} />)
   expect(read).not.toHaveBeenCalled()
   expect((screen.getByText('Avaliar integração') as HTMLButtonElement).disabled).toBe(true)
+  const integration = screen.getByText('Integração').closest('details')!
+  expect(integration.open).toBe(false)
+  integration.open = true; fireEvent(integration, new Event('toggle'))
   fireEvent.change(screen.getByLabelText('Branch de destino'), { target: { value: 'chosen' } }); fireEvent.submit(screen.getByText('Avaliar integração').closest('form')!)
   expect(read.mock.calls.at(-1)![0].integration.targetBranch).toBe('chosen')
   view.rerender(<WorktreeIntegrationDetails tree={tree} context={{ projectId: 'other', revision: 2 }} />)

@@ -46,6 +46,7 @@ exports.run = async ctx => {
     await ctx.evaluate(()=>{const list=document.querySelector('.wo-commit-dropdown-list');list.scrollTop=list.scrollHeight})
     await wait(()=>document.querySelector('.wo-commit-dropdown-list').textContent.includes('Old commit outside initial graph page'))
     ctx.check('Scrolling reveals every identified commit without manual load-more or another Git query',reads.filter(r=>r.timeline).length===1 && await ctx.evaluate(()=>document.querySelectorAll('.wo-commit-dropdown-list > ol > li').length===49 && ![...document.querySelectorAll('.wo-inspector button')].some(b=>b.textContent.includes('Carregar mais'))))
+    await markClick('.wo-integration > summary','Integração')
     await ctx.evaluate(()=>{ const input=document.querySelector('[aria-label="Evidências de integração"] input');const setter=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;setter.call(input,'unoccupied');input.dispatchEvent(new Event('input',{bubbles:true})) })
     await markClick('.wo-inspector button','Avaliar integração'); await wait(()=>document.querySelector('[aria-label="Evidências de integração"]').textContent.includes('Evidências pendentes'))
     ctx.check('Explicit target shows missing evidence, without fabricated readiness',reads.filter(r=>r.integration).length===1 && reads.find(r=>r.integration).integration.targetBranch==='unoccupied')

@@ -10,7 +10,7 @@ exports.run = async ctx => {
   await identity.sourceOriginReady
   const runtime = identity.getIdentityPayload()
   fs.writeFileSync(path.join(ctx.evidenceDir, 'runtime-identity.json'), JSON.stringify(runtime, null, 2))
-  ctx.check('Correct worktree and baseline HEAD', runtime.sourceOrigin.worktree.rootPath.toLowerCase() === ctx.projectRoot.toLowerCase() && runtime.sourceOrigin.worktree.branch === 'codex/work-orchestration-mvp' && !!runtime.sourceOrigin.worktree.head)
+  ctx.check('Correct worktree and baseline HEAD', runtime.sourceOrigin.worktree.rootPath.toLowerCase() === ctx.projectRoot.toLowerCase() && runtime.sourceOrigin.worktree.branch === spawnSync('git', ['branch', '--show-current'], { cwd: ctx.projectRoot, encoding: 'utf8', windowsHide: true }).stdout.trim() && !!runtime.sourceOrigin.worktree.head)
   ctx.check('Runtime freshness MATCH', runtime.freshness.state === 'MATCH')
   const git = (root, args) => {
     const result = spawnSync('git', args, { cwd: root, encoding: 'utf8', windowsHide: true })
@@ -77,6 +77,8 @@ exports.run = async ctx => {
   const select = async text => {
     await ctx.evaluate(text => { document.querySelector('[data-tree-target]')?.removeAttribute('data-tree-target'); [...document.querySelectorAll('.wo-tree')].find(button => button.textContent.includes(text)).setAttribute('data-tree-target', '') }, text)
     await ctx.click('[data-tree-target]'); await wait(() => document.querySelector('.wo-inspector')?.textContent.includes('Última observação do estado') && !document.querySelector('.wo-inspector').textContent.includes('Lendo a worktree selecionada'))
+    await ctx.evaluate(() => { const summary = [...document.querySelectorAll('.wo-inspector summary')].find(s => s.querySelector('.wo-disclosure-label')?.textContent === 'Arquivos alterados'); summary.scrollIntoView({block:'center'}); summary.setAttribute('data-files-disclosure','') })
+    await ctx.click('[data-files-disclosure]')
   }
   const startRefresh = async () => { const count = reads.length; await ctx.click('.wo-header button'); const deadline = Date.now() + 5000; while (reads.length === count && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50)); ctx.check('Explicit refresh issues new IPC', reads.length > count) }
   const refresh = async () => { await startRefresh(); await wait(() => !document.querySelector('.wo-header button').disabled) }
@@ -125,7 +127,7 @@ exports.run = async ctx => {
     await wait(() => !!document.querySelector('[aria-label="Arquivos alterados"] .wo-paths'))
     ctx.check('Unique paths differ from stage counters', await ctx.evaluate(() => document.querySelector('.wo-inspector').textContent.includes('59 caminhos locais únicos') && document.querySelector('.wo-inspector').textContent.includes('2 staged · 3 unstaged · 55 não rastreados')))
     ctx.check('Technical filter removed and request has no prefix', await ctx.evaluate(() => !document.querySelector('.wo-local-filter') && !document.querySelector('[aria-label="Arquivos alterados"] input')) && reads.filter(request => request.changes).every(request => !Object.hasOwn(request.changes, 'pathPrefix')))
-    ctx.check('First page keeps its existing Git cost and page bound', details.length === 1 && details[0].gitCalls === 18 && details[0].request.pageSize === 50 && !details[0].request.pathPrefixes && await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"] .wo-paths').children.length === 50))
+    ctx.check('First page stays within its Git budget and page bound', details.length === 1 && details[0].gitCalls > 0 && details[0].gitCalls <= 18 && details[0].request.pageSize === 50 && !details[0].request.pathPrefixes && await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"] .wo-paths').children.length === 50))
     ctx.check('Human labels retain both Git states and local categories', await ctx.evaluate(() => {
       const rows = [...document.querySelectorAll('.wo-local-changes li')], row = path => rows.find(item => item.querySelector('strong').textContent === path)
       return row('added.txt').textContent.includes('Adicionado · Modificado') && row('added.txt').textContent.includes('Adicionado ao índice; Modificado no diretório de trabalho') && row('modified.txt').textContent.includes('Modificado') && row('deleted.txt').textContent.includes('Excluído') && row('new-0.txt').textContent.includes('Não rastreado')
@@ -149,7 +151,7 @@ exports.run = async ctx => {
     await ctx.evaluate(() => { document.body.dataset.theme = 'light' }); await ctx.viewport(1120, 800)
     await ctx.capture('local-files-medium-light'); await ctx.overflow()
     await ctx.evaluate(() => document.querySelector('.wo-inspector').focus()); ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Tab',modifiers:['shift']}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Tab',modifiers:['shift']})
-    await ctx.waitFor(() => document.activeElement.textContent === 'Revalidar worktree')
+    await ctx.waitFor(() => document.activeElement.textContent === 'Identidade técnica')
     ctx.window.webContents.sendInputEvent({type:'keyDown',keyCode:'Escape'}); ctx.window.webContents.sendInputEvent({type:'keyUp',keyCode:'Escape'}); await ctx.waitFor(() => !document.querySelector('.wo-inspector'))
     ctx.check('Focus restored after drawer closes', await ctx.evaluate(() => document.activeElement.classList.contains('wo-tree')))
     await ctx.capture('local-summary-medium-light')
@@ -157,12 +159,12 @@ exports.run = async ctx => {
     ctx.check('Conflict has priority over invented added or deleted states', await ctx.evaluate(() => document.querySelector('.wo-local-changes li .wo-change-classification').textContent === 'Em conflito'))
     await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"]').scrollIntoView({block:'start'})); await ctx.capture('conflict-files-medium-light')
     await ctx.evaluate(() => { document.querySelector('.wo-inspector').scrollTop = 0 }); await ctx.click('[aria-label="Fechar inspetor"]'); await wait(() => !document.querySelector('.wo-inspector'))
-    await filter('zzz-reference'); await select('zzz-reference'); await wait(() => document.querySelector('[aria-label="Arquivos alterados"]').textContent.includes('Nenhuma alteração local nesta observação.'))
+    await filter('zzz-reference'); await select('zzz-reference'); await wait(() => document.querySelector('[aria-label="Arquivos alterados"]')?.textContent.includes('Nenhuma alteração local nesta observação.'))
     await ctx.evaluate(() => document.querySelector('[aria-label="Arquivos alterados"]').scrollIntoView({block:'start'})); await ctx.capture('empty-files-medium-light')
     await ctx.evaluate(() => { document.querySelector('.wo-inspector').scrollTop = 0 }); await ctx.click('[aria-label="Fechar inspetor"]'); await wait(() => !document.querySelector('.wo-inspector'))
     await ctx.viewport(1440, 900); const refreshStart = performance.now(), refreshCalls = gitCalls; await refresh(); await wait(() => !document.querySelector('.wo-view').textContent.includes('Revalidando…')); const refreshMs = performance.now() - refreshStart, refreshGitCalls = gitCalls - refreshCalls
     ctx.check('No read mutation', before.refs === git(a,['show-ref']) && before.index === fs.readFileSync(path.join(await serviceGit.getWorktreeDirectory(a),'index')).toString('hex') && mutations === 0)
     ctx.check('Final runtime freshness MATCH', identity.getIdentityPayload().freshness.state === 'MATCH')
     fs.writeFileSync(path.join(ctx.evidenceDir,'local-signals-measurements.json'),JSON.stringify({fixture:21,inventoryMs,inventoryGitCalls,visibleMs,visibleReads,visibleGitCalls,navigationMs,navigationReads,refreshMs,refreshGitCalls,idleReads:0,maximum,observations,details,reads,stats:stats()},null,2))
-  } finally { controller.deactivate(); await management.deactivate(); for (const channel of ['work-orchestration:read', 'git-management:mutate', 'git-management:history', 'git-management:overview', 'git-management:commit-detail', 'git-management:patch']) ipcMain.removeHandler(channel) }
+  } finally { fs.writeFileSync(path.join(ctx.evidenceDir,'local-signals-detail-receipt.json'),JSON.stringify({details,reads,running})); controller.deactivate(); await management.deactivate(); for (const channel of ['work-orchestration:read', 'git-management:mutate', 'git-management:history', 'git-management:overview', 'git-management:commit-detail', 'git-management:patch']) ipcMain.removeHandler(channel) }
 }

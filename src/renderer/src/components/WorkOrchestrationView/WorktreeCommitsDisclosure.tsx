@@ -1,4 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { GitCommitHorizontal } from 'lucide-react'
+import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import type { ObservableWorktree, OrchestrationContext } from '../../../../shared/types/work-orchestration-types'
 import type { CommitNavigationIntent, WorktreeTimelinePage } from '../../../../shared/types/worktree-integration-evidence-types'
 
@@ -25,18 +27,19 @@ export function WorktreeCommitsDisclosure({ tree, context, active, onCommit }: {
     } finally { if (epoch.current === request) setBusy(false) }
   }
   const reveal = () => setVisible(value => Math.min(value + 40, page?.items.length ?? value))
-  return <details className="wo-commit-dropdown" open={expanded} onToggle={event => {
+  return <details className="wo-commit-dropdown wo-disclosure" open={expanded} onToggle={event => {
     const next = event.currentTarget.open
     if (next === opened.current) return
     opened.current = next; setExpanded(next)
     if (next && active) void load()
     else { epoch.current++; setPage(null); setBusy(false) }
   }}>
-    <summary>Commits desta worktree{page ? ` · ${page.identifiedCount} identificados · ${page.coverage === 'PARTIAL' ? 'cobertura parcial' : page.coverage === 'UNAVAILABLE' ? 'indisponível' : page.coverage === 'EMPTY_VERIFIED' ? 'escopo observado vazio' : 'cobertura desde a criação comprovada'}` : ''}</summary>
+    <summary><WorktreeSectionTitle icon={GitCommitHorizontal} meta={page ? `${page.identifiedCount} identificados` : 'Sob demanda'}>Commits desta worktree</WorktreeSectionTitle></summary>
     {expanded && <>
       <p>Procedência: reflog HEAD deste checkout. Instante da operação local; não é a data do commit nem prova de autoria.</p>
       {busy && <p role="status">Consultando operações locais…</p>}{error && <p role="alert">{error}</p>}
       {page && <>
+        <p>{page.coverage === 'PARTIAL' ? 'cobertura parcial' : page.coverage === 'UNAVAILABLE' ? 'indisponível' : page.coverage === 'EMPTY_VERIFIED' ? 'escopo observado vazio' : 'cobertura desde a criação comprovada'}</p>
         {(page.coverage === 'PARTIAL' || page.coverage === 'UNAVAILABLE') && <p role="status">Histórico de commits realizados nesta worktree {page.coverage === 'UNAVAILABLE' ? 'indisponível' : 'incompleto'}. Reflogs podem expirar, ser desativados ou alterados; a contagem não representa toda a vida da worktree.</p>}
         {page.truncated && <p>Limite de leitura atingido; há registros fora desta observação.</p>}
         {page.omitted > 0 && <p>{page.omitted} eventos sem objeto ou operação verificável foram omitidos.</p>}
