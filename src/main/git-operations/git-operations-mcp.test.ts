@@ -98,6 +98,14 @@ describe('Git MCP contract', () => {
 })
 
 describe('shared GitHub remote authentication', () => {
+  it('does not repeat a failed authenticated push with ambient credentials', async () => {
+    const auth = { getValidAccessToken: vi.fn(async () => 'private-token') } as unknown as GitHubAuthService
+    const git = { getRemoteUrl: vi.fn(async () => 'https://github.com/owner/repository.git'), pushAuthenticated: vi.fn(async () => { throw new Error('confirmation lost') }), push: vi.fn() }
+    const transport = new GitHubGitTransport(auth, git as unknown as GitService)
+    await expect(transport.push('/project', 'main')).rejects.toThrow('confirmation lost')
+    expect(git.pushAuthenticated).toHaveBeenCalledTimes(1)
+    expect(git.push).not.toHaveBeenCalled()
+  })
   it('uses existing ephemeral credentials for GitHub HTTPS only and forwards the pinned push SHA', async () => {
     const auth = { getValidAccessToken: vi.fn(async () => 'private-token') } as unknown as GitHubAuthService
     const git = {

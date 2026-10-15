@@ -155,14 +155,6 @@
     },
     {
       "project": "node",
-      "file": "src/main/academy/git/academy-git-sync-service.test.ts",
-      "code": 2561,
-      "category": "Error",
-      "message": "Object literal may only specify known properties, but 'owner' does not exist in type 'GitHubRepositoryIdentity'. Did you mean to write 'ownerId'?",
-      "count": 6
-    },
-    {
-      "project": "node",
       "file": "src/main/core/codemap-addressability.test.ts",
       "code": 2835,
       "category": "Error",

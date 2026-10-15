@@ -1,6 +1,7 @@
-import { lstat, mkdir, readFile, readdir, realpath, rm, writeFile, rename } from 'node:fs/promises'
+import { lstat, readFile, readdir, realpath, rm, rename } from 'node:fs/promises'
 import { createHash, randomUUID } from 'node:crypto'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { closeSync, constants, fstatSync, ftruncateSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import type { AcademyPackage } from '../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage } from './academy-package'
 
@@ -92,39 +93,79 @@ export async function readSkillDirectory(directory: string): Promise<AcademyPack
   return normalizeAcademyPackage({ skillMd, artifacts })
 }
 
-export async function writeSkillDirectory(directory: string, input: AcademyPackage): Promise<void> {
-  const pkg = normalizeAcademyPackage(input)
-  await mkdir(directory, { recursive: true })
-  const root = resolve(directory)
-  const expected = new Set(['SKILL.md', ...Object.keys(pkg.artifacts)])
-  const existing: string[] = []
-  const collect = async (current: string): Promise<void> => {
-    for (const entry of await readdir(current, { withFileTypes: true })) {
+export function assertAcademyPathHasNoLinks(path: string): void {
+  const absolute = resolve(path)
+  const anchor = parse(absolute).root
+  let current = anchor
+  for (const part of relative(anchor, absolute).split(sep).filter(Boolean)) {
+    current = join(current, part)
+    try {
+      if (lstatSync(current).isSymbolicLink()) throw new AcademyError('SYMLINK_NOT_ALLOWED', `Unsafe Academy mutation path: ${current}`)
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+  }
+}
+
+export function listSkillFilesWithoutLinks(directory: string): string[] {
+  assertAcademyPathHasNoLinks(directory)
+  try { lstatSync(directory) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw error
+  }
+  const files: string[] = []
+  const collect = (current: string): void => {
+    assertAcademyPathHasNoLinks(current)
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
       const absolute = join(current, entry.name)
-      if (entry.isSymbolicLink()) throw new AcademyError('SYMLINK_NOT_ALLOWED', `Refusing to project through symbolic link: ${absolute}`)
-      if (entry.isDirectory()) await collect(absolute)
-      else if (entry.isFile()) existing.push(relative(root, absolute).split(sep).join('/'))
+      assertAcademyPathHasNoLinks(absolute)
+      if (lstatSync(absolute).isDirectory()) collect(absolute)
+      else files.push(relative(directory, absolute).split(sep).join('/'))
     }
   }
-  await collect(directory)
+  collect(directory)
+  return files
+}
+
+export async function writeSkillDirectory(directory: string, input: AcademyPackage): Promise<void> {
+  const pkg = normalizeAcademyPackage(input)
+  const root = resolve(directory)
+  const expected = new Set(['SKILL.md', ...Object.keys(pkg.artifacts)])
+  const existing = listSkillFilesWithoutLinks(directory)
   const entries: Array<[string, string]> = [['SKILL.md', pkg.skillMd], ...Object.entries(pkg.artifacts)]
+  // Keep link verification and each mutation synchronous; an await would reopen the checked path.
   for (const [path, content] of entries) {
     const absolute = resolve(root, ...path.split('/'))
     if (!isWithin(root, absolute)) throw new AcademyError('PATH_ESCAPE')
-    await mkdir(dirname(absolute), { recursive: true })
+    assertAcademyPathHasNoLinks(absolute)
+    mkdirSync(dirname(absolute), { recursive: true })
+    assertAcademyPathHasNoLinks(absolute)
     let same = false
-    try { same = decoder.decode(await readFile(absolute)) === content } catch {}
-    if (!same) await writeFile(absolute, content, 'utf8')
+    try { same = decoder.decode(readFileSync(absolute)) === content } catch {}
+    if (!same) {
+      assertAcademyPathHasNoLinks(absolute)
+      const file = openSync(absolute, constants.O_WRONLY | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0))
+      try {
+        assertAcademyPathHasNoLinks(absolute)
+        const current = lstatSync(absolute), opened = fstatSync(file)
+        if (!opened.isFile() || current.dev !== opened.dev || current.ino !== opened.ino) throw new AcademyError('PROJECTION_CHANGED')
+        ftruncateSync(file, 0)
+        writeFileSync(file, content, 'utf8')
+      } finally { closeSync(file) }
+    }
   }
   for (const path of existing.filter((path) => !expected.has(path)).sort((a, b) => b.length - a.length)) {
     const absolute = resolve(root, ...path.split('/'))
-    if (isWithin(root, absolute)) await rm(absolute, { force: true })
+    if (isWithin(root, absolute)) {
+      assertAcademyPathHasNoLinks(absolute)
+      rmSync(absolute, { force: true })
+    }
   }
-  await removeEmptyDirectories(directory)
+  removeEmptyDirectories(directory)
 }
 
 export async function removeSkillDirectory(directory: string): Promise<void> {
-  await rm(directory, { recursive: true, force: true })
+  listSkillFilesWithoutLinks(directory)
+  assertAcademyPathHasNoLinks(directory)
+  rmSync(directory, { recursive: true, force: true })
 }
 
 function isWithin(root: string, candidate: string): boolean {
@@ -132,12 +173,18 @@ function isWithin(root: string, candidate: string): boolean {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
 }
 
-async function removeEmptyDirectories(root: string): Promise<void> {
-  const entries = await readdir(root, { withFileTypes: true })
+function removeEmptyDirectories(root: string): void {
+  assertAcademyPathHasNoLinks(root)
+  const entries = readdirSync(root, { withFileTypes: true })
   for (const entry of entries) {
     if (!entry.isDirectory()) continue
     const child = join(root, entry.name)
-    await removeEmptyDirectories(child)
-    if ((await readdir(child)).length === 0) await rm(child, { recursive: true })
+    assertAcademyPathHasNoLinks(child)
+    removeEmptyDirectories(child)
+    assertAcademyPathHasNoLinks(child)
+    if (readdirSync(child).length === 0) {
+      assertAcademyPathHasNoLinks(child)
+      rmSync(child, { recursive: true })
+    }
   }
 }

@@ -1,5 +1,5 @@
-import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
-import { existsSync, lstatSync } from 'node:fs'
+import { readFile, readdir } from 'node:fs/promises'
+import { copyFileSync, existsSync, lstatSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import type {
   AcademyOpenAiPluginProfile,
@@ -7,6 +7,7 @@ import type {
   AcademyPluginPackageRevision
 } from '../../../shared/types/academy-types'
 import { AcademyError } from '../academy-package'
+import { assertAcademyPathHasNoLinks } from '../academy-filesystem'
 import {
   buildOpenAiManifest,
   canonicalJson
@@ -44,7 +45,11 @@ export class AcademyPluginRepositoryProjection {
     const manifest = buildOpenAiManifest(profile, version)
     const manifestJson = `${canonicalJson(manifest)}\n`
 
-    await writeFile(join(repoRoot, 'plugin.json'), manifestJson, 'utf8')
+    const manifestPath = join(repoRoot, 'plugin.json')
+    const logoPath = join(repoRoot, 'assets', 'logo.png')
+    assertAcademyPathHasNoLinks(manifestPath)
+    if (profile.logoPath) assertAcademyPathHasNoLinks(logoPath)
+    writeFileSync(manifestPath, manifestJson, 'utf8')
 
     if (profile.logoPath) {
       if (!existsSync(profile.logoPath)) {
@@ -55,8 +60,10 @@ export class AcademyPluginRepositoryProjection {
         throw new AcademyError('OPENAI_PLUGIN_LOGO_INVALID', `OPENAI_PLUGIN_LOGO_INVALID: Logo path must be a regular file: ${profile.logoPath}`)
       }
       const assetsDir = join(repoRoot, 'assets')
-      if (!existsSync(assetsDir)) await mkdir(assetsDir, { recursive: true })
-      await copyFile(profile.logoPath, join(assetsDir, 'logo.png'))
+      assertAcademyPathHasNoLinks(assetsDir)
+      mkdirSync(assetsDir, { recursive: true })
+      assertAcademyPathHasNoLinks(logoPath)
+      copyFileSync(profile.logoPath, logoPath)
     }
 
     return { version, manifestHash: canonicalJson(manifest) }

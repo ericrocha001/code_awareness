@@ -17,6 +17,16 @@ Completion produces one receipt projection, no progress snapshots. Limits are UT
 bytes: 900 for success and 3500 for failure (presentation proxies, not measured tokens
 or billed cost). The persisted receipt records exact command, cwd, pid, duration,
 exit, signal and state. Vitest counts are included only when its summary provides them.
+`processState` preserves the process outcome separately from `validation`. Vitest CLI
+commands and observed `Tests` summaries activate the evidence gate; use
+`run --expect-tests -- ...` for other test commands whose summaries may be absent.
+Recognized summaries with passed tests produce `SUFFICIENT`; a run with zero executed
+tests produces `INSUFFICIENT`. Missing or unrecognized counts produce `UNKNOWN`.
+Both states prevent `PASS` and return a nonzero wrapper exit while preserving the
+child's exit code. Mixed passed/skipped tests remain sufficient; each observed test
+run in a composed command must execute tests. This gate proves execution, not that
+every required property or individual test was covered. Generic commands without a
+test expectation report process success with validation `NOT_APPLICABLE`.
 Failure diagnostics are bounded and deduplicated; full evidence is never truncated.
 
 ```powershell

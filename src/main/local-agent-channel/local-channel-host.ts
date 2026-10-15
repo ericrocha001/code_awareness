@@ -23,28 +23,37 @@ export class LocalChannelHost {
     if (this.server) fail('CHANNEL_ALREADY_STARTED')
     const directory = join(this.profile, 'local-agent-channel')
     const legacyDirectory = join(this.profile, 'continuum-local')
-    for (const folder of [directory, legacyDirectory]) {
-      mkdirSync(folder, { recursive: true, mode: 0o700 })
-      if (process.platform === 'win32') {
-        const sid = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim()
-        if (!/^S-1-\d+(?:-\d+)+$/.test(sid)) fail('AUTHORIZATION_UNAVAILABLE')
-        execFileSync('icacls.exe', [folder, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true, timeout: 5000, stdio: 'pipe' })
-      }
-    }
-    // Existing clients validate this pipe prefix before connecting.
-    const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\code-awareness-continuum-${randomBytes(24).toString('hex')}` : join(directory, 'channel.sock')
-    const server = createServer(socket => this.accept(socket))
-    this.server = server
+    let stage = 'profile'
     try {
+      for (const folder of [directory, legacyDirectory]) {
+        stage = 'profile'
+        mkdirSync(folder, { recursive: true, mode: 0o700 })
+        if (process.platform === 'win32') {
+          stage = 'authorization'
+          const sid = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', '[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value'], { encoding: 'utf8', windowsHide: true, timeout: 5000 }).trim()
+          if (!/^S-1-\d+(?:-\d+)+$/.test(sid)) fail('AUTHORIZATION_UNAVAILABLE')
+          execFileSync('icacls.exe', [folder, '/inheritance:r', '/grant:r', `*${sid}:(OI)(CI)F`], { windowsHide: true, timeout: 5000, stdio: 'pipe' })
+        }
+      }
+      // Existing clients validate this pipe prefix before connecting.
+      const endpoint = process.platform === 'win32' ? `\\\\.\\pipe\\code-awareness-continuum-${randomBytes(24).toString('hex')}` : join(directory, 'channel.sock')
+      const server = createServer(socket => this.accept(socket))
+      this.server = server
+      stage = 'listen'
       await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(endpoint, () => { server.off('error', reject); resolve() }) })
       server.on('error', () => this.dispose())
       for (const [folder, protocol] of [[directory, 'code-awareness-local/v1'], [legacyDirectory, 'continuum-local/v1']]) {
+        stage = 'descriptor'
         const descriptor = join(folder, 'endpoint.json')
         writeFileSync(descriptor + '.tmp', JSON.stringify({ protocol, endpoint, token: this.token }), { mode: 0o600 })
         renameSync(descriptor + '.tmp', descriptor)
         this.descriptors.push(descriptor)
       }
-    } catch (error) { this.dispose(); throw error }
+    } catch (error) {
+      this.dispose()
+      const code = (error as { code?: string })?.code
+      throw Object.assign(new Error('LOCAL_CHANNEL_START_FAILED'), { stage, code: code || (error instanceof Error && error.message === 'AUTHORIZATION_UNAVAILABLE' ? error.message : 'START_FAILED') })
+    }
   }
 
   dispose(): void {

@@ -37,6 +37,22 @@ export class GitHubIntegrationService {
     return this.statusFromMetadata(this.hasInstallation === false ? 'INSTALLATION_REQUIRED' : 'CONNECTED', metadata)
   }
 
+  async inspectPullRequestMergeability(repoPath: string, prNumber: number) {
+    try {
+      this.requireConfigured()
+      if (!this.auth!.hasCredentials()) throw new GitHubIntegrationError('NOT_CONNECTED', githubErrorMessage('NOT_CONNECTED'))
+      const remote = await this.git.getRemoteUrl(repoPath)
+      const fullName = remote ? normalizeGitHubOrigin(remote) : null
+      if (!fullName) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+      const record = this.catalog.findByPath(repoPath)
+      if (record?.github && record.github.fullName.toLowerCase() !== fullName.toLowerCase()) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+      return await this.api!.inspectPullRequestMergeability(fullName, prNumber)
+    } catch (error) {
+      return { status: 'UNAVAILABLE' as const, source: 'GITHUB_REST' as const, prNumber,
+        reason: toGitHubIntegrationError(error).code, observedAt: new Date().toISOString() }
+    }
+  }
+
   async connect(): Promise<GitHubStatusProjection> {
     this.requireConfigured()
     try {

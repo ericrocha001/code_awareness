@@ -45,6 +45,7 @@ declare global {
       getAcademySnapshot: () => Promise<AcademySnapshot>
       getAcademyGitStatus: () => Promise<AcademyGitStatusProjection>
       syncAcademyGitNow: () => Promise<AcademyGitStatusProjection>
+      resolveAcademyGitConflict: (expectedRemoteHead: string | null, expectedDesiredTree: string) => Promise<AcademyGitStatusProjection>
       bindAcademyGitRepository: (repositoryCatalogId: string) => Promise<AcademyGitStatusProjection>
       listAcademyGitEligibleRepositories: () => Promise<RepositoryRecord[]>
       openAcademyGitRepository: () => Promise<boolean>

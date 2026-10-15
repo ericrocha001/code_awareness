@@ -1,8 +1,9 @@
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { AcademyGitProfile, AcademyMarketplaceState, AcademyOpenAiPluginProfile } from '../../../shared/types/academy-types'
 import type { RepositoryRecord } from '../../../shared/types/repository-catalog-types'
 import { AcademyError } from '../academy-package'
+import { assertAcademyPathHasNoLinks } from '../academy-filesystem'
 import { canonicalJson, sha256 } from '../publication/openai-plugin-model'
 
 export interface AcademyMarketplaceProjectionResult {
@@ -63,9 +64,11 @@ export class AcademyMarketplaceProjection {
   ): Promise<AcademyMarketplaceProjectionResult> {
     const manifest = this.render(repository, gitProfile, pluginProfile, marketplaceState)
     const target = join(repoRoot, '.agents', 'plugins', 'marketplace.json')
-    await mkdir(dirname(target), { recursive: true })
+    assertAcademyPathHasNoLinks(target)
+    mkdirSync(dirname(target), { recursive: true })
     const content = `${canonicalJson(manifest)}\n`
-    await writeFile(target, content, 'utf8')
+    assertAcademyPathHasNoLinks(target)
+    writeFileSync(target, content, 'utf8')
     return { path: '.agents/plugins/marketplace.json', contentHash: sha256(content) }
   }
 }

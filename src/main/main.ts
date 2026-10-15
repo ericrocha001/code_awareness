@@ -48,7 +48,8 @@ import { resolveRelayEndpoint } from './mcp/connection/relay-endpoint'
 import { SelectedTransport } from './mcp/connection/selected-transport'
 import { RemoteAccessService } from './mcp/connection/remote-access-service'
 import { InstallationIdentityService } from './installation/installation-identity-service'
-import { desktopProfilePaths } from './desktop-profile'
+import { canonicalDesktopProfile, desktopProfilePaths } from './desktop-profile'
+import { localChannelStartupDiagnostic } from './local-agent-channel/startup-diagnostic'
 import { registerConnectionHandlers } from './ipc/connection-handler'
 import { ChannelStateProjection } from './integrations/channel-state-projection'
 import { isInstallationConfigured } from './integrations/installation-configured'
@@ -326,12 +327,17 @@ app.whenReady().then(async () => {
     academyGitRepositoryPort,
     academyService,
     academyPluginProjection,
-    { packageRevisions: academyService.packageRevisions }
+    { packageRevisions: academyService.packageRevisions, publicationRoot: join(app.getPath('userData'), 'academy', 'github-publication') }
   )
   academyService.initializeGitSync(academyGitSyncService)
   registerAcademyHandlers(academyService)
   registerContinuumHandlers(continuumSession)
-  try { await localAgentChannel.start() } catch { console.error('[Local Agent Channel] Unavailable') }
+  const expectedProfile = canonicalDesktopProfile(app.getPath('appData')).userData
+  const normalizeProfile = (value: string) => process.platform === 'win32' ? resolve(value).toLowerCase() : resolve(value)
+  console.info('[Local Agent Channel] Profile', {
+    appName: app.getName(), profileMatchesDefault: normalizeProfile(app.getPath('userData')) === normalizeProfile(expectedProfile)
+  })
+  try { await localAgentChannel.start() } catch (error) { console.error('[Local Agent Channel] Unavailable', localChannelStartupDiagnostic(error)) }
 
   void (async () => {
     if (academyService.store.list().length === 0) {
@@ -475,6 +481,7 @@ app.whenReady().then(async () => {
       validationExecution: activeValidationExecution,
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
+      githubIntegration,
       repositoryFileIngress,
       repositoryFileEditing,
       runtimeRestart
