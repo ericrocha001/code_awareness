@@ -13,6 +13,7 @@ interface GlobalSidebarProps {
   isSidebarOpen: boolean;
   setIsSidebarOpen: (open: boolean) => void;
   activeTab: Tab;
+  orchestrationAlerts?: number;
   setActiveTab: (tab: Tab) => void;
   activeProject: { path: string; name: string } | null;
   onSelectRepository: (repositoryId: string) => void;
@@ -24,6 +25,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
   isSidebarOpen,
   setIsSidebarOpen,
   activeTab,
+  orchestrationAlerts = 0,
   setActiveTab,
   activeProject,
   onSelectRepository,
@@ -48,6 +50,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
       <GlobalSidebarNav
         items={NAV_ITEMS}
         activeTab={activeTab}
+        orchestrationAlerts={orchestrationAlerts}
         onSelect={setActiveTab}
         isSidebarOpen={isSidebarOpen}
       />

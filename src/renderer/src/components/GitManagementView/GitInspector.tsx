@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { CommitWorktrees } from './CommitWorktrees'
 import type {
   GitCommitDetail,
   GitDecoration,
@@ -175,6 +176,7 @@ export function GitInspector({
       )}
       {selection?.kind === 'COMMIT' && (
         <>
+          {sha && <CommitWorktrees key={`${context.projectId}:${context.revision}:${sha}`} sha={sha} context={context} />}
           {detail ? (
             <>
               <h2>{detail.commit.subject}</h2>

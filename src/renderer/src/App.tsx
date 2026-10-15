@@ -16,6 +16,9 @@ import { ChannelView } from "./components/ChannelView/ChannelView";
 import { AcademyView } from "./components/AcademyView/AcademyView";
 import { ContinuumView } from "./components/ContinuumView/ContinuumView";
 import { GitManagementView } from "./components/GitManagementView/GitManagementView";
+import type { CommitNavigationIntent } from '../../shared/types/worktree-integration-evidence-types';
+import { WorkOrchestrationTab } from "./components/WorkOrchestrationView/WorkOrchestrationTab";
+import { useOrchestrationAttention } from './components/WorkOrchestrationView/useOrchestrationAttention';
 
 
 import { GlobalSidebar } from "./components/GlobalSidebar/GlobalSidebar";
@@ -32,8 +35,12 @@ export const App: React.FC = () => {
   useTheme();
 
   const [activeTab, setActiveTab] = useState<Tab>("home");
+  const [commitIntent, setCommitIntent] = useState<CommitNavigationIntent | null>(null);
   const [activeProjectState, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
   const { project: activeProject } = activeProjectState;
+  const commitContext = useRef(activeProjectState);
+  commitContext.current = activeProjectState;
+  const orchestration = useOrchestrationAttention(activeProjectState, activeTab === 'work-orchestration');
   const selectionRequest = useRef(0);
   const [statusMessage, setStatusMessage] = useState<{
     text: string;
@@ -151,6 +158,7 @@ export const App: React.FC = () => {
         isSidebarOpen={sidebarPreferences.sidebarOpen}
         setIsSidebarOpen={updateSidebarOpen}
         activeTab={activeTab}
+        orchestrationAlerts={orchestration.unseen}
         setActiveTab={setActiveTab}
         activeProject={activeProject}
         onSelectRepository={setActiveRepository}
@@ -163,7 +171,11 @@ export const App: React.FC = () => {
       />
 
       <main className="app-main">
-        {activeTab === "git-management" && <GitManagementView key={`${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} />}
+        {activeTab === "git-management" && <GitManagementView key={`git-management:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} commitIntent={commitIntent} onIntentConsumed={id => setCommitIntent(previous => previous?.requestId === id ? null : previous)} />}
+        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} attention={orchestration.attention} onCommit={intent => {
+          if (intent.projectId !== commitContext.current.project?.id || intent.revision !== commitContext.current.revision) return;
+          setCommitIntent(intent); setActiveTab('git-management');
+        }} />
         {activeTab === "channel" && <ChannelView />}
         {activeTab === "academy" && <AcademyView />}
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} />}

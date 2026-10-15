@@ -4,7 +4,7 @@
 
 import { spawn } from 'child_process'
 import { createHash, randomUUID } from 'node:crypto'
-import { closeSync, copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import { closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { dirname, join } from 'path'
 import { DiffFileStatus } from '../../shared/types'
@@ -140,6 +140,13 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['rev-parse', '--absolute-git-dir'], root)).trim()
   }
 
+  async getRepositoryDirectories(root: string): Promise<{ common: string; admin: string }> {
+    const directories = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-common-dir', '--absolute-git-dir'], root)).trim().split('\n')
+    if (directories.length === 2) return { common: directories[0], admin: directories[1] }
+    const [common, admin] = await Promise.all([this.getCommonDirectory(root), this.getWorktreeDirectory(root)])
+    return { common, admin }
+  }
+
   async createAndSwitchBranch(root: string, branch: string): Promise<void> {
     await this.runGit(['switch', '-c', branch], root)
   }
@@ -157,8 +164,108 @@ export class GitService implements FileListingPort {
       (await this.runGit(['rev-list', '--count', `${descendant}..${ancestor}`], root)).trim() === '0'
   }
 
-  async mergeBase(root: string, source: string, target: string): Promise<string> {
-    return (await this.runGit(['merge-base', source, target], root)).trim()
+  async getReachableCommitPage(root: string, head: string, reference: string | null, offset: number, limit: number, order: 'topo' | 'date' = 'topo'): Promise<string[]> {
+    if (![head, ...(reference ? [reference] : [])].every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha)) ||
+      !Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 101) throw new Error('INVALID_ARGUMENT')
+    const args = ['rev-list', order === 'date' ? '--date-order' : '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, `${head}^{commit}`, ...(reference ? ['--not', `${reference}^{commit}`] : []), '--']
+    return (await this.runGit(args, root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })).trim().split('\n').filter(Boolean)
+  }
+
+  async readHeadReflog(root: string) {
+    const admin = realpathSync(await this.getWorktreeDirectory(root))
+    const file = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'logs/HEAD'], root, { env: this.localReadEnvironment(), maxOutputBytes: 16384 })).trim()
+    const expected = join(admin, 'logs', 'HEAD')
+    const empty = { admin, revision: 'MISSING', exists: false, bytes: 0, truncated: false, malformed: 0, records: [] as Array<{ oldSha: string; sha: string; message: string; eventAt: string; sequence: number }> }
+    if (!existsSync(file)) return empty
+    if (realpathSync(file) !== realpathSync(expected) || realpathSync(file) !== expected) throw new Error('WORKTREE_IDENTITY_MISMATCH')
+    const descriptor = openSync(file, 'r')
+    try {
+      const stat = fstatSync(descriptor)
+      if (!stat.isFile()) throw new Error('HEAD_REFLOG_UNAVAILABLE')
+      const offset = Math.max(0, stat.size - 1048576), bytes = Buffer.alloc(stat.size - offset)
+      const read = readSync(descriptor, bytes, 0, bytes.length, offset)
+      if (read !== bytes.length) throw new Error('GIT_STATE_CHANGED')
+      let lines = bytes.toString('utf8').split('\n')
+      if (offset) lines.shift()
+      if (lines.at(-1) === '') lines.pop()
+      const truncated = offset > 0 || lines.length > 2000
+      lines = lines.slice(-2000)
+      let malformed = 0
+      const records = lines.flatMap((line, sequence) => {
+        const match = /^([a-f0-9]{40}|[a-f0-9]{64}) ([a-f0-9]{40}|[a-f0-9]{64}) .+ (-?\d+) ([+-]\d{4})\t(.*)$/.exec(line)
+        const time = match ? Number(match[3]) * 1000 : NaN
+        if (!match || !Number.isFinite(time) || Math.abs(time) > 8640000000000000 || line.length > 16384) { malformed++; return [] }
+        return [{ oldSha: match[1], sha: match[2], eventAt: new Date(time).toISOString(), message: match[5], sequence }]
+      })
+      return { admin, exists: true, bytes: read, truncated, malformed, records, revision: createHash('sha256').update(bytes).update(String(stat.size)).digest('hex') }
+    } finally { closeSync(descriptor) }
+  }
+
+  async getCommitOperationObjects(root: string, shas: string[]) {
+    if (shas.length > 1000 || !shas.every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    if (!shas.length) return []
+    const checked = await this.runGit(['cat-file', '--batch-check=%(objectname) %(objecttype)'], root, { input: shas.join('\n') + '\n', env: this.localReadEnvironment(), maxOutputBytes: 262144 })
+    const valid = checked.trim().split('\n').filter(line => line.endsWith(' commit')).map(line => line.split(' ')[0])
+    const rows: Array<{ sha: string; parents: string[]; title: string }> = []
+    for (let offset = 0; offset < valid.length; offset += 100) {
+      const selected = valid.slice(offset, offset + 100)
+      const raw = await this.runGit(['show', '--no-patch', '--format=%H%x00%P%x00%s%x00', ...selected, '--'], root, { env: this.localReadEnvironment(), maxOutputBytes: 262144 })
+      const fields = raw.split('\0')
+      for (let i = 0; i + 2 < fields.length; i += 3) rows.push({ sha: fields[i].trim(), parents: fields[i + 1].split(' ').filter(Boolean), title: fields[i + 2].slice(0, 240) })
+    }
+    if (rows.length !== valid.length || rows.some((row, i) => row.sha !== valid[i])) throw new Error('COMMIT_METADATA_UNAVAILABLE')
+    return rows
+  }
+
+  async getUnreachableOperationCommits(root: string, head: string, shas: string[]) {
+    if (shas.length > 500 || ![head, ...shas].every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    if (!shas.length) return []
+    const raw = await this.runGit(['rev-list', '--stdin'], root, { input: shas.join('\n') + '\n^' + head + '\n', env: this.localReadEnvironment(), maxOutputBytes: 1048576 })
+    return raw.trim().split('\n').filter(Boolean)
+  }
+
+  async getCommitTopologyRevision(root: string): Promise<string> {
+    const common = await this.getCommonDirectory(root)
+    const files = ['shallow', 'info/grafts'].map(name => {
+      const file = join(common, name)
+      if (!existsSync(file)) return ''
+      if (statSync(file).size > 65536) throw new Error('COMMIT_GRAPH_UNAVAILABLE')
+      return readFileSync(file, 'utf8')
+    })
+    const replacements = await this.runGit(['for-each-ref', '--format=%(refname)%00%(objectname)', 'refs/replace/'], root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })
+    if (files.some(value => value.trim()) || replacements.trim()) throw new Error('COMMIT_GRAPH_UNAVAILABLE')
+    return createHash('sha256').update(JSON.stringify([files, replacements])).digest('hex')
+  }
+
+  async isCommitReachable(root: string, commit: string, head: string): Promise<boolean> {
+    if (![commit, head].every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    return (await this.runGit(['merge-base', commit, head], root, { allowExitOne: true, maxOutputBytes: 256, env: this.localReadEnvironment() })).trim() === commit
+  }
+  private localReadEnvironment(): NodeJS.ProcessEnv {
+    return { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }
+  }
+
+  async mergeBase(root: string, source: string, target: string, localOnly = false): Promise<string> {
+    return (await this.runGit(['merge-base', source, target], root, localOnly ? { env: this.localReadEnvironment() } : undefined)).trim()
+  }
+
+  async getChangedPathsBetweenCommits(root: string, base: string, head: string): Promise<string[]> {
+    if (![base, head].every(value => /^[a-f0-9]{40,64}$/.test(value))) throw new Error('INVALID_ARGUMENT')
+    const raw = (await this.runGitBytes(['diff', '--name-status', '-z', '--no-ext-diff', '--no-textconv', '--find-renames', base, head, '--'], root, { maxOutputBytes: 2 * 1024 * 1024 })).toString('utf8').split('\0')
+    const paths = new Set<string>()
+    for (let i = 0; i < raw.length && raw[i];) {
+      const status = raw[i++]
+      const path = raw[i++]
+      if (!path) throw new Error('GIT_PATH_OUTPUT_INVALID')
+      paths.add(path)
+      if (/^[RC]/.test(status)) {
+        const destination = raw[i++]
+        if (!destination) throw new Error('GIT_PATH_OUTPUT_INVALID')
+        paths.add(destination)
+      }
+      if (paths.size > 10000) throw new Error('GIT_PATH_LIMIT')
+    }
+    return [...paths].sort()
   }
 
   async integrationCommits(root: string, source: string, target: string): Promise<string[]> {
@@ -223,23 +330,32 @@ export class GitService implements FileListingPort {
     }
   }
 
-  async getWorktreeRevision(dirPath: string, metadataOnly = false): Promise<string> {
+  async getWorktreeRevision(dirPath: string, metadataOnly = false, readOnly = metadataOnly): Promise<string> {
     const head = await this.getCurrentCommitHash(dirPath)
     const index = await this.getIndexRevision(dirPath)
-    const status = await this.getOperationsStatus(dirPath)
+    const status = await this.getOperationsStatus(dirPath, readOnly)
     const revision = this.worktreeRevision(dirPath, head, index, status, metadataOnly)
-    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || status !== await this.getOperationsStatus(dirPath)) throw new Error('GIT_STATE_CHANGED')
+    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || status !== await this.getOperationsStatus(dirPath, readOnly)) throw new Error('GIT_STATE_CHANGED')
     return revision
   }
 
   async captureWorktreeReadSnapshot(dirPath: string): Promise<GitWorktreeReadSnapshot> {
     // A read must match two captures bracketing its effect; this is not a mutation precondition.
-    const [head, indexRevision, status, branch, operation] = await Promise.all([
-      this.getCurrentCommitHash(dirPath), this.getIndexRevision(dirPath), this.getOperationsStatus(dirPath),
-      this.getCurrentBranch(dirPath), this.getGitOperation(dirPath)
+    const [identity, indexRevision, status] = await Promise.all([
+      this.captureSnapshotIdentity(dirPath), this.getIndexRevision(dirPath), this.getOperationsStatus(dirPath, true)
     ])
+    const { head, branch, operation } = identity
     return { head, branch, operation, indexRevision, status,
       worktreeRevision: this.worktreeRevision(dirPath, head, indexRevision, status, true) }
+  }
+
+  private async captureSnapshotIdentity(dirPath: string): Promise<{ head: string | null; branch: string | null; operation: string | null }> {
+    let identity: RegExpExecArray | null = null
+    try { identity = /^([\s\S]+)\n([a-f0-9]{40,64})\n(HEAD|refs\/heads\/[^\r\n]+)\n$/.exec(await this.runGit(['rev-parse', '--absolute-git-dir', 'HEAD', '--symbolic-full-name', 'HEAD'], dirPath)) }
+    catch { }
+    if (identity) return { head: identity[2], branch: identity[3] === 'HEAD' ? null : identity[3].slice(11), operation: this.operationFromDirectory(identity[1].trim()) }
+    const [head, branch, operation] = await Promise.all([this.getCurrentCommitHash(dirPath), this.getCurrentBranch(dirPath), this.getGitOperation(dirPath)])
+    return { head, branch, operation }
   }
 
   private worktreeRevision(dirPath: string, head: string | null, index: string, status: string, metadataOnly: boolean): string {
@@ -503,8 +619,9 @@ export class GitService implements FileListingPort {
       if (temporary) rmSync(temporary, { recursive: true, force: true })
     }
   }
-  async getOperationsStatus(dirPath: string): Promise<string> {
-    return this.runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], dirPath)
+  async getOperationsStatus(dirPath: string, readOnly = false): Promise<string> {
+    return this.runGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], dirPath,
+      readOnly ? { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } } : undefined)
   }
 
   async getIndexRevision(dirPath: string): Promise<string> {
@@ -513,6 +630,10 @@ export class GitService implements FileListingPort {
 
   async getGitOperation(dirPath: string): Promise<string | null> {
     const gitDir = (await this.runGit(['rev-parse', '--absolute-git-dir'], dirPath)).trim()
+    return this.operationFromDirectory(gitDir)
+  }
+
+  private operationFromDirectory(gitDir: string): string | null {
     for (const [file, operation] of [['rebase-merge', 'REBASE'], ['rebase-apply', 'REBASE'], ['MERGE_HEAD', 'MERGE'], ['CHERRY_PICK_HEAD', 'CHERRY_PICK'], ['REVERT_HEAD', 'REVERT']] as const) {
       if (existsSync(join(gitDir, file))) return operation
     }
@@ -531,8 +652,8 @@ export class GitService implements FileListingPort {
     await this.runGit(['check-ref-format', '--branch', branch], dirPath)
   }
 
-  async resolveCommit(dirPath: string, ref: string): Promise<string> {
-    return (await this.runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], dirPath)).trim()
+  async resolveCommit(dirPath: string, ref: string, options?: { noLazyFetch: true }): Promise<string> {
+    return (await this.runGit(['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], dirPath, options ? { env: this.localReadEnvironment() } : undefined)).trim()
   }
 
   async getOperationsDiff(dirPath: string, paths: string[], mode: 'WORKTREE' | 'STAGED' | 'BETWEEN_REFS', base?: string, head?: string, maxOutputBytes?: number): Promise<string> {

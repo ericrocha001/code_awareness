@@ -4,6 +4,21 @@ import { GitManagementController } from './git-management-handler'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { GitMutationRequest } from '../../shared/types/git-management-types'
 
+it('routes only typed correlation reads, binds continuation to project context and drops late results', async () => {
+  let state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }, finish!: (value: any) => void
+  const service = { getWorktreeCommits: vi.fn(async () => ({ direction: 'WORKTREE_COMMITS' })), getCommitWorktrees: vi.fn(() => new Promise(resolve => { finish = resolve })) } as unknown as GitOperationsService
+  const controller = new GitManagementController({ getState: () => state }); controller.bind(service)
+  const context = { projectId: 'a', revision: 1 }
+  expect(await controller.correlation({ context, direction: 'WORKTREE_COMMITS', worktreeId: 'a'.repeat(64), generation: 'g' })).toMatchObject({ success: true, data: { direction: 'WORKTREE_COMMITS' } })
+  expect(service.getWorktreeCommits).toHaveBeenCalledWith({ worktreeId: 'a'.repeat(64), generation: 'g', contextKey: 'a:1' })
+  expect(await controller.correlation({ context, direction: 'COMMIT_WORKTREES', sha: 'a'.repeat(40), path: 'outside' } as any)).toEqual({ success: false, code: 'INVALID_ARGUMENT' })
+  expect(service.getCommitWorktrees).not.toHaveBeenCalled()
+  const pending = controller.correlation({ context, direction: 'COMMIT_WORKTREES', sha: 'a'.repeat(40) })
+  state = { project: { id: 'b', path: '/b', name: 'B' }, revision: 2 }; controller.bind(service); finish({ direction: 'COMMIT_WORKTREES' })
+  expect(await pending).toEqual({ success: false, code: 'PROJECT_CONTEXT_CHANGED' })
+  expect(await controller.correlation({ context, direction: 'COMMIT_WORKTREES', sha: 'a'.repeat(40) })).toEqual({ success: false, code: 'PROJECT_CONTEXT_CHANGED' })
+})
+
 it('rejects obsolete contexts and discards requests completing after a project change', async () => {
   let state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }
   const controller = new GitManagementController({ getState: () => state })

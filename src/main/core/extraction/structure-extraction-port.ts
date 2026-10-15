@@ -46,9 +46,11 @@ export interface StructureExtractionInput {
   relativePath: string
   extension: string
   content: string
+  includeContractDeclarations?: boolean
 }
 
 export interface StructureExtractionResult {
+  contractDeclarations?: Array<{ elementId: string; declaration: string; implementationHash: string }>
   diagnostics?: string[]
   elements: CodeMapElement[]
   relationships: CodeMapRelationship[]

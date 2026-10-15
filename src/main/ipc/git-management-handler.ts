@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import type { ActiveProjectService } from '../core/active-project-service'
+import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
 import {
   GitOperationsError,
   type GitOperationsService
@@ -36,6 +37,19 @@ export class GitManagementController {
   async deactivate(): Promise<void> {
     this.active = null
     await Promise.allSettled([...this.mutations])
+  }
+  correlation(request: GitCommitCorrelationRequest): Promise<GitManagementResult<GitCommitCorrelationPage>> {
+    if (!request || !['WORKTREE_COMMITS', 'COMMIT_WORKTREES'].includes(request.direction) || Object.keys(request).some(key =>
+      !['context', 'direction', 'mode', 'reference', 'limit', 'cursor', ...(request.direction === 'WORKTREE_COMMITS' ? ['worktreeId', 'generation'] : ['sha'])].includes(key))) return Promise.resolve({ success: false, code: 'INVALID_ARGUMENT' })
+    return this.read<GitCommitCorrelationPage>(request.context, service => {
+      const contextKey = `${request.context.projectId}:${request.context.revision}`
+      if (request.direction === 'WORKTREE_COMMITS') {
+        const { context: _context, direction: _direction, ...query } = request
+        return service.getWorktreeCommits({ ...query, contextKey })
+      }
+      const { context: _context, direction: _direction, ...query } = request
+      return service.getCommitWorktrees({ ...query, contextKey })
+    })
   }
   async mutate(
     request: GitMutationRequest
@@ -183,6 +197,7 @@ function validMutation(value: GitMutationRequest): boolean {
 export function registerGitManagementHandlers(
   controller: GitManagementController
 ): void {
+  ipcMain.handle('git-operations:correlation', (_event, request: GitCommitCorrelationRequest) => controller.correlation(request))
   ipcMain.handle(
     'git-management:mutate',
     (_event, request: GitMutationRequest) => controller.mutate(request)
