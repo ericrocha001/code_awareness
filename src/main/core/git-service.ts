@@ -113,11 +113,21 @@ export class GitService implements FileListingPort {
       (await this.runGit(['rev-list', '--count', `${descendant}..${ancestor}`], root)).trim() === '0'
   }
 
-  async getReachableCommitPage(root: string, head: string, reference: string | null, offset: number, limit: number): Promise<string[]> {
+  async getReachableCommitPage(root: string, head: string, reference: string | null, offset: number, limit: number, order: 'topo' | 'date' = 'topo'): Promise<string[]> {
     if (![head, ...(reference ? [reference] : [])].every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha)) ||
       !Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 101) throw new Error('INVALID_ARGUMENT')
-    const args = ['rev-list', '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, `${head}^{commit}`, ...(reference ? ['--not', `${reference}^{commit}`] : []), '--']
+    const args = ['rev-list', order === 'date' ? '--date-order' : '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, `${head}^{commit}`, ...(reference ? ['--not', `${reference}^{commit}`] : []), '--']
     return (await this.runGit(args, root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })).trim().split('\n').filter(Boolean)
+  }
+
+  async getCommitPageMetadata(root: string, shas: string[]) {
+    if (!shas.length) return []
+    if (shas.length > 100 || !shas.every(sha => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    const raw = await this.runGit(['show', '--no-patch', '--format=%H%x00%cI%x00%s%x00', ...shas, '--'], root, { maxOutputBytes: 262144, env: this.localReadEnvironment() })
+    const fields = raw.split('\0'), result: Array<{ sha: string; committerDate: string; title: string }> = []
+    for (let i = 0; i + 2 < fields.length; i += 3) result.push({ sha: fields[i].trim(), committerDate: fields[i + 1], title: fields[i + 2] })
+    if (result.length !== shas.length || result.some((row, i) => row.sha !== shas[i] || !Number.isFinite(Date.parse(row.committerDate)))) throw new Error('COMMIT_METADATA_UNAVAILABLE')
+    return result
   }
 
   async getCommitTopologyRevision(root: string): Promise<string> {
@@ -141,8 +151,8 @@ export class GitService implements FileListingPort {
     return { ...process.env, GIT_NO_LAZY_FETCH: '1', GIT_TERMINAL_PROMPT: '0', GIT_OPTIONAL_LOCKS: '0' }
   }
 
-  async mergeBase(root: string, source: string, target: string): Promise<string> {
-    return (await this.runGit(['merge-base', source, target], root)).trim()
+  async mergeBase(root: string, source: string, target: string, localOnly = false): Promise<string> {
+    return (await this.runGit(['merge-base', source, target], root, localOnly ? { env: this.localReadEnvironment() } : undefined)).trim()
   }
 
   async getChangedPathsBetweenCommits(root: string, base: string, head: string): Promise<string[]> {
@@ -226,12 +236,12 @@ export class GitService implements FileListingPort {
     }
   }
 
-  async getWorktreeRevision(dirPath: string, metadataOnly = false): Promise<string> {
+  async getWorktreeRevision(dirPath: string, metadataOnly = false, readOnly = metadataOnly): Promise<string> {
     const head = await this.getCurrentCommitHash(dirPath)
     const index = await this.getIndexRevision(dirPath)
-    const status = await this.getOperationsStatus(dirPath)
+    const status = await this.getOperationsStatus(dirPath, readOnly)
     const revision = this.worktreeRevision(dirPath, head, index, status, metadataOnly)
-    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || status !== await this.getOperationsStatus(dirPath)) throw new Error('GIT_STATE_CHANGED')
+    if (head !== await this.getCurrentCommitHash(dirPath) || index !== await this.getIndexRevision(dirPath) || status !== await this.getOperationsStatus(dirPath, readOnly)) throw new Error('GIT_STATE_CHANGED')
     return revision
   }
 

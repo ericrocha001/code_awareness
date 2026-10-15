@@ -64,6 +64,9 @@
 .wo-document-list input { width:100%; box-sizing:border-box; font-family:var(--font-mono,monospace); }
 .wo-document-actions { display:grid; gap:8px; }
 .wo-empty { color:var(--text-secondary); padding:20px 24px; font-size:13px; }
+.wo-inspector section[aria-label="Histórico de commits da worktree"] li { margin:10px 0; overflow-wrap:anywhere; }
+.wo-inspector section[aria-label="Histórico de commits da worktree"] button { text-align:left; max-width:100%; }
+.wo-inspector section[aria-label="Evidências de integração"] form,.wo-inspector section[aria-label="Evidências de integração"] label { display:grid; gap:8px; }
 .wo-footnote { margin-top:16px; line-height:1.6; }
 @container (max-width:1000px) { .wo-inspector { position:absolute; right:0; top:0; bottom:0; width:min(420px,90%); z-index:5; box-shadow:-12px 0 32px #0003; } .wo-tree { grid-template-columns:minmax(0,1fr); } .wo-state { grid-column:1; grid-row:auto; } }
 @container (max-width:650px) { .wo-header,.wo-toolbar { padding:14px; } .wo-content { padding:0 14px 20px; } }

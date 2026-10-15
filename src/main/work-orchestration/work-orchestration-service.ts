@@ -4,7 +4,7 @@ import type { WorktreeDocumentRequest } from '../../shared/types/worktree-docume
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { ObservableWorktree, OrchestrationOverview, WorktreeObservation, OrchestrationRequest, LocalChangesPage } from '../../shared/types/work-orchestration-types'
 
-export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'> & Partial<Pick<GitOperationsService, 'getWorktreeChanges' | 'getCoordinationIdentity' | 'getWorktreeCommits' | 'getCommitWorktrees'>>
+export type OrchestrationGitReader = Pick<GitOperationsService, 'discoverCoordinationWorktrees' | 'getCoordinationSnapshot' | 'getCoordinationCommitPaths'> & Partial<Pick<GitOperationsService, 'getWorktreeChanges' | 'getCoordinationIdentity' | 'getWorktreeCommits' | 'getCommitWorktrees' | 'getWorktreeTimeline' | 'evaluateWorktreeIntegration'>>
 type Observation = Awaited<ReturnType<OrchestrationGitReader['getCoordinationSnapshot']>>
 const reason = (error: unknown) => error instanceof Error ? error.message : 'GIT_READ_UNAVAILABLE'
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
@@ -35,6 +35,14 @@ export class WorkOrchestrationService {
   async documents(request: WorktreeDocumentRequest) {
     if (!this.git.getCoordinationIdentity) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
     return readWorktreeDocumentContext({ getCoordinationIdentity: id => this.git.getCoordinationIdentity!(id) }, this.continuum, request)
+  }
+  async timeline(request: NonNullable<OrchestrationRequest['timeline']>, contextKey: string) {
+    if (!this.git.getWorktreeTimeline) throw new Error('TIMELINE_UNAVAILABLE')
+    return this.withReadBudget(async () => { const timeline = await this.git.getWorktreeTimeline!({ ...request, contextKey }); return { repositoryId: timeline.repositoryId, timeline } })
+  }
+  async integration(request: NonNullable<OrchestrationRequest['integration']>) {
+    if (!this.git.evaluateWorktreeIntegration) throw new Error('INTEGRATION_EVIDENCE_UNAVAILABLE')
+    return this.withReadBudget(() => this.git.evaluateWorktreeIntegration!(request))
   }
 
   private records() {

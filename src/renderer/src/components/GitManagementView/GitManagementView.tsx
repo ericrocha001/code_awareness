@@ -9,6 +9,7 @@ import { layoutGitGraph } from './graph-layout'
 import { GitInspector, type GitSelection } from './GitInspector'
 import { GitActions } from './GitActions'
 import './GitManagementView.css'
+import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 
 const laneColors = [
   'var(--accent)',
@@ -17,7 +18,7 @@ const laneColors = [
   'var(--color-warning)',
   'var(--color-danger)'
 ]
-export function GitManagementView({ state }: { state: ActiveProjectState }) {
+export function GitManagementView({ state, commitIntent, onIntentConsumed }: { state: ActiveProjectState; commitIntent?: CommitNavigationIntent | null; onIntentConsumed?: (requestId: string) => void }) {
   const [history, setHistory] = useState<GitHistoryPage | null>(null)
   const [selection, setSelection] = useState<GitSelection>(null)
   const [overview, setOverview] = useState<GitOverview | null>(null)
@@ -27,10 +28,16 @@ export function GitManagementView({ state }: { state: ActiveProjectState }) {
   const [drawer, setDrawer] = useState(false)
   const generation = useRef(0)
   const returnFocus = useRef<HTMLElement | null>(null)
+  const inspectorFocus = useRef<HTMLElement>(null)
   const context = useMemo(
     () => ({ projectId: state.project?.id ?? '', revision: state.revision }),
     [state.project?.id, state.revision]
   )
+  useEffect(() => {
+    if (commitIntent?.projectId !== context.projectId || commitIntent.revision !== context.revision) return
+    setSelection({ kind: 'COMMIT', sha: commitIntent.commitSha }); setDrawer(true); onIntentConsumed?.(commitIntent.requestId)
+    inspectorFocus.current?.focus()
+  }, [commitIntent?.requestId, context.projectId, context.revision])
   const load = useCallback(
     async (cursor?: string) => {
       if (!state.project) return
@@ -314,6 +321,8 @@ export function GitManagementView({ state }: { state: ActiveProjectState }) {
           </div>
         </div>
         <aside
+          ref={inspectorFocus}
+          tabIndex={-1}
           className={`gm-inspector ${drawer ? 'is-open' : ''}`}
           aria-label="Detalhes Git"
         >

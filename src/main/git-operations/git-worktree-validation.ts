@@ -28,7 +28,7 @@ export class GitWorktreeValidation {
   async fingerprint(id: string): Promise<string> {
     const { record } = await this.checkout(id)
     return ownershipDigest({ repositoryId: this.identity.repositoryId, worktreeId: id, generation: record.generation,
-      head: record.head, index: await this.git.getIndexRevision(record.path), content: await this.git.getWorktreeRevision(record.path) })
+      head: record.head, index: await this.git.getIndexRevision(record.path), content: await this.git.getWorktreeRevision(record.path, false, true) })
   }
 
   async busy(id: string): Promise<boolean> {
@@ -91,9 +91,14 @@ export class GitWorktreeValidation {
   }
 
   async verify(id: string, commit: string, proofIds: string[]): Promise<boolean> {
-    if (!proofIds.length || await this.busy(id)) return false
+    const result = await this.currentProofs(id, commit, proofIds)
+    return result.current && result.behavioral
+  }
+  private async currentProofs(id: string, commit: string, proofIds: string[]) {
+    const unavailable = { current: false, behavioral: false }
+    if (!proofIds.length || await this.busy(id)) return unavailable
     const { record } = await this.checkout(id)
-    if (record.head !== commit) return false
+    if (record.head !== commit) return unavailable
     const fingerprint = await this.fingerprint(id)
     let behavioralProof = false
     for (const proofId of proofIds) {
@@ -102,11 +107,21 @@ export class GitWorktreeValidation {
       if (!proof || proof.status !== 'PASSED' || proof.producer !== 'SYSTEM' || proof.runtimeInstanceId !== this.runtime.getInstanceId() ||
         proof.sourceFingerprint !== fingerprint || checkout?.issuer !== 'VALIDATION_EXECUTION' || checkout.repositoryId !== this.identity.repositoryId ||
         checkout.worktreeId !== id || checkout.generation !== record.generation || checkout.head !== commit || proof.commandProfile?.cwd !== record.path ||
-        this.executions.get(checkout.runId)?.get(checkout.runId)?.proofId !== proofId || this.executions.get(checkout.runId)?.get(checkout.runId)?.status !== 'PASSED') return false
+        this.executions.get(checkout.runId)?.get(checkout.runId)?.proofId !== proofId || this.executions.get(checkout.runId)?.get(checkout.runId)?.status !== 'PASSED') return unavailable
       behavioralProof ||= ['TARGETED_TEST', 'SUBSYSTEM_TEST', 'FULL_TEST_SUITE', 'E2E'].includes(proof.kind)
     }
-    return behavioralProof
+    return { current: true, behavioral: behavioralProof }
   }
 
+  async inspectIntegrationProof(id: string, commit: string, profileId: string, proofId: string) {
+    const proof = this.ledger.getProof(proofId)
+    if (!proof) return { proofId, profileId, freshness: 'NOT_AVAILABLE' as const, status: 'NOT_AVAILABLE' }
+    const checkout = proof.commandProfile?.checkout
+    const run = checkout ? this.executions.get(checkout.runId)?.get(checkout.runId) : null
+    let current = false
+    try { current = run?.profileId === profileId && (await this.currentProofs(id, commit, [proofId])).current } catch {}
+    return { proofId, profileId, freshness: current ? 'CURRENT' as const : run ? 'HISTORICAL' as const : 'UNVERIFIABLE' as const,
+      status: proof.status, producer: proof.producer, head: checkout?.head, checkout, runtimeInstanceId: proof.runtimeInstanceId, sourceFingerprint: proof.sourceFingerprint }
+  }
   async shutdown(): Promise<void> { await Promise.all([...this.executions.values()].map(execution => execution.shutdown())) }
 }

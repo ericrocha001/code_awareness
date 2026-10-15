@@ -1,5 +1,5 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, unlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { GitService } from '../core/git-service'
@@ -22,6 +22,57 @@ async function fixture() {
   const records = (await service.discoverCoordinationWorktrees()).worktrees, record = records.find(r => r.path === a)!, detached = records.find(r => r.path === b)!
   return { root, parent, a, b, base, head, git, service, record, detached, records, deactivate: () => { active = false } }
 }
+it('enriches date-ordered timeline pages in one batch and invalidates their continuation after reset', async () => {
+  const f = await fixture(), metadata = vi.spyOn(f.git, 'getCommitPageMetadata'), query = { worktreeId: f.record.worktreeId, generation: f.record.generation, limit: 1 }
+  const first = await f.service.getWorktreeTimeline(query)
+  expect(first.items[0]).toMatchObject({ sha: f.head, title: 'a two', relation: 'HEAD_EXACT' })
+  expect(Number.isFinite(Date.parse(first.items[0].committerDate))).toBe(true)
+  expect(metadata).toHaveBeenCalledTimes(1)
+  const next = await f.service.getWorktreeTimeline({ ...query, cursor: first.nextCursor! })
+  expect(next.items[0].title).toBe('a one')
+  const detached = await f.service.getWorktreeTimeline({ worktreeId: f.detached.worktreeId, generation: f.detached.generation })
+  expect(detached.worktree.detached).toBe(true)
+  await gitExec(f.a, ['reset', '--hard', f.base])
+  await expect(f.service.getWorktreeTimeline({ ...query, cursor: first.nextCursor! })).rejects.toMatchObject({ code: 'GIT_STATE_CHANGED' })
+}, 30000)
+it('diagnoses explicit targets without preview writes and separates operational blockers from missing evidence', async () => {
+  const f = await fixture(), query = { worktreeId: f.record.worktreeId, generation: f.record.generation, targetBranch: 'reference' }
+  const snapshot = await f.git.captureWorktreeReadSnapshot(f.root)
+  const blocked = await f.service.evaluateWorktreeIntegration(query)
+  expect(existsSync(join(await f.git.getCommonDirectory(f.root), 'code-awareness-integration-previews'))).toBe(false)
+  expect(blocked).toMatchObject({ state: 'BLOCKED', mode: 'FF_ONLY', compatibility: 'FAST_FORWARD_VERIFIED', blockers: ['TARGET_OWNERSHIP_REQUIRED'] })
+  expect(blocked.missing).toContain('VALIDATION_REQUIREMENTS_NOT_DEFINED')
+  expect(await f.git.captureWorktreeReadSnapshot(f.root)).toEqual(snapshot)
+  expect(await gitExec(f.root, ['status', '--porcelain'])).toBe('')
+  await gitExec(f.root, ['branch', 'unoccupied', f.base])
+  expect(await f.service.evaluateWorktreeIntegration({ ...query, targetBranch: 'unoccupied' })).toMatchObject({ state: 'EVIDENCE_PENDING', blockers: [] })
+  writeFileSync(join(f.a, 'dirty.txt'), 'dirty')
+  expect((await f.service.evaluateWorktreeIntegration({ ...query, targetBranch: 'unoccupied' })).blockers).toContain('SOURCE_DIRTY')
+  await expect(f.service.evaluateWorktreeIntegration({ ...query, targetBranch: 'absent' })).rejects.toThrow()
+  const read = f.git.getReachableCommitPage.bind(f.git)
+  vi.spyOn(f.git, 'getReachableCommitPage').mockImplementationOnce(async (...args) => { const result = await read(...args); await gitExec(f.root, ['update-ref', 'refs/heads/unoccupied', f.head]); return result })
+  expect(await f.service.evaluateWorktreeIntegration({ ...query, targetBranch: 'unoccupied' })).toMatchObject({ state: 'STALE' })
+}, 60000)
+it('keeps divergent merge compatibility unknown, reports dirty/operating checkouts and handles unrelated or detached history', async () => {
+  const f = await fixture(), query = { worktreeId: f.record.worktreeId, generation: f.record.generation, targetBranch: 'reference' }
+  writeFileSync(join(f.root, 'target.txt'), 'target'); await stageAll(f.root); await commit(f.root, 'target diverged')
+  const merge = await f.service.evaluateWorktreeIntegration(query)
+  expect(merge).toMatchObject({ mode: 'MERGE', compatibility: 'MERGE_COMPATIBILITY_NOT_VERIFIED' })
+  expect(merge.missing).toContain('MERGE_COMPATIBILITY_NOT_VERIFIED')
+  writeFileSync(join(f.root, 'dirty.txt'), 'dirty')
+  expect((await f.service.evaluateWorktreeIntegration(query)).blockers).toContain('TARGET_DIRTY')
+  unlinkSync(join(f.root, 'dirty.txt'))
+  const directory = await f.git.getWorktreeDirectory(f.a)
+  writeFileSync(join(directory, 'MERGE_HEAD'), f.base + '\n')
+  expect((await f.service.evaluateWorktreeIntegration(query)).blockers).toContain('SOURCE_GIT_OPERATION_IN_PROGRESS')
+  unlinkSync(join(directory, 'MERGE_HEAD'))
+  const tree = (await gitExec(f.root, ['rev-parse', 'HEAD^{tree}'])).trim(), unrelated = (await gitExec(f.root, ['commit-tree', tree, '-m', 'unrelated'])).trim()
+  await gitExec(f.root, ['branch', 'unrelated', unrelated])
+  const absent = await f.service.evaluateWorktreeIntegration({ ...query, targetBranch: 'unrelated' })
+  expect(absent).toMatchObject({ state: 'EVIDENCE_PENDING', mergeBase: null, compatibility: 'MERGE_COMPATIBILITY_NOT_VERIFIED' })
+  expect(absent.missing).toContain('MERGE_BASE_UNAVAILABLE')
+  expect(await f.service.evaluateWorktreeIntegration({ worktreeId: f.detached.worktreeId, generation: f.detached.generation, targetBranch: 'unrelated' })).toMatchObject({ source: { branch: null }, state: 'EVIDENCE_PENDING' })
+}, 90000)
 it('pages inherited history from an exact worktree HEAD and qualifies exclusivity only against an explicit reference', async () => {
   const f = await fixture(), query = { worktreeId: f.record.worktreeId, generation: f.record.generation, limit: 1 }
   const first = await f.service.getWorktreeCommits(query)

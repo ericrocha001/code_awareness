@@ -19,10 +19,10 @@ export class GitWorktreeLifecycle {
     return join(directory, randomUUID())
   }
 
-  private file(worktreeId: string): string {
+  private file(worktreeId: string, create = false): string {
     if (!/^[a-f0-9]{64}$/.test(worktreeId)) throw new Error('INVALID_ARGUMENT')
     const directory = join(this.common, 'code-awareness-managed-worktrees')
-    mkdirSync(directory, { recursive: true })
+    if (create) mkdirSync(directory, { recursive: true })
     return join(directory, worktreeId + '.json')
   }
 
@@ -42,7 +42,7 @@ export class GitWorktreeLifecycle {
   }
 
   save(record: ManagedWorktree): void {
-    const file = this.file(record.worktreeId)
+    const file = this.file(record.worktreeId, true)
     const temporary = file + '.' + randomUUID() + '.tmp'
     writeFileSync(temporary, JSON.stringify(record), { flag: 'wx', mode: 0o600 })
     renameSync(temporary, file)

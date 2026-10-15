@@ -10,6 +10,8 @@ import type { LocalChangeCategory } from '../../../../shared/types/local-change-
 import type { OrchestrationAttention, StructuralAlert } from '../../../../shared/types/work-orchestration-attention-types'
 import { StructuralEvidence } from './StructuralEvidence'
 import { OperationalRecommendation } from './OperationalRecommendation'
+import { WorktreeIntegrationDetails } from './WorktreeIntegrationDetails'
+import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 
 const label = (w: ObservableWorktree) => w.branch ?? (w.head ? 'Detached HEAD' : 'Sem HEAD')
 const phaseLabel = { NOT_OBSERVED: 'Não observado', LAST_KNOWN: 'Último estado conhecido', REVALIDATING: 'Revalidando', VERIFIED: 'Observação verificada', UNAVAILABLE: 'Indisponível', STALE: 'Observação obsoleta' }
@@ -20,7 +22,7 @@ export function orderWorktrees(worktrees: ObservableWorktree[]): ObservableWorkt
   return [...worktrees].sort((a, b) => Number(b.reference) - Number(a.reference) || createdTime(b) - createdTime(a) || compare(a.path, b.path) || compare(a.worktreeId, b.worktreeId))
 }
 type Selection = ObservableWorktree | null
-export function WorkOrchestrationView({ state, active = true, attention }: { state: ActiveProjectState; active?: boolean; attention?: OrchestrationAttention | null }) {
+export function WorkOrchestrationView({ state, active = true, attention, onCommit }: { state: ActiveProjectState; active?: boolean; attention?: OrchestrationAttention | null; onCommit?: (intent: CommitNavigationIntent) => void }) {
   const [overview, setOverview] = useState<OrchestrationOverview | null>(null)
   const repository = useRef<string | null>(null)
   const [selected, setSelected] = useState<Selection>(null), selection = useRef<Selection>(null)
@@ -218,6 +220,7 @@ export function WorkOrchestrationView({ state, active = true, attention }: { sta
         {structuralAlert && tree?.worktreeId === structuralAlert.consumer && <StructuralEvidence alert={structuralAlert} providerName={label(overview?.worktrees.find(w => w.worktreeId === structuralAlert.provider) ?? tree)} consumerName={label(tree)} />}
         {tree && <><h3>{label(tree)}</h3><p>{tree.reason ? reasonLabel(tree.reason) : (tree.observation === 'NOT_OBSERVED' ? 'Estado não observado' : 'Última observação do estado')}</p><dl><dt>Caminho</dt><dd>{tree.path}</dd><dt>HEAD</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd></dl>
           <details><summary>Identidade da worktree</summary><dl><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd></dl></details></>}
+        {tree && <WorktreeIntegrationDetails key={`integration:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }} onCommit={onCommit} />}
         {tree && <WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} />}
         {tree && <><p>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</p>{tree.localChanges && <p>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</p>}<LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} /></>}
       </aside>}

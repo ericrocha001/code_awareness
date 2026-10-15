@@ -51,15 +51,15 @@ export class GitCommitCorrelation {
       return record
     }
   }
-  async worktreeCommits(query: GitWorktreeCommitsQuery): Promise<GitWorktreeCommitsPage> {
+  async worktreeCommits(query: GitWorktreeCommitsQuery, order: 'topo' | 'date' = 'topo'): Promise<GitWorktreeCommitsPage> {
     this.current()
     const { mode, limit } = this.validate(query, ['worktreeId', 'generation'])
     if (typeof query.worktreeId !== 'string' || !/^[a-f0-9]{64}$/.test(query.worktreeId) || typeof query.generation !== 'string' || !query.generation || query.generation.length > 256) fail('INVALID_ARGUMENT')
     const before = await this.selection(query.worktreeId), reference = await this.reference(query), topology = await this.git.getCommitTopologyRevision(this.root)
     if (before.generation !== query.generation) fail('WORKTREE_STALE')
     if (!fullSha(before.head) || /^0+$/.test(before.head)) fail('HEAD_UNAVAILABLE')
-    const revision = digest([this.identity.repositoryId, 'WORKTREE_COMMITS', before, mode, reference, topology, limit, query.contextKey]), position = this.position(query.cursor, revision)
-    const rows = await this.git.getReachableCommitPage(this.root, before.head, reference?.sha ?? null, position.offset, limit + 1)
+    const revision = digest([this.identity.repositoryId, 'WORKTREE_COMMITS', before, mode, reference, topology, limit, query.contextKey, order]), position = this.position(query.cursor, revision)
+    const rows = await this.git.getReachableCommitPage(this.root, before.head, reference?.sha ?? null, position.offset, limit + 1, order)
     const after = await this.selection(query.worktreeId), currentReference = await this.reference(query)
     this.current()
     if (digest(before) !== digest(after) || digest(reference) !== digest(currentReference) || topology !== await this.git.getCommitTopologyRevision(this.root)) fail('GIT_STATE_CHANGED')

@@ -39,6 +39,7 @@ interface ScopedWorktreeRequest {
   snapshot: WorktreeSnapshot
 }
 export interface WorktreeValidationPort {
+  inspectIntegrationProof?(id: string, commit: string, profileId: string, proofId: string): Promise<import('../../shared/types/worktree-integration-evidence-types').IntegrationEvidence['proofs'][number]>
   verify(worktreeId: string, commit: string, proofIds: string[]): Promise<boolean>
   busy(worktreeId: string): Promise<boolean>
   start(worktreeId: string, input: { profileId: string; targets?: string[]; evidenceFor?: string[] }): Promise<unknown>
@@ -320,6 +321,77 @@ export class GitOperationsService {
     return preview
   }
 
+  async evaluateWorktreeIntegration(input: import('../../shared/types/worktree-integration-evidence-types').IntegrationEvidenceRequest): Promise<import('../../shared/types/worktree-integration-evidence-types').IntegrationEvidence> {
+    const request = JSON.parse(JSON.stringify(input)) as typeof input
+    if (!request || Object.keys(request).some(key => !['worktreeId', 'generation', 'targetBranch', 'candidate'].includes(key)) ||
+      !/^[a-f0-9]{64}$/.test(request.worktreeId) || typeof request.generation !== 'string' || !request.generation || typeof request.targetBranch !== 'string' || !request.targetBranch) fail('INVALID_ARGUMENT')
+    const candidate = request.candidate
+    if (candidate && (Object.keys(candidate).some(key => !['worktreeId', 'generation', 'head', 'sourceHead', 'targetHead', 'requirements'].includes(key)) ||
+      !/^[a-f0-9]{64}$/.test(candidate.worktreeId) || typeof candidate.generation !== 'string' || !candidate.generation ||
+      ![candidate.head, candidate.sourceHead, candidate.targetHead].every(value => /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) ||
+      !Array.isArray(candidate.requirements) || candidate.requirements.length > 10 || candidate.requirements.some(r => !r || Object.keys(r).some(k => !['profileId', 'proofIds'].includes(k)) ||
+        typeof r.profileId !== 'string' || !r.profileId || r.profileId.length > 256 || !Array.isArray(r.proofIds) || r.proofIds.length > 20 || r.proofIds.some(p => typeof p !== 'string' || !p || p.length > 256)) || candidate.requirements.reduce((count, r) => count + r.proofIds.length, 0) > 20)) fail('INVALID_ARGUMENT')
+    const capture = async () => {
+      if (!this.coordinationIdentity?.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
+      const records = await this.worktrees!.discover({ reuseValidatedDirectories: true })
+      const selected = await this.selectWorktree(request.worktreeId, { revalidateSelection: true })
+      if (selected.record.generation !== request.generation) fail('WORKTREE_STALE')
+      const snapshot = this.snapshot(await selected.service.getState())
+      const branch = await selected.service.branch(request.targetBranch)
+      const head = await this.git.resolveCommit(this.repoRoot, `refs/heads/${branch}`, { noLazyFetch: true })
+      const target = records.worktrees.find(r => r.branch === branch)
+      const targetSnapshot = target ? this.snapshot(await (await this.selectWorktree(target.worktreeId, { revalidateSelection: true })).service.getState()) : null
+      if (targetSnapshot && targetSnapshot.head !== head) fail('GIT_STATE_CHANGED')
+      const prepared = candidate ? await this.selectWorktree(candidate.worktreeId, { revalidateSelection: true }) : null
+      const preparedSnapshot = prepared ? this.snapshot(await prepared.service.getState()) : null
+      const changes = await selected.service.getChanges()
+      const targetChanges = target ? await (await this.selectWorktree(target.worktreeId, { revalidateSelection: true })).service.getChanges() : []
+      const candidateChanges = prepared ? await prepared.service.getChanges() : []
+      return { record: selected.record, snapshot, branch, head, target, targetSnapshot, changes, targetChanges, prepared: prepared?.record ?? null, preparedSnapshot, candidateChanges,
+        topology: await this.git.getCommitTopologyRevision(this.repoRoot) }
+    }
+    const before = await capture(), blockers: string[] = [], missing: string[] = []
+    if (!before.snapshot.head) blockers.push('SOURCE_HEAD_UNAVAILABLE')
+    if (before.snapshot.operation) blockers.push('SOURCE_GIT_OPERATION_IN_PROGRESS')
+    if (before.changes.length) blockers.push('SOURCE_DIRTY')
+    if (before.target) blockers.push('TARGET_OWNERSHIP_REQUIRED')
+    if (before.targetSnapshot?.operation) blockers.push('TARGET_GIT_OPERATION_IN_PROGRESS')
+    if (before.targetChanges.length) blockers.push('TARGET_DIRTY')
+    let mergeBase: string | null = null
+    if (before.snapshot.head) { try { mergeBase = await this.git.mergeBase(this.repoRoot, before.snapshot.head, before.head, true) } catch { missing.push('MERGE_BASE_UNAVAILABLE') } }
+    const ff = !!before.snapshot.head && await this.git.isCommitReachable(this.repoRoot, before.head, before.snapshot.head)
+    const commits = before.snapshot.head ? await this.git.getReachableCommitPage(this.repoRoot, before.snapshot.head, before.head, 0, 21) : []
+    const inspectProofs = async () => {
+      const proofs: import('../../shared/types/worktree-integration-evidence-types').IntegrationEvidence['proofs'] = []
+      if (candidate) for (const requirement of candidate.requirements) for (const proofId of requirement.proofIds) {
+        proofs.push(this.worktreeValidation?.inspectIntegrationProof ? await this.worktreeValidation.inspectIntegrationProof(candidate.worktreeId, candidate.head, requirement.profileId, proofId) :
+          { proofId, profileId: requirement.profileId, freshness: 'UNVERIFIABLE', status: 'UNAVAILABLE' })
+      }
+      return proofs
+    }
+    const proofs = await inspectProofs()
+    let candidateVerified = false, stale = false
+    if (candidate) {
+      stale = candidate.sourceHead !== before.snapshot.head || candidate.targetHead !== before.head || candidate.generation !== before.prepared?.generation || candidate.head !== before.preparedSnapshot?.head
+      if (!stale && !before.preparedSnapshot?.operation && !before.candidateChanges.length && before.snapshot.head) candidateVerified =
+        await this.git.isCommitReachable(this.repoRoot, before.snapshot.head, candidate.head) && await this.git.isCommitReachable(this.repoRoot, before.head, candidate.head)
+      if (!candidateVerified) missing.push('INTEGRATED_CANDIDATE_NOT_VERIFIED')
+    } else missing.push('INTEGRATED_CANDIDATE_NOT_PREPARED')
+    const requirements = candidate?.requirements ?? []
+    if (!requirements.length) missing.push('VALIDATION_REQUIREMENTS_NOT_DEFINED')
+    if (requirements.some(r => !r.proofIds.length || r.proofIds.some(id => !proofs.some(p => p.proofId === id && p.profileId === r.profileId && p.freshness === 'CURRENT' && p.status === 'PASSED')))) missing.push('CURRENT_CANDIDATE_VALIDATION_REQUIRED')
+    if (!ff && !candidateVerified) missing.push('MERGE_COMPATIBILITY_NOT_VERIFIED')
+    const after = await capture(), finalProofs = await inspectProofs()
+    if (JSON.stringify(before) !== JSON.stringify(after) || JSON.stringify(proofs) !== JSON.stringify(finalProofs) || !this.coordinationIdentity?.isActive()) stale = true
+    const state = stale ? 'STALE' : blockers.length ? 'BLOCKED' : missing.length ? 'EVIDENCE_PENDING' : 'ELIGIBLE_FOR_REVIEW'
+    return { repositoryId: this.worktreeRepositoryId!, revision: createHash('sha256').update(JSON.stringify([before, candidate, proofs])).digest('hex'), observedAt: new Date().toISOString(), state,
+      source: { worktreeId: before.record.worktreeId, generation: before.record.generation, ...before.snapshot },
+      target: { branch: before.branch, head: before.head, worktreeId: before.target?.worktreeId ?? null, generation: before.target?.generation ?? null, snapshot: before.targetSnapshot }, candidate: candidate ?? null,
+      mode: ff ? 'FF_ONLY' : 'MERGE', mergeBase, compatibility: candidateVerified ? 'CANDIDATE_VERIFIED' : ff ? 'FAST_FORWARD_VERIFIED' : 'MERGE_COMPATIBILITY_NOT_VERIFIED',
+      blockers, missing, commits: commits.slice(0, 20), coverage: commits.length > 20 ? 'PARTIAL' : 'COMPLETE', proofs,
+      nextAction: stale ? 'Atualizar origem, destino e provas antes de avaliar novamente.' : blockers.length ? 'Resolver os impedimentos operacionais indicados; esta avaliação não concede autorização.' : missing.length ? 'Preparar e validar a candidata no checkout isolado autorizado, com requisitos explícitos.' : 'Solicitar revisão da candidata verificada; integração continua sujeita à autorização.' }
+  }
+
   private async revalidateIntegration(preview: WorktreeIntegrationPreview, sourceSnapshot = true, targetSnapshot = true): Promise<void> {
     if (preview.repositoryId !== this.worktreeRepositoryId || Date.parse(preview.expiresAt) <= Date.now()) fail('WORKTREE_PREVIEW_STALE')
     const source = await this.selectWorktree(preview.source.worktreeId)
@@ -445,6 +517,16 @@ export class GitOperationsService {
     const request = { ...query }
     return this.withCorrelationRead(provider => provider.worktreeCommits(request))
   }
+  getWorktreeTimeline(query: GitWorktreeCommitsQuery) {
+    const request = { ...query }
+    return this.withCorrelationRead(async provider => {
+      const page = await provider.worktreeCommits(request, 'date')
+      const metadata = await this.git.getCommitPageMetadata(this.repoRoot, page.items.map(item => item.sha))
+      const verified = await provider.worktreeCommits(request, 'date')
+      if (verified.revision !== page.revision) fail('GIT_STATE_CHANGED')
+      return { ...page, items: page.items.map((item, i) => ({ ...item, title: metadata[i].title, committerDate: metadata[i].committerDate })) }
+    })
+  }
   getCommitWorktrees(query: GitCommitWorktreesQuery) {
     const request = { ...query }
     return this.withCorrelationRead(provider => provider.commitWorktrees(request))
@@ -466,10 +548,10 @@ export class GitOperationsService {
       relation: base === rightHead ? 'HEAD_INCLUDED' : 'EXCLUSIVE_COMMITS', provenance: 'EXACT_MERGE_BASE' } }
   }
 
-  async selectWorktree(worktreeId: string) {
+  async selectWorktree(worktreeId: string, options?: { revalidateSelection: true }) {
     if (!this.worktrees) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     try {
-      const record = await this.worktrees!.select(worktreeId)
+      const record = options?.revalidateSelection ? await this.worktrees!.revalidateSelection(worktreeId) : await this.worktrees!.select(worktreeId)
       return { record, service: new GitOperationsService(record.path, this.git, this.transport, undefined, true) }
     } catch (error) { throw new GitOperationsError(error instanceof Error ? error.message : 'WORKTREE_IDENTITY_MISMATCH') }
   }
