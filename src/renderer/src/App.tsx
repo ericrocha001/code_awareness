@@ -33,6 +33,7 @@ export const App: React.FC = () => {
   // Invoca o hook para aplicar data-theme no <body> imediatamente
   useTheme();
 
+  const [artifactIntent, setArtifactIntent] = useState<{ repositoryId: string; artifactId: string } | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("home");
   const [commitIntent, setCommitIntent] = useState<CommitNavigationIntent | null>(null);
   const [activeProjectState, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
@@ -170,13 +171,13 @@ export const App: React.FC = () => {
 
       <main className="app-main">
         {activeTab === "git-management" && <GitManagementView key={`git-management:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} commitIntent={commitIntent} onIntentConsumed={id => setCommitIntent(previous => previous?.requestId === id ? null : previous)} />}
-        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} onCommit={intent => {
+        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} onArtifact={intent => { setArtifactIntent(intent); setActiveTab("continuum"); }} onCommit={intent => {
           if (intent.projectId !== commitContext.current.project?.id || intent.revision !== commitContext.current.revision) return;
           setCommitIntent(intent); setActiveTab('git-management');
         }} />
         {activeTab === "channel" && <ChannelView />}
         {activeTab === "academy" && <AcademyView />}
-        {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} />}
+        {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} artifactIntent={artifactIntent} />}
         {activeTab === "home" && (
           <HomeView
             activeProject={activeProject}

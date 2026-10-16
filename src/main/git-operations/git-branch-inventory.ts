@@ -50,6 +50,18 @@ export async function recordBranchCreation(root: string, git: GitService, ref: s
 export class GitBranchInventory {
   constructor(private readonly root: string, private readonly git: GitService, private readonly registry: GitWorktreeRegistry, private readonly identity: WorktreeIdentity) {}
 
+  async executionSnapshot(worktreeId: string, generation: string): Promise<import('../../shared/types/execution-branch-types').ExecutionBranchSnapshot> {
+    const inventory = await this.inventory()
+    const tree = inventory.worktrees.find(w => w.worktreeId === worktreeId && w.generation === generation)
+    if (!tree || tree.missing || tree.prunable || tree.detached || !tree.branch || !tree.head) throw new Error('WORKTREE_STALE')
+    const branch = inventory.branches.find(b => b.namespace === 'LOCAL' && b.ref === 'refs/heads/' + tree.branch && b.head === tree.head && b.worktrees.some(w => w.worktreeId === tree.worktreeId && w.generation === tree.generation))
+    if (!branch) throw new Error('BRANCH_IDENTITY_UNAVAILABLE')
+    if (branch.generation === 'UNKNOWN') throw new Error('BRANCH_GENERATION_UNKNOWN')
+    const snapshot = { repositoryId: inventory.repositoryId, branchRef: branch.ref, branchGeneration: branch.generation, branchRevision: branch.revision,
+      head: branch.head, worktreeId, worktreeGeneration: generation }
+    return { ...snapshot, fingerprint: digest(snapshot) }
+  }
+
   async inventory(): Promise<BranchInventory> {
     const current = () => { if (!this.identity.isActive()) throw new Error('WORKTREE_REPOSITORY_CHANGED') }
     current()

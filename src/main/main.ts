@@ -417,7 +417,7 @@ app.whenReady().then(async () => {
       detail: `${preview.worktree.path}\nBranch preservada: ${preview.preservationRef}\nHEAD: ${preview.preservationHead}\n\nA remoção será revalidada. A branch e seus commits serão mantidos.`,
       buttons: ['Cancelar', 'IDE e agentes liberados; remover Worktree'], defaultId: 0, cancelId: 0, noLink: true })
     return response.response === 1
-  })
+  }, continuumSession)
   registerBranchOrchestrationHandlers(branchOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))

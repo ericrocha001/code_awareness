@@ -4,11 +4,14 @@ import type { GitOperationsService } from '../git-operations/git-operations-serv
 import type { GitHubIntegrationService } from '../github/github-integration-service'
 import type { BranchManagerRequest, BranchManagerResult, BranchManagerData } from '../../shared/types/branch-manager-types'
 import type { WorktreeRemovalPreview } from '../../shared/types/worktree-removal-types'
+import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
+import { readBranchExecutions } from '../work-orchestration/branch-executions'
+import type { ExecutionBindingPage, ExecutionDocumentPage } from '../../shared/types/execution-branch-types'
 
 export class BranchOrchestrationController {
   private active: { git: GitOperationsService; github: Pick<GitHubIntegrationService, 'branchPullRequests' | 'pullRequestCommits' | 'assessBranchDiscard'>; path: string; projectId: string; revision: number } | null = null
   private readonly mutations = new Set<Promise<unknown>>()
-  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly confirmRelease: (preview: WorktreeRemovalPreview) => Promise<boolean>) {}
+  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly confirmRelease: (preview: WorktreeRemovalPreview) => Promise<boolean>, private readonly continuum?: RepositoryContinuumSession) {}
   bind(git: GitOperationsService, github: Pick<GitHubIntegrationService, 'branchPullRequests' | 'pullRequestCommits' | 'assessBranchDiscard'>, path: string) {
     const state = this.projects.getState()
     this.active = state.project ? { git, github, path, projectId: state.project.id, revision: state.revision } : null
@@ -29,6 +32,8 @@ export class BranchOrchestrationController {
         let data: BranchManagerData
         switch (operation.action) {
           case 'INVENTORY': data = { kind: 'INVENTORY', inventory: await git.getBranchInventory() }; break
+          case 'EXECUTIONS': data = { kind: 'EXECUTIONS', page: await readBranchExecutions(git, this.continuum, operation) as ExecutionBindingPage }; break
+          case 'EXECUTION_DOCUMENTS': data = { kind: 'EXECUTION_DOCUMENTS', page: await readBranchExecutions(git, this.continuum, operation) as ExecutionDocumentPage }; break
           case 'PULL_REQUESTS': {
             const inventory = await git.getBranchInventory()
             if (inventory.revision !== operation.inventoryRevision) throw new Error('GIT_STATE_CHANGED')
@@ -63,6 +68,7 @@ function valid(value: BranchManagerRequest): boolean {
   const op = value.operation
   if (!op || typeof op !== 'object') return false
   if (op.action === 'INVENTORY') return keys(op, ['action'])
+  if (op.action === 'EXECUTIONS' || op.action === 'EXECUTION_DOCUMENTS') return keys(op, ['action', 'ref', 'revision', 'cursor', ...(op.action === 'EXECUTION_DOCUMENTS' ? ['bindingId', 'executionId'] : [])]) && text(op.ref) && text(op.revision) && (op.cursor === undefined || text(op.cursor, 4096)) && (op.action === 'EXECUTIONS' || text(op.bindingId) && text(op.executionId))
   if (op.action === 'PULL_REQUESTS') return keys(op, ['action', 'inventoryRevision']) && text(op.inventoryRevision)
   if (op.action === 'PR_COMMITS') return keys(op, ['action', 'number', 'head', 'page']) && Number.isSafeInteger(op.number) && op.number > 0 && /^[a-f0-9]{40,64}$/.test(op.head) && Number.isSafeInteger(op.page) && op.page > 0 && op.page <= 1000
   if (op.action === 'COMMITS') return keys(op, ['action', 'query']) && keys(op.query, ['ref', 'revision', 'mode', 'baseRef', 'cursor']) && text(op.query.ref) && text(op.query.revision) && ['REACHABLE', 'EXCLUSIVE'].includes(op.query.mode) && (op.query.baseRef === undefined || text(op.query.baseRef)) && (op.query.cursor === undefined || text(op.query.cursor, 4096))

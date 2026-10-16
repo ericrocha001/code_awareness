@@ -4,8 +4,11 @@ import type { BranchPullRequests, PullRequestCommitsPage } from './branch-pull-r
 import type { BranchDiscardExecute, BranchDiscardPreview } from './branch-discard-types'
 import type { WorktreeRemovalExecute, WorktreeRemovalPreview } from './worktree-removal-types'
 import type { GitOperationalResult } from './git-management-types'
+import type { ExecutionBindingPage, ExecutionDocumentPage } from './execution-branch-types'
 export type BranchManagerOperation =
   | { action: 'INVENTORY' }
+  | { action: 'EXECUTIONS'; ref: string; revision: string; cursor?: string }
+  | { action: 'EXECUTION_DOCUMENTS'; ref: string; revision: string; bindingId: string; executionId: string; cursor?: string }
   | { action: 'PULL_REQUESTS'; inventoryRevision: string }
   | { action: 'COMMITS'; query: BranchHistoryQuery }
   | { action: 'PR_COMMITS'; number: number; head: string; page: number }
@@ -16,6 +19,8 @@ export type BranchManagerOperation =
 export interface BranchManagerRequest { context: OrchestrationContext; operation: BranchManagerOperation }
 export type BranchManagerData =
   | { kind: 'INVENTORY'; inventory: BranchInventory }
+  | { kind: 'EXECUTIONS'; page: ExecutionBindingPage }
+  | { kind: 'EXECUTION_DOCUMENTS'; page: ExecutionDocumentPage }
   | { kind: 'PULL_REQUESTS'; pullRequests: BranchPullRequests; inventoryRevision: string }
   | { kind: 'COMMITS'; page: BranchHistoryPage }
   | { kind: 'PR_COMMITS'; page: PullRequestCommitsPage }

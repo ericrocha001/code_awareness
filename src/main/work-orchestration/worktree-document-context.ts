@@ -12,7 +12,7 @@ export interface OrchestrationContinuumReader {
 export interface WorktreeIdentityReader {
   getCoordinationIdentity(worktreeId: string): Promise<{ repositoryId: string; record: { worktreeId: string; generation: string; path: string } }>
 }
-const project = (record: ArtifactDiscoveryRecord): WorktreeDocument => ({ artifactId: record.artifactId, name: record.name,
+export const projectDocument = (record: ArtifactDiscoveryRecord): WorktreeDocument => ({ artifactId: record.artifactId, name: record.name,
   description: record.description, kind: record.kind, status: record.status, updatedAt: record.updatedAt,
   ...(typeof record.metadata?.executionId === 'string' ? { executionId: record.metadata.executionId } : {}) })
 
@@ -36,7 +36,7 @@ export async function readWorktreeDocumentContext(git: WorktreeIdentityReader, c
     const edges = graph.edges.filter(edge => edge.nature === 'DECLARED' && edge.origin === 'metadata.relations' &&
       (edge.sourceId === request.artifactId || edge.targetId === request.artifactId))
     const relatedIds = new Set(edges.flatMap(edge => [edge.sourceId, edge.targetId]).filter(id => id !== request.artifactId))
-    base.artifacts = graph.nodes.filter(node => relatedIds.has(node.artifactId) && ['EXECUTABLE_PLAN', 'IMPLEMENTATION_HANDOFF', 'WORK_ITEM'].includes(node.kind)).map(project)
+    base.artifacts = graph.nodes.filter(node => relatedIds.has(node.artifactId) && ['EXECUTABLE_PLAN', 'IMPLEMENTATION_HANDOFF', 'WORK_ITEM'].includes(node.kind)).map(projectDocument)
     const shown = new Set(base.artifacts.map(artifact => artifact.artifactId))
     base.relations = edges.filter(edge => shown.has(edge.sourceId) || shown.has(edge.targetId)).map(({ sourceId, targetId, kind }) => ({ sourceId, targetId, kind }))
     base.sourceArtifactId = request.artifactId
@@ -45,7 +45,7 @@ export async function readWorktreeDocumentContext(git: WorktreeIdentityReader, c
     const page = continuum.list({ metadata: request.mode === 'EXACT' ? exact : { worktreePath: before.record.path },
       metadataKeys: ['worktreeId', 'worktreeGeneration', 'executionId'], limit: 10, ...(request.cursor ? { cursor: request.cursor } : {}) })
     base.artifacts = page.artifacts.filter(record => request.mode === 'EXACT' ? record.metadata?.worktreeId === request.worktreeId && record.metadata?.worktreeGeneration === request.generation :
-      record.metadata?.worktreeId === undefined && record.metadata?.worktreeGeneration === undefined).map(project)
+      record.metadata?.worktreeId === undefined && record.metadata?.worktreeGeneration === undefined).map(projectDocument)
     if (request.mode === 'EXACT' && base.artifacts.length !== page.artifacts.length) throw new Error('DOCUMENT_ASSOCIATION_CHANGED')
     base.nextCursor = page.nextCursor
     base.coverage = page.nextCursor ? 'PARTIAL' : 'COMPLETE'

@@ -1,12 +1,12 @@
 const fs = require('node:fs')
 const path = require('node:path')
-const { spawnSync } = require('node:child_process')
+const { execFile, spawnSync } = require('node:child_process')
 const { buildSync } = require('esbuild')
 
 exports.run = async ctx => {
   const backend = path.join(ctx.evidenceDir, 'backend.cjs')
-  buildSync({ stdin: { contents: "export { GitService } from './src/main/core/git-service'; export { GitOperationsService } from './src/main/git-operations/git-operations-service'; export { GitHubGitTransport } from './src/main/github/github-git-transport'; export { GitHubApiClient } from './src/main/github/github-api-client'; export { GitHubPullRequestCatalog } from './src/main/github/github-pull-request-catalog'; export { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './src/main/ipc/branch-orchestration-handler'; export { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './src/main/ipc/work-orchestration-handler'; export { RuntimeIdentityProvider } from './src/main/runtime-identity/runtime-identity-provider'", resolveDir: ctx.projectRoot }, bundle: true, outfile: backend, platform: 'node', format: 'cjs', external: ['electron', 'better-sqlite3'] })
-  const { GitService, GitOperationsService, GitHubGitTransport, GitHubApiClient, GitHubPullRequestCatalog, BranchOrchestrationController, registerBranchOrchestrationHandlers, WorkOrchestrationController, registerWorkOrchestrationHandlers, RuntimeIdentityProvider } = require(backend)
+  buildSync({ stdin: { contents: "export { ArtifactStore } from './src/main/continuum/artifact-store'; export { ContinuumService } from './src/main/continuum/continuum-service'; export { ContinuumLocalAdapter } from './src/main/continuum/local-adapter'; export { LocalChannelHost } from './src/main/local-agent-channel/local-channel-host'; export { registerContinuumHandlers } from './src/main/ipc/continuum-handler'; export { GitService } from './src/main/core/git-service'; export { GitOperationsService } from './src/main/git-operations/git-operations-service'; export { GitHubGitTransport } from './src/main/github/github-git-transport'; export { GitHubApiClient } from './src/main/github/github-api-client'; export { GitHubPullRequestCatalog } from './src/main/github/github-pull-request-catalog'; export { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './src/main/ipc/branch-orchestration-handler'; export { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './src/main/ipc/work-orchestration-handler'; export { RuntimeIdentityProvider } from './src/main/runtime-identity/runtime-identity-provider'", resolveDir: ctx.projectRoot }, bundle: true, outfile: backend, platform: 'node', format: 'cjs', external: ['electron', 'better-sqlite3', 'sharp', 'js-yaml'] })
+  const { ArtifactStore, ContinuumService, ContinuumLocalAdapter, LocalChannelHost, registerContinuumHandlers, GitService, GitOperationsService, GitHubGitTransport, GitHubApiClient, GitHubPullRequestCatalog, BranchOrchestrationController, registerBranchOrchestrationHandlers, WorkOrchestrationController, registerWorkOrchestrationHandlers, RuntimeIdentityProvider } = require(backend)
   const runtime = new RuntimeIdentityProvider({ rootDir: ctx.projectRoot, includedDirectories: ['src/main', 'src/shared', 'src/renderer/src'] })
   await runtime.sourceOriginReady
   const identity = runtime.getIdentityPayload()
@@ -50,8 +50,25 @@ exports.run = async ctx => {
     pullRequestCommits: async () => { throw new Error('NOT_REQUESTED') },
     assessBranchDiscard: async () => ({ repositoryId: 'fixture', coverage: 'COMPLETE', observedAt: new Date().toISOString(), revision: 'local-only', defaultBranch: 'main', protected: false, openPullRequests: [], knownPullRequests: [], reason: null })
   }
+  let continuumReads = 0
+  let store = new ArtifactStore(path.join(ctx.temporary, 'continuum.db'), 'fixture')
+  let continuum = new ContinuumService(store)
+  const activeSession = { repositoryId: 'fixture', repositoryPath: root }
+  let continuumAvailable = true
+  const session = { getActiveSession: () => continuumAvailable ? activeSession : null, getActiveService: () => continuumAvailable ? continuum : null, onChanged: () => () => {} }
+  const countReads = () => { const list = continuum.list.bind(continuum); continuum.list = filter => { continuumReads++; return list(filter) } }
+  countReads()
+  const plan = continuum.publish('---\nname: Execution binding acceptance plan\ndescription: Real CLI selection\nkind: EXECUTABLE_PLAN\nexecutionId: acceptance-execution\n---\nCanonical plan body')
+  continuum.publish('---\nname: Execution acceptance handoff\ndescription: Document membership\nkind: IMPLEMENTATION_HANDOFF\nstatus: VALIDATED\nexecutionId: acceptance-execution\n---\nHandoff body')
+  const channel = new LocalChannelHost([new ContinuumLocalAdapter(session)], path.join(ctx.temporary, 'profile'))
+  await channel.start()
+  const cli = args => new Promise((resolve, reject) => execFile('node', [path.join(ctx.projectRoot, 'scripts/continuum/local.cjs'), ...args, '--repository', 'fixture', '--profile', path.join(ctx.temporary, 'profile')], { cwd: path.join(ctx.temporary, 'topic'), windowsHide: true, timeout: 60000 }, (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(JSON.parse(stdout))))
+  const args = ['bind_execution', '--execution', 'acceptance-execution', '--id', plan.artifactId]
+  const binding = await cli(args), replay = await cli(args)
+  ctx.check('Real CLI receipt PERSISTED and replay identity', binding.state === 'PERSISTED' && binding.artifactId === replay.artifactId && binding.branchRef === 'refs/heads/topic')
+  const unregisterContinuum = registerContinuumHandlers(session)
   const projects = { getState: () => ({ project: { id: 'fixture', name: 'Acceptance', path: root }, revision: 1 }) }
-  const controller = new BranchOrchestrationController(projects, async () => { releaseConfirmations++; return true }), legacy = new WorkOrchestrationController(projects)
+  const controller = new BranchOrchestrationController(projects, async () => { releaseConfirmations++; return true }, session), legacy = new WorkOrchestrationController(projects)
   controller.bind(service, remote, root); legacy.bind(service)
   let uiInventoryReads = 0
   const request = controller.request.bind(controller)
@@ -91,14 +108,32 @@ exports.run = async ctx => {
     ctx.check('Renderer shows branch-first inventory and detached section', await ctx.evaluate(() => document.querySelector('.bm-toolbar').textContent.includes('21 Worktrees') && document.body.textContent.includes('Worktrees sem branch confirmada')))
     await select('topic')
     ctx.check('Multiple current PRs retained and fork unconfirmed', await ctx.evaluate(() => document.querySelector('.bm-detail').textContent.includes('#1') && document.querySelector('.bm-detail').textContent.includes('#2') && document.querySelectorAll('.bm-pr-list small').length > 0 && document.querySelector('.bm-detail').textContent.includes('Associação ambígua')))
+    ctx.check('No Continuum reads while mounting inventory or selecting branch', continuumReads === 0)
+    const bindingStart = Date.now(), bindingCalls = gitCalls
+    await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
+    const binding21 = { milliseconds: Date.now() - bindingStart, gitCalls: gitCalls - bindingCalls, continuumReads }
+    await clickText('Ver Artifacts desta execução', '.bm-executions'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Execution acceptance handoff'))
+    ctx.check('Branch to execution to canonical document membership', continuumReads === 2 && await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('EXECUTABLE_PLAN') && document.querySelector('.bm-executions').textContent.includes('VALIDATED')))
+    await ctx.capture('execution-documents-dark')
+    await clickText('Abrir no Continuum', '.bm-executions'); await wait(() => !!document.querySelector('.continuum-markdown'))
+    ctx.check('Artifact opens existing Continuum inspector', await ctx.evaluate(() => document.querySelector('.continuum-markdown').textContent.length > 0))
+    await clickText('Voltar ao gestor', '.fixture-nav'); await wait(() => !document.querySelector('.wo-header button').disabled)
+    await select('topic')
+    git(path.join(ctx.temporary, 'topic'), ['commit', '--allow-empty', '-m', 'Normal HEAD advance'])
+    const advancedReplay = await cli(args)
+    ctx.check('CLI HEAD advance preserves binding identity', advancedReplay.artifactId === binding.artifactId)
+    store.close(); store = new ArtifactStore(path.join(ctx.temporary, 'continuum.db'), 'fixture'); continuum = new ContinuumService(store); countReads()
+    ctx.check('Canonical SQLite association survives service restart', continuum.get(binding.artifactId).artifactId === binding.artifactId)
+    await refresh(); await select('topic'); await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     await ctx.capture('branches-21-dark'); await ctx.overflow()
     const idleBefore = { gitCalls, httpCalls, snapshots }
     await new Promise(resolve => setTimeout(resolve, 1000))
-    ctx.check('No idle polling, structural scanner or per-card snapshots', JSON.stringify(idleBefore) === JSON.stringify({ gitCalls, httpCalls, snapshots }) && snapshots === 0 && httpCalls === 2)
-    await clickText('Commits exclusivos', '.bm-detail'); await wait(() => document.querySelector('.bm-detail').textContent.includes('Nenhum commit nesta comparação.'))
+    ctx.check('No idle polling, structural scanner or per-card snapshots', JSON.stringify(idleBefore) === JSON.stringify({ gitCalls, httpCalls, snapshots }) && snapshots === 0 && httpCalls >= 2)
+    await clickText('Commits exclusivos', '.bm-detail'); await wait(() => document.querySelector('.bm-detail').textContent.includes('Normal HEAD advance'))
     await select('abandoned'); await clickText('História alcançável', '.bm-detail')
     await wait(() => document.querySelector('.bm-detail').textContent.includes('Exclusive abandoned work'))
     await clickText('Exclusive abandoned work · ' + abandonedHead.slice(0, 8), '.bm-detail')
+    await wait(() => document.querySelector('output').textContent.length === 40)
     ctx.check('Commit navigation carries exact SHA', await ctx.evaluate(sha => document.querySelector('output').textContent === sha, abandonedHead))
     await clickText('Preparar descarte da branch…', '.bm-detail'); await wait(() => !!document.querySelector('[role=dialog]'))
     ctx.check('Discard requires explicit preservation consent', await ctx.evaluate(() => [...document.querySelector('[role=dialog]').querySelectorAll('button')].find(b => b.textContent === 'Confirmar descarte').disabled))
@@ -116,13 +151,15 @@ exports.run = async ctx => {
     await wait(() => document.body.textContent.includes('Worktree removida.'))
     ctx.check('Separate removal handshake preserves branch', releaseConfirmations === 1 && git(root, ['rev-parse', 'refs/heads/topic']) === topicBefore && !fs.existsSync(path.join(ctx.temporary, 'topic')))
     await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote').textContent.includes('Consultando'))
+    await select('topic'); await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
+    ctx.check('Association remains after authorized fixture Worktree removal', await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('checkout histórico')))
     for (let i = 18; i < 99; i++) git(root, ['worktree', 'add', '--no-checkout', '-b', `work-${String(i).padStart(3, '0')}`, path.join(ctx.temporary, `work-${i}`)])
     const largeStart = Date.now(), largeCalls = gitCalls, large = await service.getBranchInventory()
     const largeCold = { milliseconds: Date.now() - largeStart, gitCalls: gitCalls - largeCalls, worktrees: large.worktrees.length }
     const largeWarmStart = Date.now(), largeWarmCalls = gitCalls
     await service.getBranchInventory()
     const largeWarm = { milliseconds: Date.now() - largeWarmStart, gitCalls: gitCalls - largeWarmCalls }
-    fs.writeFileSync(path.join(ctx.evidenceDir, 'costs.json'), JSON.stringify({ cold, warm, largeCold, largeWarm, gitCalls, httpCalls, snapshots }, null, 2))
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'costs.json'), JSON.stringify({ cold, warm, largeCold, largeWarm, gitCalls, httpCalls, snapshots, continuumReads }, null, 2))
     ctx.check('101 real Worktrees, bounded warm cost', large.worktrees.length === 101 && largeWarm.gitCalls <= 8)
     mode = 'offline'; await refresh()
     await ctx.evaluate(() => { const close = document.querySelector('[aria-label="Fechar detalhes"]'); close?.click() })
@@ -133,6 +170,14 @@ exports.run = async ctx => {
     const scroll = await ctx.evaluate(() => document.querySelector('.bm-list').scrollTop)
     await refresh()
     ctx.check('Explicit refresh preserves list scroll', await ctx.evaluate(top => document.querySelector('.bm-list').scrollTop === top, scroll))
+    await select('topic')
+    const largeBindingStart = Date.now(), largeBindingCalls = gitCalls, largeBindingReads = continuumReads
+    await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
+    const binding101 = { milliseconds: Date.now() - largeBindingStart, gitCalls: gitCalls - largeBindingCalls, continuumReads: continuumReads - largeBindingReads }
+    ctx.check('101 branches: one demanded metadata query per selection', binding101.continuumReads === 1)
+    continuumAvailable = false; await clickText('Atualizar execuções', '.bm-executions'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Consulta indisponível'))
+    ctx.check('Unavailable Continuum does not claim no documents', await ctx.evaluate(() => !document.querySelector('.bm-executions').textContent.includes('Sem vínculo explícito')))
+    continuumAvailable = true
     await ctx.capture('branches-101-offline-dark'); await ctx.overflow()
     await ctx.viewport(820, 760); await ctx.evaluate(() => { document.body.dataset.theme = 'light' }); await select('work-098')
     await ctx.capture('branch-detail-narrow-light'); await ctx.overflow()
@@ -140,6 +185,7 @@ exports.run = async ctx => {
     const hidden = { gitCalls, httpCalls }
     await new Promise(resolve => setTimeout(resolve, 500))
     ctx.check('Hidden manager performs zero reads', JSON.stringify(hidden) === JSON.stringify({ gitCalls, httpCalls }))
-    fs.writeFileSync(path.join(ctx.evidenceDir, 'costs.json'), JSON.stringify({ cold, warm, largeCold, largeWarm, gitCalls, httpCalls, snapshots }, null, 2))
-  } finally { await controller.deactivate(); legacy.deactivate() }
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'costs.json'), JSON.stringify({ cold, warm, largeCold, largeWarm, gitCalls, httpCalls, snapshots, continuumReads }, null, 2))
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'execution-costs.json'), JSON.stringify({ binding21, binding101, continuumReads }, null, 2))
+  } finally { channel.dispose(); unregisterContinuum(); store.close(); await controller.deactivate(); legacy.deactivate() }
 }
