@@ -20,6 +20,7 @@ export interface ProjectPreferences {
 }
 
 export interface AppSettings {
+  hiddenNavigationItems?: string[]
   ngrokDomain?: string
   remoteAccessEnabled?: boolean
   transportKind?: 'relay' | 'ngrok'

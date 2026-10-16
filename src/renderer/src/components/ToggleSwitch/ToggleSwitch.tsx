@@ -10,9 +10,10 @@ interface ToggleSwitchProps {
   onChange: (checked: boolean) => void
   disabled?: boolean
   indeterminate?: boolean
+  'aria-label'?: string
 }
 
-export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, disabled = false, indeterminate = false }) => {
+export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, disabled = false, indeterminate = false, 'aria-label': ariaLabel }) => {
   const handleToggle = () => {
     if (!disabled) {
       onChange(!checked)
@@ -36,6 +37,7 @@ export const ToggleSwitch: React.FC<ToggleSwitchProps> = ({ checked, onChange, d
       onKeyDown={handleKeyDown}
       tabIndex={disabled ? -1 : 0}
       role="switch"
+      aria-label={ariaLabel}
       aria-checked={indeterminate ? 'mixed' : checked}
       aria-disabled={disabled}
     >

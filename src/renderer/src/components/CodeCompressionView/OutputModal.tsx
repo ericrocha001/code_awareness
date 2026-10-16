@@ -11,6 +11,7 @@ import type {
 } from '../../../../shared/types'
 import { DEFAULT_PROFILE, normalizeCompressionProfile } from '../../utils/compression-profile'
 import { outputFormatToExtension } from '../../../../shared/utils/format-utils'
+import { updateSettings } from '../../utils/update-settings'
 import { Button } from '../shared/Button/Button'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
 import { FormatPreview } from '../shared/FormatPreview/FormatPreview'
@@ -81,14 +82,10 @@ export const OutputModal: React.FC<OutputModalProps> = ({
    */
   const persistConfig = useCallback(() => {
     const { outputFormat: of, profile: p, enrichment: e } = settingsRef.current
-    window.codeAwareness
-      .loadSettings()
-      .then((settings) => {
-        window.codeAwareness.saveSettings({
-          ...settings,
-          compressionSettings: { profile: p, outputFormat: of, ...(e ? { enrichment: e } : {}) }
-        })
-      })
+    updateSettings(settings => ({
+      ...settings,
+      compressionSettings: { profile: p, outputFormat: of, ...(e ? { enrichment: e } : {}) }
+    }))
       .catch(() => { /* falha silenciosa de persistência não deve travar o modal */ })
   }, [])
 

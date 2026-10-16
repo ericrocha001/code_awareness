@@ -235,6 +235,7 @@ exports.run = async (ctx) => {
     'external update after inspection\n'
   )
   await ctx.click('.gm-path-selection label:nth-child(2) input')
+  await ctx.waitFor(() => document.querySelector('.gm-path-selection label:nth-child(2) input').checked && !document.querySelector('.gm-action-row button:first-child').disabled)
   await ctx.click('.gm-action-row button:first-child')
   await waitForGit(() =>
     document
