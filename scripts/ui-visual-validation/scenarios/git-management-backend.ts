@@ -15,6 +15,7 @@ export async function setup(
   nonGitRoot: string,
   sourceRoot: string
 ) {
+  const metrics = { atlas: [] as number[], overview: [] as number[], compare: [] as number[] }
   const runtime = new RuntimeIdentityProvider({
     rootDir: sourceRoot,
     mode: 'production'
@@ -32,15 +33,19 @@ export async function setup(
   const controller = new GitManagementController(projects)
   projects.onBeforeChange(() => controller.deactivate())
   projects.onChanged((state) => {
-    controller.bind(
-      state.project
-        ? new GitOperationsService(
+    const service = state.project ? new GitOperationsService(
             state.project.path,
             git,
             new GitHubGitTransport(null, git)
-          )
-        : null
-    )
+          ) : null
+    if (service) for (const [method, name] of [['getAtlasHistory', 'atlas'], ['getManagementOverview', 'overview'], ['compareAtlas', 'compare']] as const) {
+      const run = service[method].bind(service) as (...args: any[]) => Promise<any>
+      ;(service as any)[method] = async (...args: any[]) => {
+        const start = performance.now()
+        try { return await run(...args) } finally { metrics[name].push(Math.round(performance.now() - start)) }
+      }
+    }
+    controller.bind(service)
   })
   registerGitManagementHandlers(controller)
   ipcMain.handle('project:get-active', () => projects.getState())
@@ -50,5 +55,5 @@ export async function setup(
     data: await projects.activate(id)
   }))
   await projects.activate('proof-a')
-  return { controller, projects, runtime }
+  return { controller, projects, runtime, metrics }
 }

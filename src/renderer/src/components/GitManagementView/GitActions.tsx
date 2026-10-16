@@ -162,14 +162,14 @@ export function GitActions({
       )
   return (
     <section className="gm-actions" aria-label="Operações Git">
-      <h3>Preparar → Registrar → Publicar</h3>
+      {!!available.length && <h3>Preparar → Registrar → Publicar</h3>}
       {overview.state.operation || overview.state.conflictCount > 0 ? (
         <p role="alert">
           Resolva a operação Git ou os conflitos em uma ferramenta local antes
           de continuar.
         </p>
       ) : null}
-      <div className="gm-path-selection">
+      {!!available.length && <><div className="gm-path-selection">
         {available.map((change) => (
           <label key={change.path}>
             <input
@@ -206,7 +206,8 @@ export function GitActions({
           Retirar do índice
         </button>
       </div>
-      <div className="gm-commit-review">
+      </>}
+      {!!staged.length && <div className="gm-commit-review">
         <h3>Prévia do commit · {staged.length} arquivos</h3>
         {staged.length ? (
           <ul>
@@ -237,7 +238,7 @@ export function GitActions({
         >
           Registrar commit…
         </button>
-      </div>
+      </div>}
       <details>
         <summary>Branches e sincronização</summary>
         <p>
