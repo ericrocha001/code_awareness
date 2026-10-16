@@ -10,7 +10,7 @@ it('guards temporal IPC inputs, binds snapshots to project revision and discards
   vi.mocked(ipcMain.handle).mockImplementation((channel, listener) => { handlers.set(channel, listener) })
   let state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }
   let finish!: (value: unknown) => void
-  const service = {
+  const service = { clearAtlasCache: vi.fn(),
     getAtlasHistory: vi.fn(() => new Promise(resolve => { finish = resolve })),
     compareAtlas: vi.fn(async () => ({ snapshot: 'fixed' }))
   } as unknown as GitOperationsService
@@ -33,7 +33,7 @@ it('guards temporal IPC inputs, binds snapshots to project revision and discards
 
 it('routes only typed correlation reads, binds continuation to project context and drops late results', async () => {
   let state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }, finish!: (value: any) => void
-  const service = { getWorktreeCommits: vi.fn(async () => ({ direction: 'WORKTREE_COMMITS' })), getCommitWorktrees: vi.fn(() => new Promise(resolve => { finish = resolve })) } as unknown as GitOperationsService
+  const service = { clearAtlasCache: vi.fn(), getWorktreeCommits: vi.fn(async () => ({ direction: 'WORKTREE_COMMITS' })), getCommitWorktrees: vi.fn(() => new Promise(resolve => { finish = resolve })) } as unknown as GitOperationsService
   const controller = new GitManagementController({ getState: () => state }); controller.bind(service)
   const context = { projectId: 'a', revision: 1 }
   expect(await controller.correlation({ context, direction: 'WORKTREE_COMMITS', worktreeId: 'a'.repeat(64), generation: 'g' })).toMatchObject({ success: true, data: { direction: 'WORKTREE_COMMITS' } })
@@ -49,7 +49,7 @@ it('routes only typed correlation reads, binds continuation to project context a
 it('rejects obsolete contexts and discards requests completing after a project change', async () => {
   let state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }
   const controller = new GitManagementController({ getState: () => state })
-  const service = {} as GitOperationsService
+  const service = { clearAtlasCache: vi.fn() } as unknown as GitOperationsService
   controller.bind(service)
   let finish!: (value: string) => void
   const pending = controller.read(
@@ -86,6 +86,7 @@ it('quiesces mutations during project transition and rechecks authority inside e
     return { value: {} }
   })
   controller.bind({
+    clearAtlasCache: vi.fn(),
     executeManagementMutation: execute
   } as unknown as GitOperationsService)
   const request = {

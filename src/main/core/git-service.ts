@@ -224,8 +224,8 @@ export class GitService implements FileListingPort {
     return raw.trim().split('\n').filter(Boolean)
   }
 
-  async getCommitTopologyRevision(root: string): Promise<string> {
-    const common = await this.getCommonDirectory(root)
+  async getCommitTopologyRevision(root: string, commonDirectory?: string): Promise<string> {
+    const common = commonDirectory ?? await this.getCommonDirectory(root)
     const files = ['shallow', 'info/grafts'].map(name => {
       const file = join(common, name)
       if (!existsSync(file)) return ''
@@ -683,10 +683,10 @@ export class GitService implements FileListingPort {
     return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(*objectname)%00%(upstream:short)%00%(objecttype)%00%(*objecttype)', 'refs/heads/', 'refs/remotes/', 'refs/tags/'], root, { maxOutputBytes: 256000, env: this.localReadEnvironment() })
   }
 
-  async getAtlasPrimaryRef(root: string): Promise<string | null> {
+  async getAtlasPrimaryRef(root: string, references?: string): Promise<string | null> {
     const configured = (await this.runGit(['config', '--get', 'code-awareness.primaryBranch'], root, { allowExitOne: true, env: this.localReadEnvironment() })).trim()
     if (configured) return configured.startsWith('refs/') ? configured : `refs/heads/${configured}`
-    const refs = await this.getAtlasReferences(root)
+    const refs = references ?? await this.getAtlasReferences(root)
     const defaults = [...new Set(refs.split('\n').map(line => line.split('\0')[2]).filter(Boolean))]
     return defaults.length === 1 ? defaults[0] : null
   }

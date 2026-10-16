@@ -60,7 +60,7 @@ export function GitInspector({
       generation.current++
       patchGeneration.current++
     }
-  }, [context, sha, selection?.kind, overview])
+  }, [context, sha, selection?.kind, selection ? null : overview])
   const loadPatch = async (
     request: Omit<GitPatchRequest, 'context' | 'cursor'>,
     cursor?: string

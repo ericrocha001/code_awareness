@@ -29,7 +29,8 @@ exports.run = async (ctx) => {
     await nativeClick(selector)
   }
   ctx.input = async (selector, text) => {
-    await ctx.waitFor(selector => { const bounds = document.querySelector(selector)?.getBoundingClientRect(); return bounds && bounds.width > 0 && bounds.height > 0 }, selector)
+    await waitForGit(() => document.querySelector('.gm-inspector')?.getAttribute('aria-busy') !== 'true')
+    await ctx.waitFor(selector => { const element = document.querySelector(selector); const bounds = element?.getBoundingClientRect(); return element && !element.disabled && bounds && bounds.width > 0 && bounds.height > 0 }, selector)
     await ctx.click(selector)
     await ctx.waitFor(selector => document.activeElement === document.querySelector(selector), selector)
     ctx.window.webContents.insertText(text)
@@ -187,6 +188,7 @@ exports.run = async (ctx) => {
       document.querySelector('.gm-inspector').textContent.includes('Merge')
     )
   )
+  await waitForGit(() => !!document.querySelector('.gm-commit-author') && !!document.querySelector('.gm-files button'))
   await ctx.click('.gm-files button')
   await ctx.waitFor(() => !!document.querySelector('.gm-patch pre'))
   ctx.check(
@@ -314,7 +316,7 @@ exports.run = async (ctx) => {
       'false'
   )
   try {
-    await ctx.waitFor(() =>
+    await waitForGit(() =>
       document
         .querySelector('.gm-commit-review h3')
         ?.textContent.includes('2 arquivos')
@@ -420,8 +422,8 @@ exports.run = async (ctx) => {
   ctx.check('Changing windows keeps recent visible commits in view', await ctx.evaluate(() => document.querySelectorAll('.gm-commit').length > 0))
   git('branch', 'snapshot-changed')
   await ctx.click('.gm-load-more')
-  await waitForGit(() => document.querySelector('.gm-error')?.textContent.includes('Histórico desatualizado'))
-  ctx.check('Actual ref changes invalidate temporal pagination', await ctx.evaluate(() => document.querySelector('.gm-load-more').disabled))
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && [...document.querySelectorAll('[aria-label="Branch do Atlas"] option')].some(option => option.value === 'refs/heads/snapshot-changed'))
+  ctx.check('Actual ref changes restart temporal pagination on the current revision', await ctx.evaluate(() => !document.querySelector('.gm-error')))
   await ctx.capture('wide-dark-stale-history')
   await ctx.click('[data-proof-project="b"]')
   await ctx.waitFor(() =>

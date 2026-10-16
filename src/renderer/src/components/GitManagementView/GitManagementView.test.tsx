@@ -66,11 +66,11 @@ it('discards history completing after a project change and rejects stale paginat
   complete(ok(page))
   await waitFor(() => expect(screen.queryByRole('button', { name: /Real change/ })).toBeNull())
   view.unmount()
-  api.getGitAtlas.mockResolvedValueOnce(ok({ ...page, nextCursor: 'cursor', coverage: 'PARTIAL' })).mockResolvedValueOnce({ success: false, code: 'GIT_STATE_CHANGED' })
+  api.getGitAtlas.mockResolvedValue(ok(page)).mockResolvedValueOnce(ok({ ...page, nextCursor: 'cursor', coverage: 'PARTIAL' })).mockResolvedValueOnce({ success: false, code: 'GIT_STATE_CHANGED' })
   render(<GitManagementView state={state} />)
-  fireEvent.click(await screen.findByText('Carregar anteriores'))
-  await screen.findByText('Histórico desatualizado. Atualize para carregar um novo snapshot.')
-  expect((screen.getByText('Carregar anteriores') as HTMLButtonElement).disabled).toBe(true)
+  await waitFor(() => expect(api.getGitAtlas.mock.calls.filter(([query]) => query.cursor === 'cursor')).toHaveLength(1))
+  await screen.findByRole('button', { name: /Real change/ })
+  expect(api.getGitAtlas.mock.calls.at(-1)![0].cursor).toBeUndefined()
 })
 
 it('renders structured branch details and reads the selected branch tip through the canonical API', async () => {
@@ -84,4 +84,67 @@ it('renders structured branch details and reads the selected branch tip through 
   expect(screen.getByRole('button', { name: 'Copiar SHA da branch' })).toBeTruthy()
   expect(screen.getByText('Rastreamento')).toBeTruthy()
   expect(screen.getByText('Author')).toBeTruthy()
+})
+
+it('prefetches at most one page while idle and continues only after exploration', async () => {
+  const api = setup()
+  api.getGitAtlas.mockResolvedValueOnce(ok({ ...page, nextCursor: 'one', coverage: 'PARTIAL' })).mockResolvedValueOnce(ok({ ...page, nextCursor: 'two', coverage: 'PARTIAL' }))
+  render(<GitManagementView state={state} />)
+  await waitFor(() => expect(api.getGitAtlas).toHaveBeenCalledTimes(2))
+  await new Promise(resolve => setTimeout(resolve, 100))
+  expect(api.getGitAtlas).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('Carregar anteriores')).toBeTruthy()
+  fireEvent.wheel(screen.getByLabelText('Mapa temporal Git; role para explorar'), { deltaX: -100 })
+  await waitFor(() => expect(api.getGitAtlas).toHaveBeenCalledTimes(3))
+  expect(api.getGitAtlas.mock.calls[2][0].cursor).toBe('two')
+})
+
+it('renders history before secondary overview finishes and explicit refresh bypasses derived pages', async () => {
+  const api = setup()
+  api.getGitManagementOverview.mockImplementation(() => new Promise(() => {}))
+  render(<GitManagementView state={state} />)
+  await screen.findByRole('button', { name: /Real change/ })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Atualizar Git' }).hasAttribute('disabled')).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Atualizar Git' }))
+  await waitFor(() => expect(api.getGitAtlas.mock.calls.at(-1)![0].refresh).toBe(true))
+})
+
+it('discards a late window response after rapid filter changes', async () => {
+  const api = setup(); let finish!: (value: unknown) => void
+  render(<GitManagementView state={state} />)
+  await screen.findByRole('button', { name: /Real change/ })
+  api.getGitAtlas.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  fireEvent.click(screen.getByText('30d'))
+  api.getGitAtlas.mockResolvedValue(ok({ ...page, nodes: [{ ...page.nodes[0], subject: 'Sixty day window' }] }))
+  fireEvent.click(screen.getByText('60d'))
+  await screen.findByRole('button', { name: /Sixty day window/ })
+  finish(ok(page))
+  await waitFor(() => expect(screen.queryByRole('button', { name: /Real change/ })).toBeNull())
+})
+
+it('preserves the established visual shell and ornaments while using cached reads', async () => {
+  const api = setup(); render(<GitManagementView state={state} />)
+  await screen.findByRole('button', { name: /Real change/ })
+  expect(screen.getByLabelText('Detalhes Git')).toBeTruthy()
+  expect(screen.getByLabelText('Branch do Atlas')).toBeTruthy()
+  expect(screen.getByLabelText('Modo do Atlas')).toBeTruthy()
+  expect(document.querySelector('.gm-feature-icon')).toBeTruthy()
+  expect(document.querySelector('.gm-atlas-legend')).toBeTruthy()
+  expect(document.querySelector('.gm-atlas-lane-label small')?.textContent).toContain('commits neste trecho')
+  fireEvent.click(screen.getByText('30d'))
+  await waitFor(() => expect(api.getGitAtlas.mock.calls.at(-1)![0].window).toBe(30))
+  expect(api.getGitManagementOverview).toHaveBeenCalledTimes(1)
+})
+
+it('does not reload selected immutable commit details when overview completes later', async () => {
+  const api = setup(); let complete!: (value: unknown) => void
+  api.getGitManagementOverview.mockImplementationOnce(() => new Promise(resolve => { complete = resolve }))
+  render(<GitManagementView state={state} />)
+  fireEvent.click(await screen.findByRole('button', { name: /Real change/ }))
+  await screen.findByText('Origem: Não registrada')
+  const reads = api.getGitManagementCommit.mock.calls.length
+  complete(ok({ state: { head: sha, branch: 'trunk' }, changes: [] }))
+  await waitFor(() => expect(screen.getByLabelText('Detalhes Git').getAttribute('aria-busy')).toBe('false'))
+  expect(api.getGitManagementCommit).toHaveBeenCalledTimes(reads)
+  expect(screen.getByText('Origem: Não registrada')).toBeTruthy()
 })
