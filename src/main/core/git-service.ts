@@ -6,7 +6,7 @@ import { spawn } from 'child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, copyFileSync, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, readlinkSync, readSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
-import { dirname, join } from 'path'
+import { dirname, join, resolve } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
 import type { GitOperationReceipt } from '../git-operations/git-operation-receipts'
@@ -148,15 +148,46 @@ export class GitService implements FileListingPort {
   }
 
   async createAndSwitchBranch(root: string, branch: string): Promise<void> {
-    await this.runGit(['switch', '-c', branch], root)
+    await this.runGit(['-c', 'core.logAllRefUpdates=true', 'switch', '-c', branch], root)
   }
 
   async createWorktree(root: string, destination: string, branch: string, commit: string): Promise<void> {
-    await this.runGit(['worktree', 'add', '-b', branch, destination, commit], root, { timeoutMs: 120000 })
+    await this.runGit(['-c', 'core.logAllRefUpdates=true', 'worktree', 'add', '-b', branch, destination, commit], root, { timeoutMs: 120000 })
   }
 
   async removeWorktree(root: string, destination: string): Promise<void> {
     await this.runGit(['worktree', 'remove', '--', destination], root, { timeoutMs: 120000 })
+  }
+
+  async countIgnoredWorktreeFiles(root: string): Promise<number> {
+    return (await this.runGit(['ls-files', '--others', '--ignored', '--exclude-standard', '-z'], root, { env: this.localReadEnvironment(), maxOutputBytes: 4194304 })).split('\0').filter(Boolean).length
+  }
+
+  async assertWorktreeRemovalSafe(root: string): Promise<void> {
+    if (lstatSync(join(root, '.git')).isSymbolicLink()) throw new Error('WORKTREE_LINK_NOT_ALLOWED')
+    const { common, admin } = await this.getRepositoryDirectories(root)
+    for (const directory of [root, common, admin]) {
+      for (let current = resolve(directory); ; current = dirname(current)) {
+        if (lstatSync(current).isSymbolicLink()) throw new Error('WORKTREE_LINK_NOT_ALLOWED')
+        if (dirname(current) === current) break
+      }
+    }
+    if (['index.lock', 'HEAD.lock'].some(name => existsSync(join(admin, name))) || ['packed-refs.lock', 'config.lock'].some(name => existsSync(join(common, name)))) throw new Error('GIT_OPERATION_IN_PROGRESS')
+    const entries = (await this.runGit(['ls-files', '--stage', '-z'], root, { env: this.localReadEnvironment(), maxOutputBytes: 4194304 })).split('\0').filter(Boolean)
+    const checked = new Set<string>()
+    for (const entry of entries) {
+      if (entry.startsWith('160000 ')) throw new Error('WORKTREE_SUBMODULE_NOT_ALLOWED')
+      if (entry.startsWith('120000 ')) throw new Error('WORKTREE_LINK_NOT_ALLOWED')
+      const path = entry.slice(entry.indexOf('\t') + 1)
+      for (let current = join(root, path); current !== resolve(root) && current !== root; current = dirname(current)) {
+        if (checked.has(current)) break
+        checked.add(current)
+        if (existsSync(current) && lstatSync(current).isSymbolicLink()) throw new Error('WORKTREE_LINK_NOT_ALLOWED')
+        if (dirname(current) === current) throw new Error('PATH_OUTSIDE_REPOSITORY')
+      }
+    }
+    const flags = (await this.runGit(['ls-files', '-v', '-z'], root, { env: this.localReadEnvironment(), maxOutputBytes: 4194304 })).split('\0').filter(Boolean)
+    if (flags.some(entry => /^[a-zS]/.test(entry))) throw new Error('WORKTREE_HIDDEN_INDEX_FLAGS')
   }
 
   async isAncestor(root: string, ancestor: string, descendant: string): Promise<boolean> {
@@ -679,9 +710,28 @@ export class GitService implements FileListingPort {
     return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(upstream:short)', 'refs/heads/', 'refs/remotes/'], root)
   }
 
-  async getBranchHistory(root: string, tips: string[], offset: number, limit: number): Promise<string> {
+  async getBranchInventoryReferences(root: string): Promise<string> {
+    return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(upstream)%00%(committerdate:iso-strict)', 'refs/heads/', 'refs/remotes/'], root, { env: this.localReadEnvironment(), maxOutputBytes: 4194304 })
+  }
+
+  async getExclusiveCommitSummary(root: string, head: string, base: string) {
+    const count = Number((await this.runGit(['rev-list', '--count', `${base}..${head}`], root, { env: this.localReadEnvironment() })).trim())
+    const sample = (await this.runGit(['rev-list', '--max-count=20', `${base}..${head}`], root, { env: this.localReadEnvironment() })).trim().split('\n').filter(Boolean)
+    return { count, sample }
+  }
+
+  async preserveAndDiscardBranch(root: string, ref: string, head: string, base: { ref: string; head: string }, recoveryRef: string): Promise<void> {
+    if (!ref.startsWith('refs/heads/') || !base.ref.startsWith('refs/heads/') || !/^refs\/code-awareness\/recovery\/[a-f0-9-]+$/.test(recoveryRef)) throw new Error('INVALID_REF')
+    await this.runGit(['update-ref', '--stdin'], root, { input: `start\ncreate ${recoveryRef} ${head}\nverify ${base.ref} ${base.head}\nprepare\ncommit\n` })
+    if (await this.resolveCommit(root, recoveryRef) !== head) throw new Error('BRANCH_RECOVERY_UNVERIFIED')
+    const records = await this.listWorktreeRecords(root)
+    if (records.split('\0').includes('branch ' + ref)) throw new Error('WORKTREE_BRANCH_OCCUPIED')
+    await this.runGit(['update-ref', '--stdin'], root, { input: `start\nverify ${recoveryRef} ${head}\nverify ${base.ref} ${base.head}\ndelete ${ref} ${head}\nprepare\ncommit\n` })
+  }
+
+  async getBranchHistory(root: string, tips: string[], offset: number, limit: number, dateKind: 'AUTHOR' | 'COMMITTER' = 'AUTHOR'): Promise<string> {
     if (!tips.length) return ''
-    return this.runGit(['log', '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, '--format=%H%x00%P%x00%an%x00%aI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000 })
+    return this.runGit(['log', '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, dateKind === 'COMMITTER' ? '--format=%H%x00%P%x00%an%x00%cI%x00%s' : '--format=%H%x00%P%x00%an%x00%aI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000 })
   }
 
   async getCommitFileStatus(root: string, sha: string, parent: string | null): Promise<string> {
@@ -709,7 +759,7 @@ export class GitService implements FileListingPort {
   }
 
   async createBranch(dirPath: string, branch: string, startPoint: string): Promise<void> {
-    await this.runGit(['branch', branch, startPoint], dirPath)
+    await this.runGit(['branch', '--create-reflog', branch, startPoint], dirPath)
   }
 
   async setBranchUpstream(dirPath: string, branch: string, remote: string, remoteBranch: string, expectedHead: string | null): Promise<void> {
