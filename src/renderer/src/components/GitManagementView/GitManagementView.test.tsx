@@ -72,3 +72,16 @@ it('discards history completing after a project change and rejects stale paginat
   await screen.findByText('Histórico desatualizado. Atualize para carregar um novo snapshot.')
   expect((screen.getByText('Carregar anteriores') as HTMLButtonElement).disabled).toBe(true)
 })
+
+it('renders structured branch details and reads the selected branch tip through the canonical API', async () => {
+  const api = setup()
+  api.getGitManagementCommit.mockResolvedValue(ok({ commit: { ...page.nodes[0], sha: parent }, base: null, comparison: 'ROOT', files: [], nextCursor: null }))
+  render(<GitManagementView state={state} />)
+  await screen.findByRole('button', { name: /Real change/ })
+  fireEvent.change(screen.getByLabelText('Referência em foco'), { target: { value: refs[1].ref } })
+  await screen.findByText('Último commit')
+  expect(api.getGitManagementCommit).toHaveBeenCalledWith({ context: { projectId: 'p', revision: 1 }, sha: parent })
+  expect(screen.getByRole('button', { name: 'Copiar SHA da branch' })).toBeTruthy()
+  expect(screen.getByText('Rastreamento')).toBeTruthy()
+  expect(screen.getByText('Author')).toBeTruthy()
+})

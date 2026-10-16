@@ -29,7 +29,11 @@ exports.create = root => {
     if (day >= 18 && day <= 38 && day % 4 === 2) cli = commit(day - .25, 'feat: diagnose Windows profile discovery', [cli], 2)
     main.push(commit(day, day === 26 ? 'Merge work-orchestration: guarded worktree lifecycle' : day === 44 ? 'Merge academy-sync: synchronize local materialization' : 'feat: improve repository awareness', parents, 6))
   }
-  for (const [name, mark] of [['main', main.at(-1)], ['work-orchestration', work], ['academy-sync', academy], ['local-cli-dlg', cli]]) records.push(`reset refs/heads/${name}\nfrom ${mark}\n\n`)
+  records.push('reset refs/heads/fixture-import\n\n')
+  const archived = commit(-30, 'Archived independent work')
+  records.push('reset refs/heads/fixture-import\n\n')
+  const archivedLater = commit(-20, 'Later independent work')
+  for (const [name, mark] of [['main', main.at(-1)], ['work-orchestration', work], ['academy-sync', academy], ['local-cli-dlg', cli], ['zz-archived-independent-work-before-main', archived], ['zz-later-independent-work-before-main', archivedLater]]) records.push(`reset refs/heads/${name}\nfrom ${mark}\n\n`)
   for (const [name, mark] of [['v0.8.0', main[5]], ['v0.9.0', main[11]], ['v0.10.0', main[20]]]) records.push(`reset refs/tags/${name}\nfrom ${mark}\n\n`)
   execFileSync('git', ['fast-import', '--quiet'], { cwd: root, windowsHide: true, encoding: 'utf8', input: records.join('') })
   git('update-ref', '-d', 'refs/heads/fixture-import')

@@ -32,7 +32,7 @@ export function GitInspector({
   const [loading, setLoading] = useState(false)
   const generation = useRef(0)
   const patchGeneration = useRef(0)
-  const sha = selection?.kind === 'COMMIT' ? selection.sha : null
+  const sha = selection?.kind === 'COMMIT' ? selection.sha : selection?.kind === 'BRANCH' ? selection.ref.sha : null
   useEffect(() => {
     const request = ++generation.current
     patchGeneration.current++
@@ -158,20 +158,12 @@ export function GitInspector({
       {selection?.kind === 'BRANCH' && (
         <>
           <h2>{selection.ref.name}</h2>
-          <p>
-            {selection.ref.kind === 'REMOTE'
-              ? 'Referência de rastreamento remoto'
-              : 'Branch local'}
-            {selection.ref.name === overview?.state.branch
-              ? ' · ativa (HEAD)'
-              : ''}
-          </p>
-          <p>Uma branch é uma referência móvel para um commit.</p>
-          <p>Upstream: {selection.ref.upstream ?? 'não configurado'}</p>
-          <details>
-            <summary>Commit na ponta</summary>
-            <code>{selection.ref.sha}</code>
-          </details>
+          <div className="gm-commit-badges"><span><GitBranch size={14} />{selection.ref.kind === 'REMOTE' ? 'Branch remota' : 'Branch local'}</span>{selection.ref.name === overview?.state.branch && <span>HEAD · ativa</span>}</div>
+          <div className="gm-commit-author"><span className="gm-author-avatar"><GitBranch size={21} /></span><div><strong>Referência Git</strong><span className="gm-branch-ref">{selection.ref.ref}</span></div></div>
+          <section className="gm-inspector-section"><h3>Rastreamento</h3><div className="gm-detail-row gm-branch-detail"><GitBranch size={17} /><span>Upstream</span><span>{selection.ref.upstream ?? 'Não configurado'}</span></div></section>
+          <section className="gm-inspector-section"><h3>Commit na ponta</h3><div className="gm-detail-row"><GitCommitHorizontal size={17} /><span>SHA</span><button title={selection.ref.sha} aria-label="Copiar SHA da branch" onClick={() => navigator.clipboard.writeText(selection.ref.sha)}>{selection.ref.sha.slice(0, 12)}<Copy size={14} /></button></div><details className="gm-branch-identity"><summary>Identidade completa</summary><code>{selection.ref.sha}</code></details></section>
+          {detail && detail.commit.sha === selection.ref.sha && <section className="gm-inspector-section gm-branch-tip" data-sha={detail.commit.sha}><h3>Último commit</h3><p>{detail.commit.subject}</p><div className="gm-commit-author"><span className="gm-author-avatar">{detail.commit.author.split(/\s+/).slice(0, 2).map(part => part[0]).join('')}</span><div><strong>{detail.commit.author}</strong><time>{new Date(detail.commit.timestamp).toLocaleString()}</time></div></div></section>}
+          {loading && !detail && <p>Carregando commit na ponta…</p>}
         </>
       )}
       {selection?.kind === 'COMMIT' && (
