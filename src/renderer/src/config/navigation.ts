@@ -30,3 +30,13 @@ export const NAV_ITEMS: NavItem[] = [
   { id: 'code-map', label: 'Code Map', icon: '🗺️', lucideIcon: Map }
 ]
 
+export function normalizeHiddenNavigationItems(value: unknown): NavId[] {
+  if (!Array.isArray(value)) return []
+  return NAV_ITEMS.filter(item => item.id !== 'home' && value.includes(item.id)).map(item => item.id)
+}
+
+export function visibleNavigationItems(value: unknown): NavItem[] {
+  const hidden = normalizeHiddenNavigationItems(value)
+  return NAV_ITEMS.filter(item => !hidden.includes(item.id))
+}
+

@@ -29,6 +29,7 @@ beforeEach(() => {
   sidebar.mockClear()
   unsubscribe.mockClear()
   window.codeAwareness = {
+    loadSettings: vi.fn(async () => ({})),
     getPendingDeepLink: vi.fn(async () => null),
     onDeepLink: vi.fn(() => () => {}),
     getActiveProject: vi.fn(async () => state('A', 1)),

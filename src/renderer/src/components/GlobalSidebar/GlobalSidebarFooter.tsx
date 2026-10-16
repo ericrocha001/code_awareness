@@ -3,7 +3,7 @@
 */
 
 import React from 'react'
-import { Tag, EyeOff, ChevronsLeft, ChevronsRight, Sun, Moon, Monitor, Wrench } from 'lucide-react'
+import { Tag, EyeOff, ChevronsLeft, ChevronsRight, Sun, Moon, Monitor, Wrench, Settings } from 'lucide-react'
 import { useTheme } from '../../hooks/useTheme'
 
 interface GlobalSidebarFooterProps {
@@ -11,6 +11,7 @@ interface GlobalSidebarFooterProps {
   onToggle: () => void
   onOpenTags: () => void
   onOpenIgnored: () => void
+  onOpenSettings?: () => void
 }
 
 const themeLabel: Record<string, string> = {
@@ -29,7 +30,8 @@ export const GlobalSidebarFooter: React.FC<GlobalSidebarFooterProps> = ({
   isSidebarOpen, 
   onToggle, 
   onOpenTags, 
-  onOpenIgnored 
+  onOpenIgnored,
+  onOpenSettings
 }) => {
   const { theme, setTheme } = useTheme()
 
@@ -41,6 +43,10 @@ export const GlobalSidebarFooter: React.FC<GlobalSidebarFooterProps> = ({
 
   return (
     <div className="global-sidebar-footer">
+      <button className="global-sidebar-footer-btn" onClick={onOpenSettings} aria-label="Configurações" title="Configurações">
+        <span className="global-sidebar-nav-icon" aria-hidden="true"><Settings size={18} strokeWidth={2} /></span>
+        <span className="global-sidebar-nav-label">Configurações</span>
+      </button>
       <button className="global-sidebar-footer-btn" onClick={onOpenTags} aria-label="Gerenciar tags" title="Gerenciar tags">
         <span className="global-sidebar-nav-icon" aria-hidden="true">
           <Tag size={18} strokeWidth={2} />

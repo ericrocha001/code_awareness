@@ -1,0 +1,91 @@
+const fs = require('node:fs')
+const path = require('node:path')
+const { buildSync } = require('esbuild')
+const { ipcMain } = require('electron')
+const { pathToFileURL } = require('node:url')
+
+exports.run = async ctx => {
+  const backend = path.join(ctx.evidenceDir, 'settings-backend.cjs')
+  buildSync({ stdin: { contents: "export { SettingsService } from './src/main/core/settings-service'; export { registerSettingsHandlers } from './src/main/ipc/settings-handler'", resolveDir: ctx.projectRoot }, bundle: true, outfile: backend, platform: 'node', format: 'cjs', external: ['electron'] })
+  const { SettingsService, registerSettingsHandlers } = require(backend)
+  const service = new SettingsService()
+  const original = { ...service.loadSettings(), ngrokDomain: 'preserved.example', projectPreferences: { '/acceptance': { sidebarOpen: true, fileViewColumnWidths: { path: 280 } } } }
+  service.saveSettings(original)
+  registerSettingsHandlers(service)
+  let project = { revision: 0, project: null }
+  ipcMain.handle('visibility-project', () => project)
+  const preload = path.join(ctx.temporary, 'preload.cjs')
+  buildSync({ entryPoints: [path.join(__dirname, 'feature-visibility-preload.ts')], bundle: true, outfile: preload, platform: 'node', format: 'cjs', external: ['electron'] })
+  ctx.window.webContents.session.setPreloads([preload])
+  buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/renderer/src/main.tsx')], bundle: true, outfile: path.join(ctx.temporary, 'app.js'), platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, alias: { '@shared': path.join(ctx.projectRoot, 'src/shared') }, loader: { '.woff': 'file', '.woff2': 'file', '.ttf': 'file', '.png': 'file', '.svg': 'file' } })
+  const csp = /<meta\s+http-equiv="Content-Security-Policy"\s+content="([^"]+)"/.exec(fs.readFileSync(path.join(ctx.projectRoot, 'src/renderer/index.html'), 'utf8'))[1]
+  const page = path.join(ctx.temporary, 'index.html')
+  fs.writeFileSync(page, `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><link rel="stylesheet" href="app.css"></head><body><div id="root"></div><script src="app.js"></script></body></html>`)
+  const wait = ctx.waitFor
+  const open = async () => {
+    await ctx.click('[aria-label="Configurações"]')
+    await wait(() => !!document.querySelector('dialog[open] [role="switch"][aria-disabled="false"]'))
+  }
+  const close = () => ctx.click('[aria-label="Fechar configurações"]')
+  const toggle = label => ctx.click(`[role="switch"][aria-label="Mostrar ${label}"]`)
+  const saved = () => wait(() => !document.querySelector('.settings-actions [role="status"]').textContent)
+  const key = (code, modifiers = []) => {
+    ctx.window.webContents.sendInputEvent({ type: 'keyDown', keyCode: code, modifiers })
+    ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: code, modifiers })
+  }
+  const resolveLogo = () => ctx.evaluate(source => { document.querySelector('.global-sidebar-logo-img').src = source }, pathToFileURL(path.join(ctx.projectRoot, 'src/renderer/public/logo.svg')).href)
+  try {
+    await ctx.load(page); await ctx.viewport(1280, 900)
+    await wait(() => !!document.querySelector('.global-sidebar-logo-img')); await resolveLogo()
+    await open()
+    ctx.check('Settings opens without project, has all 12 optional features', await ctx.evaluate(() => document.querySelectorAll('[role="switch"]').length === 12))
+    ctx.check('Dialog receives focus', await ctx.evaluate(() => document.activeElement.getAttribute('aria-label') === 'Fechar configurações'))
+    await ctx.evaluate(() => { localStorage.setItem('theme-preference', 'dark'); document.body.dataset.theme = 'dark' })
+    await ctx.capture('settings-expanded-dark'); await ctx.overflow()
+    key('Tab', ['shift'])
+    await wait(() => document.activeElement.getAttribute('role') === 'switch')
+    ctx.check('Native modal traps keyboard focus', await ctx.evaluate(() => document.querySelector('dialog').contains(document.activeElement)))
+    key('Escape'); await wait(() => !document.querySelector('dialog'))
+    ctx.check('Escape restores focus to permanent Settings action', await ctx.evaluate(() => document.activeElement.getAttribute('aria-label') === 'Configurações'))
+    await open()
+    await toggle('Academy'); await toggle('Channel'); await saved()
+    ctx.check('Real settings service persisted both rapid choices', JSON.stringify(service.loadSettings().hiddenNavigationItems) === JSON.stringify(['channel', 'academy']))
+    await close()
+    ctx.check('Hidden items absent from actual sidebar', await ctx.evaluate(() => !document.querySelector('.global-sidebar-nav [aria-label="Academy"]') && !document.querySelector('.global-sidebar-nav [aria-label="Channel"]')))
+    await ctx.load(page); await wait(() => !!document.querySelector('[aria-label="Configurações"]'))
+    await resolveLogo()
+    await open()
+    ctx.check('Renderer reopening reloads real persisted choices', await ctx.evaluate(() => document.querySelector('[aria-label="Mostrar Academy"]').getAttribute('aria-checked') === 'false' && document.querySelector('[aria-label="Mostrar Channel"]').getAttribute('aria-checked') === 'false'))
+    const realSave = service.saveSettings.bind(service)
+    service.saveSettings = () => { throw new Error('Injected disk write failure') }
+    await toggle('Continuum')
+    await wait(() => !!document.querySelector('.settings-error') && !document.querySelector('.settings-actions [role="status"]').textContent)
+    ctx.check('Real IPC save rejection reconciles last persisted visibility and exposes error', await ctx.evaluate(() => document.querySelector('[aria-label="Mostrar Continuum"]').getAttribute('aria-checked') === 'true' && !!document.querySelector('.global-sidebar-nav [aria-label="Continuum"]')) && !service.loadSettings().hiddenNavigationItems.includes('continuum'))
+    await ctx.capture('save-error-dark')
+    service.saveSettings = realSave
+    project = { revision: 1, project: { id: 'acceptance', path: '/acceptance', name: 'Acceptance' } }
+    ctx.window.webContents.send('active-project-changed', project)
+    await close(); await ctx.click('[aria-label="Recolher sidebar"]')
+    await wait(() => !!document.querySelector('.global-sidebar.sidebar-closed'))
+    await open(); await ctx.viewport(900, 600)
+    await ctx.capture('settings-collapsed-compact-dark')
+    ctx.check('Optional feature list owns vertical scrolling', await ctx.evaluate(() => { const list = document.querySelector('.settings-list'); return list.scrollHeight > list.clientHeight && document.querySelector('dialog').getBoundingClientRect().bottom <= innerHeight }))
+    await ctx.evaluate(() => { document.querySelector('.settings-list').scrollTop = 10000 })
+    await ctx.capture('settings-list-scrolled-dark')
+    ctx.check('Last toggle remains reachable by scrolling', await ctx.evaluate(() => { const last = document.querySelector('[aria-label="Mostrar Code Map"]').getBoundingClientRect(); const list = document.querySelector('.settings-list').getBoundingClientRect(); return last.top >= list.top && last.bottom <= list.bottom }))
+    await ctx.evaluate(() => { document.querySelector('.settings-actions button').click() }); await saved()
+    ctx.check('Restore defaults persisted through real IPC', service.loadSettings().hiddenNavigationItems.length === 0)
+    await ctx.evaluate(() => { for (const item of document.querySelectorAll('[role="switch"]')) item.click() }); await saved()
+    ctx.check('All optional features hidden, Home and Settings retained', await ctx.evaluate(() => document.querySelectorAll('.global-sidebar-nav-item').length === 1 && !!document.querySelector('.global-sidebar-nav [aria-label="Home"]') && !!document.querySelector('[aria-label="Configurações"]')))
+    await ctx.capture('all-optional-hidden-dark')
+    const persisted = new SettingsService().loadSettings()
+    ctx.check('Project sidebar and column widths plus unrelated settings preserved', persisted.ngrokDomain === original.ngrokDomain && persisted.projectPreferences['/acceptance'].sidebarOpen === false && persisted.projectPreferences['/acceptance'].fileViewColumnWidths.path === 280)
+    await ctx.evaluate(() => { document.querySelector('.settings-actions button').click() }); await saved()
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' }); await ctx.viewport(1100, 760)
+    await ctx.evaluate(() => { document.querySelector('.settings-list').scrollTop = 0 })
+    await ctx.capture('settings-light'); await ctx.overflow()
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'persisted-settings.json'), JSON.stringify(new SettingsService().loadSettings(), null, 2))
+  } finally {
+    for (const channel of ['load-settings', 'save-settings', 'visibility-project']) ipcMain.removeHandler(channel)
+  }
+}
