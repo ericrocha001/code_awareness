@@ -1,21 +1,17 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { GitBranch, GitMerge, Tag } from 'lucide-react'
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { Crown, GitBranch, GitMerge, Tag } from 'lucide-react'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
 import { firstParentPath, layoutGitAtlas } from './atlas-layout'
 import { presentGitAtlas } from './atlas-presentation'
 
 const colors = ['var(--color-green)', 'var(--color-warning)', 'var(--status-restored)', 'var(--accent)']
-export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison, selected, select, focusTrajectory, requestMore, loading }: {
+export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison, selected, select, focusTrajectory }: {
   page: GitAtlasPage | null; windowDays: GitAtlasWindow; base: string; focus: string; mode: string; comparison: GitAtlasComparison | null; selected?: string; select: (sha: string) => void; focusTrajectory: (ref: string, sha: string) => void
-  requestMore?: () => void; loading?: boolean
 }) {
   const previous = useRef(new Map<string, number>())
   const scroll = useRef<HTMLDivElement>(null)
   const positionedSnapshot = useRef<string | null>(null)
   const previousHeadX = useRef(0)
-  const previousWidth = useRef(0)
-  const budget = useRef(1)
-  const [demand, setDemand] = useState(0)
   const layout = useMemo(() => {
     const value = layoutGitAtlas(page, base, previous.current)
     previous.current = new Map(value.tracks.map(track => [track.id, track.lane]))
@@ -24,12 +20,6 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
   const [expanded, setExpanded] = useState(false)
   const [viewport, setViewport] = useState({ x: 0, y: 0, width: 1200, height: 900 })
   const { points, width, days } = useMemo(() => presentGitAtlas(layout, page, windowDays), [layout, page, windowDays])
-  useEffect(() => {
-    if (!page || !requestMore || loading || budget.current <= 0) return
-    const oldest = Math.min(...page.nodes.map(node => Date.parse(node.timestamp)))
-    const firstVisible = days.find(day => day.x + day.width >= viewport.x)
-    if (firstVisible && firstVisible.start <= oldest + 86400000) { budget.current--; requestMore() }
-  }, [page, loading, demand, viewport.x, viewport.width, days, requestMore])
   useLayoutEffect(() => {
     const element = scroll.current
     if (!page || !element) { positionedSnapshot.current = null; previousHeadX.current = 0; return }
@@ -37,11 +27,7 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
     if (positionedSnapshot.current !== page.snapshot) {
       element.scrollLeft = Math.max(0, (head?.x ?? 0) + 240 - element.clientWidth * .75)
       element.scrollTop = 0
-    } else if (selected && previousWidth.current !== element.clientWidth) {
-      const anchor = points.find(point => point.node.sha === selected)
-      if (anchor) element.scrollLeft = Math.max(0, anchor.x + 240 - element.clientWidth * .65)
     } else element.scrollLeft += (head?.x ?? 0) - previousHeadX.current
-    previousWidth.current = element.clientWidth
     positionedSnapshot.current = page.snapshot
     previousHeadX.current = head?.x ?? 0
     setViewport({ x: element.scrollLeft, y: element.scrollTop, width: element.clientWidth, height: element.clientHeight })
@@ -79,7 +65,7 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
   return <>
     {layout.edges.some(edge => edge.skew) && <div className="gm-atlas-note" role="status">Há datas invertidas entre pais e filhos. Conexões tracejadas preservam o parentesco real.</div>}
     {layout.tracks.length > 12 && <button className="gm-secondary-toggle" onClick={() => setExpanded(value => !value)}>{expanded ? 'Recolher trajetórias secundárias' : `Mostrar trajetórias secundárias (${layout.tracks.length - allowedTracks.length})`}</button>}
-    <div ref={scroll} className="gm-atlas-scroll" tabIndex={0} aria-label="Mapa temporal Git; role para explorar" onWheel={() => { budget.current = 1; setDemand(value => value + 1) }} onPointerDown={() => { budget.current = 1; setDemand(value => value + 1) }} onKeyDown={() => { budget.current = 1; setDemand(value => value + 1) }} onScroll={event => {
+    <div ref={scroll} className="gm-atlas-scroll" tabIndex={0} aria-label="Mapa temporal Git; role para explorar" onScroll={event => {
       const element = event.currentTarget
       setViewport({ x: element.scrollLeft, y: element.scrollTop, width: element.clientWidth, height: element.clientHeight })
     }}>
@@ -87,8 +73,8 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
         <div className="gm-atlas-labels" style={{ height }}>
           <div className="gm-atlas-corner">Branches / trajetórias</div>
           {allowedTracks.map(track => <div className="gm-atlas-lane-label" data-track={track.id} key={track.id} style={{ top: y(rows.get(track.id)!) - 21 }}>
-            <button title={track.label} onClick={() => focusTrajectory(track.ref ?? track.shas[0], track.shas[0])} style={{ '--trajectory-color': colors[track.color] } as React.CSSProperties}>{track.ref === base ? <GitBranch size={21} /> : <GitBranch size={21} />}<span>{track.label}</span></button>
-
+            <button title={track.label} onClick={() => focusTrajectory(track.ref ?? track.shas[0], track.shas[0])} style={{ '--trajectory-color': colors[track.color] } as React.CSSProperties}>{track.ref === base ? <Crown size={21} /> : <GitBranch size={21} />}<span>{track.label}</span></button>
+            <small>{track.shas.length} commits neste trecho</small>
           </div>)}
         </div>
         <svg className="gm-atlas-lines" width={width} height={height} aria-label="Relações reais entre commits">
@@ -128,6 +114,6 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
         })}
       </div>
     </div>
-    {!!layout.inactive.length && <details className="gm-inactive"><summary>Pontas fora do trecho carregado ({layout.inactive.length})</summary>{layout.inactive.map(ref => <button key={ref.ref} onClick={() => focusTrajectory(ref.ref, ref.sha)}>{ref.name} · {ref.sha.slice(0, 8)}</button>)}</details>}
+    {!!layout.inactive.length && <details className="gm-inactive"><summary>Pontas fora do trecho carregado ({layout.inactive.length})</summary>{layout.inactive.map(ref => <p key={ref.ref}>{ref.name} · {ref.sha.slice(0, 8)}</p>)}</details>}
   </>
 }

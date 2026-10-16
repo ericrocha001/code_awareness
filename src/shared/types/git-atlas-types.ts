@@ -6,7 +6,6 @@ export interface GitAtlasRequest {
   window: GitAtlasWindow
   cursor?: string
   limit?: number
-  refresh?: boolean
 }
 export interface GitAtlasPage extends GitHistoryPage {
   queriedAt: string
@@ -38,5 +37,4 @@ export interface GitAtlasQuery {
   cursor?: string
   limit?: number
   contextKey?: string
-  refresh?: boolean
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Copy, FileText, GitBranch, GitCommitHorizontal } from 'lucide-react'
+import { Copy, FileText, GitBranch, GitCommitHorizontal, Hexagon } from 'lucide-react'
 import type {
   GitCommitDetail,
   GitDecoration,
@@ -16,13 +16,11 @@ export type GitSelection =
 export function GitInspector({
   context,
   overview,
-  selection,
-  onCompare
+  selection
 }: {
   context: GitManagementContext
   overview: GitOverview | null
   selection: GitSelection
-  onCompare?: () => void
 }) {
   const [detail, setDetail] = useState<GitCommitDetail | null>(null)
   const [patchRequest, setPatchRequest] = useState<Omit<
@@ -161,11 +159,11 @@ export function GitInspector({
         <>
           <h2>{selection.ref.name}</h2>
           <div className="gm-commit-badges"><span><GitBranch size={14} />{selection.ref.kind === 'REMOTE' ? 'Branch remota' : 'Branch local'}</span>{selection.ref.name === overview?.state.branch && <span>HEAD · ativa</span>}</div>
+          <div className="gm-commit-author"><span className="gm-author-avatar"><GitBranch size={21} /></span><div><strong>Referência Git</strong><span className="gm-branch-ref">{selection.ref.ref}</span></div></div>
           <section className="gm-inspector-section"><h3>Rastreamento</h3><div className="gm-detail-row gm-branch-detail"><GitBranch size={17} /><span>Upstream</span><span>{selection.ref.upstream ?? 'Não configurado'}</span></div></section>
           <section className="gm-inspector-section"><h3>Commit na ponta</h3><div className="gm-detail-row"><GitCommitHorizontal size={17} /><span>SHA</span><button title={selection.ref.sha} aria-label="Copiar SHA da branch" onClick={() => navigator.clipboard.writeText(selection.ref.sha)}>{selection.ref.sha.slice(0, 12)}<Copy size={14} /></button></div><details className="gm-branch-identity"><summary>Identidade completa</summary><code>{selection.ref.sha}</code></details></section>
           {detail && detail.commit.sha === selection.ref.sha && <section className="gm-inspector-section gm-branch-tip" data-sha={detail.commit.sha}><h3>Último commit</h3><p>{detail.commit.subject}</p><div className="gm-commit-author"><span className="gm-author-avatar">{detail.commit.author.split(/\s+/).slice(0, 2).map(part => part[0]).join('')}</span><div><strong>{detail.commit.author}</strong><time>{new Date(detail.commit.timestamp).toLocaleString()}</time></div></div></section>}
           {loading && !detail && <p>Carregando commit na ponta…</p>}
-          {onCompare && <button aria-label="Comparar branch" onClick={onCompare}>Comparar…</button>}
         </>
       )}
       {selection?.kind === 'COMMIT' && (
@@ -175,7 +173,7 @@ export function GitInspector({
               <h2>{detail.commit.subject}</h2>
               <div className="gm-commit-badges"><span><GitCommitHorizontal size={14} />{detail.commit.parents.length > 1 ? 'Merge' : 'Commit'}</span>{detail.commit.decorations.map(ref => <span key={ref.ref}>{ref.name}</span>)}</div>
               <div className="gm-commit-author"><span className="gm-author-avatar">{detail.commit.author.split(/\s+/).slice(0, 2).map(part => part[0]).join('')}</span><div><strong>{detail.commit.author}</strong><time>{new Date(detail.commit.timestamp).toLocaleString()}</time></div><button title={detail.commit.sha} onClick={() => navigator.clipboard.writeText(detail.commit.sha)} aria-label="Copiar SHA">{detail.commit.sha.slice(0, 7)}<Copy size={14} /></button></div>
-              <details className="gm-inspector-section gm-technical"><summary>Detalhes técnicos</summary><p>Origem: Não registrada</p><code>{detail.commit.sha}</code>
+              <section className="gm-inspector-section"><h3>Origem</h3><p className="gm-origin-status">Origem: Não registrada</p><div className="gm-detail-row"><Hexagon size={17} /><span>Worktree de origem</span><span>Não registrada</span></div><div className="gm-detail-row"><GitBranch size={17} /><span>Branch de origem</span><span>Não registrada</span></div></section>
               <section className="gm-inspector-section"><h3>Parentesco</h3>{detail.commit.parents.map((parent, index) => <div className="gm-detail-row" key={parent}><GitCommitHorizontal size={17} /><span>{index === 0 ? 'Pai' : `Pai ${index + 1}`}</span><button title={parent} aria-label={`Copiar pai ${index + 1}`} onClick={() => navigator.clipboard.writeText(parent)}>{parent.slice(0, 7)}<Copy size={14} /></button></div>)}
               <p className="gm-comparison-note">
                 {detail.comparison === 'ROOT'
@@ -184,7 +182,7 @@ export function GitInspector({
                     ? 'Merge: diff comparado ao primeiro pai.'
                     : 'Diff comparado ao pai deste commit.'}
               </p>
-              </section></details>
+              </section>
               <section className="gm-inspector-section"><h3>Arquivos alterados <span className="gm-file-count">{detail.files.length}{detail.nextCursor ? '+' : ''}</span></h3>
               <div className="gm-files">
                 {detail.files.map((file) => (
@@ -240,8 +238,11 @@ export function GitInspector({
               Operação Git em andamento: {overview.state.operation}
             </p>
           )}
-          {!overview.changes.length && <p>Checkout limpo.</p>}
-          {groups.filter(group => group.items.length > 0).map((group) => (
+          <p>
+            Stage prepara uma versão do arquivo no índice. Commit registra
+            somente o índice; alterações posteriores continuam não preparadas.
+          </p>
+          {groups.map((group) => (
             <section key={group.label} className="gm-change-group">
               <h3>
                 {group.label} <span>{group.items.length}</span>
