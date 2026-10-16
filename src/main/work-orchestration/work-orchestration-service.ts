@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto'
-import { readWorktreeDocumentContext, type OrchestrationContinuumReader } from './worktree-document-context'
-import type { WorktreeDocumentRequest } from '../../shared/types/worktree-document-context-types'
+import type { GitHubApiClient } from '../github/github-api-client'
+import type { GitHubPullRequestCatalog } from '../github/github-pull-request-catalog'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { ObservableWorktree, OrchestrationOverview, WorktreeObservation, OrchestrationRequest, LocalChangesPage } from '../../shared/types/work-orchestration-types'
 
@@ -16,7 +15,7 @@ export class WorkOrchestrationService {
   private readonly pendingSnapshots = new Map<string, Promise<Observation>>()
   private readers = 0
   private readonly waitingReaders: Array<() => void> = []
-  constructor(private readonly git: OrchestrationGitReader, private readonly continuum?: OrchestrationContinuumReader) {}
+  constructor(private readonly git: OrchestrationGitReader, private readonly continuum?: OrchestrationContinuumReader, private readonly githubApi?: GitHubApiClient) {}
 
   async withReadBudget<T>(read: () => Promise<T>): Promise<T> {
     if (this.readers >= 2) await new Promise<void>(resolve => this.waitingReaders.push(resolve))
@@ -92,6 +91,29 @@ export class WorkOrchestrationService {
     if (page.generation !== request.generation || digest(page.snapshot) !== request.snapshotRevision) throw new Error('GIT_STATE_CHANGED')
     return { repositoryId, worktreeId: page.worktreeId, generation: page.generation, snapshotRevision: request.snapshotRevision,
       changes: page.changes, totalCount: page.totalCount, revision: page.revision, nextCursor: page.nextCursor }
+  }
+
+  async pullRequests(request: NonNullable<OrchestrationRequest['pullRequests']>): Promise<{ repositoryId: string; pullRequests: PullRequestPreview[] }> {
+    if (!this.githubApi) throw new Error('PR_HISTORY_UNAVAILABLE')
+    const repository = request.repositoryId
+    const branches: string[] = []
+    if (request.branch) branches.push(request.branch)
+    else {
+      const selected = this.known?.records
+      if (selected) {
+        const localBranches = new Set<string>()
+        for (const record of selected) {
+          if (record.branch) localBranches.add(record.branch)
+        }
+        branches.push(...Array.from(localBranches))
+      }
+    }
+    const catalog = new GitHubPullRequestCatalog(this.githubApi, { repositoryId, ownerId: '', ownerLogin: '', name: '', fullName: '', visibility: 'PUBLIC', htmlUrl: '', cloneUrl: '', accessState: 'AVAILABLE', lastSeenAt: new Date().toISOString() })
+    const previews = await Promise.all(branches.map(async (branch) => {
+      const projection = await catalog.project({ repository: { repositoryId, ownerId: '', ownerLogin: '', name: '', fullName: '', visibility: 'PUBLIC', htmlUrl: '', cloneUrl: '', accessState: 'AVAILABLE', lastSeenAt: new Date().toISOString() }, branch, limit: 30 })
+      return { repositoryId: repository, branch, origin: projection.origin, destination: projection.destination }
+    }))
+    return { repositoryId: repository, pullRequests: previews }
   }
 
 }

@@ -1,6 +1,7 @@
 import type { GitHubRepositoryIdentity, GitHubRepositoryVisibility } from '../../shared/types/repository-catalog-types'
 import type { GitHubUserProjection } from '../../shared/types/github-types'
 import type { PullRequestMergeability } from '../../shared/types/git-evidence-types'
+import type { GitHubPullRequest } from '../../shared/types/github-pr-types'
 import { GITHUB_API_BASE_URL, GITHUB_API_VERSION, GITHUB_USER_AGENT } from './github-config'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 
@@ -18,6 +19,7 @@ interface GitHubRepositoryDto {
 
 export class GitHubApiClient {
   constructor(
+    private readonly repository: GitHubRepositoryIdentity,
     private readonly tokenProvider: () => Promise<string>,
     private readonly fetcher: typeof fetch = fetch
   ) {}
@@ -53,6 +55,67 @@ export class GitHubApiClient {
     return toIdentity(await this.request<GitHubRepositoryDto>(`/repos/${encodeRepositoryFullName(fullName)}`))
   }
 
+  async listPullRequests(
+    owner: string,
+    repo: string,
+    baseRef: string | null = null,
+    state: 'open' | 'closed' | 'all' = 'all',
+    cursor: string | null = null
+  ): Promise<{ values: GitHubPullRequest[]; nextCursor: string | null }> {
+    const params = new URLSearchParams({ state, per_page: '100' })
+    if (baseRef) params.set('base', baseRef)
+    if (cursor) params.set('cursor', cursor)
+    const path = `/repos/${encodeRepositoryFullName(`${owner}/${repo}`)}/pulls?${params.toString()}`
+    const values = await this.paginate<any>(path, 'values')
+    return {
+      values: values.map(value => toGitHubPullRequest({ repositoryId: String(this.repository.repositoryId), ownerId: String(this.repository.ownerId), ownerLogin: this.repository.ownerLogin, name: this.repository.name, fullName: this.repository.fullName, visibility: this.repository.visibility, htmlUrl: this.repository.htmlUrl, cloneUrl: this.repository.cloneUrl, accessState: this.repository.accessState, lastSeenAt: this.repository.lastSeenAt }, value)),
+      nextCursor: null
+    }
+  }
+
+  async listBranches(owner: string, repo: string, protectedOnly: boolean): Promise<{ values: { name: string }[]; nextCursor: string | null }> {
+    const params = new URLSearchParams({ protected: protectedOnly ? 'true' : 'false', per_page: '100' })
+    const path = `/repos/${encodeRepositoryFullName(`${owner}/${repo}`)}/branches?${params.toString()}`
+    return { values: (await this.paginate<any>(path, 'values')).map(value => ({ name: value.name })), nextCursor: null }
+  }
+
+  private async paginate<T>(path: string, field: string): Promise<T[]> {
+    const result: T[] = []
+    let next: string | null = `${path}${path.includes('?') ? '&' : '?'}per_page=100`
+    while (next) {
+      const { value, response } = await this.requestWithResponse<any>(next)
+      if (!value || !Array.isArray(value[field])) throw malformed()
+      result.push(...value[field])
+      next = nextLink(response.headers.get('link'))
+    }
+    return result
+  }
+
+  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    return (await this.requestWithResponse<T>(path, init)).value
+  }
+
+  private async requestWithResponse<T>(path: string, init?: RequestInit): Promise<{ value: T; response: Response }> {
+    const token = await this.tokenProvider()
+    let response: Response
+    try {
+      response = await this.fetcher(path.startsWith('http') ? path : `${GITHUB_API_BASE_URL}${path}`, {
+        ...init,
+        headers: {
+          Accept: 'application/vnd.github+json',
+          Authorization: `Bearer ${token}`,
+          'X-GitHub-Api-Version': GITHUB_API_VERSION,
+          'User-Agent': GITHUB_USER_AGENT,
+          ...(init?.headers ?? {})
+        }
+      })
+    } catch (error) {
+      if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) throw new GitHubIntegrationError('TIMEOUT', githubErrorMessage('TIMEOUT'))
+      throw new GitHubIntegrationError('NETWORK_ERROR', githubErrorMessage('NETWORK_ERROR'))
+    }
+    if (!response.ok) throw responseError(response)
+    try { return { value: await response.json() as T, response } } catch { throw malformed() }
+  }
   async createRepository(name: string, visibility: 'PUBLIC' | 'PRIVATE'): Promise<GitHubRepositoryIdentity> {
     return toIdentity(await this.request<GitHubRepositoryDto>('/user/repos', {
       method: 'POST', body: JSON.stringify({ name, private: visibility === 'PRIVATE' })
@@ -82,6 +145,26 @@ export class GitHubApiClient {
       response = await this.fetcher(path.startsWith('http') ? path : `${GITHUB_API_BASE_URL}${path}`, {
         ...init,
         headers: {
+function toGitHubPullRequest(repository: GitHubRepositoryIdentity, value: any): GitHubPullRequest {
+  if (!value || typeof value.number !== 'number' || !value.base || !value.head || typeof value.created_at !== 'string' || typeof value.updated_at !== 'string' ||
+      typeof value.html_url !== 'string' || typeof value.state !== 'string') {
+    throw malformed()
+  }
+  return {
+    repository,
+    prNumber: value.number,
+    title: typeof value.title === 'string' ? value.title : '',
+    state: value.state === 'merged' ? 'merged' : (value.state === 'open' ? 'open' : 'closed'),
+    draft: typeof value.draft === 'boolean' ? value.draft : false,
+    head: { ref: value.head.ref, sha: value.head.sha },
+    base: { ref: value.base.ref, sha: value.base.sha },
+    mergeCommitSha: value.merge_commit_sha ?? null,
+    createdAt: value.created_at,
+    updatedAt: value.updated_at,
+    mergedAt: value.merged_at ?? null,
+    htmlUrl: value.html_url
+  }
+}
           Accept: 'application/vnd.github+json',
           Authorization: `Bearer ${token}`,
           'X-GitHub-Api-Version': GITHUB_API_VERSION,

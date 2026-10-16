@@ -3,6 +3,7 @@ import type { WorktreeDocumentContext, WorktreeDocumentRequest } from './worktre
 import type { WorktreeCreationEstimate } from './worktree-creation-types'
 import type { OrchestrationAttention } from './work-orchestration-attention-types'
 import type { WorktreeTimelinePage, WorktreeTimelineQuery, IntegrationEvidenceRequest, IntegrationEvidence } from './worktree-integration-evidence-types'
+import type { BranchPullRequests } from './github-pr-types'
 export interface OrchestrationContext { projectId: string; revision: number }
 export interface ObservableWorktree {
   worktreeId: string
@@ -47,16 +48,14 @@ export interface OrchestrationRequest {
   attention?: true
   timeline?: WorktreeTimelineQuery
   integration?: IntegrationEvidenceRequest
+  /** PR history projection per branch; selector may target one branch or omit for all. */
+  pullRequests?: { repositoryId: string; branch?: string } | { repositoryId: string }
 }
-export interface LocalChangesPage {
+export interface PullRequestPreview {
   repositoryId: string
-  worktreeId: string
-  generation: string
-  snapshotRevision: string
-  changes: LocalChange[]
-  totalCount: number
-  revision: string
-  nextCursor: string | null
+  branch: string
+  origin: BranchPullRequests['origin']
+  destination: BranchPullRequests['destination']
 }
-export type OrchestrationData = OrchestrationOverview | WorktreeObservation | LocalChangesPage | WorktreeDocumentContext | OrchestrationAttention | { repositoryId: string; timeline: WorktreeTimelinePage } | IntegrationEvidence
+export type OrchestrationData = OrchestrationOverview | WorktreeObservation | LocalChangesPage | WorktreeDocumentContext | OrchestrationAttention | { repositoryId: string; timeline: WorktreeTimelinePage } | IntegrationEvidence | { repositoryId: string; pullRequests: PullRequestPreview[] }
 export type OrchestrationResult<T> = { success: true; context: OrchestrationContext; data: T } | { success: false; code: string }

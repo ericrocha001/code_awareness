@@ -11,11 +11,11 @@ import { Workline } from '../work-orchestration/workline'
 export class WorkOrchestrationController {
   private active: { service: WorkOrchestrationService; projectId: string; revision: number } | null = null
   private workline: Workline | null = null
-  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly changed?: (change: OrchestrationAttentionChange) => void) {}
+  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly changed?: (change: OrchestrationAttentionChange) => void, private readonly githubApi?: GitHubApiClient) {}
   bind(git: OrchestrationGitReader | null, continuum?: OrchestrationContinuumReader, navigation?: WorktreeContractNavigation): void {
     this.deactivate()
     const state = this.projects.getState()
-    this.active = git && state.project ? { service: new WorkOrchestrationService(git, continuum), projectId: state.project.id, revision: state.revision } : null
+    this.active = git && state.project ? { service: new WorkOrchestrationService(git, continuum, this.githubApi), projectId: state.project.id, revision: state.revision } : null
     if (this.active && git && navigation) {
       const selected = this.active
       const current = () => this.active === selected && !!this.workline?.isCurrent()
@@ -40,11 +40,12 @@ export class WorkOrchestrationController {
     const changes = request?.changes
     const documents = request?.documents
     const attention = request?.attention
+    const pullRequests = request?.pullRequests
     const timeline = request?.timeline, integration = request?.integration
-    if (!request || Object.keys(request).some(k => !['context', 'worktree', 'changes', 'documents', 'attention', 'timeline', 'integration'].includes(k)) || !context ||
+    if (!request || Object.keys(request).some(k => !['context', 'worktree', 'changes', 'documents', 'attention', 'timeline', 'integration', 'pullRequests'].includes(k)) || !context ||
       Object.keys(context).some(k => !['projectId', 'revision'].includes(k)) || typeof context.projectId !== 'string' || !context.projectId ||
       !Number.isSafeInteger(context.revision) || context.revision < 0 ||
-      ([worktree, changes, documents, attention, timeline, integration].filter(value => value !== undefined).length > 1) || (attention !== undefined && attention !== true) ||
+      ([worktree, changes, documents, attention, timeline, integration, pullRequests].filter(value => value !== undefined).length > 1) || (attention !== undefined && attention !== true) ||
       (timeline !== undefined && (!timeline || Object.keys(timeline).some(k => !['worktreeId', 'generation'].includes(k)))) ||
       (integration !== undefined && (!integration || Object.keys(integration).some(k => !['worktreeId', 'generation', 'targetBranch', 'candidate'].includes(k)))) ||
       (documents !== undefined && (!documents || Object.keys(documents).some(k => !['worktreeId', 'generation', 'mode', 'artifactId', 'cursor'].includes(k)) ||
@@ -65,7 +66,7 @@ export class WorkOrchestrationController {
     if (!current()) return { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
     if (attention) return this.workline ? { success: true, context, data: this.workline.snapshot() } : { success: false, code: 'ORCHESTRATION_UNAVAILABLE' }
     try {
-      const data = timeline ? await selected!.service.timeline(timeline) : integration ? await selected!.service.integration(integration) : documents ? await selected!.service.documents(documents) : changes ? await selected!.service.changes(changes) : worktree ? await selected!.service.observe(worktree.worktreeId) : await selected!.service.inventory()
+      const data = timeline ? await selected!.service.timeline(timeline) : integration ? await selected!.service.integration(integration) : documents ? await selected!.service.documents(documents) : changes ? await selected!.service.changes(changes) : pullRequests ? await selected!.service.pullRequests(pullRequests) : worktree ? await selected!.service.observe(worktree.worktreeId) : await selected!.service.inventory()
       return current() ? { success: true, context, data } : { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
     } catch (error) {
       return { success: false, code: current() ? error instanceof Error ? error.message : 'GIT_READ_UNAVAILABLE' : 'PROJECT_CONTEXT_CHANGED' }

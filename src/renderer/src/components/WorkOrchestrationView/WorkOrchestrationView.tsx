@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { GitBranch, RefreshCw, X, FolderOpen, Layers3, Clock3, ScanEye, Search, Fingerprint, FileText, Terminal } from 'lucide-react'
 import type { ActiveProjectState } from '../../../../shared/types/active-project-types'
-import type { ObservableWorktree, OrchestrationData, OrchestrationOverview, OrchestrationRequest, OrchestrationResult } from '../../../../shared/types/work-orchestration-types'
+import type { ObservableWorktree, OrchestrationData, OrchestrationOverview, OrchestrationRequest, OrchestrationResult, PullRequestPreview } from '../../../../shared/types/work-orchestration-types'
+import type { BranchPullRequests } from '../../../../shared/types/github-pr-types'
 import './WorkOrchestrationView.css'
 import { LocalChangesInspector } from './LocalChangesInspector'
 import { WorktreeDocumentContext } from './WorktreeDocumentContext'
@@ -13,6 +14,7 @@ import { WorkOrchestrationAttention } from './WorkOrchestrationAttention'
 import { WorktreeStatusBadges } from './WorktreeStatusBadges'
 import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import { WorktreeIntegrationDetails } from './WorktreeIntegrationDetails'
+import { BranchManagerView } from './BranchManagerView'
 import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 
 const label = (w: ObservableWorktree) => w.branch ?? (w.head ? 'Detached HEAD' : 'Sem HEAD')
@@ -40,11 +42,13 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
   const refreshPending = useRef<Promise<void> | null>(null)
   const projectId = state.project?.id, revision = state.revision
   const content = useRef<HTMLElement>(null), activeNow = useRef(active)
+  const [pullRequests, setPullRequests] = useState<PullRequestPreview[] | null>(null)
+  const [prLoading, setPrLoading] = useState(false)
   const automaticReads = useRef(0), attempted = useRef(new Set<string>())
   const resumeVisible = useRef<() => void>(() => {})
   activeNow.current = active
-  const choose = (value: Selection) => { selection.current = value; setSelected(value) }
-  const query = useCallback((extra: Pick<OrchestrationRequest, 'worktree' | 'changes' | 'documents'> = {}) => {
+  const choose = (value: Selection) => { selection.current = value; setSelected(value); void loadPullRequests(overview?.repositoryId, value?.branch) }
+  const query = useCallback((extra: Pick<OrchestrationRequest, 'worktree' | 'changes' | 'documents' | 'pullRequests'> = {}) => {
     const request = { context: { projectId: projectId!, revision }, ...extra }, key = JSON.stringify(request)
     const existing = pending.current.get(key)
     if (existing) return existing
@@ -172,6 +176,17 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
       }
     } finally { if (alive.current && intent.current === request && epoch.current === currentEpoch) setReading(false) }
   }
+  const loadPullRequests = useCallback(async (repositoryId: string, branch?: string) => {
+    if (!repositoryId) { setPullRequests(null); return }
+    try {
+      const result = await query({ pullRequests: { repositoryId, branch } })
+      if (alive.current && result.success && result.data && ('pullRequests' in result.data)) {
+        setPullRequests(result.data.pullRequests)
+        return
+      }
+      setPullRequests(null)
+    } catch { setPullRequests(null) }
+  }, [query])
   const ordered = orderWorktrees(overview?.worktrees ?? [])
   const matchesFilter = (w: ObservableWorktree) => `${label(w)} ${w.path}`.toLowerCase().includes(filter.toLowerCase())
   const worktrees = ordered.filter(w => matchesFilter(w) || w.worktreeId === revealedWorktree)
@@ -223,6 +238,7 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
           <details className="wo-files wo-disclosure" key={`changes:${tree.worktreeId}:${tree.generation}`} onToggle={event => { if (event.target === event.currentTarget) setChangesOpen(event.currentTarget.open) }}><summary><WorktreeSectionTitle icon={FileText} meta={tree.observation === 'VERIFIED' && tree.localChanges ? `${tree.localChanges.total} ${tree.localChanges.total === 1 ? 'arquivo' : 'arquivos'}` : 'Sob demanda'}>Arquivos alterados</WorktreeSectionTitle></summary>{changesOpen && <LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} />}</details>
           <WorktreeIntegrationDetails key={`integration:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }} onCommit={onCommit}><WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} /></WorktreeIntegrationDetails>
           <div className="wo-observation-receipt"><Clock3 size={16} aria-hidden="true" /><span>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</span></div>
+          <BranchManagerView branch={tree.branch ?? ''} pullRequests={pullRequests?.find(pr => pr.branch === tree.branch)} />
           <details className="wo-technical wo-disclosure"><summary><WorktreeSectionTitle icon={Terminal}>Identidade técnica</WorktreeSectionTitle></summary><dl><dt>Caminho completo</dt><dd>{tree.path}</dd><dt>HEAD completo</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd>{tree.localChanges && <><dt>Caminhos únicos</dt><dd>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</dd></>}</dl></details>
         </>}
       </aside>}
