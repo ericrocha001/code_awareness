@@ -26,6 +26,8 @@ import { TagManagerModal } from "./components/TagManagerModal/TagManagerModal";
 import { CodeAwarenessIgnoreModal } from "./components/CodeAwarenessIgnoreModal/CodeAwarenessIgnoreModal";
 import { useProjectPreferences } from "./hooks/useProjectPreferences";
 import { useTheme } from "./hooks/useTheme";
+import { useNavigationVisibility } from './hooks/useNavigationVisibility';
+import { SettingsModal } from './components/SettingsModal/SettingsModal';
 import { resolveDeepLink } from "./utils/deep-link-resolver";
 import type { Tab } from "./config/navigation";
 import "./App.css";
@@ -35,6 +37,8 @@ export const App: React.FC = () => {
   useTheme();
 
   const [activeTab, setActiveTab] = useState<Tab>("home");
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const navigation = useNavigationVisibility();
   const [commitIntent, setCommitIntent] = useState<CommitNavigationIntent | null>(null);
   const [activeProjectState, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
   const { project: activeProject } = activeProjectState;
@@ -155,6 +159,8 @@ export const App: React.FC = () => {
       className={`app-layout ${sidebarPreferences.sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}
     >
       <GlobalSidebar
+        items={navigation.items}
+        onOpenSettings={() => setIsSettingsOpen(true)}
         isSidebarOpen={sidebarPreferences.sidebarOpen}
         setIsSidebarOpen={updateSidebarOpen}
         activeTab={activeTab}
@@ -239,6 +245,14 @@ export const App: React.FC = () => {
           />
         )}
       </main>
+
+      {isSettingsOpen && <SettingsModal hidden={navigation.hidden} ready={navigation.ready} saving={navigation.saving} error={navigation.error}
+        onClose={() => setIsSettingsOpen(false)} onRestore={navigation.restoreDefaults}
+        onSetVisible={(id, visible) => {
+          if (!navigation.ready) return;
+          navigation.setVisible(id, visible);
+          if (!visible && activeTab === id) setActiveTab('home');
+        }} />}
 
       {isTagManagerOpen && activeProject?.path && (
         <TagManagerModal

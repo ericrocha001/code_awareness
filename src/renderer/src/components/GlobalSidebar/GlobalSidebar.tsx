@@ -6,7 +6,7 @@ import { GlobalSidebarHeader } from "./GlobalSidebarHeader";
 import { GlobalSidebarProject } from "./GlobalSidebarProject";
 import { GlobalSidebarNav } from "./GlobalSidebarNav";
 import { GlobalSidebarFooter } from "./GlobalSidebarFooter";
-import { NAV_ITEMS, Tab } from "../../config/navigation";
+import { NAV_ITEMS, Tab, type NavItem } from "../../config/navigation";
 import "./GlobalSidebar.css";
 
 interface GlobalSidebarProps {
@@ -19,6 +19,8 @@ interface GlobalSidebarProps {
   onSelectRepository: (repositoryId: string) => void;
   onOpenTags: () => void;
   onOpenIgnored: () => void;
+  items?: NavItem[];
+  onOpenSettings?: () => void;
 }
 
 export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
@@ -31,6 +33,8 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
   onSelectRepository,
   onOpenTags,
   onOpenIgnored,
+  items = NAV_ITEMS,
+  onOpenSettings,
 }) => {
   const toggleSidebar = () => setIsSidebarOpen(!isSidebarOpen);
 
@@ -48,7 +52,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
         onSelectRepository={onSelectRepository}
       />
       <GlobalSidebarNav
-        items={NAV_ITEMS}
+        items={items}
         activeTab={activeTab}
         orchestrationAlerts={orchestrationAlerts}
         onSelect={setActiveTab}
@@ -59,6 +63,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
         onToggle={toggleSidebar}
         onOpenTags={onOpenTags} 
         onOpenIgnored={onOpenIgnored} 
+        onOpenSettings={onOpenSettings}
       />
     </aside>
   );

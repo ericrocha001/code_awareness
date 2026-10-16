@@ -14,6 +14,7 @@ afterEach(() => { cleanup(); vi.restoreAllMocks() })
 it('keeps exactly one visible panel and one retained Orchestration view while switching Shell tabs', async () => {
   const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
   window.codeAwareness = {
+    loadSettings: async () => ({}),
     getPendingDeepLink: async () => null, onDeepLink: () => () => {}, onActiveProjectChanged: () => () => {},
     getActiveProject: async () => ({ project: { id: 'a', name: 'A', path: '/a' }, revision: 1 }),
     getWorkOrchestration: vi.fn(async () => ({ success: true, context: { projectId: 'a', revision: 1 }, data: { repositoryId: 'repo', worktrees: [], inventoryCoverage: 'COMPLETE', observedAt: '2026-10-13T00:00:00Z', revision: 'r' } }))

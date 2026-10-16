@@ -4,6 +4,7 @@
 
 import { useState, useEffect } from 'react'
 import type { ProjectPreferences } from '@shared/types'
+import { updateSettings } from '../utils/update-settings'
 
 const DEFAULT_PREFERENCES: ProjectPreferences = {
   sidebarOpen: true
@@ -24,9 +25,7 @@ export function useProjectPreferences(repoPath: string | null) {
         if ('viewMode' in prefs) {
           const { viewMode, ...cleaned } = prefs as any
           prefs = cleaned
-          settings.projectPreferences = settings.projectPreferences || {}
-          settings.projectPreferences[repoPath] = prefs
-          await window.codeAwareness.saveSettings(settings)
+          await savePreferences(repoPath, prefs)
         }
 
         setPreferences(prefs)
@@ -68,10 +67,10 @@ export function useProjectPreferences(repoPath: string | null) {
 
 async function savePreferences(repoPath: string, preferences: ProjectPreferences) {
   try {
-    const settings = await window.codeAwareness.loadSettings()
-    settings.projectPreferences = settings.projectPreferences || {}
-    settings.projectPreferences[repoPath] = preferences
-    await window.codeAwareness.saveSettings(settings)
+    await updateSettings(settings => ({
+      ...settings,
+      projectPreferences: { ...settings.projectPreferences, [repoPath]: preferences }
+    }))
   } catch {
     // Falha silenciosa no salvamento; estado local já foi atualizado.
   }
