@@ -14,8 +14,8 @@ const ok = (data: unknown) => ({ success: true, context: { projectId: 'local', r
 const catalog = { repositoryId: 'local', repository: 'owner/repo', providerRepositoryId: '1', source: 'GITHUB_REST', coverage: 'UNAVAILABLE', observedAt: '2026-01-01T00:00:00Z', revision: 'remote', defaultBranch: 'main', reason: 'NOT_CONNECTED', items: [] }
 const unavailable = { kind: 'PULL_REQUESTS', inventoryRevision: 'one', pullRequests: { repositoryId: 'local', catalog, relations: [], orphaned: [] } }
 function install(extra: (operation: any) => unknown = () => null, supplied = inventory) {
-  const read = vi.fn(async ({ operation }) => ok(operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory: supplied } : operation.action === 'PULL_REQUESTS' ? unavailable : await extra(operation)))
-  window.codeAwareness = { getBranchOrchestration: read } as any
+  const read = vi.fn(async ({ operation }) => ok(operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory: supplied } : operation.action === 'PULL_REQUESTS' ? unavailable : operation.action === 'EXECUTIONS' ? { kind: 'EXECUTIONS', page: { repositoryId: supplied.repositoryId, branchRef: operation.ref, branchRevision: operation.revision, bindings: [], coverage: 'COMPLETE' } } : await extra(operation)))
+  window.codeAwareness = { getBranchOrchestration: read, onContinuumChanged: () => () => {} } as any
   return read
 }
 it('renders local branches before GitHub resolves, preserves unknown creation and exposes offline coverage', async () => {
@@ -91,7 +91,7 @@ it('invalidates actions and drops delayed detail responses when hidden', async (
   await waitFor(() => expect(screen.getByText('Estado precisa de atualização antes de agir.')).toBeTruthy())
   expect(screen.queryByText('Delayed stale result')).toBeNull()
 })
-it('mounts lazily, retains filter and selection without rereading on tab return, and marks cached data stale', async () => {
+it('mounts lazily and revalidates only selected executions on tab return while preserving inventory state', async () => {
   const read = install()
   const view = render(<WorkOrchestrationTab state={state} active={false}/>)
   expect(read).not.toHaveBeenCalled()
@@ -102,7 +102,8 @@ it('mounts lazily, retains filter and selection without rereading on tab return,
   const count = read.mock.calls.length
   view.rerender(<WorkOrchestrationTab state={state} active={false}/>)
   view.rerender(<WorkOrchestrationTab state={state} active/>)
-  expect(read).toHaveBeenCalledTimes(count)
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(count + 1))
+  expect(read.mock.calls[count][0].operation.action).toBe('EXECUTIONS')
   expect((screen.getByPlaceholderText('Nome ou referência') as HTMLInputElement).value).toBe('topic')
   expect(screen.getByRole('complementary', { name: 'Detalhes da branch' })).toBeTruthy()
   expect(screen.getByText('Estado precisa de atualização antes de agir.')).toBeTruthy()

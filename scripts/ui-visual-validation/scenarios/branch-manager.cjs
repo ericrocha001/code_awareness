@@ -85,7 +85,7 @@ exports.run = async ctx => {
   }
   const select = async name => {
     await ctx.evaluate(name => { document.querySelector('[data-branch-target]')?.removeAttribute('data-branch-target'); const button = [...document.querySelectorAll('.bm-card')].find(b => b.querySelector('strong').textContent === name); button.scrollIntoView({ block: 'nearest' }); button.setAttribute('data-branch-target', '') }, name)
-    await ctx.click('[data-branch-target]'); await wait(() => !!document.querySelector('.bm-detail'))
+    await ctx.click('[data-branch-target]'); await wait(() => !!document.querySelector('.bm-executions') && document.querySelector('.bm-executions').getAttribute('aria-busy') === 'false')
   }
   const refresh = async () => {
     const before = uiInventoryReads
@@ -106,11 +106,11 @@ exports.run = async ctx => {
     await ctx.window.loadFile(page, { query: { repositoryPath: root } }); await ctx.viewport(1440, 900)
     await wait(() => document.querySelectorAll('.bm-card').length > 0 && !document.querySelector('.bm-remote').textContent.includes('Consultando'))
     ctx.check('Renderer shows branch-first inventory and detached section', await ctx.evaluate(() => document.querySelector('.bm-toolbar').textContent.includes('21 Worktrees') && document.body.textContent.includes('Worktrees sem branch confirmada')))
+    ctx.check('No Continuum reads while mounting inventory', continuumReads === 0)
+    const bindingStart = Date.now(), bindingCalls = gitCalls
     await select('topic')
     ctx.check('Multiple current PRs retained and fork unconfirmed', await ctx.evaluate(() => document.querySelector('.bm-detail').textContent.includes('#1') && document.querySelector('.bm-detail').textContent.includes('#2') && document.querySelectorAll('.bm-pr-list small').length > 0 && document.querySelector('.bm-detail').textContent.includes('Associação ambígua')))
-    ctx.check('No Continuum reads while mounting inventory or selecting branch', continuumReads === 0)
-    const bindingStart = Date.now(), bindingCalls = gitCalls
-    await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
+    await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     const binding21 = { milliseconds: Date.now() - bindingStart, gitCalls: gitCalls - bindingCalls, continuumReads }
     await clickText('Ver Artifacts desta execução', '.bm-executions'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Execution acceptance handoff'))
     ctx.check('Branch to execution to canonical document membership', continuumReads === 2 && await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('EXECUTABLE_PLAN') && document.querySelector('.bm-executions').textContent.includes('VALIDATED')))
@@ -124,7 +124,7 @@ exports.run = async ctx => {
     ctx.check('CLI HEAD advance preserves binding identity', advancedReplay.artifactId === binding.artifactId)
     store.close(); store = new ArtifactStore(path.join(ctx.temporary, 'continuum.db'), 'fixture'); continuum = new ContinuumService(store); countReads()
     ctx.check('Canonical SQLite association survives service restart', continuum.get(binding.artifactId).artifactId === binding.artifactId)
-    await refresh(); await select('topic'); await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
+    await refresh(); await select('topic'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     await ctx.capture('branches-21-dark'); await ctx.overflow()
     const idleBefore = { gitCalls, httpCalls, snapshots }
     await new Promise(resolve => setTimeout(resolve, 1000))
@@ -151,7 +151,7 @@ exports.run = async ctx => {
     await wait(() => document.body.textContent.includes('Worktree removida.'))
     ctx.check('Separate removal handshake preserves branch', releaseConfirmations === 1 && git(root, ['rev-parse', 'refs/heads/topic']) === topicBefore && !fs.existsSync(path.join(ctx.temporary, 'topic')))
     await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote').textContent.includes('Consultando'))
-    await select('topic'); await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
+    await select('topic'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     ctx.check('Association remains after authorized fixture Worktree removal', await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('checkout histórico')))
     for (let i = 18; i < 99; i++) git(root, ['worktree', 'add', '--no-checkout', '-b', `work-${String(i).padStart(3, '0')}`, path.join(ctx.temporary, `work-${i}`)])
     const largeStart = Date.now(), largeCalls = gitCalls, large = await service.getBranchInventory()
@@ -172,10 +172,10 @@ exports.run = async ctx => {
     ctx.check('Explicit refresh preserves list scroll', await ctx.evaluate(top => document.querySelector('.bm-list').scrollTop === top, scroll))
     await select('topic')
     const largeBindingStart = Date.now(), largeBindingCalls = gitCalls, largeBindingReads = continuumReads
-    await ctx.click('.bm-executions summary'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
+    await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     const binding101 = { milliseconds: Date.now() - largeBindingStart, gitCalls: gitCalls - largeBindingCalls, continuumReads: continuumReads - largeBindingReads }
     ctx.check('101 branches: one demanded metadata query per selection', binding101.continuumReads === 1)
-    continuumAvailable = false; await clickText('Atualizar execuções', '.bm-executions'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Consulta indisponível'))
+    continuumAvailable = false; ctx.window.webContents.send('continuum:changed', { repositoryId: 'fixture' }); await wait(() => document.querySelector('.bm-executions').textContent.includes('Consulta indisponível'))
     ctx.check('Unavailable Continuum does not claim no documents', await ctx.evaluate(() => !document.querySelector('.bm-executions').textContent.includes('Sem vínculo explícito')))
     continuumAvailable = true
     await ctx.capture('branches-101-offline-dark'); await ctx.overflow()
