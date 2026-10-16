@@ -3,9 +3,9 @@ import React, { useEffect, useRef, useState } from 'react'
 import { GitPullRequest } from 'lucide-react'
 import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import type { ObservableWorktree, OrchestrationContext } from '../../../../shared/types/work-orchestration-types'
-import type { IntegrationEvidence, CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
+import type { IntegrationEvidence } from '../../../../shared/types/worktree-integration-evidence-types'
 
-export function WorktreeIntegrationDetails({ tree, context, active = true, onCommit, children }: { tree: ObservableWorktree; context: OrchestrationContext; active?: boolean; onCommit?: (intent: CommitNavigationIntent) => void; children?: React.ReactNode }) {
+export function WorktreeIntegrationDetails({ tree, context, active = true, children }: { tree: ObservableWorktree; context: OrchestrationContext; active?: boolean; children?: React.ReactNode }) {
   const [target, setTarget] = useState(''), [evidence, setEvidence] = useState<IntegrationEvidence | null>(null), [evaluationError, setEvaluationError] = useState(''), [evaluating, setEvaluating] = useState(false)
   const assessment = useRef(0)
   useEffect(() => { assessment.current++; setEvidence(null); setEvaluating(false); return () => { assessment.current++ } }, [tree.worktreeId, tree.generation, tree.head, context.projectId, context.revision, active])
@@ -23,7 +23,7 @@ export function WorktreeIntegrationDetails({ tree, context, active = true, onCom
     finally { if (assessment.current === request) setEvaluating(false) }
   }
   return <>
-    <WorktreeCommitsDisclosure tree={tree} context={context} active={active} onCommit={onCommit} />
+    <WorktreeCommitsDisclosure tree={tree} context={context} active={active} />
     {children}
     <details className="wo-integration wo-disclosure"><summary><WorktreeSectionTitle icon={GitPullRequest}>Integração</WorktreeSectionTitle></summary><section aria-label="Evidências de integração"><h3>Evidências de integração</h3><form onSubmit={evaluate}><label>Branch de destino<input value={target} onChange={event => { assessment.current++; setTarget(event.target.value); setEvidence(null); setEvaluating(false) }} placeholder="Escolha explicitamente a branch" required /></label><button disabled={!target.trim() || evaluating}>Avaliar integração</button></form>
       {evaluating && <p role="status">Avaliando origem e destino…</p>}{evaluationError && <p role="alert">{evaluationError}</p>}

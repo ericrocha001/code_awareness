@@ -1,8 +1,35 @@
 import { expect, it, vi } from 'vitest'
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
-import { GitManagementController } from './git-management-handler'
+import { GitManagementController, registerGitManagementHandlers } from './git-management-handler'
+import { ipcMain } from 'electron'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
 import type { GitMutationRequest } from '../../shared/types/git-management-types'
+
+it('guards temporal IPC inputs, binds snapshots to project revision and discards late Atlas reads', async () => {
+  const handlers = new Map<string, (...args: any[]) => any>()
+  vi.mocked(ipcMain.handle).mockImplementation((channel, listener) => { handlers.set(channel, listener) })
+  let state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }
+  let finish!: (value: unknown) => void
+  const service = {
+    getAtlasHistory: vi.fn(() => new Promise(resolve => { finish = resolve })),
+    compareAtlas: vi.fn(async () => ({ snapshot: 'fixed' }))
+  } as unknown as GitOperationsService
+  const controller = new GitManagementController({ getState: () => state })
+  controller.bind(service); registerGitManagementHandlers(controller)
+  const context = { projectId: 'a', revision: 1 }
+  const history = (request: unknown) => handlers.get('git-management:atlas')!({}, request)
+  expect(await history({ context, window: 7 })).toEqual({ success: false, code: 'INVALID_ARGUMENT' })
+  expect(await history({ context, window: 90, path: '/elsewhere' })).toEqual({ success: false, code: 'INVALID_ARGUMENT' })
+  expect(service.getAtlasHistory).not.toHaveBeenCalled()
+  const comparison = handlers.get('git-management:atlas-compare')!
+  expect(await comparison({}, { context, snapshot: 'fixed', left: 'HEAD', right: 'refs/heads/topic' })).toMatchObject({ success: true })
+  expect(service.compareAtlas).toHaveBeenCalledWith({ context, snapshot: 'fixed', left: 'HEAD', right: 'refs/heads/topic', contextKey: 'a:1' })
+  const pending = history({ context, window: 60, limit: 10, cursor: 'signed' })
+  expect(service.getAtlasHistory).toHaveBeenCalledWith({ window: 60, limit: 10, cursor: 'signed', contextKey: 'a:1' })
+  state = { project: { id: 'b', path: '/b', name: 'B' }, revision: 2 }; controller.bind(service)
+  finish({ nodes: [{ sha: 'old' }] })
+  expect(await pending).toEqual({ success: false, code: 'PROJECT_CONTEXT_CHANGED' })
+})
 
 it('routes only typed correlation reads, binds continuation to project context and drops late results', async () => {
   let state = { project: { id: 'a', path: '/a', name: 'A' }, revision: 1 }, finish!: (value: any) => void

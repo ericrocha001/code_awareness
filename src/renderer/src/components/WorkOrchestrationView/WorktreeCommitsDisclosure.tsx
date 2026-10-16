@@ -2,11 +2,11 @@ import React, { useEffect, useRef, useState } from 'react'
 import { GitCommitHorizontal } from 'lucide-react'
 import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import type { ObservableWorktree, OrchestrationContext } from '../../../../shared/types/work-orchestration-types'
-import type { CommitNavigationIntent, WorktreeTimelinePage } from '../../../../shared/types/worktree-integration-evidence-types'
+import type { WorktreeTimelinePage } from '../../../../shared/types/worktree-integration-evidence-types'
 
 const operationLabel = { COMMIT: 'Commit', INITIAL_COMMIT: 'Commit inicial', AMEND: 'Amend', CHERRY_PICK: 'Cherry-pick', REBASE_PICK: 'Rebase (pick)' }
 const reachabilityLabel = { HEAD_CURRENT: 'HEAD atual', REACHABLE: 'Alcançável pelo HEAD atual', NOT_REACHABLE: 'Não alcançável pelo HEAD atual', UNKNOWN: 'Alcançabilidade não verificada' }
-export function WorktreeCommitsDisclosure({ tree, context, active, onCommit }: { tree: ObservableWorktree; context: OrchestrationContext; active: boolean; onCommit?: (intent: CommitNavigationIntent) => void }) {
+export function WorktreeCommitsDisclosure({ tree, context, active }: { tree: ObservableWorktree; context: OrchestrationContext; active: boolean }) {
   const [expanded, setExpanded] = useState(false), [page, setPage] = useState<WorktreeTimelinePage | null>(null), [busy, setBusy] = useState(false), [error, setError] = useState(''), [visible, setVisible] = useState(40)
   const epoch = useRef(0), opened = useRef(false)
   useEffect(() => {
@@ -48,7 +48,7 @@ export function WorktreeCommitsDisclosure({ tree, context, active, onCommit }: {
           if (list.scrollHeight - list.scrollTop - list.clientHeight < 64) reveal()
         }}>
           <ol>{page.items.slice(0, visible).map((item, index) => <li key={item.sha} onFocus={() => { if (index >= visible - 5) reveal() }}>
-            <button disabled={!onCommit} onClick={() => onCommit?.({ ...context, commitSha: item.sha, requestId: crypto.randomUUID() })}>{item.title || 'Sem título'} · {item.sha.slice(0, 8)}</button>
+            <span className="wo-local-commit-title">{item.title || 'Sem título'} · {item.sha.slice(0, 8)}</span>
             <p>{reachabilityLabel[item.reachability]}</p>
             <p>{operationLabel[item.events[0].operation]} · <time dateTime={item.events[0].eventAt}>{new Date(item.events[0].eventAt).toLocaleString('pt-BR')}</time></p>
             {item.events.length > 1 && <details><summary>{item.events.length} operações locais registradas</summary><ul>{item.events.map(event => <li key={event.sequence}>{operationLabel[event.operation]} · {new Date(event.eventAt).toLocaleString('pt-BR')}</li>)}</ul></details>}

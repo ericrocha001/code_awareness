@@ -28,6 +28,13 @@ exports.run = async (ctx) => {
     )
     await nativeClick(selector)
   }
+  ctx.input = async (selector, text) => {
+    await ctx.waitFor(selector => { const bounds = document.querySelector(selector)?.getBoundingClientRect(); return bounds && bounds.width > 0 && bounds.height > 0 }, selector)
+    await ctx.click(selector)
+    await ctx.waitFor(selector => document.activeElement === document.querySelector(selector), selector)
+    ctx.window.webContents.insertText(text)
+    await ctx.waitFor((selector, text) => document.querySelector(selector)?.value === text, selector, text)
+  }
   const root = path.join(ctx.temporary, 'repository-a')
   fs.mkdirSync(root)
   const git = (...args) =>
@@ -39,6 +46,7 @@ exports.run = async (ctx) => {
   git('init', '-b', 'main')
   git('config', 'user.name', 'Proof Author')
   git('config', 'user.email', 'proof@example.com')
+  git('config', 'code-awareness.primaryBranch', 'main')
   for (let index = 0; index < 8; index++) {
     fs.writeFileSync(path.join(root, 'file.txt'), `version ${index}\n`)
     git('add', 'file.txt')
@@ -129,7 +137,7 @@ exports.run = async (ctx) => {
     document.querySelector('.global-sidebar-logo-img').src = 'logo.svg'
   })
   await ctx.viewport(1440, 900)
-  await ctx.click('.gm-commit')
+  await ctx.click('.gm-commit.is-merge')
   await ctx.waitFor(() =>
     document.querySelector('.gm-inspector').textContent.includes('Merge')
   )
@@ -149,6 +157,20 @@ exports.run = async (ctx) => {
   )
   await ctx.overflow()
   await ctx.capture('wide-dark-selected')
+  ctx.check('Origin remains unknown despite current worktree containment', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Origem: Não registrada') && !document.querySelector('.gm-inspector').textContent.includes('Worktrees atuais')))
+  for (const label of ['30d', '60d', '90d', 'Tudo']) {
+    await ctx.click(`.gm-segmented[aria-label="Janela temporal"] button:nth-child(${['30d','60d','90d','Tudo'].indexOf(label)+1})`)
+    await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && document.querySelectorAll('.gm-commit').length === 11)
+  }
+  await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)')
+  await ctx.evaluate(() => { const select = document.querySelector('[aria-label="Referência em foco"]'); select.value = 'refs/heads/feature/inspector'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+  await waitForGit(() => document.querySelector('.gm-comparison')?.textContent.includes('exclusivos da base'))
+  await ctx.capture('wide-dark-focus')
+  await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(3)')
+  await waitForGit(() => document.querySelector('.gm-comparison')?.textContent.includes('0 exclusivos do alvo'))
+  ctx.check('Comparison uses real merge-base and reachable sets', await ctx.evaluate(() => document.querySelector('.gm-comparison').textContent.includes('0 exclusivos do alvo')))
+  await ctx.capture('wide-dark-comparison')
+  await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:first-child')
   await ctx.evaluate(() => {
     document.body.dataset.theme = 'light'
   })
@@ -173,7 +195,7 @@ exports.run = async (ctx) => {
   })
   await ctx.capture('medium-dark-history')
   await ctx.viewport(1440, 900)
-  await ctx.click('.gm-toolbar button:nth-of-type(2)')
+  await ctx.click('.gm-toolbar-actions button:nth-child(2)')
   await ctx.waitFor(
     () => document.querySelectorAll('.gm-change-group').length === 4
   )
@@ -296,6 +318,68 @@ exports.run = async (ctx) => {
       git('diff', '--name-only') === 'file.txt'
   )
   await ctx.capture('wide-dark-committed')
+  await ctx.click('.gm-actions details summary')
+  await ctx.input('[aria-label="Nova branch"]', 'atlas-created-through-ui')
+  await ctx.click('.gm-actions details > button')
+  await ctx.click('.gm-confirm button:first-child')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && [...document.querySelectorAll('[aria-label="Trocar branch"] option')].some(option => option.value === 'atlas-created-through-ui'))
+  ctx.check('Branch creation stays on the canonical mutation path and preserves checkout', git('rev-parse', 'atlas-created-through-ui') === git('rev-parse', 'HEAD') && git('branch', '--show-current') === 'main')
+  await ctx.click('.gm-actions details summary')
+  const exec = require('node:child_process').spawnSync
+  const tree = git('rev-parse', 'HEAD^{tree}')
+  const oldDate = new Date(Date.now() - 110 * 86400000).toISOString()
+  const oldRoot = exec('git', ['commit-tree', tree, '-m', 'Archived root'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate } }).stdout.trim()
+  git('update-ref', 'refs/heads/quiet', oldRoot)
+  const baseDate = new Date(Date.now() - 25 * 86400000).toISOString()
+  const denseBase = exec('git', ['commit-tree', tree, '-p', oldRoot, '-m', 'Shared parallel base'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: baseDate, GIT_COMMITTER_DATE: baseDate } }).stdout.trim()
+  git('update-ref', 'refs/heads/dense-base', denseBase)
+  const records = []
+  for (let index = 0; index < 105; index++) {
+    const message = `Parallel work ${index}\n`
+    const date = Math.floor(Date.now() / 1000) - (2 + index % 20) * 86400
+    records.push(`commit refs/heads/parallel-${String(index).padStart(3,'0')}\ncommitter Proof Author <proof@example.com> ${date} +0000\ndata ${Buffer.byteLength(message)}\n${message}from ${denseBase}\n\n`)
+  }
+  const imported = exec('git', ['fast-import', '--quiet'], { cwd: root, input: records.join(''), encoding: 'utf8', windowsHide: true })
+  if (imported.status !== 0) throw new Error(imported.stderr)
+  const detachedDate = new Date(Date.now() - 3 * 86400000).toISOString()
+  const detachedSha = exec('git', ['commit-tree', tree, '-p', denseBase, '-m', 'Detached work'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: detachedDate, GIT_COMMITTER_DATE: detachedDate } }).stdout.trim()
+  git('worktree', 'add', '--detach', path.join(ctx.temporary, 'detached-work'), detachedSha)
+  git('tag', 'atlas-proof')
+  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:nth-child(3)')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !!document.querySelector('.gm-load-more'))
+  await ctx.click('.gm-load-more')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !document.querySelector('.gm-load-more'))
+  ctx.check('Many simultaneous refs collapse explicitly', await ctx.evaluate(() => document.querySelector('.gm-secondary-toggle')?.textContent.includes('Mostrar trajetórias secundárias')))
+  await ctx.capture('wide-dark-dense-collapsed')
+  await ctx.click('.gm-secondary-toggle')
+  await ctx.waitFor(() => document.querySelectorAll('.gm-atlas-lane-label').length > 100)
+  const summary = await ctx.evaluate(() => ({ nodes: document.querySelectorAll('.gm-commit').length, labels: document.querySelectorAll('.gm-atlas-lane-label').length, width: document.querySelector('.gm-atlas-scroll').scrollWidth }))
+  ctx.check('Dense timeline virtualizes nodes rather than mounting every commit', summary.nodes < 118 && summary.labels > 100)
+  await ctx.capture('wide-dark-dense-expanded')
+  await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = map.scrollHeight; map.scrollLeft = map.scrollWidth; map.dispatchEvent(new Event('scroll')) })
+  await ctx.capture('wide-dark-dense-scrolled')
+  await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = 0; map.scrollLeft = 0; map.dispatchEvent(new Event('scroll')) })
+  await ctx.click('.gm-sha-lookup summary')
+  await ctx.input('[aria-label="SHA completo"]', detachedSha)
+  await ctx.click('.gm-sha-lookup button')
+  await waitForGit(() => document.querySelector('.gm-inspector h2')?.textContent === 'Detached work')
+  ctx.check('Detached work is inspectable with unknown origin', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Origem: Não registrada')))
+  await ctx.capture('wide-dark-detached')
+  await ctx.evaluate(() => document.querySelector('[aria-label="SHA completo"]').select())
+  ctx.window.webContents.insertText(oldRoot)
+  await ctx.waitFor(sha => document.querySelector('[aria-label="SHA completo"]').value === sha, oldRoot)
+  await ctx.click('.gm-sha-lookup button')
+  await waitForGit(() => document.querySelector('.gm-inspector h2')?.textContent === 'Archived root')
+  ctx.check('SHA outside the temporal window opens the canonical inspector', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Commit raiz')))
+  await ctx.capture('wide-dark-outside-window')
+  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:first-child')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !!document.querySelector('.gm-load-more'))
+  ctx.check('Changing windows keeps recent visible commits in view', await ctx.evaluate(() => document.querySelectorAll('.gm-commit').length > 0))
+  git('branch', 'snapshot-changed')
+  await ctx.click('.gm-load-more')
+  await waitForGit(() => document.querySelector('.gm-error')?.textContent.includes('Histórico desatualizado'))
+  ctx.check('Actual ref changes invalidate temporal pagination', await ctx.evaluate(() => document.querySelector('.gm-load-more').disabled))
+  await ctx.capture('wide-dark-stale-history')
   await ctx.click('[data-proof-project="b"]')
   await ctx.waitFor(() =>
     document
@@ -353,6 +437,6 @@ exports.run = async (ctx) => {
   ctx.check(
     'Fresh Electron source and expected worktree',
     identity.freshness.state === 'MATCH' &&
-      identity.sourceOrigin.worktree?.branch === 'codex/git-management-mvp'
+      identity.sourceOrigin.worktree?.rootPath.replace(/\\/g, '/').toLowerCase() === ctx.projectRoot.replace(/\\/g, '/').toLowerCase()
   )
 }

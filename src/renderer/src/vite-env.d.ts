@@ -4,6 +4,7 @@
 
 /// <reference types="vite/client" />
 import type { ActiveProjectState } from '../../shared/types/active-project-types'
+import type { GitAtlasRequest, GitAtlasPage, GitAtlasCompareRequest, GitAtlasComparison } from '../../shared/types/git-atlas-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../../shared/types/work-orchestration-types'
 import type { OrchestrationAttentionChange } from '../../shared/types/work-orchestration-attention-types'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
@@ -27,6 +28,8 @@ declare global {
       getWorkOrchestration: (request: OrchestrationRequest) => Promise<OrchestrationResult<OrchestrationData>>
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>
+      getGitAtlas: (request: GitAtlasRequest) => Promise<GitManagementResult<GitAtlasPage>>
+      compareGitAtlas: (request: GitAtlasCompareRequest) => Promise<GitManagementResult<GitAtlasComparison>>
       getGitCommitCorrelation: (request: GitCommitCorrelationRequest) => Promise<GitManagementResult<GitCommitCorrelationPage>>
       getGitManagementOverview: (context: GitManagementContext) => Promise<GitManagementResult<GitOverview>>
       getGitManagementCommit: (request: GitCommitRequest) => Promise<GitManagementResult<GitCommitDetail>>

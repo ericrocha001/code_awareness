@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { CommitWorktrees } from './CommitWorktrees'
 import type {
   GitCommitDetail,
   GitDecoration,
@@ -176,7 +175,6 @@ export function GitInspector({
       )}
       {selection?.kind === 'COMMIT' && (
         <>
-          {sha && <CommitWorktrees key={`${context.projectId}:${context.revision}:${sha}`} sha={sha} context={context} />}
           {detail ? (
             <>
               <h2>{detail.commit.subject}</h2>
@@ -184,6 +182,8 @@ export function GitInspector({
                 {detail.commit.author} ·{' '}
                 {new Date(detail.commit.timestamp).toLocaleString()}
               </p>
+              <button onClick={() => navigator.clipboard.writeText(detail.commit.sha)} aria-label="Copiar SHA">{detail.commit.sha.slice(0, 12)} · Copiar SHA</button>
+              <p>Origem: Não registrada</p>
               <details>
                 <summary>Identidade e pais</summary>
                 <code>{detail.commit.sha}</code>

@@ -679,6 +679,32 @@ export class GitService implements FileListingPort {
     return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(upstream:short)', 'refs/heads/', 'refs/remotes/'], root)
   }
 
+  async getAtlasReferences(root: string): Promise<string> {
+    return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(*objectname)%00%(upstream:short)%00%(objecttype)%00%(*objecttype)', 'refs/heads/', 'refs/remotes/', 'refs/tags/'], root, { maxOutputBytes: 256000, env: this.localReadEnvironment() })
+  }
+
+  async getAtlasPrimaryRef(root: string): Promise<string | null> {
+    const configured = (await this.runGit(['config', '--get', 'code-awareness.primaryBranch'], root, { allowExitOne: true, env: this.localReadEnvironment() })).trim()
+    if (configured) return configured.startsWith('refs/') ? configured : `refs/heads/${configured}`
+    const refs = await this.getAtlasReferences(root)
+    const defaults = [...new Set(refs.split('\n').map(line => line.split('\0')[2]).filter(Boolean))]
+    return defaults.length === 1 ? defaults[0] : null
+  }
+
+  async getAtlasHistory(root: string, tips: string[], offset: number, limit: number, since: string | null): Promise<string> {
+    if (!tips.length) return ''
+    return this.runGit(['log', '--date-order', `--skip=${offset}`, `--max-count=${limit}`, ...(since ? [`--since-as-filter=${since}`] : []), '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
+  }
+
+  async compareAtlasRefs(root: string, left: string, right: string) {
+    const options = { maxOutputBytes: 256000, env: this.localReadEnvironment() }
+    const bases = (await this.runGit(['merge-base', '--all', left, right], root, { ...options, allowExitOne: true })).trim().split('\n').filter(Boolean)
+    const counts = (await this.runGit(['rev-list', '--left-right', '--count', `${left}...${right}`, '--'], root, options)).trim().split(/\s+/).map(Number)
+    const exclusive = async (tip: string, other: string) => (await this.runGit(['rev-list', '--max-count=501', tip, `^${other}`, '--'], root, options)).trim().split('\n').filter(Boolean)
+    const [leftShas, rightShas] = await Promise.all([exclusive(left, right), exclusive(right, left)])
+    return { mergeBases: bases, leftOnly: counts[0], rightOnly: counts[1], exclusive: { left: leftShas.slice(0, 500), right: rightShas.slice(0, 500), complete: leftShas.length <= 500 && rightShas.length <= 500 } }
+  }
+
   async getBranchHistory(root: string, tips: string[], offset: number, limit: number): Promise<string> {
     if (!tips.length) return ''
     return this.runGit(['log', '--topo-order', `--skip=${offset}`, `--max-count=${limit}`, '--format=%H%x00%P%x00%an%x00%aI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000 })

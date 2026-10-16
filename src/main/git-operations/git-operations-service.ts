@@ -1,4 +1,6 @@
 import { readWorktreeProvenance } from './git-worktree-provenance'
+import { GitAtlasReader } from './git-atlas'
+import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
 import { createHash } from 'node:crypto'
 import { summarizeLocalChanges } from './local-change-summary'
 import type { RemoteEvidence } from '../../shared/types/git-evidence-types'
@@ -1032,6 +1034,18 @@ export class GitOperationsService {
     })
   }
 
+  private atlasReader?: GitAtlasReader
+  private atlas(): GitAtlasReader {
+    return this.atlasReader ??= new GitAtlasReader(this.repoRoot, this.git, fail)
+  }
+  async getAtlasHistory(request: GitAtlasQuery) {
+    await this.repository()
+    return this.atlas().history(request)
+  }
+  async compareAtlas(request: { snapshot: string; left: string; right: string; contextKey?: string }) {
+    await this.repository()
+    return this.atlas().compare(request)
+  }
   async getGraphHistory(request: { limit?: number; cursor?: string; contextKey?: string }): Promise<GitHistoryPage> {
     await this.repository()
     const limit = request.limit ?? 50
