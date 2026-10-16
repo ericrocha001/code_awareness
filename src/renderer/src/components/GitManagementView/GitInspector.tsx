@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { Copy, FileText, GitBranch, GitCommitHorizontal, Hexagon } from 'lucide-react'
 import type {
   GitCommitDetail,
   GitDecoration,
@@ -178,27 +179,19 @@ export function GitInspector({
           {detail ? (
             <>
               <h2>{detail.commit.subject}</h2>
-              <p>
-                {detail.commit.author} ·{' '}
-                {new Date(detail.commit.timestamp).toLocaleString()}
-              </p>
-              <button onClick={() => navigator.clipboard.writeText(detail.commit.sha)} aria-label="Copiar SHA">{detail.commit.sha.slice(0, 12)} · Copiar SHA</button>
-              <p>Origem: Não registrada</p>
-              <details>
-                <summary>Identidade e pais</summary>
-                <code>{detail.commit.sha}</code>
-                {detail.commit.parents.map((parent) => (
-                  <code key={parent}>{parent}</code>
-                ))}
-              </details>
-              <p>
+              <div className="gm-commit-badges"><span><GitCommitHorizontal size={14} />{detail.commit.parents.length > 1 ? 'Merge' : 'Commit'}</span>{detail.commit.decorations.map(ref => <span key={ref.ref}>{ref.name}</span>)}</div>
+              <div className="gm-commit-author"><span className="gm-author-avatar">{detail.commit.author.split(/\s+/).slice(0, 2).map(part => part[0]).join('')}</span><div><strong>{detail.commit.author}</strong><time>{new Date(detail.commit.timestamp).toLocaleString()}</time></div><button title={detail.commit.sha} onClick={() => navigator.clipboard.writeText(detail.commit.sha)} aria-label="Copiar SHA">{detail.commit.sha.slice(0, 7)}<Copy size={14} /></button></div>
+              <section className="gm-inspector-section"><h3>Origem</h3><p className="gm-origin-status">Origem: Não registrada</p><div className="gm-detail-row"><Hexagon size={17} /><span>Worktree de origem</span><span>Não registrada</span></div><div className="gm-detail-row"><GitBranch size={17} /><span>Branch de origem</span><span>Não registrada</span></div></section>
+              <section className="gm-inspector-section"><h3>Parentesco</h3>{detail.commit.parents.map((parent, index) => <div className="gm-detail-row" key={parent}><GitCommitHorizontal size={17} /><span>{index === 0 ? 'Pai' : `Pai ${index + 1}`}</span><button title={parent} aria-label={`Copiar pai ${index + 1}`} onClick={() => navigator.clipboard.writeText(parent)}>{parent.slice(0, 7)}<Copy size={14} /></button></div>)}
+              <p className="gm-comparison-note">
                 {detail.comparison === 'ROOT'
                   ? 'Commit raiz: alterações desde a árvore vazia.'
                   : detail.comparison === 'FIRST_PARENT'
                     ? 'Merge: diff comparado ao primeiro pai.'
                     : 'Diff comparado ao pai deste commit.'}
               </p>
-              <h3>Arquivos alterados</h3>
+              </section>
+              <section className="gm-inspector-section"><h3>Arquivos alterados <span className="gm-file-count">{detail.files.length}{detail.nextCursor ? '+' : ''}</span></h3>
               <div className="gm-files">
                 {detail.files.map((file) => (
                   <button
@@ -212,7 +205,7 @@ export function GitInspector({
                       })
                     }
                   >
-                    <span>
+                    <FileText size={17} /><span>
                       {file.previousPath ? `${file.previousPath} → ` : ''}
                       {file.path}
                     </span>
@@ -228,6 +221,7 @@ export function GitInspector({
                   Mais arquivos
                 </button>
               )}
+              </section>
             </>
           ) : loading ? (
             <p>Carregando commit…</p>

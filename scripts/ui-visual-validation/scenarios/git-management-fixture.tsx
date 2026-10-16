@@ -38,7 +38,7 @@ function Fixture() {
         onOpenIgnored={() => {}}
       />
       <main className="app-main">
-        <div style={{ display: 'flex', gap: 12, padding: 6 }}>
+        <div style={{ display: 'flex', gap: 12, padding: 3, height: 26, flexShrink: 0 }}>
           <button
             data-proof-project="a"
             onClick={() => void activate('proof-a')}

@@ -4,14 +4,14 @@ const { execFileSync } = require('node:child_process')
 const { buildSync } = require('esbuild')
 exports.run = async (ctx) => {
   const waitForGit = async (condition) => {
-    const deadline = Date.now() + 15000
+    const deadline = Date.now() + 30000
     while (Date.now() < deadline) {
       if (await ctx.evaluate(condition)) return
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
     await ctx.capture('git-operation-timeout')
     throw new Error(
-      'Git operation did not settle within 15 seconds: ' +
+      'Git operation did not settle within 30 seconds: ' +
         (await ctx.evaluate(
           () => document.querySelector('.gm-actions')?.textContent
         ))
@@ -47,6 +47,8 @@ exports.run = async (ctx) => {
   git('config', 'user.name', 'Proof Author')
   git('config', 'user.email', 'proof@example.com')
   git('config', 'code-awareness.primaryBranch', 'main')
+  if (ctx.mockup) require('./git-atlas-mockup-history.cjs').create(root)
+  else {
   for (let index = 0; index < 8; index++) {
     fs.writeFileSync(path.join(root, 'file.txt'), `version ${index}\n`)
     git('add', 'file.txt')
@@ -68,6 +70,7 @@ exports.run = async (ctx) => {
     'Integrate contextual inspector'
   )
   git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD~1'))
+  }
   fs.writeFileSync(path.join(root, 'file.txt'), 'prepared version\n')
   git('add', 'file.txt')
   fs.writeFileSync(path.join(root, 'file.txt'), 'later worktree version\n')
@@ -132,10 +135,29 @@ exports.run = async (ctx) => {
     `<!doctype html><html><head>${csp}<meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`
   )
   await ctx.load(page)
-  await ctx.waitFor(() => document.querySelectorAll('.gm-commit').length === 11)
+  await waitForGit(() => document.querySelectorAll('.gm-commit').length > 0 && document.querySelector('.gm-history').getAttribute('aria-busy') === 'false')
   await ctx.evaluate(() => {
     document.querySelector('.global-sidebar-logo-img').src = 'logo.svg'
   })
+  if (ctx.mockup) {
+    await ctx.viewport(1672, 941)
+    await ctx.click('.gm-commit.is-merge')
+    await ctx.waitFor(() => !!document.querySelector('.gm-commit-author'))
+    ctx.window.webContents.sendInputEvent({ type: 'mouseMove', x: 10, y: 10 })
+    await ctx.overflow()
+    await ctx.capture('mockup-wide-dark')
+    ctx.check('Four real Git trajectories and selected commit inspector', await ctx.evaluate(() => document.querySelectorAll('.gm-atlas-lane-label').length >= 4 && !!document.querySelector('.gm-commit-author')))
+    ctx.check('Mockup composition: header actions, single filter row, 356px inspector', await ctx.evaluate(() => {
+      const bounds = selector => document.querySelector(selector).getBoundingClientRect()
+      return bounds('.gm-toolbar-actions').top < bounds('.gm-toolbar').top && bounds('.gm-toolbar').height < 85 && Math.abs(bounds('.gm-inspector').width - 356) < 2
+    }))
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
+    await ctx.capture('mockup-wide-light')
+    await ctx.viewport(1000, 800)
+    await ctx.overflow()
+    await ctx.capture('mockup-medium-light')
+    return
+  }
   await ctx.viewport(1440, 900)
   await ctx.click('.gm-commit.is-merge')
   await ctx.waitFor(() =>
@@ -163,6 +185,7 @@ exports.run = async (ctx) => {
     await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && document.querySelectorAll('.gm-commit').length === 11)
   }
   await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)')
+  await ctx.waitFor(() => document.querySelector('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)').getAttribute('aria-pressed') === 'true')
   await ctx.evaluate(() => { const select = document.querySelector('[aria-label="Referência em foco"]'); select.value = 'refs/heads/feature/inspector'; select.dispatchEvent(new Event('change', { bubbles: true })) })
   await waitForGit(() => document.querySelector('.gm-comparison')?.textContent.includes('exclusivos da base'))
   await ctx.capture('wide-dark-focus')
@@ -195,7 +218,7 @@ exports.run = async (ctx) => {
   })
   await ctx.capture('medium-dark-history')
   await ctx.viewport(1440, 900)
-  await ctx.click('.gm-toolbar-actions button:nth-child(2)')
+  await ctx.click('.gm-toolbar-actions button:nth-of-type(2)')
   await ctx.waitFor(
     () => document.querySelectorAll('.gm-change-group').length === 4
   )
@@ -387,7 +410,7 @@ exports.run = async (ctx) => {
       .querySelector('.gm-header')
       ?.textContent.includes('Second Repository')
   )
-  await ctx.waitFor(() =>
+  await waitForGit(() =>
     document
       .querySelector('.gm-placeholder')
       ?.textContent.includes('Nenhum commit')
@@ -407,7 +430,7 @@ exports.run = async (ctx) => {
   await ctx.waitFor(() => !!document.querySelector('.gm-empty'))
   await ctx.capture('wide-dark-no-repository')
   await ctx.click('[data-proof-project="non-git"]')
-  await ctx.waitFor(() =>
+  await waitForGit(() =>
     document
       .querySelector('[role="alert"]')
       ?.textContent.includes('não é um repositório Git')

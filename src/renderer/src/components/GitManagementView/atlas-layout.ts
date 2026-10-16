@@ -53,7 +53,7 @@ export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, prev
     while (sha && nodes.has(sha) && !owner.has(sha)) {
       shas.push(sha); owner.set(sha, id); sha = nodes.get(sha)!.parents[0]
     }
-    if (shas.length) tracks.push({ id, label, ref, shas, lane: 0, start: 0, end: 0, color: hash(id) % 6, detached })
+    if (shas.length) tracks.push({ id, label, ref, shas, lane: 0, start: 0, end: 0, color: ref === primary ? 2 : hash(id) % 4, detached })
   }
   for (const ref of refs) walk(ref.sha, ref.ref, ref.kind === 'HEAD' ? ref.name : ref.name, ref.ref)
   for (const detached of page.detachedHeads) walk(detached.sha, `detached:${detached.sha}`, `HEAD detached · ${detached.name}`, null, true)

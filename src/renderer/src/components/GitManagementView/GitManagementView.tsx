@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { GitBranch, RefreshCw, X } from 'lucide-react'
+import { GitBranch, GitMerge, RefreshCw, Settings, Hexagon, X, Tag } from 'lucide-react'
 import type { ActiveProjectState } from '../../../../shared/types/active-project-types'
 import type { GitOverview } from '../../../../shared/types/git-management-types'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
@@ -94,18 +94,17 @@ export function GitManagementView({ state }: { state: ActiveProjectState }) {
   return <section className="gm-view" aria-label="Git Management">
     <header className="gm-header">
       <span className="gm-feature-icon"><GitBranch size={32} /></span>
-      <div><h1>Git Management</h1><p>{state.project.name} <span>/ {history?.branch ?? (history?.head ? 'HEAD detached' : 'sem commits')}</span></p></div>
+      <div><h1>Git Management</h1><p>{state.project.name} <span>/ {history?.branch ?? (history?.head ? 'HEAD detached' : 'sem commits')} · {history?.nodes.length ?? 0} commits {windowDays === 'ALL' ? 'no trecho carregado' : `(últimos ${windowDays} dias)`}</span></p></div>
+      <div className="gm-toolbar-actions"><label>Branch<select aria-label="Branch do Atlas" value={focus} onChange={event => { setFocus(event.target.value); setMode(event.target.value ? 'Foco' : 'Panorama') }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label><button disabled={loading} onClick={() => void load()} aria-label="Atualizar Git"><RefreshCw size={17} />Atualizar</button>
+        <button onClick={() => { setSelection(null); setDrawer(true) }}><Settings size={18} />Alterações</button>
+        <button className="gm-context-toggle" onClick={() => setDrawer(true)}>Detalhes</button></div>
     </header>
     <div className="gm-toolbar">
       <div className="gm-segmented" role="group" aria-label="Janela temporal">{([30, 60, 90, 'ALL'] as const).map(value => <button key={value} aria-pressed={windowDays === value} onClick={() => setWindowDays(value)}>{value === 'ALL' ? 'Tudo' : `${value}d`}</button>)}</div>
       <div className="gm-segmented" role="group" aria-label="Modo do Atlas">{['Panorama', 'Foco', 'Comparar'].map(value => <button key={value} aria-pressed={mode === value} onClick={() => setMode(value)}>{value}</button>)}</div>
-      {mode !== 'Panorama' && <>
-        <label>Base<select aria-label="Referência base" value={base} onChange={event => setBase(event.target.value)}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>
-        <label>{mode === 'Foco' ? 'Branch em foco' : 'Comparar com'}<select aria-label="Referência em foco" value={focus} onChange={event => { setFocus(event.target.value); const ref = refs.find(ref => ref.ref === event.target.value); if (ref) setSelection({ kind: 'BRANCH', ref }) }}><option value="">Escolha a referência</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}{/^[a-f0-9]{40,64}$/.test(focus) && <option value={focus}>Trajetória · {focus.slice(0, 8)}</option>}</select></label>
-      </>}
-      <div className="gm-toolbar-actions"><button disabled={loading} onClick={() => void load()} aria-label="Atualizar Git"><RefreshCw size={15} />Atualizar</button>
-        <button onClick={() => { setSelection(null); setDrawer(true) }}>Alterações</button>
-        <button className="gm-context-toggle" onClick={() => setDrawer(true)}>Detalhes</button></div>
+      <label>{mode === 'Comparar' ? 'Comparar com' : 'Branch em foco'}<select aria-label="Referência em foco" value={focus} onChange={event => { setFocus(event.target.value); const ref = refs.find(ref => ref.ref === event.target.value); if (ref) { setMode(mode === 'Panorama' ? 'Foco' : mode); setSelection({ kind: 'BRANCH', ref }) } }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}{/^[a-f0-9]{40,64}$/.test(focus) && <option value={focus}>Trajetória · {focus.slice(0, 8)}</option>}</select></label>
+      {mode !== 'Panorama' && <label>Base<select aria-label="Referência base" value={base} onChange={event => setBase(event.target.value)}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>}
+      <button className="gm-icon-button" disabled={loading} onClick={() => void load()} aria-label="Atualizar Atlas"><RefreshCw size={18} /></button>
     </div>
     {error && <div className="gm-error" role="alert">{error === 'NOT_GIT_REPOSITORY' ? 'Este projeto não é um repositório Git.' : error === 'GIT_STATE_CHANGED' ? 'Histórico desatualizado. Atualize para carregar um novo snapshot.' : error}</div>}
     {mode !== 'Panorama' && <div className="gm-comparison" role="status">
@@ -117,18 +116,18 @@ export function GitManagementView({ state }: { state: ActiveProjectState }) {
     </div>}
     <div className="gm-workspace">
       <div className="gm-history" aria-busy={loading}>
-        <div className="gm-pane-heading"><div><h2><GitBranch size={22} />Git Atlas</h2><p>Trajetórias temporais do repositório</p></div>{history?.coverage === 'PARTIAL' && <span>Trecho parcial</span>}</div>
+        <div className="gm-pane-heading gm-atlas-heading"><GitBranch size={32} /><div><h2>Git Atlas</h2><p>Histórico do repositório com linhas do tempo por trajetória.</p></div><div className="gm-atlas-legend" title="A cor identifica a trajetória exibida, sem afirmar a branch de origem. Datas reais com espaçamento adaptado para leitura."><span><i />Commit</span><span><GitMerge size={15} />Merge</span><span><Tag size={15} />Tag</span></div>{history?.coverage === 'PARTIAL' && <span>Trecho parcial</span>}</div>
         {history?.detachedCoverage === 'PARTIAL' && <p className="gm-atlas-note" role="status">Alguns HEADs de worktrees não puderam ser verificados.</p>}
         <GitAtlasCanvas key={`${context.projectId}:${context.revision}:${windowDays}`} page={history} base={base} focus={focus} mode={mode} comparison={comparison} selected={selected} select={select} focusTrajectory={(ref, sha) => { setFocus(ref); setMode('Foco'); const branch = history?.refs.find(item => item.ref === ref); setSelection(branch ? { kind: 'BRANCH', ref: branch } : { kind: 'COMMIT', sha }) }} />
         {!history?.nodes.length && <p className="gm-placeholder">{loading ? 'Carregando histórico…' : error ? 'Histórico indisponível.' : 'Nenhum commit no período selecionado.'}</p>}
         {history?.nextCursor && <button className="gm-load-more" disabled={loading || !!error} onClick={() => void load(history.nextCursor!)}>Carregar anteriores</button>}
       </div>
       <aside ref={inspectorFocus} tabIndex={-1} className={`gm-inspector ${drawer ? 'is-open' : ''}`} aria-label="Detalhes Git">
-        <div className="gm-pane-heading"><strong>{selection?.kind === 'COMMIT' ? 'Commit selecionado' : selection?.kind === 'BRANCH' ? 'Branch selecionada' : 'Alterações locais'}</strong><button className="gm-context-toggle" aria-label="Fechar detalhes" onClick={() => { setDrawer(false); returnFocus.current?.focus() }}><X size={16} /></button></div>
+        <div className="gm-pane-heading gm-inspector-heading"><Hexagon size={18} /><strong>{selection?.kind === 'COMMIT' ? 'Commit selecionado' : selection?.kind === 'BRANCH' ? 'Branch selecionada' : 'Alterações locais'}</strong><button className="gm-close-details" aria-label="Fechar detalhes" onClick={() => { setDrawer(false); setSelection(null); returnFocus.current?.focus() }}><X size={18} /></button></div>
         <div className="gm-inspector-scroll">
-          <details className="gm-sha-lookup"><summary>Inspecionar por SHA</summary><form onSubmit={event => { event.preventDefault(); if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())) select(shaInput.trim()) }}><input aria-label="SHA completo" value={shaInput} onChange={event => setShaInput(event.target.value)} placeholder="SHA completo do commit" /><button disabled={!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())}>Inspecionar</button></form></details>
           {error && !overview ? <p>Estado Git indisponível.</p> : <GitInspector context={context} overview={overview} selection={selection} />}
           {overview && <div hidden={!!selection}><GitActions context={context} overview={overview} history={history} refresh={() => load()} blocked={loading || !!error} /></div>}
+          <details className="gm-sha-lookup"><summary>Inspecionar por SHA</summary><form onSubmit={event => { event.preventDefault(); if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())) select(shaInput.trim()) }}><input aria-label="SHA completo" value={shaInput} onChange={event => setShaInput(event.target.value)} placeholder="SHA completo do commit" /><button disabled={!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())}>Inspecionar</button></form></details>
         </div>
       </aside>
     </div>
