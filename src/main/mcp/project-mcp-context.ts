@@ -21,6 +21,7 @@ export interface McpProjectContext {
   runtimeRestart?: RuntimeRestartController
   gitOperations?: GitOperationsService
   githubIntegration?: GitHubIntegrationService
+  githubPrIsActive?: () => boolean
   repositoryFileIngress?: RepositoryFileIngress
   repositoryFileEditing?: RepositoryFileEditing
 }

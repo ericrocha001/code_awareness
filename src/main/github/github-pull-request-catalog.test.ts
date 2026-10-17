@@ -12,6 +12,28 @@ const inventory = (branches = [branch]): BranchInventory => ({ repositoryId: 'lo
 const json = (value: unknown, init?: ResponseInit) => new Response(JSON.stringify(value), init)
 
 describe('repository pull request catalog', () => {
+  it('keeps cached branch catalog separate from fresh PR summaries and post-token mutation approval', async () => {
+    let head = sha
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/merge-async')) return json({ status: 'pending', details: { uuid: 'owned-request' } }, { status: 202 })
+      if (url.pathname.endsWith('/pulls/7')) return json(dto(7, { stack: null, head: { repo: { id: 1, full_name: 'owner/repo' }, ref: 'topic', sha: head } }))
+      const headers = init?.headers as Record<string, string>
+      if (headers['If-None-Match']) return new Response(null, { status: 304 })
+      return json([dto(7)], { headers: { etag: 'catalog-version' } })
+    })
+    const api = new GitHubApiClient(async () => 'secret', fetcher)
+    expect((await api.listPullRequestCatalogPage('owner/repo', 1)).items[0].head.sha).toBe(sha)
+    head = other
+    expect((await api.listPullRequestCatalogPage('owner/repo', 1)).items[0].head.sha).toBe(sha)
+    expect((await api.listPullRequests('owner/repo', { state: 'all' })).pullRequests[0].number).toBe(7)
+    expect((await api.getPullRequest('owner/repo', 7)).head.sha).toBe(other)
+    expect((await api.getPullRequestCatalogRecord('owner/repo', 7)).head.sha).toBe(other)
+    const approval = vi.fn()
+    expect(await api.requestPullRequestMerge('owner/repo', 7, other, false, approval)).toMatchObject({ httpStatus: 202 })
+    expect(approval).toHaveBeenCalledTimes(1)
+    expect(JSON.parse(fetcher.mock.calls.at(-1)![1]!.body as string)).toEqual({ sha: other, bypass_rules: false, merge_action: 'default', merge_method: 'merge' })
+  })
   it('paginates state=all, deduplicates concurrent reads and caches one repository snapshot', async () => {
     const fetcher = vi.fn(async (input: string | URL | Request) => {
       const url = String(input)
@@ -59,19 +81,19 @@ describe('repository pull request catalog', () => {
   it('retains head/base and commit pagination from the provider', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(json(dto(7))).mockResolvedValueOnce(json([{ sha, commit: { message: 'own\nbody', committer: { date: '2026-01-01T00:00:00Z' } } }], { headers: { link: '<https://api.github.com/next>; rel="next"' } }))
     const api = new GitHubApiClient(async () => 'secret', fetcher)
-    expect(await api.getPullRequest('owner/repo', 7)).toMatchObject({ head: { sha }, base: { sha: other } })
+    expect(await api.getPullRequestCatalogRecord('owner/repo', 7)).toMatchObject({ head: { sha }, base: { sha: other } })
     expect(await api.getPullRequestCommits('owner/repo', 7, 1)).toMatchObject({ commits: [{ sha, title: 'own' }], nextPage: 2 })
   })
   it('uses conditional page revalidation without losing pagination or origin evidence', async () => {
     const fetcher = vi.fn().mockResolvedValueOnce(json([dto(1)], { headers: { etag: '"snapshot"', link: '<https://api.github.com/next>; rel="next"' } })).mockResolvedValueOnce(new Response(null, { status: 304 }))
     const api = new GitHubApiClient(async () => 'secret', fetcher)
-    const first = await api.listPullRequests('owner/repo', 1)
-    const second = await api.listPullRequests('owner/repo', 1)
+    const first = await api.listPullRequestCatalogPage('owner/repo', 1)
+    const second = await api.listPullRequestCatalogPage('owner/repo', 1)
     expect(second).toEqual(first); expect(second.hasNext).toBe(true)
     expect(fetcher.mock.calls[1][1].headers['If-None-Match']).toBe('"snapshot"')
     api.clearPullRequestCache()
     fetcher.mockResolvedValueOnce(json([dto(2)]))
-    expect((await api.listPullRequests('owner/repo', 1)).items[0].number).toBe(2)
+    expect((await api.listPullRequestCatalogPage('owner/repo', 1)).items[0].number).toBe(2)
     expect(fetcher.mock.calls[2][1].headers['If-None-Match']).toBeUndefined()
   })
   it('invalidates in-flight catalogs on connection changes', async () => {

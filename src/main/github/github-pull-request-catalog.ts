@@ -37,7 +37,7 @@ export class GitHubPullRequestCatalog {
     try {
       repository = await this.api.getPullRequestRepository(fullName)
       for (let page = 1; page <= 10; page++) {
-        const result = await this.api.listPullRequests(fullName, page)
+        const result = await this.api.listPullRequestCatalogPage(fullName, page)
         for (const pr of result.items) {
           if (pr.base.repositoryId !== repository.id || pr.base.repository.toLowerCase() !== fullName.toLowerCase()) throw new Error('REMOTE_IDENTITY_MISMATCH')
           items.set(pr.id, pr)
