@@ -90,7 +90,7 @@ import { GitOperationsService } from './git-operations/git-operations-service'
 import { GitManagementController, registerGitManagementHandlers } from './ipc/git-management-handler'
 import { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './ipc/work-orchestration-handler'
 import { orchestrationContinuumReader } from './ipc/orchestration-continuum-reader'
-import { WorktreeContractNavigation } from './core/context/worktree-contract-navigation'
+import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
@@ -411,6 +411,14 @@ app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:changed', change)
   })
   registerWorkOrchestrationHandlers(workOrchestration)
+  const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
+    const response = await dialog.showMessageBox({ type: 'warning', title: 'Liberar e remover Worktree',
+      message: 'Confirme que a IDE e os agentes desta Worktree foram encerrados e liberaram o diretório.',
+      detail: `${preview.worktree.path}\nBranch preservada: ${preview.preservationRef}\nHEAD: ${preview.preservationHead}\n\nA remoção será revalidada. A branch e seus commits serão mantidos.`,
+      buttons: ['Cancelar', 'IDE e agentes liberados; remover Worktree'], defaultId: 0, cancelId: 0, noLink: true })
+    return response.response === 1
+  }, continuumSession)
+  registerBranchOrchestrationHandlers(branchOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))
   app.on('before-quit', () => workOrchestration.deactivate())
@@ -418,6 +426,7 @@ app.whenReady().then(async () => {
   activeProjects.onBeforeChange(async () => {
     await gitManagement.deactivate()
     workOrchestration.deactivate()
+    await branchOrchestration.deactivate()
     await mcpLifecycle.quiesce()
     await activeValidationExecution?.shutdown()
     await activeWorktreeValidation?.shutdown()
@@ -465,7 +474,8 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     gitManagement.bind(gitOperations)
-    workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession), new WorktreeContractNavigation(gitOperations))
+    workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))
+    branchOrchestration.bind(gitOperations, githubIntegration, project.path)
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
     const repositoryFileIngress = new RepositoryFileIngress(project.path, { validateDestination: relative => repositoryFileEditing.assertCreationAllowed(relative) })
     const repositoryFileEditing = new RepositoryFileEditing(project.path, {

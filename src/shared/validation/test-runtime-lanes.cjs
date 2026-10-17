@@ -1,4 +1,5 @@
 const nativeTestFiles = Object.freeze([
+  'src/main/continuum/execution-branch.test.ts',
   'src/main/repository-file-ingress/repository-file-editing.e2e.test.ts',
   'src/main/core/codemap-addressability.test.ts',
   'src/main/core/codemap-extraction-contract.test.ts',

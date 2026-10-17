@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import type { ExecutionBranchSnapshot } from '../../shared/types/execution-branch-types'
 import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionQuery } from '../../shared/types/continuum-suggestion-types'
 import sharp from 'sharp'
@@ -60,6 +61,32 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     } finally { this.thumbnailReads-- }
   }
   private receipt(artifact: Artifact): ArtifactReceipt { return { success: true, artifactId: artifact.artifactId, revision: artifact.revision, updatedAt: artifact.updatedAt } }
+  async bindExecutionBranch(executionId: string, sourceArtifactId: string, observe: () => Promise<ExecutionBranchSnapshot>) {
+    this.assertActive()
+    if (!executionId.trim() || executionId.length > 512 || /[\0\r\n]/.test(executionId)) throw new Error('INVALID_ARGUMENT')
+    const checkSource = () => {
+      this.assertActive()
+      const source = this.get(sourceArtifactId)
+      if (!source || source.metadata.kind !== 'EXECUTABLE_PLAN' || source.metadata.executionId !== executionId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+    }
+    checkSource()
+    const before = await observe()
+    if (before.branchGeneration === 'UNKNOWN' || !before.branchRef.startsWith('refs/heads/')) throw new Error('BRANCH_IDENTITY_UNAVAILABLE')
+    const after = await observe()
+    if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error('EXECUTION_BINDING_DRIFT')
+    checkSource()
+    const artifactId = 'artifact-execution-branch-' + createHash('sha256').update(JSON.stringify([before.repositoryId, executionId, before.branchRef, before.branchGeneration])).digest('hex')
+    const observedAt = new Date().toISOString()
+    const metadata = { name: `Execução ${executionId} · ${before.branchRef}`, description: 'Declaração explícita vinculada a uma instância Git observada; não comprova atividade, autoria ou conclusão.',
+      kind: 'OBSERVATION', date: observedAt, status: 'VERIFIED_AT_BINDING', bindingRole: 'EXECUTION_BRANCH', executionId, repositoryId: before.repositoryId, sourceArtifactId,
+      branchRef: before.branchRef, branchGeneration: before.branchGeneration, branchRevision: before.branchRevision, sourceHeadAtBinding: before.head,
+      worktreeId: before.worktreeId, worktreeGeneration: before.worktreeGeneration, worktreeFingerprint: before.fingerprint, observedAt,
+      evidenceKind: 'AUTHENTICATED_DECLARATION_GIT_VERIFIED', relations: [{ artifactId: sourceArtifactId, kind: 'related-to' }] }
+    const rawMarkdown = `---\n${JSON.stringify(metadata, null, 2)}\n---\n\nDeclaração autenticada de execução associada à instância Git observada. A seleção da Worktree não prova posse do processo. A verificação é pontual; não autoriza operações Git nem comprova implementação ou validação.\n`
+    const artifact = this.store.createExecutionBinding({ artifactId, metadata, rawMarkdown })
+    this.changed()
+    return { ...this.receipt(artifact), state: 'PERSISTED' as const, executionId, branchRef: artifact.metadata.branchRef, branchGeneration: artifact.metadata.branchGeneration }
+  }
   publish(rawMarkdown: string): ArtifactReceipt {
     this.reconcile?.()
     const { metadata } = parseArtifactMarkdown(rawMarkdown)

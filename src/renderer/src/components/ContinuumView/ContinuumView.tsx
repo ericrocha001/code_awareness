@@ -47,7 +47,7 @@ function Inspector({ artifact, repositoryId, preview }: { artifact: ContinuumDet
   </>
 }
 
-export function ContinuumView({ activeProject }: { activeProject: ActiveProject | null }) {
+export function ContinuumView({ activeProject, artifactIntent }: { activeProject: ActiveProject | null; artifactIntent?: { repositoryId: string; artifactId: string } | null }) {
   const [view, setView] = useState<'timeline' | 'graph'>('timeline')
   const [repositoryId, setRepositoryId] = useState<string | null>(null)
   const [facets, setFacets] = useState<ContinuumFacet[]>([])
@@ -155,6 +155,10 @@ export function ContinuumView({ activeProject }: { activeProject: ActiveProject 
     setPublishedVisualId(null); setRevealId(null); setPublicationMessage(''); setPublicationError('')
     listGeneration.current++
   }, [path])
+
+  useEffect(() => {
+    if (repositoryId && artifactIntent?.repositoryId === repositoryId) { setSelectedId(artifactIntent.artifactId); setInspectorOpen(true) }
+  }, [repositoryId, artifactIntent])
 
   useEffect(() => window.codeAwareness.onContinuumChanged(() => setRefresh(value => value + 1)), [])
 

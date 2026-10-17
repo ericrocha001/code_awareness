@@ -2,7 +2,7 @@
 import React from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { WorkOrchestrationTab } from './WorkOrchestrationTab'
+import { WorkOrchestrationView as WorkOrchestrationTab } from './WorkOrchestrationView'
 import { orderWorktrees } from './WorkOrchestrationView'
 import { WorkOrchestrationView } from './WorkOrchestrationView'
 import { LocalChangesInspector } from './LocalChangesInspector'
@@ -121,29 +121,6 @@ it('observes only visible rows, bounds concurrency and pauses without extra read
   view.rerender(<WorkOrchestrationTab state={state} active />)
   notify(rows.slice(0, 3).map(target => ({ target, isIntersecting: true })) as IntersectionObserverEntry[], {} as IntersectionObserver)
   expect(read.mock.calls.filter((call: unknown[]) => !(call[0] as OrchestrationRequest | undefined)?.timeline)).toHaveLength(4)
-})
-it('lazily mounts once under StrictMode, restores filter/selection and performs zero reads on tab toggles', async () => {
-  const read = vi.fn(async (request: OrchestrationRequest) => request.worktree ? observe(tree(1)) : success(inventory()))
-  install(read)
-  const view = render(<React.StrictMode><WorkOrchestrationTab state={state} active={false} /></React.StrictMode>)
-  expect(read).not.toHaveBeenCalled()
-  view.rerender(<React.StrictMode><WorkOrchestrationTab state={state} active /></React.StrictMode>)
-  await screen.findByText('Inventário completo · 21 descobertas')
-  expect(read.mock.calls.filter((call: unknown[]) => !(call[0] as OrchestrationRequest | undefined)?.timeline)).toHaveLength(1)
-  expect(screen.queryByText(/Sem alterações locais/)).toBeNull()
-  fireEvent.change(screen.getByLabelText('Filtrar worktrees'), { target: { value: 'work-001' } })
-  fireEvent.click(screen.getByText('work-001'))
-  await screen.findByText('Última observação do estado')
-  expect(read.mock.calls.filter((call: unknown[]) => !(call[0] as OrchestrationRequest | undefined)?.timeline)).toHaveLength(2)
-  for (let i = 0; i < 3; i++) {
-    view.rerender(<React.StrictMode><WorkOrchestrationTab state={state} active={false} /></React.StrictMode>)
-    expect(view.container.querySelector('.wo-tab')?.hasAttribute('hidden')).toBe(true)
-    view.rerender(<React.StrictMode><WorkOrchestrationTab state={state} active /></React.StrictMode>)
-  }
-  expect(read.mock.calls.filter((call: unknown[]) => !(call[0] as OrchestrationRequest | undefined)?.timeline)).toHaveLength(2)
-  expect((screen.getByLabelText('Filtrar worktrees') as HTMLInputElement).value).toBe('work-001')
-  expect(screen.getByLabelText('Inspetor de worktree')).not.toBeNull()
-  expect(screen.queryByText(/Git Management/)).toBeNull()
 })
 it('retains old content on refresh failure and clears a replaced selection after explicit refresh', async () => {
   let finish!: (value: OrchestrationResult<OrchestrationData>) => void

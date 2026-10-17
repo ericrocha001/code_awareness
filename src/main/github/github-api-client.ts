@@ -1,6 +1,7 @@
 import type { GitHubRepositoryIdentity, GitHubRepositoryVisibility } from '../../shared/types/repository-catalog-types'
 import type { GitHubUserProjection } from '../../shared/types/github-types'
 import type { PullRequestMergeability } from '../../shared/types/git-evidence-types'
+import type { PullRequestRecord } from '../../shared/types/branch-pull-request-types'
 import { GITHUB_API_BASE_URL, GITHUB_API_VERSION, GITHUB_USER_AGENT } from './github-config'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 
@@ -17,6 +18,49 @@ interface GitHubRepositoryDto {
 }
 
 export class GitHubApiClient {
+  private readonly pullRequestPages = new Map<string, { etag: string; items: PullRequestRecord[]; hasNext: boolean }>()
+  private pullRequestCacheRevision = 0
+  clearPullRequestCache() { this.pullRequestCacheRevision++; this.pullRequestPages.clear() }
+  async getPullRequestRepository(fullName: string) {
+    const value = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}`, { signal: AbortSignal.timeout(10_000) })
+    if (!value || value.id == null || typeof value.full_name !== 'string' || typeof value.default_branch !== 'string' || value.full_name.toLowerCase() !== fullName.toLowerCase()) throw malformed()
+    return { id: String(value.id), fullName: value.full_name as string, defaultBranch: value.default_branch as string }
+  }
+
+  async listPullRequests(fullName: string, page: number) {
+    if (!Number.isSafeInteger(page) || page < 1 || page > 1000) throw malformed()
+    const path = `/repos/${encodeRepositoryFullName(fullName)}/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`
+    const cached = this.pullRequestPages.get(path)
+    const version = this.pullRequestCacheRevision
+    const { value, response } = await this.requestWithResponse<any>(path, { signal: AbortSignal.timeout(10_000), ...(cached ? { headers: { 'If-None-Match': cached.etag } } : {}) }, cached?.items)
+    if (response.status === 304 && cached) return { items: cached.items, hasNext: cached.hasNext }
+    if (!Array.isArray(value)) throw malformed()
+    const result = { items: value.map(parsePullRequest), hasNext: !!nextLink(response.headers.get('link')) }
+    const etag = response.headers.get('etag')
+    if (etag && version === this.pullRequestCacheRevision) {
+      if (this.pullRequestPages.size >= 100) this.pullRequestPages.delete(this.pullRequestPages.keys().next().value!)
+      this.pullRequestPages.set(path, { ...result, etag })
+    }
+    return result
+  }
+
+  async getPullRequest(fullName: string, number: number): Promise<PullRequestRecord> {
+    if (!Number.isSafeInteger(number) || number < 1) throw malformed()
+    return parsePullRequest(await this.request(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}`, { signal: AbortSignal.timeout(10_000) }))
+  }
+
+  async getPullRequestCommits(fullName: string, number: number, page: number) {
+    if (!Number.isSafeInteger(number) || number < 1 || !Number.isSafeInteger(page) || page < 1 || page > 1000) throw malformed()
+    const { value, response } = await this.requestWithResponse<any>(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}/commits?per_page=100&page=${page}`, { signal: AbortSignal.timeout(10_000) })
+    if (!Array.isArray(value) || value.some(v => !/^[a-f0-9]{40,64}$/.test(v?.sha) || typeof v.commit?.message !== 'string' || !Number.isFinite(Date.parse(v.commit?.committer?.date)))) throw malformed()
+    return { commits: value.map(v => ({ sha: v.sha as string, title: v.commit.message.split('\n')[0] as string, committedAt: v.commit.committer.date as string })), nextPage: nextLink(response.headers.get('link')) ? page + 1 : null }
+  }
+
+  async getBranchProtection(fullName: string, branch: string): Promise<boolean> {
+    const value = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}/branches/${encodeURIComponent(branch)}`, { signal: AbortSignal.timeout(10_000) })
+    if (!value || typeof value.protected !== 'boolean' || value.name !== branch) throw malformed()
+    return value.protected
+  }
   constructor(
     private readonly tokenProvider: () => Promise<string>,
     private readonly fetcher: typeof fetch = fetch
@@ -75,7 +119,7 @@ export class GitHubApiClient {
     return (await this.requestWithResponse<T>(path, init)).value
   }
 
-  private async requestWithResponse<T>(path: string, init?: RequestInit): Promise<{ value: T; response: Response }> {
+  private async requestWithResponse<T>(path: string, init?: RequestInit, notModified?: T): Promise<{ value: T; response: Response }> {
     const token = await this.tokenProvider()
     let response: Response
     try {
@@ -93,9 +137,21 @@ export class GitHubApiClient {
       if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) throw new GitHubIntegrationError('TIMEOUT', githubErrorMessage('TIMEOUT'))
       throw new GitHubIntegrationError('NETWORK_ERROR', githubErrorMessage('NETWORK_ERROR'))
     }
+    if (response.status === 304 && notModified !== undefined) return { value: notModified, response }
     if (!response.ok) throw responseError(response)
     try { return { value: await response.json() as T, response } } catch { throw malformed() }
   }
+}
+
+function parsePullRequest(value: any): PullRequestRecord {
+  const validRef = (ref: any) => ref && typeof ref.ref === 'string' && /^[a-f0-9]{40,64}$/.test(ref.sha)
+  if (!value || value.id == null || !Number.isSafeInteger(value.number) || !['open', 'closed'].includes(value.state) || typeof value.draft !== 'boolean' || !validRef(value.head) || !validRef(value.base) || value.base.repo?.id == null || typeof value.base.repo.full_name !== 'string' || typeof value.html_url !== 'string' || typeof value.title !== 'string' || !Number.isFinite(Date.parse(value.created_at)) || !Number.isFinite(Date.parse(value.updated_at))) throw malformed()
+  const mergedAt = typeof value.merged_at === 'string' && Number.isFinite(Date.parse(value.merged_at)) ? value.merged_at : null
+  return { id: String(value.id), number: value.number, url: value.html_url, title: value.title, state: value.state, draft: value.draft,
+    merged: value.merged === true || mergedAt !== null, mergedAt, mergeCommit: typeof value.merge_commit_sha === 'string' ? value.merge_commit_sha : null,
+    createdAt: value.created_at, updatedAt: value.updated_at,
+    base: { repositoryId: String(value.base.repo.id), repository: value.base.repo.full_name, ref: value.base.ref, sha: value.base.sha },
+    head: { repositoryId: value.head.repo?.id == null ? null : String(value.head.repo.id), repository: typeof value.head.repo?.full_name === 'string' ? value.head.repo.full_name : null, ref: value.head.ref, sha: value.head.sha } }
 }
 
 function toIdentity(value: GitHubRepositoryDto): GitHubRepositoryIdentity {

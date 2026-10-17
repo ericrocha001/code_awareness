@@ -29,6 +29,7 @@ function fail(code: string): never { throw new Error(code) }
 export class GitWorktreeRegistry {
   private common: string | undefined
   private readonly observed = new Map<string, { common: string; admin: string; physical: string; record: WorktreeRecord }>()
+  private readonly observedPaths = new Map<string, string>()
 
   constructor(private readonly root: string, private readonly git: GitService, private readonly identity: WorktreeIdentity) {}
 
@@ -55,8 +56,8 @@ export class GitWorktreeRegistry {
 
   private validatedDirectories(physical: string, path: string, common: string): { common: string; admin: string } | null {
     if (process.env.GIT_DIR || process.env.GIT_COMMON_DIR || process.env.GIT_WORK_TREE) return null
-    const prior = [...this.observed.values()].reverse().find(value => value.physical === physical && value.record.path === resolve(path) && value.common === common)
-    if (!prior) return null
+    const id = this.observedPaths.get(resolve(path)), prior = id ? this.observed.get(id) : undefined
+    if (!prior || prior.physical !== physical || prior.common !== common) return null
     try {
       const pointer = join(physical, '.git')
       let admin: string
@@ -105,6 +106,7 @@ export class GitWorktreeRegistry {
       locked: fields.some(value => value === 'locked' || value.startsWith('locked ')),
       prunable: fields.some(value => value === 'prunable' || value.startsWith('prunable ')), missing, creation: this.observed.get(worktreeId)?.record.creation ?? creation }
     this.observed.set(worktreeId, { common, admin, physical, record })
+    this.observedPaths.set(resolve(path), worktreeId)
     return record
   }
 

@@ -1,4 +1,10 @@
 import { readWorktreeProvenance } from './git-worktree-provenance'
+import { GitBranchInventory, recordBranchCreation } from './git-branch-inventory'
+import { GitBranchDiscard } from './git-branch-discard'
+import type { BranchDiscardExecute, BranchDiscardRemoteReader } from '../../shared/types/branch-discard-types'
+import { randomUUID } from 'node:crypto'
+import type { WorktreeRemovalExecute, WorktreeRemovalPreview } from '../../shared/types/worktree-removal-types'
+import type { BranchHistoryQuery } from '../../shared/types/branch-orchestration-types'
 import { createHash } from 'node:crypto'
 import { summarizeLocalChanges } from './local-change-summary'
 import type { RemoteEvidence } from '../../shared/types/git-evidence-types'
@@ -76,6 +82,79 @@ function isBinary(bytes: Buffer): boolean {
 }
 
 export class GitOperationsService {
+  private readonly removalPreviews = new Map<string, WorktreeRemovalPreview>()
+  async prepareWorktreeRemoval(worktreeId: string, generation: string): Promise<WorktreeRemovalPreview> {
+    const inventory = await this.getBranchInventory()
+    const record = inventory.worktrees.find(w => w.worktreeId === worktreeId && w.generation === generation)
+    if (!record || !this.worktrees) fail('WORKTREE_STALE')
+    const blockers: string[] = []
+    if (this.worktrees.isReference(worktreeId) || resolve(record.path) === resolve(this.repoRoot)) blockers.push('WORKTREE_PRIMARY_OR_ACTIVE')
+    if (record.locked) blockers.push('WORKTREE_LOCKED')
+    if (record.missing || record.prunable) blockers.push('WORKTREE_STALE')
+    if (!record.branch || !record.head) blockers.push('WORKTREE_PRESERVATION_REQUIRED')
+    let stagedCount: number | null = null, unstagedCount: number | null = null, untrackedCount: number | null = null, ignoredCount: number | null = null, snapshotRevision = 'UNAVAILABLE'
+    try {
+      await this.git.assertWorktreeRemovalSafe(record.path)
+      const selected = await this.selectWorktree(worktreeId), state = await selected.service.getState()
+      stagedCount = state.stagedCount; unstagedCount = state.unstagedCount; untrackedCount = state.untrackedCount
+      ignoredCount = await this.git.countIgnoredWorktreeFiles(record.path)
+      snapshotRevision = ownershipDigest([this.snapshot(state), await this.git.getWorktreeRevision(record.path), ignoredCount])
+      if (state.operation) blockers.push('GIT_OPERATION_IN_PROGRESS')
+      if (state.stagedCount || state.unstagedCount || state.untrackedCount || state.conflictCount) blockers.push('DIRTY_WORKTREE')
+      if (ignoredCount) blockers.push('WORKTREE_IGNORED_CONTENT')
+      const common = realpathSync(await this.git.getCommonDirectory(record.path))
+      assertNoWorktreeGrant(common, record.path)
+      if (await this.worktreeValidation?.busy(worktreeId)) blockers.push('WORKTREE_VALIDATION_BUSY')
+    } catch (error) { blockers.push(error instanceof Error ? error.message : 'WORKTREE_OBSERVATION_UNAVAILABLE') }
+    const preservation = record.branch ? inventory.branches.find(b => b.namespace === 'LOCAL' && b.name === record.branch && b.head === record.head) : null
+    if (!preservation) blockers.push('WORKTREE_PRESERVATION_REQUIRED')
+    if ((await this.getBranchInventory()).revision !== inventory.revision) fail('GIT_STATE_CHANGED')
+    const preview: WorktreeRemovalPreview = { previewId: randomUUID(), repositoryId: inventory.repositoryId, worktree: record, inventoryRevision: inventory.revision, snapshotRevision,
+      preservationRef: preservation?.ref ?? null, preservationHead: preservation?.head ?? null, stagedCount, unstagedCount, untrackedCount, ignoredCount, blockers: [...new Set(blockers)], expiresAt: new Date(Date.now() + 300000).toISOString() }
+    for (const [id, prior] of this.removalPreviews) if (Date.parse(prior.expiresAt) < Date.now()) this.removalPreviews.delete(id)
+    if (this.removalPreviews.size >= 100) this.removalPreviews.delete(this.removalPreviews.keys().next().value!)
+    this.removalPreviews.set(preview.previewId, preview)
+    return preview
+  }
+  executeWorktreeRemoval(request: WorktreeRemovalExecute, confirmRelease: (preview: WorktreeRemovalPreview) => Promise<boolean>, guard: () => void) {
+    return this.serialized(() => new GitOperationReceipts(this.repoRoot, this.git).executeResult(request.operationId, 'remove_worktree_assisted', { ...request }, async () => {
+      try {
+        const before = this.removalPreviews.get(request.previewId)
+        if (!before || Date.parse(before.expiresAt) < Date.now()) throw new Error('WORKTREE_PREVIEW_STALE')
+        if (request.releasedByUser !== true || !await confirmRelease(before)) throw new Error('WORKTREE_RELEASE_NOT_CONFIRMED')
+        guard()
+        const current = await this.prepareWorktreeRemoval(before.worktree.worktreeId, before.worktree.generation)
+        this.removalPreviews.delete(current.previewId)
+        if (current.inventoryRevision !== before.inventoryRevision || current.snapshotRevision !== before.snapshotRevision) throw new Error('GIT_STATE_CHANGED')
+        if (current.blockers.length) throw new Error(current.blockers[0])
+        guard()
+        await this.git.assertWorktreeRemovalSafe(before.worktree.path)
+        const lifecycle = new GitWorktreeLifecycle(realpathSync(await this.git.getCommonDirectory(this.repoRoot)))
+        const managed = lifecycle.get(before.worktree)
+        await this.git.removeWorktree(this.repoRoot, before.worktree.path)
+        if (managed) lifecycle.save({ ...managed, closedAt: new Date().toISOString() })
+        this.removalPreviews.delete(before.previewId)
+        return { value: { result: 'WORKTREE_REMOVED', repositoryId: before.repositoryId, worktreeId: before.worktree.worktreeId, preservationRef: before.preservationRef, preservationHead: before.preservationHead } }
+      } catch (error) { return { value: { code: error instanceof Error ? error.message : 'WORKTREE_REMOVAL_FAILED' }, isError: true } }
+    }))
+  }
+  private branchDiscard: GitBranchDiscard | undefined
+  private discardService() { return this.branchDiscard ??= new GitBranchDiscard(this.repoRoot, this.git, this.branchReader(), id => this.getCoordinationSnapshot(id)) }
+  prepareBranchDiscard(ref: string, revision: string, baseRef: string, remote: BranchDiscardRemoteReader) {
+    return this.discardService().prepare(ref, revision, baseRef, remote)
+  }
+  executeBranchDiscard(request: BranchDiscardExecute, remote: BranchDiscardRemoteReader, guard: () => void) {
+    return this.serialized(() => new GitOperationReceipts(this.repoRoot, this.git).executeResult(request.operationId, 'discard_git_branch', { ...request }, async () => {
+      try { return { value: await this.discardService().execute(request, remote, guard) } }
+      catch (error) { return { value: { code: error instanceof Error ? error.message : 'BRANCH_DISCARD_FAILED' }, isError: true } }
+    }))
+  }
+  private branchReader(): GitBranchInventory {
+    if (!this.worktrees || !this.coordinationIdentity) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    return new GitBranchInventory(this.repoRoot, this.git, this.worktrees, this.coordinationIdentity)
+  }
+  getBranchInventory() { return this.branchReader().inventory() }
+  getBranchCommits(query: BranchHistoryQuery) { return this.branchReader().history(query) }
   async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>): Promise<LegacyGitReceiptResult> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
     return new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate)
@@ -186,7 +265,9 @@ export class GitOperationsService {
               const branch = await service.branch(request.branch!)
               if ((await this.git.listBranches(selected.record.path)).split('\n').some(existing => existing.split('\0')[0] === branch)) fail('BRANCH_ALREADY_EXISTS')
               await assertCurrent()
+              const createdAt = new Date().toISOString()
               await this.git.createAndSwitchBranch(selected.record.path, branch)
+              await recordBranchCreation(selected.record.path, this.git, `refs/heads/${branch}`, createdAt)
             }
             const current = await this.selectWorktree(request.worktreeId)
             return { content: [{ type: 'text', text: JSON.stringify({ worktreeId: request.worktreeId, ...await current.service.getState() }) }] }
@@ -238,7 +319,9 @@ export class GitOperationsService {
         if ((await this.git.listBranches(record.path)).split('\n').some(existing => existing.split('\0')[0] === request.branch)) fail('BRANCH_ALREADY_EXISTS')
         const destination = lifecycle.destination()
         await assertCurrent()
+        const createdAt = new Date().toISOString()
         await this.git.createWorktree(this.repoRoot, destination, request.branch, startPoint)
+        await recordBranchCreation(this.repoRoot, this.git, `refs/heads/${request.branch}`, createdAt)
         const created = (await this.worktrees!.discover()).worktrees.find(w => w.path === destination)
         if (!created) fail('OPERATION_OUTCOME_UNKNOWN')
         lifecycle.save({ ...created, repositoryId: observed.repositoryId, startPoint, createdAt: new Date().toISOString() })
@@ -1176,7 +1259,9 @@ export class GitOperationsService {
       await guard?.()
       if (request.action === 'CREATE') {
         await this.checkHead(request.expectedHead)
+        const createdAt = new Date().toISOString()
         await this.git.createBranch(this.repoRoot, branch, await this.ref(request.startPoint ?? 'HEAD'))
+        return this.observeMutation(async () => ({ ...await this.getState(), branchCreation: await recordBranchCreation(this.repoRoot, this.git, `refs/heads/${branch}`, createdAt) }))
       } else if (request.action === 'SWITCH') await this.git.switchBranch(this.repoRoot, branch)
       else if (request.action === 'DELETE') await this.git.deleteBranch(this.repoRoot, branch)
       else if (request.action === 'RENAME') await this.git.renameBranch(this.repoRoot, branch, await this.branch(request.newBranch))
