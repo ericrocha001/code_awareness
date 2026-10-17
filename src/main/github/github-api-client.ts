@@ -3,8 +3,9 @@ import type { GitHubUserProjection } from '../../shared/types/github-types'
 import type { PullRequestMergeability } from '../../shared/types/git-evidence-types'
 import { GITHUB_API_BASE_URL, GITHUB_API_VERSION, GITHUB_USER_AGENT } from './github-config'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
+import { PullRequestError, type PullRequestSummary, type PullRequestQuery, type CreatePullRequestInput } from '../../shared/types/github-pr-types'
 
-interface GitHubInstallation { id: number; html_url?: string }
+interface GitHubInstallation { id: number; app_slug?: string; account?: { login: string }; html_url?: string; permissions?: { pull_requests?: string } }
 interface GitHubRepositoryDto {
   id: number
   name: string
@@ -19,7 +20,8 @@ interface GitHubRepositoryDto {
 export class GitHubApiClient {
   constructor(
     private readonly tokenProvider: () => Promise<string>,
-    private readonly fetcher: typeof fetch = fetch
+    private readonly fetcher: typeof fetch = fetch,
+    private readonly appSlug?: string
   ) {}
 
   async getUser(): Promise<GitHubUserProjection> {
@@ -42,6 +44,60 @@ export class GitHubApiClient {
 
   async listInstallations(): Promise<GitHubInstallation[]> {
     return this.paginate<GitHubInstallation>('/user/installations', 'installations')
+  }
+
+  async getPullRequestPermissions(fullName: string): Promise<{ read: boolean; create: boolean }> {
+    if (!this.appSlug) throw new GitHubIntegrationError('CONFIGURATION_REQUIRED', githubErrorMessage('CONFIGURATION_REQUIRED'))
+    const repository = await this.request<GitHubRepositoryDto & { permissions?: { pull?: boolean; push?: boolean } }>(`/repos/${encodeRepositoryFullName(fullName)}`)
+    if (repository.full_name?.toLowerCase() !== fullName.toLowerCase()) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+    for (let page = 1; page <= 10; page++) {
+      const installations = await this.request<{ installations: GitHubInstallation[] }>(`/user/installations?per_page=100&page=${page}`)
+      if (!Array.isArray(installations.installations)) throw malformed()
+      for (const installation of installations.installations) {
+        if (installation.app_slug !== this.appSlug || installation.account?.login.toLowerCase() !== fullName.split('/')[0].toLowerCase()) continue
+        for (let repoPage = 1; repoPage <= 10; repoPage++) {
+          const repos = await this.request<{ repositories: GitHubRepositoryDto[] }>(`/user/installations/${installation.id}/repositories?per_page=100&page=${repoPage}`)
+          if (!Array.isArray(repos.repositories)) throw malformed()
+          if (repos.repositories.some(repo => repo.id === repository.id)) {
+            const permission = installation.permissions?.pull_requests
+            return { read: repository.permissions?.pull === true && ['read', 'write'].includes(permission ?? ''), create: repository.permissions?.push === true && permission === 'write' }
+          }
+          if (repos.repositories.length < 100) break
+          if (repoPage === 10) throw new PullRequestError('RECONCILIATION_LIMIT')
+        }
+      }
+      if (installations.installations.length < 100) throw new GitHubIntegrationError('INSTALLATION_REQUIRED', githubErrorMessage('INSTALLATION_REQUIRED'))
+    }
+    throw new PullRequestError('RECONCILIATION_LIMIT')
+  }
+
+  async listPullRequests(fullName: string, query: PullRequestQuery = {}) {
+    const page = query.cursor ? Number(query.cursor) : 1
+    if (!Number.isSafeInteger(page) || page < 1 || page > 10000) throw new PullRequestError('INVALID_ARGUMENT')
+    const params = new URLSearchParams({ state: query.state ?? 'open', per_page: String(query.pageSize ?? 30), page: String(page), sort: 'created', direction: 'desc' })
+    if (query.headBranch) params.set('head', `${fullName.split('/')[0]}:${query.headBranch}`)
+    if (query.baseBranch) params.set('base', query.baseBranch)
+    const { value, response } = await this.requestWithResponse<unknown>(`/repos/${encodeRepositoryFullName(fullName)}/pulls?${params}`)
+    if (!Array.isArray(value) || value.length > (query.pageSize ?? 30)) throw malformed()
+    return { pullRequests: value.map(item => toPullRequest(item, fullName)), ...(nextLink(response.headers.get('link')) ? { nextCursor: String(page + 1) } : {}) }
+  }
+
+  async getPullRequest(fullName: string, number: number): Promise<PullRequestSummary> {
+    const result = toPullRequest(await this.request(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}`), fullName)
+    if (result.number !== number) throw malformed()
+    return result
+  }
+
+  async getBranchSha(fullName: string, branch: string): Promise<string> {
+    const ref = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}/git/ref/heads/${encodeURIComponent(branch)}`)
+    if (ref?.ref !== `refs/heads/${branch}` || ref.object?.type !== 'commit' || !/^[a-f0-9]{40}$/.test(ref.object.sha)) throw malformed()
+    return ref.object.sha
+  }
+
+  async createPullRequest(fullName: string, input: CreatePullRequestInput, beforeSend?: () => void): Promise<PullRequestSummary> {
+    return toPullRequest(await this.request(`/repos/${encodeRepositoryFullName(fullName)}/pulls`, {
+      method: 'POST', body: JSON.stringify({ head: input.headBranch, base: input.baseBranch, title: input.title, body: input.body, draft: false })
+    }, beforeSend), fullName)
   }
 
   async listInstallationRepositories(installationId: number): Promise<GitHubRepositoryIdentity[]> {
@@ -71,15 +127,18 @@ export class GitHubApiClient {
     return result
   }
 
-  private async request<T>(path: string, init?: RequestInit): Promise<T> {
-    return (await this.requestWithResponse<T>(path, init)).value
+  private async request<T>(path: string, init?: RequestInit, beforeSend?: () => void): Promise<T> {
+    return (await this.requestWithResponse<T>(path, init, beforeSend)).value
   }
 
-  private async requestWithResponse<T>(path: string, init?: RequestInit): Promise<{ value: T; response: Response }> {
+  private async requestWithResponse<T>(path: string, init?: RequestInit, beforeSend?: () => void): Promise<{ value: T; response: Response }> {
     const token = await this.tokenProvider()
+    beforeSend?.()
     let response: Response
     try {
       response = await this.fetcher(path.startsWith('http') ? path : `${GITHUB_API_BASE_URL}${path}`, {
+        signal: AbortSignal.timeout(10_000),
+        redirect: 'error',
         ...init,
         headers: {
           Accept: 'application/vnd.github+json',
@@ -96,6 +155,14 @@ export class GitHubApiClient {
     if (!response.ok) throw responseError(response)
     try { return { value: await response.json() as T, response } } catch { throw malformed() }
   }
+}
+
+function toPullRequest(value: any, fullName: string): PullRequestSummary {
+  const ref = (item: any) => item && typeof item.ref === 'string' && /^[a-f0-9]{40}$/.test(item.sha) && typeof item.repo?.full_name === 'string'
+  if (!value || !Number.isSafeInteger(value.number) || value.number <= 0 || !['open', 'closed'].includes(value.state) || typeof value.draft !== 'boolean' || typeof value.title !== 'string' || !ref(value.head) || !ref(value.base) || value.base.repo.full_name.toLowerCase() !== fullName.toLowerCase() || value.html_url?.toLowerCase() !== `https://github.com/${fullName}/pull/${value.number}`.toLowerCase() || !(value.merged_at === null || typeof value.merged_at === 'string')) throw malformed()
+  return { number: value.number, url: value.html_url, title: value.title, state: value.state, draft: value.draft,
+    head: { ref: value.head.ref, sha: value.head.sha, repository: value.head.repo.full_name }, base: { ref: value.base.ref, sha: value.base.sha, repository: value.base.repo.full_name },
+    mergedAt: value.merged_at, mergeability: value.mergeable === true ? 'MERGEABLE' : value.mergeable === false ? 'NOT_MERGEABLE' : 'UNKNOWN', observedAt: new Date().toISOString() }
 }
 
 function toIdentity(value: GitHubRepositoryDto): GitHubRepositoryIdentity {

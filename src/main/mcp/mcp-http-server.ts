@@ -93,6 +93,14 @@ export function createMcpHttpServer(
         return
       }
 
+      const host = request.headers.host
+      const origin = request.headers.origin
+      const loopback = request.socket.remoteAddress === '127.0.0.1' || request.socket.remoteAddress === '::1' || request.socket.remoteAddress === '::ffff:127.0.0.1'
+      if (!loopback || !host || !/^(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/.test(host) || (origin !== undefined && origin !== `http://${host}`)) {
+        responseSize = writeJson(response, 403, error(null, -32600, 'LOCAL_ORIGIN_REQUIRED'))
+        return
+      }
+
       const message = await readJson(request)
       const rawMethod = message.method
       method = typeof rawMethod === 'string' ? rawMethod : 'unknown'

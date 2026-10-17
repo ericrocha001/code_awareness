@@ -7,6 +7,8 @@ import type { GitHubAuthService, PendingGitHubAuthorization } from './github-aut
 import type { GitHubProductConfig } from './github-config'
 import type { GitHubConnectionMetadata, GitHubCredentialStore } from './github-credential-store'
 import { GitHubIntegrationError, githubErrorMessage, toGitHubIntegrationError } from './github-errors'
+import { GitHubPullRequests, type PullRequestDependencies, type PullRequestExecutionContext } from './github-pull-requests'
+import { PullRequestError, type CreatePullRequestInput, type PullRequestQuery } from '../../shared/types/github-pr-types'
 
 export interface ExternalUrlOpener { openExternal(url: string): Promise<unknown> }
 
@@ -22,8 +24,49 @@ export class GitHubIntegrationService {
     private readonly api: GitHubApiClient | null,
     private readonly catalog: RepositoryCatalogService,
     private readonly git: GitService,
-    private readonly external: ExternalUrlOpener
+    private readonly external: ExternalUrlOpener,
+    private readonly pullRequestDependencies?: PullRequestDependencies
   ) {}
+
+  canCreatePullRequests(): boolean { return !!(this.config && this.auth && this.api && this.pullRequestDependencies) }
+
+  private async pullRequestContext(repoPath: string) {
+    this.requireConfigured()
+    if (!this.auth!.hasCredentials()) throw new GitHubIntegrationError('NOT_CONNECTED', githubErrorMessage('NOT_CONNECTED'))
+    const remote = await this.git.getRemoteUrl(repoPath)
+    const repository = remote ? normalizeGitHubOrigin(remote) : null
+    const record = this.catalog.findByPath(repoPath)
+    if (!repository || !record || (record.github && record.github.fullName.toLowerCase() !== repository.toLowerCase())) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+    const remoteIdentity = await this.api!.getRepository(repository)
+    if (remoteIdentity.fullName.toLowerCase() !== repository.toLowerCase() || (record.github?.repositoryId && record.github.repositoryId !== remoteIdentity.repositoryId)) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+    return { repositoryId: record.id, repository }
+  }
+
+  async getPullRequestAccess(repoPath: string) {
+    try {
+      const context = await this.pullRequestContext(repoPath)
+      const permissions = await this.api!.getPullRequestPermissions(context.repository)
+      return { ...context, state: permissions.read ? 'READY' : 'PERMISSION_DENIED', operations: { read: permissions.read, create: permissions.create && this.canCreatePullRequests() },
+        restrictions: ['DESKTOP_APPROVAL_REQUIRED', 'SAME_REPOSITORY_ONLY'], requiredPermissions: { read: 'Pull requests: read', create: 'Pull requests: write' }, observedAt: new Date().toISOString() }
+    } catch (error) {
+      return { state: error instanceof PullRequestError ? error.code : toGitHubIntegrationError(error).code, operations: { read: false, create: false }, configurationRequired: !this.config ? ['CODE_AWARENESS_GITHUB_CLIENT_ID', 'CODE_AWARENESS_GITHUB_APP_SLUG'] : [], recovery: 'Use GitHub settings in Desktop to configure, connect or manage installation access.', observedAt: new Date().toISOString() }
+    }
+  }
+
+  async listPullRequests(repoPath: string, query: PullRequestQuery) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, ...await this.api!.listPullRequests(context.repository, query) }
+  }
+
+  async getPullRequest(repoPath: string, number: number) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, pullRequest: await this.api!.getPullRequest(context.repository, number) }
+  }
+
+  async createPullRequest(repoPath: string, input: CreatePullRequestInput, execution: PullRequestExecutionContext) {
+    this.requireConfigured()
+    return new GitHubPullRequests(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).create(input, execution)
+  }
 
   getStatus(): GitHubStatusProjection {
     if (!this.config || !this.auth || !this.api) return { state: 'CONFIGURATION_REQUIRED', user: null }

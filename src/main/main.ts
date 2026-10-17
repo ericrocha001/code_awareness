@@ -297,7 +297,7 @@ app.whenReady().then(async () => {
   const githubConfig = loadGitHubProductConfig()
   const githubCredentials = new GitHubCredentialStore(desktopProfilePaths(app.getPath('userData')).githubPath, safeStorage)
   const githubAuth = githubConfig ? new GitHubAuthService(githubConfig, githubCredentials) : null
-  const githubApi = githubAuth ? new GitHubApiClient(() => githubAuth.getValidAccessToken()) : null
+  const githubApi = githubAuth ? new GitHubApiClient(() => githubAuth.getValidAccessToken(), fetch, githubConfig!.appSlug) : null
   const gitTransport = new GitHubGitTransport(githubAuth, gitService)
   const academyGitMaterializer = new AcademyGitMaterializer()
   const academyPluginProjection = new AcademyPluginRepositoryProjection()
@@ -482,6 +482,7 @@ app.whenReady().then(async () => {
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
       githubIntegration,
+      githubPrIsActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision,
       repositoryFileIngress,
       repositoryFileEditing,
       runtimeRestart
@@ -516,7 +517,20 @@ app.whenReady().then(async () => {
   remoteAccess.start()
 
   const githubIntegration = new GitHubIntegrationService(
-    githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell
+    githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell, {
+      receiptDirectory: join(app.getPath('userData'), 'github', 'pr-operations'),
+      approve: async request => {
+        const project = activeProjects?.getState()
+        if (!mainWindow || mainWindow.isDestroyed() || !project?.project || repositoryCatalog?.findByPath(project.project.path)?.id !== request.repositoryId) return false
+        const response = await dialog.showMessageBox(mainWindow, {
+          type: 'question', title: 'Autorizar abertura de Pull Request',
+          message: `Abrir Pull Request em ${request.repository}?`,
+          detail: `Origem: ${request.headBranch}\nDestino: ${request.baseBranch}\nCommit publicado: ${request.expectedHeadSha}\nTítulo: ${request.title}\nDescrição:\n${request.body}\n\nOperação: ${request.operationId}\nExpira: ${request.expiresAt}`,
+          buttons: ['Recusar', 'Autorizar este Pull Request'], defaultId: 0, cancelId: 0, noLink: true
+        })
+        return response.response === 1 && activeProjects?.getState().revision === project.revision && Date.now() < Date.parse(request.expiresAt)
+      }
+    }
   )
   const codeAwarenessIgnoreService = new CodeAwarenessIgnoreService(settingsService)
 
