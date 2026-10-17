@@ -8,6 +8,8 @@ import type { GitHubProductConfig } from './github-config'
 import type { GitHubConnectionMetadata, GitHubCredentialStore } from './github-credential-store'
 import { GitHubIntegrationError, githubErrorMessage, toGitHubIntegrationError } from './github-errors'
 import { GitHubPullRequests, type PullRequestDependencies, type PullRequestExecutionContext } from './github-pull-requests'
+import { GitHubPrIntegration } from './github-pr-integration'
+import type { PullRequestMutationInput } from '../../shared/types/github-pr-types'
 import { PullRequestError, type CreatePullRequestInput, type PullRequestQuery } from '../../shared/types/github-pr-types'
 
 export interface ExternalUrlOpener { openExternal(url: string): Promise<unknown> }
@@ -29,6 +31,27 @@ export class GitHubIntegrationService {
   ) {}
 
   canCreatePullRequests(): boolean { return !!(this.config && this.auth && this.api && this.pullRequestDependencies) }
+  canIntegratePullRequests(): boolean { return this.canCreatePullRequests() && !!this.pullRequestDependencies?.approveMutation }
+
+  async getPullRequestReviews(repoPath: string, number: number) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, ...await this.api!.getPullRequestReviews(context.repository, number) }
+  }
+
+  async getPullRequestChecks(repoPath: string, number: number) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, ...await this.api!.getPullRequestChecks(context.repository, number) }
+  }
+
+  async mutatePullRequest(repoPath: string, operation: 'MERGE_PULL_REQUEST' | 'CLOSE_PULL_REQUEST', input: PullRequestMutationInput, execution: PullRequestExecutionContext) {
+    this.requireConfigured()
+    return new GitHubPrIntegration(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).mutate(operation, input, execution)
+  }
+
+  async getPullRequestOperation(repoPath: string, operationId: string) {
+    this.requireConfigured()
+    return new GitHubPrIntegration(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).status(operationId)
+  }
 
   private async pullRequestContext(repoPath: string) {
     this.requireConfigured()
@@ -45,9 +68,9 @@ export class GitHubIntegrationService {
   async getPullRequestAccess(repoPath: string) {
     try {
       const context = await this.pullRequestContext(repoPath)
-      const permissions = await this.api!.getPullRequestPermissions(context.repository)
-      return { ...context, state: permissions.read ? 'READY' : 'PERMISSION_DENIED', operations: { read: permissions.read, create: permissions.create && this.canCreatePullRequests() },
-        restrictions: ['DESKTOP_APPROVAL_REQUIRED', 'SAME_REPOSITORY_ONLY'], requiredPermissions: { read: 'Pull requests: read', create: 'Pull requests: write' }, observedAt: new Date().toISOString() }
+      const permissions = await this.api!.getPullRequestEndpointPermissions(context.repository)
+      return { ...context, state: permissions.read ? 'READY' : 'PERMISSION_DENIED', operations: { read: permissions.read, reviews: permissions.read, checks: permissions.checks, statuses: permissions.statuses, create: permissions.close && this.canCreatePullRequests(), close: permissions.close && this.canIntegratePullRequests(), merge: permissions.merge && permissions.read && permissions.checks && permissions.statuses && this.canIntegratePullRequests() },
+        restrictions: ['DESKTOP_APPROVAL_REQUIRED', 'SAME_REPOSITORY_ONLY', 'NO_LOCAL_GIT_SYNC', 'NO_ATOMIC_BASE_CAS'], requiredPermissions: { read: 'Pull requests: read', reviews: 'Pull requests: read', checks: 'Checks: read', statuses: 'Commit statuses: read', create: 'Pull requests: write', close: 'Pull requests: write', merge: 'Contents: write' }, observedAt: new Date().toISOString() }
     } catch (error) {
       return { state: error instanceof PullRequestError ? error.code : toGitHubIntegrationError(error).code, operations: { read: false, create: false }, configurationRequired: !this.config ? ['CODE_AWARENESS_GITHUB_CLIENT_ID', 'CODE_AWARENESS_GITHUB_APP_SLUG'] : [], recovery: 'Use GitHub settings in Desktop to configure, connect or manage installation access.', observedAt: new Date().toISOString() }
     }

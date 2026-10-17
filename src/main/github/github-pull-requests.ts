@@ -3,11 +3,13 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync 
 import { join } from 'node:path'
 import { PullRequestError, type CreatePullRequestInput, type PullRequestApproval, type PullRequestContext, type PullRequestSummary } from '../../shared/types/github-pr-types'
 import type { GitHubApiClient } from './github-api-client'
+import type { PullRequestMutationApproval } from '../../shared/types/github-pr-types'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 
 export interface PullRequestDependencies {
   receiptDirectory: string
   approve(request: PullRequestApproval): Promise<boolean>
+  approveMutation?(request: PullRequestMutationApproval): Promise<boolean>
 }
 
 export interface PullRequestExecutionContext {
@@ -148,9 +150,9 @@ export function validateCreatePullRequest(input: CreatePullRequestInput) {
   if (input.worktreeId !== undefined && (typeof input.worktreeId !== 'string' || !/^[a-f0-9]{64}$/.test(input.worktreeId))) throw new PullRequestError('INVALID_ARGUMENT')
 }
 
-function hash(value: string) { return createHash('sha256').update(value).digest('hex') }
+export function hash(value: string) { return createHash('sha256').update(value).digest('hex') }
 
-function claim(path: string, value: unknown): boolean {
+export function claim(path: string, value: unknown): boolean {
   let descriptor: number
   try { descriptor = openSync(path, 'wx', 0o600) } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false

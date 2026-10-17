@@ -4,8 +4,10 @@ import type { PullRequestMergeability } from '../../shared/types/git-evidence-ty
 import { GITHUB_API_BASE_URL, GITHUB_API_VERSION, GITHUB_USER_AGENT } from './github-config'
 import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 import { PullRequestError, type PullRequestSummary, type PullRequestQuery, type CreatePullRequestInput } from '../../shared/types/github-pr-types'
+import type { PullRequestReview, PullRequestCheck } from '../../shared/types/github-pr-types'
+import { effectivePullRequestReviews, summarizePullRequestChecks, evaluatePullRequestPolicy } from './github-pr-evidence'
 
-interface GitHubInstallation { id: number; app_slug?: string; account?: { login: string }; html_url?: string; permissions?: { pull_requests?: string } }
+interface GitHubInstallation { id: number; app_slug?: string; account?: { login: string }; html_url?: string; permissions?: { pull_requests?: string; contents?: string; checks?: string; statuses?: string } }
 interface GitHubRepositoryDto {
   id: number
   name: string
@@ -47,6 +49,11 @@ export class GitHubApiClient {
   }
 
   async getPullRequestPermissions(fullName: string): Promise<{ read: boolean; create: boolean }> {
+    const permissions = await this.getPullRequestEndpointPermissions(fullName)
+    return { read: permissions.read, create: permissions.close }
+  }
+
+  async getPullRequestEndpointPermissions(fullName: string) {
     if (!this.appSlug) throw new GitHubIntegrationError('CONFIGURATION_REQUIRED', githubErrorMessage('CONFIGURATION_REQUIRED'))
     const repository = await this.request<GitHubRepositoryDto & { permissions?: { pull?: boolean; push?: boolean } }>(`/repos/${encodeRepositoryFullName(fullName)}`)
     if (repository.full_name?.toLowerCase() !== fullName.toLowerCase()) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
@@ -60,7 +67,8 @@ export class GitHubApiClient {
           if (!Array.isArray(repos.repositories)) throw malformed()
           if (repos.repositories.some(repo => repo.id === repository.id)) {
             const permission = installation.permissions?.pull_requests
-            return { read: repository.permissions?.pull === true && ['read', 'write'].includes(permission ?? ''), create: repository.permissions?.push === true && permission === 'write' }
+            const readable = (value?: string) => repository.permissions?.pull === true && ['read', 'write'].includes(value ?? '')
+            return { read: readable(permission), close: repository.permissions?.push === true && permission === 'write', merge: repository.permissions?.push === true && installation.permissions?.contents === 'write', checks: readable(installation.permissions?.checks), statuses: readable(installation.permissions?.statuses) }
           }
           if (repos.repositories.length < 100) break
           if (repoPage === 10) throw new PullRequestError('RECONCILIATION_LIMIT')
@@ -88,13 +96,94 @@ export class GitHubApiClient {
     return result
   }
 
+  async getPullRequestReviews(fullName: string, number: number) {
+    const pr = await this.getPullRequest(fullName, number)
+    const page = await this.boundedPrEvidence(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}/reviews`)
+    const reviews: PullRequestReview[] = page.items.map(value => {
+      if (!Number.isSafeInteger(value.id) || typeof value.user?.login !== 'string' || !['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED', 'COMMENTED', 'PENDING'].includes(value.state) || !/^[a-f0-9]{40}$/.test(value.commit_id) || !(value.submitted_at === null || typeof value.submitted_at === 'string')) throw malformed()
+      return { id: value.id, reviewer: value.user.login, state: value.state, commitSha: value.commit_id, submittedAt: value.submitted_at }
+    })
+    return { headSha: pr.head.sha, reviews, ...effectivePullRequestReviews(reviews, pr.head.sha, page.complete), observedAt: new Date().toISOString() }
+  }
+
+  async getPullRequestChecks(fullName: string, number: number) {
+    const pr = await this.getPullRequest(fullName, number)
+    const root = `/repos/${encodeRepositoryFullName(fullName)}/commits/${pr.head.sha}`
+    const sources = await Promise.allSettled([this.boundedPrEvidence(`${root}/check-runs`, 'check_runs'), this.boundedPrEvidence(`${root}/statuses`)])
+    const checks: PullRequestCheck[] = []
+    const availability: Record<string, string> = {}
+    let complete = true
+    sources.forEach((source, index) => {
+      const kind = index === 0 ? 'CHECK_RUN' : 'COMMIT_STATUS'
+      if (source.status === 'rejected') { complete = false; availability[kind] = 'UNAVAILABLE'; return }
+      availability[kind] = source.value.complete ? 'COMPLETE' : 'INCOMPLETE'
+      complete &&= source.value.complete
+      for (const value of source.value.items) {
+        if (!Number.isSafeInteger(value.id)) throw malformed()
+        if (index === 0) {
+          if (value.head_sha !== pr.head.sha || typeof value.name !== 'string' || typeof value.status !== 'string' || !Number.isSafeInteger(value.app?.id) || typeof value.updated_at !== 'string') throw malformed()
+          const conclusion = typeof value.conclusion === 'string' ? value.conclusion : null
+          const status = value.status !== 'completed' ? 'PENDING' : ['success', 'neutral', 'skipped'].includes(conclusion ?? '') ? 'PASSED' : ['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure'].includes(conclusion ?? '') ? 'FAILED' : 'UNKNOWN'
+          checks.push({ id: value.id, name: value.name, kind, sha: pr.head.sha, appId: value.app.id, status, providerStatus: value.status, conclusion, updatedAt: value.updated_at })
+        } else {
+          if (typeof value.context !== 'string' || typeof value.state !== 'string' || typeof value.updated_at !== 'string') throw malformed()
+          checks.push({ id: value.id, name: value.context, kind, sha: pr.head.sha, appId: null, status: value.state === 'success' ? 'PASSED' : value.state === 'pending' ? 'PENDING' : ['failure', 'error'].includes(value.state) ? 'FAILED' : 'UNKNOWN', providerStatus: value.state, conclusion: value.state, updatedAt: value.updated_at })
+        }
+      }
+    })
+    let policy: Awaited<ReturnType<GitHubApiClient['getPullRequestPolicy']>> | null = null
+    try { policy = await this.getPullRequestPolicy(fullName, pr.base.ref) } catch { availability.POLICY = 'UNAVAILABLE' }
+    return { headSha: pr.head.sha, checks, availability, policy, completeness: complete ? 'COMPLETE' : 'INCOMPLETE', ...summarizePullRequestChecks(checks, complete, policy?.coverage === 'COMPLETE' ? policy.requiredChecks : null), observedAt: new Date().toISOString() }
+  }
+
+  private async boundedPrEvidence(path: string, field?: string) {
+    const items: any[] = []
+    for (let page = 1; page <= 5; page++) {
+      const { value, response } = await this.requestWithResponse<any>(`${path}?per_page=100&page=${page}`)
+      const rows = field ? value?.[field] : value
+      if (!Array.isArray(rows) || rows.length > 100) throw malformed()
+      items.push(...rows)
+      if (!nextLink(response.headers.get('link'))) return { items, complete: true }
+    }
+    return { items, complete: false }
+  }
+
+  async getPullRequestPolicy(fullName: string, branch: string) {
+    const root = `/repos/${encodeRepositoryFullName(fullName)}`
+    const repository = await this.request<any>(root)
+    const branchState = await this.request<any>(`${root}/branches/${encodeURIComponent(branch)}`)
+    const rules = await this.boundedPrEvidence(`${root}/rules/branches/${encodeURIComponent(branch)}`)
+    const protection = await this.requestWithResponse<any>(`${root}/branches/${encodeURIComponent(branch)}/protection`, undefined, undefined, [404])
+    const result = evaluatePullRequestPolicy(rules.items, protection.response.status === 404 ? null : protection.value, repository)
+    if (!rules.complete || (protection.response.status === 404 && branchState.protected !== false)) {
+      result.coverage = 'INCOMPLETE'
+      result.limitations.push('POLICY_COVERAGE_UNKNOWN')
+    }
+    return result
+  }
+
+  async requestPullRequestMerge(fullName: string, number: number, headSha: string, queue: boolean, beforeSend: () => void | Promise<void>) {
+    const result = await this.requestWithResponse<any>(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}/merge-async`, {
+      method: 'PUT', body: JSON.stringify({ sha: headSha, bypass_rules: false, merge_action: 'default', ...(!queue ? { merge_method: 'merge' } : {}) })
+    }, beforeSend, [400, 403, 404, 409, 422])
+    return { httpStatus: result.response.status, value: result.value }
+  }
+
+  async getPullRequestMergeRequest(fullName: string, number: number, uuid: string) {
+    return this.requestWithResponse<any>(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}/merge-async/${encodeURIComponent(uuid)}`, undefined, undefined, [404])
+  }
+
+  async closePullRequest(fullName: string, number: number, beforeSend: () => void | Promise<void>) {
+    return toPullRequest(await this.request(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}`, { method: 'PATCH', body: JSON.stringify({ state: 'closed' }) }, beforeSend), fullName)
+  }
+
   async getBranchSha(fullName: string, branch: string): Promise<string> {
     const ref = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}/git/ref/heads/${encodeURIComponent(branch)}`)
     if (ref?.ref !== `refs/heads/${branch}` || ref.object?.type !== 'commit' || !/^[a-f0-9]{40}$/.test(ref.object.sha)) throw malformed()
     return ref.object.sha
   }
 
-  async createPullRequest(fullName: string, input: CreatePullRequestInput, beforeSend?: () => void): Promise<PullRequestSummary> {
+  async createPullRequest(fullName: string, input: CreatePullRequestInput, beforeSend?: () => void | Promise<void>): Promise<PullRequestSummary> {
     return toPullRequest(await this.request(`/repos/${encodeRepositoryFullName(fullName)}/pulls`, {
       method: 'POST', body: JSON.stringify({ head: input.headBranch, base: input.baseBranch, title: input.title, body: input.body, draft: false })
     }, beforeSend), fullName)
@@ -127,13 +216,13 @@ export class GitHubApiClient {
     return result
   }
 
-  private async request<T>(path: string, init?: RequestInit, beforeSend?: () => void): Promise<T> {
+  private async request<T>(path: string, init?: RequestInit, beforeSend?: () => void | Promise<void>): Promise<T> {
     return (await this.requestWithResponse<T>(path, init, beforeSend)).value
   }
 
-  private async requestWithResponse<T>(path: string, init?: RequestInit, beforeSend?: () => void): Promise<{ value: T; response: Response }> {
+  private async requestWithResponse<T>(path: string, init?: RequestInit, beforeSend?: () => void | Promise<void>, acceptedStatuses: number[] = []): Promise<{ value: T; response: Response }> {
     const token = await this.tokenProvider()
-    beforeSend?.()
+    await beforeSend?.()
     let response: Response
     try {
       response = await this.fetcher(path.startsWith('http') ? path : `${GITHUB_API_BASE_URL}${path}`, {
@@ -152,7 +241,7 @@ export class GitHubApiClient {
       if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) throw new GitHubIntegrationError('TIMEOUT', githubErrorMessage('TIMEOUT'))
       throw new GitHubIntegrationError('NETWORK_ERROR', githubErrorMessage('NETWORK_ERROR'))
     }
-    if (!response.ok) throw responseError(response)
+    if (!response.ok && !acceptedStatuses.includes(response.status)) throw responseError(response)
     try { return { value: await response.json() as T, response } } catch { throw malformed() }
   }
 }
@@ -161,6 +250,9 @@ function toPullRequest(value: any, fullName: string): PullRequestSummary {
   const ref = (item: any) => item && typeof item.ref === 'string' && /^[a-f0-9]{40}$/.test(item.sha) && typeof item.repo?.full_name === 'string'
   if (!value || !Number.isSafeInteger(value.number) || value.number <= 0 || !['open', 'closed'].includes(value.state) || typeof value.draft !== 'boolean' || typeof value.title !== 'string' || !ref(value.head) || !ref(value.base) || value.base.repo.full_name.toLowerCase() !== fullName.toLowerCase() || value.html_url?.toLowerCase() !== `https://github.com/${fullName}/pull/${value.number}`.toLowerCase() || !(value.merged_at === null || typeof value.merged_at === 'string')) throw malformed()
   return { number: value.number, url: value.html_url, title: value.title, state: value.state, draft: value.draft,
+    lifecycle: value.merged_at ? 'MERGED' : value.state === 'open' ? 'OPEN' : 'CLOSED',
+    mergeCommitSha: /^[a-f0-9]{40}$/.test(value.merge_commit_sha ?? '') ? value.merge_commit_sha : null,
+    stack: value.stack === null ? 'NONE' : value.stack && typeof value.stack === 'object' ? 'PRESENT' : 'UNKNOWN',
     head: { ref: value.head.ref, sha: value.head.sha, repository: value.head.repo.full_name }, base: { ref: value.base.ref, sha: value.base.sha, repository: value.base.repo.full_name },
     mergedAt: value.merged_at, mergeability: value.mergeable === true ? 'MERGEABLE' : value.mergeable === false ? 'NOT_MERGEABLE' : 'UNKNOWN', observedAt: new Date().toISOString() }
 }

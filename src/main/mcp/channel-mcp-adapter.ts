@@ -188,7 +188,7 @@ export class ChannelMcpAdapter {
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
     if (this.githubContext?.githubIntegration) tools.push(INSPECT_PULL_REQUEST_MERGEABILITY_TOOL)
-    if (this.githubContext?.githubIntegration) tools.push(...GITHUB_PR_TOOLS.filter(tool => tool.name !== 'create_pull_request' || (this.githubContext!.githubIntegration!.canCreatePullRequests?.() && !!this.githubContext!.githubPrIsActive)))
+    if (this.githubContext?.githubIntegration) tools.push(...GITHUB_PR_TOOLS.filter(tool => tool.name === 'create_pull_request' ? this.githubContext!.githubIntegration!.canCreatePullRequests?.() && !!this.githubContext!.githubPrIsActive : ['merge_pull_request', 'close_pull_request'].includes(tool.name) ? this.githubContext!.githubIntegration!.canIntegratePullRequests?.() && !!this.githubContext!.githubPrIsActive : true))
     if (this.repositoryFileIngress) tools.push(IMPORT_REPOSITORY_FILE_TOOL)
     if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)

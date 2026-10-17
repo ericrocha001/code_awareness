@@ -180,7 +180,7 @@ describe('REST PR contract', () => {
 
 describe('readiness and MCP binding', () => {
   function service(config: unknown = {}, auth: unknown = { hasCredentials: () => true }, origin = 'https://github.com/owner/repo.git', linked = 'owner/repo') {
-    const api = { getRepository: vi.fn(async () => ({ fullName: 'owner/repo', repositoryId: '7' })), getPullRequestPermissions: vi.fn(async () => ({ read: true, create: true })), listPullRequests: vi.fn(async () => ({ pullRequests: [] })), getPullRequest: vi.fn(async () => summary()) }
+    const api = { getRepository: vi.fn(async () => ({ fullName: 'owner/repo', repositoryId: '7' })), getPullRequestEndpointPermissions: vi.fn(async () => ({ read: true, close: true, checks: false, statuses: false, merge: false })), listPullRequests: vi.fn(async () => ({ pullRequests: [] })), getPullRequest: vi.fn(async () => summary()) }
     const integration = new GitHubIntegrationService(config as any, {} as any, auth as any, api as any, { findByPath: () => ({ id: context.repositoryId, github: { fullName: linked } }) } as any, { getRemoteUrl: vi.fn(async () => origin) } as any, {} as any, { receiptDirectory: directory(), approve: async () => false })
     return { integration, api }
   }
@@ -194,16 +194,17 @@ describe('readiness and MCP binding', () => {
   })
 
   it.each(['REAUTH_REQUIRED', 'INSTALLATION_REQUIRED', 'PERMISSION_DENIED'])('preserves readiness %s', async code => {
-    const f = service(); f.api.getPullRequestPermissions.mockRejectedValue(Object.assign(new Error(code), { code }))
+    const f = service(); f.api.getPullRequestEndpointPermissions.mockRejectedValue(Object.assign(new Error(code), { code }))
     expect(await f.integration.getPullRequestAccess('/active')).toMatchObject({ state: code, operations: { create: false } })
   })
 
   it('routes every new tool to Git Operations and hides unavailable mutation', async () => {
     const f = service()
     const adapter = new ChannelMcpAdapter({ projectId: 'active', repoRoot: '/active-main', navigation: {} as any, githubIntegration: f.integration, githubPrIsActive: () => true })
-    expect(adapter.listTools().map(tool => tool.name)).toEqual(expect.arrayContaining(GITHUB_PR_TOOLS.map(tool => tool.name)))
+    expect(adapter.listTools().map(tool => tool.name)).toEqual(expect.arrayContaining(GITHUB_PR_TOOLS.filter(tool => !['merge_pull_request', 'close_pull_request'].includes(tool.name)).map(tool => tool.name)))
+    expect(adapter.listTools().some(tool => ['merge_pull_request', 'close_pull_request'].includes(tool.name))).toBe(false)
     for (const tool of GITHUB_PR_TOOLS) await adapter.callTool(tool.name, tool.name === 'get_pull_request' ? { prNumber: 23 } : tool.name === 'create_pull_request' ? input : {})
-    expect(adapter.getActivityState().byCapability['Git Operations'].totalRequests).toBe(4)
+    expect(adapter.getActivityState().byCapability['Git Operations'].totalRequests).toBe(GITHUB_PR_TOOLS.length)
     expect(f.api.getPullRequest).toHaveBeenCalledWith('owner/repo', 23)
     const absent = new ChannelMcpAdapter({ projectId: 'active', repoRoot: '/active', navigation: {} as any, githubIntegration: service(null).integration, githubPrIsActive: () => true })
     expect(absent.listTools().some(tool => tool.name === 'create_pull_request')).toBe(false)

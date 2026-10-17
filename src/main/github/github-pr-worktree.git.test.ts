@@ -7,6 +7,8 @@ import { createTempGitRepo, cleanupTempRepo, gitExec, stageAll, commit } from '.
 import { GitOperationsService } from '../git-operations/git-operations-service'
 import { GitHubGitTransport } from './github-git-transport'
 import { GitHubPullRequests } from './github-pull-requests'
+import { GitHubPrIntegration } from './github-pr-integration'
+import { evaluatePullRequestPolicy } from './github-pr-evidence'
 
 it('verifies the source using the real worktree registry while preserving Desktop main, index and files', async () => {
   const root = await createTempGitRepo()
@@ -38,6 +40,23 @@ it('verifies the source using the real worktree registry while preserving Deskto
     expect(await git.getCurrentBranch(root)).toBe('main')
     expect(await git.getCurrentCommitHash(root)).toBe(mainSha)
     expect(await gitExec(root, ['status', '--porcelain=v1'])).toEqual(before)
+    const mutationApi = {
+      getPullRequestEndpointPermissions: async () => ({ read: true, merge: true, close: true, checks: true, statuses: true }),
+      getPullRequest: async () => ({ ...pr, stack: 'NONE' }),
+      getBranchSha: api.getBranchSha,
+      getPullRequestPolicy: async () => evaluatePullRequestPolicy([], null, { allow_merge_commit: true }),
+      getPullRequestReviews: async () => ({ headSha, completeness: 'COMPLETE', decision: 'NO_APPROVAL', approvalCount: 0 }),
+      getPullRequestChecks: async () => ({ headSha, completeness: 'COMPLETE', checks: [] }),
+      requestPullRequestMerge: async (_repo: string, _number: number, _head: string, _queue: boolean, beforeSend: () => Promise<void>) => { await beforeSend(); return { httpStatus: 200, value: { status: 'enqueued' } } }
+    }
+    const integration = new GitHubPrIntegration(mutationApi as any, async () => ({ repositoryId: 'proof-repository', repository: 'owner/repo' }), { receiptDirectory: join(external, 'receipts'), approve: async () => true, approveMutation: async () => true })
+    const sourceBefore = await gitExec(source, ['status', '--porcelain=v1'])
+    expect(await integration.mutate('MERGE_PULL_REQUEST', { prNumber: 23, operationId: 'merge-worktree-proof', expectedHeadSha: headSha!, expectedBaseSha: mainSha! }, execution)).toMatchObject({ status: 'ENQUEUED', localGitChanged: false })
+    expect(await git.getCurrentCommitHash(root)).toBe(mainSha)
+    expect(await git.getCurrentBranch(root)).toBe('main')
+    expect(await git.getCurrentCommitHash(source)).toBe(headSha)
+    expect(await gitExec(root, ['status', '--porcelain=v1'])).toEqual(before)
+    expect(await gitExec(source, ['status', '--porcelain=v1'])).toEqual(sourceBefore)
     await gitExec(source, ['branch', '-m', 'cline/renamed'])
     await expect(service.create(input, execution)).rejects.toMatchObject({ code: 'WORKTREE_DRIFT' })
     expect(api.createPullRequest).toHaveBeenCalledTimes(1)

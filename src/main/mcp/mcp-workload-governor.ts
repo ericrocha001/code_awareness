@@ -27,7 +27,7 @@ export class McpWorkloadGovernor {
 
   async run(name: string, args: unknown, requestId: string | undefined, deadlineAtMs: number | undefined, execute: () => Promise<McpToolResult>): Promise<McpToolResult> {
     const values = args && typeof args === 'object' && !Array.isArray(args) ? args as Record<string, unknown> : {}
-    const lane: Lane | null = navigation.has(name) ? 'NAVIGATION' : name === 'start_validation' ? 'VALIDATION' : isReceiptedGitMutation(name, values) || name === 'stage_git_changes' || name === 'create_pull_request' ? 'MUTATIONS' : null
+    const lane: Lane | null = navigation.has(name) ? 'NAVIGATION' : name === 'start_validation' ? 'VALIDATION' : isReceiptedGitMutation(name, values) || name === 'stage_git_changes' || ['create_pull_request', 'merge_pull_request', 'close_pull_request'].includes(name) ? 'MUTATIONS' : null
     if (!lane) return execute()
     const operationId = typeof values.operationId === 'string' ? values.operationId : requestId ?? randomUUID()
     if (lane === 'NAVIGATION') return this.runNavigation(operationId, deadlineAtMs, execute)
