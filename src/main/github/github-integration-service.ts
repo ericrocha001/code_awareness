@@ -11,6 +11,7 @@ import { GitHubPullRequests, type PullRequestDependencies, type PullRequestExecu
 import { GitHubPrIntegration } from './github-pr-integration'
 import type { PullRequestMutationInput } from '../../shared/types/github-pr-types'
 import { PullRequestError, type CreatePullRequestInput, type PullRequestQuery } from '../../shared/types/github-pr-types'
+import { GitHubPrAccessError, pullRequestAccessFailure } from './github-pr-access'
 
 export interface ExternalUrlOpener { openExternal(url: string): Promise<unknown> }
 
@@ -69,10 +70,11 @@ export class GitHubIntegrationService {
     try {
       const context = await this.pullRequestContext(repoPath)
       const permissions = await this.api!.getPullRequestEndpointPermissions(context.repository)
-      return { ...context, state: permissions.read ? 'READY' : 'PERMISSION_DENIED', operations: { read: permissions.read, reviews: permissions.read, checks: permissions.checks, statuses: permissions.statuses, create: permissions.close && this.canCreatePullRequests(), close: permissions.close && this.canIntegratePullRequests(), merge: permissions.merge && permissions.read && permissions.checks && permissions.statuses && this.canIntegratePullRequests() },
+      return { ...context, state: permissions.accessState ?? (permissions.read ? 'READY' : 'PERMISSION_DENIED'), diagnostics: permissions.diagnostics ?? [], evidence: permissions.evidence, operations: { read: permissions.read, reviews: permissions.read, checks: permissions.checks, statuses: permissions.statuses, create: permissions.read && permissions.close && this.canCreatePullRequests(), close: permissions.read && permissions.close && this.canIntegratePullRequests(), merge: permissions.merge && permissions.read && permissions.checks && permissions.statuses && this.canIntegratePullRequests() },
         restrictions: ['DESKTOP_APPROVAL_REQUIRED', 'SAME_REPOSITORY_ONLY', 'NO_LOCAL_GIT_SYNC', 'NO_ATOMIC_BASE_CAS'], requiredPermissions: { read: 'Pull requests: read', reviews: 'Pull requests: read', checks: 'Checks: read', statuses: 'Commit statuses: read', create: 'Pull requests: write', close: 'Pull requests: write', merge: 'Contents: write' }, observedAt: new Date().toISOString() }
     } catch (error) {
-      return { state: error instanceof PullRequestError ? error.code : toGitHubIntegrationError(error).code, operations: { read: false, create: false }, configurationRequired: !this.config ? ['CODE_AWARENESS_GITHUB_CLIENT_ID', 'CODE_AWARENESS_GITHUB_APP_SLUG'] : [], recovery: 'Use GitHub settings in Desktop to configure, connect or manage installation access.', observedAt: new Date().toISOString() }
+      const code = error instanceof PullRequestError ? error.code : toGitHubIntegrationError(error).code
+      return { state: code, operations: { read: false, reviews: false, checks: false, statuses: false, create: false, close: false, merge: false }, diagnostics: [error instanceof GitHubPrAccessError ? error.diagnostic : pullRequestAccessFailure(code)], configurationRequired: !this.config ? ['CODE_AWARENESS_GITHUB_CLIENT_ID', 'CODE_AWARENESS_GITHUB_APP_SLUG'] : [], recovery: 'Use GitHub settings in Desktop to configure, connect or manage installation access.', observedAt: new Date().toISOString() }
     }
   }
 
@@ -92,7 +94,7 @@ export class GitHubIntegrationService {
   }
 
   getStatus(): GitHubStatusProjection {
-    if (!this.config || !this.auth || !this.api) return { state: 'CONFIGURATION_REQUIRED', user: null }
+    if (!this.config || !this.auth || !this.api) return { state: 'CONFIGURATION_REQUIRED', user: null, lastSyncError: { code: 'CONFIGURATION_REQUIRED', message: 'Provide both GitHub App overrides or remove both to use the official product identity.' } }
     const metadata = this.credentials.loadMetadata()
     if (this.pending) return {
       state: 'AUTHORIZING', user: metadata.user,

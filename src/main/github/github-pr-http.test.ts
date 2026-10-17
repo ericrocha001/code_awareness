@@ -19,7 +19,7 @@ const rest = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
   const path = new URL(String(url)).pathname
   if (path === '/repos/owner/repo') return json({ id: 7, name: 'repo', full_name: 'owner/repo', owner: { id: 9, login: 'owner' }, html_url: 'https://github.com/owner/repo', clone_url: 'https://github.com/owner/repo.git', permissions: { pull: true, push: true } })
   if (path === '/user/installations') return json({ installations: [{ id: 1, app_slug: 'ours', account: { login: 'owner' }, permissions: { pull_requests: 'write' } }] })
-  if (path === '/user/installations/1/repositories') return json({ repositories: [{ id: 7 }] })
+  if (path === '/user/installations/1/repositories') return json({ repositories: [{ id: 7, full_name: 'owner/repo', permissions: { pull: true, push: true } }] })
   if (path.includes('/git/ref/heads/')) { const branch = decodeURIComponent(path.split('/git/ref/heads/')[1]); return json({ ref: `refs/heads/${branch}`, object: { type: 'commit', sha: branch === 'main' ? 'a'.repeat(40) : sha } }) }
   if (path.endsWith('/pulls/23')) return json(pr())
   if (path.endsWith('/pulls')) {

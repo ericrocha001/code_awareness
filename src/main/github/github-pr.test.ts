@@ -169,7 +169,7 @@ describe('REST PR contract', () => {
     const fetcher = vi.fn(async (url: string | URL | Request) => {
       const path = String(url)
       if (path.includes('/user/installations?')) return response({ installations: [{ id: 1, app_slug: 'different-app', account: { login: 'owner' }, permissions: { pull_requests: 'write' } }, { id: 2, app_slug: 'ours', account: { login: 'owner' }, permissions: { pull_requests: 'read' } }] })
-      if (path.includes('/user/installations/2/')) return response({ repositories: [{ id: 7 }] })
+      if (path.includes('/user/installations/2/')) return response({ repositories: [{ id: 7, full_name: 'owner/repo', permissions: { pull: true, push: true } }] })
       return response({ id: 7, full_name: 'owner/repo', permissions: { pull: true, push: true } })
     })
     const api = new GitHubApiClient(async () => 'secret', fetcher, 'ours')

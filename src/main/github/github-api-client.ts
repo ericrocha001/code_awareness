@@ -6,8 +6,9 @@ import { GitHubIntegrationError, githubErrorMessage } from './github-errors'
 import { PullRequestError, type PullRequestSummary, type PullRequestQuery, type CreatePullRequestInput } from '../../shared/types/github-pr-types'
 import type { PullRequestReview, PullRequestCheck } from '../../shared/types/github-pr-types'
 import { effectivePullRequestReviews, summarizePullRequestChecks, evaluatePullRequestPolicy } from './github-pr-evidence'
+import { deniedPullRequestAccess, GitHubPrAccessError, prAccessOperations, pullRequestAccessFailure, type PullRequestEndpointPermissions } from './github-pr-access'
 
-interface GitHubInstallation { id: number; app_slug?: string; account?: { login: string }; html_url?: string; permissions?: { pull_requests?: string; contents?: string; checks?: string; statuses?: string } }
+interface GitHubInstallation { id: number; app_slug?: string; account?: { login: string }; html_url?: string; suspended_at?: string | null; permissions?: { pull_requests?: string; contents?: string; checks?: string; statuses?: string } }
 interface GitHubRepositoryDto {
   id: number
   name: string
@@ -53,30 +54,77 @@ export class GitHubApiClient {
     return { read: permissions.read, create: permissions.close }
   }
 
-  async getPullRequestEndpointPermissions(fullName: string) {
+  async getPullRequestEndpointPermissions(fullName: string): Promise<PullRequestEndpointPermissions> {
     if (!this.appSlug) throw new GitHubIntegrationError('CONFIGURATION_REQUIRED', githubErrorMessage('CONFIGURATION_REQUIRED'))
-    const repository = await this.request<GitHubRepositoryDto & { permissions?: { pull?: boolean; push?: boolean } }>(`/repos/${encodeRepositoryFullName(fullName)}`)
+    const repository = await this.accessRequest<GitHubRepositoryDto>(`/repos/${encodeRepositoryFullName(fullName)}`, 'REPOSITORY_IDENTITY')
     if (repository.full_name?.toLowerCase() !== fullName.toLowerCase()) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
-    for (let page = 1; page <= 10; page++) {
-      const installations = await this.request<{ installations: GitHubInstallation[] }>(`/user/installations?per_page=100&page=${page}`)
-      if (!Array.isArray(installations.installations)) throw malformed()
-      for (const installation of installations.installations) {
-        if (installation.app_slug !== this.appSlug || installation.account?.login.toLowerCase() !== fullName.split('/')[0].toLowerCase()) continue
-        for (let repoPage = 1; repoPage <= 10; repoPage++) {
-          const repos = await this.request<{ repositories: GitHubRepositoryDto[] }>(`/user/installations/${installation.id}/repositories?per_page=100&page=${repoPage}`)
-          if (!Array.isArray(repos.repositories)) throw malformed()
-          if (repos.repositories.some(repo => repo.id === repository.id)) {
-            const permission = installation.permissions?.pull_requests
-            const readable = (value?: string) => repository.permissions?.pull === true && ['read', 'write'].includes(value ?? '')
-            return { read: readable(permission), close: repository.permissions?.push === true && permission === 'write', merge: repository.permissions?.push === true && installation.permissions?.contents === 'write', checks: readable(installation.permissions?.checks), statuses: readable(installation.permissions?.statuses) }
-          }
-          if (repos.repositories.length < 100) break
-          if (repoPage === 10) throw new PullRequestError('RECONCILIATION_LIMIT')
-        }
+    const installations = await this.accessPages<GitHubInstallation>('/user/installations', 'installations', 'APP_INSTALLATIONS')
+    const installation = installations.find(item => item.app_slug === this.appSlug && item.account?.login?.toLowerCase() === fullName.split('/')[0].toLowerCase())
+    const installationUrl = 'https://github.com/settings/installations'
+    if (!installation) return deniedPullRequestAccess('INSTALLATION_REQUIRED', { cause: 'APP_INSTALLATION_NOT_ACCESSIBLE', operations: prAccessOperations, nextAction: 'VERIFY_APP_INSTALLATION_AND_ACCOUNT_ACCESS', url: installationUrl }, { installation: 'NOT_OBSERVED' })
+    if (!Number.isSafeInteger(installation.id) || installation.id <= 0) throw malformed()
+    const evidence: PullRequestEndpointPermissions['evidence'] = { source: 'GITHUB_APP_USER_TOKEN', installation: 'OBSERVED', installationId: installation.id, repositoryScope: 'UNKNOWN', publicResourceReadIsGrantEvidence: false }
+    if (installation.suspended_at) return deniedPullRequestAccess('PERMISSION_DENIED', { cause: 'INSTALLATION_SUSPENDED', operations: prAccessOperations, nextAction: 'REVIEW_INSTALLATION_SUSPENSION', url: installationUrl }, evidence)
+    const repositories = await this.accessPages<GitHubRepositoryDto & { permissions?: { pull?: boolean; push?: boolean } }>(`/user/installations/${installation.id}/repositories`, 'repositories', 'INSTALLATION_REPOSITORIES')
+    const scoped = repositories.find(item => item.id === repository.id && item.full_name?.toLowerCase() === fullName.toLowerCase())
+    if (!scoped) return deniedPullRequestAccess('PERMISSION_DENIED', { cause: 'REPOSITORY_NOT_ACCESSIBLE_IN_INSTALLATION', operations: prAccessOperations, nextAction: 'REVIEW_REPOSITORY_SELECTION_AND_USER_MEMBERSHIP', url: installationUrl }, { ...evidence, repositoryScope: 'NOT_OBSERVED' })
+    evidence.repositoryScope = 'INCLUDED'
+    const grants = installation.permissions
+    if (!grants || typeof grants !== 'object' || Array.isArray(grants)) return deniedPullRequestAccess('UNAVAILABLE', { cause: 'INSTALLATION_GRANTS_NOT_OBSERVED', operations: prAccessOperations, nextAction: 'RECHECK_INSTALLATION_WITH_DESKTOP_USER_TOKEN' }, evidence)
+    if (Object.values(grants).some(value => value !== undefined && !['read', 'write'].includes(value))) throw new GitHubPrAccessError('NETWORK_ERROR', { cause: 'PROVIDER_RESPONSE_INCONCLUSIVE', operations: prAccessOperations, nextAction: 'RECHECK_PROVIDER_RESPONSE', source: 'APP_INSTALLATIONS' })
+    evidence.grants = Object.fromEntries(['pull_requests', 'checks', 'statuses', 'contents'].map(key => [key, ['read', 'write'].includes((grants as any)[key]) ? (grants as any)[key] : 'none']))
+    evidence.userPermissions = { pull: typeof scoped.permissions?.pull === 'boolean' ? scoped.permissions.pull : null, push: typeof scoped.permissions?.push === 'boolean' ? scoped.permissions.push : null }
+    const pull = evidence.userPermissions.pull === true, push = evidence.userPermissions.push === true
+    const readable = (value?: string) => pull && ['read', 'write'].includes(value ?? '')
+    const result: PullRequestEndpointPermissions = { read: readable(grants.pull_requests), close: pull && push && grants.pull_requests === 'write', merge: pull && push && grants.contents === 'write', checks: readable(grants.checks), statuses: readable(grants.statuses), accessState: 'READY', diagnostics: [], evidence }
+    const requirements = [
+      { key: 'pull_requests', level: 'read', operations: ['read', 'reviews'], label: 'Pull requests: read' },
+      { key: 'pull_requests', level: 'write', operations: ['create', 'close'], label: 'Pull requests: write' },
+      { key: 'checks', level: 'read', operations: ['checks', 'merge'], label: 'Checks: read' },
+      { key: 'statuses', level: 'read', operations: ['statuses', 'merge'], label: 'Commit statuses: read' },
+      { key: 'contents', level: 'write', operations: ['merge'], label: 'Contents: write' }
+    ]
+    const missing = requirements.filter(rule => rule.level === 'write' ? evidence.grants![rule.key] !== 'write' : !['read', 'write'].includes(evidence.grants![rule.key]))
+    let declared: Record<string, string> | null = null
+    if (missing.length) {
+      try {
+        const app = await this.accessRequest<any>(`/apps/${encodeURIComponent(this.appSlug)}`, 'APP_DECLARED_PERMISSIONS')
+        if (app.slug === this.appSlug && app.permissions && typeof app.permissions === 'object') declared = app.permissions
+      } catch (error) {
+        if (error instanceof GitHubPrAccessError && error.code === 'REAUTH_REQUIRED') throw error
       }
-      if (installations.installations.length < 100) throw new GitHubIntegrationError('INSTALLATION_REQUIRED', githubErrorMessage('INSTALLATION_REQUIRED'))
     }
-    throw new PullRequestError('RECONCILIATION_LIMIT')
+    for (const rule of missing) {
+      const current = declared?.[rule.key]
+      const requested = rule.level === 'write' ? current === 'write' : current === 'read' || current === 'write'
+      result.diagnostics.push({ cause: requested ? 'INSTALLATION_PERMISSION_UPDATE_NOT_GRANTED' : 'INSTALLATION_GRANT_MISSING', operations: rule.operations, requiredGrant: rule.label,
+        nextAction: requested ? 'REVIEW_AND_APPROVE_INSTALLATION_PERMISSION_UPDATE' : declared ? 'REVIEW_APP_REQUESTED_PERMISSIONS_THEN_INSTALLATION' : 'REVIEW_APP_AND_INSTALLATION_PERMISSIONS', url: requested ? installationUrl : `https://github.com/settings/apps/${encodeURIComponent(this.appSlug)}/permissions` })
+    }
+    if (!pull || !push) result.diagnostics.push({ cause: evidence.userPermissions.pull === null || evidence.userPermissions.push === null ? 'USER_REPOSITORY_PERMISSIONS_NOT_OBSERVED' : 'USER_REPOSITORY_PERMISSION_MISSING', operations: !pull ? prAccessOperations : ['create', 'close', 'merge'], nextAction: 'REVIEW_USER_REPOSITORY_MEMBERSHIP_AND_AUTHORIZATION', url: installationUrl, source: 'INSTALLATION_REPOSITORIES' })
+    result.accessState = result.read ? 'READY' : 'PERMISSION_DENIED'
+    return result
+  }
+
+  private async accessRequest<T>(path: string, source: string): Promise<T> {
+    return (await this.accessResponse<T>(path, source)).value
+  }
+
+  private async accessResponse<T>(path: string, source: string) {
+    try { return await this.requestWithResponse<T>(path) } catch (error) {
+      if (error instanceof GitHubIntegrationError) throw new GitHubPrAccessError(error.code, pullRequestAccessFailure(error.code, source))
+      throw error
+    }
+  }
+
+  private async accessPages<T>(path: string, field: string, source: string): Promise<T[]> {
+    const rows: T[] = []
+    for (let page = 1; page <= 10; page++) {
+      const { value, response } = await this.accessResponse<any>(`${path}?per_page=100&page=${page}`, source)
+      if (!Array.isArray(value?.[field]) || value[field].length > 100 || (value.total_count !== undefined && (!Number.isSafeInteger(value.total_count) || value.total_count < 0))) throw new GitHubPrAccessError('NETWORK_ERROR', { cause: 'PROVIDER_RESPONSE_INCONCLUSIVE', operations: prAccessOperations, nextAction: 'RECHECK_PROVIDER_RESPONSE', source })
+      rows.push(...value[field])
+      if (!nextLink(response.headers.get('link')) && value[field].length < 100 && (value.total_count === undefined || value.total_count <= rows.length)) return rows
+    }
+    throw new GitHubPrAccessError('NETWORK_ERROR', { cause: 'ACCESS_PAGINATION_INCOMPLETE', operations: prAccessOperations, nextAction: 'INSPECT_INSTALLATION_SCOPE_WITHOUT_MUTATION', source })
   }
 
   async listPullRequests(fullName: string, query: PullRequestQuery = {}) {
