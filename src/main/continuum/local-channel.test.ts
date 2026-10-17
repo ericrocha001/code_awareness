@@ -35,6 +35,7 @@ describe('Continuum local transport boundaries', () => {
   }
   it('rejects unauthenticated/malformed requests and reports absent active repository', async () => {
     const { request } = await setup()
+    expect((await request({ operation: 'bind_execution', repositoryId: 'A', worktreeId: 'w', worktreeGeneration: 'g', executionId: 'run', sourceArtifactId: 'plan', branchRef: 'refs/heads/main' })).error.code).toBe('INVALID_ARGUMENT')
     expect((await request({ operation: 'status', token: 'invalid' })).error.code).toBe('UNAUTHORIZED')
     expect((await request({ operation: 'status', protocol: 'wrong' })).error.code).toBe('INVALID_ARGUMENT')
     expect((await request({ operation: 'status' })).result).toEqual({ available: true, repository: null })
