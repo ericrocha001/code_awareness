@@ -118,16 +118,14 @@ export function GitManagementView({ state }: { state: ActiveProjectState }) {
     <header className="gm-header">
       <span className="gm-feature-icon"><GitBranch size={32} /></span>
       <div><h1>Git Management</h1><p>{state.project.name} <span>/ {history?.branch ?? (history?.head ? 'HEAD detached' : 'sem commits')} · {history?.nodes.length ?? 0} commits {windowDays === 'ALL' ? 'no trecho carregado' : `(últimos ${windowDays} dias)`}</span></p></div>
-      <div className="gm-toolbar-actions"><label>Branch<select aria-label="Branch do Atlas" value={focus} onChange={event => { setFocus(event.target.value); setMode(event.target.value ? 'Foco' : 'Panorama') }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label><button disabled={loading} onClick={() => void refresh()} aria-label="Atualizar Git"><RefreshCw size={17} />Atualizar</button>
-        <button onClick={() => { setSelection(null); setDrawer(true) }}><Settings size={18} />Alterações</button>
-        <button className="gm-context-toggle" onClick={() => setDrawer(true)}>Detalhes</button></div>
+      <div className="gm-toolbar-actions"><button disabled={loading} onClick={() => void refresh()} aria-label="Atualizar Git"><RefreshCw size={17} />Atualizar</button>
+        <button onClick={() => { setSelection(null); setDrawer(true) }}><Settings size={18} />Alterações</button></div>
     </header>
     <div className="gm-toolbar">
-      <div className="gm-segmented" role="group" aria-label="Janela temporal">{([30, 60, 90, 'ALL'] as const).map(value => <button key={value} aria-pressed={windowDays === value} onClick={() => setWindowDays(value)}>{value === 'ALL' ? 'Tudo' : `${value}d`}</button>)}</div>
+      <div className="gm-segmented" role="group" aria-label="Janela temporal">{([7, 15, 30, 60, 90, 'ALL'] as const).map(value => <button key={value} aria-pressed={windowDays === value} onClick={() => setWindowDays(value)}>{value === 'ALL' ? 'Tudo' : `${value}d`}</button>)}</div>
       <div className="gm-segmented" role="group" aria-label="Modo do Atlas">{['Panorama', 'Foco', 'Comparar'].map(value => <button key={value} aria-pressed={mode === value} onClick={() => setMode(value)}>{value}</button>)}</div>
       <label>{mode === 'Comparar' ? 'Comparar com' : 'Branch em foco'}<select aria-label="Referência em foco" value={focus} onChange={event => { setFocus(event.target.value); const ref = refs.find(ref => ref.ref === event.target.value); if (ref) { setMode(mode === 'Panorama' ? 'Foco' : mode); setSelection({ kind: 'BRANCH', ref }) } }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}{/^[a-f0-9]{40,64}$/.test(focus) && <option value={focus}>Trajetória · {focus.slice(0, 8)}</option>}</select></label>
       {mode !== 'Panorama' && <label>Base<select aria-label="Referência base" value={base} onChange={event => setBase(event.target.value)}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>}
-      <button className="gm-icon-button" disabled={loading} onClick={() => void refresh()} aria-label="Atualizar Atlas"><RefreshCw size={18} /></button>
     </div>
     {notice && <div className="gm-atlas-note" role="status">{notice}</div>}
     {error && <div className="gm-error" role="alert">{error === 'NOT_GIT_REPOSITORY' ? 'Este projeto não é um repositório Git.' : error === 'GIT_STATE_CHANGED' ? 'Histórico desatualizado. Atualize para carregar um novo snapshot.' : error}</div>}

@@ -167,7 +167,6 @@
 .gm-placeholder { padding:0 24px 18px; color:var(--text-secondary); font-size:13px; }
 .gm-error { padding:10px 16px; color:var(--color-danger); border:1px solid var(--border); border-radius:10px; background:var(--bg-secondary); font-size:12px; flex-shrink:0; }
 .gm-empty { margin:auto; text-align:center; color:var(--text-secondary); }
-.gm-context-toggle { display:none !important; }
 .gm-atlas-heading { min-height:77px; margin:0 16px; padding:16px 4px; gap:16px; }
 .gm-atlas-heading > svg { flex-shrink:0; color:var(--text-secondary); }
 .gm-atlas-heading h2 { margin-bottom:5px; font-size:20px; }
@@ -210,7 +209,6 @@
  .gm-workspace { grid-template-columns:minmax(0,1fr); }
  .gm-inspector { display:none; }
  .gm-inspector.is-open { display:flex; position:absolute; right:0; top:0; bottom:0; width:min(380px,94%); z-index:5; box-shadow:-8px 0 24px rgba(0,0,0,.2); background:var(--bg-secondary); }
- .gm-context-toggle { display:inline-flex !important; }
  .gm-toolbar { gap:8px; }
  .gm-segmented button { padding:8px 10px; }
 }

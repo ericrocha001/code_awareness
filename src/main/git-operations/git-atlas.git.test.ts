@@ -17,6 +17,18 @@ async function fixture() {
   return { root, reader, add }
 }
 
+it.each([7, 15] as const)('filters real commits within the %i-day window', async days => {
+  const { root, reader } = await fixture()
+  const run = promisify(execFile)
+  for (const age of [20, 10, 0]) {
+    const date = new Date(Date.now() - age * 86400000).toISOString()
+    await run('git', ['commit', '--allow-empty', '-m', `age-${age}`], { cwd: root, windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } })
+  }
+  const page = await reader.history({ window: days })
+  expect(page.nodes.map(node => node.subject)).toEqual(days === 7 ? ['age-0'] : ['age-0', 'age-10'])
+  expect(Date.parse(page.queriedAt) - Date.parse(page.since!)).toBe(days * 86400000)
+})
+
 it('queries bounded temporal pages, real merge ancestry, remote refs, tags and detached worktree HEADs', async () => {
   const { root, reader, add } = await fixture()
   await gitExec(root, ['branch', '-m', 'trunk'])

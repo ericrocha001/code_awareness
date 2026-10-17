@@ -200,13 +200,18 @@ exports.run = async (ctx) => {
   await ctx.overflow()
   await ctx.capture('wide-dark-selected')
   ctx.check('Origin remains unknown despite current worktree containment', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Origem: Não registrada') && !document.querySelector('.gm-inspector').textContent.includes('Worktrees atuais')))
-  for (const label of ['30d', '60d', '90d', 'Tudo']) {
-    await ctx.click(`.gm-segmented[aria-label="Janela temporal"] button:nth-child(${['30d','60d','90d','Tudo'].indexOf(label)+1})`)
-    await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && document.querySelectorAll('.gm-commit').length === 11)
+  for (const label of ['7d', '15d', '30d', '60d', '90d', 'Tudo']) {
+    await ctx.click(`.gm-segmented[aria-label="Janela temporal"] button:nth-child(${['7d','15d','30d','60d','90d','Tudo'].indexOf(label)+1})`)
+    {
+      const deadline = Date.now() + 30000
+      while (Date.now() < deadline && !await ctx.evaluate(count => document.querySelectorAll('.gm-atlas-date').length === count, label === 'Tudo' ? 1 : parseInt(label))) await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && document.querySelectorAll('.gm-commit').length > 0)
     if (label !== 'Tudo') ctx.check(`${label}: every daily period is represented`, await ctx.evaluate(count => document.querySelectorAll('.gm-atlas-date').length === count, parseInt(label)))
   }
   await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)')
   await ctx.waitFor(() => document.querySelector('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)').getAttribute('aria-pressed') === 'true')
+  await waitForGit(() => [...document.querySelectorAll('[aria-label="Referência em foco"] option')].some(option => option.value === 'refs/heads/feature/inspector'))
   await ctx.evaluate(() => { const select = document.querySelector('[aria-label="Referência em foco"]'); select.value = 'refs/heads/feature/inspector'; select.dispatchEvent(new Event('change', { bubbles: true })) })
   await waitForGit(() => document.querySelector('.gm-comparison')?.textContent.includes('exclusivos da base'))
   await ctx.capture('wide-dark-focus')
@@ -390,7 +395,7 @@ exports.run = async (ctx) => {
   const detachedSha = exec('git', ['commit-tree', tree, '-p', denseBase, '-m', 'Detached work'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: detachedDate, GIT_COMMITTER_DATE: detachedDate } }).stdout.trim()
   git('worktree', 'add', '--detach', path.join(ctx.temporary, 'detached-work'), detachedSha)
   git('tag', 'atlas-proof')
-  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:nth-child(3)')
+  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:nth-child(5)')
   await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !!document.querySelector('.gm-load-more'))
   await ctx.click('.gm-load-more')
   await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !document.querySelector('.gm-load-more'))
@@ -417,12 +422,12 @@ exports.run = async (ctx) => {
   await waitForGit(() => document.querySelector('.gm-inspector h2')?.textContent === 'Archived root')
   ctx.check('SHA outside the temporal window opens the canonical inspector', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Commit raiz')))
   await ctx.capture('wide-dark-outside-window')
-  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:first-child')
+  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:nth-child(3)')
   await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !!document.querySelector('.gm-load-more'))
   ctx.check('Changing windows keeps recent visible commits in view', await ctx.evaluate(() => document.querySelectorAll('.gm-commit').length > 0))
   git('branch', 'snapshot-changed')
   await ctx.click('.gm-load-more')
-  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && [...document.querySelectorAll('[aria-label="Branch do Atlas"] option')].some(option => option.value === 'refs/heads/snapshot-changed'))
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && [...document.querySelectorAll('[aria-label="Referência em foco"] option')].some(option => option.value === 'refs/heads/snapshot-changed'))
   ctx.check('Actual ref changes restart temporal pagination on the current revision', await ctx.evaluate(() => !document.querySelector('.gm-error')))
   await ctx.capture('wide-dark-stale-history')
   await ctx.click('[data-proof-project="b"]')

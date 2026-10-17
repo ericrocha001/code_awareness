@@ -1,6 +1,6 @@
 import type { GitHistoryPage, GitManagementContext } from './git-management-types'
 
-export type GitAtlasWindow = 30 | 60 | 90 | 'ALL'
+export type GitAtlasWindow = 7 | 15 | 30 | 60 | 90 | 'ALL'
 export interface GitAtlasRequest {
   context: GitManagementContext
   window: GitAtlasWindow

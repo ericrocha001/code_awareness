@@ -79,7 +79,7 @@ export class GitAtlasReader {
   private async readHistory(request: GitAtlasQuery, anchor: number): Promise<GitAtlasPage> {
     const generation = this.generation
     const limit = request.limit ?? 100
-    if (![30, 60, 90, 'ALL'].includes(request.window) || !Number.isInteger(limit) || limit < 1 || limit > 100) this.fail('INVALID_ARGUMENT')
+    if (![7, 15, 30, 60, 90, 'ALL'].includes(request.window) || !Number.isInteger(limit) || limit < 1 || limit > 100) this.fail('INVALID_ARGUMENT')
     const before = await this.observe(request.contextKey)
     if (this.revision !== before.snapshot) { this.pages.clear(); this.revision = before.snapshot }
     let offset = 0, queriedAt = new Date(Date.now()).toISOString()

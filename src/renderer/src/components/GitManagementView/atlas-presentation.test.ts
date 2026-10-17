@@ -7,7 +7,7 @@ const end = Date.parse('2026-10-16T12:00:00Z')
 function fixture(days: number): GitAtlasPage {
   return { snapshot: 'fixture', head: 'late', branch: 'main', primaryRef: 'refs/heads/main', queriedAt: new Date(end).toISOString(), since: new Date(end - days * 86400000).toISOString(), nodes: ['early', 'late'].map((sha, index) => ({ sha, parents: [], author: 'Author', subject: sha, timestamp: new Date(end - (index ? 1 : days - 1) * 86400000).toISOString(), decorations: [] })), refs: ['main', 'topic'].map((name, index) => ({ ref: `refs/heads/${name}`, name, sha: index ? 'early' : 'late', kind: 'LOCAL', upstream: null })), detachedHeads: [], detachedCoverage: 'COMPLETE', tags: [], coverage: 'COMPLETE_WINDOW', boundary: [], pendingParents: [], nextCursor: null }
 }
-it.each([30, 60, 90] as const)('shows every one of %i daily periods including empty days', days => {
+it.each([7, 15, 30, 60, 90] as const)('shows every one of %i daily periods including empty days', days => {
   const page = fixture(days)
   const result = presentGitAtlas(layoutGitAtlas(page), page, days)
   expect(result.days).toHaveLength(days)
