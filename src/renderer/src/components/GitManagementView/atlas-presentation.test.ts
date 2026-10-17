@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest'
 import type { GitAtlasPage } from '../../../../shared/types/git-atlas-types'
 import { layoutGitAtlas } from './atlas-layout'
-import { presentGitAtlas } from './atlas-presentation'
+import { atlasWindowPage, presentGitAtlas } from './atlas-presentation'
 
 const end = Date.parse('2026-10-16T12:00:00Z')
 function fixture(days: number): GitAtlasPage {
@@ -37,4 +37,23 @@ it('keeps dense commits inside their daily column with disjoint hit targets', ()
   expect(points.every(point => point.x > day.x && point.x < day.x + day.width)).toBe(true)
   const bySha = new Map(points.map(point => [point.node.sha, point]))
   for (const point of points) for (const parent of point.node.parents) expect(bySha.get(parent)!.x).toBeLessThan(point.x)
+})
+
+it.each([7, 15, 30, 60, 90] as const)('fills the viewport and excludes rows outside %i days', days => {
+  const input = fixture(days)
+  for (const [sha, timestamp] of [['outside', end - (days + 1) * 86400000], ['future', end + 86400000]] as const) {
+    input.nodes.push({ ...input.nodes[0], sha, timestamp: new Date(timestamp).toISOString() })
+    input.refs.push({ ...input.refs[0], ref: 'refs/heads/' + sha, name: sha, sha })
+  }
+  const bounded = atlasWindowPage(input, days)!
+  const layout = layoutGitAtlas(bounded)
+  expect(bounded.nodes.map(node => node.sha)).toEqual(['early', 'late'])
+  expect(layout.tracks.map(track => track.label).sort()).toEqual(['main', 'topic'])
+  const result = presentGitAtlas(layout, bounded, days, 2200)
+  expect(result.width).toBeGreaterThanOrEqual(2200)
+  expect(result.days).toHaveLength(days)
+  expect(result.days[0].x).toBe(0)
+  expect(result.days.at(-1)!.x + result.days.at(-1)!.width).toBeCloseTo(result.width)
+  expect(result.days.at(-1)!.end).toBe(end)
+  expect(input.nodes).toHaveLength(4)
 })

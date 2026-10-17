@@ -2,7 +2,7 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 're
 import { Crown, GitBranch, GitMerge, Tag } from 'lucide-react'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
 import { firstParentPath, layoutGitAtlas } from './atlas-layout'
-import { presentGitAtlas } from './atlas-presentation'
+import { atlasWindowPage, presentGitAtlas } from './atlas-presentation'
 
 const colors = ['var(--color-green)', 'var(--color-warning)', 'var(--status-restored)', 'var(--accent)']
 export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison, selected, select, focusTrajectory, requestMore, loading }: {
@@ -16,14 +16,14 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
   const previousWidth = useRef(0)
   const budget = useRef(1)
   const [demand, setDemand] = useState(0)
+  const windowPage = useMemo(() => atlasWindowPage(page, windowDays), [page, windowDays])
   const layout = useMemo(() => {
-    const value = layoutGitAtlas(page, base, previous.current)
+    const value = layoutGitAtlas(windowPage, base, previous.current)
     previous.current = new Map(value.tracks.map(track => [track.id, track.lane]))
     return value
-  }, [page, base])
-  const [expanded, setExpanded] = useState(false)
+  }, [windowPage, base])
   const [viewport, setViewport] = useState({ x: 0, y: 0, width: 1200, height: 900 })
-  const { points, width, days } = useMemo(() => presentGitAtlas(layout, page, windowDays), [layout, page, windowDays])
+  const { points, width, days } = useMemo(() => presentGitAtlas(layout, windowPage, windowDays, Math.max(0, viewport.width - 240)), [layout, windowPage, windowDays, viewport.width])
   useEffect(() => {
     if (!page || !requestMore || loading || budget.current <= 0) return
     const oldest = Math.min(...page.nodes.map(node => Date.parse(node.timestamp)))
@@ -56,8 +56,7 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
   const trackById = new Map(layout.tracks.map(track => [track.id, track]))
   const path = firstParentPath(new Map((page?.nodes ?? []).map(node => [node.sha, node])), page?.refs.find(ref => ref.ref === focus)?.sha ?? focus)
   const exclusive = new Set([...(comparison?.exclusive.left ?? []), ...(comparison?.exclusive.right ?? []), ...(comparison?.mergeBases ?? [])])
-  const important = new Set(layout.tracks.filter(track => track.ref === base || track.ref === focus || track.shas.includes(selected ?? '')).map(track => track.id))
-  const allowedTracks = expanded ? layout.tracks : layout.tracks.filter((track, index) => index < 12 || important.has(track.id))
+  const allowedTracks = layout.tracks
   const allowed = new Set(allowedTracks.map(track => track.id))
   const rows = new Map(allowedTracks.map((track, index) => [track.id, index]))
   const y = (lane: number) => 158 + lane * 104
@@ -78,7 +77,6 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
   }
   return <>
     {layout.edges.some(edge => edge.skew) && <div className="gm-atlas-note" role="status">Há datas invertidas entre pais e filhos. Conexões tracejadas preservam o parentesco real.</div>}
-    {layout.tracks.length > 12 && <button className="gm-secondary-toggle" onClick={() => setExpanded(value => !value)}>{expanded ? 'Recolher trajetórias secundárias' : `Mostrar trajetórias secundárias (${layout.tracks.length - allowedTracks.length})`}</button>}
     <div ref={scroll} className="gm-atlas-scroll" tabIndex={0} aria-label="Mapa temporal Git; role para explorar" onWheel={() => { budget.current = 1; setDemand(value => value + 1) }} onPointerDown={() => { budget.current = 1; setDemand(value => value + 1) }} onKeyDown={() => { budget.current = 1; setDemand(value => value + 1) }} onScroll={event => {
       const element = event.currentTarget
       setViewport({ x: element.scrollLeft, y: element.scrollTop, width: element.clientWidth, height: element.clientHeight })
@@ -120,14 +118,15 @@ export function GitAtlasCanvas({ page, windowDays, base, focus, mode, comparison
         </div>
         {visible.map(point => {
           const track = trackById.get(point.track)!, tags = page?.tags.filter(tag => tag.sha === point.node.sha) ?? [], detached = page?.detachedHeads.filter(head => head.sha === point.node.sha) ?? []
-          return <button className={`gm-commit gm-atlas-node ${point.node.parents.length > 1 ? 'is-merge' : ''} ${active(point.node.sha) ? '' : 'is-muted'}`} style={{ left: point.x + 240, top: y(point.lane), '--trajectory-color': colors[track.color] } as React.CSSProperties} key={point.node.sha} data-sha={point.node.sha} aria-label={`${point.node.parents.length > 1 ? 'Merge: ' : ''}${point.node.subject} · ${point.node.sha.slice(0, 8)}`} aria-pressed={point.node.sha === selected} onClick={() => select(point.node.sha)}>
+          const margin = Math.min(87, width / 2)
+          const captionShift = Math.max(margin - point.x, Math.min(0, width - margin - point.x))
+          return <button className={`gm-commit gm-atlas-node ${point.node.parents.length > 1 ? 'is-merge' : ''} ${active(point.node.sha) ? '' : 'is-muted'}`} style={{ left: point.x + 240, top: y(point.lane), '--trajectory-color': colors[track.color], '--caption-shift': `${captionShift}px` } as React.CSSProperties} key={point.node.sha} data-sha={point.node.sha} aria-label={`${point.node.parents.length > 1 ? 'Merge: ' : ''}${point.node.subject} · ${point.node.sha.slice(0, 8)}`} aria-pressed={point.node.sha === selected} onClick={() => select(point.node.sha)}>
             <span className="gm-atlas-dot" />
             {(captions.has(point.node.sha) || detached.length > 0) && <span className={`gm-node-caption ${tags.length ? 'is-tag' : ''}`}>{tags.length ? <Tag size={18} /> : point.node.parents.length > 1 ? <GitMerge size={18} /> : null}<span>{tags.length ? tags.map(tag => tag.name).join(', ') : point.node.subject}{detached.length > 0 && <small>HEAD detached / worktree atual</small>}</span></span>}
-            <span className="gm-node-tooltip">{track.label}<br />{point.node.subject}<br />{point.node.author} · {new Date(point.node.timestamp).toLocaleString()}<br />{point.node.sha.slice(0, 12)}</span>
+            <span className="gm-node-tooltip" style={{ left: Math.max(21 - point.x, Math.min(-25, width - point.x - 215)) }}>{track.label}<br />{point.node.subject}<br />{point.node.author} · {new Date(point.node.timestamp).toLocaleString()}<br />{point.node.sha.slice(0, 12)}</span>
           </button>
         })}
       </div>
     </div>
-    {!!layout.inactive.length && <details className="gm-inactive"><summary>Pontas fora do trecho carregado ({layout.inactive.length})</summary>{layout.inactive.map(ref => <p key={ref.ref}>{ref.name} · {ref.sha.slice(0, 8)}</p>)}</details>}
   </>
 }

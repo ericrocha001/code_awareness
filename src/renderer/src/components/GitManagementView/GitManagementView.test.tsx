@@ -159,3 +159,18 @@ it.each([7, 15] as const)('requests the %i-day window and renders each daily col
   await waitFor(() => expect(api.getGitAtlas.mock.calls.at(-1)![0].window).toBe(days))
   await waitFor(() => expect(document.querySelectorAll('.gm-atlas-date')).toHaveLength(days))
 })
+
+it('shows every active trajectory without noise controls and drops older rows on a short window', async () => {
+  const api = setup()
+  const nodes = Array.from({ length: 20 }, (_, index) => ({ ...page.nodes[0], sha: String(index).padStart(40, '0'), parents: [] }))
+  nodes.push({ ...nodes[0], sha: 'f'.repeat(40), timestamp: '2026-10-01T00:00:00Z' })
+  const branches = nodes.map((node, index) => ({ ...refs[0], ref: 'refs/heads/row-' + index, name: 'row-' + index, sha: node.sha }))
+  api.getGitAtlas.mockResolvedValue(ok({ ...page, nodes, refs: branches, head: nodes[0].sha }))
+  render(<GitManagementView state={state} />)
+  await waitFor(() => expect(document.querySelectorAll('.gm-atlas-lane-label')).toHaveLength(21))
+  expect(document.querySelector('.gm-secondary-toggle')).toBeNull()
+  expect(document.querySelector('.gm-inactive')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: '7d' }))
+  await waitFor(() => expect(document.querySelectorAll('.gm-atlas-lane-label')).toHaveLength(20))
+  expect(document.querySelector('[data-track="refs/heads/row-20"]')).toBeNull()
+})

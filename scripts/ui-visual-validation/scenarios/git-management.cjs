@@ -72,6 +72,7 @@ exports.run = async (ctx) => {
   )
   git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD~1'))
   }
+  if (ctx.gridProof) require('./git-atlas-grid.cjs').seed(root)
   fs.writeFileSync(path.join(root, 'file.txt'), 'prepared version\n')
   git('add', 'file.txt')
   fs.writeFileSync(path.join(root, 'file.txt'), 'later worktree version\n')
@@ -140,6 +141,7 @@ exports.run = async (ctx) => {
   await ctx.evaluate(() => {
     document.querySelector('.global-sidebar-logo-img').src = 'logo.svg'
   })
+  if (ctx.gridProof) { await require('./git-atlas-grid.cjs').verify(ctx); return }
   if (ctx.mockup) {
     await ctx.viewport(1672, 941)
     await ctx.click('.gm-commit.is-merge')
@@ -202,12 +204,23 @@ exports.run = async (ctx) => {
   ctx.check('Origin remains unknown despite current worktree containment', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Origem: Não registrada') && !document.querySelector('.gm-inspector').textContent.includes('Worktrees atuais')))
   for (const label of ['7d', '15d', '30d', '60d', '90d', 'Tudo']) {
     await ctx.click(`.gm-segmented[aria-label="Janela temporal"] button:nth-child(${['7d','15d','30d','60d','90d','Tudo'].indexOf(label)+1})`)
+    await ctx.evaluate(async () => { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))) })
     {
       const deadline = Date.now() + 30000
       while (Date.now() < deadline && !await ctx.evaluate(count => document.querySelectorAll('.gm-atlas-date').length === count, label === 'Tudo' ? 1 : parseInt(label))) await new Promise(resolve => setTimeout(resolve, 50))
     }
     await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && document.querySelectorAll('.gm-commit').length > 0)
     if (label !== 'Tudo') ctx.check(`${label}: every daily period is represented`, await ctx.evaluate(count => document.querySelectorAll('.gm-atlas-date').length === count, parseInt(label)))
+    if (label === '7d' || label === '15d') {
+      await ctx.viewport(2560, 1440)
+      await waitForGit(() => {
+        const map = document.querySelector('.gm-atlas-scroll'), surface = document.querySelector('.gm-atlas-surface')
+        return map && Math.abs(parseFloat(surface.style.width) - map.clientWidth) < 1
+      })
+      ctx.check(`${label}: daily grid fills the available width without hidden trajectories`, await ctx.evaluate(() => !document.querySelector('.gm-secondary-toggle') && !document.querySelector('.gm-inactive') && document.querySelector('.gm-atlas-scroll').scrollLeft === 0))
+      await ctx.capture(`wide-dark-${label}-filled`)
+      await ctx.viewport(1440, 900)
+    }
   }
   await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)')
   await ctx.waitFor(() => document.querySelector('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)').getAttribute('aria-pressed') === 'true')
@@ -399,9 +412,7 @@ exports.run = async (ctx) => {
   await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !!document.querySelector('.gm-load-more'))
   await ctx.click('.gm-load-more')
   await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !document.querySelector('.gm-load-more'))
-  ctx.check('Many simultaneous refs collapse explicitly', await ctx.evaluate(() => document.querySelector('.gm-secondary-toggle')?.textContent.includes('Mostrar trajetórias secundárias')))
-  await ctx.capture('wide-dark-dense-collapsed')
-  await ctx.click('.gm-secondary-toggle')
+  ctx.check('All active trajectories are available without secondary or inactive controls', await ctx.evaluate(() => !document.querySelector('.gm-secondary-toggle') && !document.querySelector('.gm-inactive')))
   await ctx.waitFor(() => document.querySelectorAll('.gm-atlas-lane-label').length > 100)
   const summary = await ctx.evaluate(() => ({ nodes: document.querySelectorAll('.gm-commit').length, labels: document.querySelectorAll('.gm-atlas-lane-label').length, width: document.querySelector('.gm-atlas-scroll').scrollWidth }))
   ctx.check('Dense timeline virtualizes nodes rather than mounting every commit', summary.nodes < 118 && summary.labels > 100)
