@@ -39,25 +39,35 @@ function PathStep({ icon: Icon, label, value, detail, tone }: { icon: LucideIcon
   </div>
 }
 
-export function ChannelView() {
+export function ChannelView({ active = true }: { active?: boolean }) {
   const [state, setState] = useState<ChannelState | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
   const [showDiagnostic, setShowDiagnostic] = useState(false)
   const mounted = useRef(false)
   const updating = useRef(false)
   const closeDiagnostic = useCallback(() => setShowDiagnostic(false), [])
-  const receive = (next: ChannelState) => {
+  const receive = useCallback((next: ChannelState) => {
     if (mounted.current) setState(previous => !previous || next.revision > previous.revision ? next : previous)
-  }
+  }, [])
   useEffect(() => {
     mounted.current = true
-    const unsubscribe = window.codeAwareness.onChannelChanged(receive)
-    window.codeAwareness.getChannelState().then(receive).catch(() => {
-      if (mounted.current) setError('Estado do Channel indisponível. Reabra o Channel para tentar novamente.')
-    })
-    return () => { mounted.current = false; unsubscribe() }
+    return () => { mounted.current = false }
   }, [])
+  useEffect(() => {
+    if (!active) { setShowDiagnostic(false); return }
+    let current = true, eventReceived = false
+    const unsubscribe = window.codeAwareness.onChannelChanged(next => {
+      if (current) { eventReceived = true; receive(next); setLoadError(null) }
+    })
+    window.codeAwareness.getChannelState().then(next => {
+      if (current) { receive(next); setLoadError(null) }
+    }).catch(() => {
+      if (current && !eventReceived) setLoadError('Estado do Channel indisponível. Reabra o Channel para tentar novamente.')
+    })
+    return () => { current = false; unsubscribe() }
+  }, [active, receive])
 
   async function toggle() {
     if (!state || updating.current) return
@@ -82,15 +92,15 @@ export function ChannelView() {
       <header className="channel-heading">
         <div className="channel-identity"><span className="channel-feature-icon"><Radio size={30} aria-hidden="true" /></span><div><h1 id="channel-title">Code Awareness Channel</h1><p>Acesso remoto, capacidades e saúde da execução atual.</p></div></div>
         <div className="channel-header-controls">
-          <div className="channel-project"><Folder size={19} aria-hidden="true" /><div><span className="channel-label">Projeto ativo</span><strong title={state?.activeProject?.name}>{state?.activeProject?.name ?? 'Nenhum projeto ativo'}</strong></div></div>
+          <div className="channel-project"><Folder size={19} aria-hidden="true" /><div><span className="channel-label">Projeto ativo</span><strong title={state?.activeProject?.name}>{state ? state.activeProject?.name ?? 'Nenhum projeto ativo' : 'Não verificado'}</strong></div></div>
           <button type="button" className="channel-action" disabled={!state || pending} aria-busy={pending} onClick={toggle}>{pending ? <Loader2 className="channel-spinner" size={16} aria-hidden="true" /> : <Power size={16} aria-hidden="true" />}{pending ? 'Atualizando…' : state?.remoteAccessEnabled ? 'Desativar acesso remoto' : 'Ativar acesso remoto'}</button>
         </div>
         {state && copy && <div className="channel-status" aria-label="Disponibilidade" role="status" aria-live="polite"><StatusBadge tone={mainTone}>{readyTitle}</StatusBadge><p>{copy.description}</p>{state.availability === 'READY' && health && <span className="channel-header-health">{healthCopy[health.status]}</span>}</div>}
       </header>
-      {error && <p className="channel-error" role="alert">{error}</p>}
+      {(error || loadError) && <p className="channel-error" role="alert">{error ?? loadError}</p>}
       <div className="channel-content">
-      <LocalMcpSetup />
-      {!state && !error && <p className="channel-loading" role="status"><Loader2 className="channel-spinner" size={18} aria-hidden="true" />Carregando Channel…</p>}
+      <LocalMcpSetup active={active} />
+      {!state && !loadError && <p className="channel-loading" role="status"><Loader2 className="channel-spinner" size={18} aria-hidden="true" />Carregando estado operacional…</p>}
       {state && activity && health && copy && <>
         <section className="channel-panel" aria-labelledby="channel-path-title">
           <div className="channel-section-heading"><h2 id="channel-path-title"><Radio size={19} aria-hidden="true" />Caminho operacional</h2><span>Controle local do acesso</span></div>
@@ -135,6 +145,6 @@ export function ChannelView() {
       </>}
       </div>
     </section>
-    {showDiagnostic && <DiagnosticModal onClose={closeDiagnostic} />}
+    {active && showDiagnostic && <DiagnosticModal onClose={closeDiagnostic} />}
   </>
 }

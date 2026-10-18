@@ -20,6 +20,7 @@ it('keeps exactly one visible panel and one retained Orchestration view while sw
     getWorkOrchestration: vi.fn(async () => ({ success: true, context: { projectId: 'a', revision: 1 }, data: { repositoryId: 'repo', worktrees: [], inventoryCoverage: 'COMPLETE', observedAt: '2026-10-13T00:00:00Z', revision: 'r' } }))
   } as any
   render(<React.StrictMode><App /></React.StrictMode>)
+  expect(screen.queryByTestId('channel-view')).toBeNull()
   fireEvent.click(screen.getByText('work-orchestration'))
   await screen.findByText('Inventário completo · 0 descobertas')
   for (let i = 0; i < 3; i++) for (const tab of ['git-management', 'work-orchestration', 'codebase', 'channel', 'home']) {
@@ -27,8 +28,12 @@ it('keeps exactly one visible panel and one retained Orchestration view while sw
     expect(document.querySelectorAll('.wo-view')).toHaveLength(1)
     expect(document.querySelectorAll('.wo-tab')).toHaveLength(1)
     expect((document.querySelector('.wo-tab') as HTMLElement).hidden).toBe(tab !== 'work-orchestration')
-    for (const [name, target] of [['git-view', 'git-management'], ['source-view', 'codebase'], ['channel-view', 'channel'], ['home-view', 'home']])
+    for (const [name, target] of [['git-view', 'git-management'], ['source-view', 'codebase'], ['home-view', 'home']])
       expect(screen.queryAllByTestId(name)).toHaveLength(tab === target ? 1 : 0)
+    const channel = document.querySelector('.channel-tab') as HTMLElement
+    expect(channel.hidden).toBe(tab !== 'channel')
+    expect(channel.hasAttribute('inert')).toBe(tab !== 'channel')
+    expect(screen.queryAllByTestId('channel-view')).toHaveLength(channel.childElementCount ? 1 : 0)
   }
   expect(errors.mock.calls.some(args => String(args[0]).includes('same key'))).toBe(false)
   expect(window.codeAwareness.getWorkOrchestration).toHaveBeenCalledTimes(1)

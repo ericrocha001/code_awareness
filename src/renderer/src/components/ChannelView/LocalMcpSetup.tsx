@@ -1,12 +1,12 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Plug, RefreshCw } from 'lucide-react'
 import type { LocalMcpAction, LocalMcpClientId, LocalMcpClientState, LocalMcpPreview } from '../../../../shared/types/local-mcp-client-types'
 
 const configuration = { ABSENT: 'Disponível para instalação', INSTALLED: 'Configurado', CONFLICT: 'Migração ou revisão necessária', ERROR: 'Requer atenção', UNSUPPORTED: 'Não suportado neste perfil' }
-const groups: { name: string; ids: LocalMcpClientId[] }[] = [
-  { name: 'Codex', ids: ['codex'] },
-  { name: 'Antigravity', ids: ['antigravity', 'antigravity-settings'] },
-  { name: 'Cline', ids: ['cline', 'cline-settings', 'cline-vscode'] }
+const groups: { name: string; variants: { id: LocalMcpClientId; name: string }[] }[] = [
+  { name: 'Codex', variants: [{ id: 'codex', name: 'Codex' }] },
+  { name: 'Antigravity', variants: [{ id: 'antigravity', name: 'Antigravity 2.0 · plugin' }, { id: 'antigravity-settings', name: 'IDE · configuração (fallback)' }] },
+  { name: 'Cline', variants: [{ id: 'cline', name: 'Desktop · Agent Plugin v1' }, { id: 'cline-settings', name: 'Desktop · configuração (fallback)' }, { id: 'cline-vscode', name: 'VS Code · configuração (fallback)' }] }
 ]
 const actionName = { connect: 'Conectar', repair: 'Reparar / atualizar', disconnect: 'Desconectar' }
 const messages: Record<string, string> = {
@@ -33,7 +33,7 @@ const diagnostic = (error: unknown) => {
   return /[A-Z][A-Z_]{3,}/.exec(message)?.[0] ?? 'LOCAL_SETUP_UNAVAILABLE'
 }
 
-export function LocalMcpSetup() {
+export function LocalMcpSetup({ active = true }: { active?: boolean }) {
   const [clients, setClients] = useState<LocalMcpClientState[]>([])
   const [selection, setSelection] = useState<Record<string, LocalMcpClientId>>({})
   const [busy, setBusy] = useState(false)
@@ -42,51 +42,55 @@ export function LocalMcpSetup() {
   const [confirmed, setConfirmed] = useState(false)
   const [replace, setReplace] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
-  const active = useRef(true)
+  const mounted = useRef(true)
+  const visible = useRef(active)
+  const visibilityEpoch = useRef(0)
   const pending = useRef(false)
   const api = window.codeAwareness.localMcpClients
   async function run(work: () => Promise<void>) {
-    if (pending.current) return
+    if (pending.current || !visible.current) return
     pending.current = true; setBusy(true); setError(null)
-    try { await work() } catch (caught) { if (active.current) setError(diagnostic(caught)) }
-    finally { pending.current = false; if (active.current) setBusy(false) }
+    try { await work() } catch (caught) { if (mounted.current) setError(diagnostic(caught)) }
+    finally { pending.current = false; if (mounted.current) setBusy(false) }
   }
+  function clearPreview() { setPreview(null); setConfirmed(false); setReplace(false) }
   useEffect(() => {
-    active.current = true
-    void run(async () => {
-      if (!api) throw new Error('LOCAL_SETUP_UNAVAILABLE')
-      const result = await api.detect()
-      if (active.current) setClients(result)
-    })
-    return () => { active.current = false }
+    mounted.current = true
+    return () => { mounted.current = false }
   }, [])
-  function update(next: LocalMcpClientState) { if (active.current) setClients(previous => previous.map(row => row.id === next.id ? next : row)) }
+  useLayoutEffect(() => {
+    visible.current = active
+    visibilityEpoch.current++
+    if (!active) clearPreview()
+  }, [active])
+  function update(next: LocalMcpClientState) { if (mounted.current) setClients(previous => [...previous.filter(row => row.id !== next.id), next]) }
   function prepare(id: LocalMcpClientId, action: LocalMcpAction) {
+    const epoch = visibilityEpoch.current
     void run(async () => {
       const result = await api.preview(id, action)
-      if (active.current) { setPreview(result); setConfirmed(false); setReplace(false); setNotice(null) }
+      if (mounted.current && visible.current && visibilityEpoch.current === epoch) { setPreview(result); setConfirmed(false); setReplace(false); setNotice(null) }
     })
   }
   return <section className="channel-panel local-mcp-setup" aria-labelledby="local-mcp-title" aria-busy={busy}>
     <div className="channel-section-heading"><h2 id="local-mcp-title"><Plug size={19} aria-hidden="true" />Configurar MCP Local</h2>
-      <button type="button" className="channel-action" disabled={busy || !api} onClick={() => void run(async () => { const rows = await api.detect(); if (active.current) { setClients(rows); setPreview(null) } })}><RefreshCw size={14} aria-hidden="true" />Detectar</button></div>
+      <button type="button" className="channel-action" disabled={busy || !api} onClick={() => { clearPreview(); void run(async () => { const rows = await api.detect(); if (mounted.current) setClients(rows) }) }}><RefreshCw size={14} aria-hidden="true" />Detectar</button></div>
     <p className="channel-note">Conecte seus clientes ao Desktop neste computador. MCP Local e MCP Online têm configurações independentes.</p>
     {error && <p className="channel-error" role="alert" title={error}>{explain(error)}</p>}
     {notice && <p className="channel-note" role="status">{notice}</p>}
     <div className="local-mcp-clients">{groups.map(group => {
-      const variants = clients.filter(client => group.ids.includes(client.id))
-      const client = variants.find(row => row.id === selection[group.name]) ?? variants[0]
-      if (!client) return null
+      const variants = group.variants
+      const id = selection[group.name] ?? variants[0].id
+      const client = clients.find(row => row.id === id)
       return <article className="local-mcp-client" key={group.name} aria-label={group.name}>
-      <div><h3>{group.name}</h3><span className={`channel-badge channel-tone-${client.configuration === 'INSTALLED' ? 'healthy' : 'neutral'}`}>{configuration[client.configuration]}</span></div>
-      {variants.length > 1 ? <label className="local-mcp-variant">Destino<select aria-label={`Destino ${group.name}`} value={client.id} disabled={busy || !!preview} onChange={event => setSelection(previous => ({ ...previous, [group.name]: event.target.value as LocalMcpClientId }))}>{variants.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label> : client.id !== 'codex' && <p className="channel-note">{client.name}</p>}
-      <p className="channel-note">{client.mechanism === 'PLUGIN' ? 'Plugin local · reconhecimento pendente' : client.mechanism === 'CODEX_CLI' ? 'Registro oficial Codex' : 'Configuração de fallback'} · Reconexão: pendente</p>
+      <div><h3>{group.name}</h3><span className={`channel-badge channel-tone-${client?.configuration === 'INSTALLED' ? 'healthy' : 'neutral'}`}>{client ? configuration[client.configuration] : 'Não verificado'}</span></div>
+      {variants.length > 1 && <label className="local-mcp-variant">Destino<select aria-label={`Destino ${group.name}`} value={id} disabled={busy || !!preview} onChange={event => setSelection(previous => ({ ...previous, [group.name]: event.target.value as LocalMcpClientId }))}>{variants.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>}
+      {client ? <><p className="channel-note">{client.mechanism === 'PLUGIN' ? 'Plugin local · reconhecimento pendente' : client.mechanism === 'CODEX_CLI' ? 'Registro oficial Codex' : 'Configuração de fallback'} · Reconexão: pendente</p>
       <p className="local-mcp-path">{client.path}</p>
-      <p className="channel-note">Launcher: {client.launcherPresent ? 'presente' : 'ausente'} · Bootstrap: {client.bootstrap === 'RESPONDS' ? 'responde' : client.bootstrap === 'ERROR' ? 'falhou' : 'não verificado'} · Uso pelo cliente: não confirmado</p>
-      {client.diagnostic && <p className="channel-note" role="status" title={client.diagnostic}>{explain(client.diagnostic)}</p>}
-      <div className="local-mcp-actions"><button type="button" className="channel-action" disabled={busy || !!preview} onClick={() => void run(async () => update(await api.verify(client.id)))}>Verificar</button>
-        <button type="button" className="channel-action" disabled={busy || !!preview || !client.detected || client.configuration === 'ERROR'} onClick={() => prepare(client.id, client.configuration === 'ABSENT' ? 'connect' : 'repair')}>{client.configuration === 'ABSENT' ? 'Conectar' : 'Reparar / atualizar'}</button>
-        {client.configuration !== 'ABSENT' && client.configuration !== 'UNSUPPORTED' && <button type="button" className="channel-action" disabled={busy || !!preview || client.configuration === 'ERROR'} onClick={() => prepare(client.id, 'disconnect')}>Desconectar</button>}</div>
+      <p className="channel-note">Launcher: {client.launcherPresent ? 'presente' : 'ausente'} · Bootstrap: {client.bootstrap === 'RESPONDS' ? 'responde' : client.bootstrap === 'ERROR' ? 'falhou' : 'não verificado'} · Uso pelo cliente: não confirmado</p></> : <p className="channel-note">Verifique este destino ou use Detectar para consultar os clientes.</p>}
+      {client?.diagnostic && <p className="channel-note" role="status" title={client.diagnostic}>{explain(client.diagnostic)}</p>}
+      <div className="local-mcp-actions"><button type="button" className="channel-action" disabled={busy || !!preview || !api} onClick={() => void run(async () => update(await api.verify(id)))}>Verificar</button>
+        <button type="button" className="channel-action" disabled={busy || !!preview || !api || !client?.detected || client.configuration === 'ERROR' || client.configuration === 'UNSUPPORTED'} onClick={() => prepare(id, client?.configuration === 'ABSENT' ? 'connect' : 'repair')}>{!client || client.configuration === 'ABSENT' ? 'Conectar' : 'Reparar / atualizar'}</button>
+        {client && client.configuration !== 'ABSENT' && client.configuration !== 'UNSUPPORTED' && <button type="button" className="channel-action" disabled={busy || !!preview || client.configuration === 'ERROR'} onClick={() => prepare(id, 'disconnect')}>Desconectar</button>}</div>
     </article>})}</div>
     {busy && <p className="channel-note" role="status">Verificando configuração local…</p>}
     {preview && <div className="local-mcp-preview" aria-label="Prévia da configuração">
@@ -98,8 +102,8 @@ export function LocalMcpSetup() {
       <label><input type="checkbox" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />Confirmo a operação neste destino</label>
       <div className="local-mcp-actions"><button type="button" className="channel-action" disabled={busy || !confirmed || preview.conflict && !replace} onClick={() => void run(async () => {
         update(await api.apply(preview.token, true, replace))
-        if (active.current) { setPreview(null); setNotice('Configuração processada. Reconecte o cliente e execute as ferramentas de leitura para confirmar o uso.') }
-      })}>Confirmar {actionName[preview.action].toLowerCase()}</button><button type="button" className="channel-action" disabled={busy} onClick={() => setPreview(null)}>Cancelar</button></div>
+        if (mounted.current) { clearPreview(); setNotice('Configuração processada. Reconecte o cliente e execute as ferramentas de leitura para confirmar o uso.') }
+      })}>Confirmar {actionName[preview.action].toLowerCase()}</button><button type="button" className="channel-action" disabled={busy} onClick={clearPreview}>Cancelar</button></div>
     </div>}
   </section>
 }
