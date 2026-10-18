@@ -7,10 +7,85 @@ import type { GitHubAuthService, PendingGitHubAuthorization } from './github-aut
 import type { GitHubProductConfig } from './github-config'
 import type { GitHubConnectionMetadata, GitHubCredentialStore } from './github-credential-store'
 import { GitHubIntegrationError, githubErrorMessage, toGitHubIntegrationError } from './github-errors'
+import { GitHubPullRequests, type PullRequestDependencies, type PullRequestExecutionContext } from './github-pull-requests'
+import { GitHubPrIntegration } from './github-pr-integration'
+import type { PullRequestMutationInput } from '../../shared/types/github-pr-types'
+import { PullRequestError, type CreatePullRequestInput, type PullRequestQuery } from '../../shared/types/github-pr-types'
+import { GitHubPrAccessError, pullRequestAccessFailure } from './github-pr-access'
+import { GitHubPullRequestCatalog } from './github-pull-request-catalog'
+import { createHash } from 'node:crypto'
+import type { BranchRecord } from '../../shared/types/branch-orchestration-types'
+import type { BranchDiscardRemoteEvidence } from '../../shared/types/branch-discard-types'
+import type { BranchInventory } from '../../shared/types/branch-orchestration-types'
+import type { BranchPullRequests, PullRequestCatalog, PullRequestCommitsPage } from '../../shared/types/branch-pull-request-types'
 
 export interface ExternalUrlOpener { openExternal(url: string): Promise<unknown> }
 
 export class GitHubIntegrationService {
+  private connectionRevision = 0
+  async assessBranchDiscard(repoPath: string, inventory: BranchInventory, branch: BranchRecord): Promise<BranchDiscardRemoteEvidence> {
+    const origin = await this.git.getRemoteUrl(repoPath)
+    if (!origin) return { repositoryId: inventory.repositoryId, coverage: 'COMPLETE', observedAt: new Date().toISOString(), revision: 'LOCAL_ONLY', defaultBranch: 'main', protected: false, openPullRequests: [], knownPullRequests: [], reason: null }
+    const { catalog } = await this.branchPullRequests(repoPath, inventory, true)
+    let coverage = catalog.coverage, reason = catalog.reason
+    let protection: boolean | null = null
+    try { protection = await this.branchProtection(repoPath, branch.name) } catch {}
+    const prs = catalog.items.filter(pr => pr.head.repositoryId === catalog.providerRepositoryId && pr.head.repository?.toLowerCase() === catalog.repository?.toLowerCase() && pr.head.ref === branch.name)
+    if (prs.length > 20) { coverage = 'PARTIAL'; reason = 'PR_CONFIRMATION_LIMIT' }
+    else for (const pr of prs) {
+      try {
+        const confirmed = await this.api!.getPullRequestCatalogRecord(catalog.repository!, pr.number)
+        if (confirmed.id !== pr.id || confirmed.updatedAt !== pr.updatedAt || confirmed.head.sha !== pr.head.sha || confirmed.head.ref !== branch.name || confirmed.head.repositoryId !== catalog.providerRepositoryId || confirmed.base.repositoryId !== catalog.providerRepositoryId || confirmed.state !== pr.state) { coverage = 'PARTIAL'; reason = 'PR_CHANGED_DURING_REVALIDATION' }
+      } catch { coverage = 'PARTIAL'; reason = 'PR_CONFIRMATION_UNAVAILABLE' }
+    }
+    const evidence = { repositoryId: inventory.repositoryId, coverage, defaultBranch: catalog.defaultBranch, protected: protection,
+      openPullRequests: prs.filter(pr => pr.state === 'open').map(pr => pr.number), knownPullRequests: prs.map(pr => ({ number: pr.number, state: pr.state, merged: pr.merged })), reason }
+    return { ...evidence, observedAt: catalog.observedAt, revision: createHash('sha256').update(JSON.stringify([evidence, prs])).digest('hex') }
+  }
+  private pullRequestCatalog: GitHubPullRequestCatalog | null = null
+
+  private async pullRequestOrigin(repoPath: string) {
+    this.requireConfigured()
+    if (!this.auth!.hasCredentials()) throw new GitHubIntegrationError('NOT_CONNECTED', githubErrorMessage('NOT_CONNECTED'))
+    const remote = await this.git.getRemoteUrl(repoPath), fullName = remote ? normalizeGitHubOrigin(remote) : null
+    if (!fullName) throw new Error('REMOTE_CONFLICT')
+    const record = this.catalog.findByPath(repoPath)
+    if (!record || record.github && record.github.fullName.toLowerCase() !== fullName.toLowerCase()) throw new Error('REMOTE_CONFLICT')
+    return { fullName, repositoryId: record.id, providerRepositoryId: record.github?.repositoryId }
+  }
+
+  async branchPullRequests(repoPath: string, inventory: BranchInventory, force = false): Promise<BranchPullRequests> {
+    try {
+      const connection = this.connectionRevision
+      const origin = await this.pullRequestOrigin(repoPath)
+      if (origin.repositoryId !== inventory.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+      const reader = this.pullRequestCatalog ??= new GitHubPullRequestCatalog(this.api!)
+      const catalog = await reader.read(inventory.repositoryId, origin.fullName, force)
+      const after = await this.pullRequestOrigin(repoPath)
+      if (connection !== this.connectionRevision || after.repositoryId !== origin.repositoryId || after.fullName !== origin.fullName) throw new Error('REMOTE_CONTEXT_CHANGED')
+      if (origin.providerRepositoryId && catalog.providerRepositoryId !== origin.providerRepositoryId) throw new Error('REMOTE_IDENTITY_MISMATCH')
+      return reader.project(inventory, catalog)
+    } catch (error) {
+      const catalog: PullRequestCatalog = { repositoryId: inventory.repositoryId, repository: null, providerRepositoryId: null, defaultBranch: null,
+        source: 'GITHUB_REST', coverage: 'UNAVAILABLE', observedAt: new Date().toISOString(), revision: 'UNAVAILABLE', items: [], reason: error instanceof Error ? error.message : 'GITHUB_UNAVAILABLE' }
+      return { repositoryId: inventory.repositoryId, catalog, relations: [], orphaned: [] }
+    }
+  }
+
+  async branchProtection(repoPath: string, branch: string) {
+    const origin = await this.pullRequestOrigin(repoPath)
+    return this.api!.getBranchProtection(origin.fullName, branch)
+  }
+
+  async pullRequestCommits(repoPath: string, number: number, head: string, page = 1): Promise<PullRequestCommitsPage> {
+    const origin = await this.pullRequestOrigin(repoPath)
+    const before = await this.api!.getPullRequestCatalogRecord(origin.fullName, number)
+    if (before.head.sha !== head || before.base.repository.toLowerCase() !== origin.fullName.toLowerCase()) throw new Error('PR_STATE_CHANGED')
+    const commits = await this.api!.getPullRequestCommits(origin.fullName, number, page)
+    const after = await this.api!.getPullRequestCatalogRecord(origin.fullName, number)
+    if (after.head.sha !== head || after.updatedAt !== before.updatedAt) throw new Error('PR_STATE_CHANGED')
+    return { repositoryId: origin.repositoryId, prNumber: number, head, source: 'GITHUB_REST', observedAt: new Date().toISOString(), ...commits }
+  }
   private pending: PendingGitHubAuthorization | null = null
   private authorizationError: GitHubIntegrationError | null = null
   private hasInstallation: boolean | null = null
@@ -22,11 +97,74 @@ export class GitHubIntegrationService {
     private readonly api: GitHubApiClient | null,
     private readonly catalog: RepositoryCatalogService,
     private readonly git: GitService,
-    private readonly external: ExternalUrlOpener
+    private readonly external: ExternalUrlOpener,
+    private readonly pullRequestDependencies?: PullRequestDependencies
   ) {}
 
+  canCreatePullRequests(): boolean { return !!(this.config && this.auth && this.api && this.pullRequestDependencies) }
+  canIntegratePullRequests(): boolean { return this.canCreatePullRequests() && !!this.pullRequestDependencies?.approveMutation }
+
+  async getPullRequestReviews(repoPath: string, number: number) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, ...await this.api!.getPullRequestReviews(context.repository, number) }
+  }
+
+  async getPullRequestChecks(repoPath: string, number: number) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, ...await this.api!.getPullRequestChecks(context.repository, number) }
+  }
+
+  async mutatePullRequest(repoPath: string, operation: 'MERGE_PULL_REQUEST' | 'CLOSE_PULL_REQUEST', input: PullRequestMutationInput, execution: PullRequestExecutionContext) {
+    this.requireConfigured()
+    return new GitHubPrIntegration(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).mutate(operation, input, execution)
+  }
+
+  async getPullRequestOperation(repoPath: string, operationId: string) {
+    this.requireConfigured()
+    return new GitHubPrIntegration(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).status(operationId)
+  }
+
+  private async pullRequestContext(repoPath: string) {
+    this.requireConfigured()
+    if (!this.auth!.hasCredentials()) throw new GitHubIntegrationError('NOT_CONNECTED', githubErrorMessage('NOT_CONNECTED'))
+    const remote = await this.git.getRemoteUrl(repoPath)
+    const repository = remote ? normalizeGitHubOrigin(remote) : null
+    const record = this.catalog.findByPath(repoPath)
+    if (!repository || !record || (record.github && record.github.fullName.toLowerCase() !== repository.toLowerCase())) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+    const remoteIdentity = await this.api!.getRepository(repository)
+    if (remoteIdentity.fullName.toLowerCase() !== repository.toLowerCase() || (record.github?.repositoryId && record.github.repositoryId !== remoteIdentity.repositoryId)) throw new GitHubIntegrationError('REMOTE_CONFLICT', githubErrorMessage('REMOTE_CONFLICT'))
+    return { repositoryId: record.id, repository }
+  }
+
+  async getPullRequestAccess(repoPath: string) {
+    try {
+      const context = await this.pullRequestContext(repoPath)
+      const permissions = await this.api!.getPullRequestEndpointPermissions(context.repository)
+      return { ...context, state: permissions.accessState ?? (permissions.read ? 'READY' : 'PERMISSION_DENIED'), diagnostics: permissions.diagnostics ?? [], evidence: permissions.evidence, operations: { read: permissions.read, reviews: permissions.read, checks: permissions.checks, statuses: permissions.statuses, create: permissions.read && permissions.close && this.canCreatePullRequests(), close: permissions.read && permissions.close && this.canIntegratePullRequests(), merge: permissions.merge && permissions.read && permissions.checks && permissions.statuses && this.canIntegratePullRequests() },
+        restrictions: ['DESKTOP_APPROVAL_REQUIRED', 'SAME_REPOSITORY_ONLY', 'NO_LOCAL_GIT_SYNC', 'NO_ATOMIC_BASE_CAS'], requiredPermissions: { read: 'Pull requests: read', reviews: 'Pull requests: read', checks: 'Checks: read', statuses: 'Commit statuses: read', create: 'Pull requests: write', close: 'Pull requests: write', merge: 'Contents: write' }, observedAt: new Date().toISOString() }
+    } catch (error) {
+      const code = error instanceof PullRequestError ? error.code : toGitHubIntegrationError(error).code
+      return { state: code, operations: { read: false, reviews: false, checks: false, statuses: false, create: false, close: false, merge: false }, diagnostics: [error instanceof GitHubPrAccessError ? error.diagnostic : pullRequestAccessFailure(code)], configurationRequired: !this.config ? ['CODE_AWARENESS_GITHUB_CLIENT_ID', 'CODE_AWARENESS_GITHUB_APP_SLUG'] : [], recovery: 'Use GitHub settings in Desktop to configure, connect or manage installation access.', observedAt: new Date().toISOString() }
+    }
+  }
+
+  async listPullRequests(repoPath: string, query: PullRequestQuery) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, ...await this.api!.listPullRequests(context.repository, query) }
+  }
+
+  async getPullRequest(repoPath: string, number: number) {
+    const context = await this.pullRequestContext(repoPath)
+    return { ...context, pullRequest: await this.api!.getPullRequest(context.repository, number) }
+  }
+
+  async createPullRequest(repoPath: string, input: CreatePullRequestInput, execution: PullRequestExecutionContext) {
+    this.requireConfigured()
+    return new GitHubPullRequests(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).create(input, execution)
+  }
+
   getStatus(): GitHubStatusProjection {
-    if (!this.config || !this.auth || !this.api) return { state: 'CONFIGURATION_REQUIRED', user: null }
+    if (!this.config || !this.auth || !this.api) return { state: 'CONFIGURATION_REQUIRED', user: null, lastSyncError: { code: 'CONFIGURATION_REQUIRED', message: 'Provide both GitHub App overrides or remove both to use the official product identity.' } }
     const metadata = this.credentials.loadMetadata()
     if (this.pending) return {
       state: 'AUTHORIZING', user: metadata.user,
@@ -74,6 +212,9 @@ export class GitHubIntegrationService {
   }
 
   disconnect(): GitHubStatusProjection {
+    this.connectionRevision++
+    this.api?.clearPullRequestCache()
+    this.pullRequestCatalog?.clear()
     this.auth?.disconnect()
     this.pending = null
     this.authorizationError = null

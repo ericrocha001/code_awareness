@@ -188,6 +188,21 @@ export class ArtifactStore {
   }
   create(input: CreateArtifactInput): Artifact { return this.db.transaction(() => this.createInsideTransaction(input)).immediate() }
 
+  createExecutionBinding(input: CreateArtifactInput): Artifact {
+    return this.db.transaction(() => {
+      const metadata = input.metadata
+      const source = this.get(String(metadata.sourceArtifactId))
+      if (!source || source.metadata.kind !== 'EXECUTABLE_PLAN' || source.metadata.executionId !== metadata.executionId || metadata.repositoryId !== this.repositoryId) throw new Error('EXECUTION_SOURCE_MISMATCH')
+      const prior = this.get(input.artifactId)
+      if (prior) {
+        const keys = ['bindingRole', 'repositoryId', 'executionId', 'sourceArtifactId', 'branchRef', 'branchGeneration']
+        if (prior.provenance.executionBranchBinding !== true || keys.some(key => prior.metadata[key] !== metadata[key])) throw new Error('EXECUTION_BINDING_CONFLICT')
+        return prior
+      }
+      return this.createInsideTransaction({ ...input, provenance: { executionBranchBinding: true } })
+    }).immediate()
+  }
+
   createVisual(input: CreateArtifactInput, data: Buffer, media: VisualMedia): Artifact {
     if (input.metadata.kind !== 'VISUAL_REFERENCE') throw new Error('RESERVED_VISUAL_METADATA')
     const dimensions = inspectWebP(data)
@@ -220,6 +235,7 @@ export class ArtifactStore {
     return this.db.transaction(() => {
       const current = this.get(input.artifactId)
       if (!current) throw new Error('ARTIFACT_NOT_FOUND: ' + input.artifactId)
+      if (current.provenance.executionBranchBinding === true) throw new Error('IMMUTABLE_EXECUTION_BINDING')
       if (current.revision !== input.expectedRevision) throw new ArtifactRevisionConflictError(input.artifactId, current.revision)
       const visual = current.metadata.kind === 'VISUAL_REFERENCE'
       if (visual && input.metadata.kind !== 'VISUAL_REFERENCE') throw new Error('IMMUTABLE_VISUAL_KIND')

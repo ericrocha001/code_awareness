@@ -1,0 +1,47 @@
+.bm-view { gap:12px; }
+.bm-toolbar { display:flex; align-items:center; justify-content:space-between; gap:16px; font-size:12px; color:var(--text-secondary); }
+.bm-toolbar label { display:flex; align-items:center; gap:10px; }
+.bm-toolbar input { width:240px; }
+.bm-remote { font-size:11px; color:var(--text-secondary); min-height:16px; }
+.bm-layout { display:flex; gap:14px; min-height:0; flex:1; overflow:hidden; }
+.bm-list,.bm-detail { border:1px solid var(--border); border-radius:16px; background:var(--bg-secondary); padding:16px; min-width:0; overflow:auto; overscroll-behavior:contain; }
+.bm-list { flex:1; }
+.bm-list h2,.bm-detail h2 { margin:0 0 12px; font-size:17px; overflow:hidden; text-overflow:ellipsis; }
+.bm-list h2 small { color:var(--text-secondary); font-weight:400; }
+.bm-list h3 { font-size:11px; font-weight:500; color:var(--text-secondary); margin:18px 0 10px; }
+.bm-list .bm-card { display:flex; flex-direction:column; text-align:left; width:100%; border-radius:12px; padding:13px 15px; gap:7px; margin-bottom:8px; background:var(--wo-card); border-color:var(--border-subtle); }
+.bm-list .bm-card.selected { border-color:var(--accent); background:color-mix(in srgb,var(--accent) 12%,var(--bg-secondary)); }
+.bm-card-title { display:flex; align-items:center; gap:9px; width:100%; min-width:0; }
+.bm-card-title svg { color:var(--accent); flex-shrink:0; }
+.bm-card-title strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.bm-card-title small { margin-left:auto; color:var(--text-secondary); font-size:10px; flex-shrink:0; }
+.bm-card-meta,.bm-pr-summary { font-size:11px; color:var(--text-secondary); }
+.bm-detail { flex:0 1 520px; }
+.bm-detail>header { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+.bm-detail>header button { padding:5px; flex-shrink:0; }
+.bm-detail section { border-top:1px solid var(--border-subtle); padding-top:12px; margin-top:16px; }
+.bm-detail h3 { font-size:13px; margin:0 0 10px; }
+.bm-detail h4 { font-size:12px; }
+.bm-detail p,.bm-detail label { font-size:12px; line-height:1.6; color:var(--text-secondary); }
+.bm-detail dl { display:grid; grid-template-columns:100px minmax(0,1fr); gap:8px; font-size:11px; }
+.bm-detail dt { color:var(--text-secondary); }
+.bm-detail dd { margin:0; overflow-wrap:anywhere; }
+.bm-detail select { display:block; width:100%; margin:6px 0; }
+.bm-actions { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0 0; }
+.bm-actions button,.bm-detail button { font-size:11px; }
+.bm-pr-list,.bm-trees,.bm-commits { padding:0; list-style:none; }
+.bm-pr-list li,.bm-worktree,.bm-commits li { display:flex; flex-direction:column; gap:7px; padding:10px 0; border-bottom:1px solid var(--border-subtle); font-size:12px; overflow-wrap:anywhere; }
+.bm-pr-list small,.bm-worktree small,.bm-commits small { display:block; font-size:10px; color:var(--text-secondary); line-height:1.5; }
+.bm-worktree code { display:block; overflow-wrap:anywhere; margin:5px 0; font-size:11px; }
+.bm-worktree button { align-self:flex-start; }
+.bm-commits button { text-align:left; }
+.bm-view .bm-danger { color:var(--color-error,var(--text-primary)); border-color:color-mix(in srgb,var(--color-error,var(--accent)) 45%,var(--border)); }
+.bm-receipt { font-size:12px; overflow-wrap:anywhere; margin:0; }
+.bm-tree-detail { position:absolute; right:24px; top:130px; bottom:14px; width:min(540px,90%); z-index:3; box-shadow:0 12px 40px #0006; }
+.bm-modal-backdrop { position:absolute; inset:0; z-index:10; display:flex; align-items:center; justify-content:center; background:#0008; padding:24px; }
+.bm-modal { width:min(650px,100%); max-height:100%; overflow:auto; background:var(--bg-secondary); border:1px solid var(--border); border-radius:18px; padding:24px; box-shadow:0 20px 70px #0008; font-size:12px; line-height:1.6; }
+.bm-modal h2 { margin-top:0; font-size:20px; }
+.bm-modal code,.bm-modal p { overflow-wrap:anywhere; }
+.bm-consent { display:flex; align-items:flex-start; gap:10px; margin-top:16px; }
+.bm-consent input { margin-top:4px; flex-shrink:0; }
+@container (max-width:850px) { .bm-has-selection .bm-list { display:none; } .bm-detail { flex:1; } .bm-toolbar { flex-wrap:wrap; gap:8px; } .bm-view .wo-feature-icon { width:52px; height:52px; } .bm-view .wo-header h1 { font-size:23px; } .bm-view .wo-header p { font-size:12px; } }

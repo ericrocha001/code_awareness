@@ -24,6 +24,7 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 declare global {
   interface Window {
     codeAwareness: {
+      getBranchOrchestration: (request: import('../../shared/types/branch-manager-types').BranchManagerRequest) => Promise<import('../../shared/types/branch-manager-types').BranchManagerResult>
       getWorkOrchestration: (request: OrchestrationRequest) => Promise<OrchestrationResult<OrchestrationData>>
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>

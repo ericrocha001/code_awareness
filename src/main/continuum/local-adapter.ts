@@ -1,5 +1,6 @@
 import { GitService } from '../core/git-service'
 import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
+import { GitBranchInventory } from '../git-operations/git-branch-inventory'
 import { operation, type LocalChannelAdapter, type LocalRequestContext } from '../local-agent-channel/local-channel-types'
 import { object, text, integer } from '../local-agent-channel/request-validation'
 import type { RepositoryContinuumSession } from './project-continuum-session'
@@ -20,6 +21,19 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
       return { value, repositoryId: value.repositoryId, worktreeId: value.worktreeId }
     }
     this.operations = {
+      bind_execution: operation(input => {
+        const request = selection(input, ['executionId', 'sourceArtifactId', 'worktreeGeneration'])
+        return { ...request, executionId: text(request.value.executionId), sourceArtifactId: text(request.value.sourceArtifactId), generation: text(request.value.worktreeGeneration) }
+      }, async (request, context) => {
+        const service = await this.service(request, context)
+        const active = this.session.getActiveSession()!
+        const git = new GitService(), identity = { repositoryId: active.repositoryId, isActive: () => this.session.getActiveSession() === active && context.connected() }
+        const reader = new GitBranchInventory(active.repositoryPath, git, this.getRegistry(active), identity)
+        return service.bindExecutionBranch(request.executionId, request.sourceArtifactId, async () => {
+          if (await this.service(request, context, false) !== service) throw new Error('REPOSITORY_MISMATCH')
+          return reader.executionSnapshot(String(request.worktreeId), request.generation)
+        })
+      }),
       suggestions: operation(input => {
         const request = selection(input, ['query'])
         return { ...request, query: validateSuggestionQuery(request.value.query) }
@@ -56,7 +70,7 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         if (!active) return { available: true, repository: null }
         const discovery = await this.getRegistry(active).discover()
         if (this.session.getActiveSession() !== active) throw new Error('REPOSITORY_MISMATCH')
-        return { available: true, repository: { repositoryId: active.repositoryId, checkout: active.repositoryPath }, worktrees: discovery.worktrees.filter(w => !w.missing && !w.prunable).map(w => ({ worktreeId: w.worktreeId, path: w.path })) }
+        return { available: true, repository: { repositoryId: active.repositoryId, checkout: active.repositoryPath }, worktrees: discovery.worktrees.filter(w => !w.missing && !w.prunable).map(w => ({ worktreeId: w.worktreeId, generation: w.generation, path: w.path })) }
       }),
       list: operation(input => { const request = selection(input, ['filter']); return { ...request, filter: request.value.filter === undefined ? undefined : object(request.value.filter, ['query', 'kind', 'status', 'metadata', 'metadataKeys', 'relatedToArtifactId', 'relationKind', 'direction', 'updatedAfter', 'updatedBefore', 'limit', 'cursor']) as ListArtifactsFilter } }, async (request, context) => (await this.service(request, context)).list(request.filter)),
       get: operation(input => { const request = selection(input, ['artifactId']); return { ...request, artifactId: text(request.value.artifactId) } }, async (request, context) => {

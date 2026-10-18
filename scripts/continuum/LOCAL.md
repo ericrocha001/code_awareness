@@ -10,6 +10,7 @@ Execute a CLI de dentro do checkout cadastrado ou de uma worktree Git vinculada 
 node scripts/continuum/local.cjs status
 node scripts/continuum/local.cjs list --repository <repositoryId> --filter '{"kind":"EXECUTABLE_PLAN","limit":10}'
 node scripts/continuum/local.cjs get --repository <repositoryId> --id <artifactId>
+node scripts/continuum/local.cjs bind_execution --repository <repositoryId> --id <planArtifactId> --execution <executionId>
 node scripts/continuum/local.cjs suggestions --repository <repositoryId> --id <artifactId> --filter '{"limit":5}'
 node scripts/continuum/local.cjs get --repository <repositoryId> --id <artifactId> --format markdown
 node scripts/continuum/local.cjs publish --repository <repositoryId> --file handoff.md
@@ -17,6 +18,8 @@ node scripts/continuum/local.cjs update --repository <repositoryId> --id <artifa
 node scripts/continuum/local.cjs publish_visual --repository <repositoryId> --file context.md --media reference.webp
 node scripts/continuum/local.cjs get_visual --repository <repositoryId> --id <artifactId> --output retrieved.webp
 ```
+
+`bind_execution` registra uma declaração explícita após selecionar a Worktree da execução e recuperar seu Plano. A CLI resolve a Worktree pelo checkout atual; o serviço resolve branch, geração e HEAD pelo Git. Não informe esses fatos manualmente. O Plano deve possuir o mesmo executionId. `PERSISTED` confirma uma única OBSERVATION por execução/instância de branch, inclusive em replay após commits; geração desconhecida, detached, drift ou fonte divergente recusam o registro. A declaração não comprova posse, atividade ou conclusão. Uma branch recriada ou renomeada exige nova associação.
 
 `suggestions` consulta um Artifact explícito sem adquirir corpos Markdown. Retorna até 10 candidatas `SUGGESTED` (padrão 5), com razões limitadas e score de evidência relativo, nunca probabilidade de verdade. Examina no máximo 100 candidatas; `truncated` e `BACKFILL_PENDING` indicam limites da aquisição, e resultado vazio não prova ausência de relações. Não existe promoção automática: confira o alvo com `get` e, quando houver decisão explícita, acrescente `metadata.relations` pelo `update` CAS existente.
 

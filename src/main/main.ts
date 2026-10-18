@@ -93,7 +93,7 @@ import { GitOperationsService } from './git-operations/git-operations-service'
 import { GitManagementController, registerGitManagementHandlers } from './ipc/git-management-handler'
 import { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './ipc/work-orchestration-handler'
 import { orchestrationContinuumReader } from './ipc/orchestration-continuum-reader'
-import { WorktreeContractNavigation } from './core/context/worktree-contract-navigation'
+import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
@@ -304,7 +304,7 @@ app.whenReady().then(async () => {
   const githubConfig = loadGitHubProductConfig()
   const githubCredentials = new GitHubCredentialStore(desktopProfilePaths(app.getPath('userData')).githubPath, safeStorage)
   const githubAuth = githubConfig ? new GitHubAuthService(githubConfig, githubCredentials) : null
-  const githubApi = githubAuth ? new GitHubApiClient(() => githubAuth.getValidAccessToken()) : null
+  const githubApi = githubAuth ? new GitHubApiClient(() => githubAuth.getValidAccessToken(), fetch, githubConfig!.appSlug) : null
   const gitTransport = new GitHubGitTransport(githubAuth, gitService)
   const academyGitMaterializer = new AcademyGitMaterializer()
   const academyPluginProjection = new AcademyPluginRepositoryProjection()
@@ -418,6 +418,14 @@ app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:changed', change)
   })
   registerWorkOrchestrationHandlers(workOrchestration)
+  const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
+    const response = await dialog.showMessageBox({ type: 'warning', title: 'Liberar e remover Worktree',
+      message: 'Confirme que a IDE e os agentes desta Worktree foram encerrados e liberaram o diretório.',
+      detail: `${preview.worktree.path}\nBranch preservada: ${preview.preservationRef}\nHEAD: ${preview.preservationHead}\n\nA remoção será revalidada. A branch e seus commits serão mantidos.`,
+      buttons: ['Cancelar', 'IDE e agentes liberados; remover Worktree'], defaultId: 0, cancelId: 0, noLink: true })
+    return response.response === 1
+  }, continuumSession)
+  registerBranchOrchestrationHandlers(branchOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))
   app.on('before-quit', () => workOrchestration.deactivate())
@@ -425,6 +433,7 @@ app.whenReady().then(async () => {
   activeProjects.onBeforeChange(async () => {
     await gitManagement.deactivate()
     workOrchestration.deactivate()
+    await branchOrchestration.deactivate()
     await mcpLifecycle.quiesce()
     await activeValidationExecution?.shutdown()
     await activeWorktreeValidation?.shutdown()
@@ -472,7 +481,8 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     gitManagement.bind(gitOperations)
-    workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession), new WorktreeContractNavigation(gitOperations))
+    workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))
+    branchOrchestration.bind(gitOperations, githubIntegration, project.path)
     const navigation = bindProjectNavigation(contextNavigation, project.path, new WorktreeStructureNavigation(gitOperations, codeMapService, project.path))
     const repositoryFileIngress = new RepositoryFileIngress(project.path, { validateDestination: relative => repositoryFileEditing.assertCreationAllowed(relative) })
     const repositoryFileEditing = new RepositoryFileEditing(project.path, {
@@ -489,6 +499,7 @@ app.whenReady().then(async () => {
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
       githubIntegration,
+      githubPrIsActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision,
       repositoryFileIngress,
       repositoryFileEditing,
       runtimeRestart
@@ -524,7 +535,31 @@ app.whenReady().then(async () => {
   remoteAccess.start()
 
   const githubIntegration = new GitHubIntegrationService(
-    githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell
+    githubConfig, githubCredentials, githubAuth, githubApi, repositoryCatalog, gitService, shell, {
+      receiptDirectory: join(app.getPath('userData'), 'github', 'pr-operations'),
+      approveMutation: async request => {
+        const project = activeProjects?.getState()
+        if (!mainWindow || mainWindow.isDestroyed() || !project?.project || repositoryCatalog?.findByPath(project.project.path)?.id !== request.repositoryId) return false
+        const action = request.operation === 'MERGE_PULL_REQUEST' ? 'Solicitar integração' : 'Fechar'
+        const response = await dialog.showMessageBox(mainWindow, {
+          type: 'question', title: `${action} de Pull Request`, message: `${action} PR #${request.prNumber} em ${request.repository}?`,
+          detail: `Origem: ${request.headBranch}\nDestino: ${request.baseBranch}\nHead: ${request.expectedHeadSha}\nBase: ${request.expectedBaseSha}\nEstado: ${request.observedState}\nMétodo: ${request.mergeMethod ?? 'não aplicável'}\nAção: ${request.mergeAction ?? 'fechamento'}\nPode entrar na fila: ${request.mayEnqueue ? 'sim' : 'não'}\nA base não possui comparação atômica; regras do GitHub continuam aplicáveis.\nNenhuma sincronização ou limpeza Git local.\nOperação: ${request.operationId}\nExpira: ${request.expiresAt}`,
+          buttons: ['Recusar', 'Autorizar esta operação'], defaultId: 0, cancelId: 0, noLink: true
+        })
+        return response.response === 1 && activeProjects?.getState().revision === project.revision && Date.now() < Date.parse(request.expiresAt)
+      },
+      approve: async request => {
+        const project = activeProjects?.getState()
+        if (!mainWindow || mainWindow.isDestroyed() || !project?.project || repositoryCatalog?.findByPath(project.project.path)?.id !== request.repositoryId) return false
+        const response = await dialog.showMessageBox(mainWindow, {
+          type: 'question', title: 'Autorizar abertura de Pull Request',
+          message: `Abrir Pull Request em ${request.repository}?`,
+          detail: `Origem: ${request.headBranch}\nDestino: ${request.baseBranch}\nCommit publicado: ${request.expectedHeadSha}\nTítulo: ${request.title}\nDescrição:\n${request.body}\n\nOperação: ${request.operationId}\nExpira: ${request.expiresAt}`,
+          buttons: ['Recusar', 'Autorizar este Pull Request'], defaultId: 0, cancelId: 0, noLink: true
+        })
+        return response.response === 1 && activeProjects?.getState().revision === project.revision && Date.now() < Date.parse(request.expiresAt)
+      }
+    }
   )
   const codeAwarenessIgnoreService = new CodeAwarenessIgnoreService(settingsService)
 

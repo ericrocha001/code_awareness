@@ -8,12 +8,37 @@ import { RepositoryCatalogService } from '../repository-catalog/repository-catal
 import { RepositoryCatalogStore } from '../repository-catalog/repository-catalog-store'
 import { GitHubIntegrationService, normalizeGitHubOrigin } from './github-integration-service'
 import { GitHubCredentialStore } from './github-credential-store'
+import { GitHubAuthService } from './github-auth-service'
+import { loadGitHubProductConfig } from './github-config'
+import { canonicalDesktopProfile } from '../desktop-profile'
 
 const roots: string[] = []
 const temp = () => { const value = mkdtempSync(join(tmpdir(), 'github-integration-')); roots.push(value); return value }
 afterEach(() => { for (const value of roots.splice(0)) rmSync(value, { recursive: true, force: true }) })
 
 describe('GitHub Repository Catalog integration', () => {
+  it('shares the canonical profile and existing session across two checkout compositions and restarts without App overrides', async () => {
+    vi.stubEnv('CODE_AWARENESS_GITHUB_CLIENT_ID', undefined)
+    vi.stubEnv('CODE_AWARENESS_GITHUB_APP_SLUG', undefined)
+    const profile = canonicalDesktopProfile(temp())
+    const protection = { isEncryptionAvailable: () => true, encryptString: (value: string) => Buffer.from(value).reverse(), decryptString: (value: Buffer) => Buffer.from(value).reverse().toString() }
+    const existing = new GitHubCredentialStore(profile.githubPath, protection)
+    existing.saveCredentials({ accessToken: 'shared-existing-session', accessTokenExpiresAt: '2999-01-01', refreshToken: 'shared-existing-refresh', refreshTokenExpiresAt: '2999-01-01' })
+    const bytes = readFileSync(join(profile.githubPath, 'credentials.bin'))
+    const fetcher = vi.fn()
+    try {
+      for (const checkout of [join(temp(), 'worktree-one'), join(temp(), 'worktree-two')]) {
+        mkdirSync(checkout)
+        const config = loadGitHubProductConfig()!
+        expect(config.appSlug).toBe('code-awareness-desktop')
+        const reopened = new GitHubCredentialStore(profile.githubPath, protection)
+        const auth = new GitHubAuthService(config, reopened, fetcher)
+        expect(await auth.getValidAccessToken()).toBe('shared-existing-session')
+      }
+      expect(fetcher).not.toHaveBeenCalled()
+      expect(readFileSync(join(profile.githubPath, 'credentials.bin'))).toEqual(bytes)
+    } finally { vi.unstubAllEnvs() }
+  })
   it('reconciles HTTPS/SSH origins, deduplicates by GitHub ID, tracks rename/access loss, and survives reopen', async () => {
     const root = temp()
     const local = join(root, 'local-one'); mkdirSync(join(local, '.git'), { recursive: true })

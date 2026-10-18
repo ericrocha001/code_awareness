@@ -17,12 +17,12 @@ it('keeps exactly one visible panel and one retained Orchestration view while sw
     loadSettings: async () => ({}),
     getPendingDeepLink: async () => null, onDeepLink: () => () => {}, onActiveProjectChanged: () => () => {},
     getActiveProject: async () => ({ project: { id: 'a', name: 'A', path: '/a' }, revision: 1 }),
-    getWorkOrchestration: vi.fn(async () => ({ success: true, context: { projectId: 'a', revision: 1 }, data: { repositoryId: 'repo', worktrees: [], inventoryCoverage: 'COMPLETE', observedAt: '2026-10-13T00:00:00Z', revision: 'r' } }))
+    getBranchOrchestration: vi.fn(async ({ operation }) => ({ success: true, context: { projectId: 'a', revision: 1 }, data: operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory: { repositoryId: 'repo', worktrees: [], unassignedWorktrees: [], branches: [], coverage: 'COMPLETE', observedAt: '2026-10-13T00:00:00Z', revision: 'r' } } : { kind: 'PULL_REQUESTS', inventoryRevision: 'r', pullRequests: { repositoryId: 'repo', catalog: { coverage: 'UNAVAILABLE', items: [] }, relations: [], orphaned: [] } } }))
   } as any
   render(<React.StrictMode><App /></React.StrictMode>)
   expect(screen.queryByTestId('channel-view')).toBeNull()
   fireEvent.click(screen.getByText('work-orchestration'))
-  await screen.findByText('Inventário completo · 0 descobertas')
+  await screen.findByText('Inventário completo · 0 branches · 0 Worktrees')
   for (let i = 0; i < 3; i++) for (const tab of ['git-management', 'work-orchestration', 'codebase', 'channel', 'home']) {
     fireEvent.click(screen.getByText(tab))
     expect(document.querySelectorAll('.wo-view')).toHaveLength(1)
@@ -36,5 +36,5 @@ it('keeps exactly one visible panel and one retained Orchestration view while sw
     expect(screen.queryAllByTestId('channel-view')).toHaveLength(channel.childElementCount ? 1 : 0)
   }
   expect(errors.mock.calls.some(args => String(args[0]).includes('same key'))).toBe(false)
-  expect(window.codeAwareness.getWorkOrchestration).toHaveBeenCalledTimes(1)
+  expect(window.codeAwareness.getBranchOrchestration).toHaveBeenCalled()
 })
