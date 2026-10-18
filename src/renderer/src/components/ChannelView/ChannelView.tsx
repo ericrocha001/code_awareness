@@ -4,6 +4,7 @@ import type { ChannelAvailability, ChannelState } from '../../../../shared/types
 import type { ChannelActivityCounters } from '../../../../shared/types/channel-types'
 import { DiagnosticModal } from '../SystemHealth/DiagnosticModal'
 import './ChannelView.css'
+import { LocalMcpSetup } from './LocalMcpSetup'
 
 const availabilityCopy: Record<ChannelAvailability, { title: string; description: string }> = {
   DISABLED: { title: 'Acesso remoto desativado', description: 'Ative o acesso remoto para disponibilizar o projeto ativo ao ChatGPT.' },
@@ -87,14 +88,16 @@ export function ChannelView() {
         {state && copy && <div className="channel-status" aria-label="Disponibilidade" role="status" aria-live="polite"><StatusBadge tone={mainTone}>{readyTitle}</StatusBadge><p>{copy.description}</p>{state.availability === 'READY' && health && <span className="channel-header-health">{healthCopy[health.status]}</span>}</div>}
       </header>
       {error && <p className="channel-error" role="alert">{error}</p>}
+      <div className="channel-content">
+      <LocalMcpSetup />
       {!state && !error && <p className="channel-loading" role="status"><Loader2 className="channel-spinner" size={18} aria-hidden="true" />Carregando Channel…</p>}
-      {state && activity && health && copy && <div className="channel-content">
+      {state && activity && health && copy && <>
         <section className="channel-panel" aria-labelledby="channel-path-title">
           <div className="channel-section-heading"><h2 id="channel-path-title"><Radio size={19} aria-hidden="true" />Caminho operacional</h2><span>Controle local do acesso</span></div>
           <dl className="channel-path">
             <PathStep icon={ShieldCheck} label="Acesso remoto · ChatGPT" value={!state.installationConfigured ? 'Configuração necessária' : state.remoteAccessEnabled ? 'Ativado' : 'Desativado'} detail={!state.installationConfigured ? 'Instalação requer atenção' : undefined} tone={!state.installationConfigured ? 'warning' : state.remoteAccessEnabled ? 'healthy' : 'neutral'} />
             <PathStep icon={Server} label={state.transport === 'relay' ? 'Relay' : 'Transporte de desenvolvimento'} value={connectionCopy[state.connectionStatus] ?? 'Indisponível'} tone={connectionTone(state.connectionStatus)} />
-            <PathStep icon={Blocks} label="MCP" value={connectionCopy[state.mcpStatus] ?? 'Indisponível'} tone={connectionTone(state.mcpStatus)} />
+            <PathStep icon={Blocks} label="MCP Online" value={connectionCopy[state.mcpStatus] ?? 'Indisponível'} tone={connectionTone(state.mcpStatus)} />
             <PathStep icon={Folder} label="Projeto atendido" value={state.activeProject?.name ?? 'Aguardando projeto'} tone={state.activeProject ? 'healthy' : 'neutral'} />
           </dl>
         </section>
@@ -129,7 +132,8 @@ export function ChannelView() {
           <div className="channel-diagnostic"><p>Consulte a prova funcional e as fronteiras da navegação de código.</p><button type="button" className="channel-action" onClick={() => setShowDiagnostic(true)}>Abrir diagnóstico<ArrowUpRight size={15} aria-hidden="true" /></button></div>
         </section>
         </div>
-      </div>}
+      </>}
+      </div>
     </section>
     {showDiagnostic && <DiagnosticModal onClose={closeDiagnostic} />}
   </>

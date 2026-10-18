@@ -6,6 +6,19 @@
   container-type: inline-size; box-sizing: border-box;
 }
 .channel-view *, .channel-view *::before, .channel-view *::after { box-sizing: border-box; }
+.local-mcp-setup { flex-shrink: 0; }
+.local-mcp-clients { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 12px; margin-top: 14px; }
+.local-mcp-client { min-width: 0; padding: 14px; border: 1px solid var(--border-subtle); border-radius: 12px; background: var(--bg-secondary); }
+.local-mcp-client > div:first-child { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; align-items: center; }
+.local-mcp-setup h3 { font-size: 13px; font-weight: 600; margin: 0; }
+.local-mcp-setup h4 { font-size: 12px; margin: 0 0 8px; color: var(--text-secondary); }
+.channel-view .local-mcp-path { margin-top: 10px; color: var(--text-secondary); font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.local-mcp-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.local-mcp-preview { margin-top: 16px; padding: 16px; border: 1px solid var(--accent); border-radius: 12px; background: var(--bg-secondary); }
+.local-mcp-diff { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; margin-top: 14px; }
+.local-mcp-diff > div { min-width: 0; }
+.local-mcp-preview pre { margin: 0; padding: 12px; border-radius: 8px; background: var(--bg-primary); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; }
+.local-mcp-preview label { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 12px; }
 .channel-view h1, .channel-view h2, .channel-view p, .channel-view dl, .channel-view dd { margin: 0; }
 .channel-heading {
   flex: 0 0 auto; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
@@ -126,3 +139,6 @@
   .channel-health-details { grid-template-columns: 1fr; }
   .channel-panel { padding: 14px; }
 }
+.local-mcp-variant { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--text-secondary); }
+.local-mcp-variant select { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--bg-secondary); }
+.local-mcp-variant select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

@@ -5,6 +5,7 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage, powerMonitor } from 'electron'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
+import { pathToFileURL } from 'node:url'
 import { registerFileHandlers } from './ipc/file-handler'
 import { registerSettingsHandlers } from './ipc/settings-handler'
 import { registerGitHandlers } from './ipc/git-handler'
@@ -54,6 +55,8 @@ import { registerConnectionHandlers } from './ipc/connection-handler'
 import { ChannelStateProjection } from './integrations/channel-state-projection'
 import { isInstallationConfigured } from './integrations/installation-configured'
 import { registerChannelHandlers } from './ipc/channel-handler'
+import { registerLocalMcpClientHandlers } from './ipc/local-mcp-client-handler'
+import { createDesktopClientSetup } from './local-mcp-clients/desktop-client-setup'
 import { ChannelFunctionalHealthMonitor } from './mcp/channel-functional-health'
 import { ChannelActivityMonitor } from './mcp/channel-activity-monitor'
 import { SystemHealthCore } from './system-health/system-health-core'
@@ -134,7 +137,11 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
   findByPath: path => repositoryCatalog?.findByPath(path) ?? null
 })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
-const localAgentChannel = new LocalChannelHost([new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)], app.getPath('userData'))
+const localAgentChannel = new LocalChannelHost(
+  [new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)],
+  app.getPath('userData'),
+  () => mcpLifecycle.getLocalEndpoint(runtimeIdentityProvider.getInstanceId())
+)
 const runtimeRestart = new RuntimeRestartController(
   runtimeIdentityProvider,
   new EnvironmentRestartSupervisorClient(),
@@ -492,6 +499,7 @@ app.whenReady().then(async () => {
   channelProjection = new ChannelStateProjection(remoteAccess, activeProjects, mcpLifecycle,
     () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, channelFunctionalHealth)
   registerChannelHandlers(channelProjection)
+  registerLocalMcpClientHandlers(createDesktopClientSetup(app, process.resourcesPath), process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href)
   registerSystemHealthHandlers(systemHealth)
   try {
     const installPath = desktopProfilePaths(app.getPath('userData')).installationPath

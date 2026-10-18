@@ -13,7 +13,7 @@
     "dev": "node scripts/dev-supervisor.cjs",
     "dev:runtime": "electron-vite dev",
     "prebuild": "npm run native:doctor",
-    "build": "electron-vite build && npm run native:bundle-guard",
+    "build": "electron-vite build && node scripts/local-mcp/build.cjs && npm run native:bundle-guard",
     "preview": "electron-vite preview",
     "typecheck": "node scripts/typecheck-gate.cjs",
     "typecheck:baseline": "node scripts/typecheck-gate.cjs --update",
@@ -39,6 +39,8 @@
     "benchmark:tokenizer": "node scripts/benchmark-tokenizer.mjs",
     "benchmark:repo-map-real": "npm run native:doctor && node scripts/run-vitest-electron.cjs run --config vitest.benchmark.config.ts",
     "mcp:serve": "node scripts/run-mcp-server.cjs",
+    "mcp:local:build": "node scripts/local-mcp/build.cjs",
+    "mcp:local:install": "node scripts/local-mcp/install.cjs",
     "test:context:node": "npm run test:lanes:guard && node scripts/test-output.cjs run -- node node_modules/vitest/vitest.mjs run src/main/core/tokenizer.test.ts src/main/core/dash src/renderer/src/components/CodeDashView src/main/ipc/dash-handler-v2.test.ts",
     "test:context:native": "npm run test:native -- --run src/main/core/dash/dash-v2-acceptance.e2e.test.ts src/main/core/context/context-navigation.e2e.test.ts",
     "test:ui": "npm run test:lanes:guard && node scripts/test-output.cjs run -- node node_modules/vitest/vitest.mjs run src/renderer/src/components/CodeJourneyView/restore-modal.test.tsx",
@@ -94,6 +96,12 @@
       "out/**/*",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "out/local-mcp/launcher.cjs",
+        "to": "local-mcp/launcher.cjs"
+      }
+    ],
     "win": {
       "target": "nsis"
     },
@@ -106,6 +114,7 @@
     }
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
     "@tanstack/react-virtual": "^3.13.0",
     "@types/dompurify": "^3.0.5",
     "@vscode/codicons": "^0.0.46-24",
@@ -119,16 +128,19 @@
     "ignore": "^7.0.6",
     "jose": "^6.2.12",
     "js-tiktoken": "^1.0.21",
+    "js-yaml": "^4.3.2",
+    "jsonc-parser": "3.3.1",
     "lucide-react": "^1.25.0",
     "markdown-to-jsx": "^9.8.2",
     "prism-react-renderer": "^2.4.1",
     "react-window": "^1.8.10",
     "sharp": "0.35.5",
+    "toml-eslint-parser": "0.10.0",
     "tree-sitter": "0.21.1",
     "tree-sitter-javascript": "0.23.1",
     "tree-sitter-typescript": "0.23.2",
     "ws": "8.21.3",
-    "js-yaml": "^4.3.2"
+    "zod": "3.25.76"
   },
   "allowScripts": {
     "tree-sitter@0.21.1": true,

@@ -1,4 +1,5 @@
 import type { Server } from 'node:http'
+import { randomUUID } from 'node:crypto'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { ChannelMcpAdapter } from './channel-mcp-adapter'
 import { createMcpHttpServer } from './mcp-http-server'
@@ -38,6 +39,7 @@ export class McpLifecycle {
   private transition = Promise.resolve()
   private disposed = false
   private runtimeFailure = false
+  private endpointGeneration: string | null = null
   private readonly listeners = new Set<(state: McpLifecycleState) => void | Promise<void>>()
   private readonly createServer: (context: McpProjectContext) => Server
   private readonly log: (state: McpLifecycleState) => void
@@ -57,7 +59,14 @@ export class McpLifecycle {
       this.currentAdapter = adapter
       adapter.setWorkloadGovernor(this.governor)
       adapter.setActivityMonitor(this.activity)
-      return createMcpHttpServer(adapter, console.log, options.trace)
+      const generation = this.endpointGeneration
+      return createMcpHttpServer(adapter, console.log, options.trace, headers => {
+        const supplied = headers['x-code-awareness-binding']
+        if (supplied === undefined) return true
+        return this.state.status === 'RUNNING' && this.endpointGeneration === generation && supplied === generation &&
+          headers['x-code-awareness-instance'] === options.runtimeIdentity?.getInstanceId() &&
+          headers['x-code-awareness-project'] === context.projectId
+      })
     }))
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))
   }
@@ -65,6 +74,15 @@ export class McpLifecycle {
 
   getState(): McpLifecycleState {
     return { ...this.state }
+  }
+
+  getLocalEndpoint(instanceId: string) {
+    const observedAt = new Date().toISOString()
+    if (this.state.status !== 'RUNNING' || !this.endpointGeneration) {
+      return { status: 'UNAVAILABLE', reason: this.state.status, observedAt }
+    }
+    return { status: 'RUNNING', endpoint: this.state.endpoint, projectId: this.state.projectId,
+      instanceId, bindingId: this.endpointGeneration, observedAt, protocol: 'code-awareness-mcp-bootstrap/v1' }
   }
 
   getActivityState() { return this.activity.getState() }
@@ -188,6 +206,7 @@ export class McpLifecycle {
     }
     await this.setState({ status: 'STARTING', available: false })
     try {
+      this.endpointGeneration = randomUUID()
       const server = this.createServer(requested)
       this.server = server
       await new Promise<void>((resolve, reject) => {

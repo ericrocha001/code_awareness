@@ -18,6 +18,7 @@ beforeEach(() => {
   }
   unsubscribe.mockClear()
   window.codeAwareness = {
+    localMcpClients: { detect: vi.fn(async () => []) },
     getChannelState: vi.fn(async () => structuredClone(state)),
     onChannelChanged: vi.fn(callback => { receive = callback; return unsubscribe }),
     connect: vi.fn(async () => ({ success: true })), disconnect: vi.fn(async () => ({ success: true })),
@@ -143,7 +144,7 @@ it('keeps a four-stage operational path and surfaces installation attention in r
   state.availability = 'SETUP_REQUIRED'; state.installationConfigured = false
   render(<ChannelView />)
   const path = await screen.findByRole('region', { name: 'Caminho operacional' })
-  expect(within(path).getAllByRole('term').map(term => term.textContent)).toEqual(['Acesso remoto · ChatGPT', 'Relay', 'MCP', 'Projeto atendido'])
+  expect(within(path).getAllByRole('term').map(term => term.textContent)).toEqual(['Acesso remoto · ChatGPT', 'Relay', 'MCP Online', 'Projeto atendido'])
   expect(within(path).getByText('Configuração necessária')).toBeTruthy()
   expect(within(path).getByText('Instalação requer atenção')).toBeTruthy()
 })
@@ -154,5 +155,5 @@ it('keeps activity runtime-scoped without illustrated history, charts or invente
   expect(screen.getByText('Nesta execução')).toBeTruthy()
   expect(document.body.textContent).not.toMatch(/Last 24 hours|últimas 24 horas|tendência|período anterior|CodeScope/i)
   expect(screen.queryByRole('combobox')).toBeNull()
-  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Abrir diagnóstico'])
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Detectar', 'Abrir diagnóstico'])
 })
