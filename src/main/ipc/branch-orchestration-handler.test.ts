@@ -37,3 +37,20 @@ it('revalidates inventory before attaching PRs and mutation context inside the o
   release(); await ending
   expect(await pending).toEqual({ success: false, code: 'PROJECT_CONTEXT_CHANGED' })
 })
+
+it('transports both PR directions in one repository snapshot and rejects delayed project drift', async () => {
+  const controller = new BranchOrchestrationController({ getState: () => ({ project: { id: 'a' }, revision: 1 }) as any }, async () => false)
+  const inventory = { repositoryId: 'a', revision: 'one' }
+  const pullRequests = { repositoryId: 'a', catalog: { revision: 'catalog' }, relations: [{ branchKey: 'topic' }], received: [{ branchKey: 'main', classification: 'DECLARED_DESTINATION' }], orphaned: [{ number: 32 }] }
+  const github = { branchPullRequests: vi.fn(async () => pullRequests) }
+  controller.bind({ getBranchInventory: async () => inventory } as any, github as any, '/a')
+  expect(await controller.request({ context, operation: { action: 'PULL_REQUESTS', inventoryRevision: 'one' } })).toEqual({ success: true, context, data: { kind: 'PULL_REQUESTS', inventoryRevision: 'one', pullRequests } })
+  expect(github.branchPullRequests).toHaveBeenCalledExactlyOnceWith('/a', inventory)
+  let release!: (value: any) => void
+  github.branchPullRequests.mockImplementationOnce(() => new Promise(resolve => { release = resolve }))
+  const delayed = controller.request({ context, operation: { action: 'PULL_REQUESTS', inventoryRevision: 'one' } })
+  await vi.waitFor(() => expect(release).toBeDefined())
+  await controller.deactivate()
+  release(pullRequests)
+  expect(await delayed).toEqual({ success: false, code: 'PROJECT_CONTEXT_CHANGED' })
+})

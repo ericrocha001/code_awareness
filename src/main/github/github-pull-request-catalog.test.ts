@@ -117,4 +117,40 @@ describe('repository pull request catalog', () => {
     expect(await service.assessBranchDiscard('/fixture', inventory(), branch)).toMatchObject({ coverage: 'PARTIAL', reason: 'PR_CHANGED_DURING_REVALIDATION', openPullRequests: [1], protected: false })
     expect(fetcher.mock.calls.some(([url]) => String(url).endsWith('/pulls/1'))).toBe(true)
   })
+  it('projects received PRs independently of origin, generation and checkout without new remote reads', async () => {
+    const records = [dto(1), dto(2, { draft: true }), dto(32, { state: 'closed' }), dto(4, { state: 'closed', merged_at: '2026-01-04T00:00:00Z', head: { repo: null, ref: 'deleted', sha } }), dto(5, { head: { repo: { id: 2, full_name: 'fork/repo' }, ref: 'foreign', sha } })]
+    const fetcher = vi.fn(async (input: string | URL | Request) => String(input).includes('/pulls') ? json(records) : json({ id: 1, full_name: 'owner/repo', default_branch: 'main' }))
+    const reader = new GitHubPullRequestCatalog(new GitHubApiClient(async () => 'secret', fetcher))
+    const catalog = await reader.read('local', 'owner/repo')
+    const main = { ...branch, key: 'main', name: 'main', ref: 'refs/heads/main', head: other }
+    const result = reader.project(inventory([branch, main, { ...main, key: 'tracking', namespace: 'TRACKING', ref: 'refs/remotes/origin/main' }]), catalog)
+    expect(result.received.map(r => r.pullRequest.number)).toEqual([1, 2, 32, 4, 5])
+    expect(result.received[0].pullRequest).toMatchObject({ state: 'open', draft: false, merged: false })
+    expect(result.received[1].pullRequest).toMatchObject({ state: 'open', draft: true, merged: false })
+    expect(reader.project(inventory([{ ...main, repositoryId: 'foreign' }]), catalog).received).toEqual([])
+    expect(result.received.every(r => r.branchKey === 'main' && r.branchRevision === 'one' && r.classification === 'DECLARED_DESTINATION' && r.catalogRevision === catalog.revision)).toBe(true)
+    expect(result.received.find(r => r.pullRequest.number === 32)?.pullRequest).toMatchObject({ merged: false, mergedAt: null, state: 'closed' })
+    expect(result.received.find(r => r.pullRequest.number === 4)?.pullRequest).toMatchObject({ merged: true, head: { repository: null } })
+    expect(result.orphaned.map(p => p.number)).toEqual([4, 5])
+    expect(result.relations.every(r => r.classification === 'CONFIRMED_CURRENT')).toBe(true)
+    const recreated = reader.project(inventory([{ ...main, generation: 'recreated', revision: 'new' }]), catalog)
+    expect(recreated.received).toHaveLength(5)
+    expect(recreated.received.every(r => r.branchRevision === 'new' && !('branchGeneration' in r) && !('historicalEvidence' in r))).toBe(true)
+    expect(recreated.relations).toEqual([])
+    expect(fetcher).toHaveBeenCalledTimes(2)
+    const pr = catalog.items[0]
+    for (const invalid of [{ ...pr.base, repositoryId: '2' }, { ...pr.base, repository: 'fork/repo' }, { ...pr.base, ref: 'Main' }]) {
+      expect(reader.project(inventory([main]), { ...catalog, items: [{ ...pr, base: invalid }] }).received).toEqual([])
+    }
+    expect(reader.project(inventory([main]), { ...catalog, providerRepositoryId: null }).received).toEqual([])
+    expect(reader.project(inventory([main]), { ...catalog, items: [pr, pr] }).received).toHaveLength(1)
+    for (const coverage of ['PARTIAL', 'UNAVAILABLE'] as const) {
+      const projected = reader.project(inventory([main]), { ...catalog, coverage, reason: 'RATE_LIMITED' })
+      expect(projected.catalog.reason).toBe('RATE_LIMITED')
+      expect(projected.received.every(r => r.coverage === coverage && r.observedAt === catalog.observedAt)).toBe(true)
+      expect(reader.project(inventory([main]), { ...catalog, coverage, items: [] }).catalog.coverage).toBe(coverage)
+    }
+    expect(() => reader.project(inventory(), { ...catalog, repositoryId: 'other' })).toThrow('REPOSITORY_CONTEXT_CHANGED')
+  })
+
 })

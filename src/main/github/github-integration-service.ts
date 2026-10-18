@@ -68,7 +68,7 @@ export class GitHubIntegrationService {
     } catch (error) {
       const catalog: PullRequestCatalog = { repositoryId: inventory.repositoryId, repository: null, providerRepositoryId: null, defaultBranch: null,
         source: 'GITHUB_REST', coverage: 'UNAVAILABLE', observedAt: new Date().toISOString(), revision: 'UNAVAILABLE', items: [], reason: error instanceof Error ? error.message : 'GITHUB_UNAVAILABLE' }
-      return { repositoryId: inventory.repositoryId, catalog, relations: [], orphaned: [] }
+      return { repositoryId: inventory.repositoryId, catalog, relations: [], received: [], orphaned: [] }
     }
   }
 

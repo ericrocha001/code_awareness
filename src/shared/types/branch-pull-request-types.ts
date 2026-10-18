@@ -46,7 +46,19 @@ export interface BranchPullRequests {
   repositoryId: string
   catalog: PullRequestCatalog
   relations: BranchPullRequestRelation[]
+  received: BranchReceivedPullRequestRelation[]
   orphaned: PullRequestRecord[]
+}
+export interface BranchReceivedPullRequestRelation {
+  branchKey: string
+  branchRevision: string
+  repositoryId: string
+  source: 'GITHUB_REST'
+  observedAt: string
+  catalogRevision: string
+  coverage: PullRequestCatalog['coverage']
+  classification: 'DECLARED_DESTINATION'
+  pullRequest: PullRequestRecord
 }
 export interface PullRequestCommitsPage {
   repositoryId: string

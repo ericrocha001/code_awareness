@@ -16,7 +16,7 @@ exports.run = async ctx => {
     if (result.status !== 0) throw new Error(result.stderr)
     return result.stdout.trim()
   }
-  ctx.check('Implementation source branch, root and HEAD', identity.sourceOrigin.worktree.branch === 'codex/branch-pr-worktree-manager' && identity.sourceOrigin.worktree.head === git(ctx.projectRoot, ['rev-parse', 'HEAD']) && identity.sourceOrigin.worktree.rootPath.toLowerCase() === ctx.projectRoot.toLowerCase())
+  ctx.check('Implementation source branch, root and HEAD', identity.sourceOrigin.worktree.branch === git(ctx.projectRoot, ['branch', '--show-current']) && identity.sourceOrigin.worktree.head === git(ctx.projectRoot, ['rev-parse', 'HEAD']) && identity.sourceOrigin.worktree.rootPath.toLowerCase() === ctx.projectRoot.toLowerCase())
   ctx.check('Runtime freshness MATCH', identity.freshness.state === 'MATCH')
   const root = path.join(ctx.temporary, 'repository')
   fs.mkdirSync(root); git(root, ['init', '-b', 'main']); git(root, ['config', 'user.name', 'Acceptance']); git(root, ['config', 'user.email', 'acceptance@example.test'])
@@ -40,11 +40,11 @@ exports.run = async ctx => {
   ctx.check('Warm inventory has bounded Git calls and no snapshots', warm.gitCalls <= 8 && snapshots === 0)
   const pr = (number, fork = false) => ({ id: number, number, title: fork ? 'Fork with repeated branch name' : `Delivery ${number}`, html_url: `https://github.com/fixture/repo/pull/${number}`, state: 'open', draft: number === 2, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', merged_at: null,
     head: { repo: { id: fork ? 2 : 1, full_name: fork ? 'fork/repo' : 'fixture/repo' }, ref: 'topic', sha: first.branches.find(b => b.name === 'topic').head }, base: { repo: { id: 1, full_name: 'fixture/repo' }, ref: 'main', sha: first.branches.find(b => b.name === 'main').head } })
-  const api = new GitHubApiClient(async () => 'fixture-only', async url => { httpCalls++; return new Response(JSON.stringify(String(url).includes('/pulls') ? [pr(1), pr(2), pr(3, true)] : { id: 1, full_name: 'fixture/repo', default_branch: 'main' })) })
+  const api = new GitHubApiClient(async () => 'fixture-only', async url => { httpCalls++; return new Response(JSON.stringify(String(url).includes('/pulls') ? [pr(1), pr(2), pr(3, true), ...[4, 5].map(number => ({ ...pr(number), state: 'closed', merged_at: '2026-01-04T00:00:00Z', head: { repo: null, ref: 'deleted-' + number, sha: abandonedHead } })), { ...pr(32), state: 'closed', head: { repo: null, ref: 'rejected', sha: abandonedHead } }] : { id: 1, full_name: 'fixture/repo', default_branch: 'main' })) })
   const catalog = new GitHubPullRequestCatalog(api)
   const remote = {
     branchPullRequests: async (_path, inventory) => {
-      if (mode === 'offline') return { repositoryId: 'fixture', catalog: { repositoryId: 'fixture', repository: null, providerRepositoryId: null, defaultBranch: null, source: 'GITHUB_REST', coverage: 'UNAVAILABLE', observedAt: new Date().toISOString(), revision: 'offline', reason: 'NOT_CONNECTED', items: [] }, relations: [], orphaned: [] }
+      if (mode === 'offline') return { repositoryId: 'fixture', catalog: { repositoryId: 'fixture', repository: null, providerRepositoryId: null, defaultBranch: null, source: 'GITHUB_REST', coverage: 'UNAVAILABLE', observedAt: new Date().toISOString(), revision: 'offline', reason: 'NOT_CONNECTED', items: [] }, relations: [], received: [], orphaned: [] }
       return catalog.project(inventory, await catalog.read('fixture', 'fixture/repo'))
     },
     pullRequestCommits: async () => { throw new Error('NOT_REQUESTED') },
@@ -107,13 +107,20 @@ exports.run = async ctx => {
     await wait(() => document.querySelectorAll('.bm-card').length > 0 && !document.querySelector('.bm-remote').textContent.includes('Consultando'))
     ctx.check('Renderer shows branch-first inventory and detached section', await ctx.evaluate(() => document.querySelector('.bm-toolbar').textContent.includes('21 Worktrees') && document.body.textContent.includes('Worktrees sem branch confirmada')))
     ctx.check('No Continuum reads while mounting inventory', continuumReads === 0)
-    const bindingStart = Date.now(), bindingCalls = gitCalls
+    await select('main')
+    ctx.check('Main receives extinct origins with merge dates and rejected PR without delivery', await ctx.evaluate(() => {
+      const received = document.querySelector('[aria-label="PRs destinados a esta branch"]'), sent = document.querySelector('[aria-label="PRs enviados desta branch"]')
+      return received.querySelectorAll('li').length === 6 && received.textContent.includes('#4') && received.textContent.includes('Mergeado em') && [...received.querySelectorAll('li')].find(li => li.textContent.includes('#32')).textContent.includes('Fechado sem merge') && sent.textContent.includes('Nenhum PR observado nesta direção.')
+    }))
+    ctx.check('Received projection reuses single repository capture', httpCalls === 2)
+    await ctx.capture('main-received-history-dark')
+    const bindingStart = Date.now(), bindingCalls = gitCalls, bindingReads = continuumReads
     await select('topic')
     ctx.check('Multiple current PRs retained and fork unconfirmed', await ctx.evaluate(() => document.querySelector('.bm-detail').textContent.includes('#1') && document.querySelector('.bm-detail').textContent.includes('#2') && document.querySelectorAll('.bm-pr-list small').length > 0 && document.querySelector('.bm-detail').textContent.includes('Associação ambígua')))
     await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     const binding21 = { milliseconds: Date.now() - bindingStart, gitCalls: gitCalls - bindingCalls, continuumReads }
     await clickText('Ver Artifacts desta execução', '.bm-executions'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Execution acceptance handoff'))
-    ctx.check('Branch to execution to canonical document membership', continuumReads === 2 && await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('EXECUTABLE_PLAN') && document.querySelector('.bm-executions').textContent.includes('VALIDATED')))
+    ctx.check('Branch to execution to canonical document membership', continuumReads - bindingReads === 2 && await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('EXECUTABLE_PLAN') && document.querySelector('.bm-executions').textContent.includes('VALIDATED')))
     await ctx.capture('execution-documents-dark')
     await clickText('Abrir no Continuum', '.bm-executions'); await wait(() => !!document.querySelector('.continuum-markdown'))
     ctx.check('Artifact opens existing Continuum inspector', await ctx.evaluate(() => document.querySelector('.continuum-markdown').textContent.length > 0))
@@ -170,8 +177,9 @@ exports.run = async ctx => {
     const scroll = await ctx.evaluate(() => document.querySelector('.bm-list').scrollTop)
     await refresh()
     ctx.check('Explicit refresh preserves list scroll', await ctx.evaluate(top => document.querySelector('.bm-list').scrollTop === top, scroll))
-    await select('topic')
+    await select('main')
     const largeBindingStart = Date.now(), largeBindingCalls = gitCalls, largeBindingReads = continuumReads
+    await select('topic')
     await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     const binding101 = { milliseconds: Date.now() - largeBindingStart, gitCalls: gitCalls - largeBindingCalls, continuumReads: continuumReads - largeBindingReads }
     ctx.check('101 branches: one demanded metadata query per selection', binding101.continuumReads === 1)

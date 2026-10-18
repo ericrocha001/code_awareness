@@ -27,7 +27,7 @@ exports.run = async ctx => {
   serviceGit.runGit = (...args) => { gitCalls++; return rawGit(...args) }
   const service = new GitOperationsService(root, serviceGit, new GitHubGitTransport(null, serviceGit), { repositoryId: record.id, isActive: () => true })
   const projects = { getState: () => ({ project: { id: 'fixture', path: root, name: 'Reactive fixture' }, revision: 1 }) }
-  const remote = { branchPullRequests: async (_path, inventory) => ({ repositoryId: record.id, catalog: { repositoryId: record.id, coverage: 'UNAVAILABLE', observedAt: new Date().toISOString(), revision: 'offline', reason: 'NOT_CONNECTED', items: [] }, relations: [], orphaned: [] }) }
+  const remote = { branchPullRequests: async (_path, inventory) => ({ repositoryId: record.id, catalog: { repositoryId: record.id, coverage: 'UNAVAILABLE', observedAt: new Date().toISOString(), revision: 'offline', reason: 'NOT_CONNECTED', items: [] }, relations: [], received: [], orphaned: [] }) }
   const controller = new BranchOrchestrationController(projects, async () => false, session)
   controller.bind(service, remote, root)
   const request = controller.request.bind(controller)

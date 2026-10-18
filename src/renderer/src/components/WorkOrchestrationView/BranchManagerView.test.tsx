@@ -2,6 +2,8 @@
 import React from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { GitHubPullRequestCatalog } from '../../../../main/github/github-pull-request-catalog'
+import type { PullRequestCatalog } from '../../../../shared/types/branch-pull-request-types'
 import { BranchManagerView, orderBranches } from './BranchManagerView'
 import { WorkOrchestrationTab } from './WorkOrchestrationTab'
 import type { BranchInventory, BranchRecord } from '../../../../shared/types/branch-orchestration-types'
@@ -12,7 +14,7 @@ const branch = (name: string): BranchRecord => ({ key: name, repositoryId: 'loca
 const inventory: BranchInventory = { repositoryId: 'local', source: 'GIT_LOCAL', coverage: 'COMPLETE', observedAt: '2026-01-01T00:00:00Z', revision: 'one', branches: [branch('main'), branch('topic')], worktrees: [], unassignedWorktrees: [] }
 const ok = (data: unknown) => ({ success: true, context: { projectId: 'local', revision: 1 }, data })
 const catalog = { repositoryId: 'local', repository: 'owner/repo', providerRepositoryId: '1', source: 'GITHUB_REST', coverage: 'UNAVAILABLE', observedAt: '2026-01-01T00:00:00Z', revision: 'remote', defaultBranch: 'main', reason: 'NOT_CONNECTED', items: [] }
-const unavailable = { kind: 'PULL_REQUESTS', inventoryRevision: 'one', pullRequests: { repositoryId: 'local', catalog, relations: [], orphaned: [] } }
+const unavailable = { kind: 'PULL_REQUESTS', inventoryRevision: 'one', pullRequests: { repositoryId: 'local', catalog, relations: [], received: [], orphaned: [] } }
 function install(extra: (operation: any) => unknown = () => null, supplied = inventory) {
   const read = vi.fn(async ({ operation }) => ok(operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory: supplied } : operation.action === 'PULL_REQUESTS' ? unavailable : operation.action === 'EXECUTIONS' ? { kind: 'EXECUTIONS', page: { repositoryId: supplied.repositoryId, branchRef: operation.ref, branchRevision: operation.revision, bindings: [], coverage: 'COMPLETE' } } : await extra(operation)))
   window.codeAwareness = { getBranchOrchestration: read, onContinuumChanged: () => () => {} } as any
@@ -107,4 +109,83 @@ it('mounts lazily and revalidates only selected executions on tab return while p
   expect((screen.getByPlaceholderText('Nome ou referência') as HTMLInputElement).value).toBe('topic')
   expect(screen.getByRole('complementary', { name: 'Detalhes da branch' })).toBeTruthy()
   expect(screen.getByText('Estado precisa de atualização antes de agir.')).toBeTruthy()
+})
+
+const historyCatalog = (coverage: PullRequestCatalog['coverage'] = 'COMPLETE'): PullRequestCatalog => ({
+  ...catalog, source: 'GITHUB_REST', coverage, reason: coverage === 'COMPLETE' ? null : 'RATE_LIMITED', items: [
+    [1, true, 'deleted-a', '2026-01-04T00:00:00Z'], [2, true, 'deleted-b', '2026-01-04T00:00:00Z'], [32, false, 'topic', null]
+  ].map(([number, merged, ref, mergedAt]) => ({ id: String(number), number: number as number, title: 'History ' + number, url: 'https://github.com/owner/repo/pull/' + number, state: 'closed', draft: false, merged: merged as boolean, mergedAt: mergedAt as string | null, mergeCommit: null, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-03T00:00:00Z', base: { repositoryId: '1', repository: 'owner/repo', ref: 'main', sha: 'b'.repeat(40) }, head: { repositoryId: merged ? null : '1', repository: merged ? null : 'owner/repo', ref: ref as string, sha: 'a'.repeat(40) } }))
+})
+function installHistory(remoteCatalog = historyCatalog(), supplied = inventory) {
+  const read = install(undefined, supplied)
+  const projection = new GitHubPullRequestCatalog({} as any).project(supplied, remoteCatalog)
+  read.mockImplementation(async ({ operation }) => ok(operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory: supplied } : operation.action === 'PULL_REQUESTS' ? { kind: 'PULL_REQUESTS', inventoryRevision: supplied.revision, pullRequests: projection } : { kind: 'EXECUTIONS', page: { bindings: [], coverage: 'COMPLETE' } }))
+  return { read, projection }
+}
+it('composes catalog and renderer: main receives extinct origins, closed #32 is not integrated and cards retain both directions', async () => {
+  const { read } = installHistory()
+  render(<BranchManagerView state={state}/>)
+  fireEvent.click(await screen.findByText('main', { selector: 'strong' }))
+  const received = await screen.findByRole('region', { name: 'PRs destinados a esta branch' })
+  await within(received).findByText('#1 · History 1')
+  expect(within(received).getAllByRole('listitem').map(li => li.querySelector('strong')?.textContent)).toEqual(['#2 · History 2', '#1 · History 1', '#32 · History 32'])
+  expect(within(received).getAllByText('Integrado no GitHub')).toHaveLength(2)
+  expect(within(received).getByText('Fechado sem merge')).toBeTruthy()
+  expect(within(received).getAllByText(/Mergeado em/)).toHaveLength(2)
+  expect(within(received).getByText('Origem removida:deleted-a → owner/repo:main')).toBeTruthy()
+  expect(within(screen.getByRole('region', { name: 'PRs enviados desta branch' })).getByText('Nenhum PR observado nesta direção.')).toBeTruthy()
+  expect(screen.getByText(/PRs sem vínculo corrente confirmado/)).toBeTruthy()
+  expect(screen.getByText('main', { selector: 'strong' }).closest('button')?.textContent).toContain('3 recebido(s) · 2 integrado(s) no GitHub')
+  fireEvent.click(screen.getByText('topic', { selector: 'strong' }))
+  expect(within(screen.getByRole('region', { name: 'PRs enviados desta branch' })).getByText('Origem corrente confirmada')).toBeTruthy()
+  expect(within(screen.getByRole('region', { name: 'PRs destinados a esta branch' })).queryByText('#1 · History 1')).toBeNull()
+  expect(read.mock.calls.filter(([r]) => r.operation.action === 'PULL_REQUESTS')).toHaveLength(1)
+})
+it.each(['PARTIAL', 'UNAVAILABLE'] as const)('keeps empty %s coverage inconclusive with reason and observation', async coverage => {
+  installHistory({ ...historyCatalog(coverage), items: [] })
+  render(<BranchManagerView state={state}/>)
+  fireEvent.click(await screen.findByText('main', { selector: 'strong' }))
+  await screen.findByText(/RATE_LIMITED/)
+  expect(screen.getAllByText('Consulta inconclusiva. Consulte a cobertura GitHub acima.')).toHaveLength(2)
+  expect(screen.queryByText('Nenhum PR observado nesta direção.')).toBeNull()
+  expect(screen.getByText(/RATE_LIMITED/).textContent).toContain('observado em')
+})
+it('keeps candidates distinct from confirmed origins and filters obsolete branch revisions', async () => {
+  const supplied = { ...inventory, branches: [branch('main'), { ...branch('topic'), head: 'different' }] }
+  const { projection } = installHistory(historyCatalog(), supplied)
+  projection.received.push({ ...projection.received[0], branchKey: 'topic', branchRevision: 'old' })
+  render(<BranchManagerView state={state}/>)
+  fireEvent.click(await screen.findByText('topic', { selector: 'strong' }))
+  await screen.findByText('Candidato — HEAD divergente')
+  expect(within(screen.getByRole('region', { name: 'PRs destinados a esta branch' })).queryByText('#1 · History 1')).toBeNull()
+})
+it('uses current selection for a delayed repository catalog and drops it after a project change', async () => {
+  const { read, projection } = installHistory()
+  let release!: (value: any) => void
+  read.mockImplementation(async ({ operation }) => operation.action === 'INVENTORY' ? ok({ kind: 'INVENTORY', inventory }) : operation.action === 'PULL_REQUESTS' ? new Promise(resolve => { release = resolve }) : ok({ kind: 'EXECUTIONS', page: { bindings: [], coverage: 'COMPLETE' } }))
+  const view = render(<BranchManagerView state={state}/>)
+  fireEvent.click(await screen.findByText('main', { selector: 'strong' }))
+  fireEvent.click(screen.getByText('topic', { selector: 'strong' }))
+  release(ok({ kind: 'PULL_REQUESTS', inventoryRevision: 'one', pullRequests: projection }))
+  await screen.findByText('#32 · History 32')
+  expect(within(screen.getByRole('region', { name: 'PRs destinados a esta branch' })).queryByText('#1 · History 1')).toBeNull()
+  fireEvent.click(screen.getByText('Atualizar'))
+  await waitFor(() => expect(screen.getByText(/O inventário local já está disponível/)).toBeTruthy())
+  const old = release
+  view.rerender(<BranchManagerView state={{ project: { id: 'other', path: '/other', name: 'Other' }, revision: 2 }}/>)
+  old(ok({ kind: 'PULL_REQUESTS', inventoryRevision: 'one', pullRequests: projection }))
+  await waitFor(() => expect(screen.queryByText('#32 · History 32')).toBeNull())
+})
+
+it('keeps failed remote reads inconclusive instead of claiming absence', async () => {
+  const read = install()
+  read.mockImplementation(async ({ operation }) => {
+    if (operation.action === 'PULL_REQUESTS') throw new Error('NETWORK_UNAVAILABLE')
+    return ok(operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory } : { kind: 'EXECUTIONS', page: { bindings: [], coverage: 'COMPLETE' } })
+  })
+  render(<BranchManagerView state={state}/>)
+  await screen.findByText('PRs indisponíveis: NETWORK_UNAVAILABLE')
+  fireEvent.click(screen.getByText('main', { selector: 'strong' }))
+  expect(screen.getAllByText('Consulta inconclusiva. Consulte a cobertura GitHub acima.')).toHaveLength(2)
+  expect(screen.queryByText('Nenhum PR observado nesta direção.')).toBeNull()
 })
