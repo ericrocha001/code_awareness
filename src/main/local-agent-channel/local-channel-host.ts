@@ -15,7 +15,7 @@ export class LocalChannelHost {
   private readonly sockets = new Set<Socket>()
   private readonly token = randomBytes(32).toString('hex')
   private readonly descriptors: string[] = []
-  constructor(private readonly adapters: readonly LocalChannelAdapter[], private readonly profile: string) {
+  constructor(private readonly adapters: readonly LocalChannelAdapter[], private readonly profile: string, private readonly mcpEndpoint?: () => unknown) {
     if (new Set(adapters.map(adapter => adapter.domain)).size !== adapters.length || adapters.some(adapter => adapter.domain === 'channel')) fail('INVALID_ARGUMENT')
   }
 
@@ -113,6 +113,10 @@ export class LocalChannelHost {
     if (domain === 'channel' && action === 'status') {
       object(args, [])
       return { available: true, domains: this.adapters.map(adapter => adapter.domain) }
+    }
+    if (domain === 'channel' && action === 'mcp_endpoint') {
+      object(args, [])
+      return this.mcpEndpoint?.() ?? { status: 'UNAVAILABLE', reason: 'MCP_DISCOVERY_UNAVAILABLE' }
     }
     const adapter = this.adapters.find(adapter => adapter.domain === domain)
     if (!adapter || !Object.hasOwn(adapter.operations, action)) fail('METHOD_NOT_FOUND')

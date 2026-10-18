@@ -18,6 +18,7 @@ beforeEach(() => {
   }
   unsubscribe.mockClear()
   window.codeAwareness = {
+    localMcpClients: { snapshot: vi.fn(async () => ({ revision: 1, restoration: 'READY', installations: [] })), onChanged: vi.fn(() => () => {}), detect: vi.fn(async () => []) },
     getChannelState: vi.fn(async () => structuredClone(state)),
     onChannelChanged: vi.fn(callback => { receive = callback; return unsubscribe }),
     connect: vi.fn(async () => ({ success: true })), disconnect: vi.fn(async () => ({ success: true })),
@@ -109,6 +110,50 @@ it('ignores late hydration and lower or equal event revisions, unsubscribes on u
   view.unmount(); expect(unsubscribe).toHaveBeenCalledOnce()
 })
 
+it('suspends hidden subscriptions and preserves the snapshot until a monotonic resume refresh', async () => {
+  const view = render(<ChannelView />)
+  await screen.findByText('Pronto para acesso remoto')
+  const instance = document.querySelector('.channel-view')
+  const hiddenCallback = receive
+  view.rerender(<ChannelView active={false} />)
+  expect(unsubscribe).toHaveBeenCalledTimes(1)
+  act(() => hiddenCallback({ ...state, revision: 99, activeProject: { id: 'ignored', name: 'ignored-project' } }))
+  expect(screen.queryByText('ignored-project')).toBeNull()
+  let refresh!: (next: ChannelState) => void
+  const order: string[] = []
+  vi.mocked(window.codeAwareness.onChannelChanged).mockImplementation(callback => { order.push('subscribe'); receive = callback; return unsubscribe })
+  vi.mocked(window.codeAwareness.getChannelState).mockImplementation(() => { order.push('snapshot'); return new Promise(resolve => { refresh = resolve }) })
+  view.rerender(<ChannelView active />)
+  expect(order).toEqual(['subscribe', 'snapshot'])
+  expect(document.querySelector('.channel-view')).toBe(instance)
+  expect(screen.getByText('Pronto para acesso remoto')).toBeTruthy()
+  expect(screen.queryByText('Carregando estado operacional…')).toBeNull()
+  const changed: ChannelState = { ...state, revision: 6, availability: 'DISABLED', remoteAccessEnabled: false, connectionStatus: 'STOPPED',
+    activeProject: { id: 'B', name: 'project-b' }, functionalHealth: { ...state.functionalHealth, status: 'OPERATIONAL' }, activity: { ...state.activity, totalRequests: 12 } }
+  act(() => receive(changed))
+  await act(async () => refresh({ ...state, revision: 4 }))
+  expect(screen.getAllByText('project-b')).toHaveLength(2)
+  expect(screen.getByText('Acesso remoto desativado')).toBeTruthy()
+  expect(screen.getByText('Operacional')).toBeTruthy()
+  expect(screen.getByText('12')).toBeTruthy()
+  expect(window.codeAwareness.localMcpClients.detect).not.toHaveBeenCalled()
+  view.unmount()
+  expect(unsubscribe).toHaveBeenCalledTimes(2)
+})
+
+it('discards snapshots and errors belonging to an earlier visibility cycle', async () => {
+  let obsolete!: (next: ChannelState) => void
+  vi.mocked(window.codeAwareness.getChannelState).mockImplementationOnce(() => new Promise(resolve => { obsolete = resolve }))
+  const view = render(<ChannelView />)
+  view.rerender(<ChannelView active={false} />)
+  vi.mocked(window.codeAwareness.getChannelState).mockResolvedValue({ ...state, revision: 3, activeProject: { id: 'B', name: 'project-b' } })
+  view.rerender(<ChannelView active />)
+  await screen.findAllByText('project-b')
+  await act(async () => obsolete({ ...state, revision: 10 }))
+  expect(screen.getAllByText('project-b')).toHaveLength(2)
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
 it('reports command and hydration failures without leaking exception text', async () => {
   vi.mocked(window.codeAwareness.disconnect).mockRejectedValue(new Error('secret JWT'))
   render(<ChannelView />)
@@ -143,7 +188,7 @@ it('keeps a four-stage operational path and surfaces installation attention in r
   state.availability = 'SETUP_REQUIRED'; state.installationConfigured = false
   render(<ChannelView />)
   const path = await screen.findByRole('region', { name: 'Caminho operacional' })
-  expect(within(path).getAllByRole('term').map(term => term.textContent)).toEqual(['Acesso remoto · ChatGPT', 'Relay', 'MCP', 'Projeto atendido'])
+  expect(within(path).getAllByRole('term').map(term => term.textContent)).toEqual(['Acesso remoto · ChatGPT', 'Relay', 'MCP Online', 'Projeto atendido'])
   expect(within(path).getByText('Configuração necessária')).toBeTruthy()
   expect(within(path).getByText('Instalação requer atenção')).toBeTruthy()
 })
@@ -153,6 +198,6 @@ it('keeps activity runtime-scoped without illustrated history, charts or invente
   await screen.findByText('Pronto para acesso remoto')
   expect(screen.getByText('Nesta execução')).toBeTruthy()
   expect(document.body.textContent).not.toMatch(/Last 24 hours|últimas 24 horas|tendência|período anterior|CodeScope/i)
-  expect(screen.queryByRole('combobox')).toBeNull()
-  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Abrir diagnóstico'])
+  expect(screen.getAllByRole('combobox')).toHaveLength(2)
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Diagnosticar problemas', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Abrir diagnóstico'])
 })

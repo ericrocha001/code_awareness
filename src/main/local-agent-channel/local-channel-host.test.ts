@@ -30,6 +30,9 @@ describe('domain-neutral local host', () => {
   it('routes only explicit registered actions and rejects schema/protocol/domain violations', async () => {
     const { request, descriptor } = await setup()
     expect((await request({ domain: 'channel', action: 'status', args: {} })).result).toEqual({ available: true, domains: ['probe'] })
+    expect((await request({ domain: 'channel', action: 'mcp_endpoint', args: {} })).result).toEqual({ status: 'UNAVAILABLE', reason: 'MCP_DISCOVERY_UNAVAILABLE' })
+    expect((await request({ domain: 'channel', action: 'mcp_endpoint', args: { token: 'untrusted' } })).error.code).toBe('INVALID_ARGUMENT')
+    expect((await request({ domain: 'channel', action: 'mcp_endpoint', args: {}, token: 'stale' })).error.code).toBe('UNAUTHORIZED')
     expect((await request({ domain: 'probe', action: 'echo', args: { value: 'literal' } })).result).toEqual({ value: 'literal' })
     for (const payload of [{ domain: 'absent', action: 'echo', args: {} }, { domain: 'probe', action: 'constructor', args: {} }, { domain: 'probe', action: 'archive', args: {} }]) expect((await request(payload)).error.code).toBe('METHOD_NOT_FOUND')
     expect((await request({ domain: 'probe', action: 'echo', args: { command: 'bad' } })).error.code).toBe('INVALID_ARGUMENT')

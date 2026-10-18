@@ -53,7 +53,8 @@ function writeJson(response: import('node:http').ServerResponse, status: number,
 export function createMcpHttpServer(
   adapter: ChannelMcpAdapter,
   log: (entry: McpOperationalLogEntry) => void = console.log,
-  trace?: ChannelTraceSink
+  trace?: ChannelTraceSink,
+  acceptsBinding?: (headers: import('node:http').IncomingHttpHeaders) => boolean
 ): Server {
   return createServer(async (request, response) => {
     const startedAt = performance.now()
@@ -102,6 +103,10 @@ export function createMcpHttpServer(
       }
 
       const message = await readJson(request)
+      if (acceptsBinding && !acceptsBinding(request.headers)) {
+        responseSize = writeJson(response, 409, error(message.id, -32001, 'MCP_SESSION_INVALIDATED'))
+        return
+      }
       const rawMethod = message.method
       method = typeof rawMethod === 'string' ? rawMethod : 'unknown'
       const id = message.id

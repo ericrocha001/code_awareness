@@ -12,7 +12,7 @@ import { CodeJourneyView } from "./components/CodeJourneyView/CodeJourneyView";
 import { CodeMapView } from "./components/CodeMapView/CodeMapView";
 import { CodeDashView } from "./components/CodeDashView/CodeDashView";
 import { HomeView } from "./components/HomeView/HomeView";
-import { ChannelView } from "./components/ChannelView/ChannelView";
+import { ChannelTab } from "./components/ChannelView/ChannelTab";
 import { AcademyView } from "./components/AcademyView/AcademyView";
 import { ContinuumView } from "./components/ContinuumView/ContinuumView";
 import { GitManagementView } from "./components/GitManagementView/GitManagementView";
@@ -181,7 +181,7 @@ export const App: React.FC = () => {
           if (intent.projectId !== commitContext.current.project?.id || intent.revision !== commitContext.current.revision) return;
           setCommitIntent(intent); setActiveTab('git-management');
         }} />
-        {activeTab === "channel" && <ChannelView />}
+        <ChannelTab active={activeTab === "channel"} />
         {activeTab === "academy" && <AcademyView />}
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} artifactIntent={artifactIntent} />}
         {activeTab === "home" && (
