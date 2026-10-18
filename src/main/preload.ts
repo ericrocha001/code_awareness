@@ -24,6 +24,12 @@ import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishR
 
 contextBridge.exposeInMainWorld('codeAwareness', {
   localMcpClients: {
+    snapshot: () => ipcRenderer.invoke('local-mcp:snapshot'),
+    onChanged: callback => {
+      const listener = (_event: Electron.IpcRendererEvent, snapshot: import('../shared/types/local-mcp-client-types').LocalMcpInstallationSnapshot) => callback(snapshot)
+      ipcRenderer.on('local-mcp:changed', listener)
+      return () => { ipcRenderer.removeListener('local-mcp:changed', listener) }
+    },
     detect: () => ipcRenderer.invoke('local-mcp:detect'),
     verify: id => ipcRenderer.invoke('local-mcp:verify', id),
     preview: (id, action) => ipcRenderer.invoke('local-mcp:preview', id, action),

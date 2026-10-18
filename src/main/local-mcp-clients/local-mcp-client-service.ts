@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { isAbsolute, join, resolve } from 'node:path'
 import { stableDestination } from '../../shared/local-mcp-installation.cjs'
-import type { LocalMcpAction, LocalMcpClientId, LocalMcpClientState, LocalMcpPreview } from '../../shared/types/local-mcp-client-types'
+import type { LocalMcpAction, LocalMcpClientId, LocalMcpClientState, LocalMcpInstallation, LocalMcpInstallationSnapshot, LocalMcpPreview } from '../../shared/types/local-mcp-client-types'
 import { editEntry, readEntry, sameEntry, type McpEntry } from './config-editors'
-import { assertProfilePath, assertRevision, assertUserOwned, revision, type FileRevision } from './safe-config-file'
-import { applyFiles, preparePlugin, pluginName, type FileChange, type PluginTarget } from './plugin-installation'
+import { assertProfilePath, assertRevision, assertUserOwned, assertUserOwnedAsync, revision, revisionAsync, type FileRevision } from './safe-config-file'
+import { applyFiles, inspectPlugin, preparePlugin, pluginName, type FileChange, type PluginTarget } from './plugin-installation'
+import { InstallationRegistry, type InstallationRecord } from './installation-registry'
 
 interface Options {
   home: string
@@ -26,9 +27,71 @@ const code = (error: unknown) => error instanceof Error && /^[A-Z][A-Z_]+$/.test
 
 export class LocalMcpClientService {
   private readonly prepared = new Map<string, Prepared>()
+  private readonly registry: InstallationRegistry
+  private record: InstallationRecord | null = null
+  private initialization?: Promise<void>
+  private migrationStarted = false
+  private queue: Promise<unknown> = Promise.resolve()
+  private readonly listeners = new Set<(snapshot: LocalMcpInstallationSnapshot) => void>()
+  private current: LocalMcpInstallationSnapshot = { revision: 0, restoration: 'RESTORING', installations: [] }
   readonly launcher: string
   constructor(private readonly options: Options) {
     this.launcher = stableDestination(join(options.localAppData, 'CodeAwareness', 'mcp', 'v1', 'launcher.cjs'))
+    this.registry = new InstallationRegistry(options.home, options.profile)
+  }
+  onSnapshotChanged(listener: (snapshot: LocalMcpInstallationSnapshot) => void) { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
+  private emit(restoration: LocalMcpInstallationSnapshot['restoration'], diagnostic?: string) {
+    this.current = { revision: this.current.revision + 1, restoration, installations: structuredClone(this.record?.installations ?? []), ...(diagnostic ? { diagnostic } : {}) }
+    for (const listener of this.listeners) { try { listener(structuredClone(this.current)) } catch {} }
+  }
+  private initialize() {
+    return this.initialization ??= (async () => {
+      try { this.record = (await this.registry.read()).record; this.emit(this.record?.migrationCompleted ? 'READY' : 'RESTORING') }
+      catch (error) { this.emit('ERROR', code(error)) }
+    })()
+  }
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
+    const next = this.queue.then(work, work)
+    this.queue = next.then(() => undefined, () => undefined)
+    return next
+  }
+  async snapshot(): Promise<LocalMcpInstallationSnapshot> {
+    await this.initialize()
+    if (!this.record?.migrationCompleted && !this.migrationStarted && this.current.restoration !== 'ERROR') {
+      this.migrationStarted = true
+      void this.serialize(async () => {
+        const latest = (await this.registry.read()).record
+        if (latest?.migrationCompleted) { this.record = latest; this.emit('READY'); return }
+        await this.persist(await this.inspectAll(), 'MANAGED_ENTRY', true)
+      }).catch(error => this.emit('ERROR', code(error)))
+    }
+    return structuredClone(this.current)
+  }
+  private async persist(states: LocalMcpClientState[], evidence: LocalMcpInstallation['evidence'], migrationCompleted = false, migratedId?: LocalMcpClientId) {
+    const changes: LocalMcpInstallation[] = []
+    for (const state of states) {
+      const previous = this.record?.installations.find(row => row.id === state.id)
+      const base = { id: state.id, mechanism: state.mechanism ?? 'CONFIG_FALLBACK', ...(previous?.installationEvidence ? { installationEvidence: previous.installationEvidence } : {}) } as LocalMcpInstallation
+      if (state.configuration === 'INSTALLED') {
+        const proof = evidence === 'APPLY_CONNECT' || evidence === 'APPLY_REPAIR' ? evidence : 'MANAGED_ENTRY'
+        changes.push({ ...base, state: 'CONFIGURED', evidence: proof, installationEvidence: base.installationEvidence ?? proof })
+      } else if (evidence === 'APPLY_DISCONNECT' && state.configuration === 'ABSENT') changes.push({ ...base, state: 'REMOVED', evidence })
+      else if (state.configuration === 'ERROR' || state.configuration === 'CONFLICT' || previous?.state === 'CONFIGURED' || previous?.state === 'NEEDS_ATTENTION') {
+        changes.push({ ...base, state: 'NEEDS_ATTENTION', evidence: state.configuration === 'ABSENT' ? 'CONFIG_ABSENT' : state.configuration === 'CONFLICT' ? 'CONFIG_DIVERGENT' : 'READ_INCONCLUSIVE' })
+      }
+    }
+    if (migratedId) {
+      const previous = this.record?.installations.find(row => row.id === migratedId)
+      if (previous) changes.push({ ...previous, state: 'REMOVED', evidence: 'APPLY_MIGRATION' })
+    }
+    try {
+      this.record = await this.registry.update(changes, migrationCompleted)
+      this.emit(this.record.migrationCompleted ? 'READY' : 'RESTORING')
+      states.forEach(state => { state.persistence = 'SAVED' })
+    } catch {
+      this.emit('ERROR', 'PERSISTENCE_FAILED')
+      states.forEach(state => { state.persistence = 'FAILED'; state.diagnostic = 'PERSISTENCE_FAILED' })
+    }
   }
   private targets(): Target[] {
     const { home, appData, env = process.env } = this.options
@@ -75,7 +138,19 @@ export class LocalMcpClientService {
     if (!entry || !Array.isArray(entry.args) || entry.args[0] !== this.launcher) throw new Error('LEGACY_ENTRY_OWNERSHIP_UNVERIFIED')
     return { output: editEntry(content, target.toml, alias, undefined), migration: true }
   }
-  async detect(): Promise<LocalMcpClientState[]> { return Promise.all(this.targets().map(target => this.inspect(target))) }
+  private async inspectAll() {
+    const states: LocalMcpClientState[] = []
+    for (const target of this.targets()) states.push(await this.inspect(target))
+    return states
+  }
+  async detect(): Promise<LocalMcpClientState[]> {
+    await this.initialize()
+    return this.serialize(async () => {
+      const states = await this.inspectAll()
+      await this.persist(states, 'MANAGED_ENTRY', true)
+      return states
+    })
+  }
   private async inspect(target: Target): Promise<LocalMcpClientState> {
     const state: LocalMcpClientState = { id: target.id, name: target.name, path: target.path, detected: target.detected,
       configuration: 'ABSENT', launcherPresent: false, bootstrap: 'NOT_CHECKED', clientUse: 'NOT_CONFIRMED', recognition: 'NOT_CONFIRMED', reconnection: 'NOT_CONFIRMED',
@@ -85,22 +160,37 @@ export class LocalMcpClientService {
       state.launcherPresent = existsSync(this.launcher)
       if (!target.detected) { state.configuration = 'UNSUPPORTED'; state.diagnostic = 'CLIENT_PROFILE_NOT_IDENTIFIED'; return state }
       if (target.plugin) {
-        const plan = preparePlugin(target.plugin, this.desired(target), this.options.home, false)
+        const plan = await inspectPlugin(target.plugin, this.desired(target), this.options.home)
         state.configuration = plan.configured && !plan.migration ? 'INSTALLED' : existsSync(target.path) || plan.migration ? 'CONFLICT' : 'ABSENT'
         if (plan.migration) state.diagnostic = 'LEGACY_MIGRATION_AVAILABLE'
       } else {
-        const { entry, file } = this.read(target)
+        assertProfilePath(target.path, this.options.home); await assertUserOwnedAsync(target.path)
+        const file = await revisionAsync(target.path), entry = readEntry(file.content, target.toml, target.key)
         const alias = this.legacyAlias(target, file.content)
         state.configuration = entry === undefined ? 'ABSENT' : sameEntry(entry, this.desired(target)) ? 'INSTALLED' : 'CONFLICT'
-        if (alias.migration) { state.configuration = 'CONFLICT'; state.diagnostic = 'LEGACY_MIGRATION_AVAILABLE' }
+        if (alias.migration) {
+          const aliasKey = target.key === 'code_awareness_local' ? 'code-awareness-local' : 'code_awareness_local'
+          state.configuration = entry === undefined && sameEntry(readEntry(file.content, target.toml, aliasKey), this.desired(target)) ? 'INSTALLED' : 'CONFLICT'
+          state.diagnostic = 'LEGACY_MIGRATION_AVAILABLE'
+        }
         if (target.pluginPeer && existsSync(target.pluginPeer)) { state.configuration = 'UNSUPPORTED'; state.diagnostic = 'PLUGIN_ALREADY_INSTALLED' }
       }
+      if (state.configuration === 'INSTALLED' && !state.launcherPresent) state.diagnostic = 'LAUNCHER_UNAVAILABLE'
     } catch (error) { state.configuration = 'ERROR'; state.diagnostic = code(error) }
     return state
   }
   async verify(id: LocalMcpClientId): Promise<LocalMcpClientState> {
+    await this.initialize()
+    return this.serialize(async () => {
+      const state = await this.verifyNow(id)
+      await this.persist([state], 'MANAGED_ENTRY')
+      return state
+    })
+  }
+  private async verifyNow(id: LocalMcpClientId): Promise<LocalMcpClientState> {
     const state = await this.inspect(this.target(id))
-    if (state.configuration !== 'INSTALLED' || !state.launcherPresent) return state
+    if (state.configuration !== 'INSTALLED') return state
+    if (!state.launcherPresent) { state.diagnostic = 'LAUNCHER_UNAVAILABLE'; return state }
     try { await this.options.probe(this.options.command!, this.launcher, this.options.profile); state.bootstrap = 'RESPONDS' }
     catch (error) { state.bootstrap = 'ERROR'; state.diagnostic = code(error) }
     return state
@@ -145,6 +235,17 @@ export class LocalMcpClientService {
     return preview
   }
   async apply(token: string, confirmed: boolean, replaceConflict: boolean, owner = 0): Promise<LocalMcpClientState> {
+    await this.initialize()
+    return this.serialize(async () => {
+      await this.registry.read()
+      const pending = this.prepared.get(token)
+      const state = await this.applyNow(token, confirmed, replaceConflict, owner)
+      const migratedId = pending?.preview.migration && pending.target.plugin ? pending.target.id === 'antigravity' ? 'antigravity-settings' : 'cline-settings' : undefined
+      await this.persist([state], pending!.preview.action === 'disconnect' ? 'APPLY_DISCONNECT' : pending!.preview.action === 'repair' ? 'APPLY_REPAIR' : 'APPLY_CONNECT', false, migratedId)
+      return state
+    })
+  }
+  private async applyNow(token: string, confirmed: boolean, replaceConflict: boolean, owner: number): Promise<LocalMcpClientState> {
     const pending = this.prepared.get(token)
     if (!confirmed || !pending || pending.owner !== owner || pending.expires < Date.now()) throw new Error('CONFIRMATION_REQUIRED')
     if (pending.preview.conflict && !replaceConflict) throw new Error('EXPLICIT_CONFLICT_CHOICE_REQUIRED')

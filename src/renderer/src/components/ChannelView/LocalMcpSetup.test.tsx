@@ -3,20 +3,21 @@ import React from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react'
 import { LocalMcpSetup } from './LocalMcpSetup'
-import type { LocalMcpAction, LocalMcpClientApi, LocalMcpClientState } from '../../../../shared/types/local-mcp-client-types'
+import type { LocalMcpAction, LocalMcpClientApi, LocalMcpClientState, LocalMcpInstallationSnapshot } from '../../../../shared/types/local-mcp-client-types'
 afterEach(cleanup)
 const row: LocalMcpClientState = { id: 'codex', name: 'Codex', path: 'C:/user/.codex/config.toml', detected: true, configuration: 'ABSENT', launcherPresent: false, bootstrap: 'NOT_CHECKED', clientUse: 'NOT_CONFIRMED' }
-function setup(conflict = false) {
-  const api = { detect: vi.fn(async () => [row, { ...row, id: 'antigravity', name: 'Antigravity' }, { ...row, id: 'cline', name: 'Cline', detected: false, configuration: 'UNSUPPORTED' }]),
+function setup(conflict = false, initial: LocalMcpInstallationSnapshot = { revision: 1, restoration: 'READY', installations: [] }) {
+  let receive!: (snapshot: LocalMcpInstallationSnapshot) => void
+  const api = { snapshot: vi.fn(async () => initial), onChanged: vi.fn((callback: typeof receive) => { receive = callback; return () => {} }), detect: vi.fn(async () => [row, { ...row, id: 'antigravity', name: 'Antigravity' }, { ...row, id: 'cline', name: 'Cline', detected: false, configuration: 'UNSUPPORTED' }]),
     verify: vi.fn(async () => ({ ...row, configuration: 'INSTALLED', bootstrap: 'ERROR', diagnostic: 'MCP_SESSION_INVALIDATED' })),
     preview: vi.fn(async (_id: string, action: LocalMcpAction) => ({ token: 'preview', client: 'codex', path: row.path, action, before: 'Nenhuma entrada', after: '{"command":"node"}', launcherPath: 'C:/local/launcher.cjs', conflict, changes: true, restartRequired: true })),
     apply: vi.fn(async () => ({ ...row, configuration: 'INSTALLED', launcherPresent: true })) }
   window.codeAwareness = { localMcpClients: api as unknown as LocalMcpClientApi } as Window['codeAwareness']
   const view = render(<LocalMcpSetup />)
-  return { ...api, view }
+  return { ...api, view, emit: (snapshot: LocalMcpInstallationSnapshot) => receive(snapshot) }
 }
 async function detect() {
-  fireEvent.click(screen.getByRole('button', { name: 'Detectar' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Diagnosticar problemas' }))
   await within(screen.getByRole('article', { name: 'Codex' })).findByText('Disponível para instalação')
 }
 it('requires preview and specific confirmation before writing; preserves the distinction between installed and used', async () => {
@@ -58,7 +59,7 @@ it('renders exactly three client cards and keeps variants inside their owning ca
   api.detect.mockResolvedValueOnce([row, { ...row, id: 'antigravity', name: 'Antigravity 2.0 · plugin' },
     { ...row, id: 'antigravity-settings', name: 'IDE fallback' }, { ...row, id: 'cline', name: 'Desktop · Agent Plugin v1' },
     { ...row, id: 'cline-settings', name: 'Desktop fallback' }, { ...row, id: 'cline-vscode', name: 'VS Code fallback' }] as never)
-  fireEvent.click(screen.getByRole('button', { name: 'Detectar' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Diagnosticar problemas' }))
   await within(screen.getByRole('article', { name: 'Codex' })).findByText('Disponível para instalação')
   const select = await screen.findByRole('combobox', { name: 'Destino Cline' })
   expect(screen.getAllByRole('article')).toHaveLength(3)
@@ -73,7 +74,7 @@ it('renders exactly three client cards and keeps variants inside their owning ca
 it('renders three neutral cards before any lookup and only detects on an explicit click', async () => {
   const api = setup()
   expect(screen.getAllByRole('article')).toHaveLength(3)
-  expect(screen.getAllByText('Não verificado')).toHaveLength(3)
+  expect(screen.getAllByText('Restaurando configuração…')).toHaveLength(3)
   expect(api.detect).not.toHaveBeenCalled()
   expect(api.verify).not.toHaveBeenCalled()
   expect(api.preview).not.toHaveBeenCalled()
@@ -163,4 +164,62 @@ it('repairs and disconnects the selected client with confirmation and no global 
   expect(api.preview.mock.calls.map(call => call[1])).toEqual(['connect', 'repair', 'disconnect'])
   expect(api.apply).toHaveBeenCalledTimes(3)
   expect(api.detect).toHaveBeenCalledTimes(1)
+})
+
+const registered = (id: 'codex' | 'antigravity' | 'cline' | 'cline-vscode') => ({ id, mechanism: 'PLUGIN' as const, state: 'CONFIGURED' as const, evidence: 'MANAGED_ENTRY' as const, installationEvidence: 'MANAGED_ENTRY' as const })
+it('restores three configured cards and a unique variant after renderer restart without inspecting profiles', async () => {
+  const initial: LocalMcpInstallationSnapshot = { revision: 3, restoration: 'READY', installations: [registered('codex'), registered('antigravity'), registered('cline-vscode')] }
+  const first = setup(false, initial)
+  await screen.findAllByText('Configurado')
+  expect((screen.getByRole('combobox', { name: 'Destino Cline' }) as HTMLSelectElement).value).toBe('cline-vscode')
+  expect(document.body.textContent).not.toMatch(/Launcher:|Bootstrap: responde|Uso pelo cliente: confirmado/)
+  first.view.rerender(<LocalMcpSetup active={false} />)
+  first.view.rerender(<LocalMcpSetup active />)
+  expect(first.snapshot).toHaveBeenCalledTimes(1)
+  first.view.unmount()
+  const second = setup(false, initial)
+  expect(await screen.findAllByText('Configurado')).toHaveLength(3)
+  expect(second.detect).not.toHaveBeenCalled(); expect(second.verify).not.toHaveBeenCalled()
+})
+it('requires an explicit variant when multiple configured variants exist', async () => {
+  const api = setup(false, { revision: 1, restoration: 'READY', installations: [registered('cline'), registered('cline-vscode')] })
+  const card = within(screen.getByRole('article', { name: 'Cline' }))
+  await card.findByText('Múltiplas variantes configuradas')
+  expect((card.getByRole('combobox') as HTMLSelectElement).value).toBe('')
+  expect((card.getByRole('button', { name: 'Verificar' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.change(card.getByRole('combobox'), { target: { value: 'cline-vscode' } })
+  expect(card.getByText('Configurado')).toBeTruthy()
+  fireEvent.click(card.getByRole('button', { name: 'Reparar / atualizar' }))
+  await screen.findByLabelText('Prévia da configuração')
+  expect(api.preview).toHaveBeenCalledWith('cline-vscode', 'repair')
+})
+it('restores automatically from events and ignores stale snapshots without another lookup', async () => {
+  const api = setup(false, { revision: 1, restoration: 'RESTORING', installations: [] })
+  await act(async () => {})
+  await act(async () => api.emit({ revision: 3, restoration: 'READY', installations: [registered('codex')] }))
+  expect(within(screen.getByRole('article', { name: 'Codex' })).getByText('Configurado')).toBeTruthy()
+  await act(async () => api.emit({ revision: 2, restoration: 'READY', installations: [] }))
+  expect(screen.getByText('Configurado')).toBeTruthy()
+  expect(api.detect).not.toHaveBeenCalled(); expect(api.verify).not.toHaveBeenCalled()
+})
+it('shows an explicit registry failure without inventing disconnected clients or losing trusted proof', async () => {
+  const api = setup(false, { revision: 1, restoration: 'READY', installations: [registered('codex')] })
+  await screen.findByText('Configurado')
+  await act(async () => api.emit({ revision: 2, restoration: 'ERROR', installations: [registered('codex')], diagnostic: 'REGISTRY_INVALID' }))
+  expect(screen.getByRole('alert').textContent).toContain('corrompido')
+  expect(screen.getByText('Configurado')).toBeTruthy()
+  expect(screen.queryByText('Não configurado')).toBeNull()
+  expect(api.detect).not.toHaveBeenCalled()
+})
+it('does not claim durable success when client publication succeeds but persistence fails', async () => {
+  const api = setup()
+  await detect()
+  fireEvent.click(within(screen.getByRole('article', { name: 'Codex' })).getByRole('button', { name: 'Conectar' }))
+  await screen.findByLabelText('Prévia da configuração')
+  api.apply.mockResolvedValueOnce({ ...row, configuration: 'INSTALLED', persistence: 'FAILED', diagnostic: 'PERSISTENCE_FAILED' } as never)
+  fireEvent.click(screen.getByLabelText('Confirmo a operação neste destino'))
+  fireEvent.click(screen.getByRole('button', { name: 'Confirmar conectar' }))
+  expect(await screen.findByText('Registro não salvo')).toBeTruthy()
+  expect(screen.queryByText('Configurado')).toBeNull()
+  expect(document.body.textContent).toContain('Diagnosticar problemas para reconciliar')
 })

@@ -1,7 +1,7 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, promises as fs } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { readEntry, editEntry, sameEntry, type McpEntry } from './config-editors'
-import { assertProfilePath, assertRevision, assertUserOwned, removeConfig, revision, writeConfig, type FileRevision } from './safe-config-file'
+import { assertProfilePath, assertRevision, assertUserOwned, assertUserOwnedAsync, removeConfig, revision, revisionAsync, writeConfig, type FileRevision } from './safe-config-file'
 
 export const pluginName = 'code-awareness-local'
 export interface FileChange { path: string; before: FileRevision; after: string | null }
@@ -38,6 +38,20 @@ export function preparePlugin(target: PluginTarget, entry: McpEntry, home: strin
   assertProfilePath(root, home); assertUserOwned(root)
   if (existsSync(root) && readdirSync(root).some(name => !(name in files))) throw new Error('PLUGIN_OWNERSHIP_UNVERIFIED')
   const snapshots = Object.keys(files).map(name => ({ path: join(root, name), before: read(join(root, name), home), after: disconnect ? null : files[name] }))
+  return analyzePlugin(target, entry, files, snapshots, read(target.legacy, home), disconnect)
+}
+
+export async function inspectPlugin(target: PluginTarget, entry: McpEntry, home: string) {
+  const root = dirname(target.path), files = pluginFiles(target, entry)
+  assertProfilePath(root, home); await assertUserOwnedAsync(root)
+  if (existsSync(root) && (await fs.readdir(root)).some(name => !(name in files))) throw new Error('PLUGIN_OWNERSHIP_UNVERIFIED')
+  const safeRead = async (path: string) => { assertProfilePath(path, home); await assertUserOwnedAsync(path); return revisionAsync(path) }
+  const snapshots = await Promise.all(Object.keys(files).map(async name => ({ path: join(root, name), before: await safeRead(join(root, name)), after: files[name] })))
+  return analyzePlugin(target, entry, files, snapshots, await safeRead(target.legacy), false)
+}
+
+function analyzePlugin(target: PluginTarget, entry: McpEntry, files: Record<string, string>, snapshots: FileChange[], legacy: FileRevision, disconnect: boolean) {
+  const root = dirname(target.path)
   const manifest = snapshots[0]
   if (manifest.before.content !== null && manifest.before.content !== files['plugin.json']) throw new Error('PLUGIN_OWNERSHIP_UNVERIFIED')
   const component = snapshots.find(row => row.path.endsWith(target.cline ? 'mcp.json' : 'mcp_config.json'))!
@@ -50,7 +64,6 @@ export function preparePlugin(target: PluginTarget, entry: McpEntry, home: strin
   }
   const shim = snapshots.find(row => row.path.endsWith('launch.cmd'))
   if (shim?.before.content !== null && shim?.before.content !== undefined && shim.before.content !== files['launch.cmd']) throw new Error('PLUGIN_OWNERSHIP_UNVERIFIED')
-  const legacy = read(target.legacy, home)
   const keys = ['code-awareness-local', 'code_awareness_local']
   let legacyOutput = legacy.content
   let migration = false

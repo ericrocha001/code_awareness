@@ -18,7 +18,7 @@ beforeEach(() => {
   }
   unsubscribe.mockClear()
   window.codeAwareness = {
-    localMcpClients: { detect: vi.fn(async () => []) },
+    localMcpClients: { snapshot: vi.fn(async () => ({ revision: 1, restoration: 'READY', installations: [] })), onChanged: vi.fn(() => () => {}), detect: vi.fn(async () => []) },
     getChannelState: vi.fn(async () => structuredClone(state)),
     onChannelChanged: vi.fn(callback => { receive = callback; return unsubscribe }),
     connect: vi.fn(async () => ({ success: true })), disconnect: vi.fn(async () => ({ success: true })),
@@ -199,5 +199,5 @@ it('keeps activity runtime-scoped without illustrated history, charts or invente
   expect(screen.getByText('Nesta execução')).toBeTruthy()
   expect(document.body.textContent).not.toMatch(/Last 24 hours|últimas 24 horas|tendência|período anterior|CodeScope/i)
   expect(screen.getAllByRole('combobox')).toHaveLength(2)
-  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Detectar', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Abrir diagnóstico'])
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Diagnosticar problemas', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Abrir diagnóstico'])
 })

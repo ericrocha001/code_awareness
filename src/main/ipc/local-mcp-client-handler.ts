@@ -1,15 +1,29 @@
 import { ipcMain, type IpcMainInvokeEvent } from 'electron'
 import type { LocalMcpClientService } from '../local-mcp-clients/local-mcp-client-service'
 import type { LocalMcpAction, LocalMcpClientId } from '../../shared/types/local-mcp-client-types'
+import type { WebContents } from 'electron'
 
 export function registerLocalMcpClientHandlers(service: LocalMcpClientService, trustedUrl: string): void {
+  const subscribers = new Map<number, WebContents>()
+  const trusted = (url: string) => { try { return new URL(url).href.split('#')[0] === new URL(trustedUrl).href.split('#')[0] } catch { return false } }
+  service.onSnapshotChanged(snapshot => {
+    for (const [id, sender] of subscribers) {
+      if (sender.isDestroyed() || !trusted(sender.mainFrame.url)) { subscribers.delete(id); continue }
+      sender.send('local-mcp:changed', snapshot)
+    }
+  })
   const bind = (name: string, count: number, callback: (owner: number, ...args: unknown[]) => unknown) => {
     ipcMain.handle(`local-mcp:${name}`, (event: IpcMainInvokeEvent, ...args: unknown[]) => {
       const url = event.senderFrame?.url
-      if (args.length !== count || event.senderFrame !== event.sender.mainFrame || event.sender.isDestroyed() || !url || new URL(url).href.split('#')[0] !== new URL(trustedUrl).href.split('#')[0]) throw new Error('INVALID_LOCAL_SETUP_REQUEST')
+      if (args.length !== count || event.senderFrame !== event.sender.mainFrame || event.sender.isDestroyed() || !url || !trusted(url)) throw new Error('INVALID_LOCAL_SETUP_REQUEST')
+      if (!subscribers.has(event.sender.id)) {
+        subscribers.set(event.sender.id, event.sender)
+        event.sender.once('destroyed', () => subscribers.delete(event.sender.id))
+      }
       return callback(event.sender.id, ...args)
     })
   }
+  bind('snapshot', 0, () => service.snapshot())
   const client = (value: unknown): LocalMcpClientId => {
     if (!['codex', 'antigravity', 'antigravity-settings', 'cline', 'cline-settings', 'cline-vscode'].includes(String(value))) throw new Error('UNKNOWN_CLIENT')
     return value as LocalMcpClientId

@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { Plug, RefreshCw } from 'lucide-react'
-import type { LocalMcpAction, LocalMcpClientId, LocalMcpClientState, LocalMcpPreview } from '../../../../shared/types/local-mcp-client-types'
+import type { LocalMcpAction, LocalMcpClientId, LocalMcpClientState, LocalMcpInstallationSnapshot, LocalMcpPreview } from '../../../../shared/types/local-mcp-client-types'
 
 const configuration = { ABSENT: 'Disponível para instalação', INSTALLED: 'Configurado', CONFLICT: 'Migração ou revisão necessária', ERROR: 'Requer atenção', UNSUPPORTED: 'Não suportado neste perfil' }
 const groups: { name: string; variants: { id: LocalMcpClientId; name: string }[] }[] = [
@@ -14,7 +14,14 @@ const messages: Record<string, string> = {
   CLIENT_PROFILE_NOT_IDENTIFIED: 'Perfil não identificado. Confira o arquivo consumido pelo cliente antes de configurar.',
   PACKAGED_NODE_RUNTIME_UNSUPPORTED: 'Este pacote ainda não inclui um runtime local compatível. A configuração automática está indisponível.',
   NODE_RUNTIME_UNAVAILABLE: 'Node.js compatível não encontrado. A configuração não foi alterada.',
-  CONFIG_REVISION_CONFLICT: 'O arquivo mudou desde a prévia. Detecte novamente antes de confirmar.',
+  CONFIG_REVISION_CONFLICT: 'O arquivo mudou desde a prévia. Diagnostique novamente antes de confirmar.',
+  PERSISTENCE_FAILED: 'Os arquivos do cliente podem ter sido atualizados, mas o registro não foi salvo. Use Diagnosticar problemas para reconciliar o estado.',
+  REGISTRY_INVALID: 'O registro de instalações está corrompido. As configurações dos clientes foram preservadas.',
+  REGISTRY_VERSION_UNSUPPORTED: 'Esta versão do registro de instalações não é compatível com o Desktop.',
+  REGISTRY_ACCESS_DENIED: 'Não foi possível acessar o registro de instalações com segurança.',
+  REGISTRY_READ_FAILED: 'Não foi possível ler o registro de instalações.',
+  REGISTRY_MISSING: 'O registro de instalações foi removido durante esta sessão.',
+  LAUNCHER_UNAVAILABLE: 'A configuração está registrada, mas o launcher está ausente. Use Reparar / atualizar.',
   PROFILE_OWNERSHIP_UNVERIFIED: 'Não foi possível confirmar que o destino pertence ao seu usuário.',
   CONFIG_LINK_NOT_ALLOWED: 'O destino usa um link ou junction. A escrita foi bloqueada.',
   INVALID_CLIENT_CONFIG: 'A configuração existente não pôde ser lida com segurança. Nenhuma entrada foi substituída.',
@@ -35,6 +42,7 @@ const diagnostic = (error: unknown) => {
 
 export function LocalMcpSetup({ active = true }: { active?: boolean }) {
   const [clients, setClients] = useState<LocalMcpClientState[]>([])
+  const [snapshot, setSnapshot] = useState<LocalMcpInstallationSnapshot>({ revision: -1, restoration: 'RESTORING', installations: [] })
   const [selection, setSelection] = useState<Record<string, LocalMcpClientId>>({})
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -58,6 +66,18 @@ export function LocalMcpSetup({ active = true }: { active?: boolean }) {
     mounted.current = true
     return () => { mounted.current = false }
   }, [])
+  useEffect(() => {
+    let listening = true
+    const receive = (next: LocalMcpInstallationSnapshot) => {
+      if (listening) setSnapshot(previous => next.revision >= previous.revision ? next : previous)
+    }
+    if (!api) { setSnapshot({ revision: 0, restoration: 'ERROR', installations: [], diagnostic: 'LOCAL_SETUP_UNAVAILABLE' }); return }
+    const stop = api.onChanged(receive)
+    void api.snapshot().then(receive, caught => {
+      if (listening) setSnapshot(previous => ({ ...previous, restoration: 'ERROR', diagnostic: diagnostic(caught) }))
+    })
+    return () => { listening = false; stop() }
+  }, [api])
   useLayoutEffect(() => {
     visible.current = active
     visibilityEpoch.current++
@@ -73,24 +93,29 @@ export function LocalMcpSetup({ active = true }: { active?: boolean }) {
   }
   return <section className="channel-panel local-mcp-setup" aria-labelledby="local-mcp-title" aria-busy={busy}>
     <div className="channel-section-heading"><h2 id="local-mcp-title"><Plug size={19} aria-hidden="true" />Configurar MCP Local</h2>
-      <button type="button" className="channel-action" disabled={busy || !api} onClick={() => { clearPreview(); void run(async () => { const rows = await api.detect(); if (mounted.current) setClients(rows) }) }}><RefreshCw size={14} aria-hidden="true" />Detectar</button></div>
+      <button type="button" className="channel-action" disabled={busy || !api} onClick={() => { clearPreview(); void run(async () => { const rows = await api.detect(); if (mounted.current) { setClients(rows); setNotice('Diagnóstico concluído. Os resultados descrevem a configuração; não confirmam sessões ativas nos clientes.') } }) }}><RefreshCw size={14} aria-hidden="true" />Diagnosticar problemas</button></div>
     <p className="channel-note">Conecte seus clientes ao Desktop neste computador. MCP Local e MCP Online têm configurações independentes.</p>
     {error && <p className="channel-error" role="alert" title={error}>{explain(error)}</p>}
+    {snapshot.diagnostic && <p className="channel-error" role="alert" title={snapshot.diagnostic}>{explain(snapshot.diagnostic)}</p>}
     {notice && <p className="channel-note" role="status">{notice}</p>}
     <div className="local-mcp-clients">{groups.map(group => {
       const variants = group.variants
-      const id = selection[group.name] ?? variants[0].id
+      const configured = variants.filter(variant => snapshot.installations.some(row => row.id === variant.id && row.state === 'CONFIGURED'))
+      const id = selection[group.name] ?? (configured.length === 1 ? configured[0].id : configured.length > 1 ? '' : variants[0].id)
       const client = clients.find(row => row.id === id)
+      const installation = snapshot.installations.find(row => row.id === id)
+      const installed = installation?.state === 'CONFIGURED' || !installation && client?.configuration === 'INSTALLED'
+      const label = !id ? 'Múltiplas variantes configuradas' : client?.persistence === 'FAILED' ? 'Registro não salvo' : installation ? { CONFIGURED: 'Configurado', REMOVED: 'Não configurado', NEEDS_ATTENTION: 'Requer atenção' }[installation.state] : client ? configuration[client.configuration] : snapshot.restoration === 'RESTORING' ? 'Restaurando configuração…' : snapshot.restoration === 'ERROR' ? 'Estado indisponível' : 'Sem configuração registrada'
       return <article className="local-mcp-client" key={group.name} aria-label={group.name}>
-      <div><h3>{group.name}</h3><span className={`channel-badge channel-tone-${client?.configuration === 'INSTALLED' ? 'healthy' : 'neutral'}`}>{client ? configuration[client.configuration] : 'Não verificado'}</span></div>
-      {variants.length > 1 && <label className="local-mcp-variant">Destino<select aria-label={`Destino ${group.name}`} value={id} disabled={busy || !!preview} onChange={event => setSelection(previous => ({ ...previous, [group.name]: event.target.value as LocalMcpClientId }))}>{variants.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>}
+      <div><h3>{group.name}</h3><span className={`channel-badge channel-tone-${installed && client?.persistence !== 'FAILED' ? 'healthy' : 'neutral'}`}>{label}</span></div>
+      {variants.length > 1 && <label className="local-mcp-variant">Destino<select aria-label={`Destino ${group.name}`} value={id} disabled={busy || !!preview} onChange={event => setSelection(previous => ({ ...previous, [group.name]: event.target.value as LocalMcpClientId }))}>{!id && <option value="">Selecione uma variante</option>}{variants.map(row => <option key={row.id} value={row.id}>{row.name}</option>)}</select></label>}
       {client ? <><p className="channel-note">{client.mechanism === 'PLUGIN' ? 'Plugin local · reconhecimento pendente' : client.mechanism === 'CODEX_CLI' ? 'Registro oficial Codex' : 'Configuração de fallback'} · Reconexão: pendente</p>
       <p className="local-mcp-path">{client.path}</p>
-      <p className="channel-note">Launcher: {client.launcherPresent ? 'presente' : 'ausente'} · Bootstrap: {client.bootstrap === 'RESPONDS' ? 'responde' : client.bootstrap === 'ERROR' ? 'falhou' : 'não verificado'} · Uso pelo cliente: não confirmado</p></> : <p className="channel-note">Verifique este destino ou use Detectar para consultar os clientes.</p>}
-      {client?.diagnostic && <p className="channel-note" role="status" title={client.diagnostic}>{explain(client.diagnostic)}</p>}
-      <div className="local-mcp-actions"><button type="button" className="channel-action" disabled={busy || !!preview || !api} onClick={() => void run(async () => update(await api.verify(id)))}>Verificar</button>
-        <button type="button" className="channel-action" disabled={busy || !!preview || !api || !client?.detected || client.configuration === 'ERROR' || client.configuration === 'UNSUPPORTED'} onClick={() => prepare(id, client?.configuration === 'ABSENT' ? 'connect' : 'repair')}>{!client || client.configuration === 'ABSENT' ? 'Conectar' : 'Reparar / atualizar'}</button>
-        {client && client.configuration !== 'ABSENT' && client.configuration !== 'UNSUPPORTED' && <button type="button" className="channel-action" disabled={busy || !!preview || client.configuration === 'ERROR'} onClick={() => prepare(id, 'disconnect')}>Desconectar</button>}</div>
+      <p className="channel-note">Launcher: {client.launcherPresent ? 'presente' : 'ausente'} · Bootstrap: {client.bootstrap === 'RESPONDS' ? 'responde' : client.bootstrap === 'ERROR' ? 'falhou' : 'não verificado'} · Uso pelo cliente: não confirmado</p></> : <p className="channel-note">{!id ? 'Escolha o destino para verificar ou alterar sua configuração.' : installation ? 'Registro de instalação restaurado. Conectividade e uso pelo cliente não foram verificados.' : 'Use Diagnosticar problemas quando precisar consultar os perfis reais.'}</p>}
+      {client?.diagnostic && client.diagnostic !== snapshot.diagnostic && <p className="channel-note" role="status" title={client.diagnostic}>{explain(client.diagnostic)}</p>}
+      <div className="local-mcp-actions"><button type="button" className="channel-action" disabled={busy || !!preview || !api || !id} onClick={() => id && void run(async () => update(await api.verify(id)))}>Verificar</button>
+        <button type="button" className="channel-action" disabled={busy || !!preview || !api || !id || client?.configuration === 'ERROR' || client?.configuration === 'UNSUPPORTED'} onClick={() => id && prepare(id, installed || client && client.configuration !== 'ABSENT' ? 'repair' : 'connect')}>{installed || client && client.configuration !== 'ABSENT' ? 'Reparar / atualizar' : 'Conectar'}</button>
+        {(installed || client && client.configuration !== 'ABSENT' && client.configuration !== 'UNSUPPORTED') && <button type="button" className="channel-action" disabled={busy || !!preview || client?.configuration === 'ERROR'} onClick={() => id && prepare(id, 'disconnect')}>Desconectar</button>}</div>
     </article>})}</div>
     {busy && <p className="channel-note" role="status">Verificando configuração local…</p>}
     {preview && <div className="local-mcp-preview" aria-label="Prévia da configuração">
@@ -101,8 +126,9 @@ export function LocalMcpSetup({ active = true }: { active?: boolean }) {
       {preview.conflict && <label><input type="checkbox" checked={replace} disabled={busy} onChange={event => setReplace(event.target.checked)} />Substituir explicitamente a entrada divergente Code Awareness</label>}
       <label><input type="checkbox" checked={confirmed} disabled={busy} onChange={event => setConfirmed(event.target.checked)} />Confirmo a operação neste destino</label>
       <div className="local-mcp-actions"><button type="button" className="channel-action" disabled={busy || !confirmed || preview.conflict && !replace} onClick={() => void run(async () => {
-        update(await api.apply(preview.token, true, replace))
-        if (mounted.current) { clearPreview(); setNotice('Configuração processada. Reconecte o cliente e execute as ferramentas de leitura para confirmar o uso.') }
+        const result = await api.apply(preview.token, true, replace)
+        update(result)
+        if (mounted.current) { clearPreview(); setNotice(result.persistence === 'FAILED' ? null : 'Configuração processada. Reconecte o cliente e execute as ferramentas de leitura para confirmar o uso.') }
       })}>Confirmar {actionName[preview.action].toLowerCase()}</button><button type="button" className="channel-action" disabled={busy} onClick={clearPreview}>Cancelar</button></div>
     </div>}
   </section>

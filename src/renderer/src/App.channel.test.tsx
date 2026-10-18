@@ -19,7 +19,7 @@ it('mounts Channel on demand once and retains its accessible view, selection and
       latency: { completedRequests: 0, totalDurationMs: 0, lastDurationMs: null, maxDurationMs: null }, byTool: {}, byCapability: {} } } as ChannelState
   let hydrate!: (state: ChannelState) => void
   const subscriptions = new Set<unknown>()
-  const api = { detect: vi.fn(), preview: vi.fn(), apply: vi.fn(), verify: vi.fn(async (id: string) => ({ id, name: 'VS Code', path: 'profile/config.json', detected: true, configuration: 'ABSENT', launcherPresent: true, bootstrap: 'NOT_CHECKED', clientUse: 'NOT_CONFIRMED' })) }
+  const api = { snapshot: vi.fn(async () => ({ revision: 1, restoration: 'READY', installations: [] })), onChanged: vi.fn(() => () => {}), detect: vi.fn(), preview: vi.fn(), apply: vi.fn(), verify: vi.fn(async (id: string) => ({ id, name: 'VS Code', path: 'profile/config.json', detected: true, configuration: 'ABSENT', launcherPresent: true, bootstrap: 'NOT_CHECKED', clientUse: 'NOT_CONFIRMED' })) }
   window.codeAwareness = {
     loadSettings: async () => ({}), getPendingDeepLink: async () => null, onDeepLink: () => () => {},
     getActiveProject: async () => ({ revision: 0, project: null }), onActiveProjectChanged: () => () => {},
@@ -36,7 +36,7 @@ it('mounts Channel on demand once and retains its accessible view, selection and
   fireEvent.click(screen.getByRole('button', { name: 'channel' }))
   const instance = document.querySelector('.channel-view')
   expect(screen.getAllByRole('article')).toHaveLength(3)
-  expect(screen.getAllByText('Não verificado').length).toBeGreaterThanOrEqual(3)
+  expect(screen.getAllByText('Restaurando configuração…').length).toBeGreaterThanOrEqual(3)
   const cline = within(screen.getByRole('article', { name: 'Cline' }))
   const selector = cline.getByRole('combobox') as HTMLSelectElement
   fireEvent.change(selector, { target: { value: 'cline-vscode' } })

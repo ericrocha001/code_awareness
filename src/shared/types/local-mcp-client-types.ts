@@ -1,4 +1,19 @@
-export type LocalMcpClientId = 'codex' | 'antigravity' | 'antigravity-settings' | 'cline' | 'cline-settings' | 'cline-vscode'
+export const LOCAL_MCP_CLIENT_IDS = ['codex', 'antigravity', 'antigravity-settings', 'cline', 'cline-settings', 'cline-vscode'] as const
+export type LocalMcpClientId = typeof LOCAL_MCP_CLIENT_IDS[number]
+export type LocalMcpMechanism = 'PLUGIN' | 'CODEX_CLI' | 'CONFIG_FALLBACK'
+export interface LocalMcpInstallation {
+  id: LocalMcpClientId
+  mechanism: LocalMcpMechanism
+  state: 'CONFIGURED' | 'REMOVED' | 'NEEDS_ATTENTION'
+  evidence: 'MANAGED_ENTRY' | 'APPLY_CONNECT' | 'APPLY_REPAIR' | 'APPLY_DISCONNECT' | 'APPLY_MIGRATION' | 'CONFIG_ABSENT' | 'CONFIG_DIVERGENT' | 'READ_INCONCLUSIVE'
+  installationEvidence?: 'MANAGED_ENTRY' | 'APPLY_CONNECT' | 'APPLY_REPAIR'
+}
+export interface LocalMcpInstallationSnapshot {
+  revision: number
+  restoration: 'RESTORING' | 'READY' | 'ERROR'
+  installations: LocalMcpInstallation[]
+  diagnostic?: string
+}
 export type LocalMcpAction = 'connect' | 'repair' | 'disconnect'
 export interface LocalMcpClientState {
   id: LocalMcpClientId
@@ -9,7 +24,8 @@ export interface LocalMcpClientState {
   launcherPresent: boolean
   bootstrap: 'NOT_CHECKED' | 'RESPONDS' | 'ERROR'
   clientUse: 'NOT_CONFIRMED'
-  mechanism?: 'PLUGIN' | 'CODEX_CLI' | 'CONFIG_FALLBACK'
+  mechanism?: LocalMcpMechanism
+  persistence?: 'SAVED' | 'FAILED'
   recognition?: 'NOT_CONFIRMED'
   reconnection?: 'NOT_CONFIRMED'
   diagnostic?: string
@@ -29,6 +45,8 @@ export interface LocalMcpPreview {
   mechanism?: LocalMcpClientState['mechanism']
 }
 export interface LocalMcpClientApi {
+  snapshot(): Promise<LocalMcpInstallationSnapshot>
+  onChanged(callback: (snapshot: LocalMcpInstallationSnapshot) => void): () => void
   detect(): Promise<LocalMcpClientState[]>
   verify(client: LocalMcpClientId): Promise<LocalMcpClientState>
   preview(client: LocalMcpClientId, action: LocalMcpAction): Promise<LocalMcpPreview>

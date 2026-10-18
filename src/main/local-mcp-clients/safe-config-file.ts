@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
-import { execFileSync } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
+import { promises as fs, type Stats } from 'node:fs'
 
 export function assertUserOwned(path: string): void {
   let existing = path
@@ -84,6 +85,57 @@ export function writeConfig(path: string, profile: string, expected: FileRevisio
     if (moved && !published && !existsSync(path)) { linkSync(backup, path); unlinkSync(backup); moved = false }
     if (existsSync(temp)) unlinkSync(temp)
     if (moved && existsSync(backup) && existsSync(path) && readFileSync(path, 'utf8') === expected.content) unlinkSync(backup)
+    throw error
+  }
+}
+
+export async function assertUserOwnedAsync(path: string): Promise<void> {
+  let existing = path
+  while (!existsSync(existing)) existing = dirname(existing)
+  if (process.platform !== 'win32') {
+    if ((await fs.lstat(existing)).uid !== process.getuid?.()) throw new Error('PROFILE_OWNERSHIP_UNVERIFIED')
+    return
+  }
+  const literal = existing.replaceAll("'", "''")
+  const command = `$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $acl=if ([System.IO.Directory]::Exists('${literal}')) {[System.IO.Directory]::GetAccessControl('${literal}')} else {[System.IO.File]::GetAccessControl('${literal}')}; if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $me) {exit 1}`
+  await new Promise<void>((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, timeout: 5000 }, error => error ? reject(new Error('PROFILE_OWNERSHIP_UNVERIFIED')) : resolve()))
+}
+
+export async function revisionAsync(path: string): Promise<FileRevision> {
+  let stat: Stats
+  try { stat = await fs.lstat(path) } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { content: null, hash: 'ABSENT', identity: 'ABSENT' }
+    throw error
+  }
+  if (!stat.isFile() || stat.size > 2 * 1024 * 1024 || stat.isSymbolicLink() || stat.nlink !== 1) throw new Error('UNSAFE_CONFIG_FILE')
+  const content = await fs.readFile(path, 'utf8')
+  return { content, hash: createHash('sha256').update(content).digest('hex'), identity: `${stat.dev}:${stat.ino}:${stat.mode}` }
+}
+
+export async function writeConfigAsync(path: string, profile: string, expected: FileRevision, content: string): Promise<void> {
+  const check = async (target = path) => {
+    const actual = await revisionAsync(target)
+    if (actual.hash !== expected.hash || actual.identity !== expected.identity) throw new Error('CONFIG_REVISION_CONFLICT')
+  }
+  assertProfilePath(path, profile); await assertUserOwnedAsync(path); await check()
+  if (expected.content === content) return
+  await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  assertProfilePath(path, profile)
+  const temp = `${path}.${randomUUID()}.tmp`, backup = `${path}.${randomUUID()}.rollback`
+  let moved = false, published = false
+  try {
+    const file = await fs.open(temp, 'wx', 0o600)
+    try { await file.writeFile(content, 'utf8'); await file.sync() } finally { await file.close() }
+    assertProfilePath(path, profile); await check()
+    if (expected.content !== null) { await fs.rename(path, backup); moved = true; await check(backup) }
+    assertProfilePath(path, profile)
+    await fs.link(temp, path); published = true
+    await fs.unlink(temp)
+    if (moved) await fs.unlink(backup)
+  } catch (error) {
+    if (moved && !published && !existsSync(path)) { await fs.link(backup, path); await fs.unlink(backup); moved = false }
+    if (existsSync(temp)) await fs.unlink(temp)
+    if (moved && existsSync(backup) && existsSync(path) && await fs.readFile(path, 'utf8') === expected.content) await fs.unlink(backup)
     throw error
   }
 }

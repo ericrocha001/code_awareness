@@ -13,14 +13,16 @@ exports.run = async ctx => {
   const antigravity = path.join(home, '.gemini/config/mcp_config.json')
   fs.writeFileSync(codex, '# preserved user comment\n[mcp_servers.other]\ncommand="existing"\nargs=[]\n')
   for (const file of [cline, vscode, antigravity]) fs.writeFileSync(file, '{"mcpServers":{"existing":{"command":"keep","env":{"TOKEN":"fixture-private"}}}}')
-  const service = new api.LocalMcpClientService({ home, appData: path.join(home, 'AppData/Roaming'), localAppData: path.join(home, 'AppData/Local'), sourceBundle: path.join(ctx.projectRoot, 'out/local-mcp/launcher.cjs'), command: path.join(process.env.ProgramFiles, 'nodejs/node.exe'), profile: path.join(home, 'desktop'), packaged: false, env: {}, probe: async () => { throw new Error('MCP_SESSION_INVALIDATED') } })
+  const options = { home, appData: path.join(home, 'AppData/Roaming'), localAppData: path.join(home, 'AppData/Local'), sourceBundle: path.join(ctx.projectRoot, 'out/local-mcp/launcher.cjs'), command: path.join(process.env.ProgramFiles, 'nodejs/node.exe'), profile: path.join(home, 'desktop'), packaged: false, env: {}, probe: async () => { throw new Error('MCP_SESSION_INVALIDATED') } }
+  let service = new api.LocalMcpClientService(options)
   let detections = 0
   const detect = service.detect.bind(service)
   service.detect = () => { detections++; return detect() }
   const page = path.join(ctx.temporary, 'index.html'), preload = path.join(ctx.temporary, 'preload.cjs')
   buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')], outfile: preload, bundle: true, platform: 'node', format: 'cjs', external: ['electron'], logLevel: 'silent' })
   ctx.window.webContents.session.setPreloads([preload])
-  api.registerLocalMcpClientHandlers(service, pathToFileURL(page).href)
+  const register = () => api.registerLocalMcpClientHandlers(service, pathToFileURL(page).href)
+  register()
   const counters = { activeRequests: 0, peakConcurrentRequests: 0, totalRequests: 0, succeededRequests: 0, failedRequests: 0, timedOutRequests: 0, latency: { completedRequests: 0, totalDurationMs: 0, lastDurationMs: null, maxDurationMs: null } }
   ipcMain.handle('channel:get-state', () => ({ revision: 1, availability: 'DISABLED', remoteAccessEnabled: false, transport: 'relay', connectionStatus: 'STOPPED', mcpStatus: 'STOPPED', activeProject: null, installationConfigured: false, lastError: null, functionalHealth: { status: 'UNKNOWN' }, activity: { ...counters, byTool: {}, byCapability: {} } }))
   buildSync({ entryPoints: [path.join(__dirname, 'local-mcp-setup-fixture.tsx')], outfile: path.join(ctx.temporary, 'fixture.js'), bundle: true, platform: 'browser', define: { 'process.env.NODE_ENV': '"production"' }, loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' }, logLevel: 'silent' })
@@ -29,7 +31,11 @@ exports.run = async ctx => {
   ctx.check('Startup does not mount Channel', await ctx.evaluate(() => !document.querySelector('.channel-view')))
   await ctx.evaluate(() => [...document.querySelectorAll('nav button')].find(button => button.textContent === 'Channel').click())
   await ctx.waitFor(() => document.querySelectorAll('.local-mcp-client').length === 3)
-  ctx.check('First paint leaves all three clients unverified', await ctx.evaluate(() => [...document.querySelectorAll('.local-mcp-client .channel-badge')].every(badge => badge.textContent === 'Não verificado')))
+  ctx.check('First paint never invents installed clients', await ctx.evaluate(() => [...document.querySelectorAll('.local-mcp-client .channel-badge')].every(badge => ['Restaurando configuração…', 'Sem configuração registrada'].includes(badge.textContent))))
+  await new Promise((resolve, reject) => {
+    const stop = service.onSnapshotChanged(snapshot => { if (snapshot.restoration !== 'RESTORING') { stop(); snapshot.restoration === 'READY' ? resolve() : reject(new Error(snapshot.diagnostic)) } })
+    void service.snapshot().then(snapshot => { if (snapshot.restoration !== 'RESTORING') { stop(); snapshot.restoration === 'READY' ? resolve() : reject(new Error(snapshot.diagnostic)) } }, reject)
+  })
   await ctx.evaluate(() => {
     document.querySelector('.channel-view').dataset.retained = 'yes'
     const selector = document.querySelector('select[aria-label="Destino Cline"]')
@@ -62,11 +68,30 @@ exports.run = async ctx => {
   }
   ctx.check('TOML comments and existing MCP preserved', fs.readFileSync(codex, 'utf8').startsWith('# preserved user comment\n[mcp_servers.other]\ncommand="existing"\nargs=[]\n'))
   ctx.check('All JSON clients preserve other MCP credentials', [cline, vscode, antigravity].every(file => JSON.parse(fs.readFileSync(file)).mcpServers.existing.env.TOKEN === 'fixture-private'))
+  for (const method of ['snapshot', 'detect', 'verify', 'preview', 'apply']) ipcMain.removeHandler(`local-mcp:${method}`)
+  service = new api.LocalMcpClientService(options)
+  let inspections = 0, probes = 0
+  const inspect = service.inspect.bind(service)
+  service.inspect = (...args) => { inspections++; return inspect(...args) }
+  options.probe = async () => { probes++; throw new Error('MCP_SESSION_INVALIDATED') }
+  const restartedDetect = service.detect.bind(service)
+  service.detect = () => { detections++; return restartedDetect() }
+  register()
   await ctx.load(page)
   await ctx.evaluate(() => [...document.querySelectorAll('nav button')].find(button => button.textContent === 'Channel').click())
   await ctx.waitFor(() => document.querySelectorAll('.local-mcp-client').length === 3)
-  await ctx.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent.includes('Detectar')).click())
+  await ctx.waitFor(() => document.body.textContent.includes('Múltiplas variantes configuradas'))
+  ctx.check('Restart restores both Cline variants without guessing or profile inspection', inspections === 0 && probes === 0 && detections === 0 && await ctx.evaluate(() => document.querySelector('select[aria-label="Destino Cline"]').value === ''))
+  await ctx.evaluate(() => { const select = document.querySelector('select[aria-label="Destino Cline"]'); select.value = 'cline'; select.dispatchEvent(new Event('change', { bubbles: true })) })
   await ctx.waitFor(() => [...document.querySelectorAll('.local-mcp-client .channel-badge')].every(badge => badge.textContent === 'Configurado'))
+  ctx.check('Three configured cards return without manual verification', detections === 0 && inspections === 0 && probes === 0)
+  const diagnosis = new Promise((resolve, reject) => {
+    const stop = service.onSnapshotChanged(snapshot => { stop(); snapshot.restoration === 'READY' ? resolve() : reject(new Error(snapshot.diagnostic)) })
+  })
+  await ctx.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent.includes('Diagnosticar problemas')).click())
+  await diagnosis
+  await ctx.waitFor(() => !document.querySelector('.local-mcp-setup').getAttribute('aria-busy') || document.querySelector('.local-mcp-setup').getAttribute('aria-busy') === 'false')
+  ctx.check('Only explicit diagnosis inspects profiles and never probes', detections === 1 && inspections === 6 && probes === 0)
   ctx.check('Renderer contains no other MCP secrets', await ctx.evaluate(() => !document.body.textContent.includes('fixture-private')))
   await ctx.capture('local-mcp-desktop')
   await ctx.overflow()
