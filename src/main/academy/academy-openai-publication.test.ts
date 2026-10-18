@@ -70,6 +70,36 @@ describe('Academy OpenAI plugin publication', () => {
     service.close()
   })
 
+  it('preserves Skill scripts byte for byte in a prepared ZIP without executing them', async () => {
+    const { service } = await fixture()
+    const artifacts = {
+      'references/guide.md': 'guide',
+      'scripts/open-pr-safe.cjs': 'throw new Error("must never execute")\n',
+      'scripts/nested/check.py': 'raise Exception("must never execute")\n',
+      'assets/mcp.json': '{"example":true}\n'
+    }
+    const skill = await service.create({ package: { skillMd: skillMd('worktree-execution'), artifacts }, scope: 'GLOBAL', origin: 'UI' })
+    const canonical = service.get(skill.id)
+    try {
+      const release = service.prepareOpenAiRelease()
+      expect(release.status).toBe('READY_TO_UPLOAD')
+      const entries = readZipEntries(readFileSync(release.artifactPath!))
+      for (const [path, content] of Object.entries(artifacts)) {
+        expect(entries.find(entry => entry.path === 'academy-skills/skills/worktree-execution/' + path)?.data.equals(Buffer.from(content))).toBe(true)
+      }
+      expect(service.get(skill.id)).toEqual(canonical)
+    } finally { service.close() }
+  })
+
+  it.each(['cjs', 'js', 'mjs', 'sh', 'py', 'ps1', 'custom', ''])('blocks known secrets in textual Skill resources with extension %s', async (extension) => {
+    const { service, global } = await fixture()
+    const path = 'scripts/check' + (extension ? '.' + extension : '')
+    try {
+      await service.update({ skillId: global.id, expectedVersion: global.currentVersion, package: { skillMd: global.current.package.skillMd, artifacts: { [path]: 'sk-proj-abcdefghijklmnopqrstuvwxyz' } }, origin: 'UI' })
+      expect(() => service.prepareOpenAiRelease()).toThrow('KNOWN_SECRET:')
+    } finally { service.close() }
+  })
+
   it('calculates stable-id delta and automatic PATCH/MINOR versions', () => {
     const before = [{ skillId: '1', name: 'alpha', academyVersion: 1, packageHash: 'a' }]
     const content = [{ skillId: '1', name: 'alpha', academyVersion: 2, packageHash: 'b' }]
@@ -143,6 +173,16 @@ describe('Academy OpenAI plugin publication', () => {
       { path: 'academy-skills/mcp.json', data: Buffer.from('{"token":"sk-proj-abcdefghijklmnopqrstuvwxyz"}') }
     ], profile, snapshot)).toThrow(/KNOWN_SECRET:.*FORBIDDEN_COMPONENT:.*LOGO_INVALID_DIMENSIONS/)
     service.close()
+  })
+
+  it.each(['mcp.json', '.app.json', '.codex-plugin/plugin.json', 'scripts/run.cjs', 'node_modules/a/index.js', 'skills/global-skill/node_modules/a/index.js', 'skills/global-skill/.codex-plugin/plugin.json', 'skills/unknown/scripts/run.cjs', 'skills/global-skill/../escape.txt', 'skills/global-skill/skill.md'])('rejects unauthorized or invalid path %s', async (path) => {
+    const { service } = await fixture()
+    try {
+      const release = service.prepareOpenAiRelease()
+      const entries = readZipEntries(readFileSync(release.artifactPath!))
+      entries.push({ path: 'academy-skills/' + path, data: Buffer.from('safe') })
+      expect(() => validateOpenAiPluginPackage(entries, service.getOpenAiPublicationState().profile!, release.snapshot)).toThrow(/FORBIDDEN_COMPONENT|UNEXPECTED_FILE|INVALID_PATH/)
+    } finally { service.close() }
   })
 
   it('persists profile, snapshots, hashes, destructive evidence, and confirmations across reopen', async () => {

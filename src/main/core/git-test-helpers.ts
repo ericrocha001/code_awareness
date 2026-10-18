@@ -16,8 +16,9 @@ const GIT_TIMEOUT_MS = 5000
 export async function gitExec(
   repoPath: string,
   args: string[],
-  options: { allowExitOne?: boolean } = {}
+  options: { allowExitOne?: boolean; timeoutMs?: number } = {}
 ): Promise<string> {
+  const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS
   return new Promise((resolve, reject) => {
     let stdout = ''
     let stderr = ''
@@ -26,8 +27,8 @@ export async function gitExec(
 
     const timer = setTimeout(() => {
       proc.kill()
-      reject(new Error(`git timeout após ${GIT_TIMEOUT_MS}ms: git ${args.join(' ')}`))
-    }, GIT_TIMEOUT_MS)
+      reject(new Error(`git timeout após ${timeoutMs}ms: git ${args.join(' ')}`))
+    }, timeoutMs)
 
     proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
     proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
