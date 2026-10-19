@@ -55,7 +55,7 @@ export class GitWorktreeValidation {
         binding: { repositoryId: this.identity.repositoryId, worktreeId: id, generation: record.generation, head: record.head },
         startFingerprint, fingerprint: () => this.fingerprint(id)
       })
-      const run = execution.start({ ...input, producer: 'SYSTEM' })
+      const run = await execution.start({ ...input, producer: 'SYSTEM' })
       this.executions.set(run.runId, execution)
       void this.releaseOnCompletion(execution, run.runId, descriptor, lock, id).catch(() => console.error('[GitWorktreeValidation] VALIDATION_LOCK_FINALIZATION_FAILED', run.runId))
       return { ...run, worktreeId: id, head: record.head, validation: 'PENDING' }

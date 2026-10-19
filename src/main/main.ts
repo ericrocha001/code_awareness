@@ -462,7 +462,7 @@ app.whenReady().then(async () => {
 
     const gitRepositoryId = repositoryCatalog?.findByPath(project.path)?.id
     const gitProjectRevision = activeProjects?.getState().revision
-    activeValidationExecution = new ValidationExecution(project.path, validationLedger, runtimeIdentityProvider)
+    activeValidationExecution = new ValidationExecution(project.path, validationLedger, runtimeIdentityProvider, undefined, undefined, gitRepositoryId ?? null)
     activeWorktreeValidation = gitRepositoryId ? new GitWorktreeValidation(project.path, gitService, {
       repositoryId: gitRepositoryId,
       isActive: () => activeProjects?.getState().revision === gitProjectRevision && activeProjects?.getState().project?.id === project.id

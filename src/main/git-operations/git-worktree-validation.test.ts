@@ -12,6 +12,27 @@ import { GitWorktreeLifecycle } from './git-worktree-lifecycle'
 import { GitWorktreeOwnership, type WorktreeObservation } from './git-worktree-ownership'
 import { GitWorktreeValidation } from './git-worktree-validation'
 
+it('refuses an external checkout without managed-worktree authorization before executing a profile', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'validation-external-'))
+  const common = join(root, 'common'), workspace = join(root, 'external')
+  mkdirSync(common); mkdirSync(workspace)
+  const git = { getCommonDirectory: async () => common, getRepositoryDirectories: async () => ({ common, admin: common }),
+    listWorktreeRecords: async () => `worktree ${workspace}\0HEAD ${'a'.repeat(40)}\0branch refs/heads/external\0\0` } as unknown as GitService
+  const identity = { repositoryId: 'repository', isActive: () => true }
+  const record = (await new GitWorktreeRegistry(root, git, identity).discover()).worktrees[0]
+  const recordProof = vi.fn()
+  const runtime = new RuntimeIdentityProvider({ rootDir: workspace, includedDirectories: [], includedRootFiles: [] })
+  const validation = new GitWorktreeValidation(root, git, identity, { recordProof } as unknown as ValidationLedger, runtime)
+  try {
+    await expect(validation.start(record.worktreeId, { profileId: 'typecheck' })).rejects.toThrow('WORKTREE_NOT_MANAGED')
+    expect(recordProof).not.toHaveBeenCalled()
+  } finally {
+    await validation.shutdown()
+    await runtime.sourceOriginReady
+    rmSync(root, { recursive: true, force: true })
+  }
+})
+
 it('keeps interrupted checkout validation blocked until explicit local reconciliation', async () => {
   const root = mkdtempSync(join(tmpdir(), 'validation-ownership-'))
   const common = join(root, 'common'), admin = join(common, 'admin'), workspace = join(root, 'managed workspace')

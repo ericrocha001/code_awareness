@@ -2,12 +2,13 @@ import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapte
 import type { ProofProducer } from '../validation-ledger/validation-ledger-types'
 import type { ValidationExecution } from './validation-execution'
 import { ValidationBusyError } from './validation-execution'
+import { ValidationTargetError } from './validation-profile-catalog'
 import { operationalFailure, VALIDATION_RETRY_AFTER_MS } from '../mcp/operational-guidance'
 
 const securitySchemes = [{ type: 'oauth2' as const, scopes: [] as string[] }]
 export const VALIDATION_EXECUTION_TOOLS: McpToolDefinition[] = [
   { name: 'list_validation_profiles', description: 'List the fixed validation profiles that may be executed for the active repository.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, securitySchemes },
-  { name: 'start_validation', description: 'Start one authorized validation profile asynchronously. Commands, executables, cwd, and free-form flags are not accepted.', inputSchema: { type: 'object', properties: { profileId: { type: 'string', minLength: 1 }, targets: { type: 'array', items: { type: 'string', minLength: 1 }, uniqueItems: true }, producer: { type: 'string', enum: ['IMPLEMENTER', 'ARCHITECT', 'USER', 'SYSTEM', 'TESTER'] }, evidenceFor: { type: 'array', items: { type: 'string', minLength: 1 }, uniqueItems: true } }, required: ['profileId', 'producer'], additionalProperties: false }, securitySchemes },
+  { name: 'start_validation', description: 'Start one authorized profile exclusively in the active project checkout; returns its canonical cwd and source identity. Missing targets return TARGET_NOT_IN_ACTIVE_CHECKOUT with guarded worktree guidance. Commands, executables, cwd, and free-form flags are not accepted.', inputSchema: { type: 'object', properties: { profileId: { type: 'string', minLength: 1 }, targets: { type: 'array', items: { type: 'string', minLength: 1 }, uniqueItems: true }, producer: { type: 'string', enum: ['IMPLEMENTER', 'ARCHITECT', 'USER', 'SYSTEM', 'TESTER'] }, evidenceFor: { type: 'array', items: { type: 'string', minLength: 1 }, uniqueItems: true } }, required: ['profileId', 'producer'], additionalProperties: false }, securitySchemes },
   { name: 'get_validation_run', description: 'Get a validation result. Optional waitMs waits for terminal state within the request deadline. When RUNNING, follow retryAfterMs instead of aggressive polling.', inputSchema: { type: 'object', properties: { runId: { type: 'string', minLength: 1 }, waitMs: { type: 'integer', minimum: 0, maximum: 15000 } }, required: ['runId'], additionalProperties: false }, securitySchemes }
 ]
 
@@ -38,8 +39,8 @@ export async function executeValidationTool(execution: ValidationExecution, name
       if (values.evidenceFor !== undefined && (!Array.isArray(values.evidenceFor) || values.evidenceFor.some((value) => typeof value !== 'string'))) return error('INVALID_ARGUMENT: evidenceFor must be strings')
       const producer = values.producer as ProofProducer
       if (!['IMPLEMENTER', 'ARCHITECT', 'USER', 'SYSTEM', 'TESTER'].includes(producer)) return error('INVALID_ARGUMENT: Unknown producer')
-      const run = execution.start({ profileId: values.profileId, targets: values.targets as string[] | undefined, producer, evidenceFor: values.evidenceFor as string[] | undefined })
-      return result({ runId: run.runId, status: run.status, retryAfterMs: VALIDATION_RETRY_AFTER_MS })
+      const run = await execution.start({ profileId: values.profileId, targets: values.targets as string[] | undefined, producer, evidenceFor: values.evidenceFor as string[] | undefined })
+      return result({ runId: run.runId, status: run.status, cwd: run.cwd, source: run.source, retryAfterMs: VALIDATION_RETRY_AFTER_MS })
     }
     if (name === 'get_validation_run') {
       if (typeof values.runId !== 'string') return error('INVALID_ARGUMENT: runId is required')
@@ -49,6 +50,7 @@ export async function executeValidationTool(execution: ValidationExecution, name
     }
     return error(`UNKNOWN_TOOL: ${name}`)
   } catch (caught) {
+    if (caught instanceof ValidationTargetError) return { ...result({ code: caught.code, activeCheckout: caught.activeCheckout, target: caught.target, recommendedAction: caught.recommendedAction, worktreeRoute: caught.worktreeRoute }), isError: true }
     if (caught instanceof ValidationBusyError) return operationalFailure({ code: 'VALIDATION_BUSY', activeRunId: caught.activeRunId, retryability: 'SAFE_AFTER_BACKOFF', retryAfterMs: VALIDATION_RETRY_AFTER_MS, recommendedAction: 'FOLLOW_ACTIVE_RUN' })
     return error(caught instanceof Error ? caught.message : String(caught))
   }

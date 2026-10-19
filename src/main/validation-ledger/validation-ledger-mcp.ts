@@ -139,10 +139,10 @@ function validateArgs(args: unknown): Record<string, unknown> | null {
   return args as Record<string, unknown>
 }
 
-export function executeListValidationProofs(
+export async function executeListValidationProofs(
   ledger: ValidationLedger,
   args: unknown
-): McpToolResult {
+): Promise<McpToolResult> {
   const values = validateArgs(args)
   if (!values) return err('INVALID_ARGUMENT: Expected an arguments object')
 
@@ -155,7 +155,7 @@ export function executeListValidationProofs(
   if (values.limit !== undefined) filter.limit = values.limit as number
 
   try {
-    const proofs = ledger.listProofs(filter)
+    const proofs = await ledger.listProofs(filter)
     return ok({
       count: proofs.length,
       proofs: proofs.map(proofSummaryLine)
@@ -166,10 +166,10 @@ export function executeListValidationProofs(
   }
 }
 
-export function executeGetValidationProof(
+export async function executeGetValidationProof(
   ledger: ValidationLedger,
   args: unknown
-): McpToolResult {
+): Promise<McpToolResult> {
   const values = validateArgs(args)
   if (!values) return err('INVALID_ARGUMENT: Expected an arguments object')
   if (typeof values.proofId !== 'string' || !values.proofId) {
@@ -177,7 +177,7 @@ export function executeGetValidationProof(
   }
 
   try {
-    const proof = ledger.getProofWithFreshness(values.proofId)
+    const proof = await ledger.getProofWithFreshness(values.proofId)
     if (!proof) return err(`PROOF_NOT_FOUND: No proof with id "${values.proofId}"`)
     return ok(proof)
   } catch (e) {
@@ -192,7 +192,7 @@ export function executeRecordValidationProof(
 ): McpToolResult {
   const values = validateArgs(args)
   if (!values) return err('INVALID_ARGUMENT: Expected an arguments object')
-  if (values.commandProfile && typeof values.commandProfile === 'object' && 'checkout' in values.commandProfile) return err('INVALID_ARGUMENT: Checkout provenance is issued only by Validation Execution')
+  if (values.commandProfile && typeof values.commandProfile === 'object' && ('checkout' in values.commandProfile || 'source' in values.commandProfile)) return err('INVALID_ARGUMENT: Checkout provenance is issued only by Validation Execution')
 
   const required = ['kind', 'producer', 'status', 'startedAt', 'finishedAt', 'durationMs', 'scope', 'summary']
   for (const field of required) {

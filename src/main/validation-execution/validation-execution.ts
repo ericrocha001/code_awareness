@@ -6,6 +6,7 @@ import type { ProofProducer, ProofStatus } from '../validation-ledger/validation
 import { ValidationProfileCatalog } from './validation-profile-catalog'
 import type { ResolvedValidationCommand, ValidationProfile } from './validation-profile'
 import { MCP_REQUEST_BUDGET_MS, VALIDATION_RETRY_AFTER_MS } from '../mcp/operational-guidance'
+import { captureValidationSource, validationSourceFingerprint, type ValidationSource } from './validation-source'
 
 export class ValidationBusyError extends Error {
   constructor(readonly activeRunId: string) { super(`VALIDATION_BUSY: ${activeRunId}`) }
@@ -19,6 +20,8 @@ export interface ValidationCheckoutContext {
 }
 
 export interface ValidationRun {
+  cwd: string
+  source?: ValidationSource
   retryAfterMs?: number
   runId: string
   profileId: string
@@ -41,6 +44,7 @@ export interface StartValidationInput {
 }
 
 interface ActiveRun {
+  source?: ValidationSource
   completion?: Promise<void>
   proofDeduplicationKey: string
   publicRun: ValidationRun
@@ -71,24 +75,41 @@ export class ValidationExecution {
   private readonly waiters = new Map<string, Set<() => void>>()
   private readonly runs = new Map<string, ValidationRun>()
   private active: ActiveRun | null = null
+  private startingRunId: string | null = null
+  private stopped = false
 
   constructor(
     private readonly repoRoot: string,
     private readonly ledger: ValidationLedger,
     private readonly runtimeIdentity: RuntimeIdentityProvider,
     private readonly catalog = new ValidationProfileCatalog(),
-    private readonly checkout?: ValidationCheckoutContext
+    private readonly checkout?: ValidationCheckoutContext,
+    private readonly repositoryId: string | null = null
   ) {}
 
   listProfiles(): ValidationProfile[] {
     return this.catalog.list()
   }
 
-  start(input: StartValidationInput): ValidationRun {
-    if (this.active) throw new ValidationBusyError(this.active.publicRun.runId)
+  async start(input: StartValidationInput): Promise<ValidationRun> {
+    const activeRunId = this.getActiveRunId()
+    if (activeRunId) throw new ValidationBusyError(activeRunId)
+    if (this.stopped) throw new Error('VALIDATION_EXECUTION_STOPPED')
     const resolved = this.catalog.resolve(this.repoRoot, input.profileId, input.targets)
     const runId = `run-${randomUUID()}`
-    const publicRun: ValidationRun = { runId, profileId: resolved.profile.id, status: 'RUNNING', retryAfterMs: VALIDATION_RETRY_AFTER_MS, startedAt: new Date().toISOString() }
+    const publicRun: ValidationRun = { runId, cwd: resolved.command.cwd, profileId: resolved.profile.id, status: 'RUNNING', retryAfterMs: VALIDATION_RETRY_AFTER_MS, startedAt: new Date().toISOString() }
+    this.runs.set(runId, publicRun)
+    this.startingRunId = runId
+    let source: ValidationSource | undefined
+    try {
+      source = this.checkout ? undefined : await captureValidationSource(resolved.command.cwd, this.repositoryId)
+      if (this.stopped) throw new Error('VALIDATION_EXECUTION_STOPPED')
+      publicRun.source = source
+    } catch (error) {
+      Object.assign(publicRun, { status: 'ERROR', finishedAt: new Date().toISOString(), diagnostic: 'CHECKOUT_IDENTITY_UNAVAILABLE' })
+      delete publicRun.retryAfterMs
+      throw error
+    } finally { this.startingRunId = null }
     const output = new BoundedOutput()
     const child = spawn(resolved.command.executable, resolved.command.args, {
       cwd: resolved.command.cwd,
@@ -98,6 +119,7 @@ export class ValidationExecution {
       stdio: 'pipe'
     })
     const active: ActiveRun = {
+      source,
       proofDeduplicationKey: this.checkout ? `${runId}:${randomUUID()}` : runId,
       publicRun,
       profile: resolved.profile,
@@ -105,13 +127,12 @@ export class ValidationExecution {
       command: resolved.command,
       producer: input.producer,
       evidenceFor: input.evidenceFor ?? [],
-      startFingerprint: this.checkout?.startFingerprint ?? this.runtimeIdentity.evaluateFreshness().currentSnapshot.fingerprint,
+      startFingerprint: this.checkout?.startFingerprint ?? validationSourceFingerprint(source!),
       child,
       timeout: setTimeout(() => this.finish(active, 'ERROR', undefined, 'VALIDATION_TIMEOUT'), resolved.profile.timeoutMs),
       output
     }
     this.active = active
-    this.runs.set(runId, publicRun)
     child.stdout.on('data', (chunk) => output.append(chunk))
     child.stderr.on('data', (chunk) => output.append(chunk))
     child.once('error', (error) => void this.finish(active, 'ERROR', undefined, `SPAWN_FAILED: ${error.message}`))
@@ -120,15 +141,15 @@ export class ValidationExecution {
       if (signal) void this.finish(active, 'ERROR', code ?? undefined, `PROCESS_INTERRUPTED: ${signal}`)
       else void this.finish(active, code === 0 ? 'PASSED' : 'FAILED', code ?? undefined)
     })
-    return { ...publicRun }
+    return this.get(runId)!
   }
 
   get(runId: string): ValidationRun | null {
     const run = this.runs.get(runId)
-    return run ? { ...run, failures: run.failures ? [...run.failures] : undefined } : null
+    return run ? { ...run, source: run.source ? { ...run.source } : undefined, failures: run.failures ? [...run.failures] : undefined } : null
   }
 
-  getActiveRunId(): string | null { return this.active?.publicRun.runId ?? null }
+  getActiveRunId(): string | null { return this.active?.publicRun.runId ?? this.startingRunId }
 
   async wait(runId: string, waitMs: number, deadlineAtMs = Date.now() + MCP_REQUEST_BUDGET_MS): Promise<ValidationRun | null> {
     const run = this.get(runId)
@@ -150,6 +171,7 @@ export class ValidationExecution {
   }
 
   async shutdown(): Promise<void> {
+    this.stopped = true
     const active = this.active
     if (!active) return
     active.child.kill()
@@ -167,7 +189,7 @@ export class ValidationExecution {
     const finishedAt = new Date().toISOString()
     const durationMs = Math.max(0, Date.parse(finishedAt) - Date.parse(active.publicRun.startedAt))
     let endFingerprint: string
-    try { endFingerprint = this.checkout ? await this.checkout.fingerprint() : this.runtimeIdentity.evaluateFreshness().currentSnapshot.fingerprint }
+    try { endFingerprint = this.checkout ? await this.checkout.fingerprint() : validationSourceFingerprint(await captureValidationSource(active.command.cwd, this.repositoryId)) }
     catch { endFingerprint = 'CHECKOUT_UNAVAILABLE' }
     const sourceChanged = endFingerprint !== active.startFingerprint
     const status: ProofStatus = sourceChanged ? 'ERROR' : requestedStatus
@@ -188,10 +210,10 @@ export class ValidationExecution {
         finishedAt,
         durationMs,
         scope: active.targets.length ? active.targets : active.profile.scope,
-        sourceFingerprint: endFingerprint,
+        sourceFingerprint: active.startFingerprint,
         runtimeInstanceId: this.runtimeIdentity.getInstanceId(),
         summary: finalDiagnostic ? `${summary}: ${finalDiagnostic}` : summary,
-        commandProfile: { command: active.command.displayCommand, cwd: active.command.cwd, exitCode, ...(this.checkout ? { checkout: { ...this.checkout.binding, issuer: 'VALIDATION_EXECUTION' as const, runId: active.publicRun.runId } } : {}) },
+        commandProfile: { command: active.command.displayCommand, cwd: active.command.cwd, exitCode, ...(active.source ? { source: active.source } : {}), ...(this.checkout ? { checkout: { ...this.checkout.binding, issuer: 'VALIDATION_EXECUTION' as const, runId: active.publicRun.runId } } : {}) },
         evidenceFor: active.evidenceFor,
         deduplicationKey: active.proofDeduplicationKey
       })

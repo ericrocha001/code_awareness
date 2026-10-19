@@ -11,6 +11,7 @@ import type {
   RecordProofInput,
   ValidationProof
 } from './validation-ledger-types'
+import { captureValidationSource, validationSourceFingerprint, type ValidationSource } from '../validation-execution/validation-source'
 import type { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
 
 interface LedgerRow {
@@ -53,34 +54,27 @@ function rowToProof(row: LedgerRow): ValidationProof {
   }
 }
 
-function classifyFreshness(
+async function classifyFreshness(
   proof: ValidationProof,
-  currentFingerprint: string | null,
-  currentInstanceId: string | null
-): ProofFreshness {
+  currentInstanceId: string | null,
+  sources = new Map<string, Promise<ValidationSource>>()
+): Promise<ProofFreshness> {
   if (proof.commandProfile?.checkout) return 'UNVERIFIABLE'
-  // If the proof was tied to a specific runtime instance that differs from current
-  if (proof.runtimeInstanceId !== null && currentInstanceId !== null) {
-    if (proof.runtimeInstanceId !== currentInstanceId) {
-      return 'RUNTIME_HISTORICAL'
+  if (proof.runtimeInstanceId && currentInstanceId && proof.runtimeInstanceId !== currentInstanceId) return 'RUNTIME_HISTORICAL'
+  const source = proof.commandProfile?.source
+  if (!source || source.version !== 1 || !proof.sourceFingerprint || proof.status === 'ERROR' || proof.commandProfile?.cwd !== source.cwd ||
+    validationSourceFingerprint(source) !== proof.sourceFingerprint) return 'UNVERIFIABLE'
+  try {
+    const key = JSON.stringify([source.cwd, source.repositoryId])
+    let reading = sources.get(key)
+    if (!reading) {
+      reading = captureValidationSource(source.cwd, source.repositoryId)
+      sources.set(key, reading)
     }
-  }
-
-  // If no source fingerprint was recorded, we cannot verify currency
-  if (proof.sourceFingerprint === null) {
-    return 'UNVERIFIABLE'
-  }
-
-  // If we cannot determine current fingerprint, we cannot verify currency
-  if (currentFingerprint === null) {
-    return 'UNVERIFIABLE'
-  }
-
-  if (proof.sourceFingerprint === currentFingerprint) {
-    return 'CURRENT'
-  }
-
-  return 'SOURCE_STALE'
+    const current = await reading
+    if (current.repositoryDirectory !== source.repositoryDirectory || current.worktreeId !== source.worktreeId || current.generation !== source.generation) return 'UNVERIFIABLE'
+    return validationSourceFingerprint(current) === proof.sourceFingerprint ? 'CURRENT' : 'SOURCE_STALE'
+  } catch { return 'UNVERIFIABLE' }
 }
 
 const VALID_KINDS = new Set([
@@ -143,16 +137,6 @@ export class ValidationLedger {
       CREATE INDEX IF NOT EXISTS idx_vl_source_fp ON validation_proofs(source_fingerprint)
         WHERE source_fingerprint IS NOT NULL;
     `)
-  }
-
-  private getCurrentFingerprint(): string | null {
-    if (!this.runtimeIdentity) return null
-    try {
-      const { currentSnapshot } = this.runtimeIdentity.evaluateFreshness()
-      return currentSnapshot.fingerprint
-    } catch {
-      return null
-    }
   }
 
   private getCurrentInstanceId(): string | null {
@@ -250,20 +234,16 @@ export class ValidationLedger {
     return row ? rowToProof(row) : null
   }
 
-  getProofWithFreshness(proofId: string): ProofWithFreshness | null {
+  async getProofWithFreshness(proofId: string): Promise<ProofWithFreshness | null> {
     const proof = this.getProof(proofId)
     if (!proof) return null
-    const freshness = classifyFreshness(
-      proof,
-      this.getCurrentFingerprint(),
-      this.getCurrentInstanceId()
-    )
+    const freshness = await classifyFreshness(proof, this.getCurrentInstanceId())
     return { ...proof, freshness }
   }
 
-  listProofs(filter: ListProofsFilter = {}): ProofWithFreshness[] {
-    const currentFingerprint = this.getCurrentFingerprint()
+  async listProofs(filter: ListProofsFilter = {}): Promise<ProofWithFreshness[]> {
     const currentInstanceId = this.getCurrentInstanceId()
+    const sources = new Map<string, Promise<ValidationSource>>()
 
     let query = 'SELECT * FROM validation_proofs WHERE 1=1'
     const params: (string | number | null)[] = []
@@ -294,10 +274,10 @@ export class ValidationLedger {
         )
         .all(filter.requirementId, filter.limit ?? 100) as LedgerRow[]
 
-      let results = reqRows.map(rowToProof).map((proof) => ({
+      let results = await Promise.all(reqRows.map(rowToProof).map(async (proof) => ({
         ...proof,
-        freshness: classifyFreshness(proof, currentFingerprint, currentInstanceId)
-      }))
+        freshness: await classifyFreshness(proof, currentInstanceId, sources)
+      })))
 
       if (filter.freshness) {
         results = results.filter((p) => p.freshness === filter.freshness)
@@ -311,10 +291,10 @@ export class ValidationLedger {
 
     const rows = this.db.prepare(query).all(...params) as LedgerRow[]
 
-    let results = rows.map(rowToProof).map((proof) => ({
+    let results = await Promise.all(rows.map(rowToProof).map(async (proof) => ({
       ...proof,
-      freshness: classifyFreshness(proof, currentFingerprint, currentInstanceId)
-    }))
+      freshness: await classifyFreshness(proof, currentInstanceId, sources)
+    })))
 
     if (filter.freshness) {
       results = results.filter((p) => p.freshness === filter.freshness)
