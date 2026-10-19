@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { GitHubApiClient } from './github-api-client'
 import type { BranchInventory } from '../../shared/types/branch-orchestration-types'
-import type { BranchPullRequestRelation, BranchPullRequests, PullRequestCatalog, PullRequestRecord } from '../../shared/types/branch-pull-request-types'
+import type { BranchPullRequestRelation, BranchReceivedPullRequestRelation, BranchPullRequests, PullRequestCatalog, PullRequestRecord } from '../../shared/types/branch-pull-request-types'
 
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 
@@ -56,12 +56,23 @@ export class GitHubPullRequestCatalog {
   project(inventory: BranchInventory, catalog: PullRequestCatalog): BranchPullRequests {
     if (inventory.repositoryId !== catalog.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED')
     const relations: BranchPullRequestRelation[] = [], linked = new Set<string>()
+    const received: BranchReceivedPullRequestRelation[] = []
+    const byBase = new Map<string, Map<string, PullRequestRecord>>()
     const byRef = new Map<string, PullRequestRecord[]>()
     for (const pr of catalog.items) {
       const group = byRef.get(pr.head.ref) ?? []; group.push(pr); byRef.set(pr.head.ref, group)
+      if (catalog.providerRepositoryId !== null && catalog.repository !== null && pr.base.repositoryId === catalog.providerRepositoryId && pr.base.repository.toLowerCase() === catalog.repository.toLowerCase()) {
+        const destinations = byBase.get(pr.base.ref) ?? new Map<string, PullRequestRecord>()
+        destinations.set(pr.id, pr); byBase.set(pr.base.ref, destinations)
+      }
     }
     for (const branch of inventory.branches) {
       if (branch.namespace !== 'LOCAL') continue
+      for (const pr of branch.repositoryId === inventory.repositoryId ? byBase.get(branch.name)?.values() ?? [] : []) {
+        received.push({ branchKey: branch.key, branchRevision: branch.revision, repositoryId: inventory.repositoryId,
+          source: catalog.source, observedAt: catalog.observedAt, catalogRevision: catalog.revision, coverage: catalog.coverage,
+          classification: 'DECLARED_DESTINATION', pullRequest: pr })
+      }
       const candidates = byRef.get(branch.name) ?? []
       for (const pr of candidates) {
         const proofKey = `${inventory.repositoryId}:${branch.key}:${pr.id}`
@@ -80,6 +91,6 @@ export class GitHubPullRequestCatalog {
         if (current || historical) linked.add(pr.id)
       }
     }
-    return { repositoryId: inventory.repositoryId, catalog, relations, orphaned: catalog.items.filter(pr => !linked.has(pr.id)) }
+    return { repositoryId: inventory.repositoryId, catalog, relations, received, orphaned: catalog.items.filter(pr => !linked.has(pr.id)) }
   }
 }
