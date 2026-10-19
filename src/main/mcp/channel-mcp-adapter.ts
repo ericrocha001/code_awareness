@@ -52,6 +52,12 @@ import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../rep
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 import { REPOSITORY_FILE_EDITING_TOOLS, executeRepositoryFileEditing } from '../repository-file-ingress/repository-file-editing-mcp'
 
+const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file'])
+const literalReadOutputSchema = {
+  type: 'object', properties: { content: { type: 'string', description: 'Literal source text selected by this read.' } },
+  required: ['content'], additionalProperties: true
+}
+
 function stableDescriptor(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(stableDescriptor)
   if (value && typeof value === 'object') {
@@ -193,7 +199,7 @@ export class ChannelMcpAdapter {
     if (this.repositoryFileIngress) tools.push(IMPORT_REPOSITORY_FILE_TOOL)
     if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
-    return tools
+    return tools.map(tool => literalReadTools.has(tool.name) ? { ...tool, outputSchema: literalReadOutputSchema } : tool)
   }
 
   getToolCatalogHash(): string {
@@ -237,6 +243,12 @@ export class ChannelMcpAdapter {
       if (first.type !== 'text') throw new Error('INVALID_HEALTH_CONTENT')
       const health = JSON.parse(first.text)
       return { ...result, content: [{ type: 'text', text: JSON.stringify({ ...health, workloadGovernor: this.governor.snapshot(), activeRunId: this.validationExecution?.getActiveRunId() ?? null }) }] }
+    }
+    if (literalReadTools.has(name) && !result.isError && result.content.length === 1 && result.content[0].type === 'text') {
+      const data: unknown = JSON.parse(result.content[0].text)
+      if (data && typeof data === 'object' && !Array.isArray(data) && typeof (data as Record<string, unknown>).content === 'string') {
+        return { ...result, structuredContent: data as Record<string, unknown> }
+      }
     }
     return result
   }

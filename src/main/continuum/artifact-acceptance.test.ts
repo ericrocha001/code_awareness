@@ -48,6 +48,10 @@ describe('Agent-first acceptance over real MCP HTTP and repository lifecycle', (
       expect(JSON.stringify(outline)).not.toMatch(/RELATED_BODY_SENTINEL|rawMarkdown/)
       const structuralQuery = { artifactId: related.artifactId, sectionId: outline.sections[0].sectionId, expectedRevision: outline.revision }
       expect((await read('read_artifact_section', structuralQuery)).content).toBe('RELATED_BODY_SENTINEL')
+      const explicit = await call('read_artifact_section', structuralQuery)
+      expect(explicit.structuredContent).toEqual(JSON.parse(explicit.content[0].text))
+      expect(explicit.structuredContent.content).toBe('RELATED_BODY_SENTINEL')
+      expect((await rpc('tools/list', {})).tools.find((t: { name: string }) => t.name === 'read_artifact_section').outputSchema.required).toContain('content')
       expect(selected.rawMarkdown).toContain('RELATED_BODY_SENTINEL'); expect(JSON.stringify(selected)).not.toContain('SOURCE_BODY_SENTINEL')
       const updated = await read('update_artifact', { artifactId: related.artifactId, expectedRevision: selected.revision,
         rawMarkdown: markdown('Proof', `status: VALIDATED\nrelations:\n  - artifactId: ${first.artifactId}\n    kind: validates\n`, 'CORRECTED_BODY') })

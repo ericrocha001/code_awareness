@@ -37,6 +37,19 @@ function createNavigation(): ContextNavigationPort {
 }
 
 describe('ChannelMcpAdapter', () => {
+  it.each(['read_artifact_section', 'read_worktree_file'])('exposes %s data explicitly without changing legacy text or source fields', async name => {
+    const adapter = new ChannelMcpAdapter(createNavigation(), 'repo')
+    const data = { content: 'literal 🚀\r\n${source}', revision: 2, start: 10, end: 35, nextCursor: 'opaque' }
+    const legacy = { content: [{ type: 'text' as const, text: JSON.stringify(data) }] }
+    const dispatch = vi.spyOn(adapter as unknown as { dispatchTool: () => Promise<typeof legacy> }, 'dispatchTool').mockResolvedValue(legacy)
+    const result = await adapter.callTool(name, {})
+    expect(result.content).toEqual(legacy.content)
+    expect(result.structuredContent).toEqual(data)
+    dispatch.mockResolvedValueOnce({ ...legacy, isError: true } as typeof legacy)
+    expect((await adapter.callTool(name, {})).structuredContent).toBeUndefined()
+    expect((await adapter.callTool('get_artifact', {})).structuredContent).toBeUndefined()
+  })
+
   it('fingerprints metadata and annotations with stable object key ordering', () => {
     const adapter = new ChannelMcpAdapter(createNavigation(), 'repo')
     const original = adapter.listTools()[0]
