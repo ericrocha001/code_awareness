@@ -1,5 +1,17 @@
 # Continuum no terminal
 
+## Navegação estrutural
+
+Após `list`, selecione um Artifact e use `inspect_artifact_structure` antes de adquirir conteúdo. O outline contém títulos, hierarquia, offsets UTF-16 e linhas (base 1), revisão e hash; nunca corpo ou mídia. Intervalos são `[start, end)`. Títulos longos são limitados a 512 caracteres. Preâmbulos e documentos sem headings têm seção sintética. Frontmatter validado continua na metadata.
+
+```powershell
+node scripts/continuum/local.cjs inspect_artifact_structure --repository <repositoryId> --id <artifactId> --filter '{"limit":50}'
+node scripts/continuum/local.cjs inspect_artifact_structure --repository <repositoryId> --id <artifactId> --filter '{"sectionId":"<sectionId>","includeBlocks":true}'
+node scripts/continuum/local.cjs read_artifact_section --repository <repositoryId> --id <artifactId> --filter '{"sectionId":"<sectionId>","expectedRevision":1,"includeDescendants":false}'
+```
+
+O MCP expõe os mesmos nomes e argumentos. Para ler um bloco, acrescente `blockId` obtido pela inspeção explícita de blocos diretos. A leitura devolve slices literais de até 12288 unidades UTF-16, preservando pares surrogate; concatene `content` das páginas. Para continuar, passe `nextCursor` como `cursor` mantendo os demais argumentos. O outline usa páginas de 50 entradas (máximo 100). IDs e cursores vinculam repositório, Artifact, revisão e escopo; `REVISION_CONFLICT`/`STRUCTURE_STALE` exigem nova inspeção. Índices são lazy, reconstruíveis e reutilizados por hash/versão após restart. Falhas estruturais não impedem `get` integral, publicação ou atualização.
+
 Este domínio agora é servido pelo [Code Awareness Local Agent Channel](../local-agent/LOCAL.md). Os comandos e perfis abaixo permanecem compatíveis no mesmo listener. A CLI nova oferece os mesmos comandos com o prefixo `continuum`.
 
 Requer Code Awareness ativo com o repositório selecionado. A CLI usa Node sem bindings nativos e não usa MCP. No Windows, o perfil padrão é `%APPDATA%\code-awareness`; `--profile <diretório>` seleciona explicitamente outro perfil desktop. Credenciais do canal ficam nesse perfil, nunca no checkout.

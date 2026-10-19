@@ -84,6 +84,10 @@ export interface IArtifactReader {
   get(artifactId: string): Artifact | null
   list(filter?: ListArtifactsFilter): ArtifactPage
 }
+export interface IArtifactStructureReader {
+  inspectStructure(query: import('./artifact-structure').StructureQuery): import('./artifact-structure').StructurePage
+  readSection(query: import('./artifact-structure').SectionQuery): import('./artifact-structure').SectionPage
+}
 export interface IContinuumService extends IArtifactReader {
   publish(rawMarkdown: string): ArtifactReceipt
   update(artifactId: string, expectedRevision: number, rawMarkdown: string): ArtifactReceipt

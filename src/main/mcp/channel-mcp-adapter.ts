@@ -35,7 +35,7 @@ import {
   executePublishArtifact,
   executeUpdateArtifact
 } from '../continuum/continuum-mcp'
-import { GET_VISUAL_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, executeGetVisualArtifact, executePublishVisualArtifact } from '../continuum/continuum-mcp'
+import { GET_VISUAL_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, executeGetVisualArtifact, executePublishVisualArtifact, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL, executeArtifactNavigation } from '../continuum/continuum-mcp'
 import type { IVisualContinuumService } from '../continuum/continuum-types'
 import type { IArtifactReader, IContinuumService } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
@@ -182,6 +182,7 @@ export class ChannelMcpAdapter {
       )
     }
     if (this.continuum) tools.push(PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL)
+    if (this.continuum && 'inspectStructure' in this.continuum && 'readSection' in this.continuum) tools.push(INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL)
     if (this.visualContinuum) tools.push(PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL)
     if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
@@ -247,7 +248,7 @@ export class ChannelMcpAdapter {
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name) || GITHUB_PR_TOOLS.some(tool => tool.name === name) || name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
-    if ([LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL].some(tool => tool.name === name)) return 'Continuum'
+    if ([LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
     if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name) return 'Runtime Identity/Restart'
     if (name === SYSTEM_HEALTH_MCP_TOOL.name) return 'System Health'
@@ -303,6 +304,10 @@ export class ChannelMcpAdapter {
         : { content: [{ type: 'text', text: 'RUNTIME_RESTART_UNAVAILABLE' }], isError: true }
     }
 
+    if (name === 'inspect_artifact_structure' || name === 'read_artifact_section') {
+      if (!this.continuum || !('inspectStructure' in this.continuum) || !('readSection' in this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
+      return executeArtifactNavigation(this.continuum as IContinuumService & import('../continuum/continuum-types').IArtifactStructureReader, name, args)
+    }
     if (name === 'list_artifacts') {
       if (!this.artifactReader) {
         return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: No artifact reader configured for active project' }], isError: true }

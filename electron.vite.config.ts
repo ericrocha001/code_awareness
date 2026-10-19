@@ -11,7 +11,7 @@ export default defineConfig({
     define: {
       __CODE_AWARENESS_RELAY_ENDPOINT__: JSON.stringify(process.env.CODE_AWARENESS_RELAY_ENDPOINT?.trim() ?? '')
     },
-    plugins: [externalizeDepsPlugin()],
+    plugins: [externalizeDepsPlugin({ exclude: ['mdast-util-from-markdown', 'micromark-extension-gfm', 'mdast-util-gfm', 'mdast-util-to-string'] })],
     resolve: {
       alias: {
         '@shared': resolve('src/shared'),

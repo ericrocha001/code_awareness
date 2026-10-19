@@ -5,13 +5,16 @@ import type { ContinuumSuggestionQuery } from '../../shared/types/continuum-sugg
 import type { ContinuumGraphQuery } from '../../shared/types/continuum-graph-types'
 import Database from 'better-sqlite3'
 import type { ContinuumFacet, ContinuumScalar } from '../../shared/types/continuum-ui-types'
-import { createHash } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
+import { ArtifactNavigation } from './artifact-navigation'
+import type { StructureQuery, SectionQuery } from './artifact-structure'
 import { inspectWebP, mediaHash } from './visual-media'
 import type { VisualMedia, VisualArtifact } from './continuum-types'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Artifact, ArtifactDiscoveryRecord, ArtifactPage, CreateArtifactInput, UpdateArtifactInput, ListArtifactsFilter, MetadataValue } from './continuum-types'
 import { canonicalJson, normalizeMetadataValue, relationsOf, validateMetadata, validateMarkdown } from './artifact-metadata'
+import { extractOutline, STRUCTURE_VERSION, type OutlineSection } from './artifact-structure'
 
 export class ArtifactIdentityConflictError extends Error {
   constructor(readonly artifactId: string) { super(`IDENTITY_CONFLICT: Artifact "${artifactId}" already exists`); this.name = 'ArtifactIdentityConflictError' }
@@ -38,6 +41,12 @@ interface DiscoveryRow {
 }
 
 export class ArtifactStore {
+  inspectStructure(query: StructureQuery) { return new ArtifactNavigation(this).inspect(query) }
+  readSection(query: SectionQuery) { return new ArtifactNavigation(this).read(query) }
+  structureKey(): string {
+    this.db.prepare('INSERT OR IGNORE INTO artifact_structure_key VALUES (1, ?)').run(randomBytes(32).toString('hex'))
+    return (this.db.prepare('SELECT secret FROM artifact_structure_key WHERE id = 1').get() as { secret: string }).secret
+  }
   private readonly db: Database.Database
   private readonly graphIndex: ArtifactGraph
   suggestions(query: ContinuumSuggestionQuery) { return new ArtifactSuggestions(this.db, this.repositoryId).query(query) }
@@ -85,6 +94,11 @@ export class ArtifactStore {
 
   private ensureSchema(): void {
     this.db.exec(`
+      CREATE TABLE IF NOT EXISTS artifact_structure_key (id INTEGER PRIMARY KEY CHECK(id = 1), secret TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS artifact_structure (
+        artifact_id TEXT PRIMARY KEY REFERENCES artifacts(artifact_id), content_hash TEXT NOT NULL,
+        version INTEGER NOT NULL, outline_json TEXT, integrity TEXT, failed INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS artifacts (
         artifact_id TEXT PRIMARY KEY, revision INTEGER NOT NULL CHECK(revision >= 1),
         metadata_json TEXT NOT NULL, name TEXT NOT NULL, description TEXT, kind TEXT NOT NULL, status TEXT,
@@ -142,6 +156,30 @@ export class ArtifactStore {
     return { artifactId: row.artifact_id, revision: row.revision, metadata: JSON.parse(row.metadata_json),
       createdAt: row.created_at, updatedAt: row.updated_at, rawMarkdown: row.raw_markdown,
       contentHash: row.content_hash, provenance: JSON.parse(row.provenance_json) }
+  }
+
+  outline(artifact: Artifact): OutlineSection[] {
+    return this.db.transaction(() => {
+      const current = this.get(artifact.artifactId)
+      if (!current || current.revision !== artifact.revision) throw new ArtifactRevisionConflictError(artifact.artifactId, current?.revision ?? 0)
+      if (computeContentHash(current.rawMarkdown) !== current.contentHash) throw new ArtifactContentIntegrityError()
+      const cached = this.db.prepare('SELECT * FROM artifact_structure WHERE artifact_id = ?').get(artifact.artifactId) as
+        { content_hash: string; version: number; outline_json: string | null; integrity: string | null; failed: number } | undefined
+      if (cached?.content_hash === artifact.contentHash && cached.version === STRUCTURE_VERSION) {
+        if (cached.failed) throw new Error('STRUCTURE_UNAVAILABLE')
+        if (cached.outline_json && computeContentHash(cached.outline_json) === cached.integrity) {
+          try { return JSON.parse(cached.outline_json) as OutlineSection[] } catch { /* Rebuild a damaged projection. */ }
+        }
+      }
+      let outline: OutlineSection[]
+      try { outline = extractOutline(artifact.rawMarkdown) } catch {
+        this.db.prepare('INSERT OR REPLACE INTO artifact_structure VALUES (?, ?, ?, NULL, NULL, 1)').run(artifact.artifactId, artifact.contentHash, STRUCTURE_VERSION)
+        return null
+      }
+      const json = JSON.stringify(outline)
+      this.db.prepare('INSERT OR REPLACE INTO artifact_structure VALUES (?, ?, ?, ?, ?, 0)').run(artifact.artifactId, artifact.contentHash, STRUCTURE_VERSION, json, computeContentHash(json))
+      return outline
+    }).immediate() ?? (() => { throw new Error('STRUCTURE_UNAVAILABLE') })()
   }
 
   private validate(input: CreateArtifactInput, legacy: boolean, visual = false): CreateArtifactInput {
