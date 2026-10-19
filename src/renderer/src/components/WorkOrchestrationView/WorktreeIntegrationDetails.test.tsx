@@ -2,6 +2,7 @@
 import React from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { WorktreeCommitsDisclosure } from './WorktreeCommitsDisclosure'
 import { WorktreeIntegrationDetails } from './WorktreeIntegrationDetails'
 import type { ObservableWorktree } from '../../../../shared/types/work-orchestration-types'
 import type { WorktreeTimelinePage } from '../../../../shared/types/worktree-integration-evidence-types'
@@ -59,4 +60,13 @@ it('shows unavailable reflog as uncertainty instead of verified zero commits',as
   render(<WorktreeIntegrationDetails tree={tree} context={context}/>);openCommits()
   await screen.findByText(/Histórico de commits realizados nesta worktree indisponível/)
   expect(screen.queryByText(/Nenhum commit identificável/)).toBeNull()
+})
+
+it('preserves explicit branch-manager commit navigation with the full project context', async () => {
+  window.codeAwareness = { getWorkOrchestration: vi.fn().mockResolvedValue({ success: true, context, data: { timeline: page } }) } as any
+  const onCommit = vi.fn()
+  render(<WorktreeCommitsDisclosure tree={tree} context={context} active onCommit={onCommit} />)
+  openCommits()
+  fireEvent.click(await screen.findByRole('button', { name: /Commit histórico/ }))
+  expect(onCommit).toHaveBeenCalledWith({ ...context, commitSha: sha, requestId: expect.any(String) })
 })

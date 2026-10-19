@@ -124,7 +124,9 @@ describe('request-scoped worktree read safety', () => {
     expect(read.content).toBe(readFileSync(join(f.external, 'file.txt'), 'utf8'))
     expect(await f.call('read_worktree_file', { ...request, expectedRevision: read.revision })).toEqual(read)
     expect(await f.call('read_worktree_file', { ...request, expectedRevision: before.worktreeRevision })).toMatchObject({ code: 'GIT_STATE_CHANGED' })
-    expect(await f.call('inspect_worktree', { worktreeId: f.id })).toMatchObject({ ...before, ownership: 'NOT_GRANTED', mutationAllowed: false })
+    const { remoteEvidence, ...localBefore } = before
+    expect(remoteEvidence).toEqual({ status: 'NOT_CHECKED', source: 'LOCAL_TRACKING' })
+    expect(await f.call('inspect_worktree', { worktreeId: f.id })).toMatchObject({ ...localBefore, ownership: 'NOT_GRANTED', mutationAllowed: false })
     expect(await selected.service.getState()).toEqual(before)
   }, 60000)
 

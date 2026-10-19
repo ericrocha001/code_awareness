@@ -136,7 +136,7 @@ describe('AcademyPluginRepositoryProjection', () => {
     const profile = makeProfile(repo, { withLogo: true })
     const pkg = {
       skillMd: '---\nname: my-skill\ndescription: Test skill\n---\n# My Skill\n',
-      artifacts: { 'references/guide.md': '# Guide\n' }
+      artifacts: { 'references/guide.md': '# Guide\n', 'scripts/open-pr-safe.cjs': 'throw new Error("never execute")\n', 'scripts/check.sh': 'exit 1\n' }
     }
     const materializer = new AcademyGitMaterializer()
     const snapshot: AcademyOpenAiSnapshotEntry[] = [
@@ -161,7 +161,7 @@ describe('AcademyPluginRepositoryProjection', () => {
     const projection = new AcademyPluginRepositoryProjection()
     await projection.project(repo, profile, snapshot, revision)
 
-    // Validate must pass without throwing
+    for (const [path, content] of Object.entries(pkg.artifacts)) expect(readFileSync(join(repo, 'skills/my-skill', path)).equals(Buffer.from(content))).toBe(true)
     await expect(projection.validate(repo, profile, snapshot)).resolves.toBeUndefined()
   })
 

@@ -53,7 +53,7 @@ async function fixture() {
   expect(bound.syncState, bound.lastError ?? '').toBe('SYNCED')
   const update = (text: string) => store.update({ skillId: skill.id, expectedVersion: store.get(skill.id).currentVersion, package: pkg(text), scope: 'GLOBAL', origin: 'UI' })
   const externalCommit = async (path: string, content: string) => {
-    writeFile(external, path, content); await gitExec(external, ['add', '.']); await gitExec(external, ['commit', '-m', path]); await gitExec(external, ['push', 'origin', 'main'])
+    writeFile(external, path, content); await gitExec(external, ['add', '.']); await gitExec(external, ['commit', '-m', path]); await gitExec(external, ['push', 'origin', 'main'], { timeoutMs: 15000 })
     return git.resolveCommit(external, 'HEAD')
   }
   const restart = () => {
@@ -116,19 +116,45 @@ describe('isolated Academy GitHub reconciliation', () => {
     const png = Buffer.alloc(24); Buffer.from('89504e470d0a1a0a', 'hex').copy(png); png.writeUInt32BE(512, 16); png.writeUInt32BE(512, 20); writeFileSync(logo, png)
     f.store.createOpenAiPluginProfile({ name: 'academy-skills', displayName: 'Academy Skills', description: 'Procedural skills', author: { name: 'Academy' }, openAiInterface: { displayName: 'Academy Skills', shortDescription: 'Skills', longDescription: 'Curated procedural skills', developerName: 'Academy', category: 'Productivity', capabilities: ['Interactive'], defaultPrompt: ['Help me code'] }, logoPath: logo, publishedVersion: '0.1.3', deletionSemantics: 'UNKNOWN', deletionSemanticsEvidence: null })
     f.store.saveMarketplaceTakeoverState({ takeoverStatus: 'TAKEOVER_UNSUPPORTED', observedPluginId: null, evidence: 'Distinct source' })
-    const service = new AcademyGitSyncService(f.store, new AcademyGitMaterializer(), f.git, f.transport, f.port, undefined, new AcademyPluginRepositoryProjection())
+    const artifacts = { 'scripts/open-pr-safe.cjs': 'throw new Error("never execute")\n', 'scripts/check.py': 'raise Exception("never execute")\n', 'references/guide.md': 'guide\n' }
+    f.store.update({ skillId: f.skill.id, expectedVersion: f.store.get(f.skill.id).currentVersion, package: { ...pkg(), artifacts }, scope: 'GLOBAL', origin: 'UI' })
+    const canonical = f.store.get(f.skill.id)
+    const humanHead = await f.git.resolveCommit(f.human, 'HEAD')
+    const humanIndex = await f.git.getIndexRevision(f.human)
+    let service = new AcademyGitSyncService(f.store, new AcademyGitMaterializer(), f.git, f.transport, f.port, undefined, new AcademyPluginRepositoryProjection())
     const result = await service.syncNow()
     expect(result.syncState, result.lastError ?? '').toBe('SYNCED')
     const root = result.repository!.checkoutPath
     for (const path of ['plugin.json', 'assets/logo.png', '.agents/plugins/marketplace.json']) expect(await f.git.readCommitFile(root, result.publication!.remoteHead!, path, 10000)).not.toBeNull()
     expect(await f.git.readManagedTree(root, result.publication!.remoteHead!, ['skills', 'plugin.json', 'assets/logo.png', '.agents/plugins/marketplace.json'])).toBe(result.publication!.desiredTree)
+    const remoteHead = await f.git.readRemoteHead(root, 'origin', 'refs/heads/main')
+    expect(remoteHead).toBe(result.publication!.remoteHead)
+    for (const [path, content] of Object.entries(artifacts)) {
+      expect((await f.git.readCommitFile(root, remoteHead!, 'skills/alpha/' + path, 10000))?.equals(Buffer.from(content))).toBe(true)
+      expect(readFileSync(join(root, 'skills/alpha', path)).equals(Buffer.from(content))).toBe(true)
+    }
+    expect(f.store.get(f.skill.id)).toEqual(canonical)
+    expect(await f.git.resolveCommit(f.human, 'HEAD')).toBe(humanHead)
+    expect(await f.git.getIndexRevision(f.human)).toBe(humanIndex)
+    expect((await service.syncNow()).publication!.remoteHead).toBe(remoteHead)
+    f.restart()
+    const restarted = new AcademyGitSyncService(f.store, new AcademyGitMaterializer(), f.git, f.transport, f.port, undefined, new AcademyPluginRepositoryProjection())
+    expect((await restarted.syncNow()).publication!.remoteHead).toBe(remoteHead)
+    service = restarted
+    f.store.update({ skillId: f.skill.id, expectedVersion: f.store.get(f.skill.id).currentVersion, package: { ...pkg(), artifacts: { 'scripts/open-pr-safe.cjs': 'sk-proj-abcdefghijklmnopqrstuvwxyz' } }, scope: 'GLOBAL', origin: 'UI' })
+    const push = vi.spyOn(f.transport, 'push')
+    const secretResult = await restarted.syncNow()
+    expect(secretResult.syncState).toBe('ERROR')
+    expect(secretResult.lastError).toContain('KNOWN_SECRET')
+    expect(push).not.toHaveBeenCalled()
+    expect(await f.git.readRemoteHead(root, 'origin', 'refs/heads/main')).toBe(remoteHead)
     const validation = vi.spyOn(AcademyPluginRepositoryProjection.prototype, 'validate').mockRejectedValue(new Error('invalid plugin'))
     f.update('invalid projection')
     const failed = await service.syncNow()
     expect(failed.syncState).toBe('ERROR')
     expect(failed.lastError).toContain('invalid plugin')
     validation.mockRestore()
-  }, 60000)
+  }, 180000)
 
   it('publishes canonical changes without touching human HEAD, index, consumers or unstaged files', async () => {
     const f = await fixture()
@@ -153,7 +179,7 @@ describe('isolated Academy GitHub reconciliation', () => {
     const baseline = await f.git.resolveCommit(f.external, 'HEAD')
     const added = await f.externalCommit('skills/temporary/SKILL.md', 'temporary')
     rmSync(join(f.external, 'skills/temporary'), { recursive: true })
-    await gitExec(f.external, ['add', '.']); await gitExec(f.external, ['commit', '-m', 'remove temporary']); await gitExec(f.external, ['push'])
+    await gitExec(f.external, ['add', '.']); await gitExec(f.external, ['commit', '-m', 'remove temporary']); await gitExec(f.external, ['push'], { timeoutMs: 15000 })
     f.update('new canonical')
     const docs = await f.externalCommit('README.md', 'external documentation')
     const result = await f.sync.syncNow()

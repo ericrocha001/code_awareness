@@ -8,10 +8,10 @@ const fail = code => { throw Object.assign(new Error(code), { code }) }
 
 async function main(args = process.argv.slice(2), channel = { directory: 'continuum-local', protocol: 'continuum-local/v1' }) {
   const operation = args.shift()
-  if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual', 'suggestions'].includes(operation)) fail('INVALID_ARGUMENT')
+  if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual', 'suggestions', 'bind_execution'].includes(operation)) fail('INVALID_ARGUMENT')
   const options = {}
   for (let i = 0; i < args.length; i += 2) {
-    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
+    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output', '--execution'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
     options[args[i]] = args[i + 1]
   }
   const descriptor = readDescriptor(options['--profile'], channel)
@@ -28,6 +28,12 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
   const worktree = status.worktrees.find(w => normalize(fs.realpathSync(w.path)) === normalize(root))
   if (!worktree) fail('WORKTREE_UNLINKED')
   const request = { operation, repositoryId: options['--repository'], worktreeId: worktree.worktreeId }
+  if (operation === 'bind_execution') {
+    if (!options['--execution'] || !options['--id'] || !worktree.generation) fail('INVALID_ARGUMENT')
+    request.executionId = options['--execution']
+    request.sourceArtifactId = options['--id']
+    request.worktreeGeneration = worktree.generation
+  }
   if (operation === 'list') {
     try { request.filter = options['--filter'] ? JSON.parse(options['--filter']) : {} } catch { fail('INVALID_ARGUMENT') }
   }

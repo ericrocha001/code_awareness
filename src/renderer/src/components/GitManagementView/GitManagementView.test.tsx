@@ -174,3 +174,14 @@ it('shows every active trajectory without noise controls and drops older rows on
   await waitFor(() => expect(document.querySelectorAll('.gm-atlas-lane-label')).toHaveLength(20))
   expect(document.querySelector('[data-track="refs/heads/row-20"]')).toBeNull()
 })
+
+it('consumes current-context commit navigation from the branch manager without reloading history', async () => {
+  const api = setup(); const consumed = vi.fn()
+  const view = render(<GitManagementView state={state} commitIntent={{ projectId: 'other', revision: 1, commitSha: parent, requestId: 'stale' }} onIntentConsumed={consumed} />)
+  await screen.findByRole('button', { name: /Real change/ })
+  expect(consumed).not.toHaveBeenCalled()
+  view.rerender(<GitManagementView state={state} commitIntent={{ projectId: 'p', revision: 1, commitSha: parent, requestId: 'current' }} onIntentConsumed={consumed} />)
+  await waitFor(() => expect(api.getGitManagementCommit).toHaveBeenCalledWith({ context: { projectId: 'p', revision: 1 }, sha: parent }))
+  expect(consumed).toHaveBeenCalledWith('current')
+  expect(api.getGitAtlas).toHaveBeenCalledTimes(1)
+})

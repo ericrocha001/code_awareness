@@ -25,6 +25,7 @@ import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, Check
 declare global {
   interface Window {
     codeAwareness: {
+      getBranchOrchestration: (request: import('../../shared/types/branch-manager-types').BranchManagerRequest) => Promise<import('../../shared/types/branch-manager-types').BranchManagerResult>
       getWorkOrchestration: (request: OrchestrationRequest) => Promise<OrchestrationResult<OrchestrationData>>
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>
@@ -75,6 +76,7 @@ declare global {
       confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string) => Promise<AcademyOpenAiRelease>
       revealAcademyOpenAiPackage: (releaseId: string) => Promise<boolean>
       getChannelState: () => Promise<ChannelState>
+      localMcpClients: import('../../shared/types/local-mcp-client-types').LocalMcpClientApi
       onChannelChanged: (callback: (state: ChannelState) => void) => () => void
       getSystemHealthState: () => Promise<SystemHealthState>
       getSystemHealthDiagnosticReport: () => Promise<string>

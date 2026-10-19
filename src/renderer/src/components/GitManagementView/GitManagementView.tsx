@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GitBranch, GitMerge, RefreshCw, Settings, Hexagon, X, Tag } from 'lucide-react'
+import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 import type { ActiveProjectState } from '../../../../shared/types/active-project-types'
 import type { GitOverview } from '../../../../shared/types/git-management-types'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
@@ -8,7 +9,7 @@ import { GitActions } from './GitActions'
 import { GitAtlasCanvas } from './GitAtlasCanvas'
 import './GitManagementView.css'
 
-export function GitManagementView({ state }: { state: ActiveProjectState }) {
+export function GitManagementView({ state, commitIntent, onIntentConsumed }: { state: ActiveProjectState; commitIntent?: CommitNavigationIntent | null; onIntentConsumed?: (requestId: string) => void }) {
   const [history, setHistory] = useState<GitAtlasPage | null>(null)
   const [selection, setSelection] = useState<GitSelection>(null)
   const [overview, setOverview] = useState<GitOverview | null>(null)
@@ -110,6 +111,11 @@ export function GitManagementView({ state }: { state: ActiveProjectState }) {
     setSelection({ kind: 'COMMIT', sha }); setDrawer(true)
     requestAnimationFrame(() => inspectorFocus.current?.focus())
   }
+  useEffect(() => {
+    if (!commitIntent || commitIntent.projectId !== context.projectId || commitIntent.revision !== context.revision) return
+    select(commitIntent.commitSha)
+    onIntentConsumed?.(commitIntent.requestId)
+  }, [commitIntent?.requestId, context])
   const refresh = async () => { await Promise.all([load(undefined, true), readOverview()]) }
   const refs = history?.refs.filter(ref => ref.kind !== 'HEAD') ?? []
   const selected = selection?.kind === 'COMMIT' ? selection.sha : selection?.ref.sha

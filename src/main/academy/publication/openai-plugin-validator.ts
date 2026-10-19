@@ -15,7 +15,7 @@ export function validateOpenAiPluginPackage(entries: ZipEntry[], profile: Academ
     const path = entry.path.replaceAll('\\', '/')
     if (path.startsWith('/') || path.split('/').includes('..') || paths.has(path.toLowerCase())) errors.push(`INVALID_PATH:${entry.path}`)
     paths.set(path.toLowerCase(), entry.data)
-    const text = isTextPath(path) ? entry.data.toString('utf8') : ''
+    const text = path === `${profile.name}/assets/logo.png` ? '' : entry.data.toString('utf8')
     if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}|\bAKIA[0-9A-Z]{16}\b/.test(text)) errors.push(`KNOWN_SECRET:${path}`)
   }
   const roots = new Set(entries.map((entry) => entry.path.split('/')[0]).filter(Boolean))
@@ -59,9 +59,15 @@ export function validateOpenAiPluginPackage(entries: ZipEntry[], profile: Academ
   for (const name of expectedNames) if (!discovered.has(name)) errors.push(`SNAPSHOT_SKILL_MISSING:${name}`)
   for (const name of discovered) if (!expectedNames.has(name)) errors.push(`EXTERNAL_SKILL:${name}`)
   for (const entry of entries) {
-    const allowed = entry.path === `${profile.name}/plugin.json` || entry.path === `${profile.name}/assets/logo.png` || entry.path.startsWith(`${profile.name}/skills/`)
+    const relativePath = entry.path.slice(profile.name.length + 1)
+    const segments = relativePath.split('/')
+    const skillName = segments[1]
+    const skillResource = segments[0] === 'skills' && NAME.test(skillName ?? '') && expectedNames.has(skillName) && discovered.has(skillName) && segments.length >= 3
+    const allowed = entry.path === `${profile.name}/plugin.json` || entry.path === `${profile.name}/assets/logo.png` || skillResource
     if (!allowed) errors.push(`UNEXPECTED_FILE:${entry.path}`)
-    if (/\/(?:mcp\.json|\.app\.json|\.codex-plugin\/|node_modules\/|scripts?\/)/i.test(`/${entry.path}`)) errors.push(`FORBIDDEN_COMPONENT:${entry.path}`)
+    const forbiddenDirectory = segments.slice(0, -1).some(segment => /^(?:node_modules|\.codex-plugin)$/i.test(segment))
+    const forbiddenComponent = !skillResource && /^(?:mcp\.json|\.app\.json|scripts?)(?:\/|$)/i.test(relativePath)
+    if (forbiddenDirectory || forbiddenComponent) errors.push(`FORBIDDEN_COMPONENT:${entry.path}`)
   }
   const logo = paths.get(`${profile.name}/assets/logo.png`.toLowerCase())
   if (profile.logoPath && !logo) errors.push('CONFIGURED_LOGO_MISSING')
@@ -92,5 +98,4 @@ function validatePngLogo(value: Buffer, errors: string[]): void {
   if (width !== height || width < 48 || width > 4096) errors.push(`LOGO_INVALID_DIMENSIONS:${width}x${height}`)
 }
 
-function isTextPath(path: string): boolean { return /(?:\.md|\.json|\.ya?ml|\.txt)$/i.test(path) }
 function escapeRegExp(value: string): string { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }

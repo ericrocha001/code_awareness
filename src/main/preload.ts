@@ -9,6 +9,7 @@ import type { ActiveProjectState } from '../shared/types/active-project-types'
 import type { GitAtlasRequest, GitAtlasPage, GitAtlasCompareRequest, GitAtlasComparison } from '../shared/types/git-atlas-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../shared/types/work-orchestration-types'
 import type { OrchestrationAttentionChange } from '../shared/types/work-orchestration-attention-types'
+import type { BranchManagerRequest, BranchManagerResult } from '../shared/types/branch-manager-types'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../shared/types/git-commit-correlation-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../shared/types/git-management-types'
 import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
@@ -17,12 +18,26 @@ import type { ContinuumSuggestionRequest, ContinuumSuggestions } from '../shared
 import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '../shared/types/continuum-ui-types'
 import type { ConnectionResult, ConnectionState } from '../shared/types/connection-types'
 import type { ChannelState } from '../shared/types/channel-state-types'
+import type { LocalMcpClientApi } from '../shared/types/local-mcp-client-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
 import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem } from '../shared/types/academy-types'
 import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
+  localMcpClients: {
+    snapshot: () => ipcRenderer.invoke('local-mcp:snapshot'),
+    onChanged: callback => {
+      const listener = (_event: Electron.IpcRendererEvent, snapshot: import('../shared/types/local-mcp-client-types').LocalMcpInstallationSnapshot) => callback(snapshot)
+      ipcRenderer.on('local-mcp:changed', listener)
+      return () => { ipcRenderer.removeListener('local-mcp:changed', listener) }
+    },
+    detect: () => ipcRenderer.invoke('local-mcp:detect'),
+    verify: id => ipcRenderer.invoke('local-mcp:verify', id),
+    preview: (id, action) => ipcRenderer.invoke('local-mcp:preview', id, action),
+    apply: (token, confirmed, replaceConflict) => ipcRenderer.invoke('local-mcp:apply', token, confirmed, replaceConflict)
+  } satisfies LocalMcpClientApi,
+  getBranchOrchestration: (request: BranchManagerRequest): Promise<BranchManagerResult> => ipcRenderer.invoke('work-orchestration:branches', request),
   getWorkOrchestration: (request: OrchestrationRequest): Promise<OrchestrationResult<OrchestrationData>> => ipcRenderer.invoke('work-orchestration:read', request),
   onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, change: OrchestrationAttentionChange) => callback(change)

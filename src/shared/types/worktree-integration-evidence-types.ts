@@ -1,3 +1,4 @@
+export interface CommitNavigationIntent { projectId: string; revision: number; commitSha: string; requestId: string }
 export interface WorktreeTimelineQuery { worktreeId: string; generation: string }
 export type LocalCommitOperation = 'COMMIT' | 'INITIAL_COMMIT' | 'AMEND' | 'CHERRY_PICK' | 'REBASE_PICK'
 export interface WorktreeTimelinePage {

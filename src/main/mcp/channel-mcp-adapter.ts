@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
+import { GITHUB_PR_TOOLS, executeGitHubPrTool } from '../github/github-pr-mcp'
 import { ChannelActivityMonitor } from './channel-activity-monitor'
 import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
@@ -78,7 +79,7 @@ export class ChannelMcpAdapter {
   private readonly diagnosticSourceAccess: DiagnosticSourceAccess | undefined
   private readonly runtimeRestart: RuntimeRestartController | undefined
   private readonly gitOperations: GitOperationsService | undefined
-  private readonly githubContext?: Pick<McpProjectContext, 'githubIntegration' | 'repoRoot'>
+  private readonly githubContext?: Pick<McpProjectContext, 'githubIntegration' | 'repoRoot' | 'githubPrIsActive'>
   private readonly academy: AcademyService | undefined
   private readonly repositoryFileIngress?: RepositoryFileIngress
   private readonly repositoryFileEditing?: RepositoryFileEditing
@@ -128,7 +129,7 @@ export class ChannelMcpAdapter {
       this.diagnosticSourceAccess = context.diagnosticSourceAccess
       this.runtimeRestart = context.runtimeRestart
       this.gitOperations = context.gitOperations
-      this.githubContext = { githubIntegration: context.githubIntegration, repoRoot: context.repoRoot }
+      this.githubContext = { githubIntegration: context.githubIntegration, repoRoot: context.repoRoot, githubPrIsActive: context.githubPrIsActive }
       this.repositoryFileIngress = context.repositoryFileIngress
       this.repositoryFileEditing = context.repositoryFileEditing
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
@@ -187,6 +188,7 @@ export class ChannelMcpAdapter {
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
     if (this.githubContext?.githubIntegration) tools.push(INSPECT_PULL_REQUEST_MERGEABILITY_TOOL)
+    if (this.githubContext?.githubIntegration) tools.push(...GITHUB_PR_TOOLS.filter(tool => tool.name === 'create_pull_request' ? this.githubContext!.githubIntegration!.canCreatePullRequests?.() && !!this.githubContext!.githubPrIsActive : ['merge_pull_request', 'close_pull_request'].includes(tool.name) ? this.githubContext!.githubIntegration!.canIntegratePullRequests?.() && !!this.githubContext!.githubPrIsActive : true))
     if (this.repositoryFileIngress) tools.push(IMPORT_REPOSITORY_FILE_TOOL)
     if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
@@ -221,7 +223,14 @@ export class ChannelMcpAdapter {
       record('error', error instanceof Error ? error.name : 'EXECUTION_FAILED')
       throw error
     }
-    record(result.isError ? 'error' : 'success', result.isError && result.content.some(entry => entry.type === 'text' && /\bREQUEST_TIMEOUT\b/.test(entry.text)) ? 'REQUEST_TIMEOUT' : undefined)
+    let prError: string | undefined
+    if (result.isError && GITHUB_PR_TOOLS.some(tool => tool.name === name)) {
+      const content = result.content.find(entry => entry.type === 'text')
+      if (content?.type === 'text') {
+        try { const code = JSON.parse(content.text).code; if (typeof code === 'string' && /^[A-Z_]{1,64}$/.test(code)) prError = code } catch {}
+      }
+    }
+    record(result.isError ? 'error' : 'success', prError ?? (result.isError && result.content.some(entry => entry.type === 'text' && /\bREQUEST_TIMEOUT\b/.test(entry.text)) ? 'REQUEST_TIMEOUT' : undefined))
     if (name === 'get_system_health' && !result.isError) {
       const first = result.content[0]
       if (first.type !== 'text') throw new Error('INVALID_HEALTH_CONTENT')
@@ -235,7 +244,7 @@ export class ChannelMcpAdapter {
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
     if (name === IMPORT_REPOSITORY_FILE_TOOL.name) return 'Repository File Ingress'
     if (CODE_NAVIGATION_MCP_TOOLS.some(tool => tool.name === name)) return 'Code Navigation'
-    if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name)) return 'Git Operations'
+    if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name) || GITHUB_PR_TOOLS.some(tool => tool.name === name) || name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
     if ([LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL].some(tool => tool.name === name)) return 'Continuum'
@@ -246,6 +255,12 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (GITHUB_PR_TOOLS.some(tool => tool.name === name) && this.githubContext?.githubIntegration) {
+      return executeGitHubPrTool(this.githubContext.githubIntegration, this.githubContext.repoRoot, name, args, {
+        isActive: this.githubContext.githubPrIsActive ?? (() => false),
+        inspectWorktree: this.gitOperations ? id => this.gitOperations!.inspectWorktree(id) : undefined
+      })
+    }
     if (name === 'get_visual_artifact' || name === 'publish_visual_artifact') {
       if (!this.visualContinuum) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
       return name === 'get_visual_artifact' ? executeGetVisualArtifact(this.visualContinuum, args) : executePublishVisualArtifact(this.visualContinuum, args, { timeoutMs: Math.max(1, Math.min(10_000, (invocationContext?.deadlineAtMs ?? Date.now() + 15_000) - Date.now() - 5500)) })
