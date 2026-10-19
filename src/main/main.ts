@@ -480,6 +480,7 @@ app.whenReady().then(async () => {
         })
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
+    gitOperations.bindAtlasPullRequests(inventory => githubIntegration.branchPullRequests(project.path, inventory))
     gitManagement.bind(gitOperations)
     workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))
     branchOrchestration.bind(gitOperations, githubIntegration, project.path)

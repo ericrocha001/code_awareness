@@ -1,6 +1,9 @@
 import { readWorktreeProvenance } from './git-worktree-provenance'
 import { GitAtlasReader } from './git-atlas'
 import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
+import type { GitAtlasCoreEvidence, GitAtlasEvidenceQuery, GitAtlasPrEvidence } from '../../shared/types/git-atlas-evidence-types'
+import type { BranchInventory } from '../../shared/types/branch-orchestration-types'
+import type { BranchPullRequests } from '../../shared/types/branch-pull-request-types'
 import { GitBranchInventory, recordBranchCreation } from './git-branch-inventory'
 import { GitBranchDiscard } from './git-branch-discard'
 import type { BranchDiscardExecute, BranchDiscardRemoteReader } from '../../shared/types/branch-discard-types'
@@ -1124,6 +1127,99 @@ export class GitOperationsService {
   }
 
   clearAtlasCache() { this.atlasReader?.invalidate(true) }
+  private atlasPullRequests?: (inventory: BranchInventory) => Promise<BranchPullRequests>
+
+  bindAtlasPullRequests(reader: (inventory: BranchInventory) => Promise<BranchPullRequests>) {
+    this.atlasPullRequests = reader
+  }
+
+  async getAtlasCoreEvidence(request: GitAtlasEvidenceQuery): Promise<GitAtlasCoreEvidence> {
+    if (request.comparisonRef !== undefined && (typeof request.comparisonRef !== 'string' || !request.comparisonRef.length || request.comparisonRef.length > 256)) fail('INVALID_ARGUMENT')
+    await this.repository()
+    const identity = this.coordinationIdentity
+    if (!identity || !this.worktrees || !identity.isActive()) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    const page = await this.atlas().history(request)
+    const trees = await this.worktrees.discover({ reuseValidatedDirectories: true })
+    const normalize = (path: string) => process.platform === 'win32' ? realpathSync(path).toLowerCase() : realpathSync(path)
+    const selected = trees.worktrees.find(tree => !tree.missing && !tree.prunable && normalize(tree.path) === normalize(this.repoRoot))
+    if (!selected || selected.head !== page.head || selected.branch !== page.branch) fail('GIT_STATE_CHANGED')
+    const ref = page.branch ? 'refs/heads/' + page.branch : null
+    const checkout: GitAtlasCoreEvidence['checkout'] = {
+      head: page.head, ref, detached: selected.detached,
+      upstream: page.refs.find(item => item.ref === ref)?.upstream ?? null,
+      comparisonRef: request.comparisonRef ?? null,
+      comparisonSource: request.comparisonRef ? request.comparisonRef.startsWith('refs/remotes/') ? 'LOCAL_REMOTE_TRACKING' : 'LOCAL_REF_OR_OBJECT' : 'NOT_REQUESTED',
+      relation: 'UNKNOWN', ahead: null, behind: null, comparison: null
+    }
+    if (request.comparisonRef && page.head) {
+      const comparison = await this.atlas().compare({ snapshot: page.snapshot, left: 'HEAD', right: request.comparisonRef === 'HEAD' ? page.head : request.comparisonRef, contextKey: request.contextKey })
+      checkout.comparison = comparison
+      checkout.ahead = comparison.leftOnly; checkout.behind = comparison.rightOnly
+      checkout.relation = comparison.left.sha === comparison.right.sha ? 'EQUAL' : !comparison.mergeBases.length ? 'UNRELATED' :
+        comparison.leftOnly === 0 ? 'BEHIND_ONLY' : comparison.rightOnly === 0 ? 'AHEAD_ONLY' : 'DIVERGED'
+    }
+    await this.atlas().assertSnapshot(page.snapshot, request.contextKey)
+    if (!identity.isActive() || trees.repositoryId !== identity.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
+    const observedAt = new Date().toISOString()
+    return {
+      phase: 'CORE', repositoryId: identity.repositoryId, worktreeId: selected.worktreeId, worktreeGeneration: selected.generation,
+      observedAt, gitSnapshot: page.snapshot, source: 'GIT_LOCAL',
+      coverage: { git: page.nextCursor || page.detachedCoverage !== 'COMPLETE' ? 'PARTIAL' : 'COMPLETE', github: 'NOT_REQUESTED' },
+      gitCoverageScope: 'REQUESTED_WINDOW',
+      git: page, checkout,
+      worktrees: trees.worktrees.map(tree => ({ worktreeId: tree.worktreeId, generation: tree.generation, head: tree.head, branch: tree.branch, detached: tree.detached, available: !tree.missing && !tree.prunable })),
+      events: page.nodes.filter(node => node.parents.length > 1).map(node => ({ kind: 'GIT_MERGE_COMMIT', evidenceSource: 'GIT_LOCAL', confidence: 'CONFIRMED', sha: node.sha, parents: node.parents, firstParent: node.parents[0], committedAt: node.timestamp, observedAt })),
+      historicalIntegrationCoverage: 'UNKNOWN'
+    }
+  }
+
+  async getAtlasPrEvidence(request: GitAtlasEvidenceQuery & { snapshot: string }): Promise<GitAtlasPrEvidence> {
+    const core = await this.getAtlasCoreEvidence({ ...request, refresh: false })
+    if (core.gitSnapshot !== request.snapshot) fail('GIT_STATE_CHANGED')
+    const result: GitAtlasPrEvidence = {
+      phase: 'PR_ENRICHMENT', repositoryId: core.repositoryId, worktreeId: core.worktreeId, worktreeGeneration: core.worktreeGeneration,
+      gitSnapshot: core.gitSnapshot, observedAt: new Date().toISOString(), source: 'GITHUB_REST', providerRevision: null,
+      coverage: 'UNAVAILABLE', reason: 'GITHUB_UNAVAILABLE', branches: null, pullRequests: [], events: []
+    }
+    if (!this.atlasPullRequests) return result
+    const inventory = await this.getBranchInventory()
+    if (inventory.repositoryId !== core.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
+    await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey)
+    let branches: BranchPullRequests
+    try { branches = await this.atlasPullRequests(inventory) }
+    catch {
+      await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey)
+      if (!this.coordinationIdentity?.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
+      return result
+    }
+    if (!this.coordinationIdentity?.isActive() || branches.repositoryId !== core.repositoryId || branches.catalog.repositoryId !== core.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
+    const after = await this.getBranchInventory()
+    if (after.revision !== inventory.revision) fail('GIT_STATE_CHANGED')
+    await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey)
+    if (!this.coordinationIdentity?.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
+    const catalog = branches.catalog
+    if (catalog.items.length > 1000 || branches.relations.length > 5000 || branches.received.length > 5000) fail('ATLAS_REFERENCE_LIMIT')
+    const branchRevisions = new Map(inventory.branches.map(branch => [branch.key, branch]))
+    for (const relation of [...branches.relations, ...branches.received]) {
+      const branch = branchRevisions.get(relation.branchKey)
+      if (!branch || relation.repositoryId !== core.repositoryId || relation.branchRevision !== branch.revision || relation.catalogRevision !== catalog.revision ||
+        'branchGeneration' in relation && relation.branchGeneration !== branch.generation) fail('GIT_STATE_CHANGED')
+    }
+    result.branches = branches; result.coverage = catalog.coverage; result.reason = catalog.reason
+    result.providerRevision = catalog.revision; result.observedAt = catalog.observedAt
+    for (const pr of catalog.items) {
+      const providerMatches = catalog.providerRepositoryId !== null && catalog.repository !== null && pr.base.repositoryId === catalog.providerRepositoryId && pr.base.repository.toLowerCase() === catalog.repository.toLowerCase()
+      if (!providerMatches) fail('REPOSITORY_CONTEXT_CHANGED')
+      result.pullRequests.push({ record: pr, lifecycle: pr.merged ? 'MERGED' : pr.state === 'open' ? 'OPEN' : 'CLOSED_UNMERGED', openInterval: 'UNKNOWN', localInclusion: 'UNKNOWN' })
+      result.events.push({ kind: 'PR_CREATED', evidenceSource: 'GITHUB_REST', confidence: 'CONFIRMED', prNumber: pr.number, url: pr.url, at: pr.createdAt, observedAt: catalog.observedAt })
+      if (!pr.merged || !pr.mergedAt) continue
+      const merge = core.git.nodes.find(node => node.sha === pr.mergeCommit && node.parents.length === 2 && node.parents[1] === pr.head.sha)
+      result.events.push({ kind: 'PR_MERGED', evidenceSource: 'GITHUB_REST', confidence: 'CONFIRMED', prNumber: pr.number, url: pr.url, at: pr.mergedAt, mergeCommitSha: pr.mergeCommit, observedAt: catalog.observedAt,
+        integrationMethod: merge ? 'MERGE_COMMIT' : 'MERGED_METHOD_UNKNOWN', methodEvidenceSource: merge ? 'GIT_AND_GITHUB' : 'UNKNOWN' })
+    }
+    return result
+  }
+
   private atlasReader?: GitAtlasReader
   private atlas(): GitAtlasReader {
     return this.atlasReader ??= new GitAtlasReader(this.repoRoot, this.git, fail)

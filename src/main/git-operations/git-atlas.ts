@@ -70,6 +70,10 @@ export class GitAtlasReader {
     return { snapshot, refs, tags, detachedHeads, detachedCoverage, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
   }
 
+  async assertSnapshot(snapshot: string, contextKey?: string) {
+    if ((await this.observe(contextKey)).snapshot !== snapshot) this.fail('GIT_STATE_CHANGED')
+  }
+
   async history(request: GitAtlasQuery): Promise<GitAtlasPage> {
     if (request.refresh) this.invalidate()
     const anchor = Math.floor(Date.now() / 60000) * 60000
