@@ -10,6 +10,7 @@ import { open } from 'node:fs/promises'
 import { isAbsolute } from 'node:path'
 import { VISUAL_MAX_BYTES } from './visual-media'
 import { executeGetVisualArtifact } from './continuum-mcp'
+import { navigationQuery } from './artifact-navigation'
 
 export class ContinuumLocalAdapter implements LocalChannelAdapter {
   readonly domain = 'continuum'
@@ -21,6 +22,16 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
       return { value, repositoryId: value.repositoryId, worktreeId: value.worktreeId }
     }
     this.operations = {
+      inspect_artifact_structure: operation(input => {
+        const request = selection(input, ['artifactId', 'sectionId', 'includeBlocks', 'limit', 'cursor'])
+        const { repositoryId: _repository, worktreeId: _worktree, ...query } = request.value
+        return { ...request, query: navigationQuery(query, false) }
+      }, async (request, context) => (await this.service(request, context)).inspectStructure(request.query)),
+      read_artifact_section: operation(input => {
+        const request = selection(input, ['artifactId', 'sectionId', 'expectedRevision', 'includeDescendants', 'blockId', 'cursor'])
+        const { repositoryId: _repository, worktreeId: _worktree, ...query } = request.value
+        return { ...request, query: navigationQuery(query, true) }
+      }, async (request, context) => (await this.service(request, context)).readSection(request.query)),
       bind_execution: operation(input => {
         const request = selection(input, ['executionId', 'sourceArtifactId', 'worktreeGeneration'])
         return { ...request, executionId: text(request.value.executionId), sourceArtifactId: text(request.value.sourceArtifactId), generation: text(request.value.worktreeGeneration) }

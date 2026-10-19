@@ -52,6 +52,19 @@ async function fixture(acceptCredential = true, answerHeartbeat = true, requestT
 }
 
 describe('outbound RelayTransport', () => {
+  it('preserves both MCP content blocks and a structured literal content field through the relay', async () => {
+    const f = await fixture()
+    try {
+      await f.transport.start(f.localEndpoint, {}, new AbortController().signal)
+      const data = { content: 'literal 🚀\r\n', revision: 2 }
+      const body = JSON.stringify({ id: 1, order: 1, result: { content: [{ type: 'text', text: JSON.stringify(data) }], structuredContent: data } })
+      f.send({ protocol: RELAY_PROTOCOL, type: 'invoke', connectionId: f.connectionId, requestId: newRequestId(), body })
+      await vi.waitFor(() => expect(f.messages.some(m => m.type === 'result')).toBe(true))
+      const result = f.messages.find(m => m.type === 'result')!
+      expect(result.type === 'result' && result.response.body).toBe(body)
+    } finally { await f.close() }
+  })
+
   it('recovers from a real socket loss without replaying a completed MCP call', async () => {
     const f = await fixture()
     const mcp = { getState: () => ({ status: 'RUNNING', available: true, projectId: 'A', endpoint: f.localEndpoint }), onChanged: () => () => {} }

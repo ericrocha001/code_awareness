@@ -12,6 +12,16 @@ import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
+  inspectStructure(query: import('./artifact-structure').StructureQuery) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const result = this.store.inspectStructure(query)
+    this.assertActive(); return result
+  }
+  readSection(query: import('./artifact-structure').SectionQuery) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const result = this.store.readSection(query)
+    this.assertActive(); return result
+  }
   private readonly listeners = new Set<() => void>()
   private thumbnailReads = 0
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }

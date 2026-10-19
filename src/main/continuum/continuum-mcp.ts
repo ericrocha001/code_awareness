@@ -5,6 +5,8 @@ import type { McpTextContent, McpMultimodalToolResult } from '../mcp/mcp-types'
 import { acquireHostFile, type HostFileDescriptor } from '../local-agent-channel/host-file-acquisition'
 import { VISUAL_MAX_BYTES } from './visual-media'
 import { visualMarkdown } from './artifact-metadata'
+import { navigationQuery } from './artifact-navigation'
+import type { IArtifactStructureReader } from './continuum-types'
 export { visualMarkdown } from './artifact-metadata'
 const string = { type: 'string', minLength: 1 }
 function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []): McpToolDefinition {
@@ -19,6 +21,16 @@ export const LIST_ARTIFACTS_TOOL = tool('list_artifacts', 'Discover only the act
   limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 }, cursor: string
 })
 export const GET_ARTIFACT_TOOL = tool('get_artifact', 'Read one explicitly selected Artifact in the active repository, including current revision, metadata and exact Markdown. Relations are identity hints and never expand related content.', { artifactId: string }, ['artifactId'])
+export const INSPECT_ARTIFACT_STRUCTURE_TOOL = tool('inspect_artifact_structure', 'Inspect a selected Artifact outline without its body. Select a sectionId to inspect direct blocks with includeBlocks. IDs and cursors belong to this repository and revision. Metadata before content: list, inspect, then read_artifact_section.', {
+  artifactId: string, sectionId: string, includeBlocks: { type: 'boolean', default: false }, limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 }, cursor: string
+}, ['artifactId'])
+export const READ_ARTIFACT_SECTION_TOOL = tool('read_artifact_section', 'Read a literal original Markdown slice of one section or discovered block, at expectedRevision. Pages contain at most 12288 UTF-16 units. Preserve options when continuing nextCursor. Stale selectors/cursors require a fresh outline.', {
+  artifactId: string, sectionId: string, expectedRevision: { type: 'integer', minimum: 1 }, includeDescendants: { type: 'boolean', default: true }, blockId: string, cursor: string
+}, ['artifactId', 'sectionId', 'expectedRevision'])
+export function executeArtifactNavigation(service: IArtifactStructureReader, name: string, args: unknown): McpToolResult<McpTextContent> {
+  try { return ok(name === 'inspect_artifact_structure' ? service.inspectStructure(navigationQuery(args, false)) : service.readSection(navigationQuery(args, true))) }
+  catch (error) { return failure(error) }
+}
 export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown with YAML frontmatter name, description and open kind to the active repository Continuum. Returns a compact receipt without content. Another repository requires switching the active context.', { rawMarkdown: string }, ['rawMarkdown'])
 export const UPDATE_ARTIFACT_TOOL = tool('update_artifact', 'Replace an Artifact within the active repository atomically while preserving artifactId and history. Requires expectedRevision from get_artifact; revision conflict requires rereading. Replaces Markdown, metadata and relations together.', { artifactId: string, expectedRevision: { type: 'integer', minimum: 1 }, rawMarkdown: string }, ['artifactId', 'expectedRevision', 'rawMarkdown'])
 

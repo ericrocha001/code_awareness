@@ -11,7 +11,7 @@ import { ContinuumLocalAdapter } from '../../src/main/continuum/local-adapter'
 import { AcademyLocalAdapter } from '../../src/main/academy/local-adapter'
 import { AcademyService } from '../../src/main/academy/academy-service'
 import { createConnection } from 'node:net'
-import { executePublishArtifact, executeGetArtifact } from '../../src/main/continuum/continuum-mcp'
+import { executePublishArtifact, executeGetArtifact, executeArtifactNavigation } from '../../src/main/continuum/continuum-mcp'
 import sharp from 'sharp'
 import { canonicalDesktopProfile } from '../../src/main/desktop-profile'
 
@@ -64,6 +64,30 @@ process.once('message', async (input: { temporary: string; node: string; cli: st
       }
     }
     const selected = ['--repository', record.id]
+    const structured = service.publish(md('Structural fixture', 'DOCUMENT', '', '# A\r\n' + '🚀 literal\r\n'.repeat(1800) + '\r\n## Child\r\nchild\r\n# B\r\n- one\r\n- two'))
+    const inspect = (query = {}) => invoke(['inspect_artifact_structure', ...selected, '--id', structured.artifactId, '--filter', JSON.stringify(query)])
+    const structure = await inspect({ limit: 1 })
+    assert.deepEqual(structure, service.inspectStructure({ artifactId: structured.artifactId, limit: 1 }))
+    assert.equal(JSON.stringify(structure).includes('literal'), false)
+    assert.equal(JSON.stringify(structure).includes('rawMarkdown'), false)
+    const more = await inspect({ limit: 1, cursor: structure.nextCursor })
+    assert.equal(more.sections[0].parentSectionId, structure.sections[0].sectionId)
+    const readQuery = { sectionId: structure.sections[0].sectionId, expectedRevision: 1 }
+    const read = (query: object) => invoke(['read_artifact_section', ...selected, '--id', structured.artifactId, '--filter', JSON.stringify(query)])
+    let slice = await read(readQuery), literal = slice.content
+    assert.deepEqual(slice, JSON.parse((executeArtifactNavigation(service, 'read_artifact_section', { artifactId: structured.artifactId, ...readQuery }).content[0] as { text: string }).text))
+    while (slice.nextCursor) {
+      const next = await read({ ...readQuery, cursor: slice.nextCursor })
+      assert.equal(next.start, slice.end); literal += next.content; slice = next
+    }
+    assert.equal(literal, service.get(structured.artifactId)!.rawMarkdown.slice(structure.sections[0].start, structure.sections[0].end))
+    const all = await inspect(), sectionId = all.sections[2].sectionId
+    const blocks = await inspect({ sectionId, includeBlocks: true })
+    assert.equal((await read({ sectionId, expectedRevision: 1, blockId: blocks.blocks[0].blockId })).content, '- one\r\n- two')
+    await invoke(['inspect_artifact_structure', '--repository', second.id, '--id', structured.artifactId], worktree, 'REPOSITORY_MISMATCH')
+    await invoke(['inspect_artifact_structure', ...selected, '--id', structured.artifactId], other, 'WORKTREE_UNLINKED')
+    service.update(structured.artifactId, 1, md('Structural fixture', 'DOCUMENT', '', '# Changed'))
+    await invoke(['read_artifact_section', ...selected, '--id', structured.artifactId, '--filter', JSON.stringify(readQuery)], worktree, 'REVISION_CONFLICT')
     const suggestionSource = service.publish(md('SQLite migration rollback', 'DOCUMENT'))
     const suggestionTarget = service.publish(md('SQLite migration transaction', 'DOCUMENT'))
     const shortlist = await invoke(['suggestions', ...selected, '--id', suggestionSource.artifactId, '--filter', '{"limit":3}'])
