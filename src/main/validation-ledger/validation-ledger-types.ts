@@ -1,3 +1,5 @@
+import type { ValidationSource } from '../validation-execution/validation-source'
+
 export type ProofKind =
   | 'TARGETED_TEST'
   | 'SUBSYSTEM_TEST'
@@ -28,6 +30,7 @@ export interface ProofMetrics {
 }
 
 export interface CommandProfile {
+  source?: ValidationSource
   checkout?: { repositoryId: string; worktreeId: string; generation: string; head: string; issuer: 'VALIDATION_EXECUTION'; runId: string }
   command: string
   args?: string[]

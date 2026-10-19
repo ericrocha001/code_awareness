@@ -9,6 +9,9 @@ import {
   executeRecordValidationProof
 } from './validation-ledger-mcp'
 import { RuntimeIdentityProvider } from '../runtime-identity/runtime-identity-provider'
+import { execFileSync } from 'node:child_process'
+import { validationSourceFingerprint } from '../validation-execution/validation-source'
+import { ValidationExecution } from '../validation-execution/validation-execution'
 import type { RecordProofInput } from './validation-ledger-types'
 
 const openLedgers: Array<{ ledger: ValidationLedger; dir: string }> = []
@@ -37,14 +40,58 @@ function baseProof(overrides: Partial<RecordProofInput> = {}): RecordProofInput 
 }
 
 describe('Validation Ledger — Permanent Harness', () => {
-  it('preserves checkout provenance and never infers checkout freshness from the primary fingerprint', () => {
-    const identity = new RuntimeIdentityProvider({ rootDir: process.cwd() })
+  it('rechecks the tested checkout independently of runtime source and preserves proof identity after restart', async () => {
+    writeFileSync(join(sourceDir, 'package.json'), JSON.stringify({ scripts: { typecheck: 'node -e "process.exit(0)"' } }))
+    const git = (...args: string[]) => execFileSync('git', args, { cwd: sourceDir, windowsHide: true })
+    git('init')
+    git('add', '.')
+    git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test', 'commit', '-m', 'source A')
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'ledger-runtime-'))
+    git('worktree', 'add', '-b', 'runtime', runtimeRoot)
+    const runtime = new RuntimeIdentityProvider({ rootDir: runtimeRoot })
+    await runtime.sourceOriginReady
+    let execution: ValidationExecution | undefined
+    try {
+      const { ledger, dbPath } = tempLedger(runtime)
+      execution = new ValidationExecution(sourceDir, ledger, runtime, undefined, undefined, 'repository-A')
+      const run = await execution.start({ profileId: 'typecheck', producer: 'TESTER', evidenceFor: ['provenance'] })
+      const done = await execution.wait(run.runId, 15000)
+      expect(done).toMatchObject({ status: 'PASSED', proofId: expect.any(String) })
+      const proof = ledger.getProof(done!.proofId!)!
+      const source = proof.commandProfile!.source!
+      expect(proof).toMatchObject({ runtimeInstanceId: runtime.getInstanceId(), evidenceFor: ['provenance'], sourceFingerprint: validationSourceFingerprint(source),
+        commandProfile: { cwd: sourceDir, source: { cwd: sourceDir, repositoryId: 'repository-A', version: 1 } } })
+      expect((await ledger.getProofWithFreshness(proof.proofId))?.freshness).toBe('CURRENT')
+      writeFileSync(join(runtimeRoot, 'src/main/index.ts'), 'runtime B changed')
+      expect((await ledger.listProofs({ freshness: 'CURRENT', requirementId: 'provenance' }))[0].proofId).toBe(proof.proofId)
+      writeFileSync(join(sourceDir, 'src/main/index.ts'), 'checkout A changed')
+      expect((await ledger.getProofWithFreshness(proof.proofId))?.freshness).toBe('SOURCE_STALE')
+      expect(ledger.recordProof(baseProof({ deduplicationKey: proof.deduplicationKey })).proofId).toBe(proof.proofId)
+      const forged = executeRecordValidationProof(ledger, baseProof({ commandProfile: { command: 'claim', cwd: source.cwd, source } }))
+      expect(forged.isError).toBe(true)
+      ledger.close()
+      const restarted = new RuntimeIdentityProvider({ rootDir: runtimeRoot })
+      await restarted.sourceOriginReady
+      const reopened = new ValidationLedger(dbPath, restarted)
+      openLedgers.push({ ledger: reopened, dir: join(dbPath, '..') })
+      expect((await reopened.getProofWithFreshness(proof.proofId))?.freshness).toBe('RUNTIME_HISTORICAL')
+      expect(reopened.getProof(proof.proofId)?.commandProfile?.source).toEqual(source)
+      const missing = reopened.recordProof(baseProof({ sourceFingerprint: validationSourceFingerprint(source), commandProfile: { command: 'test', cwd: source.cwd, source } }))
+      rmSync(sourceDir, { recursive: true, force: true })
+      expect((await reopened.getProofWithFreshness(missing.proofId))?.freshness).toBe('UNVERIFIABLE')
+    } finally {
+      await execution?.shutdown()
+      rmSync(runtimeRoot, { recursive: true, force: true })
+    }
+  }, 60000)
+  it('preserves checkout provenance and never infers checkout freshness from the primary fingerprint', async () => {
+    const identity = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const { ledger } = tempLedger(identity)
     const sourceFingerprint = identity.evaluateFreshness().currentSnapshot.fingerprint
     const checkout = { repositoryId: 'repo', worktreeId: 'worktree', generation: 'generation', head: 'a'.repeat(40), issuer: 'VALIDATION_EXECUTION' as const, runId: 'run-genuine' }
     const proof = ledger.recordProof(baseProof({ producer: 'SYSTEM', sourceFingerprint, runtimeInstanceId: identity.getInstanceId(), commandProfile: { command: 'npm run test:node', cwd: 'managed-worktree', checkout } }))
     expect(ledger.getProof(proof.proofId)?.commandProfile?.checkout).toEqual(checkout)
-    expect(ledger.getProofWithFreshness(proof.proofId)?.freshness).toBe('UNVERIFIABLE')
+    expect((await ledger.getProofWithFreshness(proof.proofId))?.freshness).toBe('UNVERIFIABLE')
     const forged = executeRecordValidationProof(ledger, baseProof({ commandProfile: { command: 'claim', checkout } }))
     expect(forged.isError).toBe(true)
   })
@@ -133,29 +180,29 @@ describe('Validation Ledger — Permanent Harness', () => {
 
   // ── Freshness ─────────────────────────────────────────────────────────────
 
-  it('6. Mesmo fingerprint → CURRENT', () => {
+  it('6. Fingerprint legado igual ao runtime permanece UNVERIFIABLE', async () => {
     const provider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const fingerprint = provider.getStartupSnapshot().fingerprint
     const { ledger } = tempLedger(provider)
 
     const proof = ledger.recordProof(baseProof({ sourceFingerprint: fingerprint }))
-    const withFreshness = ledger.getProofWithFreshness(proof.proofId)
+    const withFreshness = (await ledger.getProofWithFreshness(proof.proofId))
 
-    expect(withFreshness!.freshness).toBe('CURRENT')
+    expect(withFreshness!.freshness).toBe('UNVERIFIABLE')
   })
 
-  it('7. Source alterado → SOURCE_STALE', () => {
+  it('7. Fingerprint legado divergente permanece UNVERIFIABLE', async () => {
     const provider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const oldFingerprint = 'fp-old-12345'
     const { ledger } = tempLedger(provider)
 
     const proof = ledger.recordProof(baseProof({ sourceFingerprint: oldFingerprint }))
-    const withFreshness = ledger.getProofWithFreshness(proof.proofId)
+    const withFreshness = (await ledger.getProofWithFreshness(proof.proofId))
 
-    expect(withFreshness!.freshness).toBe('SOURCE_STALE')
+    expect(withFreshness!.freshness).toBe('UNVERIFIABLE')
   })
 
-  it('8. Runtime diferente → RUNTIME_HISTORICAL', () => {
+  it('8. Runtime diferente → RUNTIME_HISTORICAL', async () => {
     const oldProvider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const currentProvider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const currentFingerprint = currentProvider.getStartupSnapshot().fingerprint
@@ -165,63 +212,63 @@ describe('Validation Ledger — Permanent Harness', () => {
       sourceFingerprint: currentFingerprint,
       runtimeInstanceId: oldProvider.getInstanceId()
     }))
-    const withFreshness = ledger.getProofWithFreshness(proof.proofId)
+    const withFreshness = (await ledger.getProofWithFreshness(proof.proofId))
 
     expect(withFreshness!.freshness).toBe('RUNTIME_HISTORICAL')
   })
 
-  it('9. Sem fingerprint → UNVERIFIABLE', () => {
+  it('9. Sem fingerprint → UNVERIFIABLE', async () => {
     const provider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const { ledger } = tempLedger(provider)
 
     const proof = ledger.recordProof(baseProof({ sourceFingerprint: null }))
-    const withFreshness = ledger.getProofWithFreshness(proof.proofId)
+    const withFreshness = (await ledger.getProofWithFreshness(proof.proofId))
 
     expect(withFreshness!.freshness).toBe('UNVERIFIABLE')
   })
 
   // ── Filtering ─────────────────────────────────────────────────────────────
 
-  it('10. Filtro por kind', () => {
+  it('10. Filtro por kind', async () => {
     const { ledger } = tempLedger()
     ledger.recordProof(baseProof({ kind: 'TYPECHECK' }))
     ledger.recordProof(baseProof({ kind: 'BUILD' }))
     ledger.recordProof(baseProof({ kind: 'FULL_TEST_SUITE' }))
 
-    const typecheck = ledger.listProofs({ kind: 'TYPECHECK' })
+    const typecheck = (await ledger.listProofs({ kind: 'TYPECHECK' }))
     expect(typecheck).toHaveLength(1)
     expect(typecheck[0].kind).toBe('TYPECHECK')
   })
 
-  it('11. Filtro por status', () => {
+  it('11. Filtro por status', async () => {
     const { ledger } = tempLedger()
     ledger.recordProof(baseProof({ status: 'PASSED' }))
     ledger.recordProof(baseProof({ status: 'FAILED', summary: 'failed run' }))
     ledger.recordProof(baseProof({ status: 'ERROR', summary: 'error run' }))
 
-    const failed = ledger.listProofs({ status: 'FAILED' })
+    const failed = (await ledger.listProofs({ status: 'FAILED' }))
     expect(failed).toHaveLength(1)
     expect(failed[0].status).toBe('FAILED')
   })
 
-  it('12. Filtro por producer', () => {
+  it('12. Filtro por producer', async () => {
     const { ledger } = tempLedger()
     ledger.recordProof(baseProof({ producer: 'IMPLEMENTER' }))
     ledger.recordProof(baseProof({ producer: 'ARCHITECT', summary: 'arch proof' }))
 
-    const arch = ledger.listProofs({ producer: 'ARCHITECT' })
+    const arch = (await ledger.listProofs({ producer: 'ARCHITECT' }))
     expect(arch).toHaveLength(1)
     expect(arch[0].producer).toBe('ARCHITECT')
   })
 
   // ── Requirement association ────────────────────────────────────────────────
 
-  it('13. evidenceFor associa corretamente ao requirementId', () => {
+  it('13. evidenceFor associa corretamente ao requirementId', async () => {
     const { ledger } = tempLedger()
     const p1 = ledger.recordProof(baseProof({ evidenceFor: ['P1', 'P2'] }))
     ledger.recordProof(baseProof({ evidenceFor: ['P3'], summary: 'unrelated' }))
 
-    const forP1 = ledger.listProofs({ requirementId: 'P1' })
+    const forP1 = (await ledger.listProofs({ requirementId: 'P1' }))
     expect(forP1).toHaveLength(1)
     expect(forP1[0].proofId).toBe(p1.proofId)
     expect(forP1[0].evidenceFor).toContain('P1')
@@ -229,7 +276,7 @@ describe('Validation Ledger — Permanent Harness', () => {
 
   // ── Deduplicação ──────────────────────────────────────────────────────────
 
-  it('14. Retry com mesmo deduplicationKey não cria duplicata', () => {
+  it('14. Retry com mesmo deduplicationKey não cria duplicata', async () => {
     const { ledger } = tempLedger()
     const deduplicationKey = 'run-vitest-full-2026-09-21'
 
@@ -239,27 +286,27 @@ describe('Validation Ledger — Permanent Harness', () => {
     expect(second.proofId).toBe(first.proofId)
     expect(second.summary).toBe(first.summary)
 
-    const all = ledger.listProofs()
+    const all = (await ledger.listProofs())
     expect(all.filter(p => p.deduplicationKey === deduplicationKey)).toHaveLength(1)
   })
 
-  it('15. Provas distintas sem deduplicationKey são registradas separadamente', () => {
+  it('15. Provas distintas sem deduplicationKey são registradas separadamente', async () => {
     const { ledger } = tempLedger()
     const p1 = ledger.recordProof(baseProof())
     const p2 = ledger.recordProof(baseProof({ summary: 'second run' }))
 
     expect(p1.proofId).not.toBe(p2.proofId)
-    expect(ledger.listProofs()).toHaveLength(2)
+    expect((await ledger.listProofs())).toHaveLength(2)
   })
 
   // ── Independence ──────────────────────────────────────────────────────────
 
-  it('16. Validation Ledger não altera CodeScope health', () => {
+  it('16. Validation Ledger não altera CodeScope health', async () => {
     const { ledger } = tempLedger()
     ledger.recordProof(baseProof({ status: 'FAILED', summary: 'test failed' }))
     ledger.recordProof(baseProof({ status: 'ERROR', summary: 'error' }))
 
-    expect(ledger.listProofs()).toHaveLength(2)
+    expect((await ledger.listProofs())).toHaveLength(2)
   })
 
   it('17. Teste FAILED no ledger não degrada System Health', async () => {
@@ -293,12 +340,12 @@ describe('Validation Ledger — Permanent Harness', () => {
 
   // ── MCP operations ────────────────────────────────────────────────────────
 
-  it('19. MCP list_validation_proofs retorna count e proofId', () => {
+  it('19. MCP list_validation_proofs retorna count e proofId', async () => {
     const { ledger } = tempLedger()
     ledger.recordProof(baseProof())
     ledger.recordProof(baseProof({ kind: 'TYPECHECK', summary: 'typecheck' }))
 
-    const result = executeListValidationProofs(ledger, {})
+    const result = await executeListValidationProofs(ledger, {})
     expect(result.isError).toBeUndefined()
 
     const payload = JSON.parse(result.content[0].text)
@@ -306,24 +353,24 @@ describe('Validation Ledger — Permanent Harness', () => {
     expect(payload.proofs[0].proofId).toMatch(/^proof-/)
   })
 
-  it('20. MCP get_validation_proof retorna detalhe completo com freshness', () => {
+  it('20. MCP get_validation_proof retorna detalhe completo com freshness', async () => {
     const provider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const fingerprint = provider.getStartupSnapshot().fingerprint
     const { ledger } = tempLedger(provider)
     const proof = ledger.recordProof(baseProof({ sourceFingerprint: fingerprint }))
 
-    const result = executeGetValidationProof(ledger, { proofId: proof.proofId })
+    const result = await executeGetValidationProof(ledger, { proofId: proof.proofId })
     expect(result.isError).toBeUndefined()
 
     const payload = JSON.parse(result.content[0].text)
     expect(payload.proofId).toBe(proof.proofId)
-    expect(payload.freshness).toBe('CURRENT')
+    expect(payload.freshness).toBe('UNVERIFIABLE')
     expect(payload.scope).toEqual(['src/main/validation-ledger'])
   })
 
-  it('21. MCP get_validation_proof retorna erro para proofId desconhecido', () => {
+  it('21. MCP get_validation_proof retorna erro para proofId desconhecido', async () => {
     const { ledger } = tempLedger()
-    const result = executeGetValidationProof(ledger, { proofId: 'proof-does-not-exist' })
+    const result = await executeGetValidationProof(ledger, { proofId: 'proof-does-not-exist' })
     expect(result.isError).toBe(true)
     expect(result.content[0].text).toContain('PROOF_NOT_FOUND')
   })
@@ -364,7 +411,7 @@ describe('Validation Ledger — Permanent Harness', () => {
     expect(result.isError).toBe(true)
   })
 
-  it('24. MCP list_validation_proofs filtra por freshness CURRENT', () => {
+  it('24. MCP list_validation_proofs filtra por freshness CURRENT', async () => {
     const provider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const fingerprint = provider.getStartupSnapshot().fingerprint
     const { ledger } = tempLedger(provider)
@@ -372,26 +419,25 @@ describe('Validation Ledger — Permanent Harness', () => {
     ledger.recordProof(baseProof({ sourceFingerprint: fingerprint }))
     ledger.recordProof(baseProof({ sourceFingerprint: 'fp-old-stale', summary: 'stale proof' }))
 
-    const result = executeListValidationProofs(ledger, { freshness: 'CURRENT' })
+    const result = await executeListValidationProofs(ledger, { freshness: 'CURRENT' })
     const payload = JSON.parse(result.content[0].text)
 
-    expect(payload.count).toBe(1)
-    expect(payload.proofs[0].freshness).toBe('CURRENT')
+    expect(payload.count).toBe(0)
   })
 
-  it('25. Prova com runtimeInstanceId atual → não é RUNTIME_HISTORICAL', () => {
+  it('25. Runtime atual não comprova identidade de checkout legado', async () => {
     const provider = new RuntimeIdentityProvider({ rootDir: sourceDir })
     const fingerprint = provider.getStartupSnapshot().fingerprint
     const instanceId = provider.getInstanceId()
     const { ledger } = tempLedger(provider)
 
     const proof = ledger.recordProof(baseProof({ sourceFingerprint: fingerprint, runtimeInstanceId: instanceId }))
-    const withFreshness = ledger.getProofWithFreshness(proof.proofId)
+    const withFreshness = (await ledger.getProofWithFreshness(proof.proofId))
 
-    expect(withFreshness!.freshness).toBe('CURRENT')
+    expect(withFreshness!.freshness).toBe('UNVERIFIABLE')
   })
 
-  it('26. Fluxo de Aceitação Real Completo (Passos 1 a 11 do Plano)', () => {
+  it('26. Fluxo de Aceitação Real Completo (Passos 1 a 11 do Plano)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'ca-acceptance-test-'))
     const dbPath = join(dir, 'ledger.db')
 
@@ -416,29 +462,25 @@ describe('Validation Ledger — Permanent Harness', () => {
     })
 
     // 3. Arquiteto chama list_validation_proofs
-    const listResult1 = executeListValidationProofs(ledger1, {})
+    const listResult1 = await executeListValidationProofs(ledger1, {})
     const parsed1 = JSON.parse(listResult1.content[0].text)
-
-    // 4. A prova aparece como CURRENT
     expect(parsed1.count).toBe(1)
     expect(parsed1.proofs[0].proofId).toBe(p1.proofId)
-    expect(parsed1.proofs[0].freshness).toBe('CURRENT')
+    expect(parsed1.proofs[0].freshness).toBe('UNVERIFIABLE')
 
     // 5. Arquiteto consulta prova existente e verifica que é suficiente (não reexecuta)
-    const getResult1 = executeGetValidationProof(ledger1, { proofId: p1.proofId })
+    const getResult1 = await executeGetValidationProof(ledger1, { proofId: p1.proofId })
     const proofDetail1 = JSON.parse(getResult1.content[0].text)
-    expect(proofDetail1.freshness).toBe('CURRENT')
+    expect(proofDetail1.freshness).toBe('UNVERIFIABLE')
     expect(proofDetail1.status).toBe('PASSED')
 
     // 6. Source é alterado
     writeFileSync(join(sourceDir, 'src', 'main', 'index.ts'), 'export const a = 999\n')
-
-    // 7. A mesma prova passa a aparecer como SOURCE_STALE
-    const listResult2 = executeListValidationProofs(ledger1, {})
+    const listResult2 = await executeListValidationProofs(ledger1, {})
     const parsed2 = JSON.parse(listResult2.content[0].text)
     expect(parsed2.count).toBe(1)
     expect(parsed2.proofs[0].proofId).toBe(p1.proofId)
-    expect(parsed2.proofs[0].freshness).toBe('SOURCE_STALE')
+    expect(parsed2.proofs[0].freshness).toBe('UNVERIFIABLE')
 
     // 8. Nova execução do Implementador produz nova prova com novo fingerprint
     const currentFp = provider1.evaluateFreshness().currentSnapshot.fingerprint
@@ -455,22 +497,18 @@ describe('Validation Ledger — Permanent Harness', () => {
       summary: 'Targeted test for index.ts after update',
       evidenceFor: ['REQ-01']
     })
-
-    // 9. Nova prova aparece como CURRENT
-    const listResult3 = executeListValidationProofs(ledger1, {})
+    const listResult3 = await executeListValidationProofs(ledger1, {})
     const parsed3 = JSON.parse(listResult3.content[0].text)
     expect(parsed3.count).toBe(2)
     const currentProof = parsed3.proofs.find((p: any) => p.proofId === p2.proofId)
-    expect(currentProof.freshness).toBe('CURRENT')
-
-    // 10. Prova antiga permanece histórica (SOURCE_STALE)
+    expect(currentProof.freshness).toBe('UNVERIFIABLE')
     const historicalProof = parsed3.proofs.find((p: any) => p.proofId === p1.proofId)
-    expect(historicalProof.freshness).toBe('SOURCE_STALE')
+    expect(historicalProof.freshness).toBe('UNVERIFIABLE')
 
     // 11. Restart não apaga o Ledger
     ledger1.close()
     const ledgerAfterRestart = new ValidationLedger(dbPath, provider1)
-    const listAfterRestart = executeListValidationProofs(ledgerAfterRestart, {})
+    const listAfterRestart = await executeListValidationProofs(ledgerAfterRestart, {})
     const parsedRestart = JSON.parse(listAfterRestart.content[0].text)
     expect(parsedRestart.count).toBe(2)
     expect(parsedRestart.proofs.map((p: any) => p.proofId)).toContain(p1.proofId)

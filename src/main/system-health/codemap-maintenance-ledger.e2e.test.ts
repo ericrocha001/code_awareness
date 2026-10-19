@@ -226,7 +226,7 @@ describe('Validation Ledger — CodeMap Maintenance Diagnostic', () => {
 
   // ─── Verify proofs were recorded ───────────────────────────────────────────
 
-  it('verifica que as 4 provas foram registradas no Ledger', () => {
+  it('verifica que as 4 provas foram registradas no Ledger', async () => {
     const proofIds = [
       'codemap-maintenance-explicit-failure-v1',
       'codemap-maintenance-correlation-chain-v1',
@@ -234,7 +234,7 @@ describe('Validation Ledger — CodeMap Maintenance Diagnostic', () => {
       'codemap-diagnostic-architecture-map-regression-v1',
     ]
 
-    const allProofs = ledger.listProofs({ status: 'PASSED' })
+    const allProofs = await ledger.listProofs({ status: 'PASSED' })
 
     for (const dedup of proofIds) {
       const found = allProofs.find(p => p.deduplicationKey === dedup)

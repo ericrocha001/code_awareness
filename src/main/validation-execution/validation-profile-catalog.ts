@@ -20,6 +20,20 @@ function normalize(value: string): string {
   return value.replace(/\\/g, '/')
 }
 
+export class ValidationTargetError extends Error {
+  readonly code = 'TARGET_NOT_IN_ACTIVE_CHECKOUT'
+  readonly recommendedAction = 'VERIFY_ACTIVE_CHECKOUT'
+  readonly worktreeRoute = {
+    discover: 'discover_worktrees',
+    start: 'start_worktree_validation',
+    requires: ['MANAGED_WORKTREE', 'EXPLICIT_AUTHORIZATION', 'INTEGRATE_LEASE', 'CLEAN_CHECKOUT', 'FRESH_SNAPSHOT'],
+    externalWorktree: 'WORKTREE_NOT_MANAGED: external worktrees cannot use this route'
+  }
+  constructor(readonly activeCheckout: string, readonly target: string) {
+    super(`TARGET_NOT_IN_ACTIVE_CHECKOUT: ${target}; active checkout: ${activeCheckout}`)
+  }
+}
+
 function laneFor(target: string): ValidationLane | null {
   if (!/\.test\.(ts|tsx)$/.test(target)) return null
   if (nativeTargets.has(target)) return 'NATIVE'
@@ -49,7 +63,12 @@ export class ValidationProfileCatalog {
 
     const validated = selected.map((target) => {
       if (!target || !/^[A-Za-z0-9_./@+\-]+$/.test(normalize(target)) || isAbsolute(target) || normalize(target).split('/').includes('..')) throw new Error(`INVALID_TARGET: ${target}`)
-      const absolute = realpathSync(resolve(root, target))
+      let absolute: string
+      try { absolute = realpathSync(resolve(root, target)) }
+      catch (error) {
+        if (['ENOENT', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')) throw new ValidationTargetError(root, target)
+        throw error
+      }
       const inside = normalize(relative(root, absolute))
       if (!inside || inside.startsWith('../') || isAbsolute(inside) || !statSync(absolute).isFile()) throw new Error(`INVALID_TARGET: ${target}`)
       const lane = laneFor(inside)
