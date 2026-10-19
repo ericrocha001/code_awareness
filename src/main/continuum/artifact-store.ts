@@ -41,11 +41,15 @@ interface DiscoveryRow {
 }
 
 export class ArtifactStore {
+  private structureSecret?: string
   inspectStructure(query: StructureQuery) { return new ArtifactNavigation(this).inspect(query) }
   readSection(query: SectionQuery) { return new ArtifactNavigation(this).read(query) }
   structureKey(): string {
+    if (this.structureSecret) return this.structureSecret
+    const existing = this.db.prepare('SELECT secret FROM artifact_structure_key WHERE id = 1').get() as { secret: string } | undefined
+    if (existing) return this.structureSecret = existing.secret
     this.db.prepare('INSERT OR IGNORE INTO artifact_structure_key VALUES (1, ?)').run(randomBytes(32).toString('hex'))
-    return (this.db.prepare('SELECT secret FROM artifact_structure_key WHERE id = 1').get() as { secret: string }).secret
+    return this.structureSecret = (this.db.prepare('SELECT secret FROM artifact_structure_key WHERE id = 1').get() as { secret: string }).secret
   }
   private readonly db: Database.Database
   private readonly graphIndex: ArtifactGraph

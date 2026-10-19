@@ -65,3 +65,24 @@ it('preserves BOM, CRLF frontmatter and legacy text without rewriting it', () =>
     expect(store.get(id)).toEqual(a)
   }
 })
+
+it('omits only whitespace preambles and keeps meaningful introductions and headingless content literal', () => {
+  const f = setup()
+  const body = '\r\n \t\r\n' + Array.from({ length: 9 }, (_, i) => `# Section ${i}\r\nbody ${i}\r\n`).join('\r\n')
+  const a = f.service.publish(markdown('Nine headings', '', body))
+  const before = f.service.get(a.artifactId)!
+  const structure = f.service.inspectStructure({ artifactId: a.artifactId })
+  expect(structure.sections).toHaveLength(9)
+  expect(structure.sections!.some(s => s.level === 0)).toBe(false)
+  const first = structure.sections![0]
+  expect(before.rawMarkdown.slice(first.start, first.end)).toBe('# Section 0\r\nbody 0\r\n\r\n')
+  expect(f.service.get(a.artifactId)).toEqual(before)
+  const intro = syntax.extractOutline(markdown('Intro', '', '\nintro 🚀\r\n\r\n# Heading\ntext'))
+  expect(intro[0].title).toBe('Preamble')
+  expect(intro[1].parent).toBeNull()
+  const text = '**Headingless**\r\n\r\nContent 🚀'
+  const plain = f.service.publish(markdown('No headings', '', text))
+  const section = f.service.inspectStructure({ artifactId: plain.artifactId }).sections![0]
+  expect(section.title).toBe('Document content')
+  expect(f.service.readSection({ artifactId: plain.artifactId, sectionId: section.sectionId, expectedRevision: 1 }).content).toBe(text)
+})

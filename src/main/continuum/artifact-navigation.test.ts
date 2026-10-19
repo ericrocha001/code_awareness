@@ -1,5 +1,6 @@
 import { afterEach, expect, it } from 'vitest'
-import { fixture, markdown } from './continuum-test-fixtures'
+import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
+import { literalRange } from './artifact-structure'
 import { executeArtifactNavigation, executeGetArtifact } from './continuum-mcp'
 import { ContinuumService } from './continuum-service'
 import { ArtifactStore } from './artifact-store'
@@ -84,4 +85,47 @@ it('paginates ephemeral blocks and resumes signed cursors after SQLite reopen', 
   const blocks = [...first.blocks!, ...second.blocks!, ...third.blocks!]
   expect(new Set(blocks.map(b => b.blockId)).size).toBe(103)
   expect(service.readSection({ artifactId, sectionId, expectedRevision: 1, blockId: blocks[102].blockId }).content).toBe('paragraph 102')
+})
+
+it('continues exact line locations across CRLF boundaries, mixed newlines and SQLite reopen', () => {
+  const f = setup()
+  const body = '# A\n' + 'x'.repeat(12283) + '\r\n🚀\rbare\n' + 'line\r\n'.repeat(5000)
+  const { artifactId } = f.service.publish(markdown('Lines', '', body))
+  const original = f.service.get(artifactId)!
+  const sectionId = f.service.inspectStructure({ artifactId }).sections![0].sectionId
+  const query = { artifactId, sectionId, expectedRevision: 1 }
+  let page = f.service.readSection(query)
+  expect(original.rawMarkdown[page.end - 1]).toBe('\r')
+  expect(original.rawMarkdown[page.end]).toBe('\n')
+  const pieces = [page.content]
+  f.store.close()
+  const reopened = new ArtifactStore(f.path, 'catalog-A'); cleanup.push(() => reopened.close())
+  while (page.nextCursor) {
+    const next = reopened.readSection({ ...query, cursor: page.nextCursor })
+    expect(next.start).toBe(page.end)
+    expect({ start: next.start, end: next.end, startLine: next.startLine, endLine: next.endLine }).toEqual(literalRange(original.rawMarkdown, next.start, next.end))
+    pieces.push(next.content); page = next
+  }
+  expect(Buffer.concat(pieces.map(text => Buffer.from(text)))).toEqual(Buffer.from(body))
+})
+
+it('never inserts an existing signing key on hot operations or after reopening a Store', () => {
+  const f = setup(), { artifactId } = f.service.publish(markdown())
+  const sectionId = f.service.inspectStructure({ artifactId }).sections![0].sectionId
+  withFixtureDatabase(f.path, db => db.exec(`CREATE TRIGGER reject_key_write BEFORE INSERT ON artifact_structure_key
+    BEGIN SELECT RAISE(ABORT, 'REPEATED_KEY_WRITE'); END`), false)
+  const query = { artifactId, sectionId, expectedRevision: 1 }
+  expect(f.service.readSection(query).content).not.toBe('')
+  f.store.close()
+  const reopened = new ArtifactStore(f.path, 'catalog-A'); cleanup.push(() => reopened.close())
+  expect(reopened.readSection(query).content).not.toBe('')
+})
+
+it('still verifies persisted Markdown integrity on every continuation page', () => {
+  const f = setup(), { artifactId } = f.service.publish(markdown('Integrity', '', '# A\n' + 'x'.repeat(20000)))
+  const sectionId = f.service.inspectStructure({ artifactId }).sections![0].sectionId
+  const query = { artifactId, sectionId, expectedRevision: 1 }
+  const first = f.service.readSection(query)
+  withFixtureDatabase(f.path, db => db.prepare("UPDATE artifacts SET raw_markdown = raw_markdown || 'tampered' WHERE artifact_id = ?").run(artifactId), false)
+  expect(() => f.service.readSection({ ...query, cursor: first.nextCursor })).toThrow(/INTEGRITY_ERROR/)
 })

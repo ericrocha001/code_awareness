@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto'
 import type { ArtifactStore } from './artifact-store'
 import type { Artifact } from './continuum-types'
-import { extractBlocks, literalRange, STRUCTURE_VERSION, type StructureQuery, type SectionQuery, type StructurePage, type SectionPage } from './artifact-structure'
+import { extractBlocks, pageRange, STRUCTURE_VERSION, type StructureQuery, type SectionQuery, type StructurePage, type SectionPage } from './artifact-structure'
 
 export function navigationQuery(input: unknown, read: false): StructureQuery
 export function navigationQuery(input: unknown, read: true): SectionQuery
@@ -25,18 +25,19 @@ export class ArtifactNavigation {
   private sign(value: string) { return createHmac('sha256', this.key).update(value).digest('base64url') }
   private identity(a: Artifact) { return [this.store.repositoryId, a.artifactId, a.revision, a.contentHash, STRUCTURE_VERSION] }
   private selector(a: Artifact, type: string, index: number) { return this.sign(JSON.stringify([...this.identity(a), type, index])) }
-  private cursor(scope: string, offset: number) {
-    const data = Buffer.from(JSON.stringify({ scope, offset })).toString('base64url')
+  private cursor(scope: string, offset: number, line?: number) {
+    const data = Buffer.from(JSON.stringify({ scope, offset, ...(line === undefined ? {} : { line }) })).toString('base64url')
     return data + '.' + this.sign(data)
   }
   private resume(cursor: string | undefined, scope: string, min: number, max: number) {
-    if (!cursor) return min
+    if (!cursor) return { offset: min, line: undefined }
     try {
       const [data, signature, extra] = cursor.split('.')
       if (extra || signature !== this.sign(data)) throw new Error()
       const parsed = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'))
       if (parsed.scope !== scope || !Number.isSafeInteger(parsed.offset) || parsed.offset <= min || parsed.offset >= max) throw new Error()
-      return parsed.offset as number
+      if (parsed.line !== undefined && (!Number.isSafeInteger(parsed.line) || parsed.line < 1)) throw new Error()
+      return parsed as { offset: number; line?: number }
     } catch { throw new Error('STRUCTURE_STALE: invalid cursor or scope') }
   }
   private artifact(id: string) {
@@ -52,7 +53,7 @@ export class ArtifactNavigation {
     const scope = JSON.stringify([...this.identity(a), 'inspect', q.sectionId ?? null, q.includeBlocks ?? false, limit])
     const entries = q.includeBlocks ? extractBlocks(a.rawMarkdown, outline[sectionIndex]).map((block, i) => ({ ...block, blockId: this.selector(a, q.sectionId!, i) }))
       : outline.map((s, i) => ({ start: s.start, end: s.end, startLine: s.startLine, endLine: s.endLine, title: s.title, level: s.level, hasChildren: s.hasChildren, sectionId: this.selector(a, 'section', i), parentSectionId: s.parent === null ? null : this.selector(a, 'section', s.parent) })).filter((_, i) => !q.sectionId || i === sectionIndex)
-    const offset = this.resume(q.cursor, scope, 0, entries.length), end = Math.min(offset + limit, entries.length)
+    const { offset } = this.resume(q.cursor, scope, 0, entries.length), end = Math.min(offset + limit, entries.length)
     return { artifactId: a.artifactId, revision: a.revision, contentHash: a.contentHash,
       ...(q.includeBlocks ? { blocks: entries.slice(offset, end) as StructurePage['blocks'] } : { sections: entries.slice(offset, end) as StructurePage['sections'] }),
       ...(end < entries.length ? { nextCursor: this.cursor(scope, end) } : {}) }
@@ -64,18 +65,22 @@ export class ArtifactNavigation {
     if (index < 0) throw new Error('STRUCTURE_STALE: invalid section selector')
     const section = outline[index]
     let start = section.start, end = q.includeDescendants === false ? section.ownEnd : section.end
+    let startLine = section.startLine
     if (q.blockId) {
       const blocks = extractBlocks(a.rawMarkdown, section), block = blocks.find((_, i) => this.selector(a, q.sectionId, i) === q.blockId)
       if (!block) throw new Error('STRUCTURE_STALE: invalid block selector')
       start = block.start; end = block.end
+      startLine = block.startLine
     }
     const scope = JSON.stringify([...this.identity(a), 'read', q.sectionId, q.blockId ?? null, q.includeDescendants ?? true])
-    const offset = this.resume(q.cursor, scope, start, end)
+    const { offset, line } = this.resume(q.cursor, scope, start, end)
+    if (q.cursor && line === undefined) throw new Error('STRUCTURE_STALE: missing cursor line')
     let pageEnd = Math.min(offset + 12 * 1024, end)
     // Keep an astral character intact so separately UTF-8 encoded pages concatenate exactly.
     if (pageEnd < end && /[\uD800-\uDBFF]/.test(a.rawMarkdown[pageEnd - 1]) && /[\uDC00-\uDFFF]/.test(a.rawMarkdown[pageEnd])) pageEnd--
+    const range = pageRange(a.rawMarkdown, offset, pageEnd, line ?? startLine)
     return { artifactId: a.artifactId, sectionId: q.sectionId, ...(q.blockId ? { blockId: q.blockId } : {}), revision: a.revision, contentHash: a.contentHash,
-      ...literalRange(a.rawMarkdown, offset, pageEnd), content: a.rawMarkdown.slice(offset, pageEnd),
-      ...(pageEnd < end ? { nextCursor: this.cursor(scope, pageEnd) } : {}) }
+      ...range, content: a.rawMarkdown.slice(offset, pageEnd),
+      ...(pageEnd < end ? { nextCursor: this.cursor(scope, pageEnd, range.endLine) } : {}) }
   }
 }

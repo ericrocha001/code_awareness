@@ -8,7 +8,7 @@ import { gfmFromMarkdown } from 'mdast-util-gfm'
 import { toString } from 'mdast-util-to-string'
 import { parseArtifactMarkdown } from './artifact-metadata'
 
-export const STRUCTURE_VERSION = 1
+export const STRUCTURE_VERSION = 2
 export interface LiteralRange { start: number; end: number; startLine: number; endLine: number }
 export interface OutlineSection extends LiteralRange {
   title: string; level: number; parent: number | null; ownEnd: number; hasChildren: boolean
@@ -22,6 +22,13 @@ export interface SectionPage extends LiteralRange { artifactId: string; sectionI
 
 export function literalRange(raw: string, start: number, end: number): LiteralRange {
   return rangeLocator(raw)(start, end)
+}
+export function pageRange(raw: string, start: number, end: number, startLine: number): LiteralRange {
+  let endLine = startLine
+  for (let offset = start; offset < end; offset++) {
+    if (raw[offset] === '\n' || raw[offset] === '\r' && raw[offset + 1] !== '\n') endLine++
+  }
+  return { start, end, startLine, endLine }
 }
 function rangeLocator(raw: string) {
   const starts = [0]
@@ -49,9 +56,9 @@ export function extractOutline(raw: string): OutlineSection[] {
   const range = rangeLocator(raw)
   const headings = nodes.filter(node => node.type === 'heading')
   const sections: OutlineSection[] = []
-  if (!headings.length || headings[0].position!.start.offset! > 0) {
+  if (!headings.length || raw.slice(offset, offset + headings[0].position!.start.offset!).trim()) {
     const end = headings.length ? offset + headings[0].position!.start.offset! : raw.length
-    sections.push({ ...range(offset, end), title: 'Preamble', level: 0, parent: null, ownEnd: end, hasChildren: false })
+    sections.push({ ...range(offset, end), title: headings.length ? 'Preamble' : 'Document content', level: 0, parent: null, ownEnd: end, hasChildren: false })
   }
   const stack: number[] = []
   for (const heading of headings) {
