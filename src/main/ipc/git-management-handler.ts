@@ -1,4 +1,5 @@
 import { ipcMain } from 'electron'
+import type { GitAtlasRequest, GitAtlasCompareRequest } from '../../shared/types/git-atlas-types'
 import type { ActiveProjectService } from '../core/active-project-service'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
 import {
@@ -25,6 +26,7 @@ export class GitManagementController {
     private readonly projects: Pick<ActiveProjectService, 'getState'>
   ) {}
   bind(service: GitOperationsService | null): void {
+    this.active?.service.clearAtlasCache()
     const state = this.projects.getState()
     this.active =
       state.project && service
@@ -35,6 +37,7 @@ export class GitManagementController {
         : null
   }
   async deactivate(): Promise<void> {
+    this.active?.service.clearAtlasCache()
     this.active = null
     await Promise.allSettled([...this.mutations])
   }
@@ -197,6 +200,16 @@ function validMutation(value: GitMutationRequest): boolean {
 export function registerGitManagementHandlers(
   controller: GitManagementController
 ): void {
+  ipcMain.handle('git-management:atlas', (_event, request: GitAtlasRequest) => {
+    if (!request || Object.keys(request).some(key => !['context', 'window', 'cursor', 'limit', 'refresh'].includes(key)) ||
+      request.refresh !== undefined && typeof request.refresh !== 'boolean' || ![7, 15, 30, 60, 90, 'ALL'].includes(request.window) || request.cursor !== undefined && (typeof request.cursor !== 'string' || request.cursor.length > 2048)) return { success: false, code: 'INVALID_ARGUMENT' }
+    return controller.read(request.context, service => service.getAtlasHistory({ window: request.window, limit: request.limit, cursor: request.cursor, refresh: request.refresh, contextKey: `${request.context.projectId}:${request.context.revision}` }))
+  })
+  ipcMain.handle('git-management:atlas-compare', (_event, request: GitAtlasCompareRequest) => {
+    if (!request || Object.keys(request).some(key => !['context', 'snapshot', 'left', 'right'].includes(key)) ||
+      ![request.snapshot, request.left, request.right].every(value => typeof value === 'string' && value.length > 0 && value.length <= 256)) return { success: false, code: 'INVALID_ARGUMENT' }
+    return controller.read(request.context, service => service.compareAtlas({ ...request, contextKey: `${request.context.projectId}:${request.context.revision}` }))
+  })
   ipcMain.handle('git-operations:correlation', (_event, request: GitCommitCorrelationRequest) => controller.correlation(request))
   ipcMain.handle(
     'git-management:mutate',

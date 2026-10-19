@@ -48,7 +48,7 @@ export function WorktreeCommitsDisclosure({ tree, context, active, onCommit }: {
           if (list.scrollHeight - list.scrollTop - list.clientHeight < 64) reveal()
         }}>
           <ol>{page.items.slice(0, visible).map((item, index) => <li key={item.sha} onFocus={() => { if (index >= visible - 5) reveal() }}>
-            <button disabled={!onCommit} onClick={() => onCommit?.({ ...context, commitSha: item.sha, requestId: crypto.randomUUID() })}>{item.title || 'Sem título'} · {item.sha.slice(0, 8)}</button>
+            {onCommit ? <button onClick={() => onCommit({ ...context, commitSha: item.sha, requestId: crypto.randomUUID() })}>{item.title || 'Sem título'} · {item.sha.slice(0, 8)}</button> : <span className="wo-local-commit-title">{item.title || 'Sem título'} · {item.sha.slice(0, 8)}</span>}
             <p>{reachabilityLabel[item.reachability]}</p>
             <p>{operationLabel[item.events[0].operation]} · <time dateTime={item.events[0].eventAt}>{new Date(item.events[0].eventAt).toLocaleString('pt-BR')}</time></p>
             {item.events.length > 1 && <details><summary>{item.events.length} operações locais registradas</summary><ul>{item.events.map(event => <li key={event.sequence}>{operationLabel[event.operation]} · {new Date(event.eventAt).toLocaleString('pt-BR')}</li>)}</ul></details>}

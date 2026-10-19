@@ -1,4 +1,6 @@
 import { readWorktreeProvenance } from './git-worktree-provenance'
+import { GitAtlasReader } from './git-atlas'
+import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
 import { GitBranchInventory, recordBranchCreation } from './git-branch-inventory'
 import { GitBranchDiscard } from './git-branch-discard'
 import type { BranchDiscardExecute, BranchDiscardRemoteReader } from '../../shared/types/branch-discard-types'
@@ -157,7 +159,12 @@ export class GitOperationsService {
   getBranchCommits(query: BranchHistoryQuery) { return this.branchReader().history(query) }
   async executeReceipted(operationId: string, name: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>): Promise<LegacyGitReceiptResult> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
-    return new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate)
+    const result = await new GitOperationReceipts(this.repoRoot, this.git).execute(operationId, name, args, mutate)
+    const changesTopology = ['commit_git_changes', 'manage_git_branch', 'merge_git_branch', 'revert_git_commit', 'integrate_worktree', 'manage_worktree'].includes(name)
+      || name === 'sync_git_remote' && args.action !== 'PUSH'
+      || name === 'mutate_worktree' && ['COMMIT', 'CREATE_BRANCH'].includes(String(args.action))
+    if (!result.isError && changesTopology) this.atlasReader?.invalidate()
+    return result
   }
   async executeManagementMutation(request: GitMutationRequest, assertCurrent: () => void): Promise<GitOperationalResult> {
     const { operation, snapshot, operationId } = request
@@ -186,6 +193,7 @@ export class GitOperationsService {
           else if (operation.action === 'COMMIT') value = await this.commit(args as Parameters<GitOperationsService['commit']>[0], guard)
           else if (operation.action === 'CREATE' || operation.action === 'SWITCH') value = await this.manageBranch(args as BranchRequest, guard)
           else value = await this.sync(args as SyncRequest, guard)
+          if (!['STAGE', 'UNSTAGE', 'PUSH'].includes(operation.action)) this.atlasReader?.invalidate()
           return { value: value as Record<string, unknown> }
         } catch (error) {
           const code = error instanceof GitOperationsError ? error.code : this.normalizeError(error).code
@@ -1115,6 +1123,19 @@ export class GitOperationsService {
     })
   }
 
+  clearAtlasCache() { this.atlasReader?.invalidate(true) }
+  private atlasReader?: GitAtlasReader
+  private atlas(): GitAtlasReader {
+    return this.atlasReader ??= new GitAtlasReader(this.repoRoot, this.git, fail)
+  }
+  async getAtlasHistory(request: GitAtlasQuery) {
+    await this.repository()
+    return this.atlas().history(request)
+  }
+  async compareAtlas(request: { snapshot: string; left: string; right: string; contextKey?: string }) {
+    await this.repository()
+    return this.atlas().compare(request)
+  }
   async getGraphHistory(request: { limit?: number; cursor?: string; contextKey?: string }): Promise<GitHistoryPage> {
     await this.repository()
     const limit = request.limit ?? 50

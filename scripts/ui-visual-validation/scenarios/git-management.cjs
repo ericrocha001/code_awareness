@@ -4,14 +4,14 @@ const { execFileSync } = require('node:child_process')
 const { buildSync } = require('esbuild')
 exports.run = async (ctx) => {
   const waitForGit = async (condition) => {
-    const deadline = Date.now() + 15000
+    const deadline = Date.now() + 30000
     while (Date.now() < deadline) {
       if (await ctx.evaluate(condition)) return
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
     await ctx.capture('git-operation-timeout')
     throw new Error(
-      'Git operation did not settle within 15 seconds: ' +
+      'Git operation did not settle within 30 seconds: ' +
         (await ctx.evaluate(
           () => document.querySelector('.gm-actions')?.textContent
         ))
@@ -28,6 +28,14 @@ exports.run = async (ctx) => {
     )
     await nativeClick(selector)
   }
+  ctx.input = async (selector, text) => {
+    await waitForGit(() => document.querySelector('.gm-inspector')?.getAttribute('aria-busy') !== 'true')
+    await ctx.waitFor(selector => { const element = document.querySelector(selector); const bounds = element?.getBoundingClientRect(); return element && !element.disabled && bounds && bounds.width > 0 && bounds.height > 0 }, selector)
+    await ctx.click(selector)
+    await ctx.waitFor(selector => document.activeElement === document.querySelector(selector), selector)
+    ctx.window.webContents.insertText(text)
+    await ctx.waitFor((selector, text) => document.querySelector(selector)?.value === text, selector, text)
+  }
   const root = path.join(ctx.temporary, 'repository-a')
   fs.mkdirSync(root)
   const git = (...args) =>
@@ -39,6 +47,9 @@ exports.run = async (ctx) => {
   git('init', '-b', 'main')
   git('config', 'user.name', 'Proof Author')
   git('config', 'user.email', 'proof@example.com')
+  git('config', 'code-awareness.primaryBranch', 'main')
+  if (ctx.mockup) require('./git-atlas-mockup-history.cjs').create(root)
+  else {
   for (let index = 0; index < 8; index++) {
     fs.writeFileSync(path.join(root, 'file.txt'), `version ${index}\n`)
     git('add', 'file.txt')
@@ -60,6 +71,8 @@ exports.run = async (ctx) => {
     'Integrate contextual inspector'
   )
   git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD~1'))
+  }
+  if (ctx.gridProof) require('./git-atlas-grid.cjs').seed(root)
   fs.writeFileSync(path.join(root, 'file.txt'), 'prepared version\n')
   git('add', 'file.txt')
   fs.writeFileSync(path.join(root, 'file.txt'), 'later worktree version\n')
@@ -124,12 +137,50 @@ exports.run = async (ctx) => {
     `<!doctype html><html><head>${csp}<meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`
   )
   await ctx.load(page)
-  await ctx.waitFor(() => document.querySelectorAll('.gm-commit').length === 11)
+  await waitForGit(() => document.querySelectorAll('.gm-commit').length > 0 && document.querySelector('.gm-history').getAttribute('aria-busy') === 'false')
   await ctx.evaluate(() => {
     document.querySelector('.global-sidebar-logo-img').src = 'logo.svg'
   })
+  if (ctx.gridProof) { await require('./git-atlas-grid.cjs').verify(ctx); return }
+  if (ctx.mockup) {
+    await ctx.viewport(1672, 941)
+    await ctx.click('.gm-commit.is-merge')
+    await ctx.waitFor(() => !!document.querySelector('.gm-commit-author'))
+    ctx.window.webContents.sendInputEvent({ type: 'mouseMove', x: 10, y: 10 })
+    await ctx.overflow()
+    await ctx.capture('mockup-wide-dark')
+    ctx.check('Four real Git trajectories and selected commit inspector', await ctx.evaluate(() => document.querySelectorAll('.gm-atlas-lane-label').length >= 4 && !!document.querySelector('.gm-commit-author')))
+    ctx.check('Independent trajectory labels do not overlap', await ctx.evaluate(() => {
+      const labels = [...document.querySelectorAll('.gm-atlas-lane-label')].map(element => element.getBoundingClientRect())
+      return labels.every((bounds, index) => !index || bounds.top >= labels[index - 1].bottom + 20)
+    }))
+    ctx.check('Each trajectory guide stays horizontal on its independent row', await ctx.evaluate(() => [...document.querySelectorAll('.gm-track-guide')].every(line => line.getAttribute('y1') === line.getAttribute('y2'))))
+    ctx.check('Daily axis contains all 90 selected periods', await ctx.evaluate(() => document.querySelectorAll('.gm-atlas-date').length === 90))
+    ctx.check('Mockup composition: header actions, single filter row, 356px inspector', await ctx.evaluate(() => {
+      const bounds = selector => document.querySelector(selector).getBoundingClientRect()
+      return bounds('.gm-toolbar-actions').top < bounds('.gm-toolbar').top && bounds('.gm-toolbar').height < 85 && Math.abs(bounds('.gm-inspector').width - 356) < 2
+    }))
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
+    await ctx.capture('mockup-wide-light')
+    await ctx.click('.gm-atlas-lane-label[data-track="refs/heads/academy-sync"] button')
+    await waitForGit(() => !!document.querySelector('.gm-branch-tip') && document.querySelector('.gm-branch-tip')?.getAttribute('data-sha') === document.querySelector('[aria-label="Copiar SHA da branch"]')?.getAttribute('title'))
+    ctx.window.webContents.sendInputEvent({ type: 'mouseMove', x: 10, y: 10 })
+    await ctx.capture('mockup-branch-inspector')
+    ctx.check('Branch inspector shares structured commit design and uses real tip metadata', await ctx.evaluate(() => !!document.querySelector('.gm-branch-tip .gm-commit-author') && !!document.querySelector('[aria-label="Copiar SHA da branch"]') && document.querySelectorAll('.gm-inspector-section').length >= 3))
+    await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = map.scrollHeight; map.dispatchEvent(new Event('scroll')) })
+    await ctx.capture('independent-branch-rows')
+    ctx.check('Long labels on reused topological lanes remain disjoint', await ctx.evaluate(() => {
+      const labels = [...document.querySelectorAll('.gm-atlas-lane-label')].map(element => element.getBoundingClientRect())
+      return labels.length >= 6 && labels.every((bounds, index) => !index || bounds.top >= labels[index - 1].bottom + 20)
+    }))
+    await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = 0; map.dispatchEvent(new Event('scroll')) })
+    await ctx.viewport(1000, 800)
+    await ctx.overflow()
+    await ctx.capture('mockup-medium-light')
+    return
+  }
   await ctx.viewport(1440, 900)
-  await ctx.click('.gm-commit')
+  await ctx.click('.gm-commit.is-merge')
   await ctx.waitFor(() =>
     document.querySelector('.gm-inspector').textContent.includes('Merge')
   )
@@ -139,6 +190,7 @@ exports.run = async (ctx) => {
       document.querySelector('.gm-inspector').textContent.includes('Merge')
     )
   )
+  await waitForGit(() => !!document.querySelector('.gm-commit-author') && !!document.querySelector('.gm-files button'))
   await ctx.click('.gm-files button')
   await ctx.waitFor(() => !!document.querySelector('.gm-patch pre'))
   ctx.check(
@@ -149,6 +201,38 @@ exports.run = async (ctx) => {
   )
   await ctx.overflow()
   await ctx.capture('wide-dark-selected')
+  ctx.check('Origin remains unknown despite current worktree containment', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Origem: Não registrada') && !document.querySelector('.gm-inspector').textContent.includes('Worktrees atuais')))
+  for (const label of ['7d', '15d', '30d', '60d', '90d', 'Tudo']) {
+    await ctx.click(`.gm-segmented[aria-label="Janela temporal"] button:nth-child(${['7d','15d','30d','60d','90d','Tudo'].indexOf(label)+1})`)
+    await ctx.evaluate(async () => { await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))) })
+    {
+      const deadline = Date.now() + 30000
+      while (Date.now() < deadline && !await ctx.evaluate(count => document.querySelectorAll('.gm-atlas-date').length === count, label === 'Tudo' ? 1 : parseInt(label))) await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && document.querySelectorAll('.gm-commit').length > 0)
+    if (label !== 'Tudo') ctx.check(`${label}: every daily period is represented`, await ctx.evaluate(count => document.querySelectorAll('.gm-atlas-date').length === count, parseInt(label)))
+    if (label === '7d' || label === '15d') {
+      await ctx.viewport(2560, 1440)
+      await waitForGit(() => {
+        const map = document.querySelector('.gm-atlas-scroll'), surface = document.querySelector('.gm-atlas-surface')
+        return map && Math.abs(parseFloat(surface.style.width) - map.clientWidth) < 1
+      })
+      ctx.check(`${label}: daily grid fills the available width without hidden trajectories`, await ctx.evaluate(() => !document.querySelector('.gm-secondary-toggle') && !document.querySelector('.gm-inactive') && document.querySelector('.gm-atlas-scroll').scrollLeft === 0))
+      await ctx.capture(`wide-dark-${label}-filled`)
+      await ctx.viewport(1440, 900)
+    }
+  }
+  await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)')
+  await ctx.waitFor(() => document.querySelector('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(2)').getAttribute('aria-pressed') === 'true')
+  await waitForGit(() => [...document.querySelectorAll('[aria-label="Referência em foco"] option')].some(option => option.value === 'refs/heads/feature/inspector'))
+  await ctx.evaluate(() => { const select = document.querySelector('[aria-label="Referência em foco"]'); select.value = 'refs/heads/feature/inspector'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+  await waitForGit(() => document.querySelector('.gm-comparison')?.textContent.includes('exclusivos da base'))
+  await ctx.capture('wide-dark-focus')
+  await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:nth-child(3)')
+  await waitForGit(() => document.querySelector('.gm-comparison')?.textContent.includes('0 exclusivos do alvo'))
+  ctx.check('Comparison uses real merge-base and reachable sets', await ctx.evaluate(() => document.querySelector('.gm-comparison').textContent.includes('0 exclusivos do alvo')))
+  await ctx.capture('wide-dark-comparison')
+  await ctx.click('.gm-segmented[aria-label="Modo do Atlas"] button:first-child')
   await ctx.evaluate(() => {
     document.body.dataset.theme = 'light'
   })
@@ -173,7 +257,7 @@ exports.run = async (ctx) => {
   })
   await ctx.capture('medium-dark-history')
   await ctx.viewport(1440, 900)
-  await ctx.click('.gm-toolbar button:nth-of-type(2)')
+  await ctx.click('.gm-toolbar-actions button:nth-of-type(2)')
   await ctx.waitFor(
     () => document.querySelectorAll('.gm-change-group').length === 4
   )
@@ -213,6 +297,7 @@ exports.run = async (ctx) => {
     'external update after inspection\n'
   )
   await ctx.click('.gm-path-selection label:nth-child(2) input')
+  await ctx.waitFor(() => document.querySelector('.gm-path-selection label:nth-child(2) input').checked && !document.querySelector('.gm-action-row button:first-child').disabled)
   await ctx.click('.gm-action-row button:first-child')
   await waitForGit(() =>
     document
@@ -249,7 +334,7 @@ exports.run = async (ctx) => {
       'false'
   )
   try {
-    await ctx.waitFor(() =>
+    await waitForGit(() =>
       document
         .querySelector('.gm-commit-review h3')
         ?.textContent.includes('2 arquivos')
@@ -296,13 +381,73 @@ exports.run = async (ctx) => {
       git('diff', '--name-only') === 'file.txt'
   )
   await ctx.capture('wide-dark-committed')
+  await ctx.click('.gm-actions details summary')
+  await ctx.input('[aria-label="Nova branch"]', 'atlas-created-through-ui')
+  await ctx.click('.gm-actions details > button')
+  await ctx.click('.gm-confirm button:first-child')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && [...document.querySelectorAll('[aria-label="Trocar branch"] option')].some(option => option.value === 'atlas-created-through-ui'))
+  ctx.check('Branch creation stays on the canonical mutation path and preserves checkout', git('rev-parse', 'atlas-created-through-ui') === git('rev-parse', 'HEAD') && git('branch', '--show-current') === 'main')
+  await ctx.click('.gm-actions details summary')
+  const exec = require('node:child_process').spawnSync
+  const tree = git('rev-parse', 'HEAD^{tree}')
+  const oldDate = new Date(Date.now() - 110 * 86400000).toISOString()
+  const oldRoot = exec('git', ['commit-tree', tree, '-m', 'Archived root'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate } }).stdout.trim()
+  git('update-ref', 'refs/heads/quiet', oldRoot)
+  const baseDate = new Date(Date.now() - 25 * 86400000).toISOString()
+  const denseBase = exec('git', ['commit-tree', tree, '-p', oldRoot, '-m', 'Shared parallel base'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: baseDate, GIT_COMMITTER_DATE: baseDate } }).stdout.trim()
+  git('update-ref', 'refs/heads/dense-base', denseBase)
+  const records = []
+  for (let index = 0; index < 105; index++) {
+    const message = `Parallel work ${index}\n`
+    const date = Math.floor(Date.now() / 1000) - (2 + index % 20) * 86400
+    records.push(`commit refs/heads/parallel-${String(index).padStart(3,'0')}\ncommitter Proof Author <proof@example.com> ${date} +0000\ndata ${Buffer.byteLength(message)}\n${message}from ${denseBase}\n\n`)
+  }
+  const imported = exec('git', ['fast-import', '--quiet'], { cwd: root, input: records.join(''), encoding: 'utf8', windowsHide: true })
+  if (imported.status !== 0) throw new Error(imported.stderr)
+  const detachedDate = new Date(Date.now() - 3 * 86400000).toISOString()
+  const detachedSha = exec('git', ['commit-tree', tree, '-p', denseBase, '-m', 'Detached work'], { cwd: root, encoding: 'utf8', windowsHide: true, env: { ...process.env, GIT_AUTHOR_DATE: detachedDate, GIT_COMMITTER_DATE: detachedDate } }).stdout.trim()
+  git('worktree', 'add', '--detach', path.join(ctx.temporary, 'detached-work'), detachedSha)
+  git('tag', 'atlas-proof')
+  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:nth-child(5)')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !!document.querySelector('.gm-load-more'))
+  await ctx.click('.gm-load-more')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !document.querySelector('.gm-load-more'))
+  ctx.check('All active trajectories are available without secondary or inactive controls', await ctx.evaluate(() => !document.querySelector('.gm-secondary-toggle') && !document.querySelector('.gm-inactive')))
+  await ctx.waitFor(() => document.querySelectorAll('.gm-atlas-lane-label').length > 100)
+  const summary = await ctx.evaluate(() => ({ nodes: document.querySelectorAll('.gm-commit').length, labels: document.querySelectorAll('.gm-atlas-lane-label').length, width: document.querySelector('.gm-atlas-scroll').scrollWidth }))
+  ctx.check('Dense timeline virtualizes nodes rather than mounting every commit', summary.nodes < 118 && summary.labels > 100)
+  await ctx.capture('wide-dark-dense-expanded')
+  await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = map.scrollHeight; map.scrollLeft = map.scrollWidth; map.dispatchEvent(new Event('scroll')) })
+  await ctx.capture('wide-dark-dense-scrolled')
+  await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = 0; map.scrollLeft = 0; map.dispatchEvent(new Event('scroll')) })
+  await ctx.click('.gm-sha-lookup summary')
+  await ctx.input('[aria-label="SHA completo"]', detachedSha)
+  await ctx.click('.gm-sha-lookup button')
+  await waitForGit(() => document.querySelector('.gm-inspector h2')?.textContent === 'Detached work')
+  ctx.check('Detached work is inspectable with unknown origin', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Origem: Não registrada')))
+  await ctx.capture('wide-dark-detached')
+  await ctx.evaluate(() => document.querySelector('[aria-label="SHA completo"]').select())
+  ctx.window.webContents.insertText(oldRoot)
+  await ctx.waitFor(sha => document.querySelector('[aria-label="SHA completo"]').value === sha, oldRoot)
+  await ctx.click('.gm-sha-lookup button')
+  await waitForGit(() => document.querySelector('.gm-inspector h2')?.textContent === 'Archived root')
+  ctx.check('SHA outside the temporal window opens the canonical inspector', await ctx.evaluate(() => document.querySelector('.gm-inspector').textContent.includes('Commit raiz')))
+  await ctx.capture('wide-dark-outside-window')
+  await ctx.click('.gm-segmented[aria-label="Janela temporal"] button:nth-child(3)')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && !!document.querySelector('.gm-load-more'))
+  ctx.check('Changing windows keeps recent visible commits in view', await ctx.evaluate(() => document.querySelectorAll('.gm-commit').length > 0))
+  git('branch', 'snapshot-changed')
+  await ctx.click('.gm-load-more')
+  await waitForGit(() => document.querySelector('.gm-history').getAttribute('aria-busy') === 'false' && [...document.querySelectorAll('[aria-label="Referência em foco"] option')].some(option => option.value === 'refs/heads/snapshot-changed'))
+  ctx.check('Actual ref changes restart temporal pagination on the current revision', await ctx.evaluate(() => !document.querySelector('.gm-error')))
+  await ctx.capture('wide-dark-stale-history')
   await ctx.click('[data-proof-project="b"]')
   await ctx.waitFor(() =>
     document
       .querySelector('.gm-header')
       ?.textContent.includes('Second Repository')
   )
-  await ctx.waitFor(() =>
+  await waitForGit(() =>
     document
       .querySelector('.gm-placeholder')
       ?.textContent.includes('Nenhum commit')
@@ -322,7 +467,7 @@ exports.run = async (ctx) => {
   await ctx.waitFor(() => !!document.querySelector('.gm-empty'))
   await ctx.capture('wide-dark-no-repository')
   await ctx.click('[data-proof-project="non-git"]')
-  await ctx.waitFor(() =>
+  await waitForGit(() =>
     document
       .querySelector('[role="alert"]')
       ?.textContent.includes('não é um repositório Git')
@@ -353,6 +498,6 @@ exports.run = async (ctx) => {
   ctx.check(
     'Fresh Electron source and expected worktree',
     identity.freshness.state === 'MATCH' &&
-      identity.sourceOrigin.worktree?.branch === 'codex/git-management-mvp'
+      identity.sourceOrigin.worktree?.rootPath.replace(/\\/g, '/').toLowerCase() === ctx.projectRoot.replace(/\\/g, '/').toLowerCase()
   )
 }

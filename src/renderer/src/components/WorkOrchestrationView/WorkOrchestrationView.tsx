@@ -13,7 +13,6 @@ import { WorkOrchestrationAttention } from './WorkOrchestrationAttention'
 import { WorktreeStatusBadges } from './WorktreeStatusBadges'
 import { WorktreeSectionTitle } from './WorktreeSectionTitle'
 import { WorktreeIntegrationDetails } from './WorktreeIntegrationDetails'
-import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 
 const label = (w: ObservableWorktree) => w.branch ?? (w.head ? 'Detached HEAD' : 'Sem HEAD')
 const phaseLabel = { NOT_OBSERVED: 'Não observado', LAST_KNOWN: 'Último estado conhecido', REVALIDATING: 'Revalidando', VERIFIED: 'Observação verificada', UNAVAILABLE: 'Indisponível', STALE: 'Observação obsoleta' }
@@ -24,7 +23,7 @@ export function orderWorktrees(worktrees: ObservableWorktree[]): ObservableWorkt
   return [...worktrees].sort((a, b) => Number(b.reference) - Number(a.reference) || createdTime(b) - createdTime(a) || compare(a.path, b.path) || compare(a.worktreeId, b.worktreeId))
 }
 type Selection = ObservableWorktree | null
-export function WorkOrchestrationView({ state, active = true, attention, onCommit }: { state: ActiveProjectState; active?: boolean; attention?: OrchestrationAttention | null; onCommit?: (intent: CommitNavigationIntent) => void }) {
+export function WorkOrchestrationView({ state, active = true, attention }: { state: ActiveProjectState; active?: boolean; attention?: OrchestrationAttention | null }) {
   const [overview, setOverview] = useState<OrchestrationOverview | null>(null)
   const repository = useRef<string | null>(null)
   const [selected, setSelected] = useState<Selection>(null), selection = useRef<Selection>(null)
@@ -221,7 +220,7 @@ export function WorkOrchestrationView({ state, active = true, attention, onCommi
           <p className="wo-observation-context">{tree.reason ? reasonLabel(tree.reason) : tree.observation === 'NOT_OBSERVED' ? 'Estado não observado' : 'Última observação do estado'}</p>
           <details className="wo-identity wo-disclosure" key={tree.worktreeId} open><summary><WorktreeSectionTitle icon={Fingerprint}>Identidade</WorktreeSectionTitle></summary><dl className="wo-identity-grid"><dt>Caminho</dt><dd title={tree.path}>{tree.path.split('\\').join('/').split('/').slice(-3).join('/')}</dd><dt>HEAD</dt><dd title={tree.head ?? undefined}>{tree.head?.slice(0, 12) ?? 'Indisponível'}</dd></dl></details>
           <details className="wo-files wo-disclosure" key={`changes:${tree.worktreeId}:${tree.generation}`} onToggle={event => { if (event.target === event.currentTarget) setChangesOpen(event.currentTarget.open) }}><summary><WorktreeSectionTitle icon={FileText} meta={tree.observation === 'VERIFIED' && tree.localChanges ? `${tree.localChanges.total} ${tree.localChanges.total === 1 ? 'arquivo' : 'arquivos'}` : 'Sob demanda'}>Arquivos alterados</WorktreeSectionTitle></summary>{changesOpen && <LocalChangesInspector key={`${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} revalidate={() => void inspect({ worktree: { worktreeId: tree.worktreeId } }, tree)} stale={() => { choose({ ...tree, observation: 'STALE' }); setOverview(previous => previous && { ...previous, worktrees: previous.worktrees.map(worktree => worktree.worktreeId === tree.worktreeId ? { ...worktree, observation: 'STALE' } : worktree) }) }} />}</details>
-          <WorktreeIntegrationDetails key={`integration:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }} onCommit={onCommit}><WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} /></WorktreeIntegrationDetails>
+          <WorktreeIntegrationDetails key={`integration:${state.project?.id}:${state.revision}:${tree.worktreeId}:${tree.generation}`} tree={tree} active={active} context={{ projectId: state.project!.id, revision: state.revision }}><WorktreeDocumentContext key={`documents:${tree.worktreeId}:${tree.generation}`} tree={tree} query={query} /></WorktreeIntegrationDetails>
           <div className="wo-observation-receipt"><Clock3 size={16} aria-hidden="true" /><span>{tree.observedAt ? `Observado em ${new Date(tree.observedAt).toLocaleString('pt-BR')} · ${phaseLabel[tree.observation]}` : phaseLabel[tree.observation]}</span></div>
           <details className="wo-technical wo-disclosure"><summary><WorktreeSectionTitle icon={Terminal}>Identidade técnica</WorktreeSectionTitle></summary><dl><dt>Caminho completo</dt><dd>{tree.path}</dd><dt>HEAD completo</dt><dd>{tree.head ?? 'Indisponível'}</dd><dt>Repositório / worktree</dt><dd>{overview?.repositoryId} / {tree.worktreeId}</dd><dt>Geração</dt><dd>{tree.generation}</dd><dt>Alterações locais</dt><dd>{tree.observation === 'VERIFIED' ? `${tree.stagedCount} staged · ${tree.unstagedCount} unstaged · ${tree.untrackedCount} não rastreados · ${tree.conflictCount} em conflito` : 'Não verificado'}</dd>{tree.localChanges && <><dt>Caminhos únicos</dt><dd>{tree.localChanges.total} {tree.localChanges.total === 1 ? 'caminho local único' : 'caminhos locais únicos'}</dd></>}</dl></details>
         </>}
