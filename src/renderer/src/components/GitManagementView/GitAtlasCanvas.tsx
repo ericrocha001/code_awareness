@@ -1,21 +1,51 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Crown, GitBranch, Tag } from 'lucide-react'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
 import type { GitAtlasCoreEvidence, GitAtlasPrEvidence, GitAtlasEvidenceEvent } from '../../../../shared/types/git-atlas-evidence-types'
 import { firstParentPath, layoutGitAtlas } from './atlas-layout'
 import { atlasWindowPage, presentGitAtlas } from './atlas-presentation'
 
+interface AtlasLabelBox { left: number; top: number; width: number; height: number }
+
+function connectionGeometry(px: number, py: number, cx: number, cy: number, secondary: boolean) {
+  const start = px + 7, end = cx - (secondary ? 15 : 12)
+  const room = Math.max(1, end - start), approach = Math.min(18, room / 3)
+  const transition = Math.min(room - approach, Math.max(32, Math.abs(cy - py) * .5))
+  const turn = end - approach - transition
+  const xs = secondary ? [turn, turn + transition / 2, end - approach - transition / 2, end - approach] : [start, start + room / 2, end - room / 2, end]
+  const d = `${secondary ? `M ${start} ${py} L ${turn} ${py}` : `M ${start} ${py}`} C ${xs[1]} ${py}, ${xs[2]} ${cy}, ${xs[3]} ${cy}${secondary ? ` L ${end} ${cy}` : ''}`
+  const crosses = (box: AtlasLabelBox) => {
+    const top = box.top - 4, bottom = box.top + box.height + 4
+    if (bottom < Math.min(py, cy) || top > Math.max(py, cy) || box.left + box.width < start || box.left > end) return false
+    if (py === cy) return true
+    const parameter = (target: number) => {
+      const ratio = Math.max(0, Math.min(1, (target - py) / (cy - py)))
+      let low = 0, high = 1
+      for (let step = 0; step < 12; step++) { const t = (low + high) / 2; if (t * t * (3 - 2 * t) < ratio) low = t; else high = t }
+      return (low + high) / 2
+    }
+    const xAt = (t: number) => (1 - t) ** 3 * xs[0] + 3 * (1 - t) ** 2 * t * xs[1] + 3 * (1 - t) * t * t * xs[2] + t ** 3 * xs[3]
+    const limits = [xAt(parameter(top)), xAt(parameter(bottom))]
+    if (py >= top && py <= bottom) limits.push(start)
+    if (cy >= top && cy <= bottom) limits.push(end)
+    return box.left <= Math.max(...limits) + 4 && box.left + box.width >= Math.min(...limits) - 4
+  }
+  return { d, crosses }
+}
+
 export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, base, focus, mode, comparison, selected, select, focusTrajectory, requestMore, loading }: {
   page: GitAtlasPage | null; windowDays: GitAtlasWindow; base: string; focus: string; mode: string; comparison: GitAtlasComparison | null; selected?: string; select: (sha: string) => void; focusTrajectory: (ref: string, sha: string) => void
   core?: GitAtlasCoreEvidence | null; enrichment?: GitAtlasPrEvidence | null; choosePr?: (number: number) => void
   requestMore?: () => void; loading?: boolean
 }) {
+  const mergeArrowId = `atlas-merge-${useId().replace(/:/g, '')}`
   const previous = useRef(new Map<string, number>())
   const scroll = useRef<HTMLDivElement>(null)
   const positionedSnapshot = useRef<string | null>(null)
   const previousHeadX = useRef(0)
   const previousWidth = useRef(0)
   const budget = useRef(1)
+  const pendingTrack = useRef<string | null>(null)
   const [demand, setDemand] = useState(0)
   const [showAll, setShowAll] = useState(false)
   const windowPage = useMemo(() => atlasWindowPage(page, windowDays), [page, windowDays])
@@ -25,7 +55,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
     return value
   }, [windowPage, base])
   const [viewport, setViewport] = useState({ x: 0, y: 0, width: 1200, height: 900 })
-  const { points, width, days, unit } = useMemo(() => presentGitAtlas(layout, windowPage, windowDays, Math.max(0, viewport.width - 240)), [layout, windowPage, windowDays, viewport.width])
+  const { points, width, days, unit } = useMemo(() => presentGitAtlas(layout, windowPage, windowDays, viewport.width), [layout, windowPage, windowDays, viewport.width])
   const pointBySha = useMemo(() => new Map(points.map(point => [point.node.sha, point])), [points])
   const integrated = new Set(layout.edges.filter(edge => edge.secondary).map(edge => pointBySha.get(edge.parent)?.track))
   const allowedTracks = layout.tracks.filter(track => showAll || track.ref || track.detached || integrated.has(track.id) || track.shas.includes(selected ?? '') || track.shas.includes(page?.head ?? '') || track.id === focus || track.shas.includes(focus))
@@ -40,11 +70,41 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
   const path = firstParentPath(new Map((page?.nodes ?? []).map(node => [node.sha, node])), page?.refs.find(ref => ref.ref === focus)?.sha ?? focus)
   const exclusive = new Set([...(comparison?.exclusive.left ?? []), ...(comparison?.exclusive.right ?? []), ...(comparison?.mergeBases ?? [])])
   const active = (sha: string) => mode === 'Panorama' || (mode === 'Foco' ? path.has(sha) : exclusive.has(sha)) || selected === sha
-  const labelTracks = new Map<number, typeof allowedTracks[number]>()
-  for (const track of allowedTracks) {
-    const prior = labelTracks.get(track.lane)
-    const distance = (item: typeof track) => Math.max(0, item.start - viewport.x, viewport.x - item.end)
-    if (!prior || distance(track) < distance(prior)) labelTracks.set(track.lane, track)
+  const connections = layout.edges.flatMap(edge => {
+    const child = pointBySha.get(edge.child), parent = pointBySha.get(edge.parent)
+    if (!child || !parent || !allowed.has(child.track) || !allowed.has(parent.track) || child.x < viewport.x - 120 || parent.x > viewport.x + viewport.width) return []
+    const cy = y(child.lane), py = y(parent.lane)
+    if (Math.max(cy, py) < viewport.y - 100 || Math.min(cy, py) > viewport.y + viewport.height + 100) return []
+    return [{ edge, ...connectionGeometry(parent.x, py, child.x, cy, edge.secondary) }]
+  })
+  const overlaps = (a: AtlasLabelBox, b: AtlasLabelBox) => a.left < b.left + b.width + 6 && a.left + a.width + 6 > b.left && a.top < b.top + b.height + 4 && a.top + a.height + 4 > b.top
+  const protectedBoxes: AtlasLabelBox[] = [{ left: viewport.x, top: viewport.y, width: viewport.width, height: 66 }, { left: viewport.x, top: 0, width: viewport.width, height: 136 }, ...visible.flatMap(point => {
+    const boxes = [{ left: point.x - 18, top: y(point.lane) - 18, width: 36, height: 36 }]
+    if (point.node.sha === selected || page?.tags.some(tag => tag.sha === point.node.sha)) boxes.push({ left: point.x - 84, top: y(point.lane) - 105, width: 168, height: 70 })
+    if (point.node.sha === core?.checkout.head) boxes.push({ left: point.x - 64, top: y(point.lane) + 30, width: 128, height: 28 })
+    return boxes
+  })]
+  const priority = (track: typeof allowedTracks[number]) => Number(track.id === focus || track.references.some(ref => ref.ref === focus) || track.shas.includes(selected ?? '')) * 2 + Number(track.ref === base)
+  const inlineLabels: Array<AtlasLabelBox & { track: typeof allowedTracks[number]; continued: boolean }> = []
+  for (const track of [...allowedTracks].sort((a, b) => priority(b) - priority(a) || a.lane - b.lane || a.start - b.start || a.id.localeCompare(b.id))) {
+    const first = pointBySha.get(track.shas[track.shas.length - 1])!, last = pointBySha.get(track.shas[0])!
+    const left = Math.max(first.x - 20, viewport.x + 12), right = Math.min(last.x + 20, viewport.x + viewport.width - 12)
+    if (right <= left || y(track.lane) < viewport.y + 110 || y(track.lane) > viewport.y + viewport.height + 60) continue
+    const width = Math.min(192, Math.max(36, viewport.x + viewport.width - 12 - left))
+    const candidates = [left, Math.min(right - width, left + 56), right - width]
+    let box: AtlasLabelBox | undefined
+    for (const top of [y(track.lane) - 42, y(track.lane) + 48, y(track.lane) - 66]) {
+      for (const x of candidates) {
+        const candidate = { left: Math.max(left, x), top, width, height: 24 }
+        if (!protectedBoxes.some(item => overlaps(candidate, item)) && !inlineLabels.some(item => overlaps(candidate, item)) && !connections.some(item => item.crosses(candidate))) { box = candidate; break }
+      }
+      if (box) break
+    }
+    if (!box) {
+      const candidate = { left, top: y(track.lane) - 42, width: 36, height: 24 }
+      if (!protectedBoxes.some(item => overlaps(candidate, item)) && !inlineLabels.some(item => overlaps(candidate, item)) && !connections.some(item => item.crosses(candidate))) box = candidate
+    }
+    if (box) inlineLabels.push({ ...box, track, continued: first.x < viewport.x || first.node.parents.length > 0 })
   }
   const annotations = useMemo(() => {
     const groups = new Map<string, { x: number; created: boolean; events: Array<Exclude<GitAtlasEvidenceEvent, { kind: 'GIT_MERGE_COMMIT' }>> }>()
@@ -75,11 +135,11 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
     if (!page || !element) { positionedSnapshot.current = null; previousHeadX.current = 0; return }
     const head = pointBySha.get(page.head ?? '') ?? points.at(-1)
     if (positionedSnapshot.current !== page.snapshot) {
-      element.scrollLeft = Math.max(0, (head?.x ?? 0) + 240 - element.clientWidth * .75)
+      element.scrollLeft = Math.max(0, (head?.x ?? 0) - element.clientWidth * .75)
       element.scrollTop = 0
     } else if (selected && previousWidth.current !== element.clientWidth) {
       const anchor = pointBySha.get(selected)
-      if (anchor) element.scrollLeft = Math.max(0, anchor.x + 240 - element.clientWidth * .65)
+      if (anchor) element.scrollLeft = Math.max(0, anchor.x - element.clientWidth * .65)
     } else element.scrollLeft += (head?.x ?? 0) - previousHeadX.current
     previousWidth.current = element.clientWidth
     positionedSnapshot.current = page.snapshot
@@ -93,14 +153,25 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
     observer.observe(element)
     return () => observer.disconnect()
   }, [])
+  useLayoutEffect(() => {
+    const element = scroll.current, track = pendingTrack.current ? trackById.get(pendingTrack.current) : null
+    if (!element || !track) return
+    const point = pointBySha.get(track.shas[0])
+    if (!point) return
+    pendingTrack.current = null
+    element.scrollLeft = Math.max(0, point.x - 180)
+    element.scrollTop = Math.max(0, y(point.lane) - 180)
+    setViewport({ x: element.scrollLeft, y: element.scrollTop, width: element.clientWidth, height: element.clientHeight })
+  }, [showAll, layout, selected])
   const demandMore = () => { budget.current = 1; setDemand(value => value + 1) }
   return <>
     <div className="gm-atlas-visibility">
       <span>{allowedTracks.length} trajetórias visíveis{hidden ? ` · ${hidden} sem referência atual ou integração visível ocultas` : ''}</span>
       {(hidden > 0 || showAll) && <button aria-pressed={showAll} onClick={() => setShowAll(value => !value)}>{showAll ? 'Mostrar relevantes' : `Mostrar todas (${layout.tracks.length})`}</button>}
       <details><summary>Localizar trajetória ou referência</summary><div className="gm-atlas-track-list">
-        {layout.tracks.map(track => <button key={track.id} onClick={() => { setShowAll(true); focusTrajectory(track.ref ?? track.shas[0], track.shas[0]); const point = pointBySha.get(track.shas[0]); if (point && scroll.current) { scroll.current.scrollLeft = Math.max(0, point.x - 180); scroll.current.scrollTop = Math.max(0, y(point.lane) - 180) } }}>{track.label}</button>)}
+        {layout.tracks.map(track => <button key={track.id} onClick={() => { pendingTrack.current = track.id; setShowAll(true); focusTrajectory(track.ref ?? track.shas[0], track.shas[0]) }}>{track.label}</button>)}
         {layout.inactive.map(ref => <button key={ref.ref} onClick={() => focusTrajectory(ref.ref, ref.sha)}>{ref.name} · ponta fora do trecho carregado</button>)}
+        {page?.refs.filter(ref => ref.kind !== 'HEAD' && !layout.tracks.some(track => track.ref === ref.ref) && !layout.inactive.some(item => item.ref === ref.ref)).map(ref => <button key={ref.ref} onClick={() => focusTrajectory(ref.ref, ref.sha)}>{ref.name} · referência atual no trecho compartilhado</button>)}
       </div></details>
     </div>
     {core?.checkout.head && !pointBySha.has(core.checkout.head) && <p className="gm-atlas-note">Você está aqui: {core.checkout.head.slice(0, 8)} · HEAD fora do trecho visível.</p>}
@@ -109,34 +180,23 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
       const element = event.currentTarget
       setViewport({ x: element.scrollLeft, y: element.scrollTop, width: element.clientWidth, height: element.clientHeight })
     }}>
-      <div className="gm-atlas-surface" style={{ width: width + 240, height }}>
-        <div className="gm-atlas-labels" style={{ height }}>
-          <div className="gm-atlas-corner">Trajetórias · faixas reutilizáveis</div>
-          {[...labelTracks.values()].map(track => <div className="gm-atlas-lane-label" data-track={track.id} key={track.id} style={{ top: y(track.lane) - 21 }}>
-            <button title={track.label} onClick={() => focusTrajectory(track.ref ?? track.shas[0], track.shas[0])}>{track.ref === base ? <Crown size={18} /> : <GitBranch size={18} />}<span>{track.label}</span></button>
-            <small>{track.shas.length} commits no trecho</small>
-          </div>)}
-        </div>
+      <div className="gm-atlas-surface" style={{ width, height }}>
         <svg className="gm-atlas-lines" width={width} height={height} aria-label="Relações reais entre commits">
-          {days.filter(day => day.x + day.width >= viewport.x - 240 && day.x <= viewport.x + viewport.width).map(day => <line key={day.x} x1={day.x} x2={day.x} y1={66} y2={height} stroke="var(--border)" strokeDasharray="2 8" opacity=".35" />)}
-          {layout.edges.map(edge => {
-            const child = pointBySha.get(edge.child), parent = pointBySha.get(edge.parent)
-            if (!child || !parent || !allowed.has(child.track) || !allowed.has(parent.track)) return null
-            if (child.x < viewport.x - 240 || parent.x > viewport.x + viewport.width) return null
-            const cy = y(child.lane), py = y(parent.lane)
-            if (Math.max(cy, py) < viewport.y - 100 || Math.min(cy, py) > viewport.y + viewport.height + 100) return null
-            const bend = Math.max(12, (child.x - parent.x) * .5)
-            return <path key={`${edge.child}:${edge.parent}`} data-child={edge.child} data-parent={edge.parent} d={`M ${parent.x} ${py} C ${parent.x + bend} ${py}, ${child.x - bend} ${cy}, ${child.x} ${cy}`} fill="none" stroke={edge.secondary ? 'var(--accent)' : 'var(--text-secondary)'} strokeWidth={edge.secondary ? 2.5 : 1.8} opacity={active(edge.child) && active(edge.parent) ? .9 : .18} strokeDasharray={edge.skew ? '5 3' : undefined}><title>{edge.secondary ? 'Merge topológico · pai secundário' : 'Primeiro pai'}: {edge.parent} → {edge.child}{edge.skew ? ' · datas invertidas' : ''}</title></path>
-          })}
+          <defs><marker id={mergeArrowId} viewBox="0 0 8 8" refX={7} refY={4} markerWidth={6} markerHeight={6} markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="var(--accent)" strokeWidth={1.6} /></marker></defs>
+          {days.filter(day => day.x + day.width >= viewport.x - 120 && day.x <= viewport.x + viewport.width).map(day => <line key={day.x} x1={day.x} x2={day.x} y1={66} y2={height} stroke="var(--border)" strokeDasharray="2 8" opacity=".35" />)}
+          {connections.map(({ edge, d }) => <path key={`${edge.child}:${edge.parent}`} data-child={edge.child} data-parent={edge.parent} data-receiving-track={edge.receivingTrack} d={d} fill="none" stroke={edge.secondary ? 'var(--accent)' : 'var(--text-secondary)'} strokeWidth={edge.secondary ? 2.5 : 1.8} markerEnd={edge.secondary ? `url(#${mergeArrowId})` : undefined} opacity={active(edge.child) && active(edge.parent) ? .9 : .18} strokeDasharray={edge.skew ? '5 3' : undefined}><title>{edge.secondary ? 'Contribuição secundária → merge M na trajetória receptora; nome histórico de destino não inferido' : 'Continuidade do primeiro pai'}: {edge.parent} → {edge.child}{edge.skew ? ' · datas invertidas' : ''}</title></path>)}
           {layout.anchors.map(anchor => {
             const point = pointBySha.get(anchor.child)
             return point && visible.some(item => item.node.sha === anchor.child) ? <g key={`${anchor.child}:${anchor.parent}`}><path d={`M ${point.x - 24} ${y(point.lane)} L ${point.x - 9} ${y(point.lane)}`} stroke="var(--text-secondary)" strokeDasharray="3 3" /><text x={point.x - 30} y={y(point.lane) - 13} fill="var(--text-secondary)" fontSize="11">…<title>Pai {anchor.parent} fora do trecho carregado</title></text></g> : null
           })}
         </svg>
-        <div className="gm-atlas-date-axis" style={{ width, marginTop: -height }} aria-label={`Datas por ${unit === 'DAY' ? 'dia' : unit === 'WEEK' ? 'semana' : 'mês'}; ordem dos eventos preservada`}>
-          {days.filter(day => day.x + day.width >= viewport.x - 240 && day.x <= viewport.x + viewport.width).map(day => <div key={day.x} className="gm-atlas-date" style={{ left: day.x, width: day.width }} title={`${new Date(day.start).toLocaleString()} — ${new Date(day.end).toLocaleString()}`}><span>{new Date(day.start).toLocaleDateString(undefined, unit === 'MONTH' ? { month: 'short', year: 'numeric' } : { day: '2-digit', month: 'short' })}</span>{day.end !== day.start && unit !== 'MONTH' && <small>até {new Date(day.end).toLocaleDateString(undefined, { day: '2-digit', month: 'short' })}</small>}</div>)}
+        <div className="gm-atlas-date-axis" style={{ width }} aria-label={`Datas por ${unit === 'DAY' ? 'dia' : unit === 'WEEK' ? 'semana' : 'mês'}; ordem dos eventos preservada`}>
+          {days.filter(day => day.x + day.width >= viewport.x - 120 && day.x <= viewport.x + viewport.width).map(day => <div key={day.x} className="gm-atlas-date" style={{ left: day.x, width: day.width }} title={`${new Date(day.start).toLocaleString()} — ${new Date(day.end).toLocaleString()}`}><span>{new Date(day.start).toLocaleDateString(undefined, unit === 'MONTH' ? { month: 'short', year: 'numeric' } : { day: '2-digit', month: 'short' })}</span>{day.end !== day.start && unit !== 'MONTH' && <small>até {new Date(day.end).toLocaleDateString(undefined, { day: '2-digit', month: 'short' })}</small>}</div>)}
         </div>
-        {annotations.filter(group => group.x >= viewport.x - 240 && group.x <= viewport.x + viewport.width).map(group => <details key={`${group.created}:${group.x}`} className={`gm-pr-annotation ${group.created ? 'is-created' : 'is-integrated'}`} style={{ left: group.x + 240, top: group.created ? 78 : 106 }}>
+        {inlineLabels.map(({ track, left, top, width, continued }) => <button className={`gm-atlas-inline-label ${width < 80 ? 'is-compact' : ''}`} key={track.id} data-track={track.id} style={{ left, top, width }} title={`${track.label}${track.references.length ? ` · referências atuais no trecho: ${track.references.map(ref => ref.name).join(', ')}` : ''}. Rótulo de contexto; não marca criação ou encerramento de branch.`} aria-label={`Trajetória ${track.label}${continued ? ', continuidade anterior' : ''}`} aria-pressed={track.id === focus || track.references.some(ref => ref.ref === focus)} onClick={() => focusTrajectory(track.ref ?? track.shas[0], track.shas[0])}>
+          {track.ref === base ? <Crown size={13} /> : <GitBranch size={13} />}<span>{continued ? '… ' : ''}{track.label}</span>{track.references.filter(ref => ref.kind !== 'HEAD').length > 1 && <small>+{track.references.filter(ref => ref.kind !== 'HEAD').length - 1}</small>}
+        </button>)}
+        {annotations.filter(group => group.x >= viewport.x - 120 && group.x <= viewport.x + viewport.width).map(group => <details key={`${group.created}:${group.x}`} className={`gm-pr-annotation ${group.created ? 'is-created' : 'is-integrated'}`} style={{ left: group.x, top: group.created ? 78 : 106 }}>
           <summary aria-label={`${group.created ? 'PR criado' : 'PR integrado'} #${group.events[0].prNumber}${group.events.length > 1 ? ` e mais ${group.events.length - 1}` : ''}`} title="Anotação temporal aproximada; não representa um commit nem comprova intervalo aberto">{group.created ? '+' : '↗'} #{group.events[0].prNumber}{group.events.length > 1 ? ` +${group.events.length - 1}` : ''}</summary>
           <div>{group.events.map(event => <button key={`${event.kind}:${event.prNumber}`} onClick={() => choosePr?.(event.prNumber)}>#{event.prNumber} · {new Date(event.at).toLocaleString()}{event.kind === 'PR_MERGED' && event.integrationMethod === 'MERGED_METHOD_UNKNOWN' ? ' · método não identificado' : ''}</button>)}</div>
         </details>)}
@@ -144,11 +204,11 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
           const track = trackById.get(point.track)!, tags = page?.tags.filter(tag => tag.sha === point.node.sha) ?? []
           const merge = point.node.parents.length > 1
           const head = core?.checkout.head === point.node.sha
-          return <button className={`gm-commit gm-atlas-node ${merge ? 'is-merge' : ''} ${head ? 'is-checkout' : ''} ${active(point.node.sha) ? '' : 'is-muted'}`} style={{ left: point.x + 240, top: y(point.lane) } as React.CSSProperties} key={point.node.sha} data-sha={point.node.sha} aria-label={`${head ? 'Você está aqui. ' : ''}${merge ? 'Merge topológico: ' : ''}${point.node.subject} · ${point.node.sha.slice(0, 8)}`} aria-pressed={point.node.sha === selected} onClick={() => select(point.node.sha)}>
+          return <button className={`gm-commit gm-atlas-node ${merge ? 'is-merge' : ''} ${head ? 'is-checkout' : ''} ${active(point.node.sha) ? '' : 'is-muted'}`} style={{ left: point.x, top: y(point.lane) } as React.CSSProperties} key={point.node.sha} data-sha={point.node.sha} aria-label={`${head ? 'Você está aqui. ' : ''}${merge ? 'Merge topológico: ' : ''}${point.node.subject} · ${point.node.sha.slice(0, 8)}`} aria-pressed={point.node.sha === selected} onClick={() => select(point.node.sha)}>
             <span className="gm-atlas-dot">{merge ? 'M' : null}</span>
             {head && <span className="gm-checkout-marker">Você está aqui</span>}
             {(point.node.sha === selected || tags.length > 0) && <span className="gm-node-caption">{tags.length > 0 && <Tag size={15} />}<span>{tags.length ? tags.map(tag => tag.name).join(', ') : point.node.subject}</span></span>}
-            <span className="gm-node-tooltip">{track.label}<br />{point.node.subject}<br />{point.node.author} · {new Date(point.node.timestamp).toLocaleString()}<br />{point.node.sha.slice(0, 12)}{page?.detachedHeads.filter(item => item.sha === point.node.sha).map((item, index) => <React.Fragment key={`${item.name}:${index}`}><br />HEAD detached observado · {item.name}</React.Fragment>)}</span>
+            <span className="gm-node-tooltip">{track.label}<br />{point.node.subject}<br />{point.node.author} · {new Date(point.node.timestamp).toLocaleString()}<br />{point.node.sha.slice(0, 12)}{track.references.filter(ref => ref.sha === point.node.sha).map(ref => <React.Fragment key={ref.ref}><br />Referência atual · {ref.name}</React.Fragment>)}{page?.detachedHeads.filter(item => item.sha === point.node.sha).map((item, index) => <React.Fragment key={`${item.name}:${index}`}><br />HEAD detached observado · {item.name}</React.Fragment>)}</span>
           </button>
         })}
       </div>

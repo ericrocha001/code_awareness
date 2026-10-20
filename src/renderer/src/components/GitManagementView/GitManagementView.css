@@ -128,15 +128,14 @@
 .gm-atlas-note { padding:10px 20px 4px; color:var(--text-secondary); font-size:11px; flex-shrink:0; }
 .gm-atlas-scroll { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
 .gm-atlas-surface { position:relative; min-height:100%; }
-.gm-atlas-labels { position:sticky; left:0; width:240px; z-index:4; pointer-events:none; background:var(--bg-primary); border-right:1px solid var(--border); }
-.gm-atlas-corner { position:sticky; top:0; height:66px; display:flex; align-items:center; padding:12px; font-size:12px; color:var(--text-secondary); background:var(--bg-primary); border-bottom:1px solid var(--border); z-index:5; }
-.gm-atlas-lane-label { position:absolute; left:12px; width:216px; height:76px; display:flex; flex-direction:column; gap:6px; }
-.gm-atlas-lane-label small { font-size:12px; color:var(--text-secondary); padding-left:12px; }
-.gm-atlas-lane-label button { pointer-events:auto; text-align:left; display:flex; align-items:center; gap:10px; width:100%; padding:9px 10px; font-size:12px; font-weight:600; border:1px solid var(--border); border-radius:10px; background:var(--bg-secondary); color:var(--text-primary); }
-.gm-atlas-lane-label button svg { flex-shrink:0; color:var(--text-secondary); }
-.gm-atlas-lane-label button span { overflow:hidden; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; white-space:normal; overflow-wrap:anywhere; line-height:18px; }
-.gm-atlas-lines { position:absolute; top:0; left:240px; pointer-events:none; }
-.gm-atlas-date-axis { position:sticky; top:0; height:66px; margin-left:240px; z-index:3; background:var(--bg-primary); border-bottom:1px solid var(--border); }
+.gm-view .gm-atlas-inline-label { position:absolute; z-index:2; height:24px; padding:2px 6px; display:flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:7px; background:var(--bg-secondary); color:var(--text-secondary); font-size:11px; text-align:left; }
+.gm-atlas-inline-label > svg { flex-shrink:0; }
+.gm-atlas-inline-label > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.gm-atlas-inline-label small { margin-left:auto; flex-shrink:0; }
+.gm-atlas-inline-label.is-compact > :is(svg,small) { display:none; }
+.gm-view .gm-atlas-inline-label[aria-pressed=true] { color:var(--text-primary); border-color:var(--accent); background:var(--selected-bg); }
+.gm-atlas-lines { position:absolute; top:0; left:0; pointer-events:none; }
+.gm-atlas-date-axis { position:sticky; top:0; height:66px; z-index:3; background:var(--bg-primary); border-bottom:1px solid var(--border); }
 .gm-atlas-date { position:absolute; top:0; height:66px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:0 3px; font-size:11px; color:var(--text-secondary); border-left:1px solid var(--border); overflow:hidden; white-space:nowrap; }
 .gm-atlas-date small { font-size:11px; }
 .gm-branch-ref { display:block; color:var(--text-secondary); font-size:11px; overflow-wrap:anywhere; }
