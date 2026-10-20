@@ -7,28 +7,35 @@ import { atlasWindowPage, presentGitAtlas } from './atlas-presentation'
 
 interface AtlasLabelBox { left: number; top: number; width: number; height: number }
 
-function connectionGeometry(px: number, py: number, cx: number, cy: number, secondary: boolean) {
-  const start = px + 7, end = cx - (secondary ? 15 : 12)
-  const room = Math.max(1, end - start), approach = Math.min(18, room / 3)
-  const transition = Math.min(room - approach, Math.max(32, Math.abs(cy - py) * .5))
-  const turn = end - approach - transition
-  const xs = secondary ? [turn, turn + transition / 2, end - approach - transition / 2, end - approach] : [start, start + room / 2, end - room / 2, end]
-  const d = `${secondary ? `M ${start} ${py} L ${turn} ${py}` : `M ${start} ${py}`} C ${xs[1]} ${py}, ${xs[2]} ${cy}, ${xs[3]} ${cy}${secondary ? ` L ${end} ${cy}` : ''}`
+function connectionGeometry(px: number, py: number, cx: number, cy: number, secondary: boolean, contribution = 0, contributions = 1) {
+  const direction = cx >= px ? 1 : -1
+  const side = py === cy ? contribution % 2 === 0 ? -1 : 1 : Math.sign(py - cy)
+  const angle = Math.PI / 6 + Math.PI / 6 * contribution / Math.max(1, contributions - 1)
+  const start = { x: px + direction * 7, y: py }
+  const end = { x: cx - direction * (secondary ? Math.cos(angle) * 20 : 12), y: cy + (secondary ? side * Math.sin(angle) * 20 : 0) }
+  const room = Math.max(1, Math.abs(end.x - start.x)), approach = Math.min(18, room / 3)
+  const gate = { x: end.x - direction * Math.cos(angle) * approach, y: end.y + side * Math.sin(angle) * approach }
+  const transition = secondary ? Math.min(room - approach, Math.max(32, Math.abs(gate.y - py) * .5)) : Math.min(room * .65, Math.max(28, Math.abs(cy - py) * .5))
+  const curveStart = secondary ? { x: gate.x - direction * transition, y: py } : start
+  const curveEnd = secondary ? gate : { x: start.x + direction * transition, y: cy }
+  const xs = [curveStart.x, (curveStart.x + curveEnd.x) / 2, (curveStart.x + curveEnd.x) / 2, curveEnd.x]
+  const d = `M ${start.x} ${start.y}${secondary ? ` L ${curveStart.x} ${curveStart.y}` : ''} C ${xs[1]} ${curveStart.y}, ${xs[2]} ${curveEnd.y}, ${curveEnd.x} ${curveEnd.y} L ${end.x} ${end.y}`
   const crosses = (box: AtlasLabelBox) => {
     const top = box.top - 4, bottom = box.top + box.height + 4
-    if (bottom < Math.min(py, cy) || top > Math.max(py, cy) || box.left + box.width < start || box.left > end) return false
-    if (py === cy) return true
+    const left = box.left - 4, right = box.left + box.width + 4
+    const lineCrosses = (a: { x: number; y: number }, b: { x: number; y: number }) => right >= Math.min(a.x, b.x) && left <= Math.max(a.x, b.x) && bottom >= Math.min(a.y, b.y) && top <= Math.max(a.y, b.y)
+    if (lineCrosses(start, curveStart) || lineCrosses(curveEnd, end)) return true
+    if (bottom < Math.min(curveStart.y, curveEnd.y) || top > Math.max(curveStart.y, curveEnd.y) || right < Math.min(xs[0], xs[3]) || left > Math.max(xs[0], xs[3])) return false
+    if (curveStart.y === curveEnd.y) return true
     const parameter = (target: number) => {
-      const ratio = Math.max(0, Math.min(1, (target - py) / (cy - py)))
+      const ratio = Math.max(0, Math.min(1, (target - curveStart.y) / (curveEnd.y - curveStart.y)))
       let low = 0, high = 1
       for (let step = 0; step < 12; step++) { const t = (low + high) / 2; if (t * t * (3 - 2 * t) < ratio) low = t; else high = t }
       return (low + high) / 2
     }
     const xAt = (t: number) => (1 - t) ** 3 * xs[0] + 3 * (1 - t) ** 2 * t * xs[1] + 3 * (1 - t) * t * t * xs[2] + t ** 3 * xs[3]
     const limits = [xAt(parameter(top)), xAt(parameter(bottom))]
-    if (py >= top && py <= bottom) limits.push(start)
-    if (cy >= top && cy <= bottom) limits.push(end)
-    return box.left <= Math.max(...limits) + 4 && box.left + box.width >= Math.min(...limits) - 4
+    return left <= Math.max(...limits) && right >= Math.min(...limits)
   }
   return { d, crosses }
 }
@@ -72,11 +79,11 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
   const active = (sha: string) => mode === 'Panorama' || (mode === 'Foco' ? path.has(sha) : exclusive.has(sha)) || selected === sha
   const connections = layout.edges.flatMap(edge => {
     const child = pointBySha.get(edge.child), parent = pointBySha.get(edge.parent)
-    if (!child || !parent || !allowed.has(child.track) || !allowed.has(parent.track) || child.x < viewport.x - 120 || parent.x > viewport.x + viewport.width) return []
+    if (!child || !parent || !allowed.has(child.track) || !allowed.has(parent.track) || Math.max(child.x, parent.x) < viewport.x - 120 || Math.min(child.x, parent.x) > viewport.x + viewport.width) return []
     const cy = y(child.lane), py = y(parent.lane)
     if (Math.max(cy, py) < viewport.y - 100 || Math.min(cy, py) > viewport.y + viewport.height + 100) return []
     const mergeContext: AtlasMergeContext = child.mergeContext ?? 'UNKNOWN'
-    return [{ edge, mergeContext, ...connectionGeometry(parent.x, py, child.x, cy, edge.secondary) }]
+    return [{ edge, mergeContext, ...connectionGeometry(parent.x, py, child.x, cy, edge.secondary, Math.max(0, child.node.parents.indexOf(edge.parent) - 1), child.node.parents.length - 1) }]
   })
   const overlaps = (a: AtlasLabelBox, b: AtlasLabelBox) => a.left < b.left + b.width + 6 && a.left + a.width + 6 > b.left && a.top < b.top + b.height + 4 && a.top + a.height + 4 > b.top
   const protectedBoxes: AtlasLabelBox[] = [{ left: viewport.x, top: viewport.y, width: viewport.width, height: 66 }, { left: viewport.x, top: 0, width: viewport.width, height: 136 }, ...visible.flatMap(point => {
