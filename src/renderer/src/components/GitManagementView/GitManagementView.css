@@ -128,9 +128,15 @@
 .gm-atlas-note { padding:10px 20px 4px; color:var(--text-secondary); font-size:11px; flex-shrink:0; }
 .gm-atlas-scroll { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
 .gm-atlas-surface { position:relative; min-height:100%; }
-.gm-view .gm-atlas-inline-label { position:absolute; z-index:2; padding:4px 6px; display:flex; align-items:flex-start; gap:5px; border:1px solid var(--border); border-radius:7px; background:var(--bg-secondary); color:var(--text-secondary); font:11px/18px var(--font-mono); text-align:left; box-sizing:border-box; }
+.gm-atlas-label-group { position:absolute; z-index:2; display:flex; align-items:stretch; gap:4px; }
+.gm-atlas-label-group:has(details[open]),.gm-atlas-label-group:focus-within { z-index:6; }
+.gm-view .gm-atlas-inline-label { padding:4px 6px; display:flex; align-items:center; gap:5px; flex:1; min-width:0; border:1px solid var(--border); border-radius:7px; background:var(--bg-secondary); color:var(--text-secondary); font:11px/18px var(--font-mono); text-align:left; box-sizing:border-box; }
 .gm-atlas-inline-label > svg { flex-shrink:0; }
-.gm-atlas-inline-label > span { white-space:normal; overflow-wrap:anywhere; min-width:0; flex:1; }
+.gm-atlas-inline-label > span { white-space:nowrap; min-width:0; flex:1; }
+.gm-atlas-ref-aliases { flex-shrink:0; align-self:center; font:11px/18px var(--font-mono); }
+.gm-atlas-ref-aliases > summary { cursor:pointer; padding:4px 6px; border:1px solid var(--border); border-radius:7px; background:var(--bg-secondary); color:var(--text-secondary); }
+.gm-atlas-ref-aliases > div { position:absolute; top:34px; right:0; display:flex; flex-direction:column; gap:4px; width:max-content; max-width:min(640px,80vw); max-height:240px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:8px; background:var(--bg-secondary); box-shadow:0 8px 20px rgba(0,0,0,.25); }
+.gm-atlas-ref-aliases button { text-align:left; white-space:normal; overflow-wrap:anywhere; }
 .gm-atlas-inline-label small { margin-left:auto; flex-shrink:0; }
 .gm-view .gm-atlas-inline-label[aria-pressed=true] { color:var(--text-primary); border-color:var(--accent); background:var(--selected-bg); }
 .gm-atlas-lines { position:absolute; top:0; left:0; pointer-events:none; }
