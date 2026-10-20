@@ -1127,6 +1127,13 @@ export class GitOperationsService {
   }
 
   clearAtlasCache() { this.atlasReader?.invalidate(true) }
+  async getAtlasCheckoutState() {
+    await this.repository()
+    const [head, branch, operation] = await Promise.all([
+      this.git.getCurrentCommitHash(this.repoRoot), this.git.getCurrentBranch(this.repoRoot), this.git.getGitOperation(this.repoRoot)
+    ])
+    return { head, branch, operation }
+  }
   private atlasPullRequests?: (inventory: BranchInventory) => Promise<BranchPullRequests>
 
   bindAtlasPullRequests(reader: (inventory: BranchInventory) => Promise<BranchPullRequests>) {
@@ -1139,7 +1146,9 @@ export class GitOperationsService {
     const identity = this.coordinationIdentity
     if (!identity || !this.worktrees || !identity.isActive()) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     const page = await this.atlas().history(request)
-    const trees = await this.worktrees.discover({ reuseValidatedDirectories: true })
+    const trees = request.scope?.kind === 'CHECKOUT'
+      ? { repositoryId: identity.repositoryId, worktrees: [await this.worktrees.current()] }
+      : await this.worktrees.discover({ reuseValidatedDirectories: true })
     const normalize = (path: string) => process.platform === 'win32' ? realpathSync(path).toLowerCase() : realpathSync(path)
     const selected = trees.worktrees.find(tree => !tree.missing && !tree.prunable && normalize(tree.path) === normalize(this.repoRoot))
     const selectedHead = selected?.head && !/^0+$/.test(selected.head) ? selected.head : null
@@ -1153,13 +1162,13 @@ export class GitOperationsService {
       relation: 'UNKNOWN', ahead: null, behind: null, comparison: null
     }
     if (request.comparisonRef && page.head) {
-      const comparison = await this.atlas().compare({ snapshot: page.snapshot, left: 'HEAD', right: request.comparisonRef === 'HEAD' ? page.head : request.comparisonRef, contextKey: request.contextKey })
+      const comparison = await this.atlas().compare({ snapshot: page.snapshot, left: 'HEAD', right: request.comparisonRef === 'HEAD' ? page.head : request.comparisonRef, contextKey: request.contextKey, scope: request.scope })
       checkout.comparison = comparison
       checkout.ahead = comparison.leftOnly; checkout.behind = comparison.rightOnly
       checkout.relation = comparison.left.sha === comparison.right.sha ? 'EQUAL' : !comparison.mergeBases.length ? 'UNRELATED' :
         comparison.leftOnly === 0 ? 'BEHIND_ONLY' : comparison.rightOnly === 0 ? 'AHEAD_ONLY' : 'DIVERGED'
     }
-    await this.atlas().assertSnapshot(page.snapshot, request.contextKey)
+    await this.atlas().assertSnapshot(page.snapshot, request.contextKey, request.scope)
     if (!identity.isActive() || trees.repositoryId !== identity.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
     const observedAt = new Date().toISOString()
     return {
@@ -1185,18 +1194,18 @@ export class GitOperationsService {
     if (!this.atlasPullRequests) return result
     const inventory = await this.getBranchInventory()
     if (inventory.repositoryId !== core.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
-    await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey)
+    await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey, request.scope)
     let branches: BranchPullRequests
     try { branches = await this.atlasPullRequests(inventory) }
     catch {
-      await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey)
+      await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey, request.scope)
       if (!this.coordinationIdentity?.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
       return result
     }
     if (!this.coordinationIdentity?.isActive() || branches.repositoryId !== core.repositoryId || branches.catalog.repositoryId !== core.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
     const after = await this.getBranchInventory()
     if (after.revision !== inventory.revision) fail('GIT_STATE_CHANGED')
-    await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey)
+    await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey, request.scope)
     if (!this.coordinationIdentity?.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
     const catalog = branches.catalog
     if (catalog.items.length > 1000 || branches.relations.length > 5000 || branches.received.length > 5000) fail('ATLAS_REFERENCE_LIMIT')
@@ -1229,7 +1238,7 @@ export class GitOperationsService {
     await this.repository()
     return this.atlas().history(request)
   }
-  async compareAtlas(request: { snapshot: string; left: string; right: string; contextKey?: string }) {
+  async compareAtlas(request: { snapshot: string; left: string; right: string; contextKey?: string; scope?: GitAtlasQuery['scope'] }) {
     await this.repository()
     return this.atlas().compare(request)
   }

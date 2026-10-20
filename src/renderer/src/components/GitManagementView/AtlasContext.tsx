@@ -17,7 +17,7 @@ export function AtlasCheckout({ core, context, windowDays, base, inspect }: {
     setCheckout(null); setError(''); setLoading(false)
     if (!core || !reference) return
     setLoading(true)
-    window.codeAwareness.getGitAtlasCore({ context, window: windowDays, limit: 1, comparisonRef: reference }).then(result => {
+    window.codeAwareness.getGitAtlasCore({ context, window: windowDays, limit: 1, comparisonRef: reference, scope: core.git.scope }).then(result => {
       if (!current) return
       if (result.success && result.data.repositoryId === core.repositoryId && result.data.gitSnapshot === core.gitSnapshot && result.data.worktreeId === core.worktreeId && result.data.worktreeGeneration === core.worktreeGeneration) setCheckout(result.data.checkout)
       else setError(result.success ? 'A revisão mudou; atualize o Atlas.' : result.code)

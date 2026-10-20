@@ -3,7 +3,7 @@ import { GitBranch, RefreshCw, Settings, Hexagon, X } from 'lucide-react'
 import type { CommitNavigationIntent } from '../../../../shared/types/worktree-integration-evidence-types'
 import type { ActiveProjectState } from '../../../../shared/types/active-project-types'
 import type { GitOverview } from '../../../../shared/types/git-management-types'
-import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
+import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow, GitAtlasScope } from '../../../../shared/types/git-atlas-types'
 import type { GitAtlasCoreEvidence, GitAtlasPrEvidence } from '../../../../shared/types/git-atlas-evidence-types'
 import { GitInspector, type GitSelection } from './GitInspector'
 import { GitActions } from './GitActions'
@@ -22,7 +22,9 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const [prRequested, setPrRequested] = useState(false)
   const [selection, setSelection] = useState<GitSelection>(null)
   const [overview, setOverview] = useState<GitOverview | null>(null)
-  const [windowDays, setWindowDays] = useState<GitAtlasWindow>(90)
+  const [windowDays, setWindowDays] = useState<GitAtlasWindow>(7)
+  const [scope, setScope] = useState<GitAtlasScope>({ kind: 'CHECKOUT', anchor: 'AUTO' })
+  const [operation, setOperation] = useState<string | null>(null)
   const [mode, setMode] = useState('Panorama')
   const [base, setBase] = useState('')
   const [focus, setFocus] = useState('')
@@ -37,6 +39,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const [overviewError, setOverviewError] = useState('')
   const [overviewLoading, setOverviewLoading] = useState(false)
   const paging = useRef<string | null>(null)
+  const loadedPage = useRef<GitAtlasPage | null>(null)
   const [notice, setNotice] = useState('')
   const returnFocus = useRef<HTMLElement | null>(null)
   const inspectorFocus = useRef<HTMLElement>(null)
@@ -48,23 +51,26 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     const request = ++generation.current
     setLoading(true); setError('')
     try {
-      const result = await window.codeAwareness.getGitAtlasCore({ context, window: windowDays, limit: 100, cursor, ...(refresh ? { refresh: true } : {}) })
+      const result = await window.codeAwareness.getGitAtlasCore({ context, window: windowDays, scope, limit: 100, cursor, ...(refresh ? { refresh: true } : {}) })
       if (generation.current !== request) return
       if (!result.success) { if (cursor && result.code === 'GIT_STATE_CHANGED') { setHistory(null); setCore(null); setEnrichment(null); setNotice('O histórico mudou. A revisão atual está sendo carregada.'); paging.current = null; void load(); return } setError(result.code); return }
       setNotice('')
       const page = result.data.git
+      if (cursor && (!loadedPage.current || loadedPage.current.snapshot !== page.snapshot || loadedPage.current.queriedAt !== page.queriedAt || loadedPage.current.anchorAt !== page.anchorAt)) { setError('GIT_STATE_CHANGED'); return }
+      loadedPage.current = page
       if (!cursor) { setCore(result.data); setEnrichment(null); setSelectedPr(null) }
       setHistory(previous => {
         if (!cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt) return previous
-        return cursor && previous?.snapshot === page.snapshot
+        return cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt && previous.anchorAt === page.anchorAt
           ? { ...page, nodes: [...new Map([...previous.nodes, ...page.nodes].map(node => [node.sha, node])).values()] }
           : page
       })
     } catch { if (generation.current === request) setError('Falha ao carregar histórico. Atualize para tentar novamente.') }
     finally { if (generation.current === request) { setLoading(false); paging.current = null } }
-  }, [context, state.project?.id, windowDays])
+  }, [context, state.project?.id, windowDays, scope])
   useEffect(() => {
     setHistory(null); setCore(null); setEnrichment(null); setPrRequested(false); setSelectedPr(null); setPrState('NOT_REQUESTED'); setOverview(null); setNotice(''); setSelection(null); setBase(''); setFocus(''); setComparison(null); setDrawer(false)
+    setWindowDays(7); setScope(previous => previous.kind === 'CHECKOUT' && previous.anchor === 'AUTO' && !previous.baseRef && !previous.focusRef ? previous : { kind: 'CHECKOUT', anchor: 'AUTO' }); setOperation(null)
   }, [context])
   const readOverview = useCallback(async () => {
     if (!context.projectId) { setOverview(null); setOverviewLoading(false); setOverviewError(''); return }
@@ -79,17 +85,32 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     finally { if (overviewGeneration.current === request) setOverviewLoading(false) }
   }, [context])
   useEffect(() => {
+    loadedPage.current = null
     setHistory(null); setCore(null); setEnrichment(null); void load()
-    const focusWindow = () => void load()
-    window.addEventListener('focus', focusWindow)
-    return () => { generation.current++; paging.current = null; window.removeEventListener('focus', focusWindow) }
+    return () => { generation.current++; paging.current = null }
   }, [load])
+  useEffect(() => {
+    let current = true, pending = false
+    const focusWindow = async () => {
+      if (!core || pending) return
+      pending = true
+      try {
+        const result = await window.codeAwareness.getGitAtlasCheckoutState(context)
+        if (!current || !result.success) return
+        setOperation(result.data.operation)
+        if (result.data.head !== core.checkout.head || result.data.branch !== core.git.branch) void load()
+      } finally { pending = false }
+    }
+    const listener = () => { void focusWindow().catch(() => {}) }
+    window.addEventListener('focus', listener)
+    return () => { current = false; window.removeEventListener('focus', listener) }
+  }, [core, context, load])
   useEffect(() => {
     let current = true
     setEnrichment(null)
     if (!core || !prRequested) { setPrState('NOT_REQUESTED'); return }
     setPrState('LOADING')
-    window.codeAwareness.getGitAtlasPrEvidence({ context, window: windowDays, limit: 100, snapshot: core.gitSnapshot }).then(result => {
+    window.codeAwareness.getGitAtlasPrEvidence({ context, window: windowDays, scope: core.git.scope, limit: 100, snapshot: core.gitSnapshot }).then(result => {
       if (!current) return
       if (result.success && result.data.repositoryId === core.repositoryId && result.data.gitSnapshot === core.gitSnapshot && result.data.worktreeId === core.worktreeId && result.data.worktreeGeneration === core.worktreeGeneration) {
         setEnrichment(result.data); setPrState(result.data.coverage === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'READY')
@@ -97,12 +118,14 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     }).catch(() => { if (current) setPrState('UNAVAILABLE') })
     return () => { current = false }
   }, [core, context, windowDays, prRequested])
+  const actionsActive = drawer && !selection && selectedPr === null
   useEffect(() => {
+    if (!actionsActive) return
     void readOverview()
     const focusWindow = () => void readOverview()
     window.addEventListener('focus', focusWindow)
     return () => { overviewGeneration.current++; window.removeEventListener('focus', focusWindow) }
-  }, [readOverview])
+  }, [readOverview, actionsActive])
   useEffect(() => {
     if (!history) return
     setBase(previous => history.refs.some(ref => ref.ref === previous) ? previous : history.primaryRef ?? '')
@@ -117,7 +140,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     let current = true
     setComparison(null); setCompareError('')
     if (mode !== 'Panorama' && history && base && focus && base !== focus) {
-      window.codeAwareness.compareGitAtlas({ context, snapshot: history.snapshot, left: base, right: focus }).then(result => {
+      window.codeAwareness.compareGitAtlas({ context, snapshot: history.snapshot, left: base, right: focus, scope: history.scope }).then(result => {
         if (!current) return
         if (result.success) setComparison(result.data)
         else setCompareError(result.code)
@@ -145,7 +168,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     select(commitIntent.commitSha)
     onIntentConsumed?.(commitIntent.requestId)
   }, [commitIntent?.requestId, context])
-  const refresh = async () => { await Promise.all([load(undefined, true), readOverview()]) }
+  const refresh = async () => { await Promise.all([load(undefined, true), ...(actionsActive ? [readOverview()] : [])]) }
   const refs = history?.refs.filter(ref => ref.kind !== 'HEAD') ?? []
   const selected = selection?.kind === 'COMMIT' ? selection.sha : selection?.ref.sha
   const mergeContexts = useMemo(() => classifyAtlasMerges(atlasWindowPage(history, windowDays), base), [history, windowDays, base])
@@ -154,7 +177,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   return <section className="gm-view" aria-label="Git Management">
     <header className="gm-header">
       <span className="gm-feature-icon"><GitBranch size={32} /></span>
-      <div><h1>Git Management</h1><p>{state.project.name} <span>/ {history?.branch ?? (history?.head ? 'HEAD detached' : 'sem commits')} · {history?.nodes.length ?? 0} commits {windowDays === 'ALL' ? 'no trecho carregado' : `(últimos ${windowDays} dias)`}</span></p></div>
+      <div><h1>Git Management</h1><p>{state.project.name} <span>/ {history?.branch ?? (history?.head ? 'HEAD detached' : 'sem commits')} · {history?.nodes.length ?? 0} commits {windowDays === 'ALL' ? 'no trecho carregado' : history?.anchorKind === 'CHECKOUT' ? `${windowDays} dias no checkout (histórico)` : `(últimos ${windowDays} dias)`}</span></p></div>
       <div className="gm-toolbar-actions"><button disabled={loading} onClick={() => void refresh()} aria-label="Atualizar Git"><RefreshCw size={17} />Atualizar</button>
         <button onClick={() => { setSelectedPr(null); setSelection(null); setDrawer(true) }}><Settings size={18} />Alterações</button></div>
     </header>
@@ -162,10 +185,13 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
       <div className="gm-segmented" role="group" aria-label="Janela temporal">{([7, 15, 30, 60, 90, 'ALL'] as const).map(value => <button key={value} aria-pressed={windowDays === value} onClick={() => setWindowDays(value)}>{value === 'ALL' ? 'Tudo' : `${value}d`}</button>)}</div>
       <div className="gm-segmented" role="group" aria-label="Modo do Atlas">{['Panorama', 'Foco', 'Comparar'].map(value => <button key={value} aria-pressed={mode === value} onClick={() => setMode(value)}>{value}</button>)}</div>
       <label>{mode === 'Comparar' ? 'Comparar com' : 'Branch em foco'}<select aria-label="Referência em foco" value={focus} onChange={event => { setFocus(event.target.value); const ref = refs.find(ref => ref.ref === event.target.value); if (ref) { setSelectedPr(null); setDrawer(true); setMode(mode === 'Panorama' ? 'Foco' : mode); setSelection({ kind: 'BRANCH', ref }) } }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}{/^[a-f0-9]{40,64}$/.test(focus) && <option value={focus}>Trajetória · {focus.slice(0, 8)}</option>}</select></label>
-      {mode !== 'Panorama' && <label>Base<select aria-label="Referência base" value={base} onChange={event => setBase(event.target.value)}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>}
+      {mode !== 'Panorama' && <label>Base<select aria-label="Referência base" value={base} onChange={event => { setBase(event.target.value); setScope(previous => ({ ...previous, baseRef: event.target.value || undefined })) }}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>}
+      {scope.kind === 'CHECKOUT' && <button onClick={() => setScope(previous => ({ ...previous, kind: 'ALL_REFS' }))}>Explorar outras referências</button>}
+      {history?.anchorKind === 'CHECKOUT' && <button onClick={() => setScope(previous => ({ ...previous, anchor: 'PRESENT' }))}>Ir ao presente</button>}
     </div>
     <AtlasCheckout core={core} context={context} windowDays={windowDays} base={base} inspect={select} />
     {notice && <div className="gm-atlas-note" role="status">{notice}</div>}
+    {operation && <div className="gm-atlas-note" role="status">Operação Git em andamento: {operation}. Abra Alterações para consultar as ações disponíveis.</div>}
     {error && <div className="gm-error" role="alert">{error === 'NOT_GIT_REPOSITORY' ? 'Este projeto não é um repositório Git.' : error === 'GIT_STATE_CHANGED' ? 'Histórico desatualizado. Atualize para carregar um novo snapshot.' : error}</div>}
     {mode !== 'Panorama' && <div className="gm-comparison" role="status">
       {!base || !focus ? 'Escolha uma base e uma referência para revelar a relação Git.' : base === focus ? 'A base e o alvo apontam para a mesma referência.' : compareError ? `Relação indisponível: ${compareError}` : !comparison ? 'Verificando relação Git…' : !comparison.mergeBases.length ? 'As referências não possuem ancestral comum.' : <>
@@ -185,10 +211,9 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
           {prState === 'LOADING' && <span role="status">Consultando catálogo…</span>}{prState === 'UNAVAILABLE' && <span role="status">GitHub indisponível; mapa local preservado.</span>}{enrichment?.coverage === 'PARTIAL' && <span>PRs: cobertura parcial</span>}
           {enrichment && <details><summary>PRs do repositório ({enrichment.pullRequests.length}{enrichment.coverage !== 'COMPLETE' ? ', parcial' : ''})</summary><div className="gm-pr-catalog">{enrichment.pullRequests.map(pr => <button key={pr.record.id} onClick={() => choosePr(pr.record.number)}>#{pr.record.number} · {pr.record.title}{enrichment.branches?.orphaned.some(item => item.id === pr.record.id) ? ' · sem vínculo confirmado à origem local' : ''}</button>)}</div></details>}
         </div>
-        {history?.detachedCoverage === 'PARTIAL' && <p className="gm-atlas-note" role="status">Alguns HEADs de worktrees não puderam ser verificados.</p>}
+        {history?.referenceCoverage === 'SELECTED' ? <p className="gm-atlas-note" role="status">Contexto do checkout e da base; outras referências e worktrees ainda não consultadas.</p> : history?.detachedCoverage === 'PARTIAL' && <p className="gm-atlas-note" role="status">Alguns HEADs de worktrees não puderam ser verificados.</p>}
         <GitAtlasCanvas key={`${context.projectId}:${context.revision}:${windowDays}`} page={history} core={core} enrichment={enrichment} choosePr={choosePr} windowDays={windowDays} base={base} focus={focus} mode={mode} comparison={comparison} selected={selected} select={select} loading={loading} requestMore={history?.nextCursor && !error ? () => void load(history.nextCursor!) : undefined} focusTrajectory={(ref, sha) => { returnFocus.current = document.activeElement as HTMLElement; setSelectedPr(null); setDrawer(true); setFocus(ref); setMode('Foco'); const branch = history?.refs.find(item => item.ref === ref); setSelection(branch ? { kind: 'BRANCH', ref: branch } : { kind: 'COMMIT', sha }) }} />
         {!history?.nodes.length && <p className="gm-placeholder">{loading ? 'Carregando histórico…' : error ? 'Histórico indisponível.' : 'Nenhum commit no período selecionado.'}</p>}
-        {history?.nextCursor && <button className="gm-load-more" disabled={loading || !!error} onClick={() => void load(history.nextCursor!)}>Carregar anteriores</button>}
       </div>
       <aside ref={inspectorFocus} tabIndex={-1} className={`gm-inspector ${drawer ? 'is-open' : ''}`} aria-label="Detalhes Git" aria-busy={overviewLoading}>
         <div className="gm-pane-heading gm-inspector-heading"><Hexagon size={18} /><strong>{selectedPr !== null ? `PR #${selectedPr}` : selection?.kind === 'COMMIT' ? 'Commit selecionado' : selection?.kind === 'BRANCH' ? 'Branch selecionada' : 'Alterações locais'}</strong><button className="gm-close-details" aria-label="Fechar detalhes" onClick={() => { setDrawer(false); setSelectedPr(null); setSelection(null); returnFocus.current?.focus() }}><X size={18} /></button></div>
@@ -196,7 +221,8 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
           {selectedPr === null && selectedMergeContext && <p className="gm-comparison-note" role="status">{atlasMergeDescriptions[selectedMergeContext]}</p>}
           {selectedPr === null && (overviewError && !overview ? <p role="alert">Estado Git indisponível. <button onClick={() => void readOverview()}>Tentar novamente</button></p> : <GitInspector context={context} overview={overview} selection={selection} />)}
           {(selection || selectedPr !== null) && <AtlasPullRequests evidence={enrichment} selection={selection} selectedPr={selectedPr} choose={choosePr} />}
-          {overview && <div hidden={!!selection || selectedPr !== null}><GitActions context={context} overview={overview} history={history} refresh={refresh} blocked={overviewLoading || !!overviewError} /></div>}
+          {actionsActive && !overview && overviewLoading && <p role="status">Consultando alterações locais…</p>}
+          {actionsActive && overview && <GitActions context={context} overview={overview} history={history} refresh={refresh} blocked={overviewLoading || !!overviewError} />}
           <details className="gm-sha-lookup"><summary>Inspecionar por SHA</summary><form onSubmit={event => { event.preventDefault(); if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())) select(shaInput.trim()) }}><input aria-label="SHA completo" value={shaInput} onChange={event => setShaInput(event.target.value)} placeholder="SHA completo do commit" /><button disabled={!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())}>Inspecionar</button></form></details>
         </div>
       </aside>

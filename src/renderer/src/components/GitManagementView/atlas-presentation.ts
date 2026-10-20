@@ -4,7 +4,7 @@ import type { AtlasLayout } from './atlas-layout'
 const dayMs = 86400000
 export function atlasWindowPage(page: GitAtlasPage | null, window: GitAtlasWindow): GitAtlasPage | null {
   if (!page || window === 'ALL') return page
-  const end = Date.parse(page.queriedAt), start = end - window * dayMs
+  const end = Date.parse(page.anchorAt ?? page.queriedAt), start = end - window * dayMs
   const nodes = page.nodes.filter(node => {
     const timestamp = Date.parse(node.timestamp)
     return timestamp >= start && timestamp <= end
@@ -14,7 +14,7 @@ export function atlasWindowPage(page: GitAtlasPage | null, window: GitAtlasWindo
 }
 
 export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, window: GitAtlasWindow, minimumWidth = 0) {
-  const end = Date.parse(page?.queriedAt ?? new Date().toISOString())
+  const end = Date.parse(page?.anchorAt ?? page?.queriedAt ?? new Date().toISOString())
   const earliest = layout.points.reduce((time, point) => Math.min(time, Date.parse(point.node.timestamp)), end)
   const span = window === 'ALL' ? (end - earliest) / dayMs : window
   const unit = span <= 15 ? 'DAY' : span <= 90 ? 'WEEK' : 'MONTH'

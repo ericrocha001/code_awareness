@@ -710,8 +710,21 @@ export class GitService implements FileListingPort {
     return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(upstream:short)', 'refs/heads/', 'refs/remotes/'], root)
   }
 
-  async getAtlasReferences(root: string): Promise<string> {
-    return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(*objectname)%00%(upstream:short)%00%(objecttype)%00%(*objecttype)', 'refs/heads/', 'refs/remotes/', 'refs/tags/'], root, { maxOutputBytes: 256000, env: this.localReadEnvironment() })
+  async getAtlasReferences(root: string, selected?: string[]): Promise<string> {
+    const raw = await this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(*objectname)%00%(upstream:short)%00%(objecttype)%00%(*objecttype)', ...(selected ?? ['refs/heads/', 'refs/remotes/', 'refs/tags/'])], root, { maxOutputBytes: 256000, env: this.localReadEnvironment() })
+    return selected ? raw.split('\n').filter(line => selected.includes(line.split('\0')[0])).join('\n') : raw
+  }
+
+  async getAtlasSelectedBase(root: string): Promise<string | null> {
+    const configured = (await this.runGit(['config', '--get', 'code-awareness.primaryBranch'], root, { allowExitOne: true, env: this.localReadEnvironment() })).trim()
+    if (configured) return configured.startsWith('refs/') ? configured : `refs/heads/${configured}`
+    const heads = await this.runGit(['for-each-ref', '--format=%(symref)', 'refs/remotes/*/HEAD'], root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })
+    const defaults = [...new Set(heads.trim().split('\n').filter(Boolean))]
+    return defaults.length === 1 ? defaults[0] : null
+  }
+
+  async getWorktreeRoot(root: string): Promise<string> {
+    return (await this.runGit(['rev-parse', '--path-format=absolute', '--show-toplevel'], root, { env: this.localReadEnvironment() })).trim()
   }
 
   async getAtlasPrimaryRef(root: string, references?: string): Promise<string | null> {
@@ -722,9 +735,9 @@ export class GitService implements FileListingPort {
     return defaults.length === 1 ? defaults[0] : null
   }
 
-  async getAtlasHistory(root: string, tips: string[], offset: number, limit: number, since: string | null): Promise<string> {
+  async getAtlasHistory(root: string, tips: string[], offset: number, limit: number, since: string | null, until?: string): Promise<string> {
     if (!tips.length) return ''
-    return this.runGit(['log', '--date-order', `--skip=${offset}`, `--max-count=${limit}`, ...(since ? [`--since-as-filter=${since}`] : []), '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
+    return this.runGit(['log', '--date-order', `--skip=${offset}`, `--max-count=${limit}`, ...(since ? [`--since-as-filter=${since}`] : []), ...(until ? [`--until=${until}`] : []), '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
   }
 
   async compareAtlasRefs(root: string, left: string, right: string) {

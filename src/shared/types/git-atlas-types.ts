@@ -1,14 +1,25 @@
 import type { GitHistoryPage, GitManagementContext } from './git-management-types'
 
 export type GitAtlasWindow = 7 | 15 | 30 | 60 | 90 | 'ALL'
+export interface GitAtlasScope {
+  kind: 'CHECKOUT' | 'ALL_REFS'
+  anchor: 'AUTO' | 'PRESENT'
+  baseRef?: string
+  focusRef?: string
+}
 export interface GitAtlasRequest {
   context: GitManagementContext
   window: GitAtlasWindow
   cursor?: string
   limit?: number
   refresh?: boolean
+  scope?: GitAtlasScope
 }
 export interface GitAtlasPage extends GitHistoryPage {
+  scope?: GitAtlasScope
+  referenceCoverage?: 'SELECTED' | 'ALL_REFS'
+  anchorAt?: string
+  anchorKind?: 'PRESENT' | 'CHECKOUT'
   queriedAt: string
   since: string | null
   primaryRef: string | null
@@ -23,6 +34,7 @@ export interface GitAtlasCompareRequest {
   snapshot: string
   left: string
   right: string
+  scope?: GitAtlasScope
 }
 export interface GitAtlasComparison {
   snapshot: string
@@ -39,4 +51,5 @@ export interface GitAtlasQuery {
   limit?: number
   contextKey?: string
   refresh?: boolean
+  scope?: GitAtlasScope
 }

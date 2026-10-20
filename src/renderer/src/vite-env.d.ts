@@ -31,6 +31,7 @@ declare global {
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>
       getGitAtlas: (request: GitAtlasRequest) => Promise<GitManagementResult<GitAtlasPage>>
+      getGitAtlasCheckoutState: (context: GitManagementContext) => Promise<GitManagementResult<Pick<GitOverview['state'], 'head' | 'branch' | 'operation'>>>
       getGitAtlasCore: (request: GitAtlasCoreRequest) => Promise<GitManagementResult<GitAtlasCoreEvidence>>
       getGitAtlasPrEvidence: (request: GitAtlasPrRequest) => Promise<GitManagementResult<GitAtlasPrEvidence>>
       compareGitAtlas: (request: GitAtlasCompareRequest) => Promise<GitManagementResult<GitAtlasComparison>>

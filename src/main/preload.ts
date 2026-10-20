@@ -48,6 +48,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getGitCommitCorrelation: (request: GitCommitCorrelationRequest): Promise<GitManagementResult<GitCommitCorrelationPage>> => ipcRenderer.invoke('git-operations:correlation', request),
   getGitManagementHistory: (request: GitHistoryRequest): Promise<GitManagementResult<GitHistoryPage>> => ipcRenderer.invoke('git-management:history', request),
   getGitAtlas: (request: GitAtlasRequest): Promise<GitManagementResult<GitAtlasPage>> => ipcRenderer.invoke('git-management:atlas', request),
+  getGitAtlasCheckoutState: (context: GitManagementContext): Promise<GitManagementResult<Pick<GitOverview['state'], 'head' | 'branch' | 'operation'>>> => ipcRenderer.invoke('git-management:atlas-checkout-state', context),
   getGitAtlasCore: (request: GitAtlasCoreRequest): Promise<GitManagementResult<GitAtlasCoreEvidence>> => ipcRenderer.invoke('git-management:atlas-core', request),
   getGitAtlasPrEvidence: (request: GitAtlasPrRequest): Promise<GitManagementResult<GitAtlasPrEvidence>> => ipcRenderer.invoke('git-management:atlas-pr-evidence', request),
   compareGitAtlas: (request: GitAtlasCompareRequest): Promise<GitManagementResult<GitAtlasComparison>> => ipcRenderer.invoke('git-management:atlas-compare', request),
