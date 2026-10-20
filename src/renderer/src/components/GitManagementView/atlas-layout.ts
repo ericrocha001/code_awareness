@@ -20,6 +20,11 @@ export const atlasMergeDescriptions: Record<AtlasMergeContext, string> = {
   UNKNOWN: 'Merge (destino histórico não identificado)'
 }
 export interface AtlasPoint { node: GitHistoryNode; x: number; lane: number; track: string; mergeContext?: AtlasMergeContext }
+export function atlasTrackLabelSize(label: string) {
+  const width = Math.max(180, Math.ceil(Math.sqrt(label.length + 1) * 24) + 64)
+  const lines = Math.ceil(label.length / Math.max(1, Math.floor((width - 64) / 11)))
+  return { width, height: Math.max(30, lines * 18 + 12) }
+}
 export interface AtlasEdge { child: string; parent: string; secondary: boolean; skew: boolean; receivingTrack: string }
 export interface AtlasLayout {
   tracks: AtlasTrack[]
@@ -82,12 +87,12 @@ export function classifyAtlasMerges(page: GitAtlasPage | null, baseRef?: string)
   return result
 }
 
-export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, previous: ReadonlyMap<string, number> = new Map()): AtlasLayout {
+export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, previous: ReadonlyMap<string, number> = new Map(), leadingSpace = 32): AtlasLayout {
   if (!page) return { tracks: [], points: [], edges: [], anchors: [], inactive: [], laneCount: 1, width: 800 }
   const nodes = new Map(page.nodes.map(node => [node.sha, node]))
   const chronological = causalOrder(nodes)
   const positions = new Map<string, number>()
-  let last = 32
+  let last = leadingSpace
   for (const node of chronological) {
     last += 56
     positions.set(node.sha, last)
@@ -124,7 +129,7 @@ export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, prev
     const detached = page.detachedHeads.find(head => members.has(head.sha))
     const tip = shas[shas.length - 1]
     const id = reference?.ref ?? (detached ? `detached:${tip}` : `segment:${tip}`)
-    const label = reference?.name ?? (detached ? `HEAD detached · ${detached.name}` : secondaryTips.has(tip) ? 'Trecho de contribuição' : 'Trecho do histórico')
+    const label = [...new Set(references.filter(ref => ref.kind !== 'HEAD').map(ref => ref.name))].join(' · ') || (detached ? `HEAD detached · ${detached.name}` : secondaryTips.has(tip) ? 'Trecho de contribuição' : 'Trecho do histórico')
     for (const member of shas) owner.set(member, id)
     tracks.push({ id, label, ref: reference?.ref ?? null, references, shas: shas.reverse(), lane: 0, start: 0, end: 0, color: 0, detached: !!detached })
   }

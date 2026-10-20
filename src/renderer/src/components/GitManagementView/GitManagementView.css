@@ -128,16 +128,16 @@
 .gm-atlas-note { padding:10px 20px 4px; color:var(--text-secondary); font-size:11px; flex-shrink:0; }
 .gm-atlas-scroll { flex:1; min-height:0; overflow:auto; overscroll-behavior:contain; scrollbar-gutter:stable; }
 .gm-atlas-surface { position:relative; min-height:100%; }
-.gm-view .gm-atlas-inline-label { position:absolute; z-index:2; height:24px; padding:2px 6px; display:flex; align-items:center; gap:5px; border:1px solid var(--border); border-radius:7px; background:var(--bg-secondary); color:var(--text-secondary); font-size:11px; text-align:left; }
+.gm-view .gm-atlas-inline-label { position:absolute; z-index:2; padding:4px 6px; display:flex; align-items:flex-start; gap:5px; border:1px solid var(--border); border-radius:7px; background:var(--bg-secondary); color:var(--text-secondary); font:11px/18px var(--font-mono); text-align:left; box-sizing:border-box; }
 .gm-atlas-inline-label > svg { flex-shrink:0; }
-.gm-atlas-inline-label > span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+.gm-atlas-inline-label > span { white-space:normal; overflow-wrap:anywhere; min-width:0; flex:1; }
 .gm-atlas-inline-label small { margin-left:auto; flex-shrink:0; }
-.gm-atlas-inline-label.is-compact > :is(svg,small) { display:none; }
 .gm-view .gm-atlas-inline-label[aria-pressed=true] { color:var(--text-primary); border-color:var(--accent); background:var(--selected-bg); }
 .gm-atlas-lines { position:absolute; top:0; left:0; pointer-events:none; }
 .gm-atlas-date-axis { position:sticky; top:0; height:66px; z-index:3; background:var(--bg-primary); border-bottom:1px solid var(--border); }
 .gm-atlas-date { position:absolute; top:0; height:66px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:0 3px; font-size:11px; color:var(--text-secondary); border-left:1px solid var(--border); overflow:hidden; white-space:nowrap; }
 .gm-atlas-date small { font-size:11px; }
+.gm-atlas-date span { white-space:normal; text-align:center; }
 .gm-branch-ref { display:block; color:var(--text-secondary); font-size:11px; overflow-wrap:anywhere; }
 .gm-branch-detail { flex-wrap:wrap; }
 .gm-branch-detail > :last-child { max-width:210px; overflow-wrap:anywhere; text-align:right; }

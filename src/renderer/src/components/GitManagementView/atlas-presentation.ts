@@ -25,11 +25,12 @@ export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, 
 export function atlasDateBands(points: AtlasLayout['points'], unit: 'DAY' | 'WEEK' | 'MONTH', visibleRange?: { left: number; right: number }) {
   const key = (time: number) => {
     const date = new Date(time)
-    if (unit === 'MONTH') return `${date.getUTCFullYear()}-${date.getUTCMonth()}`
-    const day = Math.floor(time / dayMs)
-    return String(unit === 'WEEK' ? Math.floor((day + 3) / 7) : day)
+    if (unit === 'MONTH') return `${date.getFullYear()}-${date.getMonth()}`
+    if (unit === 'WEEK') date.setDate(date.getDate() - (date.getDay() + 6) % 7)
+    return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
   }
-  const days: Array<{ x: number; width: number; start: number; end: number }> = []
+  const days: Array<{ x: number; width: number; start: number; end: number; repeated: boolean }> = []
+  const seen = new Set<string>()
   let previousKey = ''
   let start = 0, end = points.length
   if (visibleRange) {
@@ -49,9 +50,29 @@ export function atlasDateBands(points: AtlasLayout['points'], unit: 'DAY' | 'WEE
       band.width = point.x + 28 - band.x
       band.start = Math.min(band.start, time); band.end = Math.max(band.end, time)
     } else {
-      days.push({ x: point.x - 28, width: 56, start: time, end: time })
+      days.push({ x: point.x - 28, width: 56, start: time, end: time, repeated: seen.has(currentKey) })
+      seen.add(currentKey)
       previousKey = currentKey
     }
   }
   return days
+}
+
+export function atlasTimelineDates(points: AtlasLayout['points'], visibleRange: { left: number; right: number }) {
+  for (const unit of ['DAY', 'WEEK', 'MONTH'] as const) {
+    const days = atlasDateBands(points, unit, visibleRange)
+    if (unit === 'MONTH' || days.length * 92 <= visibleRange.right - visibleRange.left) return { unit, days }
+  }
+  return { unit: 'MONTH' as const, days: [] }
+}
+
+export function atlasLocalDate(time: number, unit: 'DAY' | 'WEEK' | 'MONTH') {
+  return new Date(time).toLocaleDateString(undefined, unit === 'MONTH'
+    ? { calendar: 'gregory', month: 'short', year: '2-digit' }
+    : { calendar: 'gregory', day: '2-digit', month: '2-digit', year: '2-digit' })
+}
+
+export function atlasLocalDateRange(start: number, end: number, repeated = false) {
+  const format = (time: number) => new Date(time).toLocaleString(undefined, { calendar: 'gregory' })
+  return `${repeated ? 'Retorno ao período; ordem causal preservada. ' : ''}${format(start)} — ${format(end)}`
 }

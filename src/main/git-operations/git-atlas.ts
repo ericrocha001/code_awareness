@@ -211,7 +211,7 @@ export class GitAtlasReader {
       if (Date.parse(timestamp) > Date.parse(queriedAt) || request.window !== 'ALL' && Date.parse(timestamp) < Date.parse(queriedAt) - request.window * 86400000) { anchorAt = timestamp; anchorKind = 'CHECKOUT' }
     }
     const since = request.window === 'ALL' ? null : new Date(Date.parse(anchorAt) - request.window * 86400000).toISOString()
-    const upperBound = request.scope && anchorKind === 'CHECKOUT' ? anchorAt : null
+    const upperBound = request.window !== 'ALL' && request.scope && anchorKind === 'CHECKOUT' ? anchorAt : null
     const sliceKey = JSON.stringify(['history-v3', before.historyRevision, request.window, anchorAt, offset, limit])
     const cacheKey = JSON.stringify(['page', sliceKey, before.snapshot, queriedAt])
     const cached = this.pages.getReadonly<GitAtlasPage>(cacheKey)
@@ -244,7 +244,7 @@ export class GitAtlasReader {
     const objects = await this.readCommits(slice.shas)
     const after = await this.observe(request.contextKey, request.scope)
     if (generation !== this.generation || after.snapshot !== before.snapshot) this.fail('GIT_STATE_CHANGED')
-    const nodes = slice.shas.filter(sha => !request.scope || Date.parse(objects.get(sha)!.timestamp) <= Date.parse(anchorAt)).map(sha => {
+    const nodes = slice.shas.filter(sha => !request.scope || request.window === 'ALL' || Date.parse(objects.get(sha)!.timestamp) <= Date.parse(anchorAt)).map(sha => {
       const immutable = objects.get(sha)!
       return { ...immutable, decorations: before.refs.filter(ref => ref.sha === sha) }
     })

@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from 'react'
 import type { GitAtlasCoreEvidence, GitAtlasPrEvidence } from '../../../../shared/types/git-atlas-evidence-types'
-import type { GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
 import type { GitManagementContext } from '../../../../shared/types/git-management-types'
 import type { GitSelection } from './GitInspector'
 
-export function AtlasCheckout({ core, context, windowDays, base, inspect }: {
-  core: GitAtlasCoreEvidence | null; context: GitManagementContext; windowDays: GitAtlasWindow; base: string; inspect: (sha: string) => void
+export function AtlasCheckout({ core, context, base, inspect }: {
+  core: GitAtlasCoreEvidence | null; context: GitManagementContext; base: string; inspect: (sha: string) => void
 }) {
   const [reference, setReference] = useState('')
   const [checkout, setCheckout] = useState<GitAtlasCoreEvidence['checkout'] | null>(null)
@@ -17,13 +16,13 @@ export function AtlasCheckout({ core, context, windowDays, base, inspect }: {
     setCheckout(null); setError(''); setLoading(false)
     if (!core || !reference) return
     setLoading(true)
-    window.codeAwareness.getGitAtlasCore({ context, window: windowDays, limit: 1, comparisonRef: reference, scope: core.git.scope }).then(result => {
+    window.codeAwareness.getGitAtlasCore({ context, window: 'ALL', limit: 1, comparisonRef: reference, scope: core.git.scope }).then(result => {
       if (!current) return
       if (result.success && result.data.repositoryId === core.repositoryId && result.data.gitSnapshot === core.gitSnapshot && result.data.worktreeId === core.worktreeId && result.data.worktreeGeneration === core.worktreeGeneration) setCheckout(result.data.checkout)
       else setError(result.success ? 'A revisão mudou; atualize o Atlas.' : result.code)
     }).catch(() => { if (current) setError('Comparação indisponível') }).finally(() => { if (current) setLoading(false) })
     return () => { current = false }
-  }, [core, context, windowDays, reference])
+  }, [core, context, reference])
   if (!core) return null
   const upstream = core.git.refs.find(ref => ref.ref === core.checkout.upstream || ref.name === core.checkout.upstream)?.ref
   const choices = [...new Set([upstream, base].filter((value): value is string => !!value))]

@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { Crown, GitBranch, Tag } from 'lucide-react'
-import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
+import type { GitAtlasComparison, GitAtlasPage } from '../../../../shared/types/git-atlas-types'
 import type { GitAtlasCoreEvidence, GitAtlasPrEvidence, GitAtlasEvidenceEvent } from '../../../../shared/types/git-atlas-evidence-types'
-import { atlasMergeDescriptions, firstParentPath, layoutGitAtlas, type AtlasMergeContext } from './atlas-layout'
-import { atlasDateBands, atlasWindowPage, presentGitAtlas } from './atlas-presentation'
+import { atlasMergeDescriptions, atlasTrackLabelSize, firstParentPath, layoutGitAtlas, type AtlasMergeContext } from './atlas-layout'
+import { atlasTimelineDates, atlasLocalDate, atlasLocalDateRange } from './atlas-presentation'
 import { atlasBoundsIntersect, atlasVisibilityIndex } from './atlas-viewport'
 
 interface AtlasLabelBox { left: number; top: number; width: number; height: number }
@@ -42,34 +42,34 @@ function connectionGeometry(px: number, py: number, cx: number, cy: number, seco
   return { d, crosses, bounds: { left: left - 8, top: top - 8, width: Math.max(start.x, curveStart.x, curveEnd.x, end.x) - left + 16, height: Math.max(start.y, curveStart.y, curveEnd.y, end.y) - top + 16 } }
 }
 
-export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, base, focus, mode, comparison, selected, select, focusTrajectory, requestMore, loading }: {
-  page: GitAtlasPage | null; windowDays: GitAtlasWindow; base: string; focus: string; mode: string; comparison: GitAtlasComparison | null; selected?: string; select: (sha: string) => void; focusTrajectory: (ref: string, sha: string) => void
+export function GitAtlasCanvas({ page, core, enrichment, choosePr, base, focus, mode, comparison, selected, select, focusTrajectory, requestMore, loading }: {
+  page: GitAtlasPage | null; base: string; focus: string; mode: string; comparison: GitAtlasComparison | null; selected?: string; select: (sha: string) => void; focusTrajectory: (ref: string, sha: string) => void
   core?: GitAtlasCoreEvidence | null; enrichment?: GitAtlasPrEvidence | null; choosePr?: (number: number) => void
   requestMore?: () => void; loading?: boolean
 }) {
   const mergeArrowId = `atlas-merge-${useId().replace(/:/g, '')}`
+  const openingSpace = useRef(Math.max(32, window.innerWidth))
   const previous = useRef(new Map<string, number>())
   const scroll = useRef<HTMLDivElement>(null)
   const priorPoints = useRef<ReturnType<typeof layoutGitAtlas>['points']>([])
   const priorRows = useRef(new Map<number, number>())
   const positioned = useRef(false)
+  const checkoutSession = useRef<{ branch: string | null; head: string | null } | null>(null)
   const frame = useRef<number | null>(null)
   const pendingDemand = useRef(false)
   const budget = useRef(1)
   const pendingTrack = useRef<string | null>(null)
   const [demand, setDemand] = useState(0)
   const [showAll, setShowAll] = useState(false)
-  const windowPage = useMemo(() => atlasWindowPage(page, windowDays), [page, windowDays])
   const layout = useMemo(() => {
-    const value = layoutGitAtlas(windowPage, base, previous.current)
-    if (windowPage) previous.current = new Map(value.tracks.map(track => [track.id, track.lane]))
+    const value = layoutGitAtlas(page, base, previous.current, openingSpace.current)
+    if (page) previous.current = new Map(value.tracks.map(track => [track.id, track.lane]))
     return value
-  }, [windowPage, base])
+  }, [page, base])
   const [viewport, setViewport] = useState({ x: 0, y: 0, width: 1200, height: 900 })
   const viewportSnapshot = useRef(viewport)
-  const { points, width: contentWidth, unit } = useMemo(() => presentGitAtlas(layout, windowPage, windowDays, 0, { left: 0, right: -1 }), [layout, windowPage, windowDays])
-  const width = Math.max(contentWidth, viewport.width)
-  const days = useMemo(() => atlasDateBands(points, unit, { left: viewport.x - 120, right: viewport.x + viewport.width + 120 }), [points, unit, viewport.x, viewport.width])
+  const { points, width: contentWidth } = layout
+  const { days, unit } = useMemo(() => atlasTimelineDates(points, { left: viewport.x - 120, right: viewport.x + viewport.width + 120 }), [points, viewport.x, viewport.width])
   const pointBySha = useMemo(() => new Map(points.map(point => [point.node.sha, point])), [points])
   const tagsBySha = useMemo(() => {
     const tags = new Map<string, NonNullable<GitAtlasPage['tags']>>()
@@ -81,9 +81,17 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
   const allowedTracks = useMemo(() => layout.tracks.filter(track => showAll || track.ref || track.detached || integrated.has(track.id) || track.shas.includes(selected ?? '') || track.shas.includes(page?.head ?? '') || track.id === focus || track.shas.includes(focus)), [layout, showAll, integrated, selected, page?.head, focus])
   const hidden = layout.tracks.length - allowedTracks.length
   const allowed = useMemo(() => new Set(allowedTracks.map(track => track.id)), [allowedTracks])
-  const laneRows = useMemo(() => new Map([...new Set(layout.tracks.map(track => track.lane))].sort((a, b) => a - b).map((lane, index) => [lane, index])), [layout])
-  const y = useCallback((lane: number) => 150 + (laneRows.get(lane) ?? lane) * 88, [laneRows])
-  const height = Math.max(360, laneRows.size * 88 + 180)
+  const labelSizes = useMemo(() => new Map(layout.tracks.map(track => [track.id, atlasTrackLabelSize(track.label)])), [layout])
+  const laneRows = useMemo(() => {
+    const heights = new Map<number, number>()
+    for (const track of layout.tracks) heights.set(track.lane, Math.max(heights.get(track.lane) ?? 0, labelSizes.get(track.id)!.height))
+    const rows = new Map<number, number>()
+    let offset = 0
+    for (const lane of [...heights.keys()].sort((a, b) => a - b)) { rows.set(lane, offset); offset += heights.get(lane)! + 164 }
+    return rows
+  }, [layout, labelSizes])
+  const y = useCallback((lane: number) => 150 + (laneRows.get(lane) ?? 0), [laneRows])
+  const nodeHeight = useMemo(() => layout.tracks.reduce((height, track) => Math.max(height, y(track.lane) + labelSizes.get(track.id)!.height + 120), 360), [layout, labelSizes, y])
   const nodeIndex = useMemo(() => atlasVisibilityIndex(points, point => ({ left: point.x - 100, top: y(point.lane) - 110, width: 200, height: 180 })), [points, y])
   const visibleBounds = { left: viewport.x - 120, top: viewport.y - 100, width: viewport.width + 240, height: viewport.height + 200 }
   const visible = nodeIndex.query(visibleBounds).filter(point => allowed.has(point.track)).sort((a, b) => a.x - b.x)
@@ -107,46 +115,49 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
   }), [layout, pointBySha, y])
   const anchors = anchorIndex.query(visibleBounds)
   const overlaps = (a: AtlasLabelBox, b: AtlasLabelBox) => a.left < b.left + b.width + 6 && a.left + a.width + 6 > b.left && a.top < b.top + b.height + 4 && a.top + a.height + 4 > b.top
-  const labelIndex = useMemo(() => {
+  const labelProjection = useMemo(() => {
+    let width = contentWidth, height = nodeHeight
     const protectedBoxes: AtlasLabelBox[] = [{ left: 0, top: 0, width: contentWidth, height: 136 }, ...points.flatMap(point => {
       const boxes = [{ left: point.x - 18, top: y(point.lane) - 18, width: 36, height: 36 }]
-      if (windowPage?.tags.some(tag => tag.sha === point.node.sha)) boxes.push({ left: point.x - 84, top: y(point.lane) - 105, width: 168, height: 70 })
-      if (point.node.sha === windowPage?.head) boxes.push({ left: point.x - 64, top: y(point.lane) + 30, width: 128, height: 28 })
+      if (page?.tags.some(tag => tag.sha === point.node.sha)) boxes.push({ left: point.x - 84, top: y(point.lane) - 105, width: 168, height: 70 })
+      if (point.node.sha === page?.head) boxes.push({ left: point.x - 64, top: y(point.lane) + 30, width: 128, height: 28 })
       return boxes
     })]
     const protectedIndex = atlasVisibilityIndex(protectedBoxes, box => ({ left: box.left - 6, top: box.top - 4, width: box.width + 12, height: box.height + 8 }))
     const inlineLabels: Array<AtlasLabelBox & { track: typeof layout.tracks[number]; continued: boolean; key: string }> = []
     for (const track of [...layout.tracks].sort((a, b) => Number(b.ref === base) - Number(a.ref === base) || a.lane - b.lane || a.start - b.start || a.id.localeCompare(b.id))) {
       const first = pointBySha.get(track.shas[track.shas.length - 1])!, last = pointBySha.get(track.shas[0])!
-      for (let tile = Math.floor((first.x - 20) / 512); tile <= Math.floor((last.x + 20) / 512); tile++) {
-        const left = Math.max(first.x - 20, tile * 512 + 12), right = Math.min(last.x + 20, (tile + 1) * 512 - 12)
-        if (right <= left) continue
-        const width = Math.min(192, Math.max(36, right - left))
-        const candidates = [left, Math.min(right - width, left + 56), right - width]
+      const size = labelSizes.get(track.id)!, tileSize = Math.max(512, size.width + 24)
+      for (let tile = Math.floor((first.x - 20) / tileSize); tile <= Math.floor((last.x + 20) / tileSize); tile++) {
+        const left = Math.max(first.x - 20, tile * tileSize + 12)
+        const candidates = [left, left + 56, left + size.width + 24]
         let box: AtlasLabelBox | undefined
-        for (const top of [y(track.lane) - 42, y(track.lane) + 48, y(track.lane) - 66]) {
+        for (const top of [y(track.lane) + 72]) {
           for (const x of candidates) {
-            const candidate = { left: Math.max(left, x), top, width, height: 24 }
+            const candidate = { left: x, top, ...size }
             if (!protectedIndex.query(candidate).length && !inlineLabels.some(item => overlaps(candidate, item)) && !connectionIndex.query(candidate).some(item => item.crosses(candidate))) { box = candidate; break }
           }
           if (box) break
         }
         if (!box) {
-          const candidate = { left, top: y(track.lane) - 42, width: 36, height: 24 }
-          if (!protectedIndex.query(candidate).length && !inlineLabels.some(item => overlaps(candidate, item)) && !connectionIndex.query(candidate).some(item => item.crosses(candidate))) box = candidate
+          const candidate = { left: contentWidth + 24, top: y(track.lane) + 72, ...size }
+          while (inlineLabels.some(item => overlaps(candidate, item))) candidate.left += size.width + 16
+          box = candidate
         }
-        if (box) inlineLabels.push({ ...box, track, key: `${track.id}:${tile}`, continued: first.x < tile * 512 || first.node.parents.length > 0 })
+        inlineLabels.push({ ...box, track, key: `${track.id}:${tile}`, continued: first.x < tile * tileSize || first.node.parents.length > 0 })
+        width = Math.max(width, box.left + box.width + 24); height = Math.max(height, box.top + box.height + 24)
       }
     }
-    return atlasVisibilityIndex(inlineLabels, item => item)
-  }, [layout, points, pointBySha, y, windowPage, contentWidth, connectionIndex, base])
+    return { index: atlasVisibilityIndex(inlineLabels, item => item), width, height }
+  }, [layout, points, pointBySha, y, page, contentWidth, nodeHeight, labelSizes, connectionIndex, base])
+  const width = Math.max(labelProjection.width, viewport.width), height = labelProjection.height
   const selectedPoint = selected ? pointBySha.get(selected) : undefined
   const selectedCaption = selectedPoint ? { left: selectedPoint.x - 84, top: y(selectedPoint.lane) - 105, width: 168, height: 70 } : null
-  const inlineLabels = labelIndex.query(visibleBounds).filter(label => allowed.has(label.track.id) && label.top > viewport.y + 66 && (!selectedCaption || !atlasBoundsIntersect(label, selectedCaption)))
+  const inlineLabels = labelProjection.index.query(visibleBounds).filter(label => allowed.has(label.track.id) && (!selectedCaption || !atlasBoundsIntersect(label, selectedCaption)))
   const annotations = useMemo(() => {
     const groups = new Map<string, { x: number; created: boolean; events: Array<Exclude<GitAtlasEvidenceEvent, { kind: 'GIT_MERGE_COMMIT' }>> }>()
     if (!page || !enrichment || enrichment.gitSnapshot !== page.snapshot || !points.length) return []
-    const start = Date.parse(windowPage?.since ?? '1970-01-01'), end = Date.parse(page.anchorAt ?? page.queriedAt)
+    const start = points.reduce((value, point) => Math.min(value, Date.parse(point.node.timestamp)), Infinity), end = points.reduce((value, point) => Math.max(value, Date.parse(point.node.timestamp)), -Infinity)
     const chronological = [...points].sort((a, b) => Date.parse(a.node.timestamp) - Date.parse(b.node.timestamp) || a.node.sha.localeCompare(b.node.sha))
     for (const event of enrichment.events) {
       if (event.kind === 'GIT_MERGE_COMMIT') continue
@@ -161,7 +172,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
       group.events.push(event); groups.set(key, group)
     }
     return [...groups.values()]
-  }, [enrichment, page, windowPage, points, pointBySha])
+  }, [enrichment, page, page, points, pointBySha])
   const scheduleViewport = useCallback(() => {
     if (frame.current !== null) return
     frame.current = requestAnimationFrame(() => {
@@ -183,6 +194,9 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
   useLayoutEffect(() => {
     const element = scroll.current
     if (!page || !element || !points.length) return
+    const priorCheckout = checkoutSession.current
+    if (priorCheckout && (priorCheckout.branch !== page.branch || page.branch === null && priorCheckout.head !== page.head)) positioned.current = false
+    checkoutSession.current = { branch: page.branch, head: page.head }
     if (!positioned.current) {
       const head = pointBySha.get(page.head ?? '') ?? points.at(-1)
       element.scrollLeft = Math.max(0, (head?.x ?? 0) - element.clientWidth * .75)
@@ -194,7 +208,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
       while (low < high) { const middle = Math.floor((low + high) / 2); if (prior[middle].x < element.scrollLeft) low = middle + 1; else high = middle }
       const anchor = prior[Math.min(low, prior.length - 1)]
       const next = anchor ? pointBySha.get(anchor.node.sha) : null
-      if (anchor && next) { element.scrollLeft += next.x - anchor.x; element.scrollTop += y(next.lane) - (150 + (priorRows.current.get(anchor.lane) ?? anchor.lane) * 88) }
+      if (anchor && next) { element.scrollLeft += next.x - anchor.x; element.scrollTop += y(next.lane) - (150 + (priorRows.current.get(anchor.lane) ?? 0)) }
     }
     priorPoints.current = points
     priorRows.current = laneRows
@@ -249,10 +263,10 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
           })}
         </svg>
         <div className="gm-atlas-date-axis" style={{ width }} aria-label={`Datas por ${unit === 'DAY' ? 'dia' : unit === 'WEEK' ? 'semana' : 'mês'}; ordem dos eventos preservada`}>
-          {days.filter(day => day.x + day.width >= viewport.x - 120 && day.x <= viewport.x + viewport.width).map(day => <div key={day.x} className="gm-atlas-date" style={{ left: day.x, width: day.width }} title={`${new Date(day.start).toLocaleString()} — ${new Date(day.end).toLocaleString()}`}><span>{new Date(day.start).toLocaleDateString(undefined, unit === 'MONTH' ? { month: 'short', year: 'numeric' } : { day: '2-digit', month: 'short' })}</span>{day.end !== day.start && unit !== 'MONTH' && <small>até {new Date(day.end).toLocaleDateString(undefined, { day: '2-digit', month: 'short' })}</small>}</div>)}
+          {days.filter(day => day.x + day.width >= viewport.x - 120 && day.x <= viewport.x + viewport.width).map(day => <div key={day.x} className="gm-atlas-date" style={{ left: day.x, width: day.width }} title={atlasLocalDateRange(day.start, day.end, day.repeated)}><span>{day.repeated ? '↶' : atlasLocalDate(day.start, unit)}</span>{!day.repeated && day.end !== day.start && unit !== 'MONTH' && atlasLocalDate(day.start, 'DAY') !== atlasLocalDate(day.end, 'DAY') && <small>até {atlasLocalDate(day.end, 'DAY')}</small>}</div>)}
         </div>
-        {inlineLabels.map(({ track, left, top, width, continued, key }) => <button className={`gm-atlas-inline-label ${width < 80 ? 'is-compact' : ''}`} key={key} data-track={track.id} style={{ left, top, width }} title={`${track.label}${track.references.length ? ` · referências atuais no trecho: ${track.references.map(ref => ref.name).join(', ')}` : ''}. Rótulo de contexto; não marca criação ou encerramento de branch.`} aria-label={`Trajetória ${track.label}${continued ? ', continuidade anterior' : ''}`} aria-pressed={track.id === focus || track.references.some(ref => ref.ref === focus)} onClick={() => focusTrajectory(track.ref ?? track.shas[0], track.shas[0])}>
-          {track.ref === base ? <Crown size={13} /> : <GitBranch size={13} />}<span>{continued ? '… ' : ''}{track.label}</span>{track.references.filter(ref => ref.kind !== 'HEAD').length > 1 && <small>+{track.references.filter(ref => ref.kind !== 'HEAD').length - 1}</small>}
+        {inlineLabels.map(({ track, left, top, width, height, continued, key }) => <button className="gm-atlas-inline-label" key={key} data-track={track.id} style={{ left, top, width, height }} title={`${track.label}${track.references.length ? ` · referências atuais no trecho: ${track.references.map(ref => ref.name).join(', ')}` : ''}. Rótulo de contexto; não marca criação ou encerramento de branch.`} aria-label={`Trajetória ${track.label}${continued ? ', continuidade anterior' : ''}`} aria-pressed={track.id === focus || track.references.some(ref => ref.ref === focus)} onClick={() => focusTrajectory(track.ref ?? track.shas[0], track.shas[0])}>
+          {track.ref === base ? <Crown size={13} /> : <GitBranch size={13} />}<span>{track.label}</span>
         </button>)}
         {annotations.filter(group => group.x >= viewport.x - 120 && group.x <= viewport.x + viewport.width).map(group => <details key={`${group.created}:${group.x}`} className={`gm-pr-annotation ${group.created ? 'is-created' : 'is-integrated'}`} style={{ left: group.x, top: group.created ? 78 : 106 }}>
           <summary aria-label={`${group.created ? 'PR criado' : 'PR integrado'} #${group.events[0].prNumber}${group.events.length > 1 ? ` e mais ${group.events.length - 1}` : ''}`} title="Anotação temporal aproximada; não representa um commit nem comprova intervalo aberto">{group.created ? '+' : '↗'} #{group.events[0].prNumber}{group.events.length > 1 ? ` +${group.events.length - 1}` : ''}</summary>
