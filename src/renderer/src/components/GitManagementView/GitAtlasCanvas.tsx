@@ -2,7 +2,7 @@ import React, { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } f
 import { Crown, GitBranch, Tag } from 'lucide-react'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasWindow } from '../../../../shared/types/git-atlas-types'
 import type { GitAtlasCoreEvidence, GitAtlasPrEvidence, GitAtlasEvidenceEvent } from '../../../../shared/types/git-atlas-evidence-types'
-import { firstParentPath, layoutGitAtlas } from './atlas-layout'
+import { atlasMergeDescriptions, firstParentPath, layoutGitAtlas, type AtlasMergeContext } from './atlas-layout'
 import { atlasWindowPage, presentGitAtlas } from './atlas-presentation'
 
 interface AtlasLabelBox { left: number; top: number; width: number; height: number }
@@ -75,7 +75,8 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
     if (!child || !parent || !allowed.has(child.track) || !allowed.has(parent.track) || child.x < viewport.x - 120 || parent.x > viewport.x + viewport.width) return []
     const cy = y(child.lane), py = y(parent.lane)
     if (Math.max(cy, py) < viewport.y - 100 || Math.min(cy, py) > viewport.y + viewport.height + 100) return []
-    return [{ edge, ...connectionGeometry(parent.x, py, child.x, cy, edge.secondary) }]
+    const mergeContext: AtlasMergeContext = child.mergeContext ?? 'UNKNOWN'
+    return [{ edge, mergeContext, ...connectionGeometry(parent.x, py, child.x, cy, edge.secondary) }]
   })
   const overlaps = (a: AtlasLabelBox, b: AtlasLabelBox) => a.left < b.left + b.width + 6 && a.left + a.width + 6 > b.left && a.top < b.top + b.height + 4 && a.top + a.height + 4 > b.top
   const protectedBoxes: AtlasLabelBox[] = [{ left: viewport.x, top: viewport.y, width: viewport.width, height: 66 }, { left: viewport.x, top: 0, width: viewport.width, height: 136 }, ...visible.flatMap(point => {
@@ -182,9 +183,9 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
     }}>
       <div className="gm-atlas-surface" style={{ width, height }}>
         <svg className="gm-atlas-lines" width={width} height={height} aria-label="Relações reais entre commits">
-          <defs><marker id={mergeArrowId} viewBox="0 0 8 8" refX={7} refY={4} markerWidth={6} markerHeight={6} markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1 L 7 4 L 1 7" fill="none" stroke="var(--accent)" strokeWidth={1.6} /></marker></defs>
+          <defs>{(['base', 'neutral'] as const).map(tone => <marker key={tone} id={`${mergeArrowId}-${tone}`} viewBox="0 0 8 8" refX={7} refY={4} markerWidth={6} markerHeight={6} markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1 L 7 4 L 1 7" fill="none" stroke={tone === 'base' ? 'var(--accent)' : 'var(--text-secondary)'} strokeWidth={1.6} /></marker>)}</defs>
           {days.filter(day => day.x + day.width >= viewport.x - 120 && day.x <= viewport.x + viewport.width).map(day => <line key={day.x} x1={day.x} x2={day.x} y1={66} y2={height} stroke="var(--border)" strokeDasharray="2 8" opacity=".35" />)}
-          {connections.map(({ edge, d }) => <path key={`${edge.child}:${edge.parent}`} data-child={edge.child} data-parent={edge.parent} data-receiving-track={edge.receivingTrack} d={d} fill="none" stroke={edge.secondary ? 'var(--accent)' : 'var(--text-secondary)'} strokeWidth={edge.secondary ? 2.5 : 1.8} markerEnd={edge.secondary ? `url(#${mergeArrowId})` : undefined} opacity={active(edge.child) && active(edge.parent) ? .9 : .18} strokeDasharray={edge.skew ? '5 3' : undefined}><title>{edge.secondary ? 'Contribuição secundária → merge M na trajetória receptora; nome histórico de destino não inferido' : 'Continuidade do primeiro pai'}: {edge.parent} → {edge.child}{edge.skew ? ' · datas invertidas' : ''}</title></path>)}
+          {connections.map(({ edge, d, mergeContext }) => <path key={`${edge.child}:${edge.parent}`} data-child={edge.child} data-parent={edge.parent} data-receiving-track={edge.receivingTrack} d={d} fill="none" stroke={edge.secondary && mergeContext === 'BASE' ? 'var(--accent)' : 'var(--text-secondary)'} strokeWidth={edge.secondary && mergeContext === 'BASE' ? 2.5 : 1.8} markerEnd={edge.secondary ? `url(#${mergeArrowId}-${mergeContext === 'BASE' ? 'base' : 'neutral'})` : undefined} opacity={active(edge.child) && active(edge.parent) ? .9 : .18} strokeDasharray={edge.skew ? '5 3' : undefined}><title>{edge.secondary ? `${atlasMergeDescriptions[mergeContext]} · contribuição secundária → M; nome histórico de destino não inferido` : 'Continuidade do primeiro pai'}: {edge.parent} → {edge.child}{edge.skew ? ' · datas invertidas' : ''}</title></path>)}
           {layout.anchors.map(anchor => {
             const point = pointBySha.get(anchor.child)
             return point && visible.some(item => item.node.sha === anchor.child) ? <g key={`${anchor.child}:${anchor.parent}`}><path d={`M ${point.x - 24} ${y(point.lane)} L ${point.x - 9} ${y(point.lane)}`} stroke="var(--text-secondary)" strokeDasharray="3 3" /><text x={point.x - 30} y={y(point.lane) - 13} fill="var(--text-secondary)" fontSize="11">…<title>Pai {anchor.parent} fora do trecho carregado</title></text></g> : null
@@ -203,12 +204,13 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, windowDays, b
         {visible.map(point => {
           const track = trackById.get(point.track)!, tags = page?.tags.filter(tag => tag.sha === point.node.sha) ?? []
           const merge = point.node.parents.length > 1
+          const mergeContext = point.mergeContext ?? 'UNKNOWN'
           const head = core?.checkout.head === point.node.sha
-          return <button className={`gm-commit gm-atlas-node ${merge ? 'is-merge' : ''} ${head ? 'is-checkout' : ''} ${active(point.node.sha) ? '' : 'is-muted'}`} style={{ left: point.x, top: y(point.lane) } as React.CSSProperties} key={point.node.sha} data-sha={point.node.sha} aria-label={`${head ? 'Você está aqui. ' : ''}${merge ? 'Merge topológico: ' : ''}${point.node.subject} · ${point.node.sha.slice(0, 8)}`} aria-pressed={point.node.sha === selected} onClick={() => select(point.node.sha)}>
+          return <button className={`gm-commit gm-atlas-node ${merge ? `is-merge is-merge-${mergeContext.toLowerCase()}` : ''} ${head ? 'is-checkout' : ''} ${active(point.node.sha) ? '' : 'is-muted'}`} style={{ left: point.x, top: y(point.lane) } as React.CSSProperties} key={point.node.sha} data-sha={point.node.sha} aria-label={`${head ? 'Você está aqui. ' : ''}${merge ? `${atlasMergeDescriptions[mergeContext]}. ` : ''}${point.node.subject} · ${point.node.sha.slice(0, 8)}`} aria-pressed={point.node.sha === selected} onClick={() => select(point.node.sha)}>
             <span className="gm-atlas-dot">{merge ? 'M' : null}</span>
             {head && <span className="gm-checkout-marker">Você está aqui</span>}
             {(point.node.sha === selected || tags.length > 0) && <span className="gm-node-caption">{tags.length > 0 && <Tag size={15} />}<span>{tags.length ? tags.map(tag => tag.name).join(', ') : point.node.subject}</span></span>}
-            <span className="gm-node-tooltip">{track.label}<br />{point.node.subject}<br />{point.node.author} · {new Date(point.node.timestamp).toLocaleString()}<br />{point.node.sha.slice(0, 12)}{track.references.filter(ref => ref.sha === point.node.sha).map(ref => <React.Fragment key={ref.ref}><br />Referência atual · {ref.name}</React.Fragment>)}{page?.detachedHeads.filter(item => item.sha === point.node.sha).map((item, index) => <React.Fragment key={`${item.name}:${index}`}><br />HEAD detached observado · {item.name}</React.Fragment>)}</span>
+            <span className="gm-node-tooltip">{track.label}{merge && <><br />{atlasMergeDescriptions[mergeContext]}</>}<br />{point.node.subject}<br />{point.node.author} · {new Date(point.node.timestamp).toLocaleString()}<br />{point.node.sha.slice(0, 12)}{track.references.filter(ref => ref.sha === point.node.sha).map(ref => <React.Fragment key={ref.ref}><br />Referência atual · {ref.name}</React.Fragment>)}{page?.detachedHeads.filter(item => item.sha === point.node.sha).map((item, index) => <React.Fragment key={`${item.name}:${index}`}><br />HEAD detached observado · {item.name}</React.Fragment>)}</span>
           </button>
         })}
       </div>

@@ -13,7 +13,13 @@ export interface AtlasTrack {
   detached: boolean
   references: GitAtlasPage['refs']
 }
-export interface AtlasPoint { node: GitHistoryNode; x: number; lane: number; track: string }
+export type AtlasMergeContext = 'BASE' | 'OTHER' | 'UNKNOWN'
+export const atlasMergeDescriptions: Record<AtlasMergeContext, string> = {
+  BASE: 'Merge recebido pela base selecionada',
+  OTHER: 'Merge recebido por outra trajetória',
+  UNKNOWN: 'Merge (destino histórico não identificado)'
+}
+export interface AtlasPoint { node: GitHistoryNode; x: number; lane: number; track: string; mergeContext?: AtlasMergeContext }
 export interface AtlasEdge { child: string; parent: string; secondary: boolean; skew: boolean; receivingTrack: string }
 export interface AtlasLayout {
   tracks: AtlasTrack[]
@@ -49,6 +55,31 @@ export function firstParentPath(nodes: Map<string, GitHistoryNode>, tip?: string
   let sha = tip
   while (sha && nodes.has(sha) && !path.has(sha)) { path.add(sha); sha = nodes.get(sha)!.parents[0] }
   return path
+}
+
+export function classifyAtlasMerges(page: GitAtlasPage | null, baseRef?: string): Map<string, AtlasMergeContext> {
+  const result = new Map<string, AtlasMergeContext>()
+  if (!page) return result
+  const nodes = new Map(page.nodes.map(node => [node.sha, node]))
+  const base = page.refs.find(ref => ref.ref === (baseRef === undefined ? page.primaryRef : baseRef))
+  const path = firstParentPath(nodes, base?.sha)
+  const oldest = [...path].at(-1)
+  const complete = oldest !== undefined && nodes.get(oldest)!.parents.length === 0
+  const children = new Map<string, string[]>()
+  for (const node of nodes.values()) for (const parent of node.parents) {
+    const group = children.get(parent) ?? []
+    group.push(node.sha); children.set(parent, group)
+  }
+  const descendants = new Set(path), queue = [...path]
+  for (let index = 0; index < queue.length; index++) for (const child of children.get(queue[index]) ?? []) {
+    if (!descendants.has(child)) { descendants.add(child); queue.push(child) }
+  }
+  for (const node of nodes.values()) {
+    if (node.parents.length < 2) continue
+    // Descendants of the observed base path cannot precede its missing first-parent boundary.
+    result.set(node.sha, path.has(node.sha) ? 'BASE' : complete || descendants.has(node.sha) ? 'OTHER' : 'UNKNOWN')
+  }
+  return result
 }
 
 export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, previous: ReadonlyMap<string, number> = new Map()): AtlasLayout {
@@ -123,9 +154,13 @@ export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, prev
     ;(occupied[lane] ??= []).push([track.start, track.end])
   }
   const lanes = new Map(tracks.map(track => [track.id, track.lane]))
+  const mergeContexts = classifyAtlasMerges(page, baseRef)
   return {
     tracks, edges, anchors,
-    points: chronological.map(node => ({ node, x: positions.get(node.sha)!, track: owner.get(node.sha)!, lane: lanes.get(owner.get(node.sha)!)! })),
+    points: chronological.map(node => {
+      const mergeContext = mergeContexts.get(node.sha)
+      return { node, x: positions.get(node.sha)!, track: owner.get(node.sha)!, lane: lanes.get(owner.get(node.sha)!)!, ...(mergeContext ? { mergeContext } : {}) }
+    }),
     inactive: page.refs.filter(ref => ref.kind !== 'HEAD' && !nodes.has(ref.sha)).sort((a, b) => a.ref.localeCompare(b.ref)),
     laneCount: Math.max(1, occupied.length), width: Math.max(800, last + 120)
   }

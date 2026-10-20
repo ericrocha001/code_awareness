@@ -145,7 +145,9 @@
 .gm-view .gm-atlas-node { position:absolute; width:26px; height:26px; padding:0; border:0; border-radius:50%; transform:translate(-50%,-50%); background:transparent; z-index:1; }
 .gm-view .gm-atlas-node:hover { background:transparent; z-index:4; }
 .gm-atlas-dot { display:grid; place-items:center; width:12px; height:12px; margin:auto; background:var(--text-secondary); border-radius:50%; border:2px solid var(--text-secondary); }
-.gm-atlas-node.is-merge .gm-atlas-dot { width:24px; height:24px; border-color:var(--accent); background:var(--bg-primary); color:var(--text-primary); font:600 11px var(--font-mono); }
+.gm-atlas-node.is-merge .gm-atlas-dot { width:22px; height:22px; border-color:var(--text-secondary); background:var(--bg-primary); color:var(--text-secondary); font:600 11px var(--font-mono); }
+.gm-atlas-node.is-merge-base .gm-atlas-dot { width:24px; height:24px; border-color:var(--accent); background:var(--accent); color:var(--accent-contrast); }
+.gm-atlas-node.is-merge-unknown .gm-atlas-dot { border-style:dashed; }
 .gm-atlas-node[aria-pressed=true] .gm-atlas-dot { outline:2px solid var(--text-primary); outline-offset:3px; box-shadow:0 0 18px var(--accent); }
 .gm-atlas-node.is-muted { opacity:.3; }
 .gm-atlas-node.is-checkout { opacity:1; }

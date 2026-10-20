@@ -9,6 +9,8 @@ import { GitInspector, type GitSelection } from './GitInspector'
 import { GitActions } from './GitActions'
 import { GitAtlasCanvas } from './GitAtlasCanvas'
 import { AtlasCheckout, AtlasPullRequests } from './AtlasContext'
+import { atlasMergeDescriptions, classifyAtlasMerges } from './atlas-layout'
+import { atlasWindowPage } from './atlas-presentation'
 import './GitManagementView.css'
 
 export function GitManagementView({ state, commitIntent, onIntentConsumed }: { state: ActiveProjectState; commitIntent?: CommitNavigationIntent | null; onIntentConsumed?: (requestId: string) => void }) {
@@ -146,6 +148,8 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const refresh = async () => { await Promise.all([load(undefined, true), readOverview()]) }
   const refs = history?.refs.filter(ref => ref.kind !== 'HEAD') ?? []
   const selected = selection?.kind === 'COMMIT' ? selection.sha : selection?.ref.sha
+  const mergeContexts = useMemo(() => classifyAtlasMerges(atlasWindowPage(history, windowDays), base), [history, windowDays, base])
+  const selectedMergeContext = selection?.kind === 'COMMIT' ? mergeContexts.get(selection.sha) : undefined
   if (!state.project) return <section className="gm-empty"><GitBranch size={32} /><h2>Git Management</h2><p>Abra um repositório para explorar seu histórico.</p></section>
   return <section className="gm-view" aria-label="Git Management">
     <header className="gm-header">
@@ -189,6 +193,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
       <aside ref={inspectorFocus} tabIndex={-1} className={`gm-inspector ${drawer ? 'is-open' : ''}`} aria-label="Detalhes Git" aria-busy={overviewLoading}>
         <div className="gm-pane-heading gm-inspector-heading"><Hexagon size={18} /><strong>{selectedPr !== null ? `PR #${selectedPr}` : selection?.kind === 'COMMIT' ? 'Commit selecionado' : selection?.kind === 'BRANCH' ? 'Branch selecionada' : 'Alterações locais'}</strong><button className="gm-close-details" aria-label="Fechar detalhes" onClick={() => { setDrawer(false); setSelectedPr(null); setSelection(null); returnFocus.current?.focus() }}><X size={18} /></button></div>
         <div className="gm-inspector-scroll">
+          {selectedPr === null && selectedMergeContext && <p className="gm-comparison-note" role="status">{atlasMergeDescriptions[selectedMergeContext]}</p>}
           {selectedPr === null && (overviewError && !overview ? <p role="alert">Estado Git indisponível. <button onClick={() => void readOverview()}>Tentar novamente</button></p> : <GitInspector context={context} overview={overview} selection={selection} />)}
           {(selection || selectedPr !== null) && <AtlasPullRequests evidence={enrichment} selection={selection} selectedPr={selectedPr} choose={choosePr} />}
           {overview && <div hidden={!!selection || selectedPr !== null}><GitActions context={context} overview={overview} history={history} refresh={refresh} blocked={overviewLoading || !!overviewError} /></div>}
