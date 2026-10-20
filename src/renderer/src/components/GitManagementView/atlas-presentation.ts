@@ -13,11 +13,16 @@ export function atlasWindowPage(page: GitAtlasPage | null, window: GitAtlasWindo
   return nodes.length === page.nodes.length && page.since === since ? page : { ...page, nodes, since }
 }
 
-export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, window: GitAtlasWindow, minimumWidth = 0) {
+export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, window: GitAtlasWindow, minimumWidth = 0, visibleRange?: { left: number; right: number }) {
   const end = Date.parse(page?.anchorAt ?? page?.queriedAt ?? new Date().toISOString())
   const earliest = layout.points.reduce((time, point) => Math.min(time, Date.parse(point.node.timestamp)), end)
   const span = window === 'ALL' ? (end - earliest) / dayMs : window
-  const unit = span <= 15 ? 'DAY' : span <= 90 ? 'WEEK' : 'MONTH'
+  const unit: 'DAY' | 'WEEK' | 'MONTH' = span <= 15 ? 'DAY' : span <= 90 ? 'WEEK' : 'MONTH'
+  const days = atlasDateBands(layout.points, unit, visibleRange)
+  return { days, points: layout.points, width: Math.max(layout.width, minimumWidth), rows: new Map(layout.tracks.map(track => [track.id, track.lane])), unit }
+}
+
+export function atlasDateBands(points: AtlasLayout['points'], unit: 'DAY' | 'WEEK' | 'MONTH', visibleRange?: { left: number; right: number }) {
   const key = (time: number) => {
     const date = new Date(time)
     if (unit === 'MONTH') return `${date.getUTCFullYear()}-${date.getUTCMonth()}`
@@ -26,7 +31,18 @@ export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, 
   }
   const days: Array<{ x: number; width: number; start: number; end: number }> = []
   let previousKey = ''
-  for (const point of layout.points) {
+  let start = 0, end = points.length
+  if (visibleRange) {
+    if (visibleRange.right < visibleRange.left) return days
+    let low = 0, high = points.length
+    while (low < high) { const middle = Math.floor((low + high) / 2); if (points[middle].x < visibleRange.left) low = middle + 1; else high = middle }
+    start = Math.max(0, low - 1)
+    low = start; high = points.length
+    while (low < high) { const middle = Math.floor((low + high) / 2); if (points[middle].x <= visibleRange.right) low = middle + 1; else high = middle }
+    end = Math.min(points.length, low + 1)
+  }
+  for (let index = start; index < end; index++) {
+    const point = points[index]
     const time = Date.parse(point.node.timestamp), currentKey = key(time)
     if (currentKey === previousKey) {
       const band = days[days.length - 1]
@@ -37,5 +53,5 @@ export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, 
       previousKey = currentKey
     }
   }
-  return { days, points: layout.points, width: Math.max(layout.width, minimumWidth), rows: new Map(layout.tracks.map(track => [track.id, track.lane])), unit }
+  return days
 }
