@@ -245,6 +245,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const selectedMergeContext = selection?.kind === 'COMMIT' ? mergeContexts.get(selection.sha) : undefined
   const catalogComplete = catalog?.coverage === 'COMPLETE' && catalog.diagnostic.state === 'READY' && !catalog.reason
   const catalogUnavailable = catalog && (catalog.diagnostic.state !== 'READY' || !!catalog.reason)
+  const prStatus = !prRequested ? 'PRs ocultos' : prState === 'LOADING' ? 'Carregando PRs' : prState === 'UNAVAILABLE' ? 'GitHub indisponível; mapa local preservado' : enrichment?.coverage === 'PARTIAL' ? 'PRs com cobertura parcial' : 'PRs habilitados no gráfico'
   if (!state.project) return <section className="gm-empty"><GitBranch size={32} /><h2>Git Management</h2><p>Abra um repositório para explorar seu histórico.</p></section>
   return <section className="gm-view" aria-label="Git Management">
     <header className="gm-header">
@@ -254,7 +255,8 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     <div className="gm-toolbar">
       <div className="gm-segmented" role="group" aria-label="Modo do Atlas">{['Panorama', 'Foco', 'Comparar'].map(value => <button key={value} aria-pressed={mode === value} onClick={() => setMode(value)}>{value}</button>)}</div>
       <label className="gm-branch-control"><GitBranch size={16} aria-hidden="true" /><span className="gm-control-label">{mode === 'Comparar' ? 'Comparar com' : 'Branch em foco'}</span><select aria-label="Referência em foco" value={focus} onChange={event => { setFocus(event.target.value); const ref = refs.find(ref => ref.ref === event.target.value); if (ref) chooseBranch(ref) }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}{/^[a-f0-9]{40,64}$/.test(focus) && <option value={focus}>Trajetória · {focus.slice(0, 8)}</option>}</select></label>
-      <button className="gm-pr-toggle" aria-pressed={prRequested} onClick={() => { setPrRequested(value => !value); setEnrichment(null); setSelectedPr(null) }}><span className="gm-toggle-track" aria-hidden="true"><span /></span>{prRequested ? 'Ocultar PRs' : 'Mostrar PRs'}</button>
+      <button className="gm-pr-toggle" aria-pressed={prRequested} aria-describedby="gm-pr-status" title={prStatus} onClick={() => { setPrRequested(value => !value); setEnrichment(null); setSelectedPr(null) }}><span className="gm-toggle-track" aria-hidden="true"><span /></span>{prRequested ? 'Ocultar PRs' : 'Mostrar PRs'}</button>
+      <span id="gm-pr-status" className="gm-control-label" role="status">{prStatus}</span>
       {mode !== 'Panorama' && <label>Base<select aria-label="Referência base" value={base} onChange={event => { setBase(event.target.value); setScope(previous => ({ ...previous, baseRef: event.target.value || undefined })) }}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>}
       <AtlasSearch page={history} evidence={enrichment} inspect={select} branch={chooseBranch} pullRequest={choosePr} />
       <button className="gm-refresh" disabled={loading || overviewLoading} onClick={() => void refresh()} aria-label="Atualizar Git" title="Atualizar histórico e alterações locais"><RefreshCw size={17} /></button>
@@ -283,10 +285,6 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
           {core?.checkout.head && <span><i className="gm-head-icon" />Checkout</span>}
           {enrichment?.events.some(event => event.kind !== 'GIT_MERGE_COMMIT') && <span><GitPullRequest size={13} />PR</span>}
         </div>{history?.coverage === 'PARTIAL' && <span>Trecho parcial</span>}</div>
-        <div className="gm-pr-controls">
-          {prState === 'LOADING' && <span role="status">Carregando PRs…</span>}{prState === 'UNAVAILABLE' && <span role="status">GitHub indisponível; mapa local preservado.</span>}{enrichment?.coverage === 'PARTIAL' && <span>PRs: cobertura parcial</span>}
-          {enrichment && <details><summary>PRs do repositório ({enrichment.pullRequests.length}{enrichment.coverage !== 'COMPLETE' ? ', parcial' : ''})</summary><div className="gm-pr-catalog">{enrichment.pullRequests.map(pr => <button key={pr.record.id} onClick={() => choosePr(pr.record.number)}>#{pr.record.number} · {pr.record.title}{enrichment.branches?.orphaned.some(item => item.id === pr.record.id) ? ' · sem vínculo confirmado à origem local' : ''}</button>)}</div></details>}
-        </div>
         {history?.referenceCoverage === 'SELECTED' ? <p className="gm-atlas-note" role="status">Contexto do checkout e da base; outras referências e worktrees ainda não consultadas.</p> : history?.detachedCoverage === 'PARTIAL' && <p className="gm-atlas-note" role="status">Alguns HEADs de worktrees não puderam ser verificados.</p>}
         {history && !history.nextCursor && !loading && <p className="gm-atlas-note">Fim do histórico do escopo consultado.</p>}
         <GitAtlasCanvas key={`${context.projectId}:${context.revision}`} page={history} core={core} enrichment={enrichment} choosePr={choosePr} base={base} focus={focus} mode={mode} comparison={comparison} selected={selected} select={select} loading={loading} requestMore={history?.nextCursor && !error ? () => void load(history.nextCursor!) : undefined} focusTrajectory={(ref, sha) => { returnFocus.current = document.activeElement as HTMLElement; setSelectedPr(null); setDrawer(true); setFocus(ref); setMode('Foco'); const branch = history?.refs.find(item => item.ref === ref); setSelection(branch ? { kind: 'BRANCH', ref: branch } : { kind: 'COMMIT', sha }) }} />

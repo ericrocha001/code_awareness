@@ -7,6 +7,7 @@ import { atlasTimelineDates, atlasLocalDate, atlasLocalDateRange } from './atlas
 import { atlasBoundsIntersect, atlasVisibilityIndex } from './atlas-viewport'
 
 interface AtlasLabelBox { left: number; top: number; width: number; height: number }
+const firstLaneY = 116
 
 function connectionGeometry(px: number, py: number, cx: number, cy: number, secondary: boolean, contribution = 0, contributions = 1) {
   const direction = cx >= px ? 1 : -1
@@ -41,9 +42,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, base, focus, 
   const frame = useRef<number | null>(null)
   const pendingDemand = useRef(false)
   const budget = useRef(1)
-  const pendingTrack = useRef<string | null>(null)
   const [demand, setDemand] = useState(0)
-  const [showAll, setShowAll] = useState(false)
   const layout = useMemo(() => {
     const value = layoutGitAtlas(page, base, previous.current, openingSpace.current)
     if (page) previous.current = new Map(value.tracks.map(track => [track.id, track.lane]))
@@ -61,8 +60,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, base, focus, 
   }, [page?.tags])
   const hasSkew = useMemo(() => layout.edges.some(edge => edge.skew), [layout])
   const integrated = useMemo(() => new Set(layout.edges.filter(edge => edge.secondary).map(edge => pointBySha.get(edge.parent)?.track)), [layout, pointBySha])
-  const allowedTracks = useMemo(() => layout.tracks.filter(track => showAll || track.ref || track.detached || integrated.has(track.id) || track.shas.includes(selected ?? '') || track.shas.includes(page?.head ?? '') || track.id === focus || track.shas.includes(focus)), [layout, showAll, integrated, selected, page?.head, focus])
-  const hidden = layout.tracks.length - allowedTracks.length
+  const allowedTracks = useMemo(() => layout.tracks.filter(track => track.ref || track.detached || integrated.has(track.id) || track.shas.includes(selected ?? '') || track.shas.includes(page?.head ?? '') || track.id === focus || track.shas.includes(focus)), [layout, integrated, selected, page?.head, focus])
   const allowed = useMemo(() => new Set(allowedTracks.map(track => track.id)), [allowedTracks])
   const labelPlan = useMemo(() => {
     const labels: Array<AtlasLabelBox & { track: typeof layout.tracks[number]; label: string; references: GitAtlasPage['refs']; sha: string; key: string; offset: number }> = []
@@ -93,7 +91,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, base, focus, 
     for (const lane of [...heights.keys()].sort((a, b) => a - b)) { rows.set(lane, offset); offset += heights.get(lane)! + 124 }
     return rows
   }, [layout, labelPlan])
-  const y = useCallback((lane: number) => 150 + (laneRows.get(lane) ?? 0), [laneRows])
+  const y = useCallback((lane: number) => firstLaneY + (laneRows.get(lane) ?? 0), [laneRows])
   const nodeHeight = useMemo(() => labelPlan.reduce((height, label) => Math.max(height, y(label.track.lane) + label.offset + label.height + 96), 360), [labelPlan, y])
   const nodeIndex = useMemo(() => atlasVisibilityIndex(points, point => ({ left: point.x - 100, top: y(point.lane) - 110, width: 200, height: 180 })), [points, y])
   const visibleBounds = { left: viewport.x - 120, top: viewport.y - 100, width: viewport.width + 240, height: viewport.height + 200 }
@@ -180,7 +178,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, base, focus, 
       while (low < high) { const middle = Math.floor((low + high) / 2); if (prior[middle].x < element.scrollLeft) low = middle + 1; else high = middle }
       const anchor = prior[Math.min(low, prior.length - 1)]
       const next = anchor ? pointBySha.get(anchor.node.sha) : null
-      if (anchor && next) { element.scrollLeft += next.x - anchor.x; element.scrollTop += y(next.lane) - (150 + (priorRows.current.get(anchor.lane) ?? 0)) }
+      if (anchor && next) { element.scrollLeft += next.x - anchor.x; element.scrollTop += y(next.lane) - (firstLaneY + (priorRows.current.get(anchor.lane) ?? 0)) }
     }
     priorPoints.current = points
     priorRows.current = laneRows
@@ -193,41 +191,18 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, base, focus, 
     observer.observe(element)
     return () => observer.disconnect()
   }, [scheduleViewport])
-  useLayoutEffect(() => {
-    const element = scroll.current, track = pendingTrack.current ? trackById.get(pendingTrack.current) : null
-    if (!element || !track) return
-    const point = pointBySha.get(track.shas[0])
-    if (!point) return
-    pendingTrack.current = null
-    element.scrollLeft = Math.max(0, point.x - 180)
-    element.scrollTop = Math.max(0, y(point.lane) - 180)
-    scheduleViewport()
-  }, [showAll, trackById, pointBySha, y, scheduleViewport])
   const demandMore = () => {
     if (!requestMore || loading || budget.current > 0 || !points.length || !scroll.current || scroll.current.scrollLeft > points[0].x + 160) return
     budget.current = 1; pendingDemand.current = true; scheduleViewport()
   }
-  const trajectoryOptions = useMemo(() => {
-    const known = new Set([...layout.tracks.flatMap(track => track.ref ? [track.ref] : []), ...layout.inactive.map(ref => ref.ref)])
-    return <div className="gm-atlas-track-list">
-      {layout.tracks.map(track => <button key={track.id} onClick={() => { pendingTrack.current = track.id; setShowAll(true); focusTrajectory(track.ref ?? track.shas[0], track.shas[0]) }}>{track.label}</button>)}
-      {layout.inactive.map(ref => <button key={ref.ref} onClick={() => focusTrajectory(ref.ref, ref.sha)}>{ref.name} · ponta fora do trecho carregado</button>)}
-      {page?.refs.filter(ref => ref.kind !== 'HEAD' && !known.has(ref.ref)).map(ref => <button key={ref.ref} onClick={() => focusTrajectory(ref.ref, ref.sha)}>{ref.name} · referência atual no trecho compartilhado</button>)}
-    </div>
-  }, [layout, page?.refs, focusTrajectory])
   return <>
-    <div className="gm-atlas-visibility">
-      <span>{allowedTracks.length} trajetórias visíveis{hidden ? ` · ${hidden} sem referência atual ou integração visível ocultas` : ''}</span>
-      {(hidden > 0 || showAll) && <button aria-pressed={showAll} onClick={() => setShowAll(value => !value)}>{showAll ? 'Mostrar relevantes' : `Mostrar todas (${layout.tracks.length})`}</button>}
-      <details><summary>Localizar trajetória ou referência</summary>{trajectoryOptions}</details>
-    </div>
     {core?.checkout.head && !pointBySha.has(core.checkout.head) && <p className="gm-atlas-note">Você está aqui: {core.checkout.head.slice(0, 8)} · HEAD fora do trecho visível.</p>}
     {hasSkew && <div className="gm-atlas-note" role="status">Há datas invertidas. A ordem causal é preservada; conexões correspondentes são tracejadas.</div>}
     <div ref={scroll} className="gm-atlas-scroll" tabIndex={0} aria-label="Mapa Git por eventos; role para explorar" onWheel={demandMore} onPointerDown={demandMore} onKeyDown={demandMore} onScroll={scheduleViewport}>
       <div className="gm-atlas-surface" style={{ width, height }}>
         <svg className="gm-atlas-lines" width={width} height={height} aria-label="Relações reais entre commits">
           <defs>{(['base', 'neutral'] as const).map(tone => <marker key={tone} id={`${mergeArrowId}-${tone}`} viewBox="0 0 8 8" refX={7} refY={4} markerWidth={6} markerHeight={6} markerUnits="userSpaceOnUse" orient="auto"><path d="M 1 1 L 7 4 L 1 7" fill="none" stroke={tone === 'base' ? 'var(--accent)' : 'var(--text-secondary)'} strokeWidth={1.6} /></marker>)}</defs>
-          {days.filter(day => day.x + day.width >= viewport.x - 120 && day.x <= viewport.x + viewport.width).map(day => <line key={day.x} x1={day.x} x2={day.x} y1={66} y2={height} stroke="var(--border)" strokeDasharray="2 8" opacity=".35" />)}
+          {days.filter(day => day.x + day.width >= viewport.x - 120 && day.x <= viewport.x + viewport.width).map(day => <line key={day.x} x1={day.x} x2={day.x} y1={32} y2={height} stroke="var(--border)" strokeDasharray="2 8" opacity=".35" />)}
           {connections.map(({ edge, d, mergeContext }) => <path key={`${edge.child}:${edge.parent}`} data-child={edge.child} data-parent={edge.parent} data-receiving-track={edge.receivingTrack} d={d} fill="none" stroke={edge.secondary && mergeContext === 'BASE' ? 'var(--accent)' : 'var(--text-secondary)'} strokeWidth={edge.secondary && mergeContext === 'BASE' ? 2.5 : 1.8} markerEnd={edge.secondary ? `url(#${mergeArrowId}-${mergeContext === 'BASE' ? 'base' : 'neutral'})` : undefined} opacity={active(edge.child) && active(edge.parent) ? .9 : .18} strokeDasharray={edge.skew ? '5 3' : undefined}><title>{edge.secondary ? `${atlasMergeDescriptions[mergeContext]} · contribuição secundária → M; nome histórico de destino não inferido` : 'Continuidade do primeiro pai'}: {edge.parent} → {edge.child}{edge.skew ? ' · datas invertidas' : ''}</title></path>)}
           {anchors.map(anchor => {
             const point = pointBySha.get(anchor.child)
@@ -247,7 +222,7 @@ export function GitAtlasCanvas({ page, core, enrichment, choosePr, base, focus, 
           </button>
           {references.length > 1 && <details className="gm-atlas-ref-aliases"><summary aria-label={`${references.length} referências atuais no mesmo commit`}>+{references.length - 1} refs</summary><div>{references.map(ref => <button key={ref.ref} aria-pressed={ref.ref === focus} onClick={() => focusTrajectory(ref.ref, ref.sha)}>{ref.name}</button>)}</div></details>}
         </div>)}
-        {annotations.filter(group => group.x >= viewport.x - 120 && group.x <= viewport.x + viewport.width).map(group => <details key={`${group.created}:${group.x}`} className={`gm-pr-annotation ${group.created ? 'is-created' : 'is-integrated'}`} style={{ left: group.x, top: group.created ? 78 : 106 }}>
+        {annotations.filter(group => group.x >= viewport.x - 120 && group.x <= viewport.x + viewport.width).map(group => <details key={`${group.created}:${group.x}`} className={`gm-pr-annotation ${group.created ? 'is-created' : 'is-integrated'}`} style={{ left: group.x, top: group.created ? 44 : 72 }}>
           <summary aria-label={`${group.created ? 'PR criado' : 'PR integrado'} #${group.events[0].prNumber}${group.events.length > 1 ? ` e mais ${group.events.length - 1}` : ''}`} title="Anotação temporal aproximada; não representa um commit nem comprova intervalo aberto">{group.created ? '+' : '↗'} #{group.events[0].prNumber}{group.events.length > 1 ? ` +${group.events.length - 1}` : ''}</summary>
           <div>{group.events.map(event => <button key={`${event.kind}:${event.prNumber}`} onClick={() => choosePr?.(event.prNumber)}>#{event.prNumber} · {new Date(event.at).toLocaleString()}{event.kind === 'PR_MERGED' && event.integrationMethod === 'MERGED_METHOD_UNKNOWN' ? ' · método não identificado' : ''}</button>)}</div>
         </details>)}

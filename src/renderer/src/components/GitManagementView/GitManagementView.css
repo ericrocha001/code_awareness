@@ -138,9 +138,9 @@
 .gm-atlas-inline-label small { margin-left:auto; flex-shrink:0; }
 .gm-view .gm-atlas-inline-label[aria-pressed=true] { color:var(--text-primary); border-color:var(--accent); background:var(--selected-bg); }
 .gm-atlas-lines { position:absolute; top:0; left:0; pointer-events:none; }
-.gm-atlas-date-axis { position:sticky; top:0; height:66px; z-index:3; background:var(--bg-primary); border-bottom:1px solid var(--border); }
-.gm-atlas-date { position:absolute; top:0; height:66px; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; padding:0 3px; font-size:11px; color:var(--text-secondary); border-left:1px solid var(--border); overflow:hidden; white-space:nowrap; }
-.gm-atlas-date small { font-size:11px; }
+.gm-atlas-date-axis { position:sticky; top:0; height:32px; z-index:3; background:var(--bg-primary); border-bottom:1px solid var(--border); }
+.gm-atlas-date { position:absolute; top:0; height:32px; display:flex; flex-direction:row; align-items:center; justify-content:center; gap:5px; padding:0 4px; font-size:11px; color:var(--text-secondary); border-left:1px solid var(--border); overflow:hidden; white-space:nowrap; }
+.gm-atlas-date small { font-size:10px; }
 .gm-atlas-date span { white-space:normal; text-align:center; }
 .gm-branch-ref { display:block; color:var(--text-secondary); font-size:11px; overflow-wrap:anywhere; }
 .gm-branch-detail { flex-wrap:wrap; }
@@ -164,12 +164,6 @@
 .gm-checkout-context select { padding:5px 8px; max-width:220px; }
 .gm-checkout-diverged { color:var(--color-warning); }
 .gm-checkout-context small { font-size:11px; }
-.gm-pr-controls { position:relative; display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:8px 20px 0; font-size:11px; color:var(--text-secondary); }
-.gm-pr-controls > button { padding:4px 8px; font-size:11px; }
-.gm-pr-controls details { margin-left:auto; }
-.gm-pr-controls summary { cursor:pointer; }
-.gm-pr-catalog { position:absolute; right:12px; top:34px; z-index:7; display:flex; flex-direction:column; gap:4px; width:320px; max-width:85cqw; max-height:300px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:12px; background:var(--bg-secondary); }
-.gm-pr-catalog button { text-align:left; overflow-wrap:anywhere; }
 .gm-pr-context article { padding:10px 0; border-bottom:1px solid var(--border); }
 .gm-pr-context article > button { text-align:left; font-size:12px; }
 .gm-pr-context p { margin:8px 0; }
@@ -198,19 +192,13 @@
 .gm-placeholder { padding:0 24px 18px; color:var(--text-secondary); font-size:13px; }
 .gm-error { padding:10px 16px; color:var(--color-danger); border:1px solid var(--border); border-radius:10px; background:var(--bg-secondary); font-size:12px; flex-shrink:0; }
 .gm-empty { margin:auto; text-align:center; color:var(--text-secondary); }
-.gm-atlas-heading { min-height:77px; margin:0 16px; padding:16px 4px; gap:16px; }
+.gm-atlas-heading { min-height:64px; margin:0 16px; padding:10px 4px; gap:16px; }
 .gm-atlas-heading > svg { flex-shrink:0; color:var(--text-secondary); }
 .gm-atlas-heading h2 { margin-bottom:5px; font-size:20px; }
 .gm-atlas-heading p { font-size:13px; }
 .gm-atlas-legend { margin-left:auto; display:flex; align-items:center; gap:16px; font-size:11px; }
 .gm-atlas-legend span { display:flex; align-items:center; gap:6px; white-space:nowrap; }
 .gm-atlas-legend i { width:10px; height:10px; border-radius:50%; background:var(--text-secondary); }
-.gm-atlas-visibility { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding:8px 20px; color:var(--text-secondary); font-size:11px; }
-.gm-atlas-visibility button { padding:4px 8px; font-size:11px; }
-.gm-atlas-visibility details { position:relative; margin-left:auto; }
-.gm-atlas-visibility summary { cursor:pointer; }
-.gm-atlas-track-list { position:absolute; right:0; top:24px; z-index:7; display:flex; flex-direction:column; gap:4px; width:280px; max-height:280px; overflow:auto; padding:8px; border:1px solid var(--border); border-radius:12px; background:var(--bg-secondary); box-shadow:0 12px 24px rgba(0,0,0,.2); }
-.gm-atlas-track-list button { text-align:left; overflow-wrap:anywhere; }
 .gm-inspector-heading { height:48px; padding:10px 18px; gap:12px; }
 .gm-inspector-heading > svg { color:var(--accent); }
 .gm-inspector-heading strong { flex:1; }
