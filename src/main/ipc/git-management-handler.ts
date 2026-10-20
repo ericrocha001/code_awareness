@@ -1,6 +1,7 @@
 import { ipcMain } from 'electron'
 import type { GitAtlasRequest, GitAtlasCompareRequest, GitAtlasScope } from '../../shared/types/git-atlas-types'
 import type { GitAtlasCoreRequest, GitAtlasPrRequest } from '../../shared/types/git-atlas-evidence-types'
+import type { AtlasCatalogRequest } from '../../shared/types/git-atlas-catalog-types'
 import type { ActiveProjectService } from '../core/active-project-service'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
 import {
@@ -107,6 +108,7 @@ export class GitManagementController {
       )
     }
     if (!current()) return { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
+    const release = selected!.service.beginAtlasInteraction()
     try {
       const data = await action(selected!.service)
       return current()
@@ -123,7 +125,7 @@ export class GitManagementController {
               ? error.message
               : 'GIT_OPERATION_FAILED'
       }
-    }
+    } finally { release() }
   }
 }
 
@@ -206,6 +208,14 @@ export function registerGitManagementHandlers(
     ['CHECKOUT', 'ALL_REFS'].includes(scope.kind) && ['AUTO', 'PRESENT'].includes(scope.anchor) &&
     [scope.baseRef, scope.focusRef].every(ref => ref === undefined || typeof ref === 'string' && /^refs\/(heads|remotes)\/.+/.test(ref) && !/[\s~^:?*\[\]\\]/.test(ref) && ref.length <= 256)
   ipcMain.handle('git-management:atlas-checkout-state', (_event, context: GitManagementContext) => controller.read(context, service => service.getAtlasCheckoutState()))
+  ipcMain.handle('git-management:atlas-catalog', (event, request: AtlasCatalogRequest) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).some(key => !['context', 'snapshot'].includes(key)) || typeof request.snapshot !== 'string' || !/^[a-f0-9]{64}$/.test(request.snapshot)) return { success: false, code: 'INVALID_ARGUMENT' }
+    const context = request.context
+    return controller.read(context, service => service.getAtlasCatalog(request.snapshot, `${context.projectId}:${context.revision}`, state => {
+      if (!event.sender.isDestroyed()) event.sender.send('git-management:atlas-catalog-changed', { context, state })
+    }))
+  })
+  ipcMain.handle('git-management:atlas-catalog-stop', (_event, context: GitManagementContext) => controller.read(context, async service => { service.stopAtlasCollection() }))
   const validEvidenceRequest = (request: GitAtlasCoreRequest | GitAtlasPrRequest, enrichment: boolean) => {
     if (!request || typeof request !== 'object' || Array.isArray(request)) return false
     const keys = enrichment ? ['context', 'window', 'cursor', 'limit', 'snapshot', 'scope'] : ['context', 'window', 'cursor', 'limit', 'refresh', 'comparisonRef', 'scope']

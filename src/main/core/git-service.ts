@@ -133,8 +133,8 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], root)).trim()
   }
 
-  async listWorktreeRecords(root: string): Promise<string> {
-    return this.runGit(['worktree', 'list', '--porcelain', '-z'], root)
+  async listWorktreeRecords(root: string, localOnly = false): Promise<string> {
+    return this.runGit(['worktree', 'list', '--porcelain', '-z'], root, localOnly ? { maxOutputBytes: 256000, env: this.localReadEnvironment() } : undefined)
   }
 
   async getWorktreeDirectory(root: string): Promise<string> {
@@ -729,6 +729,18 @@ export class GitService implements FileListingPort {
   }
 
   getAtlasCheckoutState(root: string) { return this.captureSnapshotIdentity(root) }
+
+  async getAtlasSourceFingerprint(root: string): Promise<string> {
+    const directories = await this.getRepositoryDirectories(root)
+    const common = realpathSync(directories.common), admin = realpathSync(directories.admin), physical = realpathSync(root)
+    const [checkout, references, worktrees, topology] = await Promise.all([
+      this.getAtlasCheckoutState(root), this.getAtlasReferences(root), this.listWorktreeRecords(root, true), this.getCommitTopologyRevision(root, common)
+    ])
+    if (checkout.operation) throw new Error('GIT_OPERATION_IN_PROGRESS')
+    if (worktrees.length > 256000 || references.split('\n').length > 513) throw new Error('ATLAS_REFERENCE_LIMIT')
+    const generation = [admin, physical].map(path => { const stat = statSync(path, { bigint: true }); return [path, String(stat.dev), String(stat.ino), String(stat.birthtimeNs)] })
+    return createHash('sha256').update(JSON.stringify([common, generation, checkout, references, worktrees, topology])).digest('hex')
+  }
 
   async getAtlasHistoryOrder(root: string, tips: string[], offset: number, limit: number, since: string | null, until?: string): Promise<string[]> {
     if (!tips.length) return []

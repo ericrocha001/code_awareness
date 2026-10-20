@@ -5,7 +5,8 @@ import type { GitService } from '../core/git-service'
 import type { GitDecoration } from '../../shared/types/git-management-types'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasQuery, GitAtlasScope } from '../../shared/types/git-atlas-types'
 import { AtlasCache, type AtlasCommit, type AtlasHistorySlice, type AtlasPersistence } from './git-atlas-cache'
-import type { AtlasCatalogManifest } from '../../shared/types/git-atlas-catalog-types'
+import type { AtlasCatalogManifest, AtlasCatalogState } from '../../shared/types/git-atlas-catalog-types'
+import { AtlasCollector } from './git-atlas-collector'
 
 export class GitAtlasReader {
   private readonly key = randomBytes(32)
@@ -21,14 +22,54 @@ export class GitAtlasReader {
   private persistenceToken = 0
   private persistenceFailed = false
   private disposed = false
+  private persistenceReady: Promise<void> = Promise.resolve()
+  private deliveredSnapshot = ''
+  private detachCollector?: () => void
+  private catalogRequest = 0
+  private manifest?: AtlasCatalogManifest
   private flush?: NodeJS.Immediate
   private readonly writes = new Map<string, { slice: AtlasHistorySlice; commits: AtlasCommit[]; observation: AtlasCatalogManifest }>()
   constructor(private readonly root: string, private readonly git: GitService, private readonly fail: (code: string) => never,
-    private readonly openPersistence?: (common: string) => AtlasPersistence | Promise<AtlasPersistence>) {}
+    private readonly openPersistence?: (common: string) => AtlasPersistence | Promise<AtlasPersistence>,
+    private readonly mutationPending: () => boolean = () => false) {}
+
+  stopCollection() { this.catalogRequest++; this.detachCollector?.(); this.detachCollector = undefined }
+
+  private async catalogManifest(contextKey?: string, revalidate = false): Promise<AtlasCatalogManifest> {
+    const source = await this.git.getAtlasSourceFingerprint(this.root)
+    if (!revalidate && this.manifest?.sourceFingerprint === source) return this.manifest
+    const current = await this.observe(contextKey, { kind: 'ALL_REFS', anchor: 'AUTO' })
+    if (source !== await this.git.getAtlasSourceFingerprint(this.root)) this.fail('GIT_STATE_CHANGED')
+    const tips = [...new Set([...current.refs.map(ref => ref.sha), ...current.tags.map(tag => tag.sha), ...current.detachedHeads.map(item => item.sha)])].sort()
+    if (tips.join(' ').length > 24000) this.fail('ATLAS_REFERENCE_LIMIT')
+    return this.manifest = { scopeKey: 'LOCAL_REACHABLE_V1', revision: current.historyRevision, topology: current.topologyRevision, worktreeGeneration: current.worktreeGeneration,
+      tips, refs: current.refs, tags: current.tags, observedAt: new Date().toISOString(), available: current.detachedCoverage === 'COMPLETE', sourceFingerprint: source }
+  }
+
+  async startCollection(snapshot: string, contextKey: string, changed: (state: AtlasCatalogState) => void): Promise<AtlasCatalogState> {
+    if (!snapshot || snapshot !== this.deliveredSnapshot || this.disposed) this.fail('GIT_STATE_CHANGED')
+    this.stopCollection()
+    const request = this.catalogRequest
+    const manifest = await this.catalogManifest(contextKey)
+    await this.persistenceReady
+    if (this.disposed || request !== this.catalogRequest) this.fail('REPOSITORY_CONTEXT_CHANGED')
+    const store = this.persistence
+    const state: AtlasCatalogState = { manifest, coverage: 'UNKNOWN', acquired: 0, diagnostic: this.catalogDiagnostic(), reason: null }
+    if (store?.diagnostic().state === 'READY') {
+      this.detachCollector = AtlasCollector.attach({ store, manifest, observe: () => this.catalogManifest(contextKey, true),
+        fingerprint: () => this.git.getAtlasSourceFingerprint(this.root), metadata: shas => this.git.getAtlasFullCommitMetadata(this.root, shas),
+        busy: () => this.disposed || this.pending.size > 0 || this.writes.size > 0 || this.mutationPending(),
+        changed: next => { if (!this.disposed && request === this.catalogRequest) changed(next) } })
+      state.coverage = 'NOT_STARTED'
+    }
+    return state
+  }
 
   catalogDiagnostic() { return this.persistence?.diagnostic()??{state:'UNAVAILABLE' as const,reason:this.persistenceCommon?'OPENING_OR_UNAVAILABLE':'NOT_REQUESTED'} }
 
   invalidate(dispose = false) {
+    this.stopCollection()
+    this.deliveredSnapshot = ''
     this.generation++; this.pages.clear(); this.pending.clear(); this.anchors.clear()
     if (dispose) {
       if(this.flush) clearImmediate(this.flush)
@@ -41,18 +82,20 @@ export class GitAtlasReader {
 
   private preparePersistence(common: string) {
     if (!this.openPersistence || this.disposed || this.persistenceCommon === common) return
+    this.stopCollection()
+    if (this.persistence) for (const [key, value] of this.writes) this.persistence.save(key, value.slice, value.commits, value.observation)
     this.persistence?.close(); this.persistence = undefined; this.persistenceCommon = common; this.persistenceFailed = false
     this.writes.clear()
     if (this.flush) clearImmediate(this.flush)
     this.flush = undefined
     const token = ++this.persistenceToken
-    setImmediate(() => {
-      if (this.disposed || token !== this.persistenceToken) return
+    this.persistenceReady = new Promise<void>(resolve => setImmediate(() => {
+      if (this.disposed || token !== this.persistenceToken) { resolve(); return }
       Promise.resolve().then(() => this.openPersistence!(common)).then(store => {
         if (this.disposed || token !== this.persistenceToken) { store.close(); return }
         this.persistence = store; this.scheduleFlush()
-      }).catch(() => { if (token === this.persistenceToken) { this.persistenceFailed = true; this.writes.clear() } })
-    })
+      }).catch(() => { if (token === this.persistenceToken) { this.persistenceFailed = true; this.writes.clear() } }).finally(resolve)
+    }))
   }
 
   private scheduleFlush() {
@@ -113,7 +156,7 @@ export class GitAtlasReader {
     }
     const references = this.git.getAtlasReferences(this.root)
     const [raw, worktrees, primary] = await Promise.all([
-      references, this.git.listWorktreeRecords(this.root),
+      references, this.git.listWorktreeRecords(this.root, true),
       references.then(raw => this.git.getAtlasPrimaryRef(this.root, raw))
     ])
     const { head, branch } = checkout
@@ -162,7 +205,9 @@ export class GitAtlasReader {
     const anchor = current.at
     this.anchors.set(session, current)
     if (this.anchors.size > 64) this.anchors.delete(this.anchors.keys().next().value!)
-    return this.coalesce(`history:${this.generation}:${anchor}:${JSON.stringify(request)}`, () => this.readHistory(request, anchor))
+    const page = await this.coalesce(`history:${this.generation}:${anchor}:${JSON.stringify(request)}`, () => this.readHistory(request, anchor))
+    this.deliveredSnapshot = page.snapshot
+    return page
   }
 
   private async readCommits(shas: string[]): Promise<Map<string, AtlasCommit>> {
@@ -218,7 +263,7 @@ export class GitAtlasReader {
     }
     const since = request.window === 'ALL' ? null : new Date(Date.parse(anchorAt) - request.window * 86400000).toISOString()
     const upperBound = request.window !== 'ALL' && request.scope && anchorKind === 'CHECKOUT' ? anchorAt : null
-    const sliceKey = JSON.stringify(['history-v3', before.historyRevision, request.window, anchorAt, offset, limit])
+    const sliceKey = JSON.stringify(['history-v3', before.historyRevision, request.window, request.window === 'ALL' ? 'ALL' : anchorAt, offset, limit])
     const cacheKey = JSON.stringify(['page', sliceKey, before.snapshot, queriedAt])
     const cached = this.pages.getReadonly<GitAtlasPage>(cacheKey)
     if (cached && generation === this.generation) return cached
@@ -226,7 +271,7 @@ export class GitAtlasReader {
     if (tips.join(' ').length > 24000) this.fail('ATLAS_REFERENCE_LIMIT')
     if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')
     let slice = !request.refresh ? this.slices.getReadonly<AtlasHistorySlice>(sliceKey) ?? this.persistence?.getSlice(sliceKey) : undefined
-    if (slice && (slice.revision !== before.historyRevision || slice.worktreeGeneration !== before.worktreeGeneration || slice.window !== request.window || slice.offset !== offset || slice.limit !== limit || slice.anchorAt !== anchorAt || slice.since !== since || slice.upperBound !== upperBound || JSON.stringify(slice.tips) !== JSON.stringify(tips) || JSON.stringify(slice.scope) !== JSON.stringify(request.scope))) slice = undefined
+    if (slice && (slice.revision !== before.historyRevision || slice.worktreeGeneration !== before.worktreeGeneration || slice.window !== request.window || slice.offset !== offset || slice.limit !== limit || request.window !== 'ALL' && slice.anchorAt !== anchorAt || slice.since !== since || slice.upperBound !== upperBound || JSON.stringify(slice.tips) !== JSON.stringify(tips) || JSON.stringify(slice.scope) !== JSON.stringify(request.scope))) slice = undefined
     if (!slice && !request.refresh && offset === 0) {
       const compatible = (candidate: AtlasHistorySlice) => candidate.revision === before.historyRevision && candidate.worktreeGeneration === before.worktreeGeneration && !candidate.hasMore && candidate.offset === 0 && candidate.shas.length <= limit &&
         (candidate.since === null || since !== null && Date.parse(candidate.since) <= Date.parse(since)) && (candidate.upperBound === null || Date.parse(candidate.upperBound) >= Date.parse(anchorAt)) &&

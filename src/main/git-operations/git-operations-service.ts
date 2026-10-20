@@ -855,6 +855,7 @@ export class GitOperationsService {
 
   private async serialized<T>(operation: () => Promise<T>): Promise<T> {
     if (this.readOnlyWorktree) fail('WORKTREE_OWNERSHIP_REQUIRED')
+    this.atlasActivity++
     const result = this.pending.then(async () => {
       if (this.transactionAlreadyHeld) return operation()
       const common = realpathSync(await this.git.getCommonDirectory(this.repoRoot))
@@ -865,7 +866,7 @@ export class GitOperationsService {
       })
     }).catch((error: unknown) => { throw this.normalizeError(error) })
     this.pending = result.catch(() => {})
-    return result
+    return result.finally(() => { this.atlasActivity-- })
   }
 
   private normalizeError(error: unknown): GitOperationsError {
@@ -1128,6 +1129,13 @@ export class GitOperationsService {
   }
 
   clearAtlasCache() { this.atlasReader?.invalidate(true); this.atlasReader = undefined }
+  private atlasActivity = 0
+  beginAtlasInteraction() { this.atlasActivity++; return () => { this.atlasActivity-- } }
+  stopAtlasCollection() { this.atlasReader?.stopCollection() }
+  async getAtlasCatalog(snapshot: string, contextKey: string, changed: (state: import('../../shared/types/git-atlas-catalog-types').AtlasCatalogState) => void) {
+    await this.repository()
+    return this.atlas().startCollection(snapshot, contextKey, changed)
+  }
   getAtlasCatalogDiagnostic() { return this.atlas().catalogDiagnostic() }
   private atlasPersistence?: (common: string) => AtlasPersistence | Promise<AtlasPersistence>
   private atlasCatalogClear?: (common: string, authorization: {repositoryId:string;confirmed:true}) => void | Promise<void>
@@ -1140,7 +1148,10 @@ export class GitOperationsService {
   }
   async getAtlasCheckoutState() {
     await this.repository()
-    return this.git.getAtlasCheckoutState(this.repoRoot)
+    const checkout = await this.git.getAtlasCheckoutState(this.repoRoot)
+    let sourceFingerprint: string | undefined
+    try { sourceFingerprint = await this.git.getAtlasSourceFingerprint(this.repoRoot) } catch { }
+    return { ...checkout, sourceFingerprint }
   }
   private atlasPullRequests?: (inventory: BranchInventory) => Promise<BranchPullRequests>
 
@@ -1240,7 +1251,7 @@ export class GitOperationsService {
 
   private atlasReader?: GitAtlasReader
   private atlas(): GitAtlasReader {
-    return this.atlasReader ??= new GitAtlasReader(this.repoRoot, this.git, fail, this.atlasPersistence)
+    return this.atlasReader ??= new GitAtlasReader(this.repoRoot, this.git, fail, this.atlasPersistence, () => this.atlasActivity > 0)
   }
   async getAtlasHistory(request: GitAtlasQuery) {
     await this.repository()

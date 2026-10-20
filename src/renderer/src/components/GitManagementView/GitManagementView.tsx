@@ -5,6 +5,7 @@ import type { ActiveProjectState } from '../../../../shared/types/active-project
 import type { GitOverview } from '../../../../shared/types/git-management-types'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasScope } from '../../../../shared/types/git-atlas-types'
 import type { GitAtlasCoreEvidence, GitAtlasPrEvidence } from '../../../../shared/types/git-atlas-evidence-types'
+import type { AtlasCatalogState } from '../../../../shared/types/git-atlas-catalog-types'
 import { GitInspector, type GitSelection } from './GitInspector'
 import { GitActions } from './GitActions'
 import { GitAtlasCanvas } from './GitAtlasCanvas'
@@ -15,6 +16,9 @@ import './GitManagementView.css'
 export function GitManagementView({ state, commitIntent, onIntentConsumed }: { state: ActiveProjectState; commitIntent?: CommitNavigationIntent | null; onIntentConsumed?: (requestId: string) => void }) {
   const [history, setHistory] = useState<GitAtlasPage | null>(null)
   const [core, setCore] = useState<GitAtlasCoreEvidence | null>(null)
+  const [catalog, setCatalog] = useState<AtlasCatalogState | null>(null)
+  const catalogRef = useRef<AtlasCatalogState | null>(null)
+  const [collectionSession, setCollectionSession] = useState(0)
   const [enrichment, setEnrichment] = useState<GitAtlasPrEvidence | null>(null)
   const [prState, setPrState] = useState<'NOT_REQUESTED' | 'LOADING' | 'READY' | 'UNAVAILABLE'>('NOT_REQUESTED')
   const [selectedPr, setSelectedPr] = useState<number | null>(null)
@@ -59,14 +63,23 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
       if (!cursor) { setCore(result.data); setEnrichment(null); setSelectedPr(null) }
       setHistory(previous => {
         if (!cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt) return previous
-        return cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt && previous.anchorAt === page.anchorAt
-          ? { ...page, nodes: [...new Map([...previous.nodes, ...page.nodes].map(node => [node.sha, node])).values()] }
-          : page
+        const expanding = !cursor && previous?.scope?.kind === 'CHECKOUT' && page.scope?.kind === 'ALL_REFS' && previous.head === page.head &&
+          previous.worktreeGeneration === page.worktreeGeneration && previous.topologyRevision === page.topologyRevision &&
+          previous.refs.every(ref => page.refs.some(current => current.ref === ref.ref && current.sha === ref.sha))
+        if (expanding || cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt && previous.anchorAt === page.anchorAt) {
+          const nodes = [...new Map([...(previous?.nodes ?? []), ...page.nodes].map(node => [node.sha, node])).values()]
+            .map(node => ({ ...node, decorations: page.refs.filter(ref => ref.sha === node.sha) }))
+          const present = new Set(nodes.map(node => node.sha))
+          const boundary = [...new Set(nodes.flatMap(node => node.parents).filter(sha => !present.has(sha)))]
+          return { ...page, nodes, boundary, pendingParents: boundary }
+        }
+        return page
       })
     } catch { if (generation.current === request) setError('Falha ao carregar histórico. Atualize para tentar novamente.') }
     finally { if (generation.current === request) { setLoading(false); paging.current = null } }
   }, [context, state.project?.id, scope])
   useEffect(() => {
+    setCatalog(null); catalogRef.current = null
     setHistory(null); setCore(null); setEnrichment(null); setPrRequested(false); setSelectedPr(null); setPrState('NOT_REQUESTED'); setOverview(null); setNotice(''); setSelection(null); setBase(''); setFocus(''); setComparison(null); setDrawer(false)
     setScope(previous => previous.kind === 'CHECKOUT' && previous.anchor === 'AUTO' && !previous.baseRef && !previous.focusRef ? previous : { kind: 'CHECKOUT', anchor: 'AUTO' }); setOperation(null)
   }, [context])
@@ -84,9 +97,54 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   }, [context])
   useEffect(() => {
     loadedPage.current = null
-    setHistory(null); setCore(null); setEnrichment(null); void load()
+    void load()
     return () => { generation.current++; paging.current = null }
   }, [load])
+  useEffect(() => {
+    if (!core) return
+    let current = true, first = 0, second = 0
+    const accept = (next: AtlasCatalogState) => {
+      if (!current || next.manifest && next.manifest.worktreeGeneration !== core.worktreeGeneration) return
+      const previous = catalogRef.current
+      catalogRef.current = next; setCatalog(next)
+      if (next.manifest) {
+        if (scope.kind === 'CHECKOUT') setScope(value => ({ ...value, kind: 'ALL_REFS' }))
+        else if (previous?.manifest && previous.manifest.revision !== next.manifest.revision) void load()
+      }
+    }
+    const stop = () => { void window.codeAwareness.stopGitAtlasCollection(context).catch(() => {}) }
+    const start = () => {
+      if (document.hidden) return
+      first = requestAnimationFrame(() => { second = requestAnimationFrame(() => {
+        void window.codeAwareness.getGitAtlasCatalog({ context, snapshot: core.gitSnapshot }).then(result => {
+          if (result.success) accept(result.data)
+          else if (current) { catalogRef.current = null; setCatalog({ manifest: null, coverage: 'UNKNOWN', acquired: 0, diagnostic: { state: 'UNAVAILABLE', reason: result.code }, reason: result.code }) }
+        }).catch(() => { if (current) setCatalog({ manifest: null, coverage: 'UNKNOWN', acquired: 0, diagnostic: { state: 'UNAVAILABLE', reason: 'CATALOG_UNAVAILABLE' }, reason: 'CATALOG_UNAVAILABLE' }) })
+      }) })
+    }
+    const unsubscribe = window.codeAwareness.onGitAtlasCatalogChanged(change => {
+      if (change.context.projectId === context.projectId && change.context.revision === context.revision) accept(change.state)
+    })
+    const visibility = () => {
+      cancelAnimationFrame(first); cancelAnimationFrame(second)
+      if (document.hidden) stop()
+      else start()
+    }
+    start(); document.addEventListener('visibilitychange', visibility)
+    return () => { current = false; cancelAnimationFrame(first); cancelAnimationFrame(second); unsubscribe(); document.removeEventListener('visibilitychange', visibility); stop() }
+  }, [core?.gitSnapshot, context, scope.kind, collectionSession])
+  useEffect(() => {
+    let resume: ReturnType<typeof setTimeout> | undefined
+    const navigate = () => {
+      if (!core) return
+      if (!resume) void window.codeAwareness.stopGitAtlasCollection(context).catch(() => {})
+      if (resume) clearTimeout(resume)
+      resume = setTimeout(() => { resume = undefined; setCollectionSession(value => value + 1) }, 600)
+    }
+    window.addEventListener('wheel', navigate, { passive: true })
+    window.addEventListener('pointerdown', navigate, { passive: true })
+    return () => { if (resume) clearTimeout(resume); window.removeEventListener('wheel', navigate); window.removeEventListener('pointerdown', navigate) }
+  }, [context, !!core])
   useEffect(() => {
     let current = true, pending = false
     const focusWindow = async () => {
@@ -96,7 +154,9 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
         const result = await window.codeAwareness.getGitAtlasCheckoutState(context)
         if (!current || !result.success) return
         setOperation(result.data.operation)
-        if (result.data.head !== core.checkout.head || result.data.branch !== core.git.branch) void load()
+        if (result.data.head !== core.checkout.head || result.data.branch !== core.git.branch || result.data.sourceFingerprint && result.data.sourceFingerprint !== catalogRef.current?.manifest?.sourceFingerprint) {
+          catalogRef.current = null; setCatalog(null); void load(); setCollectionSession(value => value + 1)
+        } else if (!result.data.operation && catalogRef.current?.reason) setCollectionSession(value => value + 1)
       } finally { pending = false }
     }
     const listener = () => { void focusWindow().catch(() => {}) }
@@ -166,7 +226,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     select(commitIntent.commitSha)
     onIntentConsumed?.(commitIntent.requestId)
   }, [commitIntent?.requestId, context])
-  const refresh = async () => { await Promise.all([load(undefined, true), ...(actionsActive ? [readOverview()] : [])]) }
+  const refresh = async () => { await Promise.all([load(undefined, true), ...(actionsActive ? [readOverview()] : [])]); setCollectionSession(value => value + 1) }
   const refs = history?.refs.filter(ref => ref.kind !== 'HEAD') ?? []
   const selected = selection?.kind === 'COMMIT' ? selection.sha : selection?.ref.sha
   const mergeContexts = useMemo(() => classifyAtlasMerges(history, base), [history, base])
@@ -183,9 +243,9 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
       <div className="gm-segmented" role="group" aria-label="Modo do Atlas">{['Panorama', 'Foco', 'Comparar'].map(value => <button key={value} aria-pressed={mode === value} onClick={() => setMode(value)}>{value}</button>)}</div>
       <label>{mode === 'Comparar' ? 'Comparar com' : 'Branch em foco'}<select aria-label="Referência em foco" value={focus} onChange={event => { setFocus(event.target.value); const ref = refs.find(ref => ref.ref === event.target.value); if (ref) { setSelectedPr(null); setDrawer(true); setMode(mode === 'Panorama' ? 'Foco' : mode); setSelection({ kind: 'BRANCH', ref }) } }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}{/^[a-f0-9]{40,64}$/.test(focus) && <option value={focus}>Trajetória · {focus.slice(0, 8)}</option>}</select></label>
       {mode !== 'Panorama' && <label>Base<select aria-label="Referência base" value={base} onChange={event => { setBase(event.target.value); setScope(previous => ({ ...previous, baseRef: event.target.value || undefined })) }}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>}
-      {scope.kind === 'CHECKOUT' && <button onClick={() => setScope(previous => ({ ...previous, kind: 'ALL_REFS' }))}>Explorar outras referências</button>}
     </div>
     <AtlasCheckout core={core} context={context} base={base} inspect={select} />
+    {catalog && <div className="gm-atlas-note" role="status">{catalog.coverage === 'COMPLETE' && catalog.diagnostic.state === 'READY' && !catalog.reason ? 'Catálogo completo para os tips e a revisão local verificados.' : catalog.diagnostic.state !== 'READY' || catalog.reason ? 'Coleta histórica suspensa ou indisponível; timeline local preservada.' : 'Catálogo histórico parcial; coleta local em segundo plano.'}</div>}
     {history && !history.nextCursor && !loading && <div className="gm-atlas-note" role="status">Fim do histórico do escopo consultado.{history.referenceCoverage === 'SELECTED' ? ' Outras referências ainda não foram examinadas.' : ''}</div>}
     {notice && <div className="gm-atlas-note" role="status">{notice}</div>}
     {operation && <div className="gm-atlas-note" role="status">Operação Git em andamento: {operation}. Abra Alterações para consultar as ações disponíveis.</div>}

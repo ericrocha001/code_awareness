@@ -5,6 +5,7 @@
 /// <reference types="vite/client" />
 import type { ActiveProjectState } from '../../shared/types/active-project-types'
 import type { GitAtlasRequest, GitAtlasPage, GitAtlasCompareRequest, GitAtlasComparison } from '../../shared/types/git-atlas-types'
+import type { AtlasCatalogRequest, AtlasCatalogState, AtlasCatalogChange } from '../../shared/types/git-atlas-catalog-types'
 import type { GitAtlasCoreRequest, GitAtlasCoreEvidence, GitAtlasPrRequest, GitAtlasPrEvidence } from '../../shared/types/git-atlas-evidence-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../../shared/types/work-orchestration-types'
 import type { OrchestrationAttentionChange } from '../../shared/types/work-orchestration-attention-types'
@@ -31,7 +32,10 @@ declare global {
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>
       getGitAtlas: (request: GitAtlasRequest) => Promise<GitManagementResult<GitAtlasPage>>
-      getGitAtlasCheckoutState: (context: GitManagementContext) => Promise<GitManagementResult<Pick<GitOverview['state'], 'head' | 'branch' | 'operation'>>>
+      getGitAtlasCheckoutState: (context: GitManagementContext) => Promise<GitManagementResult<Pick<GitOverview['state'], 'head' | 'branch' | 'operation'> & { sourceFingerprint?: string }>>
+      getGitAtlasCatalog: (request: AtlasCatalogRequest) => Promise<GitManagementResult<AtlasCatalogState>>
+      stopGitAtlasCollection: (context: GitManagementContext) => Promise<GitManagementResult<void>>
+      onGitAtlasCatalogChanged: (callback: (change: AtlasCatalogChange) => void) => () => void
       getGitAtlasCore: (request: GitAtlasCoreRequest) => Promise<GitManagementResult<GitAtlasCoreEvidence>>
       getGitAtlasPrEvidence: (request: GitAtlasPrRequest) => Promise<GitManagementResult<GitAtlasPrEvidence>>
       compareGitAtlas: (request: GitAtlasCompareRequest) => Promise<GitManagementResult<GitAtlasComparison>>
