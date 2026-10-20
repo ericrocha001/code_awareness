@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
 import type { GitOperationReceipt } from '../git-operations/git-operation-receipts'
+import type { GitHistoryNode } from '../../shared/types/git-management-types'
 
 
 const GIT_TIMEOUT_MS = 10_000
@@ -132,8 +133,8 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], root)).trim()
   }
 
-  async listWorktreeRecords(root: string): Promise<string> {
-    return this.runGit(['worktree', 'list', '--porcelain', '-z'], root)
+  async listWorktreeRecords(root: string, localOnly = false): Promise<string> {
+    return this.runGit(['worktree', 'list', '--porcelain', '-z'], root, localOnly ? { maxOutputBytes: 256000, env: this.localReadEnvironment() } : undefined)
   }
 
   async getWorktreeDirectory(root: string): Promise<string> {
@@ -710,8 +711,61 @@ export class GitService implements FileListingPort {
     return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(upstream:short)', 'refs/heads/', 'refs/remotes/'], root)
   }
 
-  async getAtlasReferences(root: string): Promise<string> {
-    return this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(*objectname)%00%(upstream:short)%00%(objecttype)%00%(*objecttype)', 'refs/heads/', 'refs/remotes/', 'refs/tags/'], root, { maxOutputBytes: 256000, env: this.localReadEnvironment() })
+  async getAtlasReferences(root: string, selected?: string[]): Promise<string> {
+    const raw = await this.runGit(['for-each-ref', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(*objectname)%00%(upstream:short)%00%(objecttype)%00%(*objecttype)', ...(selected ?? ['refs/heads/', 'refs/remotes/', 'refs/tags/'])], root, { maxOutputBytes: 256000, env: this.localReadEnvironment() })
+    return selected ? raw.split('\n').filter(line => selected.includes(line.split('\0')[0])).join('\n') : raw
+  }
+
+  async getAtlasSelectedBase(root: string): Promise<string | null> {
+    const configured = (await this.runGit(['config', '--get', 'code-awareness.primaryBranch'], root, { allowExitOne: true, env: this.localReadEnvironment() })).trim()
+    if (configured) return configured.startsWith('refs/') ? configured : `refs/heads/${configured}`
+    const heads = await this.runGit(['for-each-ref', '--format=%(symref)', 'refs/remotes/*/HEAD'], root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })
+    const defaults = [...new Set(heads.trim().split('\n').filter(Boolean))]
+    return defaults.length === 1 ? defaults[0] : null
+  }
+
+  async getWorktreeRoot(root: string): Promise<string> {
+    return (await this.runGit(['rev-parse', '--path-format=absolute', '--show-toplevel'], root, { env: this.localReadEnvironment() })).trim()
+  }
+
+  getAtlasCheckoutState(root: string) { return this.captureSnapshotIdentity(root) }
+
+  async getAtlasSourceFingerprint(root: string): Promise<string> {
+    const directories = await this.getRepositoryDirectories(root)
+    const common = realpathSync(directories.common), admin = realpathSync(directories.admin), physical = realpathSync(root)
+    const [checkout, references, worktrees, topology] = await Promise.all([
+      this.getAtlasCheckoutState(root), this.getAtlasReferences(root), this.listWorktreeRecords(root, true), this.getCommitTopologyRevision(root, common)
+    ])
+    if (checkout.operation) throw new Error('GIT_OPERATION_IN_PROGRESS')
+    if (worktrees.length > 256000 || references.split('\n').length > 513) throw new Error('ATLAS_REFERENCE_LIMIT')
+    const generation = [admin, physical].map(path => { const stat = statSync(path, { bigint: true }); return [path, String(stat.dev), String(stat.ino), String(stat.birthtimeNs)] })
+    return createHash('sha256').update(JSON.stringify([common, generation, checkout, references, worktrees, topology])).digest('hex')
+  }
+
+  async getAtlasHistoryOrder(root: string, tips: string[], offset: number, limit: number, since: string | null, until?: string): Promise<string[]> {
+    if (!tips.length) return []
+    return (await this.runGit(['log', '--date-order', `--skip=${offset}`, `--max-count=${limit}`, ...(since ? [`--since-as-filter=${since}`] : []), ...(until ? [`--until=${until}`] : []), '--format=%H', ...tips, '--'], root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })).trim().split('\n').filter(Boolean)
+  }
+
+  async getAtlasCommitMetadata(root: string, shas: string[]): Promise<string> {
+    if (!shas.length) return ''
+    if (shas.length > 102 || shas.some(sha => !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    return this.runGit(['log', '--no-walk=unsorted', '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...shas, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
+  }
+
+  async getAtlasFullCommitMetadata(root: string, shas: string[]): Promise<Array<Omit<GitHistoryNode,'decorations'>>> {
+    if(!shas.length) return []
+    if(shas.length>32 || shas.some(sha=>!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    const raw=await this.runGit(['log','--no-walk=unsorted','--format=%H%x00%P%x00%an%x00%cI%x00%s%x00%cn%x00%aI%x00%ae%x00%ce%x00%B%x00',...shas,'--'],root,{maxOutputBytes:2*1024*1024,env:this.localReadEnvironment()})
+    const fields=raw.split('\0'), commits: Array<Omit<GitHistoryNode,'decorations'>>=[]
+    for(let index=0;index<fields.length && fields[index].trim();index+=10) {
+      if(index+9>=fields.length) throw new Error('GIT_METADATA_INVALID')
+      const [sha,parents,author,timestamp,subject,committer,authoredAt,authorEmail,committerEmail,message]=fields.slice(index,index+10)
+      if(!shas.includes(sha.trim())) throw new Error('GIT_METADATA_INVALID')
+      commits.push({sha:sha.trim(),parents:parents.split(' ').filter(Boolean),author,timestamp,subject,committer,authoredAt,authorEmail,committerEmail,message})
+    }
+    if(commits.length!==shas.length) throw new Error('GIT_METADATA_INVALID')
+    return commits
   }
 
   async getAtlasPrimaryRef(root: string, references?: string): Promise<string | null> {
@@ -722,9 +776,9 @@ export class GitService implements FileListingPort {
     return defaults.length === 1 ? defaults[0] : null
   }
 
-  async getAtlasHistory(root: string, tips: string[], offset: number, limit: number, since: string | null): Promise<string> {
+  async getAtlasHistory(root: string, tips: string[], offset: number, limit: number, since: string | null, until?: string): Promise<string> {
     if (!tips.length) return ''
-    return this.runGit(['log', '--date-order', `--skip=${offset}`, `--max-count=${limit}`, ...(since ? [`--since-as-filter=${since}`] : []), '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
+    return this.runGit(['log', '--date-order', `--skip=${offset}`, `--max-count=${limit}`, ...(since ? [`--since-as-filter=${since}`] : []), ...(until ? [`--until=${until}`] : []), '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...tips, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
   }
 
   async compareAtlasRefs(root: string, left: string, right: string) {

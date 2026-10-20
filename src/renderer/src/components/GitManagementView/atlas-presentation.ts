@@ -4,7 +4,7 @@ import type { AtlasLayout } from './atlas-layout'
 const dayMs = 86400000
 export function atlasWindowPage(page: GitAtlasPage | null, window: GitAtlasWindow): GitAtlasPage | null {
   if (!page || window === 'ALL') return page
-  const end = Date.parse(page.queriedAt), start = end - window * dayMs
+  const end = Date.parse(page.anchorAt ?? page.queriedAt), start = end - window * dayMs
   const nodes = page.nodes.filter(node => {
     const timestamp = Date.parse(node.timestamp)
     return timestamp >= start && timestamp <= end
@@ -13,29 +13,66 @@ export function atlasWindowPage(page: GitAtlasPage | null, window: GitAtlasWindo
   return nodes.length === page.nodes.length && page.since === since ? page : { ...page, nodes, since }
 }
 
-export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, window: GitAtlasWindow, minimumWidth = 0) {
-  const end = Date.parse(page?.queriedAt ?? new Date().toISOString())
-  const earliest = Math.min(end, ...layout.points.map(point => Date.parse(point.node.timestamp)))
-  const count = window === 'ALL' ? Math.max(1, Math.ceil((end - earliest) / dayMs)) : window
-  const start = window === 'ALL' ? end - count * dayMs : Date.parse(page?.since ?? new Date(end - count * dayMs).toISOString())
-  const rows = new Map(layout.tracks.map((track, index) => [track.id, index]))
-  const order = new Map(layout.tracks.flatMap(track => [...track.shas].reverse().map((sha, index) => [sha, index] as const)))
-  const buckets = Array.from({ length: count }, () => new Map<string, typeof layout.points>())
-  for (const point of layout.points) {
-    const day = Math.max(0, Math.min(count - 1, Math.floor((Date.parse(point.node.timestamp) - start) / dayMs)))
-    const members = buckets[day].get(point.track) ?? []
-    members.push(point); buckets[day].set(point.track, members)
+export function presentGitAtlas(layout: AtlasLayout, page: GitAtlasPage | null, window: GitAtlasWindow, minimumWidth = 0, visibleRange?: { left: number; right: number }) {
+  const end = Date.parse(page?.anchorAt ?? page?.queriedAt ?? new Date().toISOString())
+  const earliest = layout.points.reduce((time, point) => Math.min(time, Date.parse(point.node.timestamp)), end)
+  const span = window === 'ALL' ? (end - earliest) / dayMs : window
+  const unit: 'DAY' | 'WEEK' | 'MONTH' = span <= 15 ? 'DAY' : span <= 90 ? 'WEEK' : 'MONTH'
+  const days = atlasDateBands(layout.points, unit, visibleRange)
+  return { days, points: layout.points, width: Math.max(layout.width, minimumWidth), rows: new Map(layout.tracks.map(track => [track.id, track.lane])), unit }
+}
+
+export function atlasDateBands(points: AtlasLayout['points'], unit: 'DAY' | 'WEEK' | 'MONTH', visibleRange?: { left: number; right: number }) {
+  const key = (time: number) => {
+    const date = new Date(time)
+    if (unit === 'MONTH') return `${date.getFullYear()}-${date.getMonth()}`
+    if (unit === 'WEEK') date.setDate(date.getDate() - (date.getDay() + 6) % 7)
+    return `${date.getFullYear()}-${date.getMonth()}-${date.getDate()}`
   }
-  let x = 0
-  const points: typeof layout.points = []
-  const widths = buckets.map(tracks => Math.max(80, ...[...tracks.values()].map(members => members.length * 28 + 32)))
-  const extra = Math.max(0, minimumWidth - widths.reduce((sum, width) => sum + width, 0)) / count
-  const days = buckets.map((tracks, index) => {
-    const width = widths[index] + extra
-    const day = { x, width, start: start + index * dayMs, end: Math.min(end, start + (index + 1) * dayMs) }
-    for (const members of tracks.values()) members.sort((left, right) => order.get(left.node.sha)! - order.get(right.node.sha)!).forEach((point, slot) => points.push({ ...point, lane: rows.get(point.track)!, x: x + width / 2 + (slot - (members.length - 1) / 2) * 28 }))
-    x += width
-    return day
-  })
-  return { days, points, width: x, rows }
+  const days: Array<{ x: number; width: number; start: number; end: number; repeated: boolean }> = []
+  const seen = new Set<string>()
+  let previousKey = ''
+  let start = 0, end = points.length
+  if (visibleRange) {
+    if (visibleRange.right < visibleRange.left) return days
+    let low = 0, high = points.length
+    while (low < high) { const middle = Math.floor((low + high) / 2); if (points[middle].x < visibleRange.left) low = middle + 1; else high = middle }
+    start = Math.max(0, low - 1)
+    low = start; high = points.length
+    while (low < high) { const middle = Math.floor((low + high) / 2); if (points[middle].x <= visibleRange.right) low = middle + 1; else high = middle }
+    end = Math.min(points.length, low + 1)
+  }
+  for (let index = start; index < end; index++) {
+    const point = points[index]
+    const time = Date.parse(point.node.timestamp), currentKey = key(time)
+    if (currentKey === previousKey) {
+      const band = days[days.length - 1]
+      band.width = point.x + 28 - band.x
+      band.start = Math.min(band.start, time); band.end = Math.max(band.end, time)
+    } else {
+      days.push({ x: point.x - 28, width: 56, start: time, end: time, repeated: seen.has(currentKey) })
+      seen.add(currentKey)
+      previousKey = currentKey
+    }
+  }
+  return days
+}
+
+export function atlasTimelineDates(points: AtlasLayout['points'], visibleRange: { left: number; right: number }) {
+  for (const unit of ['DAY', 'WEEK', 'MONTH'] as const) {
+    const days = atlasDateBands(points, unit, visibleRange)
+    if (unit === 'MONTH' || days.length * 92 <= visibleRange.right - visibleRange.left) return { unit, days }
+  }
+  return { unit: 'MONTH' as const, days: [] }
+}
+
+export function atlasLocalDate(time: number, unit: 'DAY' | 'WEEK' | 'MONTH') {
+  return new Date(time).toLocaleDateString(undefined, unit === 'MONTH'
+    ? { calendar: 'gregory', month: 'short', year: '2-digit' }
+    : { calendar: 'gregory', day: '2-digit', month: '2-digit', year: '2-digit' })
+}
+
+export function atlasLocalDateRange(start: number, end: number, repeated = false) {
+  const format = (time: number) => new Date(time).toLocaleString(undefined, { calendar: 'gregory' })
+  return `${repeated ? 'Retorno ao período; ordem causal preservada. ' : ''}${format(start)} — ${format(end)}`
 }

@@ -125,14 +125,14 @@ export function GitInspector({
           mode: 'WORKTREE' as const
         },
         {
-          label: 'Preparadas · staged',
+          label: 'Preparadas',
           items: overview.changes.filter(
             (change) => change.stagedState && !change.conflicted
           ),
           mode: 'STAGED' as const
         },
         {
-          label: 'Não preparadas · unstaged',
+          label: 'Não preparadas',
           items: overview.changes.filter(
             (change) =>
               change.unstagedState && !change.conflicted && !change.untracked
@@ -140,7 +140,7 @@ export function GitInspector({
           mode: 'WORKTREE' as const
         },
         {
-          label: 'Novos arquivos · untracked',
+          label: 'Não rastreadas',
           items: overview.changes.filter((change) => change.untracked),
           mode: 'WORKTREE' as const
         }
@@ -222,27 +222,19 @@ export function GitInspector({
       )}
       {!selection && overview && (
         <>
-          <h2>Alterações locais</h2>
-          <p>
-            {overview.state.branch ?? 'detached HEAD'} ·{' '}
-            {overview.changes.length} arquivos alterados
-          </p>
-          <p>
-            Upstream: {overview.state.upstream ?? 'não configurado'}
-            {overview.state.upstream
-              ? ` · ${overview.state.ahead} à frente / ${overview.state.behind} atrás`
-              : ''}
-          </p>
+          <p className="gm-local-description">Modificações no seu diretório de trabalho.</p>
+          <div className="gm-change-summary" aria-label="Contagem de alterações locais">
+            <div className="is-staged"><strong>{overview.state.stagedCount}</strong><span>Preparadas</span></div>
+            <div className="is-unstaged"><strong>{overview.state.unstagedCount}</strong><span>Não preparadas</span></div>
+            <div><strong>{overview.state.untrackedCount}</strong><span>Não rastreadas</span></div>
+          </div>
           {overview.state.operation && (
             <p role="alert">
               Operação Git em andamento: {overview.state.operation}
             </p>
           )}
-          <p>
-            Stage prepara uma versão do arquivo no índice. Commit registra
-            somente o índice; alterações posteriores continuam não preparadas.
-          </p>
-          {groups.map((group) => (
+          {!overview.changes.length && <p className="gm-local-clean">Nenhuma alteração local neste estado consultado.</p>}
+          {groups.filter(group => group.items.length > 0).map((group) => (
             <section key={group.label} className="gm-change-group">
               <h3>
                 {group.label} <span>{group.items.length}</span>
@@ -256,7 +248,7 @@ export function GitInspector({
                       void loadPatch({ path: change.path, mode: group.mode })
                     }
                   >
-                    <span>
+                    <FileText size={16} /><span>
                       {change.previousPath ? `${change.previousPath} → ` : ''}
                       {change.path}
                     </span>
@@ -272,6 +264,7 @@ export function GitInspector({
               </div>
             </section>
           ))}
+          <details className="gm-local-context"><summary>Contexto Git e preparo</summary><p>{overview.state.branch ?? 'HEAD detached'} · Upstream: {overview.state.upstream ?? 'não configurado'}{overview.state.upstream ? ` · ${overview.state.ahead} à frente / ${overview.state.behind} atrás` : ''}</p><p>Preparar salva uma versão no índice. O commit registra somente o índice; alterações posteriores continuam não preparadas.</p></details>
         </>
       )}
       {!selection && !overview && <p>Carregando estado Git…</p>}

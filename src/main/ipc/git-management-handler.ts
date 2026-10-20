@@ -1,5 +1,7 @@
 import { ipcMain } from 'electron'
-import type { GitAtlasRequest, GitAtlasCompareRequest } from '../../shared/types/git-atlas-types'
+import type { GitAtlasRequest, GitAtlasCompareRequest, GitAtlasScope } from '../../shared/types/git-atlas-types'
+import type { GitAtlasCoreRequest, GitAtlasPrRequest } from '../../shared/types/git-atlas-evidence-types'
+import type { AtlasCatalogRequest } from '../../shared/types/git-atlas-catalog-types'
 import type { ActiveProjectService } from '../core/active-project-service'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
 import {
@@ -106,6 +108,7 @@ export class GitManagementController {
       )
     }
     if (!current()) return { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
+    const release = selected!.service.beginAtlasInteraction()
     try {
       const data = await action(selected!.service)
       return current()
@@ -122,7 +125,7 @@ export class GitManagementController {
               ? error.message
               : 'GIT_OPERATION_FAILED'
       }
-    }
+    } finally { release() }
   }
 }
 
@@ -200,13 +203,48 @@ function validMutation(value: GitMutationRequest): boolean {
 export function registerGitManagementHandlers(
   controller: GitManagementController
 ): void {
+  const validScope = (scope: GitAtlasScope | undefined) => scope === undefined || !!scope && typeof scope === 'object' && !Array.isArray(scope) &&
+    Object.keys(scope).every(key => ['kind', 'anchor', 'baseRef', 'focusRef'].includes(key)) &&
+    ['CHECKOUT', 'ALL_REFS'].includes(scope.kind) && ['AUTO', 'PRESENT'].includes(scope.anchor) &&
+    [scope.baseRef, scope.focusRef].every(ref => ref === undefined || typeof ref === 'string' && /^refs\/(heads|remotes)\/.+/.test(ref) && !/[\s~^:?*\[\]\\]/.test(ref) && ref.length <= 256)
+  ipcMain.handle('git-management:atlas-checkout-state', (_event, context: GitManagementContext) => controller.read(context, service => service.getAtlasCheckoutState()))
+  ipcMain.handle('git-management:atlas-catalog', (event, request: AtlasCatalogRequest) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).some(key => !['context', 'snapshot'].includes(key)) || typeof request.snapshot !== 'string' || !/^[a-f0-9]{64}$/.test(request.snapshot)) return { success: false, code: 'INVALID_ARGUMENT' }
+    const context = request.context
+    return controller.read(context, service => service.getAtlasCatalog(request.snapshot, `${context.projectId}:${context.revision}`, state => {
+      if (!event.sender.isDestroyed()) event.sender.send('git-management:atlas-catalog-changed', { context, state })
+    }))
+  })
+  ipcMain.handle('git-management:atlas-catalog-stop', (_event, context: GitManagementContext) => controller.read(context, async service => { service.stopAtlasCollection() }))
+  const validEvidenceRequest = (request: GitAtlasCoreRequest | GitAtlasPrRequest, enrichment: boolean) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) return false
+    const keys = enrichment ? ['context', 'window', 'cursor', 'limit', 'snapshot', 'scope'] : ['context', 'window', 'cursor', 'limit', 'refresh', 'comparisonRef', 'scope']
+    if (!validScope(request.scope)) return false
+    if (Object.keys(request).some(key => !keys.includes(key)) || ![7, 15, 30, 60, 90, 'ALL'].includes(request.window) ||
+      request.cursor !== undefined && (typeof request.cursor !== 'string' || request.cursor.length > 2048) ||
+      request.limit !== undefined && (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 100)) return false
+    if (enrichment) return 'snapshot' in request && typeof request.snapshot === 'string' && /^[a-f0-9]{64}$/.test(request.snapshot)
+    const core = request as GitAtlasCoreRequest
+    return (core.refresh === undefined || typeof core.refresh === 'boolean') &&
+      (core.comparisonRef === undefined || typeof core.comparisonRef === 'string' && core.comparisonRef.length > 0 && core.comparisonRef.length <= 256)
+  }
+  ipcMain.handle('git-management:atlas-core', (_event, request: GitAtlasCoreRequest) => {
+    if (!validEvidenceRequest(request, false)) return { success: false, code: 'INVALID_ARGUMENT' }
+    const { context, ...query } = request
+    return controller.read(context, service => service.getAtlasCoreEvidence({ ...query, contextKey: `${context.projectId}:${context.revision}` }))
+  })
+  ipcMain.handle('git-management:atlas-pr-evidence', (_event, request: GitAtlasPrRequest) => {
+    if (!validEvidenceRequest(request, true)) return { success: false, code: 'INVALID_ARGUMENT' }
+    const { context, ...query } = request
+    return controller.read(context, service => service.getAtlasPrEvidence({ ...query, contextKey: `${context.projectId}:${context.revision}` }))
+  })
   ipcMain.handle('git-management:atlas', (_event, request: GitAtlasRequest) => {
-    if (!request || Object.keys(request).some(key => !['context', 'window', 'cursor', 'limit', 'refresh'].includes(key)) ||
+    if (!request || !validScope(request.scope) || Object.keys(request).some(key => !['context', 'window', 'cursor', 'limit', 'refresh', 'scope'].includes(key)) ||
       request.refresh !== undefined && typeof request.refresh !== 'boolean' || ![7, 15, 30, 60, 90, 'ALL'].includes(request.window) || request.cursor !== undefined && (typeof request.cursor !== 'string' || request.cursor.length > 2048)) return { success: false, code: 'INVALID_ARGUMENT' }
-    return controller.read(request.context, service => service.getAtlasHistory({ window: request.window, limit: request.limit, cursor: request.cursor, refresh: request.refresh, contextKey: `${request.context.projectId}:${request.context.revision}` }))
+    return controller.read(request.context, service => service.getAtlasHistory({ window: request.window, limit: request.limit, cursor: request.cursor, refresh: request.refresh, scope: request.scope, contextKey: `${request.context.projectId}:${request.context.revision}` }))
   })
   ipcMain.handle('git-management:atlas-compare', (_event, request: GitAtlasCompareRequest) => {
-    if (!request || Object.keys(request).some(key => !['context', 'snapshot', 'left', 'right'].includes(key)) ||
+    if (!request || !validScope(request.scope) || Object.keys(request).some(key => !['context', 'snapshot', 'left', 'right', 'scope'].includes(key)) ||
       ![request.snapshot, request.left, request.right].every(value => typeof value === 'string' && value.length > 0 && value.length <= 256)) return { success: false, code: 'INVALID_ARGUMENT' }
     return controller.read(request.context, service => service.compareAtlas({ ...request, contextKey: `${request.context.projectId}:${request.context.revision}` }))
   })
