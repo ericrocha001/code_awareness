@@ -1,5 +1,6 @@
 import type { GitHistoryNode } from '../../shared/types/git-management-types'
 import type { GitAtlasScope, GitAtlasWindow } from '../../shared/types/git-atlas-types'
+import type { AtlasCatalogManifest, AtlasCollectionRound, AtlasCatalogDiagnostic } from '../../shared/types/git-atlas-catalog-types'
 
 export type AtlasCommit = Omit<GitHistoryNode, 'decorations'>
 export interface AtlasHistorySlice {
@@ -19,10 +20,21 @@ export interface AtlasHistorySlice {
   queriedAt: string
 }
 export interface AtlasPersistence {
+  readonly catalogIdentity: string
+  diagnostic(): AtlasCatalogDiagnostic
+  suspend(reason: string): void
   getCommit(sha: string): AtlasCommit | undefined
+  getDisplayCommit(sha: string): AtlasCommit | undefined
   getSlice(key: string): AtlasHistorySlice | undefined
   findSlice(revision: string, since: string | null, until: string): AtlasHistorySlice | undefined
-  save(key: string, slice: AtlasHistorySlice, commits: readonly AtlasCommit[]): void
+  save(key: string, slice: AtlasHistorySlice, commits: readonly AtlasCommit[], observation?: AtlasCatalogManifest): boolean
+  beginRound(manifest: AtlasCatalogManifest): AtlasCollectionRound | undefined
+  getRound(id: string): AtlasCollectionRound | undefined
+  frontier(id: string, limit: number): string[]
+  covered(sha: string, topology: string): boolean
+  checkpoint(id: string, commits: readonly AtlasCommit[], processed: readonly string[]): boolean
+  finishRound(id: string, revision: string, available: boolean): boolean
+  markUnknown(id: string, reason: string): void
   close(): void
 }
 

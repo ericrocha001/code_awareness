@@ -5,6 +5,7 @@ import type { GitService } from '../core/git-service'
 import type { GitDecoration } from '../../shared/types/git-management-types'
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasQuery, GitAtlasScope } from '../../shared/types/git-atlas-types'
 import { AtlasCache, type AtlasCommit, type AtlasHistorySlice, type AtlasPersistence } from './git-atlas-cache'
+import type { AtlasCatalogManifest } from '../../shared/types/git-atlas-catalog-types'
 
 export class GitAtlasReader {
   private readonly key = randomBytes(32)
@@ -21,16 +22,21 @@ export class GitAtlasReader {
   private persistenceFailed = false
   private disposed = false
   private flush?: NodeJS.Immediate
-  private readonly writes = new Map<string, { slice: AtlasHistorySlice; commits: AtlasCommit[]; generation: number }>()
+  private readonly writes = new Map<string, { slice: AtlasHistorySlice; commits: AtlasCommit[]; observation: AtlasCatalogManifest }>()
   constructor(private readonly root: string, private readonly git: GitService, private readonly fail: (code: string) => never,
     private readonly openPersistence?: (common: string) => AtlasPersistence | Promise<AtlasPersistence>) {}
 
+  catalogDiagnostic() { return this.persistence?.diagnostic()??{state:'UNAVAILABLE' as const,reason:this.persistenceCommon?'OPENING_OR_UNAVAILABLE':'NOT_REQUESTED'} }
+
   invalidate(dispose = false) {
     this.generation++; this.pages.clear(); this.pending.clear(); this.anchors.clear()
-    this.writes.clear()
-    if (this.flush) clearImmediate(this.flush)
-    this.flush = undefined
-    if (dispose) { this.disposed = true; this.commits.clear(); this.slices.clear(); this.persistenceToken++; this.persistence?.close(); this.persistence = undefined }
+    if (dispose) {
+      if(this.flush) clearImmediate(this.flush)
+      this.flush=undefined
+      if(this.persistence) for(const [key,value] of this.writes) this.persistence.save(key,value.slice,value.commits,value.observation)
+      this.writes.clear()
+      this.disposed = true; this.commits.clear(); this.slices.clear(); this.persistenceToken++; this.persistence?.close(); this.persistence = undefined
+    }
   }
 
   private preparePersistence(common: string) {
@@ -57,16 +63,16 @@ export class GitAtlasReader {
       if (!next || !this.persistence || this.disposed) return
       const [key, value] = next
       this.writes.delete(key)
-      try { if (value.generation === this.generation) this.persistence.save(key, value.slice, value.commits) }
+      try { if(!this.persistence.save(key,value.slice,value.commits,value.observation)) this.persistenceFailed=true }
       catch { this.persistence.close(); this.persistence = undefined; this.persistenceFailed = true; this.writes.clear() }
       this.scheduleFlush()
     })
   }
 
-  private persist(key: string, slice: AtlasHistorySlice, commits: AtlasCommit[]) {
+  private persist(key: string, slice: AtlasHistorySlice, commits: AtlasCommit[], observation: AtlasCatalogManifest) {
     if (!this.openPersistence || this.persistenceFailed || this.disposed) return
-    this.writes.set(key, { slice, commits, generation: this.generation })
-    if (this.writes.size > 8) this.writes.delete(this.writes.keys().next().value!)
+    if(!this.writes.has(key) && this.writes.size>=8) { this.persistence?.suspend('PERSISTENCE_QUEUE_CAPACITY'); this.persistenceFailed=true; return }
+    this.writes.set(key, { slice, commits, observation })
     this.scheduleFlush()
   }
 
@@ -103,7 +109,7 @@ export class GitAtlasReader {
       if (head) refs.push({ ref: 'HEAD', sha: head, name: branch ? 'HEAD' : 'HEAD detached', kind: 'HEAD', upstream: null })
       const historyRevision = createHash('sha256').update(JSON.stringify({ root: physical, commonDirectory, topology, worktreeGeneration, raw, head, branch, primary, scope })).digest('hex')
       const snapshot = createHash('sha256').update(JSON.stringify([historyRevision, contextKey])).digest('hex')
-      return { snapshot, historyRevision, worktreeGeneration, refs, tags: [], detachedHeads: [], detachedCoverage: 'PARTIAL' as const, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
+      return { snapshot, historyRevision, worktreeGeneration, topologyRevision:topology, refs, tags: [], detachedHeads: [], detachedCoverage: 'PARTIAL' as const, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
     }
     const references = this.git.getAtlasReferences(this.root)
     const [raw, worktrees, primary] = await Promise.all([
@@ -142,7 +148,7 @@ export class GitAtlasReader {
     }
     const historyRevision = createHash('sha256').update(JSON.stringify({ root: normalize(physical), common, topology, worktreeGeneration, raw, worktrees, detachedHeads, detachedCoverage, head, branch, primary, ...(scope ? { scope } : {}) })).digest('hex')
     const snapshot = createHash('sha256').update(JSON.stringify([historyRevision, contextKey])).digest('hex')
-    return { snapshot, historyRevision, worktreeGeneration, refs, tags, detachedHeads, detachedCoverage, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
+    return { snapshot, historyRevision, worktreeGeneration, topologyRevision:topology, refs, tags, detachedHeads, detachedCoverage, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
   }
 
   async assertSnapshot(snapshot: string, contextKey?: string, scope?: GitAtlasScope) {
@@ -163,7 +169,7 @@ export class GitAtlasReader {
     const identity = this.structuralIdentity
     const found = new Map<string, AtlasCommit>()
     for (const sha of shas) {
-      const cached = this.commits.getReadonly<AtlasCommit>(sha) ?? this.persistence?.getCommit(sha)
+      const cached = this.commits.getReadonly<AtlasCommit>(sha) ?? this.persistence?.getDisplayCommit(sha)
       if (cached) { found.set(sha, cached); if (!Object.isFrozen(cached)) this.commits.set(sha, cached) }
     }
     const missing = shas.filter(sha => !found.has(sha))
@@ -257,7 +263,10 @@ export class GitAtlasReader {
     }
     const { historyRevision: _revision, ...presentation } = before
     const result: GitAtlasPage = { ...presentation, ...(request.scope ? { scope: request.scope, referenceCoverage: request.scope.kind === 'CHECKOUT' ? 'SELECTED' as const : 'ALL_REFS' as const, anchorAt, anchorKind } : {}), queriedAt, since, nodes, boundary, pendingParents: boundary, nextCursor, coverage: nextCursor ? 'PARTIAL' : 'COMPLETE_WINDOW' }
-    if (generation === this.generation) { this.pages.set(cacheKey, result); this.slices.set(sliceKey, slice); this.persist(sliceKey, slice, [...objects.values()]) }
+    if (generation === this.generation) {
+      this.pages.set(cacheKey, result); this.slices.set(sliceKey, slice)
+      this.persist(sliceKey,slice,[...objects.values()],{scopeKey:JSON.stringify(request.scope??'LEGACY'),revision:before.historyRevision,topology:before.topologyRevision,worktreeGeneration:before.worktreeGeneration,tips,refs:before.refs,tags:before.tags,observedAt:new Date().toISOString(),available:request.scope?.kind==='CHECKOUT'||before.detachedCoverage==='COMPLETE'})
+    }
     return result
   }
 

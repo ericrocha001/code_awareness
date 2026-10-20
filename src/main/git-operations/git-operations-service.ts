@@ -1128,8 +1128,16 @@ export class GitOperationsService {
   }
 
   clearAtlasCache() { this.atlasReader?.invalidate(true); this.atlasReader = undefined }
+  getAtlasCatalogDiagnostic() { return this.atlas().catalogDiagnostic() }
   private atlasPersistence?: (common: string) => AtlasPersistence | Promise<AtlasPersistence>
-  bindAtlasPersistence(factory: (common: string) => AtlasPersistence | Promise<AtlasPersistence>) { this.atlasPersistence = factory }
+  private atlasCatalogClear?: (common: string, authorization: {repositoryId:string;confirmed:true}) => void | Promise<void>
+  bindAtlasPersistence(factory: (common: string) => AtlasPersistence | Promise<AtlasPersistence>, clear?: (common: string, authorization: {repositoryId:string;confirmed:true}) => void | Promise<void>) { this.atlasPersistence = factory; this.atlasCatalogClear=clear }
+  async clearAtlasCatalog(authorization: {repositoryId:string;confirmed:true}) {
+    if(!this.coordinationIdentity?.isActive() || authorization.confirmed!==true || authorization.repositoryId!==this.coordinationIdentity.repositoryId || !this.atlasCatalogClear) fail('ATLAS_CLEAR_NOT_AUTHORIZED')
+    const common=await this.git.getCommonDirectory(this.repoRoot)
+    this.clearAtlasCache()
+    await this.atlasCatalogClear(common,authorization)
+  }
   async getAtlasCheckoutState() {
     await this.repository()
     return this.git.getAtlasCheckoutState(this.repoRoot)

@@ -484,7 +484,10 @@ app.whenReady().then(async () => {
     gitOperations.bindAtlasPullRequests(inventory => githubIntegration.branchPullRequests(project.path, inventory))
     if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
       const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache')
-      return new GitAtlasSqliteCache(join(app.getPath('userData'), 'cache', 'git-atlas'), gitRepositoryId, common)
+      return GitAtlasSqliteCache.acquire(join(app.getPath('userData'), 'cache', 'git-atlas'), gitRepositoryId, common)
+    }, async (common,authorization) => {
+      const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache')
+      GitAtlasSqliteCache.clearRepository(join(app.getPath('userData'),'cache','git-atlas'),gitRepositoryId,common,authorization)
     })
     gitManagement.bind(gitOperations)
     workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))

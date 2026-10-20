@@ -10,6 +10,11 @@ export interface GitDecoration {
   upstream: string | null
 }
 export interface GitHistoryNode {
+  message?: string
+  committer?: string
+  authoredAt?: string
+  authorEmail?: string
+  committerEmail?: string
   sha: string
   parents: string[]
   author: string

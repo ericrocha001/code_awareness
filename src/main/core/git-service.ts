@@ -10,6 +10,7 @@ import { dirname, join, resolve } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
 import type { GitOperationReceipt } from '../git-operations/git-operation-receipts'
+import type { GitHistoryNode } from '../../shared/types/git-management-types'
 
 
 const GIT_TIMEOUT_MS = 10_000
@@ -738,6 +739,21 @@ export class GitService implements FileListingPort {
     if (!shas.length) return ''
     if (shas.length > 102 || shas.some(sha => !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
     return this.runGit(['log', '--no-walk=unsorted', '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...shas, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
+  }
+
+  async getAtlasFullCommitMetadata(root: string, shas: string[]): Promise<Array<Omit<GitHistoryNode,'decorations'>>> {
+    if(!shas.length) return []
+    if(shas.length>32 || shas.some(sha=>!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    const raw=await this.runGit(['log','--no-walk=unsorted','--format=%H%x00%P%x00%an%x00%cI%x00%s%x00%cn%x00%aI%x00%ae%x00%ce%x00%B%x00',...shas,'--'],root,{maxOutputBytes:2*1024*1024,env:this.localReadEnvironment()})
+    const fields=raw.split('\0'), commits: Array<Omit<GitHistoryNode,'decorations'>>=[]
+    for(let index=0;index<fields.length && fields[index].trim();index+=10) {
+      if(index+9>=fields.length) throw new Error('GIT_METADATA_INVALID')
+      const [sha,parents,author,timestamp,subject,committer,authoredAt,authorEmail,committerEmail,message]=fields.slice(index,index+10)
+      if(!shas.includes(sha.trim())) throw new Error('GIT_METADATA_INVALID')
+      commits.push({sha:sha.trim(),parents:parents.split(' ').filter(Boolean),author,timestamp,subject,committer,authoredAt,authorEmail,committerEmail,message})
+    }
+    if(commits.length!==shas.length) throw new Error('GIT_METADATA_INVALID')
+    return commits
   }
 
   async getAtlasPrimaryRef(root: string, references?: string): Promise<string | null> {
