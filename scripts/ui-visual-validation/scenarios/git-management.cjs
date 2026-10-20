@@ -143,40 +143,30 @@ exports.run = async (ctx) => {
   })
   if (ctx.gridProof) { await require('./git-atlas-grid.cjs').verify(ctx); return }
   if (ctx.mockup) {
+    await ctx.evaluate(() => {
+      globalThis.__harnessCaptureBecameVisible = false
+      document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) globalThis.__harnessCaptureBecameVisible = true
+      })
+    })
     await ctx.viewport(1672, 941)
-    await ctx.click('.gm-commit.is-merge')
-    await ctx.waitFor(() => !!document.querySelector('.gm-commit-author'))
+    await ctx.waitFor(() => !!document.querySelector('.gm-commit.is-checkout'))
+    ctx.check('Single event timeline with checkout context', await ctx.evaluate(() => !!document.querySelector('.gm-context-strip') && document.querySelectorAll('.gm-atlas-date-axis').length === 1 && !document.querySelector('[aria-label="Janela temporal"]')))
+    await ctx.click('[aria-label="Fechar detalhes"]')
+    await ctx.waitFor(() => !document.querySelector('.gm-inspector').classList.contains('is-open'))
     ctx.window.webContents.sendInputEvent({ type: 'mouseMove', x: 10, y: 10 })
     await ctx.overflow()
+    await ctx.capture('mockup-checkout-dark')
+    await ctx.click('.gm-commit.is-checkout')
+    await ctx.waitFor(sha => document.querySelector('.gm-inspector [aria-label="Copiar SHA"]')?.getAttribute('title') === sha, head)
+    ctx.window.webContents.sendInputEvent({ type: 'mouseMove', x: 10, y: 10 })
     await ctx.capture('mockup-wide-dark')
-    ctx.check('Four real Git trajectories and selected commit inspector', await ctx.evaluate(() => document.querySelectorAll('.gm-atlas-lane-label').length >= 4 && !!document.querySelector('.gm-commit-author')))
-    ctx.check('Independent trajectory labels do not overlap', await ctx.evaluate(() => {
-      const labels = [...document.querySelectorAll('.gm-atlas-lane-label')].map(element => element.getBoundingClientRect())
-      return labels.every((bounds, index) => !index || bounds.top >= labels[index - 1].bottom + 20)
-    }))
-    ctx.check('Each trajectory guide stays horizontal on its independent row', await ctx.evaluate(() => [...document.querySelectorAll('.gm-track-guide')].every(line => line.getAttribute('y1') === line.getAttribute('y2'))))
-    ctx.check('Daily axis contains all 90 selected periods', await ctx.evaluate(() => document.querySelectorAll('.gm-atlas-date').length === 90))
-    ctx.check('Mockup composition: header actions, single filter row, 356px inspector', await ctx.evaluate(() => {
-      const bounds = selector => document.querySelector(selector).getBoundingClientRect()
-      return bounds('.gm-toolbar-actions').top < bounds('.gm-toolbar').top && bounds('.gm-toolbar').height < 85 && Math.abs(bounds('.gm-inspector').width - 356) < 2
-    }))
-    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
-    await ctx.capture('mockup-wide-light')
-    await ctx.click('.gm-atlas-lane-label[data-track="refs/heads/academy-sync"] button')
-    await waitForGit(() => !!document.querySelector('.gm-branch-tip') && document.querySelector('.gm-branch-tip')?.getAttribute('data-sha') === document.querySelector('[aria-label="Copiar SHA da branch"]')?.getAttribute('title'))
-    ctx.window.webContents.sendInputEvent({ type: 'mouseMove', x: 10, y: 10 })
-    await ctx.capture('mockup-branch-inspector')
-    ctx.check('Branch inspector shares structured commit design and uses real tip metadata', await ctx.evaluate(() => !!document.querySelector('.gm-branch-tip .gm-commit-author') && !!document.querySelector('[aria-label="Copiar SHA da branch"]') && document.querySelectorAll('.gm-inspector-section').length >= 3))
-    await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = map.scrollHeight; map.dispatchEvent(new Event('scroll')) })
-    await ctx.capture('independent-branch-rows')
-    ctx.check('Long labels on reused topological lanes remain disjoint', await ctx.evaluate(() => {
-      const labels = [...document.querySelectorAll('.gm-atlas-lane-label')].map(element => element.getBoundingClientRect())
-      return labels.length >= 6 && labels.every((bounds, index) => !index || bounds.top >= labels[index - 1].bottom + 20)
-    }))
-    await ctx.evaluate(() => { const map = document.querySelector('.gm-atlas-scroll'); map.scrollTop = 0; map.dispatchEvent(new Event('scroll')) })
-    await ctx.viewport(1000, 800)
+    ctx.check('Selected inspector identifies the fixture checkout HEAD', await ctx.evaluate(sha => document.querySelector('.gm-inspector [aria-label="Copiar SHA"]')?.getAttribute('title') === sha && !!document.querySelector('.gm-inspector.is-open .gm-commit-author'), head))
+    await ctx.viewport(800, 760)
     await ctx.overflow()
-    await ctx.capture('mockup-medium-light')
+    await ctx.capture('mockup-drawer-dark')
+    ctx.check('Captures do not activate visibility-driven product work', await ctx.evaluate(() => !globalThis.__harnessCaptureBecameVisible))
+    ctx.check('Visual reads preserve fixture HEAD and index', git('status', '--porcelain') === before && git('rev-parse', 'HEAD') === head)
     return
   }
   await ctx.viewport(1440, 900)
