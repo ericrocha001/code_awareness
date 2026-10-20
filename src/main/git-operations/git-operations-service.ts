@@ -4,6 +4,7 @@ import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
 import type { GitAtlasCoreEvidence, GitAtlasEvidenceQuery, GitAtlasPrEvidence } from '../../shared/types/git-atlas-evidence-types'
 import type { BranchInventory } from '../../shared/types/branch-orchestration-types'
 import type { BranchPullRequests } from '../../shared/types/branch-pull-request-types'
+import type { AtlasPersistence } from './git-atlas-cache'
 import { GitBranchInventory, recordBranchCreation } from './git-branch-inventory'
 import { GitBranchDiscard } from './git-branch-discard'
 import type { BranchDiscardExecute, BranchDiscardRemoteReader } from '../../shared/types/branch-discard-types'
@@ -1126,13 +1127,12 @@ export class GitOperationsService {
     })
   }
 
-  clearAtlasCache() { this.atlasReader?.invalidate(true) }
+  clearAtlasCache() { this.atlasReader?.invalidate(true); this.atlasReader = undefined }
+  private atlasPersistence?: (common: string) => AtlasPersistence | Promise<AtlasPersistence>
+  bindAtlasPersistence(factory: (common: string) => AtlasPersistence | Promise<AtlasPersistence>) { this.atlasPersistence = factory }
   async getAtlasCheckoutState() {
     await this.repository()
-    const [head, branch, operation] = await Promise.all([
-      this.git.getCurrentCommitHash(this.repoRoot), this.git.getCurrentBranch(this.repoRoot), this.git.getGitOperation(this.repoRoot)
-    ])
-    return { head, branch, operation }
+    return this.git.getAtlasCheckoutState(this.repoRoot)
   }
   private atlasPullRequests?: (inventory: BranchInventory) => Promise<BranchPullRequests>
 
@@ -1147,12 +1147,12 @@ export class GitOperationsService {
     if (!identity || !this.worktrees || !identity.isActive()) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     const page = await this.atlas().history(request)
     const trees = request.scope?.kind === 'CHECKOUT'
-      ? { repositoryId: identity.repositoryId, worktrees: [await this.worktrees.current()] }
+      ? { repositoryId: identity.repositoryId, worktrees: [await this.worktrees.current({ head: page.head, branch: page.branch })] }
       : await this.worktrees.discover({ reuseValidatedDirectories: true })
     const normalize = (path: string) => process.platform === 'win32' ? realpathSync(path).toLowerCase() : realpathSync(path)
     const selected = trees.worktrees.find(tree => !tree.missing && !tree.prunable && normalize(tree.path) === normalize(this.repoRoot))
     const selectedHead = selected?.head && !/^0+$/.test(selected.head) ? selected.head : null
-    if (!selected || selectedHead !== page.head || selected.branch !== page.branch) fail('GIT_STATE_CHANGED')
+    if (!selected || selectedHead !== page.head || selected.branch !== page.branch || page.worktreeGeneration && page.worktreeGeneration !== selected.generation) fail('GIT_STATE_CHANGED')
     const ref = page.branch ? 'refs/heads/' + page.branch : null
     const checkout: GitAtlasCoreEvidence['checkout'] = {
       head: page.head, ref, detached: selected.detached,
@@ -1168,7 +1168,7 @@ export class GitOperationsService {
       checkout.relation = comparison.left.sha === comparison.right.sha ? 'EQUAL' : !comparison.mergeBases.length ? 'UNRELATED' :
         comparison.leftOnly === 0 ? 'BEHIND_ONLY' : comparison.rightOnly === 0 ? 'AHEAD_ONLY' : 'DIVERGED'
     }
-    await this.atlas().assertSnapshot(page.snapshot, request.contextKey, request.scope)
+    if (request.scope?.kind !== 'CHECKOUT') await this.atlas().assertSnapshot(page.snapshot, request.contextKey, request.scope)
     if (!identity.isActive() || trees.repositoryId !== identity.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
     const observedAt = new Date().toISOString()
     return {
@@ -1232,7 +1232,7 @@ export class GitOperationsService {
 
   private atlasReader?: GitAtlasReader
   private atlas(): GitAtlasReader {
-    return this.atlasReader ??= new GitAtlasReader(this.repoRoot, this.git, fail)
+    return this.atlasReader ??= new GitAtlasReader(this.repoRoot, this.git, fail, this.atlasPersistence)
   }
   async getAtlasHistory(request: GitAtlasQuery) {
     await this.repository()

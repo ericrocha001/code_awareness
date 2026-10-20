@@ -54,10 +54,10 @@ export class GitWorktreeRegistry {
     return { repositoryId: this.identity.repositoryId, worktrees }
   }
 
-  async current(): Promise<WorktreeRecord> {
+  async current(selected?: { head: string | null; branch: string | null }): Promise<WorktreeRecord> {
     const common = await this.commonDirectory()
     const [path, head, branch] = await Promise.all([
-      this.git.getWorktreeRoot(this.root), this.git.getCurrentCommitHash(this.root), this.git.getCurrentBranch(this.root)
+      this.git.getWorktreeRoot(this.root), selected ? selected.head : this.git.getCurrentCommitHash(this.root), selected ? selected.branch : this.git.getCurrentBranch(this.root)
     ])
     const record = await this.readRecord([`worktree ${path}`, ...(head ? [`HEAD ${head}`] : []), branch ? `branch refs/heads/${branch}` : 'detached'].join('\0'), common)
     if (!this.identity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')

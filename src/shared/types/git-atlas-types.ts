@@ -16,6 +16,7 @@ export interface GitAtlasRequest {
   scope?: GitAtlasScope
 }
 export interface GitAtlasPage extends GitHistoryPage {
+  worktreeGeneration?: string
   scope?: GitAtlasScope
   referenceCoverage?: 'SELECTED' | 'ALL_REFS'
   anchorAt?: string

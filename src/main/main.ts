@@ -429,6 +429,7 @@ app.whenReady().then(async () => {
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))
   app.on('before-quit', () => workOrchestration.deactivate())
+  app.on('before-quit', () => { void gitManagement.deactivate() })
   const repositoryRuntime = new RepositoryRuntimeService(repositoryCatalog, codeMapService, activeProjects)
   activeProjects.onBeforeChange(async () => {
     await gitManagement.deactivate()
@@ -481,6 +482,10 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     gitOperations.bindAtlasPullRequests(inventory => githubIntegration.branchPullRequests(project.path, inventory))
+    if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
+      const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache')
+      return new GitAtlasSqliteCache(join(app.getPath('userData'), 'cache', 'git-atlas'), gitRepositoryId, common)
+    })
     gitManagement.bind(gitOperations)
     workOrchestration.bind(gitOperations, orchestrationContinuumReader(continuumSession))
     branchOrchestration.bind(gitOperations, githubIntegration, project.path)

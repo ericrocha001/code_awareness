@@ -727,6 +727,19 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['rev-parse', '--path-format=absolute', '--show-toplevel'], root, { env: this.localReadEnvironment() })).trim()
   }
 
+  getAtlasCheckoutState(root: string) { return this.captureSnapshotIdentity(root) }
+
+  async getAtlasHistoryOrder(root: string, tips: string[], offset: number, limit: number, since: string | null, until?: string): Promise<string[]> {
+    if (!tips.length) return []
+    return (await this.runGit(['log', '--date-order', `--skip=${offset}`, `--max-count=${limit}`, ...(since ? [`--since-as-filter=${since}`] : []), ...(until ? [`--until=${until}`] : []), '--format=%H', ...tips, '--'], root, { maxOutputBytes: 16384, env: this.localReadEnvironment() })).trim().split('\n').filter(Boolean)
+  }
+
+  async getAtlasCommitMetadata(root: string, shas: string[]): Promise<string> {
+    if (!shas.length) return ''
+    if (shas.length > 102 || shas.some(sha => !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
+    return this.runGit(['log', '--no-walk=unsorted', '--format=%H%x00%P%x00%an%x00%cI%x00%s', ...shas, '--'], root, { maxOutputBytes: 512000, env: this.localReadEnvironment() })
+  }
+
   async getAtlasPrimaryRef(root: string, references?: string): Promise<string | null> {
     const configured = (await this.runGit(['config', '--get', 'code-awareness.primaryBranch'], root, { allowExitOne: true, env: this.localReadEnvironment() })).trim()
     if (configured) return configured.startsWith('refs/') ? configured : `refs/heads/${configured}`
