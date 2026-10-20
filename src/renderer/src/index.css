@@ -13,6 +13,7 @@
   --color-green: #16A34A;
   --color-danger: #ef4444;
   --color-danger-hover: #dc2626;
+  --color-info-cyan: #0E7490;
   --hover-overlay: rgba(0, 0, 0, 0.04);
   --shadow-opacity: 0.1;
   --status-restored: #2563EB;
@@ -45,6 +46,7 @@
   --color-green: #44CF6E;
   --color-danger: #f87171;
   --color-danger-hover: #ef4444;
+  --color-info-cyan: #22D3EE;
   --hover-overlay: rgba(255, 255, 255, 0.05);
   --shadow-opacity: 0.25;
   --status-restored: #60A5FA;
@@ -77,6 +79,7 @@
     --color-green: #44CF6E;
     --color-danger: #f87171;
     --color-danger-hover: #ef4444;
+    --color-info-cyan: #22D3EE;
     --hover-overlay: rgba(255, 255, 255, 0.05);
     --shadow-opacity: 0.25;
     --status-restored: #60A5FA;

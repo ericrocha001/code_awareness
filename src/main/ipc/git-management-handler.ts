@@ -1,5 +1,6 @@
 import { ipcMain } from 'electron'
 import type { GitAtlasRequest, GitAtlasCompareRequest } from '../../shared/types/git-atlas-types'
+import type { GitAtlasCoreRequest, GitAtlasPrRequest } from '../../shared/types/git-atlas-evidence-types'
 import type { ActiveProjectService } from '../core/active-project-service'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
 import {
@@ -200,6 +201,27 @@ function validMutation(value: GitMutationRequest): boolean {
 export function registerGitManagementHandlers(
   controller: GitManagementController
 ): void {
+  const validEvidenceRequest = (request: GitAtlasCoreRequest | GitAtlasPrRequest, enrichment: boolean) => {
+    if (!request || typeof request !== 'object' || Array.isArray(request)) return false
+    const keys = enrichment ? ['context', 'window', 'cursor', 'limit', 'snapshot'] : ['context', 'window', 'cursor', 'limit', 'refresh', 'comparisonRef']
+    if (Object.keys(request).some(key => !keys.includes(key)) || ![7, 15, 30, 60, 90, 'ALL'].includes(request.window) ||
+      request.cursor !== undefined && (typeof request.cursor !== 'string' || request.cursor.length > 2048) ||
+      request.limit !== undefined && (!Number.isInteger(request.limit) || request.limit < 1 || request.limit > 100)) return false
+    if (enrichment) return 'snapshot' in request && typeof request.snapshot === 'string' && /^[a-f0-9]{64}$/.test(request.snapshot)
+    const core = request as GitAtlasCoreRequest
+    return (core.refresh === undefined || typeof core.refresh === 'boolean') &&
+      (core.comparisonRef === undefined || typeof core.comparisonRef === 'string' && core.comparisonRef.length > 0 && core.comparisonRef.length <= 256)
+  }
+  ipcMain.handle('git-management:atlas-core', (_event, request: GitAtlasCoreRequest) => {
+    if (!validEvidenceRequest(request, false)) return { success: false, code: 'INVALID_ARGUMENT' }
+    const { context, ...query } = request
+    return controller.read(context, service => service.getAtlasCoreEvidence({ ...query, contextKey: `${context.projectId}:${context.revision}` }))
+  })
+  ipcMain.handle('git-management:atlas-pr-evidence', (_event, request: GitAtlasPrRequest) => {
+    if (!validEvidenceRequest(request, true)) return { success: false, code: 'INVALID_ARGUMENT' }
+    const { context, ...query } = request
+    return controller.read(context, service => service.getAtlasPrEvidence({ ...query, contextKey: `${context.projectId}:${context.revision}` }))
+  })
   ipcMain.handle('git-management:atlas', (_event, request: GitAtlasRequest) => {
     if (!request || Object.keys(request).some(key => !['context', 'window', 'cursor', 'limit', 'refresh'].includes(key)) ||
       request.refresh !== undefined && typeof request.refresh !== 'boolean' || ![7, 15, 30, 60, 90, 'ALL'].includes(request.window) || request.cursor !== undefined && (typeof request.cursor !== 'string' || request.cursor.length > 2048)) return { success: false, code: 'INVALID_ARGUMENT' }

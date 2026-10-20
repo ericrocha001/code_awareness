@@ -23,7 +23,25 @@ export interface AtlasLayout {
   laneCount: number
   width: number
 }
-const hash = (value: string) => { let result = 0; for (const character of value) result = (result * 31 + character.charCodeAt(0)) >>> 0; return result }
+function causalOrder(nodes: Map<string, GitHistoryNode>): GitHistoryNode[] {
+  const ordered: GitHistoryNode[] = [], visited = new Set<string>()
+  const seeds = [...nodes.values()].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.sha.localeCompare(b.sha))
+  for (const seed of seeds) {
+    const stack: Array<{ node: GitHistoryNode; expanded: boolean }> = [{ node: seed, expanded: false }]
+    while (stack.length) {
+      const item = stack.pop()!
+      if (item.expanded) { ordered.push(item.node); continue }
+      if (visited.has(item.node.sha)) continue
+      visited.add(item.node.sha)
+      stack.push({ node: item.node, expanded: true })
+      for (const sha of [...item.node.parents].reverse()) {
+        const parent = nodes.get(sha)
+        if (parent && !visited.has(sha)) stack.push({ node: parent, expanded: false })
+      }
+    }
+  }
+  return ordered
+}
 
 export function firstParentPath(nodes: Map<string, GitHistoryNode>, tip?: string): Set<string> {
   const path = new Set<string>()
@@ -35,13 +53,11 @@ export function firstParentPath(nodes: Map<string, GitHistoryNode>, tip?: string
 export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, previous: ReadonlyMap<string, number> = new Map()): AtlasLayout {
   if (!page) return { tracks: [], points: [], edges: [], anchors: [], inactive: [], laneCount: 1, width: 800 }
   const nodes = new Map(page.nodes.map(node => [node.sha, node]))
-  const chronological = [...nodes.values()].sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp) || a.sha.localeCompare(b.sha))
+  const chronological = causalOrder(nodes)
   const positions = new Map<string, number>()
-  const earliest = chronological.length ? Date.parse(chronological[0].timestamp) : 0
   let last = 32
   for (const node of chronological) {
-    const real = 64 + (Date.parse(node.timestamp) - earliest) / 86400000 * 32
-    last = Math.max(last + 38, real)
+    last += 56
     positions.set(node.sha, last)
   }
   const owner = new Map<string, string>(), tracks: AtlasTrack[] = []
@@ -53,7 +69,7 @@ export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, prev
     while (sha && nodes.has(sha) && !owner.has(sha)) {
       shas.push(sha); owner.set(sha, id); sha = nodes.get(sha)!.parents[0]
     }
-    if (shas.length) tracks.push({ id, label, ref, shas, lane: 0, start: 0, end: 0, color: ref === primary ? 2 : hash(id) % 4, detached })
+    if (shas.length) tracks.push({ id, label, ref, shas, lane: 0, start: 0, end: 0, color: 0, detached })
   }
   for (const ref of refs) walk(ref.sha, ref.ref, ref.kind === 'HEAD' ? ref.name : ref.name, ref.ref)
   for (const detached of page.detachedHeads) walk(detached.sha, `detached:${detached.sha}`, `HEAD detached · ${detached.name}`, null, true)
@@ -74,7 +90,11 @@ export function layoutGitAtlas(page: GitAtlasPage | null, baseRef?: string, prev
   const occupied: Array<Array<[number, number]>> = []
   for (const track of tracks) {
     const values = spans.get(track.id)!
-    track.start = Math.min(...values) - 20; track.end = Math.max(...values) + 20
+    track.start = values.reduce((a, b) => Math.min(a, b), Infinity) - 20
+    track.end = values.reduce((a, b) => Math.max(a, b), -Infinity) + 20
+  }
+  tracks.sort((a, b) => Number(b.ref === primary) - Number(a.ref === primary) || a.start - b.start || a.end - b.end || a.id.localeCompare(b.id))
+  for (const track of tracks) {
     const fits = (lane: number) => !occupied[lane]?.some(([start, end]) => track.start <= end && track.end >= start)
     const preferred = track.ref === primary ? 0 : previous.get(track.id)
     let lane = preferred !== undefined && preferred < tracks.length && fits(preferred) ? preferred : 0

@@ -1,8 +1,17 @@
 import type { GitAtlasComparison, GitAtlasPage, GitAtlasQuery } from './git-atlas-types'
 import type { BranchPullRequests, PullRequestRecord } from './branch-pull-request-types'
+import type { GitManagementContext } from './git-management-types'
 
 export interface GitAtlasEvidenceQuery extends GitAtlasQuery {
   comparisonRef?: string
+}
+
+export interface GitAtlasCoreRequest extends Omit<GitAtlasEvidenceQuery, 'contextKey'> {
+  context: GitManagementContext
+}
+
+export interface GitAtlasPrRequest extends Omit<GitAtlasCoreRequest, 'refresh' | 'comparisonRef'> {
+  snapshot: string
 }
 
 export type CheckoutRelation = 'EQUAL' | 'BEHIND_ONLY' | 'AHEAD_ONLY' | 'DIVERGED' | 'UNRELATED' | 'UNKNOWN'

@@ -1142,7 +1142,8 @@ export class GitOperationsService {
     const trees = await this.worktrees.discover({ reuseValidatedDirectories: true })
     const normalize = (path: string) => process.platform === 'win32' ? realpathSync(path).toLowerCase() : realpathSync(path)
     const selected = trees.worktrees.find(tree => !tree.missing && !tree.prunable && normalize(tree.path) === normalize(this.repoRoot))
-    if (!selected || selected.head !== page.head || selected.branch !== page.branch) fail('GIT_STATE_CHANGED')
+    const selectedHead = selected?.head && !/^0+$/.test(selected.head) ? selected.head : null
+    if (!selected || selectedHead !== page.head || selected.branch !== page.branch) fail('GIT_STATE_CHANGED')
     const ref = page.branch ? 'refs/heads/' + page.branch : null
     const checkout: GitAtlasCoreEvidence['checkout'] = {
       head: page.head, ref, detached: selected.detached,
@@ -1167,7 +1168,7 @@ export class GitOperationsService {
       coverage: { git: page.nextCursor || page.detachedCoverage !== 'COMPLETE' ? 'PARTIAL' : 'COMPLETE', github: 'NOT_REQUESTED' },
       gitCoverageScope: 'REQUESTED_WINDOW',
       git: page, checkout,
-      worktrees: trees.worktrees.map(tree => ({ worktreeId: tree.worktreeId, generation: tree.generation, head: tree.head, branch: tree.branch, detached: tree.detached, available: !tree.missing && !tree.prunable })),
+      worktrees: trees.worktrees.map(tree => ({ worktreeId: tree.worktreeId, generation: tree.generation, head: tree.head && !/^0+$/.test(tree.head) ? tree.head : null, branch: tree.branch, detached: tree.detached, available: !tree.missing && !tree.prunable })),
       events: page.nodes.filter(node => node.parents.length > 1).map(node => ({ kind: 'GIT_MERGE_COMMIT', evidenceSource: 'GIT_LOCAL', confidence: 'CONFIRMED', sha: node.sha, parents: node.parents, firstParent: node.parents[0], committedAt: node.timestamp, observedAt })),
       historicalIntegrationCoverage: 'UNKNOWN'
     }
