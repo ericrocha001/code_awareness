@@ -22,7 +22,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const [enrichment, setEnrichment] = useState<GitAtlasPrEvidence | null>(null)
   const [prState, setPrState] = useState<'NOT_REQUESTED' | 'LOADING' | 'READY' | 'UNAVAILABLE'>('NOT_REQUESTED')
   const [selectedPr, setSelectedPr] = useState<number | null>(null)
-  const [prRequested, setPrRequested] = useState(false)
+  const [prRequested, setPrRequested] = useState(true)
   const [selection, setSelection] = useState<GitSelection>(null)
   const [overview, setOverview] = useState<GitOverview | null>(null)
   const [scope, setScope] = useState<GitAtlasScope>({ kind: 'CHECKOUT', anchor: 'AUTO' })
@@ -80,7 +80,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   }, [context, state.project?.id, scope])
   useEffect(() => {
     setCatalog(null); catalogRef.current = null
-    setHistory(null); setCore(null); setEnrichment(null); setPrRequested(false); setSelectedPr(null); setPrState('NOT_REQUESTED'); setOverview(null); setNotice(''); setSelection(null); setBase(''); setFocus(''); setComparison(null); setDrawer(false)
+    setHistory(null); setCore(null); setEnrichment(null); setPrRequested(true); setSelectedPr(null); setPrState('NOT_REQUESTED'); setOverview(null); setNotice(''); setSelection(null); setBase(''); setFocus(''); setComparison(null); setDrawer(false)
     setScope(previous => previous.kind === 'CHECKOUT' && previous.anchor === 'AUTO' && !previous.baseRef && !previous.focusRef ? previous : { kind: 'CHECKOUT', anchor: 'AUTO' }); setOperation(null)
   }, [context])
   const readOverview = useCallback(async () => {
@@ -241,6 +241,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     </header>
     <div className="gm-toolbar">
       <div className="gm-segmented" role="group" aria-label="Modo do Atlas">{['Panorama', 'Foco', 'Comparar'].map(value => <button key={value} aria-pressed={mode === value} onClick={() => setMode(value)}>{value}</button>)}</div>
+      <button aria-pressed={prRequested} onClick={() => { setPrRequested(value => !value); setEnrichment(null); setSelectedPr(null) }}>{prRequested ? 'Ocultar PRs' : 'Mostrar PRs'}</button>
       <label>{mode === 'Comparar' ? 'Comparar com' : 'Branch em foco'}<select aria-label="Referência em foco" value={focus} onChange={event => { setFocus(event.target.value); const ref = refs.find(ref => ref.ref === event.target.value); if (ref) { setSelectedPr(null); setDrawer(true); setMode(mode === 'Panorama' ? 'Foco' : mode); setSelection({ kind: 'BRANCH', ref }) } }}><option value="">Todas as branches</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}{/^[a-f0-9]{40,64}$/.test(focus) && <option value={focus}>Trajetória · {focus.slice(0, 8)}</option>}</select></label>
       {mode !== 'Panorama' && <label>Base<select aria-label="Referência base" value={base} onChange={event => { setBase(event.target.value); setScope(previous => ({ ...previous, baseRef: event.target.value || undefined })) }}><option value="">Escolha a base</option>{refs.map(ref => <option key={ref.ref} value={ref.ref}>{ref.name}</option>)}</select></label>}
     </div>
@@ -264,7 +265,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
           {history?.nodes.some(node => node.parents.length > 1) && <span><b>M</b>Merge topológico</span>}
           {core?.checkout.head && <span><i className="gm-head-icon" />Checkout</span>}
         </div>{history?.coverage === 'PARTIAL' && <span>Trecho parcial</span>}</div>
-        <div className="gm-pr-controls"><button disabled={prState === 'LOADING' || !core} onClick={() => setPrRequested(value => !value)} aria-pressed={prRequested}>{prRequested ? 'Ocultar PRs' : 'Consultar PRs'}</button>
+        <div className="gm-pr-controls">
           {prState === 'LOADING' && <span role="status">Consultando catálogo…</span>}{prState === 'UNAVAILABLE' && <span role="status">GitHub indisponível; mapa local preservado.</span>}{enrichment?.coverage === 'PARTIAL' && <span>PRs: cobertura parcial</span>}
           {enrichment && <details><summary>PRs do repositório ({enrichment.pullRequests.length}{enrichment.coverage !== 'COMPLETE' ? ', parcial' : ''})</summary><div className="gm-pr-catalog">{enrichment.pullRequests.map(pr => <button key={pr.record.id} onClick={() => choosePr(pr.record.number)}>#{pr.record.number} · {pr.record.title}{enrichment.branches?.orphaned.some(item => item.id === pr.record.id) ? ' · sem vínculo confirmado à origem local' : ''}</button>)}</div></details>}
         </div>
