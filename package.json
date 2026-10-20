@@ -60,7 +60,7 @@
     "harness:desktop-profile:migrate": "node scripts/desktop-runtime.cjs migrate",
     "harness:desktop:test": "node scripts/test-output.cjs run -- node scripts/desktop-runtime.test.cjs",
     "harness:ui:preflight": "node scripts/test-output.cjs run -- node scripts/ui-visual-validation/harness.cjs preflight",
-    "harness:ui:test": "node scripts/test-output.cjs run -- node --test scripts/ui-visual-validation/harness.test.cjs",
+    "harness:ui:test": "node scripts/test-output.cjs run -- node --test scripts/ui-visual-validation/harness.test.cjs scripts/ui-visual-validation/compare.test.cjs",
     "harness:ui:scenario": "node scripts/test-output.cjs run -- node scripts/ui-visual-validation/harness.cjs",
     "harness:ui:compare": "node scripts/ui-visual-validation/compare.cjs",
     "test:agent": "node scripts/test-output.cjs run --",
