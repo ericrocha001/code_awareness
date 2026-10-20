@@ -1,5 +1,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
+const { createHash } = require('node:crypto')
+const { isStem } = require('./evidence.cjs')
 const { app, BrowserWindow } = require('electron')
 const config = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 app.setPath('appData', config.temporary)
@@ -32,19 +34,30 @@ app.whenReady().then(async () => {
     input: async (selector, text) => { await context.click(selector); window.webContents.insertText(text) },
     overflow: async () => check('No global horizontal overflow', await evaluate(() => document.documentElement.scrollWidth <= innerWidth)),
     capture: async name => {
-      if (!/^[a-z0-9-]+$/i.test(name)) throw new Error('Invalid capture name')
+      if (!isStem(name)) throw new Error('Invalid capture name')
       window.webContents.invalidate()
       await evaluate(async () => {
         await document.fonts.ready
         await Promise.all(document.getAnimations().filter(animation => animation.effect?.getComputedTiming().iterations !== Infinity).map(animation => animation.finished.catch(() => {})))
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))
       })
-      await new Promise(resolve => setTimeout(resolve, 150))
-      const image = await window.webContents.capturePage()
+      let paintDeadline
+      try {
+        await new Promise((resolve, reject) => {
+          paintDeadline = setTimeout(() => reject(Object.assign(new Error('Chromium did not present the capture frame'), { code: 'PAINT_TIMEOUT' })), 5000)
+          window.webContents.beginFrameSubscription(false, () => resolve())
+          window.webContents.invalidate()
+        })
+      } finally {
+        clearTimeout(paintDeadline)
+        window.webContents.endFrameSubscription()
+      }
+      const image = await window.webContents.capturePage(undefined, { stayHidden: true })
       check(`${name}: usable capture`, !image.isEmpty() && image.getSize().width > 0)
       const target = path.join(config.evidenceDir, `${name}.png`)
-      fs.writeFileSync(target, image.toPNG())
-      receipt.captures.push({ name, path: target, viewport: await evaluate(() => ({ width: innerWidth, height: innerHeight })), dimensions: image.getSize() })
+      const png = image.toPNG()
+      fs.writeFileSync(target, png)
+      receipt.captures.push({ name, path: target, capturedAt: new Date().toISOString(), viewport: await evaluate(() => ({ width: innerWidth, height: innerHeight })), dimensions: image.getSize(), sha256: createHash('sha256').update(png).digest('hex'), theme: await evaluate(() => document.body.dataset.theme ?? null), devicePixelRatio: await evaluate(() => devicePixelRatio) })
       return image
     }
   }

@@ -2,16 +2,22 @@ const fs = require('node:fs')
 const path = require('node:path')
 const os = require('node:os')
 const { spawn, spawnSync } = require('node:child_process')
+const { runId: createRunId, isStem } = require('./evidence.cjs')
 
-async function run({ scenario = 'preflight', timeout = 30000, executable, output } = {}) {
+async function run({ scenario = 'preflight', timeout = 30000, executable, output, comparison } = {}) {
   const projectRoot = path.resolve(__dirname, '../..')
-  const runId = `${Date.now()}-${require('node:crypto').randomUUID()}`
+  const runId = createRunId()
   const evidenceDir = path.resolve(output || path.join(projectRoot, '.code-awareness/visual-validation', runId))
   const receipt = { status: 'FAIL', scenario, runId, checks: [], captures: [], evidenceDir }
   let temporary, child, timer
   const logFiles = []
   try {
-    if (!/^[a-z0-9-]+$/i.test(scenario)) throw Object.assign(new Error('Scenario must be a filename stem'), { code: 'SCENARIO_INVALID' })
+    if (!isStem(scenario)) throw Object.assign(new Error('Scenario must be a filename stem'), { code: 'SCENARIO_INVALID' })
+    if (comparison && (!isStem(comparison.capture) || comparison.approvedReference !== true || !comparison.reference)) throw Object.assign(new Error('Select an approved reference and named capture'), { code: 'COMPARISON_ARGUMENT_INVALID' })
+    if (comparison) {
+      const git = args => { const result = spawnSync('git', args, { cwd: projectRoot, windowsHide: true, encoding: 'utf8' }); return result.status === 0 ? result.stdout.trim() : null }
+      receipt.source = { observedAt: new Date().toISOString(), observation: 'SCENARIO_START', checkout: projectRoot, head: git(['rev-parse', 'HEAD']), branch: git(['branch', '--show-current']), changes: git(['-c', 'core.fsmonitor=false', 'status', '--porcelain']) }
+    }
     require('../test-output.cjs').protectDirectory(evidenceDir)
     for (const name of ['runtime.log', 'runtime.stdout.log', 'runtime.stderr.log']) logFiles.push(fs.openSync(path.join(evidenceDir, name), 'wx', 0o600))
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ca-ui-visual-'))
@@ -48,6 +54,12 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
       const bytes = fs.readFileSync(capture.path)
       if (bytes.length < 100 || !bytes.subarray(0, 8).equals(Buffer.from([137,80,78,71,13,10,26,10])) || bytes.readUInt32BE(16) !== capture.dimensions.width || bytes.readUInt32BE(20) !== capture.dimensions.height) throw Object.assign(new Error('Invalid PNG'), { code: 'CAPTURE_INVALID' })
     }
+    if (comparison) {
+      const image = receipt.captures.find(capture => capture.name === comparison.capture)
+      receipt.comparison = image && receipt.status === 'PASS'
+        ? await require('./compare.cjs').compare({ reference: comparison.reference, actual: image.path, approvedReference: comparison.approvedReference, mode: comparison.mode, metadata: comparison.metadata, capture: { image, receipt }, parent: evidenceDir })
+        : { state: 'ERROR', error: { code: 'CAPTURE_UNAVAILABLE', message: 'Named capture from a successful scenario is required' } }
+    }
   } catch (error) {
     receipt.status = 'FAIL'; receipt.reason = error.code || 'HARNESS_FAILED'; receipt.message = error.message
   } finally {
@@ -69,4 +81,10 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
   return receipt
 }
 module.exports = { run }
-if (require.main === module) run({ scenario: process.argv[2] || 'preflight' }).then(receipt => { console.log(JSON.stringify(receipt, null, 2)); process.exitCode = receipt.status === 'PASS' ? 0 : 1 })
+if (require.main === module) {
+  Promise.resolve().then(() => {
+    const args = process.argv.slice(3)
+    return run({ scenario: process.argv[2] || 'preflight', ...(args.length ? { comparison: require('./compare.cjs').parseArguments(args, true) } : {}) })
+  }).then(receipt => { console.log(JSON.stringify(receipt, null, 2)); process.exitCode = receipt.status === 'PASS' && (!receipt.comparison || receipt.comparison.state === 'READY_FOR_REVIEW') ? 0 : 1 })
+    .catch(error => { console.error(JSON.stringify({ status: 'FAIL', reason: error.code || 'ARGUMENT_INVALID', message: error.message })); process.exitCode = 1 })
+}

@@ -18,3 +18,100 @@ Inspect screenshots before approving visual evidence. A generated PNG alone is n
 These scenarios prove real Chromium rendering and the exercised interactions, not backend, persistence or remote integration contracts.
 The Continuum scenario renders the actual product component and styles with explicitly synthetic read API fixtures.
 Scenarios remain opt-in; they are not added to the global validation gate.
+
+## Approved reference comparison (opt-in)
+
+Compare an explicitly selected approved PNG with a user-supplied application screenshot,
+without starting Electron or any scenario:
+
+```powershell
+npm run harness:ui:compare -- --reference "C:\review\approved.png" --reference-approved --actual "C:\review\application.png" --origin USER_RUNTIME_SCREENSHOT
+```
+
+`--reference-approved` records the caller's declaration of human approval. File presence
+does not imply approval. `--origin USER_RUNTIME_SCREENSHOT` explicitly declares an external
+application screenshot; it is not independent authentication of its source. The command
+does not capture the personal desktop, access profiles or credentials, or use the network.
+The optional `--mode both` selects the supported side-by-side plus overlay package (the
+default); other modes are rejected.
+
+Optionally supply `--metadata "C:\review\pair.json"` with known information for each input:
+
+```json
+{
+  "reference": { "viewport": { "width": 1672, "height": 941 }, "scale": 1, "theme": "dark" },
+  "actual": { "viewport": { "width": 1672, "height": 941 }, "scale": 1, "theme": "dark", "gitRevision": "known-source-sha" }
+}
+```
+
+Viewport dimensions are CSS pixels; scale is PNG pixels per CSS pixel. A known viewport
+also permits deriving scale from the image dimensions. Missing information stays unknown
+with an explicit limitation; equal pixel dimensions alone cannot prove equivalent viewport
+regions. User-provided runtime/revision metadata is declared evidence, not a runtime probe.
+Different PNG dimensions, incompatible known viewport/scale, or different known themes
+produce an error. There is no implicit crop, alignment, rotation or resize. Export equivalent
+viewport regions explicitly before comparing if either source includes extra chrome.
+
+To acquire a named capture and then compare it in one invocation of the existing runner:
+
+```powershell
+npm run harness:ui:scenario -- git-atlas-mockup --reference "C:\review\approved.png" --reference-approved --capture mockup-wide-dark --metadata "C:\review\pair.json"
+```
+
+This runs only the selected scenario. It requires the usual installed Electron binary and
+native dependencies prepared for that checkout. It is a separate runtime action, to be
+executed only when authorized and within the available quota. Reference path/header and
+argument errors are rejected before starting Electron. A comparison uses only a named
+capture from a successful run and checks its acquisition SHA-256. Capture viewport, theme,
+runtime and checkout HEAD come from the runner, overriding `actual` metadata. Source Git
+metadata is a timestamped observation at scenario start, not continuous source freshness.
+The origin is
+`HARNESS_FIXTURE_ELECTRON`: production components and synthetic repositories/fixtures in an
+isolated renderer, not proof of live application backend or remote integrations.
+
+Each comparison creates its own protected `comparison-<run-id>/` under
+`.code-awareness/visual-validation/` (inside the scenario's evidence directory when bridged):
+
+- `side-by-side.png`: reference on the left, actual on the right, at original dimensions.
+- `overlay.png`: 50% reference / 50% actual. Both views flatten transparency onto white and
+  convert to sRGB for display; original files remain untouched.
+- `comparison.json`: input paths relative to this directory (explicit authorized absolute
+  paths when on another drive), original-byte SHA-256, dimensions, known geometry/theme,
+  origin and available revision/runtime, output hashes, limits and independent gates.
+
+Inputs must be explicitly selected regular local PNGs: at most 64 MiB and 32 megapixels each.
+Linked paths/junctions, network paths, alternate streams, animated PNGs and rotated images
+are refused. Output names are fixed, created exclusively in a new evidence directory.
+Failures produce `state: ERROR` with a reason in the manifest when a safe output directory
+can be created; argument or unsafe-output failures are also returned on stderr/stdout.
+
+`CAPTURE_OK` means a valid Electron capture; an external image instead records
+`USER_PROVIDED_PNG`. `COMPARISON_READY` / `READY_FOR_REVIEW` means the package was produced,
+with exit code zero. The runner preserves its original capture `status` and adds
+`comparison`; its CLI exits nonzero if either stage fails. `visualAcceptance` remains
+`NOT_REVIEWED`. No command emits `VISUAL_ACCEPTED`, a similarity score or aesthetic PASS/FAIL.
+Inspect the original captures, side-by-side and overlay before accepting material decisions
+of hierarchy, composition and spatial relationships. Explain legitimate differences from
+real data and the Design System; do not require illustrative dates/names/counters to match.
+Functional, backend, performance and accessibility acceptance need their own evidence.
+These files are disposable local evidence and are not uploaded to Continuum automatically.
+
+The focused comparator regressions can be run with
+`node --test scripts/ui-visual-validation/compare.test.cjs`. They use explicitly synthetic
+input fixtures, verify the output pixels and original-byte hashes, and exercise only one
+truncated PNG, one incompatible viewport/scale pair and one prohibited network path.
+Their simulated caller origin/approval is not evidence of a real screenshot or design approval.
+Native capture keeps the renderer hidden so that taking a screenshot does not activate
+visibility-driven background work. The mockup scenario checks this boundary explicitly.
+After fonts and finite animations settle, capture waits for a Chromium compositor
+presentation instead of assuming that renderer animation frames or a fixed delay prove
+fresh pixels. A missing presentation fails with `PAINT_TIMEOUT` after five seconds.
+
+The bounded `git-atlas-mockup` path now captures `mockup-checkout-dark` and
+`mockup-wide-dark` at 1672×941, plus `mockup-drawer-dark` at 800×760, all dark theme.
+Its synthetic Git history uses dates relative to acquisition time; hashes and capture time
+in the package identify the actual inputs rather than promising identical regenerated data.
+It no longer assumes a fixed 90-day axis, independent horizontal track guides or obsolete
+toolbar geometry. The legacy temporal-window checks elsewhere in `git-management` and
+`git-atlas-grid` are not current Git Atlas acceptance contracts and are not used by this
+comparison path; modernizing those broader scenarios is outside this MVP.

@@ -37,7 +37,12 @@ export async function setup(
         ? new GitOperationsService(
             state.project.path,
             git,
-            new GitHubGitTransport(null, git)
+            new GitHubGitTransport(null, git),
+            {
+              repositoryId: state.project.id,
+              isActive: () => projects.getState().revision === state.revision &&
+                projects.getState().project?.id === state.project?.id
+            }
           )
         : null
     )
