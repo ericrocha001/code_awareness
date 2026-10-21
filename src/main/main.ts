@@ -94,6 +94,8 @@ import { GitManagementController, registerGitManagementHandlers } from './ipc/gi
 import { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './ipc/work-orchestration-handler'
 import { orchestrationContinuumReader } from './ipc/orchestration-continuum-reader'
 import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
+import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
+import { PreviewRepositories } from './work-orchestration/preview-repositories'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
@@ -424,7 +426,13 @@ app.whenReady().then(async () => {
       detail: `${preview.worktree.path}\nBranch preservada: ${preview.preservationRef}\nHEAD: ${preview.preservationHead}\n\nA remoção será revalidada. A branch e seus commits serão mantidos.`,
       buttons: ['Cancelar', 'IDE e agentes liberados; remover Worktree'], defaultId: 0, cancelId: 0, noLink: true })
     return response.response === 1
-  }, continuumSession)
+  }, continuumSession, new PreviewProfileStore(join(app.getPath('userData'), 'work-orchestration', 'preview-profiles')), async profile => {
+    const response = await dialog.showMessageBox({ type: 'warning', title: 'Aprovar perfil de preview',
+      message: `Revisar e aprovar ${profile.profileId} revisão ${profile.revision}?`,
+      detail: `Repositório: ${profile.repositoryId}\nRuntime: ${profile.runtime} ${profile.runtimeVersion}\nComando: ${profile.command.executable} ${profile.command.args.join(' ')}\nCwd relativo: ${profile.command.cwd}\nModo: ${profile.security.mode}\nGarantias exigidas: ${JSON.stringify(profile.security.requirements)}\nDestinos: ${profile.network.destinations.join(', ')}\nRede aberta consentida: ${profile.network.openNetworkConsent}\nPerfil operacional não é sandbox. Esta aprovação não reduz requisitos nem inicia processos.`,
+      buttons: ['Cancelar', 'Aprovar esta revisão e política'], defaultId: 0, cancelId: 0, noLink: true })
+    return response.response === 1
+  }, new PreviewRepositories(repositoryCatalog, (path, identity) => new GitOperationsService(path, gitService, gitTransport, identity, true)))
   registerBranchOrchestrationHandlers(branchOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))

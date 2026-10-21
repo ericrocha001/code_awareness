@@ -7,11 +7,19 @@ import type { WorktreeRemovalPreview } from '../../shared/types/worktree-removal
 import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
 import { readBranchExecutions } from '../work-orchestration/branch-executions'
 import type { ExecutionBindingPage, ExecutionDocumentPage } from '../../shared/types/execution-branch-types'
+import { PreviewPreflightService } from '../work-orchestration/preview-preflight'
+import { PreviewProfileStore } from '../work-orchestration/preview-profile-store'
+import { previewFingerprint, type PreviewProfile } from '../work-orchestration/preview-profile'
+import type { PreviewRepositories } from '../work-orchestration/preview-repositories'
 
 export class BranchOrchestrationController {
   private active: { git: GitOperationsService; github: Pick<GitHubIntegrationService, 'branchPullRequests' | 'pullRequestCommits' | 'assessBranchDiscard'>; path: string; projectId: string; revision: number } | null = null
   private readonly mutations = new Set<Promise<unknown>>()
-  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly confirmRelease: (preview: WorktreeRemovalPreview) => Promise<boolean>, private readonly continuum?: RepositoryContinuumSession) {}
+  private readonly previewPreflight: PreviewPreflightService | undefined
+  constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly confirmRelease: (preview: WorktreeRemovalPreview) => Promise<boolean>, private readonly continuum?: RepositoryContinuumSession,
+    private readonly previewStore?: PreviewProfileStore, private readonly confirmProfile?: (profile: PreviewProfile) => Promise<boolean>, private readonly previewRepositories?: PreviewRepositories) {
+    this.previewPreflight = previewStore ? new PreviewPreflightService(previewStore) : undefined
+  }
   bind(git: GitOperationsService, github: Pick<GitHubIntegrationService, 'branchPullRequests' | 'pullRequestCommits' | 'assessBranchDiscard'>, path: string) {
     const state = this.projects.getState()
     this.active = state.project ? { git, github, path, projectId: state.project.id, revision: state.revision } : null
@@ -31,6 +39,36 @@ export class BranchOrchestrationController {
         const remote = (inventory: Parameters<GitHubIntegrationService['assessBranchDiscard']>[1], branch: Parameters<GitHubIntegrationService['assessBranchDiscard']>[2]) => github.assessBranchDiscard(path, inventory, branch)
         let data: BranchManagerData
         switch (operation.action) {
+          case 'PREVIEW_PROFILES': {
+            if (!this.previewPreflight || !this.previewRepositories) throw new Error('PREVIEW_UNAVAILABLE')
+            const target = this.previewRepositories.resolve(operation.repositoryId)
+            data = { kind: 'PREVIEW_PROFILES', profiles: await this.previewPreflight.list(operation.repositoryId) }
+            target.guard(); break
+          }
+          case 'PREVIEW_WORKTREES': {
+            if (!this.previewRepositories) throw new Error('PREVIEW_UNAVAILABLE')
+            const target = await this.previewRepositories.open(operation.repositoryId)
+            data = { kind: 'PREVIEW_WORKTREES', repositoryId: operation.repositoryId, worktrees: target.worktrees }
+            target.guard(); break
+          }
+          case 'PREVIEW_APPROVE':
+          case 'PREVIEW_PREFLIGHT': {
+            if (!this.previewStore || !this.previewRepositories || !this.previewPreflight) throw new Error('PREVIEW_UNAVAILABLE')
+            const selection = operation.selection
+            const target = await this.previewRepositories.open(selection.repositoryId, selection.worktreeId)
+            const targetGuard = () => { guard(); target.guard() }
+            const identity = await target.git.getCoordinationIdentity(selection.worktreeId)
+            if (identity.repositoryId !== selection.repositoryId || identity.record.generation !== selection.generation) throw new Error('WORKTREE_IDENTITY_MISMATCH')
+            await this.previewStore.assertExternal(identity.record.path)
+            if (operation.action === 'PREVIEW_APPROVE') {
+              const profile = (await this.previewStore.profiles(selection.repositoryId)).find(p => p.profileId === selection.profileId)
+              if (!profile || previewFingerprint(profile) !== selection.fingerprint) throw new Error('PROFILE_CHANGED')
+              targetGuard()
+              await this.previewStore.approve(profile, async p => { const approved = await this.confirmProfile?.(p); targetGuard(); return approved === true }, targetGuard)
+            }
+            data = { kind: 'PREVIEW_PREFLIGHT', preflight: await this.previewPreflight.check(target.git, selection) }
+            targetGuard(); break
+          }
           case 'INVENTORY': data = { kind: 'INVENTORY', inventory: await git.getBranchInventory() }; break
           case 'EXECUTIONS': data = { kind: 'EXECUTIONS', page: await readBranchExecutions(git, this.continuum, operation) as ExecutionBindingPage }; break
           case 'EXECUTION_DOCUMENTS': data = { kind: 'EXECUTION_DOCUMENTS', page: await readBranchExecutions(git, this.continuum, operation) as ExecutionDocumentPage }; break
@@ -53,7 +91,7 @@ export class BranchOrchestrationController {
       } catch (error) { return { success: false, code: error instanceof Error ? error.message : 'BRANCH_MANAGER_UNAVAILABLE' } }
     }
     const promise = run()
-    if (operation.action.startsWith('EXECUTE_')) {
+    if (operation.action.startsWith('EXECUTE_') || operation.action === 'PREVIEW_APPROVE') {
       this.mutations.add(promise)
       void promise.finally(() => this.mutations.delete(promise))
     }
@@ -67,6 +105,8 @@ function valid(value: BranchManagerRequest): boolean {
   if (!keys(value, ['context', 'operation']) || !keys(value.context, ['projectId', 'revision']) || !text(value.context.projectId) || !Number.isSafeInteger(value.context.revision) || value.context.revision < 0) return false
   const op = value.operation
   if (!op || typeof op !== 'object') return false
+  if (op.action === 'PREVIEW_PROFILES' || op.action === 'PREVIEW_WORKTREES') return keys(op, ['action', 'repositoryId']) && text(op.repositoryId)
+  if (op.action === 'PREVIEW_PREFLIGHT' || op.action === 'PREVIEW_APPROVE') return keys(op, ['action', 'selection']) && keys(op.selection, ['repositoryId', 'worktreeId', 'generation', 'profileId', 'fingerprint']) && [op.selection.repositoryId, op.selection.worktreeId, op.selection.generation, op.selection.profileId, op.selection.fingerprint].every(v => text(v))
   if (op.action === 'INVENTORY') return keys(op, ['action'])
   if (op.action === 'EXECUTIONS' || op.action === 'EXECUTION_DOCUMENTS') return keys(op, ['action', 'ref', 'revision', 'cursor', ...(op.action === 'EXECUTION_DOCUMENTS' ? ['bindingId', 'executionId'] : [])]) && text(op.ref) && text(op.revision) && (op.cursor === undefined || text(op.cursor, 4096)) && (op.action === 'EXECUTIONS' || text(op.bindingId) && text(op.executionId))
   if (op.action === 'PULL_REQUESTS') return keys(op, ['action', 'inventoryRevision']) && text(op.inventoryRevision)

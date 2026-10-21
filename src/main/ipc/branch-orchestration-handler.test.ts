@@ -2,6 +2,14 @@ import { expect, it, vi } from 'vitest'
 import { BranchOrchestrationController } from './branch-orchestration-handler'
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
 const context = { projectId: 'a', revision: 1 }
+it('rejects unavailable preview access, arbitrary commands and stale UI context', async () => {
+  const inventory = vi.fn(async () => ({ repositoryId: 'a' }))
+  const controller = new BranchOrchestrationController({ getState: () => ({ project: { id: 'a' }, revision: 1 }) as any }, async () => false)
+  controller.bind({ getBranchInventory: inventory } as any, {} as any, '/a')
+  expect(await controller.request({ context, operation: { action: 'PREVIEW_PROFILES', repositoryId: 'inactive' } })).toEqual({ success: false, code: 'PREVIEW_UNAVAILABLE' })
+  expect(await controller.request({ context, operation: { action: 'PREVIEW_PREFLIGHT', selection: { repositoryId: 'a', worktreeId: 'tree', generation: 'gen', profileId: 'web', fingerprint: 'hash', command: 'anything' } } } as any)).toEqual({ success: false, code: 'INVALID_ARGUMENT' })
+  expect(await controller.request({ context: { ...context, revision: 0 }, operation: { action: 'PREVIEW_PROFILES', repositoryId: 'a' } })).toEqual({ success: false, code: 'PROJECT_CONTEXT_CHANGED' })
+})
 it('rejects malformed arguments and stale contexts before touching providers', async () => {
   const inventory = vi.fn(), controller = new BranchOrchestrationController({ getState: () => ({ project: { id: 'a' }, revision: 1 }) as any }, async () => false)
   controller.bind({ getBranchInventory: inventory } as any, {} as any, '/a')
