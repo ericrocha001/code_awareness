@@ -1,13 +1,24 @@
 import { validatePeriods } from '../continuum/temporal-metadata'
 import type { ContinuumGraphRequest } from '../../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionRequest } from '../../shared/types/continuum-suggestion-types'
-import { BrowserWindow, ipcMain } from 'electron'
-import { posix, win32 } from 'node:path'
+import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage } from 'electron'
+import { dirname, extname, join, posix, win32 } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { renameSync, rmSync, writeFileSync } from 'node:fs'
+import sharp from 'sharp'
 import { dump } from 'js-yaml'
 import type { ContinuumListRequest, ContinuumPublishRequest, ContinuumPublishReceipt, ContinuumVisualPublishRequest } from '../../shared/types/continuum-ui-types'
+import type { ContinuumExportRequest, ContinuumExportReceipt } from '../../shared/types/continuum-ui-types'
 import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
 import { parseArtifactMarkdown, validateMarkdown, visualMarkdown } from '../continuum/artifact-metadata'
-import { VISUAL_MAX_BYTES } from '../continuum/visual-media'
+import { VISUAL_MAX_BYTES, VISUAL_MAX_PIXELS } from '../continuum/visual-media'
+
+function exportName(name: unknown, extension: string): string {
+  let stem = String(name ?? 'Artifact').replace(/[<>:"/\\|?*\x00-\x1F\x7F]/g, '_').replace(/^[. ]+|[. ]+$/g, '').slice(0, 100).trim()
+  if (!stem) stem = 'Artifact'
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem)) stem = `_${stem}`
+  return `${stem}${extension}`
+}
 
 function publicationMarkdown(fileName: unknown, rawMarkdown: string): string {
   if (typeof fileName !== 'string' || !/\.md$/i.test(fileName) ||
@@ -33,6 +44,58 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (typeof repositoryId !== 'string' || !repositoryId) throw new Error('INVALID_ARGUMENT: repositoryId required')
     return session.getActiveSession()?.repositoryId === repositoryId ? session.getActiveService() : null
   }
+  const exporting = new Set<number>()
+  ipcMain.handle('continuum:export', async (event, request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => {
+    if (!request || typeof request !== 'object' || typeof request.artifactId !== 'string' || !request.artifactId.trim() || !['copy', 'save'].includes(request.intent)) throw new Error('INVALID_ARGUMENT')
+    const service = active(request.repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    if (exporting.has(event.sender.id)) throw new Error('EXPORT_BUSY')
+    exporting.add(event.sender.id)
+    try {
+      const artifact = service.get(request.artifactId)
+      if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
+      const assertContext = () => {
+        if (active(request.repositoryId) !== service || event.sender.isDestroyed()) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+        const current = service.get(request.artifactId)
+        if (!current || current.revision !== artifact.revision || current.rawMarkdown !== artifact.rawMarkdown) throw new Error('ARTIFACT_CONTEXT_CHANGED')
+        if (active(request.repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+      }
+      const visual = artifact.metadata.kind === 'VISUAL_REFERENCE'
+      const data = visual ? service.getVisual(request.artifactId).data : Buffer.from(artifact.rawMarkdown, 'utf8')
+      const receipt = (outcome: ContinuumExportReceipt['outcome']): ContinuumExportReceipt => ({ repositoryId: request.repositoryId, artifactId: request.artifactId, outcome })
+      if (request.intent === 'copy') {
+        if (visual) {
+          const png = await sharp(data, { failOn: 'warning', limitInputPixels: VISUAL_MAX_PIXELS }).timeout({ seconds: 5 }).png().toBuffer()
+          const image = nativeImage.createFromBuffer(png)
+          if (image.isEmpty()) throw new Error('INVALID_VISUAL_MEDIA')
+          assertContext()
+          clipboard.writeImage(image)
+        } else {
+          assertContext()
+          clipboard.writeText(artifact.rawMarkdown)
+        }
+        return receipt('copied')
+      }
+      const extension = visual ? '.webp' : '.md'
+      assertContext()
+      const options: Electron.SaveDialogOptions = {
+        title: 'Salvar Artifact como…', defaultPath: join(app.getPath('downloads'), exportName(artifact.metadata.name, extension)),
+        filters: [{ name: visual ? 'WebP original' : 'Markdown', extensions: [extension.slice(1)] }],
+        properties: ['showOverwriteConfirmation', 'createDirectory', 'dontAddToRecent']
+      }
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      const result = await (parent ? dialog.showSaveDialog(parent, options) : dialog.showSaveDialog(options))
+      if (result.canceled) return receipt('cancelled')
+      assertContext()
+      if (!result.filePath || extname(result.filePath).toLowerCase() !== extension) throw new Error(`INVALID_EXPORT_EXTENSION: ${extension} obrigatório`)
+      const temporary = join(dirname(result.filePath), `.continuum-${randomUUID()}.tmp`)
+      try {
+        writeFileSync(temporary, data, { flag: 'wx', mode: 0o600 })
+        renameSync(temporary, result.filePath)
+      } finally { rmSync(temporary, { force: true }) }
+      return receipt('saved')
+    } finally { exporting.delete(event.sender.id) }
+  })
   ipcMain.handle('continuum:publish-visual', async (_event, request: ContinuumVisualPublishRequest) => {
     if (!request || typeof request !== 'object' || !(request.data instanceof Uint8Array) || request.data.byteLength > VISUAL_MAX_BYTES || !(['name', 'description', 'context'] as const).every(key => typeof request[key] === 'string' && request[key].trim())) throw new Error('INVALID_ARGUMENT: referência visual obrigatória')
     const service = active(request.repositoryId)

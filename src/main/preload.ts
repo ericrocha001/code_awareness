@@ -14,7 +14,7 @@ import type { OrchestrationAttentionChange } from '../shared/types/work-orchestr
 import type { BranchManagerRequest, BranchManagerResult } from '../shared/types/branch-manager-types'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../shared/types/git-commit-correlation-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../shared/types/git-management-types'
-import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
+import type { ContinuumExportRequest, ContinuumExportReceipt, ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../shared/types/continuum-ui-types'
 import type { ContinuumGraphRequest, ContinuumGraph } from '../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionRequest, ContinuumSuggestions } from '../shared/types/continuum-suggestion-types'
 import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '../shared/types/continuum-ui-types'
@@ -72,6 +72,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getContinuumVisual: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual', repositoryId, artifactId),
   getContinuumVisualThumbnail: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual-thumbnail', repositoryId, artifactId),
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
+  exportContinuumArtifact: (request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => ipcRenderer.invoke('continuum:export', request),
   getContinuumArtifact: (repositoryId: string, artifactId: string): Promise<ContinuumSelection> => ipcRenderer.invoke('continuum:get', repositoryId, artifactId),
   onContinuumChanged: (callback: (change: ContinuumChange) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, change: ContinuumChange) => callback(change)

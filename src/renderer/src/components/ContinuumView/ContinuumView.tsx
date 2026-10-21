@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
+import { Copy, Download, FilterX, Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
 import Markdown from 'markdown-to-jsx'
 import type { ActiveProject } from '../../../../shared/types/active-project-types'
-import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar, ContinuumPeriod } from '../../../../shared/types/continuum-ui-types'
+import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar, ContinuumPeriod, ContinuumExportRequest } from '../../../../shared/types/continuum-ui-types'
 import { SearchBox } from '../shared/SearchBox/SearchBox'
 import { ColumnResizer } from '../shared/ColumnResizer/ColumnResizer'
 import { useContinuumColumns } from './useContinuumColumns'
 import { VisualThumbnail, thumbnailQueue } from './VisualThumbnail'
+import { ContextFilters } from './ContextFilters'
 import './ContinuumView.css'
 const ContinuumGraph = React.lazy(() => import('./ContinuumGraph').then(module => ({ default: module.ContinuumGraph })))
 
@@ -31,8 +32,37 @@ function VisualPreview({ repositoryId, artifactId }: { repositoryId: string; art
   return error ? <p role="alert">{error}</p> : url ? <img className="continuum-visual-preview" src={url} alt="Referência visual canônica" onError={() => setError('Não foi possível renderizar a referência visual.')} /> : <p role="status">Carregando referência visual…</p>
 }
 
+function ExportActions({ repositoryId, artifactId }: { repositoryId: string; artifactId: string }) {
+  const busy = useRef(false)
+  const mounted = useRef(true)
+  const [pending, setPending] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const execute = async (intent: ContinuumExportRequest['intent']) => {
+    if (busy.current) return
+    busy.current = true; setPending(true); setMessage(''); setError('')
+    try {
+      const result = await window.codeAwareness.exportContinuumArtifact({ repositoryId, artifactId, intent })
+      if (!mounted.current) return
+      if (result.repositoryId !== repositoryId || result.artifactId !== artifactId) throw new Error('EXPORT_CONTEXT_CHANGED')
+      setMessage(result.outcome === 'cancelled' ? 'Salvamento cancelado.' : result.outcome === 'saved' ? 'Artifact salvo.' : 'Copiado para a área de transferência.')
+    } catch (reason) { if (mounted.current) setError(String(reason)) }
+    finally { busy.current = false; if (mounted.current) setPending(false) }
+  }
+  return <>
+    <div className="continuum-export-actions" aria-busy={pending}>
+      <button className="continuum-icon-button" aria-label="Copiar" title="Copiar" disabled={pending} onClick={() => execute('copy')}><Copy size={16} aria-hidden="true" /></button>
+      <button className="continuum-icon-button" aria-label="Salvar como…" title="Salvar como…" disabled={pending} onClick={() => execute('save')}><Download size={16} aria-hidden="true" /></button>
+    </div>
+    {message && <p className="continuum-export-feedback" role="status">{message}</p>}
+    {error && <p className="continuum-export-feedback" role="alert">{error}</p>}
+  </>
+}
+
 function Inspector({ artifact, repositoryId, preview }: { artifact: ContinuumDetail; repositoryId: string; preview: boolean }) {
   return <>
+    <ExportActions key={`${repositoryId}:${artifact.artifactId}:${artifact.revision}`} repositoryId={repositoryId} artifactId={artifact.artifactId} />
     <div className="continuum-detail-heading"><FileText size={24} /><h3>{String(artifact.metadata.name)}</h3></div>
     <p className="continuum-identity">{artifact.artifactId}</p>
     {preview && artifact.metadata.kind === 'VISUAL_REFERENCE' && <VisualPreview key={`${repositoryId}:${artifact.artifactId}`} repositoryId={repositoryId} artifactId={artifact.artifactId} />}
@@ -274,28 +304,12 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
       {error && <div className="continuum-error" role="alert">{error}<button onClick={() => setRefresh(value => value + 1)}>Tentar novamente</button></div>}
       <div className="continuum-workspace" ref={columns.workspace} style={columns.style}>
         <aside className="continuum-pane continuum-context" aria-label="Context">
-          <div className="continuum-pane-heading"><h2>Context</h2><button disabled={!Object.keys(metadata).length && !Object.keys(periods).length} onClick={() => { setMetadata({}); setPeriods({}) }}>Limpar</button></div>
+          <div className="continuum-pane-heading"><h2>Context</h2><button className="continuum-icon-button" aria-label="Limpar" title="Limpar" disabled={!Object.keys(metadata).length && !Object.keys(periods).length} onClick={() => { setMetadata({}); setPeriods({}) }}><FilterX size={16} aria-hidden="true" /></button></div>
           <div className="continuum-pane-scroll">
-            {facets.map(facet => <details key={facet.key} open><summary title={facet.key}>{facet.key}</summary>
-              <div className="continuum-facet-values">
-                {facet.years?.map(year => <div className="continuum-facet-year" key={year.year}>
-                  <button aria-label={`${facet.key} ${year.year}`} aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === undefined}
-                    onClick={() => choosePeriod(facet.key, { year: year.year })}><span>{year.year}</span><small>{year.count}</small></button>
-                  <details open><summary aria-label={`months for ${facet.key} ${year.year}`}>months</summary>
-                  <div className="continuum-facet-months">{year.months.map(month => <button key={month.month}
-                    aria-label={`${facet.key} ${year.year}-${String(month.month).padStart(2, '0')}`}
-                    aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === month.month}
-                    onClick={() => choosePeriod(facet.key, { year: year.year, month: month.month })}>
-                    <span>{new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(2000, month.month - 1, 1))).toLowerCase()}</span><small>{month.count}</small>
-                  </button>)}</div></details>
-                </div>)}
-                {facet.values.map(entry => {
-                const selected = metadata[facet.key] === entry.value
-                return <button key={JSON.stringify(entry.value)} aria-pressed={selected} title={`${typeof entry.value}: ${String(entry.value)}`}
-                  onClick={() => { setPeriods(previous => { const next = { ...previous }; delete next[facet.key]; return next }); setMetadata(previous => { const next = { ...previous }; if (selected) delete next[facet.key]; else next[facet.key] = entry.value; return next }) }}>
-                  <span>{String(entry.value)}</span><small>{entry.count}</small></button>
-              })}</div>
-            </details>)}
+            {repositoryId && boundPath.current === path && <ContextFilters key={`${path}:${repositoryId}`} repositoryId={repositoryId} facets={facets} metadata={metadata} periods={periods}
+              choosePeriod={choosePeriod}
+              chooseValue={(key, value) => { setPeriods(previous => { const next = { ...previous }; delete next[key]; return next }); setMetadata(previous => { const next = { ...previous }; if (previous[key] === value) delete next[key]; else next[key] = value; return next }) }}
+              remove={key => { setMetadata(previous => { const next = { ...previous }; delete next[key]; return next }); setPeriods(previous => { const next = { ...previous }; delete next[key]; return next }) }} />}
             {!loading && !facets.length && <p className="continuum-hint">Nenhuma metadata disponível.</p>}
           </div>
         </aside>
@@ -332,7 +346,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
           <div className="continuum-pane-heading"><h2>Inspector</h2><button className="continuum-close" aria-label="Fechar inspector" onClick={() => setInspectorOpen(false)}><X size={17} /></button></div>
           <div className="continuum-pane-scroll" aria-busy={detailLoading}>
             {detailError && <p role="alert">{detailError}</p>}
-            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact && repositoryId && boundPath.current === path ? <Inspector artifact={artifact} repositoryId={repositoryId} preview={inspectorOpen} /> :
+            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact && artifact.artifactId === selectedId && repositoryId && boundPath.current === path ? <Inspector artifact={artifact} repositoryId={repositoryId} preview={inspectorOpen} /> :
               <div className="continuum-empty"><FileText size={32} /><h3>Nenhum artifact selecionado</h3><p>Selecione um artifact para ler seu conteúdo e metadata.</p></div>}
           </div>
         </aside>

@@ -90,6 +90,22 @@
 }
 
 .continuum-facet-year { min-width: 0; }
+.continuum-context-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 16px; }
+.continuum-context-actions > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.continuum-context-actions button, .continuum-facet-options button, .continuum-active-filters button, .continuum-export-actions button { border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; background: var(--bg-primary); font-size: 11px; }
+.continuum-facet-options { min-width: 0; margin: 0 0 16px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; }
+.continuum-facet-options legend { font-size: 12px; color: var(--text-secondary); }
+.continuum-facet-options label { display: flex; align-items: center; gap: 8px; padding: 5px 0; font-size: 12px; overflow-wrap: anywhere; }
+.continuum-facet-options input { accent-color: var(--accent); flex-shrink: 0; }
+.continuum-facet-options button { margin-top: 8px; }
+.continuum-active-filters { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+.continuum-active-filters h3 { margin: 0; font-size: 12px; color: var(--text-secondary); }
+.continuum-active-filters > div { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 11px; }
+.continuum-active-filters > div > span { min-width: 0; overflow-wrap: anywhere; }
+.continuum-export-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.continuum-export-feedback { font-size: 12px; overflow-wrap: anywhere; }
+.continuum-view .continuum-icon-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 30px; height: 30px; padding: 0; }
+.continuum-icon-button:hover:enabled, .continuum-icon-button[aria-expanded=true] { background: var(--hover-bg); color: var(--accent); }
 .continuum-view, .continuum-view *, .continuum-view *::before, .continuum-view *::after { box-sizing: border-box; }
 .continuum-facet-year > button { width: 100%; }
 .continuum-facet-months { padding-left: 12px; display: flex; flex-direction: column; gap: 3px; }

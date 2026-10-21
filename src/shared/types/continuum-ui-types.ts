@@ -16,6 +16,8 @@ export interface ContinuumDetail {
 }
 export interface ContinuumSelection { repositoryId: string | null; artifact: ContinuumDetail | null }
 export interface ContinuumChange { repositoryId: string | null }
+export interface ContinuumExportRequest { repositoryId: string; artifactId: string; intent: 'copy' | 'save' }
+export interface ContinuumExportReceipt { repositoryId: string; artifactId: string; outcome: 'copied' | 'saved' | 'cancelled' }
 export interface ContinuumPublishRequest { repositoryId: string; fileName: string; rawMarkdown: string }
 export interface ContinuumPublishReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
 export interface ContinuumVisualPublishRequest {
