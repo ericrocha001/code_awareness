@@ -1146,12 +1146,8 @@ export class GitOperationsService {
     this.clearAtlasCache()
     await this.atlasCatalogClear(common,authorization)
   }
-  async getAtlasCheckoutState() {
-    await this.repository()
-    const checkout = await this.git.getAtlasCheckoutState(this.repoRoot)
-    let sourceFingerprint: string | undefined
-    try { sourceFingerprint = await this.git.getAtlasSourceFingerprint(this.repoRoot) } catch { }
-    return { ...checkout, sourceFingerprint }
+  async getAtlasCheckoutState(lightweight = false) {
+    return this.git.getAtlasObservation(this.repoRoot, lightweight, true)
   }
   private atlasPullRequests?: (inventory: BranchInventory) => Promise<BranchPullRequests>
 

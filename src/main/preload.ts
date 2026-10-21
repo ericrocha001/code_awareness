@@ -6,7 +6,7 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
-import type { GitAtlasRequest, GitAtlasPage, GitAtlasCompareRequest, GitAtlasComparison } from '../shared/types/git-atlas-types'
+import type { GitAtlasCheckoutObservation, GitAtlasRequest, GitAtlasPage, GitAtlasCompareRequest, GitAtlasComparison } from '../shared/types/git-atlas-types'
 import type { AtlasCatalogRequest, AtlasCatalogState, AtlasCatalogChange } from '../shared/types/git-atlas-catalog-types'
 import type { GitAtlasCoreRequest, GitAtlasCoreEvidence, GitAtlasPrRequest, GitAtlasPrEvidence } from '../shared/types/git-atlas-evidence-types'
 import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } from '../shared/types/work-orchestration-types'
@@ -49,7 +49,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getGitCommitCorrelation: (request: GitCommitCorrelationRequest): Promise<GitManagementResult<GitCommitCorrelationPage>> => ipcRenderer.invoke('git-operations:correlation', request),
   getGitManagementHistory: (request: GitHistoryRequest): Promise<GitManagementResult<GitHistoryPage>> => ipcRenderer.invoke('git-management:history', request),
   getGitAtlas: (request: GitAtlasRequest): Promise<GitManagementResult<GitAtlasPage>> => ipcRenderer.invoke('git-management:atlas', request),
-  getGitAtlasCheckoutState: (context: GitManagementContext): Promise<GitManagementResult<Pick<GitOverview['state'], 'head' | 'branch' | 'operation'> & { sourceFingerprint?: string }>> => ipcRenderer.invoke('git-management:atlas-checkout-state', context),
+  getGitAtlasCheckoutState: (context: GitManagementContext, lightweight?: boolean): Promise<GitManagementResult<GitAtlasCheckoutObservation>> => ipcRenderer.invoke('git-management:atlas-checkout-state', context, lightweight),
   getGitAtlasCatalog: (request: AtlasCatalogRequest): Promise<GitManagementResult<AtlasCatalogState>> => ipcRenderer.invoke('git-management:atlas-catalog', request),
   stopGitAtlasCollection: (context: GitManagementContext): Promise<GitManagementResult<void>> => ipcRenderer.invoke('git-management:atlas-catalog-stop', context),
   onGitAtlasCatalogChanged: (callback: (change: AtlasCatalogChange) => void) => {

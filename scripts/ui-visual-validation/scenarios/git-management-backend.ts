@@ -8,12 +8,14 @@ import {
 } from '../../../src/main/ipc/git-management-handler'
 import { ActiveProjectService } from '../../../src/main/core/active-project-service'
 import { RuntimeIdentityProvider } from '../../../src/main/runtime-identity/runtime-identity-provider'
+import { GitAtlasSqliteCache } from '../../../src/main/git-operations/git-atlas-sqlite-cache'
 
 export async function setup(
   root: string,
   secondRoot: string,
   nonGitRoot: string,
-  sourceRoot: string
+  sourceRoot: string,
+  catalogDirectory?: string
 ) {
   const runtime = new RuntimeIdentityProvider({
     rootDir: sourceRoot,
@@ -32,8 +34,7 @@ export async function setup(
   const controller = new GitManagementController(projects)
   projects.onBeforeChange(() => controller.deactivate())
   projects.onChanged((state) => {
-    controller.bind(
-      state.project
+    const service = state.project
         ? new GitOperationsService(
             state.project.path,
             git,
@@ -45,7 +46,11 @@ export async function setup(
             }
           )
         : null
-    )
+    if (service && state.project && catalogDirectory) {
+      const repositoryId = state.project.id
+      service.bindAtlasPersistence(common => GitAtlasSqliteCache.acquire(catalogDirectory, repositoryId, common))
+    }
+    controller.bind(service)
   })
   registerGitManagementHandlers(controller)
   ipcMain.handle('project:get-active', () => projects.getState())
@@ -55,5 +60,5 @@ export async function setup(
     data: await projects.activate(id)
   }))
   await projects.activate('proof-a')
-  return { controller, projects, runtime }
+  return { controller, projects, runtime, git }
 }

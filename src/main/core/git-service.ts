@@ -11,6 +11,7 @@ import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
 import type { GitOperationReceipt } from '../git-operations/git-operation-receipts'
 import type { GitHistoryNode } from '../../shared/types/git-management-types'
+import type { GitAtlasCheckoutObservation } from '../../shared/types/git-atlas-types'
 
 
 const GIT_TIMEOUT_MS = 10_000
@@ -381,11 +382,23 @@ export class GitService implements FileListingPort {
       worktreeRevision: this.worktreeRevision(dirPath, head, indexRevision, status, true) }
   }
 
-  private async captureSnapshotIdentity(dirPath: string): Promise<{ head: string | null; branch: string | null; operation: string | null }> {
+  private async captureSnapshotIdentity(dirPath: string, strict = false): Promise<{ head: string | null; branch: string | null; operation: string | null }> {
     let identity: RegExpExecArray | null = null
     try { identity = /^([\s\S]+)\n([a-f0-9]{40,64})\n(HEAD|refs\/heads\/[^\r\n]+)\n$/.exec(await this.runGit(['rev-parse', '--absolute-git-dir', 'HEAD', '--symbolic-full-name', 'HEAD'], dirPath)) }
-    catch { }
-    if (identity) return { head: identity[2], branch: identity[3] === 'HEAD' ? null : identity[3].slice(11), operation: this.operationFromDirectory(identity[1].trim()) }
+    catch (error) {
+      if (strict) {
+        const head = await this.runGit(['rev-parse', '--verify', '--quiet', 'HEAD'], dirPath, { allowExitOne: true, env: this.localReadEnvironment() })
+        if (head.trim()) throw error
+        const [admin, ref] = await Promise.all([this.getWorktreeDirectory(dirPath), this.runGit(['symbolic-ref', '--quiet', 'HEAD'], dirPath, { env: this.localReadEnvironment() })])
+        return { head: null, branch: ref.trim().replace(/^refs\/heads\//, ''), operation: this.operationFromDirectory(admin) ?? (['index.lock', 'HEAD.lock'].some(name => existsSync(join(admin, name))) ? 'LOCKED' : null) }
+      }
+    }
+    if (identity) {
+      const admin = identity[1].trim()
+      const operation = this.operationFromDirectory(admin) ?? (strict && ['index.lock', 'HEAD.lock'].some(name => existsSync(join(admin, name))) ? 'LOCKED' : null)
+      return { head: identity[2], branch: identity[3] === 'HEAD' ? null : identity[3].slice(11), operation }
+    }
+    if (strict) throw new Error('GIT_STATE_UNAVAILABLE')
     const [head, branch, operation] = await Promise.all([this.getCurrentCommitHash(dirPath), this.getCurrentBranch(dirPath), this.getGitOperation(dirPath)])
     return { head, branch, operation }
   }
@@ -728,18 +741,39 @@ export class GitService implements FileListingPort {
     return (await this.runGit(['rev-parse', '--path-format=absolute', '--show-toplevel'], root, { env: this.localReadEnvironment() })).trim()
   }
 
-  getAtlasCheckoutState(root: string) { return this.captureSnapshotIdentity(root) }
+  getAtlasCheckoutState(root: string, strict = false) { return this.captureSnapshotIdentity(root, strict) }
 
-  async getAtlasSourceFingerprint(root: string): Promise<string> {
-    const directories = await this.getRepositoryDirectories(root)
+  atlasReferenceFingerprint(checkout: { head: string | null; branch: string | null }, references: string): string {
+    return createHash('sha256').update(JSON.stringify([checkout.head, checkout.branch, references])).digest('hex')
+  }
+
+  atlasSourceFingerprint(root: string, directories: { common: string; admin: string }, checkout: { head: string | null; branch: string | null; operation: string | null }, references: string, worktrees: string, topology: string): string {
     const common = realpathSync(directories.common), admin = realpathSync(directories.admin), physical = realpathSync(root)
-    const [checkout, references, worktrees, topology] = await Promise.all([
-      this.getAtlasCheckoutState(root), this.getAtlasReferences(root), this.listWorktreeRecords(root, true), this.getCommitTopologyRevision(root, common)
-    ])
     if (checkout.operation) throw new Error('GIT_OPERATION_IN_PROGRESS')
     if (worktrees.length > 256000 || references.split('\n').length > 513) throw new Error('ATLAS_REFERENCE_LIMIT')
     const generation = [admin, physical].map(path => { const stat = statSync(path, { bigint: true }); return [path, String(stat.dev), String(stat.ino), String(stat.birthtimeNs)] })
     return createHash('sha256').update(JSON.stringify([common, generation, checkout, references, worktrees, topology])).digest('hex')
+  }
+
+  async getAtlasObservation(root: string, lightweight = false, strict = false): Promise<GitAtlasCheckoutObservation> {
+    if (lightweight) {
+      const checkout = await this.getAtlasCheckoutState(root, strict)
+      if (checkout.operation) return checkout
+      const references = await this.getAtlasReferences(root)
+      return { ...checkout, referenceFingerprint: this.atlasReferenceFingerprint(checkout, references) }
+    }
+    const directories = await this.getRepositoryDirectories(root)
+    const [checkout, references, worktrees, topology] = await Promise.all([
+      this.getAtlasCheckoutState(root, strict), this.getAtlasReferences(root), this.listWorktreeRecords(root, true), this.getCommitTopologyRevision(root, directories.common)
+    ])
+    if (checkout.operation) return checkout
+    return { ...checkout, referenceFingerprint: this.atlasReferenceFingerprint(checkout, references), sourceFingerprint: this.atlasSourceFingerprint(root, directories, checkout, references, worktrees, topology) }
+  }
+
+  async getAtlasSourceFingerprint(root: string): Promise<string> {
+    const result = await this.getAtlasObservation(root)
+    if (!('sourceFingerprint' in result) || !result.sourceFingerprint) throw new Error('GIT_OPERATION_IN_PROGRESS')
+    return result.sourceFingerprint
   }
 
   async getAtlasHistoryOrder(root: string, tips: string[], offset: number, limit: number, since: string | null, until?: string): Promise<string[]> {
