@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Check, Pencil, Plus, Tag, Trash2, X } from 'lucide-react'
+import { Check, Package, Pencil, Plus, Tag, Trash2, X } from 'lucide-react'
 import type { ContinuumDetail } from '../../../../shared/types/continuum-ui-types'
 import type { ContinuumTag, ContinuumTagAssignment, ContinuumTagMutation } from '../../../../shared/types/continuum-tag-types'
 
@@ -22,8 +22,8 @@ export function ArtifactTagEditor({ repositoryId, artifact, tags, onChanged }: {
   </fieldset>
 }
 
-export function ContinuumTagManager({ repositoryId, tags, selected, onFilter, onChanged, onClose }: {
-  repositoryId: string; tags: ContinuumTag[]; selected: ContinuumTagAssignment[]; onFilter(slug: string): void; onChanged(): void; onClose(): void
+export function ContinuumTagManager({ repositoryId, tags, selected, onFilter, onBundle, onChanged, onClose }: {
+  repositoryId: string; tags: ContinuumTag[]; selected: ContinuumTagAssignment[]; onFilter(slug: string): void; onBundle?(slug: string): void; onChanged(): void; onClose(): void
 }) {
   const [slug, setSlug] = useState(''), [name, setName] = useState(''), [color, setColor] = useState('#7852ee'), [description, setDescription] = useState('')
   const [editing, setEditing] = useState(false), [pending, setPending] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
@@ -46,6 +46,7 @@ export function ContinuumTagManager({ repositoryId, tags, selected, onFilter, on
     <div className="continuum-tag-list">{tags.map(tag => <div key={tag.slug}>
       <button title={tag.description} onClick={() => onFilter(tag.slug)}><span className="continuum-tag-dot" style={{ backgroundColor: tag.color }} />{tag.name} <small>{tag.count}</small></button>
       <code>{tag.slug}</code>
+      {onBundle && <button className="continuum-icon-button" aria-label={`Gerar Bundle ${tag.slug}`} title="Gerar Context Bundle" onClick={() => onBundle(tag.slug)}><Package size={15} /></button>}
       <button className="continuum-icon-button" aria-label={`Editar tag ${tag.slug}`} title="Editar tag" disabled={pending} onClick={() => { setSlug(tag.slug); setName(tag.name); setColor(tag.color); setDescription(tag.description); setEditing(true) }}><Pencil size={15} /></button>
       <button className="continuum-icon-button" aria-label={`Excluir tag ${tag.slug}`} title={tag.count ? 'Remova as associações antes de excluir' : 'Excluir tag vazia'} disabled={pending || tag.count > 0} onClick={() => mutate({ repositoryId, intent: 'delete', slug: tag.slug })}><Trash2 size={15} /></button>
       {selected.length > 0 && <><button className="continuum-icon-button" aria-label={`Aplicar ${tag.slug} à seleção`} title="Aplicar à seleção" disabled={pending} onClick={() => setBatch({ slug: tag.slug, assigned: true })}><Plus size={15} /></button><button className="continuum-icon-button" aria-label={`Remover ${tag.slug} da seleção`} title="Remover da seleção" disabled={pending} onClick={() => setBatch({ slug: tag.slug, assigned: false })}><X size={15} /></button></>}

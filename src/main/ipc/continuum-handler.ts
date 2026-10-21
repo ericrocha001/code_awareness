@@ -1,3 +1,4 @@
+import { registerContinuumBundleHandlers } from './continuum-bundle-handler'
 import type { ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 import { validatePeriods } from '../continuum/temporal-metadata'
 import type { ContinuumGraphRequest } from '../../shared/types/continuum-graph-types'
@@ -41,6 +42,7 @@ function publicationMarkdown(fileName: unknown, rawMarkdown: string): string {
 }
 
 export function registerContinuumHandlers(session: RepositoryContinuumSession): () => void {
+  registerContinuumBundleHandlers(session)
   const active = (repositoryId: unknown) => {
     if (typeof repositoryId !== 'string' || !repositoryId) throw new Error('INVALID_ARGUMENT: repositoryId required')
     return session.getActiveSession()?.repositoryId === repositoryId ? session.getActiveService() : null

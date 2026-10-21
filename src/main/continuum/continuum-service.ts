@@ -143,8 +143,10 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   list(filter: ListArtifactsFilter = {}): ArtifactPage { this.reconcile?.(); return this.store.list(filter) }
   importArtifact(source: string, input: CreateArtifactInput): ArtifactReceipt {
     const existing = this.store.get(input.artifactId)
-    if (/^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown)) this.assertAgentTags(parseArtifactMarkdown(input.rawMarkdown, true).metadata, existing?.metadata)
-    this.assertAgentTags(input.metadata, existing?.metadata)
+    if (!existing) {
+      if (/^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown)) this.assertAgentTags(parseArtifactMarkdown(input.rawMarkdown, true).metadata)
+      this.assertAgentTags(input.metadata)
+    }
     const receipt = this.receipt(this.store.importArtifact(source, input))
     if (!existing) this.changed()
     return receipt

@@ -100,3 +100,13 @@ it('backfills existing YAML membership once and preserves the catalog across reo
   expect(reopened.list({ tag: 'historical' }).artifacts.map(a => a.artifactId)).toEqual(['historical'])
   expect(reopened.tags()[0].count).toBe(1)
 })
+it('allows immutable import replay after human tagging without authorizing imported tag changes', () => {
+  const f = setup(); createTag(f, 'architecture')
+  const rawMarkdown = markdown('Imported'), input = { artifactId: 'imported', rawMarkdown, metadata: parseArtifactMarkdown(rawMarkdown).metadata, createdAt: '2026-10-21T00:00:00Z' }
+  f.service.importArtifact('inbox:fixture', input)
+  assign(f, 'architecture', input.artifactId, 1)
+  expect(f.service.importArtifact('inbox:fixture', input).revision).toBe(2)
+  expect(f.service.get(input.artifactId)!.metadata.tags).toEqual(['architecture'])
+  const changed = editArtifactTags(rawMarkdown, ['architecture'])
+  expect(() => f.service.importArtifact('inbox:fixture', { ...input, rawMarkdown: changed, metadata: parseArtifactMarkdown(changed).metadata })).toThrow('IDENTITY_CONFLICT')
+})

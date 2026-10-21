@@ -1,7 +1,8 @@
+import { ContinuumBundleComposer } from './ContinuumBundleComposer'
 import type { ContinuumTag } from '../../../../shared/types/continuum-tag-types'
 import { ArtifactTagEditor, ContinuumTagManager } from './ContinuumTags'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Copy, Download, FilterX, Tags, Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
+import { Copy, Download, FilterX, Tags, Package, Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
 import Markdown from 'markdown-to-jsx'
 import type { ActiveProject } from '../../../../shared/types/active-project-types'
 import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar, ContinuumPeriod, ContinuumExportRequest } from '../../../../shared/types/continuum-ui-types'
@@ -81,6 +82,7 @@ function Inspector({ artifact, repositoryId, preview, tags, onChanged }: { artif
 }
 
 export function ContinuumView({ activeProject, artifactIntent }: { activeProject: ActiveProject | null; artifactIntent?: { repositoryId: string; artifactId: string } | null }) {
+  const [bundleSlug, setBundleSlug] = useState<string | null>(null)
   const [tags, setTags] = useState<ContinuumTag[]>([])
   const [tag, setTag] = useState<string | undefined>()
   const [tagManager, setTagManager] = useState(false)
@@ -316,7 +318,8 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
       <input ref={visualInput} type="file" accept=".webp,image/webp" hidden aria-label="Arquivo WebP" onChange={selectVisual} />
     </header>
     {markdownDraft && <div className="continuum-tag-confirmation"><p>Publicar {markdownDraft.fileName} com as tags canônicas declaradas no YAML?</p><button disabled={publishing} onClick={confirmMarkdownTags}>Confirmar tags do Markdown</button><button disabled={publishing} onClick={() => setMarkdownDraft(null)}>Cancelar</button></div>}
-    {tagManager && repositoryId && <ContinuumTagManager key={repositoryId} repositoryId={repositoryId} tags={tags} selected={Object.entries(tagSelection).map(([artifactId, expectedRevision]) => ({ artifactId, expectedRevision }))} onFilter={slug => { setTag(slug); setTagManager(false) }} onChanged={() => { setTagSelection({}); setRefresh(value => value + 1) }} onClose={() => setTagManager(false)} />}
+    {bundleSlug && repositoryId && <ContinuumBundleComposer key={`${repositoryId}:${bundleSlug}`} repositoryId={repositoryId} slug={bundleSlug} onClose={() => setBundleSlug(null)} />}
+    {tagManager && repositoryId && <ContinuumTagManager key={repositoryId} repositoryId={repositoryId} tags={tags} onBundle={slug => { setBundleSlug(slug); setTagManager(false) }} selected={Object.entries(tagSelection).map(([artifactId, expectedRevision]) => ({ artifactId, expectedRevision }))} onFilter={slug => { setTag(slug); setTagManager(false) }} onChanged={() => { setTagSelection({}); setRefresh(value => value + 1) }} onClose={() => setTagManager(false)} />}
     {visualDraft && <form className="continuum-visual-publication" onSubmit={publishVisual}>
       <strong>{visualDraft.file.name}</strong>
       <label>Nome<input required value={visualName} onChange={event => setVisualName(event.target.value)} disabled={publishing} /></label>
@@ -338,7 +341,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
       {error && <div className="continuum-error" role="alert">{error}<button onClick={() => setRefresh(value => value + 1)}>Tentar novamente</button></div>}
       <div className="continuum-workspace" ref={columns.workspace} style={columns.style}>
         <aside className="continuum-pane continuum-context" aria-label="Context">
-          <div className="continuum-pane-heading"><h2>Context</h2><button className="continuum-icon-button" aria-label="Gerenciar tags" title="Gerenciar tags" disabled={!repositoryId} onClick={() => setTagManager(true)}><Tags size={16} /></button><button className="continuum-icon-button" aria-label="Limpar" title="Limpar" disabled={!Object.keys(metadata).length && !Object.keys(periods).length && !tag} onClick={() => { setMetadata({}); setPeriods({}) }}><FilterX size={16} aria-hidden="true" /></button></div>
+          <div className="continuum-pane-heading"><h2>Context</h2><button className="continuum-icon-button" aria-label="Gerar Context Bundle" title="Gerar Context Bundle" disabled={!tag} onClick={() => tag && setBundleSlug(tag)}><Package size={16} /></button><button className="continuum-icon-button" aria-label="Gerenciar tags" title="Gerenciar tags" disabled={!repositoryId} onClick={() => setTagManager(true)}><Tags size={16} /></button><button className="continuum-icon-button" aria-label="Limpar" title="Limpar" disabled={!Object.keys(metadata).length && !Object.keys(periods).length && !tag} onClick={() => { setMetadata({}); setPeriods({}) }}><FilterX size={16} aria-hidden="true" /></button></div>
           <div className="continuum-pane-scroll">
             {repositoryId && boundPath.current === path && <ContextFilters key={`${path}:${repositoryId}`} repositoryId={repositoryId} facets={[...facets, ...(tags.length ? [{ key: 'tags', values: tags.map(tag => ({ value: tag.slug, count: tag.count })) }] : [])]} metadata={{ ...metadata, ...(tag ? { tags: tag } : {}) }} periods={periods}
               choosePeriod={choosePeriod}
