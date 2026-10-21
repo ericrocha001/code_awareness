@@ -16,6 +16,7 @@ export interface GitAtlasRequest {
   scope?: GitAtlasScope
 }
 export interface GitAtlasPage extends GitHistoryPage {
+  observation?: { referenceFingerprint: string; sourceFingerprint?: string }
   worktreeGeneration?: string
   topologyRevision?: string
   scope?: GitAtlasScope
@@ -30,6 +31,13 @@ export interface GitAtlasPage extends GitHistoryPage {
   tags: { sha: string; name: string }[]
   coverage: 'COMPLETE_WINDOW' | 'PARTIAL'
   boundary: string[]
+}
+export interface GitAtlasCheckoutObservation {
+  head: string | null
+  branch: string | null
+  operation: string | null
+  referenceFingerprint?: string
+  sourceFingerprint?: string
 }
 export interface GitAtlasCompareRequest {
   context: GitManagementContext

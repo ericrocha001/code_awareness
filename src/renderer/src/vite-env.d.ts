@@ -32,7 +32,7 @@ declare global {
       onWorkOrchestrationChanged: (callback: (change: OrchestrationAttentionChange) => void) => () => void
       getGitManagementHistory: (request: GitHistoryRequest) => Promise<GitManagementResult<GitHistoryPage>>
       getGitAtlas: (request: GitAtlasRequest) => Promise<GitManagementResult<GitAtlasPage>>
-      getGitAtlasCheckoutState: (context: GitManagementContext) => Promise<GitManagementResult<Pick<GitOverview['state'], 'head' | 'branch' | 'operation'> & { sourceFingerprint?: string }>>
+      getGitAtlasCheckoutState: (context: GitManagementContext, lightweight?: boolean) => Promise<GitManagementResult<import('../../shared/types/git-atlas-types').GitAtlasCheckoutObservation>>
       getGitAtlasCatalog: (request: AtlasCatalogRequest) => Promise<GitManagementResult<AtlasCatalogState>>
       stopGitAtlasCollection: (context: GitManagementContext) => Promise<GitManagementResult<void>>
       onGitAtlasCatalogChanged: (callback: (change: AtlasCatalogChange) => void) => () => void

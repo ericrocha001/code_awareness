@@ -24,6 +24,7 @@ export class GitManagementController {
     service: GitOperationsService
   } | null = null
   private readonly mutations = new Set<Promise<unknown>>()
+  hasPendingMutations() { return this.mutations.size > 0 }
   constructor(
     private readonly projects: Pick<ActiveProjectService, 'getState'>
   ) {}
@@ -207,7 +208,11 @@ export function registerGitManagementHandlers(
     Object.keys(scope).every(key => ['kind', 'anchor', 'baseRef', 'focusRef'].includes(key)) &&
     ['CHECKOUT', 'ALL_REFS'].includes(scope.kind) && ['AUTO', 'PRESENT'].includes(scope.anchor) &&
     [scope.baseRef, scope.focusRef].every(ref => ref === undefined || typeof ref === 'string' && /^refs\/(heads|remotes)\/.+/.test(ref) && !/[\s~^:?*\[\]\\]/.test(ref) && ref.length <= 256)
-  ipcMain.handle('git-management:atlas-checkout-state', (_event, context: GitManagementContext) => controller.read(context, service => service.getAtlasCheckoutState()))
+  ipcMain.handle('git-management:atlas-checkout-state', (_event, context: GitManagementContext, lightweight?: boolean) => {
+    if (lightweight !== undefined && typeof lightweight !== 'boolean') return { success: false, code: 'INVALID_ARGUMENT' }
+    if (controller.hasPendingMutations()) return { success: false, code: 'GIT_OPERATION_IN_PROGRESS' }
+    return controller.read(context, service => service.getAtlasCheckoutState(lightweight))
+  })
   ipcMain.handle('git-management:atlas-catalog', (event, request: AtlasCatalogRequest) => {
     if (!request || typeof request !== 'object' || Array.isArray(request) || Object.keys(request).some(key => !['context', 'snapshot'].includes(key)) || typeof request.snapshot !== 'string' || !/^[a-f0-9]{64}$/.test(request.snapshot)) return { success: false, code: 'INVALID_ARGUMENT' }
     const context = request.context

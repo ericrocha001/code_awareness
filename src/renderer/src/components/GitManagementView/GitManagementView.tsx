@@ -12,6 +12,7 @@ import { GitAtlasCanvas } from './GitAtlasCanvas'
 import { AtlasCheckout, AtlasPullRequests } from './AtlasContext'
 import { AtlasSearch } from './AtlasSearch'
 import { atlasMergeDescriptions, classifyAtlasMerges } from './atlas-layout'
+import { useAtlasObservation } from './useAtlasObservation'
 import './GitManagementView.css'
 
 export function GitManagementView({ state, commitIntent, onIntentConsumed }: { state: ActiveProjectState; commitIntent?: CommitNavigationIntent | null; onIntentConsumed?: (requestId: string) => void }) {
@@ -76,6 +77,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
         }
         return page
       })
+      return true
     } catch { if (generation.current === request) setError('Falha ao carregar histórico. Atualize para tentar novamente.') }
     finally { if (generation.current === request) { setLoading(false); paging.current = null } }
   }, [context, state.project?.id, scope])
@@ -134,36 +136,15 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     start(); document.addEventListener('visibilitychange', visibility)
     return () => { current = false; cancelAnimationFrame(first); cancelAnimationFrame(second); unsubscribe(); document.removeEventListener('visibilitychange', visibility); stop() }
   }, [core?.gitSnapshot, context, scope.kind, collectionSession])
-  useEffect(() => {
-    let resume: ReturnType<typeof setTimeout> | undefined
-    const navigate = () => {
-      if (!core) return
-      if (!resume) void window.codeAwareness.stopGitAtlasCollection(context).catch(() => {})
-      if (resume) clearTimeout(resume)
-      resume = setTimeout(() => { resume = undefined; setCollectionSession(value => value + 1) }, 600)
-    }
-    window.addEventListener('wheel', navigate, { passive: true })
-    window.addEventListener('pointerdown', navigate, { passive: true })
-    return () => { if (resume) clearTimeout(resume); window.removeEventListener('wheel', navigate); window.removeEventListener('pointerdown', navigate) }
-  }, [context, !!core])
-  useEffect(() => {
-    let current = true, pending = false
-    const focusWindow = async () => {
-      if (!core || pending) return
-      pending = true
-      try {
-        const result = await window.codeAwareness.getGitAtlasCheckoutState(context)
-        if (!current || !result.success) return
-        setOperation(result.data.operation)
-        if (result.data.head !== core.checkout.head || result.data.branch !== core.git.branch || result.data.sourceFingerprint && result.data.sourceFingerprint !== catalogRef.current?.manifest?.sourceFingerprint) {
-          catalogRef.current = null; setCatalog(null); void load(); setCollectionSession(value => value + 1)
-        } else if (!result.data.operation && catalogRef.current?.reason) setCollectionSession(value => value + 1)
-      } finally { pending = false }
-    }
-    const listener = () => { void focusWindow().catch(() => {}) }
-    window.addEventListener('focus', listener)
-    return () => { current = false; window.removeEventListener('focus', listener) }
-  }, [core, context, load])
+  useAtlasObservation({ context, page: core?.git ?? null, loading, operation: setOperation,
+    pause: () => { void window.codeAwareness.stopGitAtlasCollection(context).catch(() => {}) },
+    resume: () => setCollectionSession(value => value + 1), reconcile: async () => {
+    await window.codeAwareness.stopGitAtlasCollection(context).catch(() => {})
+    catalogRef.current = null; setCatalog(null)
+    const accepted = await load()
+    if (accepted) setCollectionSession(value => value + 1)
+    return !!accepted
+  } })
   useEffect(() => {
     let current = true
     setEnrichment(null)

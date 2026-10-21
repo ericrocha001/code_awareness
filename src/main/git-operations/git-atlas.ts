@@ -145,6 +145,7 @@ export class GitAtlasReader {
       const primary = scope.baseRef ?? await this.git.getAtlasSelectedBase(this.root)
       const names = [...new Set([branch ? `refs/heads/${branch}` : null, primary, scope.focusRef].filter((ref): ref is string => !!ref))]
       const raw = names.length ? await this.git.getAtlasReferences(this.root, names) : ''
+      const observation = { referenceFingerprint: this.git.atlasReferenceFingerprint(checkout, await this.git.getAtlasReferences(this.root)) }
       const refs: GitDecoration[] = raw.split('\n').filter(Boolean).map(line => {
         const [ref, sha, , , upstream] = line.split('\0')
         return { ref, sha, name: ref.replace(/^refs\/(heads|remotes)\//, ''), kind: ref.startsWith('refs/heads/') ? 'LOCAL' : 'REMOTE', upstream: upstream || null }
@@ -152,7 +153,7 @@ export class GitAtlasReader {
       if (head) refs.push({ ref: 'HEAD', sha: head, name: branch ? 'HEAD' : 'HEAD detached', kind: 'HEAD', upstream: null })
       const historyRevision = createHash('sha256').update(JSON.stringify({ root: physical, commonDirectory, topology, worktreeGeneration, raw, head, branch, primary, scope })).digest('hex')
       const snapshot = createHash('sha256').update(JSON.stringify([historyRevision, contextKey])).digest('hex')
-      return { snapshot, historyRevision, worktreeGeneration, topologyRevision:topology, refs, tags: [], detachedHeads: [], detachedCoverage: 'PARTIAL' as const, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
+      return { snapshot, historyRevision, observation, worktreeGeneration, topologyRevision:topology, refs, tags: [], detachedHeads: [], detachedCoverage: 'PARTIAL' as const, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
     }
     const references = this.git.getAtlasReferences(this.root)
     const [raw, worktrees, primary] = await Promise.all([
@@ -191,7 +192,8 @@ export class GitAtlasReader {
     }
     const historyRevision = createHash('sha256').update(JSON.stringify({ root: normalize(physical), common, topology, worktreeGeneration, raw, worktrees, detachedHeads, detachedCoverage, head, branch, primary, ...(scope ? { scope } : {}) })).digest('hex')
     const snapshot = createHash('sha256').update(JSON.stringify([historyRevision, contextKey])).digest('hex')
-    return { snapshot, historyRevision, worktreeGeneration, topologyRevision:topology, refs, tags, detachedHeads, detachedCoverage, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
+    const observation = { referenceFingerprint: this.git.atlasReferenceFingerprint(checkout, raw), sourceFingerprint: this.git.atlasSourceFingerprint(this.root, directories, checkout, raw, worktrees, topology) }
+    return { snapshot, historyRevision, observation, worktreeGeneration, topologyRevision:topology, refs, tags, detachedHeads, detachedCoverage, head, branch, primaryRef: refs.some(ref => ref.ref === primary) ? primary : null }
   }
 
   async assertSnapshot(snapshot: string, contextKey?: string, scope?: GitAtlasScope) {
@@ -266,7 +268,7 @@ export class GitAtlasReader {
     const sliceKey = JSON.stringify(['history-v3', before.historyRevision, request.window, request.window === 'ALL' ? 'ALL' : anchorAt, offset, limit])
     const cacheKey = JSON.stringify(['page', sliceKey, before.snapshot, queriedAt])
     const cached = this.pages.getReadonly<GitAtlasPage>(cacheKey)
-    if (cached && generation === this.generation) return cached
+    if (cached && generation === this.generation) return { ...cached, observation: before.observation }
     const tips = [...new Set([...before.refs.map(ref => ref.sha), ...before.detachedHeads.map(ref => ref.sha), ...before.tags.map(tag => tag.sha)])].sort()
     if (tips.join(' ').length > 24000) this.fail('ATLAS_REFERENCE_LIMIT')
     if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')

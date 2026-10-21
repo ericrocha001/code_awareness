@@ -6,7 +6,7 @@ import { GitAtlasReader } from './git-atlas'
 import { cleanupTempRepo, createTempGitRepo, gitExec, writeFile, stageAll, commit } from '../core/git-test-helpers'
 
 const roots: string[] = []
-afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await cleanupTempRepo(root) })
+afterEach(async () => { vi.useRealTimers(); vi.restoreAllMocks(); for (const root of roots.splice(0)) await cleanupTempRepo(root) })
 it('measures Atlas cold, repeated filters and multiple refs on the same repository', async () => {
   const root = await createTempGitRepo(); roots.push(root)
   const records: string[] = [], now = Math.floor(Date.now() / 1000)
@@ -17,7 +17,7 @@ it('measures Atlas cold, repeated filters and multiple refs on the same reposito
   await gitExec(root, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
   const git = new GitService(), reader = new GitAtlasReader(root, git, code => { throw new Error(code) })
   vi.spyOn(Date, 'now').mockReturnValue(Date.now())
-  const history = vi.spyOn(git, 'getAtlasHistory'), commands = vi.spyOn(git as any, 'runGit')
+  const history = vi.spyOn(git, 'getAtlasHistoryOrder'), commands = vi.spyOn(git as any, 'runGit')
   const timings: Record<string, number> = {}
   for (const [name, window] of [['cold', 30], ['hit', 30], ['60d', 60], ['90d', 90], ['return30', 30]] as const) {
     const start = performance.now()
@@ -37,7 +37,7 @@ it('reobserves reset, rebased/deleted refs, and never poisons caches after error
   await gitExec(root, ['switch', '-c', 'topic']); const old = await add('topic')
   await gitExec(root, ['switch', 'main']); const base = await add('base')
   const git = new GitService(), reader = new GitAtlasReader(root, git, code => { throw new Error(code) })
-  const history = vi.spyOn(git, 'getAtlasHistory')
+  const history = vi.spyOn(git, 'getAtlasHistoryOrder')
   const first = await reader.history({ window: 90, limit: 1 })
   await reader.history({ window: 90, limit: 1 }); expect(history).toHaveBeenCalledTimes(1)
   await gitExec(root, ['switch', 'topic']); await gitExec(root, ['rebase', '--onto', base, initial])
@@ -50,11 +50,11 @@ it('reobserves reset, rebased/deleted refs, and never poisons caches after error
   expect(reset.refs.some(ref => ref.name === 'main')).toBe(false)
   reader.invalidate()
   history.mockRejectedValueOnce(new Error('transient'))
-  await expect(reader.history({ window: 90 })).rejects.toThrow('transient')
+  await expect(reader.history({ window: 90, refresh: true })).rejects.toThrow('transient')
   expect((await reader.history({ window: 90 })).head).toBe(initial)
 }, 60000)
 
-it('coalesces simultaneous pages, expires temporal anchors, and refresh bypasses derived pages', async () => {
+it('coalesces simultaneous pages, preserves temporal anchors, and refresh bypasses derived pages', async () => {
   const root = await createTempGitRepo(); roots.push(root)
   writeFile(root, 'file', 'data'); await stageAll(root); await commit(root, 'root')
   const now = Date.now(), cutoffDate = new Date(now - 30 * 86400000 + 20000).toISOString()
@@ -63,7 +63,8 @@ it('coalesces simultaneous pages, expires temporal anchors, and refresh bypasses
   expect(cutoff.status).toBe(0)
   await gitExec(root, ['update-ref', 'refs/heads/cutoff', cutoff.stdout.trim()])
   const git = new GitService(), reader = new GitAtlasReader(root, git, code => { throw new Error(code) })
-  const history = vi.spyOn(git, 'getAtlasHistory'), clock = vi.spyOn(Date, 'now').mockReturnValue(now)
+  const history = vi.spyOn(git, 'getAtlasHistoryOrder')
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(now)
   const pages = await Promise.all([reader.history({ window: 30 }), reader.history({ window: 30 })])
   expect(pages[0]).toEqual(pages[1]); expect(history).toHaveBeenCalledTimes(1)
   expect(pages[0].nodes.some(node => node.subject === 'cutoff-boundary')).toBe(true)
@@ -72,9 +73,11 @@ it('coalesces simultaneous pages, expires temporal anchors, and refresh bypasses
   writeFile(root, 'file', 'updated index'); await stageAll(root)
   await reader.history({ window: 30 }); expect(history).toHaveBeenCalledTimes(1)
   await reader.history({ window: 30, refresh: true }); expect(history).toHaveBeenCalledTimes(2)
-  clock.mockReturnValue(now + 60001)
-  const advanced = await reader.history({ window: 30 }); expect(history).toHaveBeenCalledTimes(3)
+  vi.setSystemTime(now + 60001)
+  const anchored = await reader.history({ window: 30 }); expect(history).toHaveBeenCalledTimes(2)
+  expect(anchored.queriedAt).toBe(pages[0].queriedAt)
+  const advanced = await reader.history({ window: 30, refresh: true }); expect(history).toHaveBeenCalledTimes(3)
   expect(advanced.nodes.some(node => node.subject === 'cutoff-boundary')).toBe(false)
   reader.invalidate(true)
-  await reader.history({ window: 30 }); expect(history).toHaveBeenCalledTimes(4)
+  await expect(reader.history({ window: 30 })).rejects.toThrow('REPOSITORY_CONTEXT_CHANGED')
 }, 60000)

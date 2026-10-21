@@ -3,6 +3,7 @@ const path = require('node:path')
 const { execFileSync } = require('node:child_process')
 const { buildSync } = require('esbuild')
 exports.run = async (ctx) => {
+  const build = ctx.atlasObservationProof?.build ?? buildSync
   const waitForGit = async (condition) => {
     const deadline = Date.now() + 30000
     while (Date.now() < deadline) {
@@ -73,17 +74,19 @@ exports.run = async (ctx) => {
   git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD~1'))
   }
   if (ctx.gridProof) require('./git-atlas-grid.cjs').seed(root)
+  if (ctx.atlasObservationProof) ctx.atlasObservationProof.seed(root)
   fs.writeFileSync(path.join(root, 'file.txt'), 'prepared version\n')
   git('add', 'file.txt')
   fs.writeFileSync(path.join(root, 'file.txt'), 'later worktree version\n')
   fs.writeFileSync(path.join(root, 'new.txt'), 'new file\n')
   const before = git('status', '--porcelain'),
     head = git('rev-parse', 'HEAD')
-  buildSync({
+  await build({
     entryPoints: [path.join(__dirname, 'git-management-backend.ts')],
     bundle: true,
     outfile: path.join(ctx.temporary, 'backend.cjs'),
     platform: 'node',
+    banner: { js: `require = require('node:module').createRequire(${JSON.stringify(path.join(ctx.projectRoot, 'package.json'))})` },
     external: ['electron', 'better-sqlite3', 'sharp']
   })
   const secondRoot = path.join(ctx.temporary, 'repository-b')
@@ -98,9 +101,11 @@ exports.run = async (ctx) => {
     root,
     secondRoot,
     nonGitRoot,
-    ctx.projectRoot
+    ctx.projectRoot,
+    ctx.atlasObservationProof ? path.join(ctx.temporary, 'atlas-cache') : undefined
   )
-  buildSync({
+  if (ctx.atlasObservationProof) ctx.atlasObservationProof.prepare(backend)
+  await build({
     entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')],
     bundle: true,
     outfile: path.join(ctx.temporary, 'preload.cjs'),
@@ -110,7 +115,7 @@ exports.run = async (ctx) => {
   ctx.window.webContents.session.setPreloads([
     path.join(ctx.temporary, 'preload.cjs')
   ])
-  buildSync({
+  await build({
     entryPoints: [path.join(__dirname, 'git-management-fixture.tsx')],
     bundle: true,
     outfile: path.join(ctx.temporary, 'fixture.js'),
@@ -138,6 +143,7 @@ exports.run = async (ctx) => {
   )
   await ctx.load(page)
   await waitForGit(() => document.querySelectorAll('.gm-commit').length > 0 && document.querySelector('.gm-history').getAttribute('aria-busy') === 'false')
+  if (ctx.atlasObservationProof) return ctx.atlasObservationProof.verify(ctx, { root, git, backend })
   await ctx.evaluate(() => {
     document.querySelector('.global-sidebar-logo-img').src = 'logo.svg'
   })
