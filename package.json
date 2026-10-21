@@ -13,7 +13,9 @@
     "dev": "node scripts/dev-supervisor.cjs",
     "dev:runtime": "electron-vite dev",
     "prebuild": "npm run native:doctor",
-    "build": "electron-vite build && node scripts/local-mcp/build.cjs && npm run native:bundle-guard",
+    "build": "electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && npm run native:bundle-guard",
+    "runtime-preview:build": "node scripts/runtime-preview/build.cjs",
+    "test:runtime-preview:windows": "node scripts/test-output.cjs run -- node --test --test-concurrency=1 scripts/runtime-preview/windows.test.cjs",
     "preview": "electron-vite preview",
     "typecheck": "node scripts/typecheck-gate.cjs",
     "typecheck:baseline": "node scripts/typecheck-gate.cjs --update",
@@ -98,6 +100,10 @@
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "out/runtime-preview/production/preview-owner.exe",
+        "to": "runtime-preview/preview-owner.exe"
+      },
       {
         "from": "out/local-mcp/launcher.cjs",
         "to": "local-mcp/launcher.cjs"

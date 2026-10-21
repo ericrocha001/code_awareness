@@ -22,6 +22,7 @@ export const previewProfileSchema = z.object({
   probes: z.object({ readiness: z.object({ kind: z.enum(['HTTP', 'COOPERATIVE_IPC']), address: text, timeoutMs: z.number().int().positive().max(120000) }).strict(),
     liveness: z.enum(['READINESS', 'COOPERATIVE_IPC']), attestation: z.enum(['NONE', 'SERVED_ARTIFACT', 'COOPERATIVE_LOADED_ARTIFACT']) }).strict(),
   shutdown: z.object({ spawn: z.enum(['JOB_LIST_AT_CREATE', 'SUSPENDED_ASSIGN_RESUME']), breakaway: z.literal(false), killOnJobClose: z.literal(true),
+    graceful: z.enum(['NONE', 'SESSION_EVENT']).optional(),
     graceMs: z.number().int().nonnegative().max(120000), forceMs: z.number().int().positive().max(120000) }).strict()
 }).strict()
 export type PreviewProfile = z.infer<typeof previewProfileSchema>
