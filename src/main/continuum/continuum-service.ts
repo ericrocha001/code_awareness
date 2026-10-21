@@ -10,8 +10,33 @@ import { parseArtifactMarkdown } from './artifact-metadata'
 import { legacyInput } from './legacy-artifact-migrator'
 import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
+import { artifactTags, type ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
+  tags() { this.assertActive(); this.reconcile?.(); this.assertActive(); return this.store.tags() }
+  mutateTags(request: ContinuumTagMutation) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    if (request.intent === 'create' || request.intent === 'edit') this.store.saveTag(request.tag, request.intent === 'create')
+    else if (request.intent === 'delete') this.store.deleteTag(request.slug)
+    else if (request.intent === 'assign') {
+      if (request.confirmed !== true) throw new Error('TAG_CONFIRMATION_REQUIRED')
+      this.store.assignTag(request.slug, request.selected, request.assigned)
+    } else throw new Error('INVALID_TAG_OPERATION')
+    this.changed()
+    return this.store.tags()
+  }
+  private assertAgentTags(metadata: { tags?: unknown }, prior?: { tags?: unknown }) {
+    if (JSON.stringify(metadata.tags) !== JSON.stringify(prior?.tags)) throw new Error('HUMAN_TAG_AUTHORSHIP_REQUIRED: agents may query tags but cannot create, change or remove them')
+  }
+  publishHuman(rawMarkdown: string, confirmedTags = false): ArtifactReceipt {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const { metadata } = parseArtifactMarkdown(rawMarkdown)
+    const tags = artifactTags(metadata.tags)
+    tags.forEach(slug => this.store.requireTag(slug))
+    if (tags.length && !confirmedTags) throw new Error('TAGS_CONFIRMATION_REQUIRED: ' + tags.join(', '))
+    const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), metadata, rawMarkdown }))
+    this.changed(); return receipt
+  }
   inspectStructure(query: import('./artifact-structure').StructureQuery) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     const result = this.store.inspectStructure(query)
@@ -48,6 +73,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     this.assertActive()
     this.reconcile?.()
     const { metadata } = parseArtifactMarkdown(rawMarkdown)
+    this.assertAgentTags(metadata)
     if (metadata.kind !== 'VISUAL_REFERENCE' || metadata.media !== undefined) throw new Error('RESERVED_VISUAL_METADATA')
     const data = Buffer.from(input)
     const media = await validateVisualMedia(data)
@@ -100,6 +126,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   publish(rawMarkdown: string): ArtifactReceipt {
     this.reconcile?.()
     const { metadata } = parseArtifactMarkdown(rawMarkdown)
+    this.assertAgentTags(metadata)
     const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), metadata, rawMarkdown }))
     this.changed()
     return receipt
@@ -107,6 +134,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   update(artifactId: string, expectedRevision: number, rawMarkdown: string): ArtifactReceipt {
     this.reconcile?.()
     const { metadata } = parseArtifactMarkdown(rawMarkdown)
+    this.assertAgentTags(metadata, this.store.get(artifactId)?.metadata)
     const receipt = this.receipt(this.store.update({ artifactId, expectedRevision, rawMarkdown, metadata }))
     this.changed()
     return receipt
@@ -115,6 +143,8 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   list(filter: ListArtifactsFilter = {}): ArtifactPage { this.reconcile?.(); return this.store.list(filter) }
   importArtifact(source: string, input: CreateArtifactInput): ArtifactReceipt {
     const existing = this.store.get(input.artifactId)
+    if (/^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown)) this.assertAgentTags(parseArtifactMarkdown(input.rawMarkdown, true).metadata, existing?.metadata)
+    this.assertAgentTags(input.metadata, existing?.metadata)
     const receipt = this.receipt(this.store.importArtifact(source, input))
     if (!existing) this.changed()
     return receipt

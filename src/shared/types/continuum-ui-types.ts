@@ -2,8 +2,8 @@ export type ContinuumScalar = string | number | boolean
 export type ContinuumMetadataValue = null | ContinuumScalar | ContinuumMetadataValue[] | { [key: string]: ContinuumMetadataValue }
 export interface ContinuumPeriod { year: number; month?: number }
 export interface ContinuumFacet { key: string; values: { value: ContinuumScalar; count: number }[]; years?: { year: number; count: number; months: { month: number; count: number }[] }[] }
-export interface ContinuumListRequest { repositoryId: string; query?: string; metadata?: Record<string, ContinuumScalar>; periods?: Record<string, ContinuumPeriod>; cursor?: string }
-export interface ContinuumItem { artifactId: string; name: string; description?: string; kind: string; status?: string; updatedAt: string; relationCount: number }
+export interface ContinuumListRequest { tag?: string; repositoryId: string; query?: string; metadata?: Record<string, ContinuumScalar>; periods?: Record<string, ContinuumPeriod>; cursor?: string }
+export interface ContinuumItem { revision?: number; artifactId: string; name: string; description?: string; kind: string; status?: string; updatedAt: string; relationCount: number }
 export interface ContinuumTimeline { repositoryId: string | null; artifacts: ContinuumItem[]; nextCursor?: string }
 export interface ContinuumFacets { repositoryId: string | null; facets: ContinuumFacet[] }
 export interface ContinuumDetail {
@@ -18,7 +18,7 @@ export interface ContinuumSelection { repositoryId: string | null; artifact: Con
 export interface ContinuumChange { repositoryId: string | null }
 export interface ContinuumExportRequest { repositoryId: string; artifactId: string; intent: 'copy' | 'save' }
 export interface ContinuumExportReceipt { repositoryId: string; artifactId: string; outcome: 'copied' | 'saved' | 'cancelled' }
-export interface ContinuumPublishRequest { repositoryId: string; fileName: string; rawMarkdown: string }
+export interface ContinuumPublishRequest { repositoryId: string; fileName: string; rawMarkdown: string; confirmedTags?: boolean }
 export interface ContinuumPublishReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
 export interface ContinuumVisualPublishRequest {
   repositoryId: string

@@ -1,0 +1,20 @@
+const fs = require('node:fs')
+const path = require('node:path')
+const { buildSync } = require('esbuild')
+exports.setup = async ctx => {
+  const backend = path.join(ctx.evidenceDir, 'backend.cjs')
+  buildSync({ stdin: { contents: "export { registerContinuumHandlers } from './src/main/ipc/continuum-handler'; export { RepositoryContinuumSession } from './src/main/continuum/project-continuum-session'", resolveDir: ctx.projectRoot }, bundle: true, outfile: backend, platform: 'node', format: 'cjs', alias: { sharp: require.resolve('sharp') }, external: ['electron', 'better-sqlite3', require.resolve('sharp')] })
+  const { registerContinuumHandlers, RepositoryContinuumSession } = require(backend)
+  const root = path.join(ctx.temporary, 'repository-A'), other = path.join(ctx.temporary, 'repository-B')
+  fs.mkdirSync(root); fs.mkdirSync(other)
+  const session = new RepositoryContinuumSession(path.join(ctx.temporary, 'storage'), { findByPath: candidate => ({ id: candidate === root ? 'acceptance-A' : 'acceptance-B', localCheckout: { path: candidate } }) })
+  session.activate(root)
+  const unsubscribe = registerContinuumHandlers(session)
+  const preload = path.join(ctx.temporary, 'preload.cjs')
+  buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')], bundle: true, outfile: preload, platform: 'node', format: 'cjs', external: ['electron'] })
+  ctx.window.webContents.session.setPreloads([preload])
+  buildSync({ entryPoints: [path.join(__dirname, 'continuum-publication-fixture.tsx')], bundle: true, outfile: path.join(ctx.temporary, 'fixture.js'), platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' } })
+  const page = path.join(ctx.temporary, 'index.html')
+  fs.writeFileSync(page, '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}body{background:var(--bg-primary);color:var(--text-primary)}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>')
+  return { session, root, other, open: () => ctx.window.loadFile(page, { query: { repositoryPath: root } }), close: () => { unsubscribe(); session.dispose() } }
+}

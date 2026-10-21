@@ -1,3 +1,4 @@
+import type { ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 import { validatePeriods } from '../continuum/temporal-metadata'
 import type { ContinuumGraphRequest } from '../../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionRequest } from '../../shared/types/continuum-suggestion-types'
@@ -44,6 +45,19 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (typeof repositoryId !== 'string' || !repositoryId) throw new Error('INVALID_ARGUMENT: repositoryId required')
     return session.getActiveSession()?.repositoryId === repositoryId ? session.getActiveService() : null
   }
+  ipcMain.handle('continuum:tags', (_event, repositoryId: string) => {
+    const service = active(repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    const tags = service.tags()
+    if (active(repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+    return { repositoryId, tags }
+  })
+  ipcMain.handle('continuum:mutate-tags', (_event, request: ContinuumTagMutation) => {
+    if (!request || typeof request !== 'object') throw new Error('INVALID_ARGUMENT')
+    const service = active(request.repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    return { repositoryId: request.repositoryId, tags: service.mutateTags(request) }
+  })
   const exporting = new Set<number>()
   ipcMain.handle('continuum:export', async (event, request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => {
     if (!request || typeof request !== 'object' || typeof request.artifactId !== 'string' || !request.artifactId.trim() || !['copy', 'save'].includes(request.intent)) throw new Error('INVALID_ARGUMENT')
@@ -121,7 +135,7 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (!request || typeof request !== 'object' || typeof request.rawMarkdown !== 'string') throw new Error('INVALID_ARGUMENT: conteúdo Markdown obrigatório')
     const service = active(request.repositoryId)
     if (!service) throw new Error('REPOSITORY_UNAVAILABLE: o repositório ativo mudou ou o Continuum está indisponível. Selecione o arquivo novamente.')
-    return service.publish(publicationMarkdown(request.fileName, request.rawMarkdown))
+    return service.publishHuman(publicationMarkdown(request.fileName, request.rawMarkdown), request.confirmedTags === true)
   })
   ipcMain.handle('continuum:list', (_event, request: ContinuumListRequest) => {
     if (!request || typeof request !== 'object') throw new Error('INVALID_ARGUMENT: list request required')
@@ -132,7 +146,7 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (request.metadata !== undefined && (!request.metadata || typeof request.metadata !== 'object' || Array.isArray(request.metadata) ||
       Object.values(request.metadata).some(value => !['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))))) throw new Error('INVALID_ARGUMENT: scalar metadata required')
     validatePeriods(request.periods, request.metadata)
-    return { repositoryId: request.repositoryId, ...service.list({ ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.periods !== undefined ? { periods: request.periods } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30 }) }
+    return { repositoryId: request.repositoryId, ...service.list({ ...(request.tag !== undefined ? { tag: request.tag } : {}), ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.periods !== undefined ? { periods: request.periods } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30 }) }
   })
   ipcMain.handle('continuum:graph', (_event, request: ContinuumGraphRequest) => {
     if (!request || typeof request !== 'object') throw new Error('INVALID_ARGUMENT: graph request required')

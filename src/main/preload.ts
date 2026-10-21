@@ -1,3 +1,4 @@
+import type { ContinuumTag, ContinuumTagMutation } from '../shared/types/continuum-tag-types'
 /*
 -T ---
 */
@@ -72,6 +73,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getContinuumVisual: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual', repositoryId, artifactId),
   getContinuumVisualThumbnail: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual-thumbnail', repositoryId, artifactId),
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
+  getContinuumTags: (repositoryId: string): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:tags', repositoryId),
+  mutateContinuumTags: (request: ContinuumTagMutation): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:mutate-tags', request),
   exportContinuumArtifact: (request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => ipcRenderer.invoke('continuum:export', request),
   getContinuumArtifact: (repositoryId: string, artifactId: string): Promise<ContinuumSelection> => ipcRenderer.invoke('continuum:get', repositoryId, artifactId),
   onContinuumChanged: (callback: (change: ContinuumChange) => void): (() => void) => {

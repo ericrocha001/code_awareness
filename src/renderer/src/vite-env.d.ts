@@ -1,3 +1,4 @@
+import type { ContinuumTag, ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 /*
 -T ---
 */
@@ -52,6 +53,8 @@ declare global {
       getContinuumVisual: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
       getContinuumVisualThumbnail: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
       getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
+      getContinuumTags: (repositoryId: string) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
+      mutateContinuumTags: (request: ContinuumTagMutation) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
       exportContinuumArtifact: (request: ContinuumExportRequest) => Promise<ContinuumExportReceipt>
       getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
       onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void

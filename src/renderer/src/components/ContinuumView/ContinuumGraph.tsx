@@ -6,6 +6,7 @@ import type { ContinuumSuggestion } from '../../../../shared/types/continuum-sug
 import './ContinuumGraph.css'
 
 interface Props {
+  tag?: string
   repositoryId: string
   query: string
   metadata: Record<string, ContinuumScalar>
@@ -73,7 +74,7 @@ function styles(container: HTMLElement): cytoscape.StylesheetJson {
 }
 
 export function ContinuumGraph(props: Props) {
-  const { repositoryId, query, metadata, periods, refresh, selectedId } = props
+  const { repositoryId, query, metadata, periods, tag, refresh, selectedId } = props
   const [graph, setGraph] = useState<Graph | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -98,14 +99,14 @@ export function ContinuumGraph(props: Props) {
   useEffect(() => {
     const request = ++generation.current
     setLoading(true); setBusy(false); setGraph(null); setSuggestions([]); setInspected(null); setError(''); setExtras(false)
-    window.codeAwareness.getContinuumGraph({ repositoryId, query, metadata, periods, nodeLimit: 50, edgeLimit: 200 }).then(result => {
+    window.codeAwareness.getContinuumGraph({ repositoryId, query, metadata, periods, ...(tag ? { tag } : {}), nodeLimit: 50, edgeLimit: 200 }).then(result => {
       if (request !== generation.current || result.repositoryId !== repositoryId) return
       seeds.current = new Set(result.nodes.map(node => node.artifactId))
       setGraph(result)
     }).catch(reason => { if (request === generation.current) setError(String(reason)) })
       .finally(() => { if (request === generation.current) setLoading(false) })
     return () => { generation.current++ }
-  }, [repositoryId, query, metadata, periods, refresh, retry])
+  }, [repositoryId, query, metadata, periods, tag, refresh, retry])
 
   useEffect(() => {
     const container = canvas.current!

@@ -1,6 +1,7 @@
 import type { ContinuumItem, ContinuumMetadataValue, ContinuumPeriod } from './continuum-ui-types'
 
 export interface ContinuumGraphQuery {
+  tag?: string
   artifactIds?: string[]
   query?: string
   kind?: string
