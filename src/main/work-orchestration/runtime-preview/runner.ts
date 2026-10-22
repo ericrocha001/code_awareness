@@ -8,6 +8,7 @@ import type { PreviewRepositories } from '../preview-repositories'
 import { NativeOwner, nativeObservation, type NativeObservation } from './native-owner'
 import { PreviewSessionStore, sessionSchema, type PreviewSessionRecord } from './session-store'
 import { PreviewStackAdapter, diagnosticBootstrapAllowed, verifyEndpointFree } from './adapters'
+import type { PreviewContextProvisioner } from './context-data'
 
 export interface PreparedPreview {
   profile: PreviewProfile; worktree: string; gitFingerprint: string; preflight: PreviewPreflight;
@@ -57,7 +58,7 @@ export class RuntimePreviewRunner {
   private readonly adapters = new Map<string, PreviewStackAdapter>()
   private readonly sources = new Map<string, NonNullable<PreparedPreview['observeSource']>>()
   constructor(private readonly store: PreviewSessionStore, private readonly authority: PreviewLaunchAuthority,
-    private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }) {}
+    private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner) {}
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const operation = this.tail.then(fn); this.tail = operation.catch(() => {}); return operation
   }
@@ -132,9 +133,17 @@ export class RuntimePreviewRunner {
       let adapter: PreviewStackAdapter | undefined
       let createRequested = false
       try {
+        if (profile.bootstrap) {
+          if (!this.contextProvisioner || !preflight.snapshot) throw new Error('PREVIEW_CONTEXT_PROVISIONER_REQUIRED')
+          const context = await this.contextProvisioner.prepare({ profile, selection: input.selection, sessionId,
+            directory: this.store.runtime(sessionId), worktree: prepared.worktree, source: preflight.snapshot })
+          await prepared.guard()
+          input.guard?.()
+          record = this.change(record, { context })
+        }
         if (profile.adapter) {
           if (!this.helper.sdkDirectory) throw new Error('TRUSTED_SDK_REQUIRED')
-          adapter = await PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory)
+          adapter = await PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory, record.context)
           this.adapters.set(sessionId, adapter)
           if (prepared.observeSource) this.sources.set(sessionId, prepared.observeSource)
         }
@@ -166,7 +175,7 @@ export class RuntimePreviewRunner {
         return record
       } catch (error) {
         try { await native?.stop(0, profile.shutdown.forceMs, false) } catch { }
-        let ownerExited = false
+        let ownerExited = !native && !createRequested
         try { await native?.shutdown(); ownerExited = true } catch { }
         this.owners.delete(sessionId)
         this.adapters.delete(sessionId)

@@ -135,7 +135,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     return () => ipcRenderer.removeListener('connection:changed', handler)
   },
   getActiveProject: (): Promise<ActiveProjectState> => ipcRenderer.invoke('project:get-active'),
-  activateProject: (projectId: string | null): Promise<{ success: boolean; data?: ActiveProjectState; error?: string }> =>
+  activateProject: (projectId: string | null): Promise<{ success: boolean; data?: ActiveProjectState; error?: string; code?: string }> =>
     ipcRenderer.invoke('project:activate', projectId),
   onActiveProjectChanged: (callback: (state: ActiveProjectState) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: ActiveProjectState): void => callback(state)
@@ -209,7 +209,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   importRepositoryRoot: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:import-root'),
   importLocalRepository: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:import-local'),
   hideRepository: (repositoryId: string): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:hide', repositoryId),
-  activateRepository: (repositoryId: string): Promise<{ success: boolean; data?: ActiveProjectState; error?: string }> => ipcRenderer.invoke('repositories:activate', repositoryId),
+  activateRepository: (repositoryId: string): Promise<{ success: boolean; data?: ActiveProjectState; error?: string; code?: string }> => ipcRenderer.invoke('repositories:activate', repositoryId),
   getGitHubStatus: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:get-status'),
   connectGitHub: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:connect'),
   cancelGitHubConnect: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:cancel-connect'),

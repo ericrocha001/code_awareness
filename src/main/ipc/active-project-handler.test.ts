@@ -8,6 +8,7 @@ import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import { registerActiveProjectHandlers } from './active-project-handler'
 import { registerCodeMapHandlers } from './code-map-handler'
 import { RepositoryRuntimeService } from '../repository-catalog/repository-runtime-service'
+import { registerWorkspaceHandlers } from './workspace-handler'
 
 const { handlers, send } = vi.hoisted(() => ({ handlers: new Map<string, Function>(), send: vi.fn() }))
 vi.mock('electron', () => ({
@@ -66,6 +67,27 @@ async function discover(mcp: McpLifecycle) {
 }
 
 describe('active project authority and MCP integration', () => {
+  it('binds a preview target automatically but rejects project, checkout and catalog changes through IPC', async () => {
+    const record = { id: 'logical-A', name: 'A', status: 'ACTIVE' as const, localCheckout: { path: '/projects/A', availability: 'AVAILABLE' as const, gitState: 'GIT' as const }, github: null, createdAt: '', updatedAt: '' }
+    const registry = { getOpenProjects: () => [], closeRepository: vi.fn(), openRepository: vi.fn(async () => {}) }
+    const projects = new ActiveProjectService(registry, () => record, { mode: 'PREVIEW', sessionId: 'session', target: { repositoryId: record.id, path: record.localCheckout.path, worktreeId: 'tree', generation: 'generation' }, dataPolicy: 'REPOSITORY_SNAPSHOT' })
+    cleanup.push(() => projects.dispose())
+    const catalog = { resolveAvailable: () => record, list: () => [record] }
+    const runtime = new RepositoryRuntimeService(catalog, registry, projects)
+    registerActiveProjectHandlers(projects)
+    registerCodeMapHandlers(registry as unknown as CodeMapService, projects)
+    registerWorkspaceHandlers({} as never, catalog as never, runtime, target => projects.assertContextSelection(target))
+    await runtime.activate(record.id)
+    const invoke = (channel: string, ...args: unknown[]) => handlers.get(channel)!({}, ...args)
+    expect(invoke('project:get-active')).toMatchObject({ project: { id: record.id }, context: { mode: 'PREVIEW', identity: 'IDENTITY_BOUND', dataPolicy: 'REPOSITORY_SNAPSHOT', worktree: { worktreeId: 'tree', generation: 'generation' } } })
+    for (const value of [null, 'legacy-A', 'other']) expect(await invoke('project:activate', value)).toMatchObject({ success: false, code: 'PREVIEW_CONTEXT_LOCKED' })
+    expect(await invoke('repositories:activate', 'other')).toMatchObject({ success: false, code: 'PREVIEW_CONTEXT_LOCKED' })
+    expect(await invoke('code-map:open-repository', '/projects/B')).toMatchObject({ success: false, error: 'PREVIEW_CONTEXT_LOCKED' })
+    expect(() => invoke('repositories:refresh')).toThrow('PREVIEW_CONTEXT_LOCKED')
+    expect(() => invoke('repositories:hide', record.id)).toThrow('PREVIEW_CONTEXT_LOCKED')
+    expect(() => projects.closeRepository('/projects/A')).toThrow('PREVIEW_CONTEXT_LOCKED')
+    expect(projects.getState().project?.id).toBe(record.id)
+  })
   it('serves the selected catalog context over real MCP before slow CodeMap fails, without restarting the Channel', async () => {
     const { projects, mcp, registry, invoke } = setup()
     let rejectOpen!: (error: Error) => void

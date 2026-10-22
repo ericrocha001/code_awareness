@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { createHash } from 'node:crypto'
 import { isAbsolute } from 'node:path'
+import { previewDataPolicy } from './runtime-preview/context-contract'
 
 const text = z.string().min(1).max(1024).refine(v => !/[\0\r\n]/.test(v))
 const relativePath = text.refine(v => !isAbsolute(v) && !v.split(/[\\/]/).includes('..'))
@@ -15,6 +16,7 @@ export const previewProfileSchema = z.object({
     manifestHash: z.string().regex(/^[a-f0-9]{64}$/), lockfileHash: z.string().regex(/^[a-f0-9]{64}$/),
     abi: text, materialization: relativePath }).strict(),
   cooperation: z.object({ manifest: relativePath, fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  bootstrap: previewDataPolicy.optional(),
   adapter: z.object({ version: z.literal(1), kind: z.enum(['VITE_WEB', 'NODE_WEB', 'ELECTRON']),
     port: z.number().int().min(1024).max(65535),
     configFile: relativePath, runtimeExecutable: relativePath.optional(), runtimeExecutableHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),

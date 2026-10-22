@@ -8,6 +8,7 @@ import { previewPath } from '../preview-preflight'
 import type { PreviewPreflight } from '../../../shared/types/runtime-preview-types'
 import type { NativeOwner } from './native-owner'
 import type { PreviewSessionRecord } from './session-store'
+import { previewDataReceipt, type PreviewContextManifest } from './context-contract'
 
 export function diagnosticBootstrapAllowed(result: PreviewPreflight, profile: PreviewProfile) {
   return !!profile.adapter && result.status === 'UNKNOWN' && result.diagnostics.length > 0 && result.diagnostics.every(d => ['ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))
@@ -26,14 +27,16 @@ const webEvidence = z.object({ schemaVersion: z.literal(1), sessionId: z.string(
     builds: z.array(z.object({ component: z.enum(['ELECTRON_MAIN', 'ELECTRON_PRELOAD']), artifactDigest: digest, sources: z.record(z.string(), digest) }).strict()).max(16),
     rendererPid: z.number().int().nullable(), rendererFailure: z.string().nullable(), sandboxObserved: z.boolean().nullable(),
     rendererModules: z.array(z.object({ path: z.string(), sourceDigest: digest, transformDigest: digest }).strict()).max(12),
+    context: z.object({ mode: z.literal('PREVIEW'), repositoryId: z.string(), worktreeId: z.string(), generation: z.string(), profileRevision: z.number().int(),
+      activeCheckout: z.string(), identity: z.literal('IDENTITY_BOUND'), data: previewDataReceipt }).strict().optional(),
     resourcesIsolated: z.literal(true), channelDisabled: z.literal(true), protocolDisabled: z.literal(true), processes: z.array(z.object({ pid: z.number().int(), type: z.string() }).strict()).max(128)
   }).strict().nullable()
 }).strict()
 export class PreviewStackAdapter {
   private readonly token = randomBytes(32).toString('hex')
   private endpoint?: { pid: number; created: string }
-  private constructor(readonly profile: PreviewProfile, readonly worktree: string, readonly directory: string, readonly sessionId: string) {}
-  static async prepare(profile: PreviewProfile, worktree: string, directory: string, sessionId: string, sdk: string) {
+  private constructor(readonly profile: PreviewProfile, readonly worktree: string, readonly directory: string, readonly sessionId: string, private readonly context?: PreviewContextManifest) {}
+  static async prepare(profile: PreviewProfile, worktree: string, directory: string, sessionId: string, sdk: string, context?: PreviewContextManifest) {
     const adapter = profile.adapter!
     if ((profile.runtime === 'WEB_DEV_SERVER') !== (adapter.kind !== 'ELECTRON')) throw new Error('ADAPTER_RUNTIME_MISMATCH')
     if (!profile.resources.some(r => r.strategy === 'SESSION_ENDPOINT')) throw new Error('ENDPOINT_RESOURCE_REQUIRED')
@@ -63,10 +66,11 @@ export class PreviewStackAdapter {
     if (profile.probes.readiness.kind !== 'HTTP' || readiness.protocol !== 'http:' || readiness.hostname !== '127.0.0.1' || Number(readiness.port) !== adapter.port || readiness.username || readiness.password || readiness.hash) throw new Error('READINESS_ENDPOINT_INVALID')
     if (profile.command.args.some(a => /no-sandbox|disable.*sandbox/i.test(a))) throw new Error('SANDBOX_DOWNGRADE_FORBIDDEN')
     await verifyEndpointFree(adapter.port)
-    const instance = new PreviewStackAdapter(profile, await realpath(worktree), directory, sessionId)
+    if (!!profile.bootstrap !== !!context) throw new Error('PREVIEW_CONTEXT_REQUIRED')
+    const instance = new PreviewStackAdapter(profile, await realpath(worktree), directory, sessionId, context)
     await writeFile(join(directory, 'configuration.json'), JSON.stringify({ sessionId, token: instance.token, worktree: instance.worktree, directory,
       profile: previewFingerprint(profile), runtimeVersion: profile.runtimeVersion, abi: profile.dependencies.abi,
-      packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...adapter }), { flag: 'wx', mode: 0o600 })
+      packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...adapter, ...(context ? { context, approvedProfile: profile } : {}) }), { flag: 'wx', mode: 0o600 })
     return instance
   }
   environment() { return { PREVIEW_SESSION_CONFIG: join(this.directory, 'configuration.json') } }
@@ -104,6 +108,11 @@ export class PreviewStackAdapter {
       if (!electron || electron.sandboxObserved === null || (!electron.rendererPid && !electron.rendererFailure)) throw new Error('ELECTRON_COMPONENT_NOT_OBSERVED')
       if (!electron.sandboxObserved) throw new Error('SANDBOX_INCOMPATIBLE')
       if (electron.sessionId !== this.sessionId || electron.runtime !== this.profile.runtimeVersion || electron.abi !== this.profile.dependencies.abi) throw new Error('WRONG_CHECKOUT')
+      if (this.context) {
+        const context = electron.context, expected = this.context
+        if (!context || context.repositoryId !== expected.selection.repositoryId || context.worktreeId !== expected.selection.worktreeId || context.generation !== expected.selection.generation ||
+          context.profileRevision !== expected.profileRevision || context.activeCheckout.toLowerCase() !== this.worktree.toLowerCase() || previewFingerprint(context.data) !== previewFingerprint(expected.data)) throw new Error('PREVIEW_CONTEXT_NOT_BOUND')
+      }
       const members = (await owner.processes()).processes
       if (!members.some(p => p.pid === electron.pid) || (electron.rendererPid && !members.some(p => p.pid === electron.rendererPid))) throw new Error('NESTED_JOB_INCOMPATIBLE')
       processEvidence = { at, members: members.map(p => ({ ...p, role: p.pid === electron.rendererPid ? 'Renderer' : electron.processes.find(m => m.pid === p.pid)?.type ?? 'Session bootstrap' })) }
@@ -128,6 +137,10 @@ export class PreviewStackAdapter {
   async awaitReady(owner: NativeOwner) {
     const deadline = Date.now() + this.profile.probes.readiness.timeoutMs
     while (Date.now() < deadline) {
+      try {
+        const failure = JSON.parse(await readFile(join(this.directory, 'bootstrap-failure.json'), 'utf8'))
+        if (failure.sessionId === this.sessionId && typeof failure.code === 'string' && /^PREVIEW_[A-Z_]{1,120}$/.test(failure.code)) throw new Error(failure.code)
+      } catch (error) { if (error instanceof Error && /^PREVIEW_[A-Z_]+$/.test(error.message)) throw error }
       const state = await owner.inspect(); if (state.rootSignaled) throw new Error('BOOTSTRAP_FAILURE')
       try { return await this.observe(owner) } catch (error) {
         if (error instanceof Error && ['WRONG_ENDPOINT_OWNER', 'WRONG_CHECKOUT'].includes(error.message)) {

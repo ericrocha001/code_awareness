@@ -62,6 +62,18 @@ it('invalidates grants on policy revision but not everyday source edits', async 
   const result = await new PreviewPreflightService(store).check(reader(), selection())
   expect(result.diagnostics.some(d => d.reasonCode === 'PROFILE_APPROVAL_REQUIRED')).toBe(true)
 })
+it('requires a new material approval when preview data policy or limits change and forbids contextual Web profiles', async () => {
+  profile.bootstrap = { kind: 'CODE_AWARENESS', dataPolicy: 'EMPTY', maxBytes: 1048576, maxArtifacts: 10 }
+  profile = previewProfileSchema.parse(profile)
+  await save(); await store.approve(profile, async () => true)
+  expect(await store.approved(profile)).toBe(true)
+  expect((await new PreviewPreflightService(store).check(reader(), selection())).diagnostics.some(d => d.reasonCode === 'PREVIEW_CONTEXT_PROFILE_INVALID')).toBe(true)
+  profile.bootstrap!.dataPolicy = 'REPOSITORY_SNAPSHOT'; await save()
+  expect(await store.approved(profile)).toBe(false)
+  await store.approve(profile, async () => true)
+  profile.bootstrap!.maxBytes *= 2; await save()
+  expect(await store.approved(profile)).toBe(false)
+})
 it('rejects stale profile, repository and generation before compatibility reads', async () => {
   const service = new PreviewPreflightService(store)
   await expect(service.check(reader(), { ...selection(), fingerprint: 'stale' })).rejects.toThrow('PROFILE_CHANGED')

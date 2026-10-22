@@ -8,7 +8,9 @@ interface OpenProjects {
 }
 
 type ProjectListener = (state: ActiveProjectState) => void | Promise<void>
-export type ActiveInstance = { mode: 'HOST' } | { mode: 'PREVIEW'; sessionId: string }
+export type ActiveInstance = { mode: 'HOST' } | { mode: 'PREVIEW'; sessionId: string;
+  target?: { repositoryId: string; path: string; worktreeId: string; generation: string };
+  dataPolicy?: 'EMPTY' | 'REPOSITORY_SNAPSHOT'; dataOrigin?: ActiveContext['dataOrigin'] }
 const normalized = (path: string) => path.replace(/\\/g, '/').replace(/\/$/, '')
 const emptyContext = (): ActiveContext => ({ revision: 0, mode: 'HOST', identity: 'UNBOUND', repositoryId: null, activeCheckout: null,
   legacyCodeMapProjectId: null, sessionId: null, dataPolicy: 'HOST_CANONICAL',
@@ -32,7 +34,17 @@ export class ActiveProjectService {
 
   private initialContext(): ActiveContext {
     return { ...emptyContext(), mode: this.instance.mode, sessionId: this.instance.mode === 'PREVIEW' ? this.instance.sessionId : null,
-      dataPolicy: this.instance.mode === 'PREVIEW' ? 'EMPTY' : 'HOST_CANONICAL' }
+      dataPolicy: this.instance.mode === 'PREVIEW' ? this.instance.dataPolicy ?? 'EMPTY' : 'HOST_CANONICAL',
+      ...(this.instance.mode === 'PREVIEW' && this.instance.target ? { worktree: { worktreeId: this.instance.target.worktreeId, generation: this.instance.target.generation }, dataOrigin: this.instance.dataOrigin } : {}) }
+  }
+
+  assertContextSelection(target?: { repositoryId?: string; path?: string }): void {
+    if (this.instance.mode !== 'PREVIEW') return
+    const fixed = this.instance.target
+    if (!target || !fixed || (target.repositoryId !== undefined && target.repositoryId !== fixed.repositoryId) ||
+      (target.path !== undefined && normalized(target.path).toLowerCase() !== normalized(fixed.path).toLowerCase())) {
+      throw Object.assign(new Error('PREVIEW_CONTEXT_LOCKED'), { code: 'PREVIEW_CONTEXT_LOCKED' })
+    }
   }
 
   getState(): ActiveProjectState {
@@ -56,6 +68,7 @@ export class ActiveProjectService {
   }
 
   activate(projectId: string | null): Promise<ActiveProjectState> {
+    if (this.instance.mode === 'PREVIEW') return Promise.reject(Object.assign(new Error('PREVIEW_CONTEXT_LOCKED'), { code: 'PREVIEW_CONTEXT_LOCKED' }))
     if (projectId === null) return this.request(null, null, 'LEGACY_CODEMAP')
     const legacy = this.projects.getOpenProjects().find(entry => entry.id === projectId)
     if (!legacy) {
@@ -67,6 +80,7 @@ export class ActiveProjectService {
   }
 
   bind(repository: RepositoryRecord, isCurrent: () => boolean = () => true): Promise<ActiveProjectState> {
+    this.assertContextSelection({ repositoryId: repository.id, path: repository.localCheckout?.path })
     if (!repository.localCheckout || repository.localCheckout.availability !== 'AVAILABLE') return Promise.reject(new Error('LOCAL_CHECKOUT_UNAVAILABLE'))
     return this.request({ id: repository.id, path: normalized(repository.localCheckout.path), name: repository.name }, repository.id, 'REPOSITORY_CATALOG', isCurrent)
   }
@@ -91,6 +105,7 @@ export class ActiveProjectService {
   }
 
   closeRepository(repoPath: string): Promise<void> {
+    this.assertContextSelection()
     if (this.disposed) return Promise.reject(new Error('Application is shutting down'))
     if (this.requestedPath === normalized(repoPath)) ++this.intention
     return this.enqueue(async () => {

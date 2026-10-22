@@ -5,12 +5,14 @@ const net = require('node:net')
 const assert = require('node:assert/strict')
 const { randomUUID, createHash } = require('node:crypto')
 const { execFileSync, spawn } = require('node:child_process')
-const root = process.cwd(), output = path.join(root, '.code-awareness/u4')
+const contextual = process.argv.includes('--context'), snapshot = process.argv.includes('--snapshot')
+const root = process.cwd(), output = path.join(root, contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
 fs.mkdirSync(output, { recursive: true })
 if (!process.versions.electron) {
-  const env = { ...process.env, U4_NODE: process.execPath, U4_NODE_VERSION: process.versions.node, U4_NODE_ABI: process.versions.modules }
+  const env = { ...process.env, U4_NODE: process.execPath, U4_NODE_VERSION: process.versions.node, U4_NODE_ABI: process.versions.modules,
+    U4_CANONICAL_USER_DATA: path.join(process.env.APPDATA, 'code-awareness') }
   delete env.ELECTRON_RUN_AS_NODE
-  const child = spawn(require('electron'), [__filename, ...process.argv.slice(2)], { cwd: root, env, stdio: 'inherit', windowsHide: true })
+  const child = spawn(require('electron'), [__filename, ...process.argv.slice(2)], { cwd: root, env, stdio: 'inherit', windowsHide: !contextual })
   child.on('exit', code => { process.exitCode = code ?? 1 })
 } else {
   const { app, BrowserWindow, ipcMain } = require('electron')
@@ -30,6 +32,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const external = Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies }).filter(name => !['mdast-util-from-markdown', 'micromark-extension-gfm', 'mdast-util-gfm', 'mdast-util-to-string'].includes(name))
   require('esbuild').buildSync({ entryPoints: entries.map(file => 'src/main/' + file + '.ts'), outdir: bundle, platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
   const get = name => require(path.join(bundle, name + '.js'))
+  require('esbuild').buildSync({ entryPoints: ['context-data', 'authorization', 'context-bootstrap'].map(file => 'src/main/work-orchestration/runtime-preview/' + file + '.ts'), outdir: path.join(bundle, 'work-orchestration/runtime-preview'), platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
   const base = path.join(directory, 'base'), target = path.join(directory, 'feature')
   fs.mkdirSync(path.join(base, 'runtime'), { recursive: true }); fs.mkdirSync(path.join(base, 'app'))
   for (const file of ['launch.cjs', 'cooperation.cjs']) fs.copyFileSync(path.join(root, 'scripts/runtime-preview', file), path.join(base, 'runtime', file))
@@ -43,7 +46,8 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const { RepositoryCatalogStore } = get('repository-catalog/repository-catalog-store'), { RepositoryCatalogService, normalizeRepositoryPath } = get('repository-catalog/repository-catalog-service')
   const catalogStore = new RepositoryCatalogStore(path.join(directory, 'catalog.db'))
   const register = (folder, name) => catalogStore.upsertLocalCheckout({ path: folder, normalizedPath: normalizeRepositoryPath(folder), name, status: 'ACTIVE', availability: 'AVAILABLE', gitState: 'GIT' }).record
-  const webRepository = register(base, 'U4 controlled Web'), electronRepository = register(root, 'Code Awareness development Worktree')
+  const electronRepository = contextual ? catalogStore.provisionPreviewIdentity('e1c8a999-6d73-4f56-83a3-fbcd78c9c19d', { path: root, normalizedPath: normalizeRepositoryPath(root), name: 'Code Awareness development Worktree', status: 'ACTIVE', availability: 'AVAILABLE', gitState: 'GIT' }) : register(root, 'Code Awareness development Worktree')
+  const webRepository = register(base, 'U4 controlled Web')
   const catalog = new RepositoryCatalogService(catalogStore, {})
   const { GitService } = get('core/git-service'), { GitOperationsService } = get('git-operations/git-operations-service'), { GitHubGitTransport } = get('github/github-git-transport')
   const git = new GitService(), transport = new GitHubGitTransport(null, git)
@@ -53,15 +57,19 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   for (const [kind, repository, folder] of [['web', webRepository, target], ['electron', electronRepository, root]]) {
     const port = await freePort(), electron = kind === 'electron', sdk = electron ? 'scripts/runtime-preview/' : 'runtime/', configFile = electron ? 'electron.vite.config.ts' : 'package.json'
     const fixed = [sdk + 'launch.cjs', sdk + 'cooperation.cjs', configFile, ...(electron ? ['scripts/runtime-preview/build-identity.cjs'] : [])]
-    const profile = { schemaVersion: 1, profileId: 'u4-' + kind, revision: 1, repositoryId: repository.id, runtime: electron ? 'ELECTRON_DEV' : 'WEB_DEV_SERVER', runtimeVersion: electron ? '32.0.0' : process.env.U4_NODE_VERSION,
-      command: { executable: process.env.U4_NODE, executableHash: hash(fs.readFileSync(process.env.U4_NODE)), args: [sdk + 'launch.cjs'], cwd: '.', inputs: fixed.map(file => ({ path: file, fingerprint: hash(fs.readFileSync(path.join(folder, file))) })) }, env: {},
+    const gitExecutable = electron ? execFileSync('where.exe', ['git.exe'], { encoding: 'utf8', windowsHide: true }).trim().split(/\r?\n/)[0] : null
+    const profile = { schemaVersion: 1, profileId: 'u4-' + kind, revision: electron ? 2 : 1, repositoryId: repository.id, runtime: electron ? 'ELECTRON_DEV' : 'WEB_DEV_SERVER', runtimeVersion: electron ? '32.0.0' : process.env.U4_NODE_VERSION,
+      command: { executable: process.env.U4_NODE, executableHash: hash(fs.readFileSync(process.env.U4_NODE)), args: [sdk + 'launch.cjs'], cwd: '.', inputs: fixed.map(file => ({ path: file, fingerprint: hash(fs.readFileSync(path.join(folder, file))) })) }, env: electron ? { PATH: path.dirname(gitExecutable) + path.delimiter + path.join(process.env.SystemRoot, 'System32') } : {},
       resources: [{ name: 'runtime', strategy: 'SESSION_DIRECTORY' }, { name: 'http-hmr', strategy: 'SESSION_ENDPOINT' }],
       dependencies: { packageManager: 'npm', packageManagerVersion: '10.9.4', manifest: 'package.json', lockfile: 'package-lock.json', manifestHash: hash(fs.readFileSync(path.join(folder, 'package.json'))), lockfileHash: hash(fs.readFileSync(path.join(folder, 'package-lock.json'))), abi: electron ? '128' : process.env.U4_NODE_ABI, materialization: '.code-awareness/u4/unverified.json' },
       cooperation: { manifest: sdk + 'cooperation.cjs', fingerprint: hash(fs.readFileSync(path.join(folder, sdk, 'cooperation.cjs'))) },
+      ...(electron ? { bootstrap: { kind: 'CODE_AWARENESS', dataPolicy: snapshot ? 'REPOSITORY_SNAPSHOT' : 'EMPTY', maxBytes: 67108864, maxArtifacts: 10000 } } : {}),
       adapter: { version: 1, kind: electron ? 'ELECTRON' : 'NODE_WEB', port, configFile,
         ...(electron ? { runtimeExecutable: 'node_modules/electron/dist/electron.exe', runtimeExecutableHash: hash(fs.readFileSync(path.join(root, 'node_modules/electron/dist/electron.exe'))) } : {}),
         nativeModules: electron ? ['better-sqlite3', 'electron', 'esbuild', 'tree-sitter', 'tree-sitter-typescript', 'tree-sitter-javascript'] : [],
-        artifacts: electron ? [{ component: 'ELECTRON_MAIN', path: 'src/main/main.ts' }, { component: 'ELECTRON_PRELOAD', path: 'src/main/preload.ts' }, { component: 'ELECTRON_RENDERER', path: 'src/renderer/src/App.tsx' }] : [{ component: 'WEB', path: 'app/feature.js' }] },
+        artifacts: electron ? [
+          ...['main.ts', 'bootstrap.ts', 'work-orchestration/runtime-preview/electron-mode.ts', 'work-orchestration/runtime-preview/context-bootstrap.ts', 'work-orchestration/runtime-preview/context-data.ts', 'core/active-project-service.ts', 'continuum/project-continuum-session.ts', 'ipc/workspace-handler.ts', 'ipc/code-map-handler.ts', 'repository-catalog/repository-catalog-store.ts'].map(file => ({ component: 'ELECTRON_MAIN', path: 'src/main/' + file })),
+          { component: 'ELECTRON_PRELOAD', path: 'src/main/preload.ts' }, { component: 'ELECTRON_RENDERER', path: 'src/renderer/src/App.tsx' }] : [{ component: 'WEB', path: 'app/feature.js' }] },
       security: { mode: 'profile_only', requirements: [] }, network: { destinations: [`http://127.0.0.1:${port}`], openNetworkConsent: false, credentials: 'TARGET_OWN_TEST_PROFILE' },
       probes: { readiness: { kind: 'HTTP', address: `http://127.0.0.1:${port}/`, timeoutMs: 120000 }, liveness: 'READINESS', attestation: 'COOPERATIVE_LOADED_ARTIFACT' },
       shutdown: { spawn: 'JOB_LIST_AT_CREATE', breakaway: false, killOnJobClose: true, graceMs: 0, forceMs: 10000 } }
@@ -81,23 +89,43 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const helper = faults ? { executable: build.owner, fingerprint: build.fingerprint, sdkDirectory: path.join(root, 'scripts/runtime-preview') } : resolveHelper(helperConfig)
   const store = new (get('work-orchestration/runtime-preview/session-store').PreviewSessionStore)(path.join(directory, 'sessions'))
   const { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } = get('work-orchestration/runtime-preview/runner')
-  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, new PreviewPreflightService(profileStore)), helper)
+  const provisionerModule = get('work-orchestration/runtime-preview/context-data')
+  const provisioner = new provisionerModule.RepositoryPreviewContextProvisioner(catalog, path.join(contextual && snapshot ? process.env.U4_CANONICAL_USER_DATA : directory, 'continuum'))
+  let bootstrapFault
+  const runnerProvisioner = { prepare: async input => {
+    const manifest = await provisioner.prepare(input)
+    if (bootstrapFault === 'generation') manifest.selection.generation = 'invalid-generation'
+    if (bootstrapFault === 'digest') manifest.data.digest = 'f'.repeat(64)
+    bootstrapFault = undefined
+    return manifest
+  } }
+  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, new PreviewPreflightService(profileStore)), helper, runnerProvisioner)
   const start = runner.start.bind(runner)
   runner.start = async input => { try { return await start(input) } catch (error) { fs.writeFileSync(path.join(output, 'launch-diagnostic.txt'), String(error.stack)); console.error('LAUNCH_DIAGNOSTIC', error.message); throw error } }
   const ledger = new (get('validation-ledger/validation-ledger').ValidationLedger)(path.join(directory, 'ledger.db'))
   const continuum = new (get('continuum/project-continuum-session').RepositoryContinuumSession)(path.join(directory, 'continuum'), { findByPath: folder => folder === base ? webRepository : null })
   continuum.activate(base)
   let approvals = 0, approvalAllowed = true
-  const service = new (get('work-orchestration/runtime-preview/operations').RuntimePreviewOperations)(repositories, profileStore, store, runner, async () => { approvals++; return approvalAllowed }, ledger, continuum)
+  let authorizationWindow
+  const confirmation = async profile => {
+    approvals++
+    if (!contextual) return approvalAllowed
+    authorizationWindow.show()
+    authorizationWindow.focus()
+    try { return await get('work-orchestration/runtime-preview/authorization').confirmPreviewProfile(authorizationWindow, profile, provisioner) }
+    finally { authorizationWindow.hide() }
+  }
+  const service = new (get('work-orchestration/runtime-preview/operations').RuntimePreviewOperations)(repositories, profileStore, store, runner, confirmation, ledger, continuum)
   let active = { revision: 1, project: { id: webRepository.id, path: base, name: 'U4 controlled Web' } }
   const activeGit = (await repositories.open(webRepository.id)).git
   const { BranchOrchestrationController, registerBranchOrchestrationHandlers } = get('ipc/branch-orchestration-handler')
-  const controller = new BranchOrchestrationController({ getState: () => active }, async () => false, continuum, profileStore, async () => { approvals++; return approvalAllowed }, repositories, service)
+  const controller = new BranchOrchestrationController({ getState: () => active }, async () => false, continuum, profileStore, confirmation, repositories, service)
   controller.bind(activeGit, { branchPullRequests: async () => ({ repositoryId: webRepository.id, relations: [], received: [], orphaned: [], catalog: { coverage: 'COMPLETE', items: [], observedAt: new Date().toISOString() }, at: new Date().toISOString() }) }, base)
   registerBranchOrchestrationHandlers(controller)
   const preload = path.join(directory, 'acceptance-preload.cjs')
   fs.writeFileSync(preload, "const {ipcRenderer}=require('electron');ipcRenderer.on('u4:request',async(_,id,request)=>{try{ipcRenderer.send('u4:result',id,await ipcRenderer.invoke('work-orchestration:branches',request))}catch{ipcRenderer.send('u4:result',id,{success:false,code:'IPC_FAILURE'})}})")
-  const window = new BrowserWindow({ show: false, webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+  const window = new BrowserWindow({ title: 'Runtime Preview — autorização isolada', show: false, webPreferences: { preload, sandbox: true, contextIsolation: true, nodeIntegration: false } })
+  authorizationWindow = window
   await window.loadURL('about:blank')
   const requests = new Map()
   ipcMain.on('u4:result', (event, id, result) => { if (event.sender !== window.webContents) return; requests.get(id)?.(result) })
@@ -144,6 +172,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const ui = await vite.createServer({ configFile: false, root: uiRoot, plugins: [react(), { name: 'isolated-u4-ipc-bridge', configureServer(server) { server.middlewares.use('/u4-branch', async (req, res) => { try { if (req.method !== 'POST' || req.headers.origin && req.headers.origin !== `http://127.0.0.1:${ui.httpServer.address().port}`) throw Error('INVALID_ORIGIN'); let body = ''; for await (const chunk of req) { body += chunk; if (body.length > 32768) throw Error('INVALID_SIZE') } res.setHeader('content-type', 'application/json'); res.end(JSON.stringify(await ipc(JSON.parse(body)))) } catch { res.statusCode = 400; res.end('{}') } }) } }], resolve: { alias: { '/src': path.join(root, 'src') } }, server: { host: '127.0.0.1', port: 0, fs: { allow: [root] } } })
   await ui.listen()
   console.log(JSON.stringify({ ready: true, ui: `http://127.0.0.1:${ui.httpServer.address().port}`, web: profiles[0].probes.readiness.address, directory }))
+  fs.writeFileSync(path.join(output, 'identity.json'), JSON.stringify({ directory, selections, profiles, root, canonicalDataOrigin: snapshot ? 'PRIMARY_SELECTED_REPOSITORY' : 'NONE' }))
   let currentKind = 'web', sessionId, bindingId, proofId
   const commandFile = path.join(output, 'commands.json')
   fs.writeFileSync(commandFile, '[]')
@@ -158,6 +187,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     try {
       if (command.startsWith('select ')) currentKind = command.slice(7)
       const selection = selections[currentKind]; assert.ok(selection)
+      if (command.startsWith('bootstrap-fault ')) bootstrapFault = command.slice(16)
       if (command === 'deny' || command === 'approve') {
         approvalAllowed = command === 'approve'
         await mcp('authorize_runtime_preview_profile', { selection }); save('authorization-complete', await service.pendingResult() ?? { success: true })
@@ -170,6 +200,15 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
       }
       if (command === 'negative-identities') {
         for (const patch of [{ repositoryId: randomUUID() }, { worktreeId: 'other-tree' }, { generation: 'other-generation' }, { fingerprint: 'f'.repeat(64) }]) { await mcp('preflight_runtime_preview', { selection: { ...selection, ...patch } }); assert.equal((await service.pendingResult()).success, false) }
+      }
+      if (command === 'context-check') {
+        const record = store.read(sessionId), context = record.context
+        assert.ok(context); assert.equal(record.state, 'RUNNING')
+        const file = path.join(store.runtime(sessionId), 'electron-evidence.json'), evidence = JSON.parse(fs.readFileSync(file))
+        assert.equal(evidence.context.repositoryId, selection.repositoryId)
+        assert.equal(evidence.context.activeCheckout.toLowerCase(), fs.realpathSync(root).toLowerCase())
+        assert.equal(evidence.context.data.policy, snapshot ? 'REPOSITORY_SNAPSHOT' : 'EMPTY')
+        save('context-bound-real-electron', { sessionId, context, evidence, approvals })
       }
       if (command === 'start') {
         const operationId = randomUUID()

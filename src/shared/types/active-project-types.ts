@@ -23,5 +23,7 @@ export interface ActiveContext {
   legacyCodeMapProjectId: string | null
   sessionId: string | null
   dataPolicy: 'HOST_CANONICAL' | 'EMPTY' | 'REPOSITORY_SNAPSHOT'
+  worktree?: { worktreeId: string; generation: string }
+  dataOrigin?: { at: string; digest: string; artifacts: number; media: number }
   capabilities: Record<ActiveContextCapability, CapabilityReadiness>
 }

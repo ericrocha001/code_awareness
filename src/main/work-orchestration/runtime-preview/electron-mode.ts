@@ -1,11 +1,23 @@
 import { BrowserWindow, ipcMain, type App } from 'electron'
 import { readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, relative, isAbsolute } from 'node:path'
+import { validatePreviewContext } from './context-bootstrap'
+import type { PreviewContextManifest } from './context-contract'
 
-export const isRuntimePreview = () => Boolean(process.env.PREVIEW_SESSION_ID)
+export const isRuntimePreview = () => ['PREVIEW_SESSION_ID', 'PREVIEW_SESSION_CONFIG', 'PREVIEW_SESSION_DIRECTORY'].some(key => process.env[key] !== undefined)
+let context: PreviewContextManifest | undefined
+let boundContext: { mode: 'PREVIEW'; repositoryId: string; worktreeId: string; generation: string; profileRevision: number; activeCheckout: string; identity: 'IDENTITY_BOUND'; data: PreviewContextManifest['data'] } | undefined
+let saveEvidence: (() => void) | undefined
+export const previewBootstrapContext = () => context ? structuredClone(context) : undefined
+export function bindPreviewContext(repositoryId: string, checkout: string) {
+  if (!context || repositoryId !== context.selection.repositoryId || realpathSync(checkout).toLowerCase() !== context.worktree.toLowerCase()) throw new Error('PREVIEW_CONTEXT_BINDING_MISMATCH')
+  boundContext = { mode: 'PREVIEW', repositoryId, worktreeId: context.selection.worktreeId, generation: context.selection.generation,
+    profileRevision: context.profileRevision, activeCheckout: context.worktree, identity: 'IDENTITY_BOUND', data: context.data }
+  saveEvidence?.()
+}
 type Build = { component: string; artifactDigest: string; sources: Record<string, string> }
 declare global { var __RUNTIME_PREVIEW_BUILDS__: Build[] | undefined }
-export function initializeElectronPreview(app: App) {
+export async function initializeElectronPreview(app: App) {
   const file = process.env.PREVIEW_SESSION_CONFIG
   if (!file) throw new Error('PREVIEW_CONFIGURATION_REQUIRED')
   const config = JSON.parse(readFileSync(file, 'utf8'))
@@ -26,15 +38,18 @@ export function initializeElectronPreview(app: App) {
     return !!scope && !scope.startsWith('..') && !isAbsolute(scope)
   })
   if (!resourcesIsolated) throw new Error('PREVIEW_RESOURCE_ESCAPED')
+  context = await validatePreviewContext(config.context, { sessionId: config.sessionId, profile: config.profile, approvedProfile: config.approvedProfile, directory, worktree })
   let preload: Build[] = [], rendererPid: number | null = null, rendererFailure: string | null = null, sandboxObserved: boolean | null = null
   const rendererModules = new Map<string, { path: string; sourceDigest: string; transformDigest: string }>()
   const save = () => {
     writeFileSync(join(directory, 'electron-evidence.json'), JSON.stringify({ sessionId: config.sessionId, pid: process.pid,
       runtime: process.versions.electron, abi: process.versions.modules, builds: [...(globalThis.__RUNTIME_PREVIEW_BUILDS__ ?? []), ...preload],
       rendererPid, rendererFailure, sandboxObserved, rendererModules: [...rendererModules.values()], resourcesIsolated, channelDisabled: true, protocolDisabled: true,
+      ...(boundContext ? { context: boundContext } : {}),
       processes: app.isReady() ? app.getAppMetrics().map(p => ({ pid: p.pid, type: p.type })) : []
     }))
   }
+  saveEvidence = save
   ipcMain.on('runtime-preview:preload-initialized', (event, payload: { builds: unknown; sandboxed: unknown; contextIsolated: unknown }) => {
     const builds = payload?.builds
     if (!BrowserWindow.fromWebContents(event.sender) || event.senderFrame !== event.sender.mainFrame || !Array.isArray(builds) || builds.length > 8) return
@@ -56,4 +71,18 @@ export function initializeElectronPreview(app: App) {
     window.webContents.on('preload-error', () => { preload = []; rendererFailure = 'PRELOAD_FAILURE'; save() })
   })
   void app.whenReady().then(save)
+}
+
+export function failPreviewBootstrap(app: App, error: unknown): never {
+  const code = error instanceof Error && /^PREVIEW_[A-Z_]{1,120}$/.test(error.message) ? error.message : 'PREVIEW_BOOTSTRAP_FAILED'
+  try {
+    const file = process.env.PREVIEW_SESSION_CONFIG, directory = realpathSync(process.env.PREVIEW_SESSION_DIRECTORY!)
+    const config = JSON.parse(readFileSync(file!, 'utf8'))
+    if (realpathSync(config.directory) === directory && config.sessionId === process.env.PREVIEW_SESSION_ID && resolve(file!) === join(directory, 'configuration.json')) {
+      writeFileSync(join(directory, 'bootstrap-failure.json'), JSON.stringify({ sessionId: config.sessionId, code }), { flag: 'wx', mode: 0o600 })
+    }
+  } catch { }
+  console.error(code)
+  app.exit(1)
+  process.exit(1)
 }

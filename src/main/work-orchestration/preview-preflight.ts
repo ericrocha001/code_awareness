@@ -35,6 +35,8 @@ export class PreviewPreflightService {
       if (priority[status] > priority[result.status]) result.status = status
     }
     await this.profiles.assertExternal(initial.record.path)
+    if (profile.bootstrap && (profile.runtime !== 'ELECTRON_DEV' || profile.adapter?.kind !== 'ELECTRON')) problem('PREVIEW_CONTEXT_PROFILE_INVALID', 'Bootstrap contextual exige o adaptador Electron cooperante.')
+    if (profile.bootstrap && !profile.env.PATH) problem('PREVIEW_GIT_PATH_REQUIRED', 'Declare no ambiente aprovado do perfil um PATH contendo o Git necessário à identidade e ao contexto do preview.', 'MISSING')
     if (!await this.profiles.approved(profile)) problem('PROFILE_APPROVAL_REQUIRED', 'O perfil atual exige aprovação independente do operador.')
     if (initial.reference || initial.record.locked || initial.record.detached || initial.conflictCount || initial.snapshot.operation) problem('TARGET_UNAVAILABLE', 'Selecione uma Worktree de branch isolada, disponível e sem operação Git ou conflitos.')
     const missingRequirements: MissingSecurityRequirement[] = profile.security.requirements.map(requirement => ({ ...requirement,

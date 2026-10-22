@@ -70,12 +70,13 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia' }
       }
+      activeProjects.assertContextSelection({ path: repoPath })
       await codeMapService.openRepository(repoPath)
       const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
       const project = codeMapService.getOpenProjects().find((entry) => entry.path === normalizedPath)
       return { success: true, projectId: project?.id }
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      return { success: false, code: err instanceof Error ? err.message : 'CODEMAP_OPEN_FAILED', error: err instanceof Error ? err.message : String(err) }
     }
   })
 
@@ -87,7 +88,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
       await activeProjects.closeRepository(repoPath)
       return { success: true }
     } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) }
+      return { success: false, code: err instanceof Error ? err.message : 'CODEMAP_CLOSE_FAILED', error: err instanceof Error ? err.message : String(err) }
     }
   })
 
@@ -96,6 +97,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia' }
       }
+      activeProjects.assertContextSelection({ path: repoPath })
       const result = await codeMapService.indexRepository(repoPath)
       broadcastToWindows('code-map:file-indexed', { repoPath, relativePath: '' })
       return { success: true, data: result }
@@ -109,6 +111,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia' }
       }
+      activeProjects.assertContextSelection({ path: repoPath })
       const result = await codeMapService.synchronizeModified(repoPath)
       return { success: true, data: result }
     } catch (err) {
@@ -157,6 +160,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
     telemetryService.log(correlationId, 'INTEGRITY', 'IPC_VERIFY_STARTED', { repoPath, autoRepair, selectedCount: selectedIssues?.length, issuesCount: issues?.length })
 
     try {
+      activeProjects.assertContextSelection({ path: repoPath })
       const result = await codeMapService.verifyIntegrity(repoPath, { autoRepair, selectedIssues, issues, deep })
       telemetryService.log(correlationId, 'INTEGRITY', 'IPC_VERIFY_COMPLETED', {
         status: result.status,

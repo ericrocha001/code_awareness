@@ -96,7 +96,9 @@ import { orchestrationContinuumReader } from './ipc/orchestration-continuum-read
 import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
 import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
 import { PreviewRepositories } from './work-orchestration/preview-repositories'
-import { isRuntimePreview } from './work-orchestration/runtime-preview/electron-mode'
+import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap } from './work-orchestration/runtime-preview/electron-mode'
+import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtime-preview/context-data'
+import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
 import { resolvePreviewHelper } from './work-orchestration/runtime-preview/host-helper'
 import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orchestration/runtime-preview/runner'
 import { PreviewSessionStore } from './work-orchestration/runtime-preview/session-store'
@@ -142,7 +144,7 @@ const validationLedger = new ValidationLedger(
 )
 const continuumSession = new RepositoryContinuumSession(join(app.getPath('userData'), 'continuum'), {
   findByPath: path => repositoryCatalog?.findByPath(path) ?? null
-})
+}, { ingestCheckout: !isRuntimePreview() })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const localAgentChannel = new LocalChannelHost(
   [new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)],
@@ -321,7 +323,7 @@ app.whenReady().then(async () => {
   const workspaceService = new WorkspaceService()
   const repositoryCatalogStore = new RepositoryCatalogStore(desktopProfilePaths(app.getPath('userData')).repositoryCatalogPath)
   repositoryCatalog = new RepositoryCatalogService(repositoryCatalogStore, workspaceService, academyService)
-  await repositoryCatalog.initialize(settingsService.loadSettings())
+  if (!isRuntimePreview()) await repositoryCatalog.initialize(settingsService.loadSettings())
   await runtimeIdentityProvider.bindSourceOrigin(repositoryCatalog.listAvailable().map(record => ({
     repositoryId: record.id, rootPath: record.localCheckout!.path
   })))
@@ -422,8 +424,11 @@ app.whenReady().then(async () => {
 
   const dashService = new DashService(codeMapService)
   const contextNavigation = new ContextEngine(codeMapService)
+  const previewContext = previewBootstrapContext()
   activeProjects = new ActiveProjectService(codeMapService, path => repositoryCatalog?.findByPath(path) ?? null,
-    isRuntimePreview() ? { mode: 'PREVIEW', sessionId: process.env.PREVIEW_SESSION_ID! } : { mode: 'HOST' })
+    previewContext ? { mode: 'PREVIEW', sessionId: previewContext.sessionId,
+      target: { ...previewContext.selection, path: previewContext.worktree }, dataPolicy: previewContext.data.policy,
+      dataOrigin: { at: previewContext.data.at, digest: previewContext.data.digest, artifacts: previewContext.data.artifacts, media: previewContext.data.media } } : { mode: 'HOST' })
   const gitManagement = new GitManagementController(activeProjects)
   registerGitManagementHandlers(gitManagement)
   const workOrchestration = new WorkOrchestrationController(activeProjects, change => {
@@ -434,20 +439,15 @@ app.whenReady().then(async () => {
   mkdirSync(join(previewDirectory, 'preview-profiles'), { recursive: true })
   const previewProfiles = new PreviewProfileStore(join(previewDirectory, 'preview-profiles'))
   const previewRepositories = new PreviewRepositories(repositoryCatalog, (path, identity) => new GitOperationsService(path, gitService, gitTransport, identity, true))
-  const confirmPreview = async (profile: import('./work-orchestration/preview-profile').PreviewProfile) => {
-    if (!mainWindow || mainWindow.isDestroyed()) return false
-    const response = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Aprovar perfil de preview',
-      message: `Revisar e aprovar ${profile.profileId} revisão ${profile.revision}?`,
-      detail: `Repositório: ${profile.repositoryId}\nRuntime: ${profile.runtime} ${profile.runtimeVersion}\nComando: ${profile.command.executable} ${profile.command.args.join(' ')}\nCwd relativo: ${profile.command.cwd}\nModo: ${profile.security.mode}\nGarantias exigidas: ${JSON.stringify(profile.security.requirements)}\nDestinos: ${profile.network.destinations.join(', ')}\nRede aberta consentida: ${profile.network.openNetworkConsent}\nPerfil operacional não é sandbox. Esta aprovação não reduz requisitos nem inicia processos.`,
-      buttons: ['Cancelar', 'Aprovar esta revisão e política'], defaultId: 0, cancelId: 0, noLink: true })
-    return response.response === 1
-  }
+  const contextProvisioner = new RepositoryPreviewContextProvisioner(repositoryCatalog, continuumSession.getStorageBaseDir())
+  const confirmPreview = async (profile: import('./work-orchestration/preview-profile').PreviewProfile) =>
+    !!mainWindow && !mainWindow.isDestroyed() && confirmPreviewProfile(mainWindow, profile, contextProvisioner)
   let runtimePreview: RuntimePreviewOperations | undefined
   if (!isRuntimePreview() && process.platform === 'win32') {
     try {
       const helper = resolvePreviewHelper({ packaged: app.isPackaged, resources: process.resourcesPath, root: app.getAppPath(), developmentBuild: process.env.CODE_AWARENESS_PREVIEW_NATIVE_BUILD })
       const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
-      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper)
+      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner)
       runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession)
     } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
   }
@@ -625,7 +625,7 @@ app.whenReady().then(async () => {
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
   registerGitHandlers(watcherService, settingsService, compressionService, codeAwarenessIgnoreService)
-  registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime)
+  registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime, target => activeProjects!.assertContextSelection(target))
   registerGitHubHandlers(githubIntegration)
   registerCheckpointHandlers(checkpointService, dbAdapter)
   registerRestoreHandlers(restoreService)
@@ -636,6 +636,13 @@ app.whenReady().then(async () => {
   registerDashHandlers(dashService)
 
 
+  if (previewContext) {
+    try {
+      const state = await repositoryRuntime.activate(previewContext.selection.repositoryId)
+      if (state.context?.identity !== 'IDENTITY_BOUND' || state.context.repositoryId !== previewContext.selection.repositoryId || state.context.capabilities.continuum.state !== 'READY') throw new Error('PREVIEW_CONTEXT_ACTIVATION_FAILED')
+      bindPreviewContext(state.context.repositoryId, state.project!.path)
+    } catch (error) { failPreviewBootstrap(app, error) }
+  }
   createWindow()
 
   // Registra handler IPC e atalhos F12 / Ctrl+Shift+I para DevTools

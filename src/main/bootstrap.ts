@@ -1,5 +1,10 @@
 import { app } from 'electron'
-import { initializeElectronPreview } from './work-orchestration/runtime-preview/electron-mode'
+import { initializeElectronPreview, isRuntimePreview, failPreviewBootstrap } from './work-orchestration/runtime-preview/electron-mode'
 
-if (process.env.PREVIEW_SESSION_ID) initializeElectronPreview(app)
-void import('./main.js')
+async function bootstrap() {
+  if (isRuntimePreview()) {
+    try { await initializeElectronPreview(app) } catch (error) { failPreviewBootstrap(app, error) }
+  }
+  await import('./main.js')
+}
+void bootstrap()
