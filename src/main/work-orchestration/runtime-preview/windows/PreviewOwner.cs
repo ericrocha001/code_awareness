@@ -194,6 +194,55 @@ internal sealed class PreviewOwner : IDisposable
         }
         return new { jobPresent = handle != IntPtr.Zero, jobQueryError = handle == IntPtr.Zero ? error : 0, activeProcesses = active, sameProcessAlive = sameProcessAlive, adopted = false, terminated = false };
     }
+    private object Endpoint(int port)
+    {
+        if (port < 1 || port > 65535 || (job == IntPtr.Zero && !stopped)) throw new Exception("INVALID_ENDPOINT");
+        int size = 0;
+        Win32.GetExtendedTcpTable(IntPtr.Zero, ref size, true, 2, 3, 0);
+        if (size < 4 || size > 16777216) throw new Exception("ENDPOINT_TABLE_UNAVAILABLE");
+        var table = Marshal.AllocHGlobal(size);
+        var matches = new List<object>();
+        try {
+            uint error = Win32.GetExtendedTcpTable(table, ref size, true, 2, 3, 0);
+            if (error != 0) throw new NativeFailure("ENDPOINT_TABLE_UNAVAILABLE", (int)error);
+            int count = Marshal.ReadInt32(table);
+            if (count < 0 || 4L + count * 24L > size) throw new Exception("ENDPOINT_TABLE_INVALID");
+            for (int i = 0; i < count; i++) {
+                var row = IntPtr.Add(table, 4 + i * 24);
+                uint rawPort = (uint)Marshal.ReadInt32(row, 8);
+                if ((((rawPort & 255) << 8) | ((rawPort >> 8) & 255)) != port) continue;
+                uint pid = (uint)Marshal.ReadInt32(row, 20);
+                uint address = (uint)Marshal.ReadInt32(row, 4);
+                var process = Win32.OpenProcess(0x1000, false, pid);
+                if (process == IntPtr.Zero) throw new NativeFailure("ENDPOINT_OWNER_UNVERIFIABLE", Marshal.GetLastWin32Error());
+                try { matches.Add(new { pid = pid, created = Win32.Creation(process).ToString(), member = !jobClosed && Member(process), loopback = address == 0x0100007f }); }
+                finally { Win32.CloseHandle(process); }
+            }
+        } finally { Marshal.FreeHGlobal(table); }
+        return new { port = port, listeners = matches.ToArray() };
+    }
+    private object Processes()
+    {
+        if (job == IntPtr.Zero) throw new Exception("OWNERSHIP_UNVERIFIED");
+        int size = 8 + 128 * IntPtr.Size;
+        var buffer = Marshal.AllocHGlobal(size);
+        var processes = new List<object>();
+        try {
+            Win32.Check(Win32.QueryInformationJobObject(job, 3, buffer, size, IntPtr.Zero), "PROCESS_COVERAGE_UNVERIFIABLE");
+            int count = Marshal.ReadInt32(buffer, 4);
+            if (count < 0 || count > 128) throw new Exception("PROCESS_COVERAGE_LIMIT");
+            for (int i = 0; i < count; i++) {
+                uint pid = checked((uint)Marshal.ReadIntPtr(buffer, 8 + i * IntPtr.Size).ToInt64());
+                var handle = Win32.OpenProcess(0x1000, false, pid);
+                if (handle == IntPtr.Zero) throw new NativeFailure("PROCESS_COVERAGE_UNVERIFIABLE", Marshal.GetLastWin32Error());
+                try {
+                    if (!Member(handle)) throw new Exception("PROCESS_COVERAGE_CHANGED");
+                    processes.Add(new { pid = pid, created = Win32.Creation(handle).ToString() });
+                } finally { Win32.CloseHandle(handle); }
+            }
+        } finally { Marshal.FreeHGlobal(buffer); }
+        return new { processes = processes.ToArray() };
+    }
     public void Dispose()
     {
 #if PREVIEW_TEST
@@ -209,6 +258,8 @@ internal sealed class PreviewOwner : IDisposable
         var action = (string)message["action"];
         if (action == "start") return Start(json.ConvertToType<Launch>(message["launch"]));
         if (action == "inspect") return Observe();
+        if (action == "endpoint") return Endpoint(Convert.ToInt32(message["port"]));
+        if (action == "processes") return Processes();
         if (action == "stop") {
             bool noTerminate = false;
 #if PREVIEW_TEST
@@ -220,6 +271,16 @@ internal sealed class PreviewOwner : IDisposable
         }
         if (action == "reconcile") return Reconcile((string)message["sessionId"], Convert.ToUInt32(message["pid"]), message["created"] as string);
 #if PREVIEW_TEST
+        if (action == "crash-member") {
+            uint pid = Convert.ToUInt32(message["pid"]);
+            var process = Win32.OpenProcess(0x1000 | 1, false, pid);
+            if (process == IntPtr.Zero) throw new Exception("TEST_TARGET_UNVERIFIABLE");
+            try {
+                if (!Member(process) || Win32.Creation(process).ToString() != (string)message["created"]) throw new Exception("TEST_TARGET_NOT_OWNED");
+                Win32.Check(Win32.TerminateProcess(process, 99), "TEST_CRASH_FAILED");
+            } finally { Win32.CloseHandle(process); }
+            return Observe();
+        }
         if (action == "release-reference") { if (leakedReference != IntPtr.Zero) Win32.CloseHandle(leakedReference); leakedReference = IntPtr.Zero; return Observe(); }
 #endif
         throw new Exception("INVALID_ACTION");

@@ -48,7 +48,7 @@ export class NativeOwner {
   private fail(error: Error) {
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(error); this.pending = undefined }
   }
-  private request(action: 'start' | 'inspect' | 'stop' | 'reconcile', fields: Record<string, unknown> = {}, timeout = 10000): Promise<unknown> {
+  private request(action: 'start' | 'inspect' | 'stop' | 'reconcile' | 'endpoint' | 'processes', fields: Record<string, unknown> = {}, timeout = 10000): Promise<unknown> {
     if (this.exited || this.pending) return Promise.reject(new Error(this.exited ? 'OWNER_LOST' : 'NATIVE_REQUEST_BUSY'))
     const id = ++this.sequence
     return new Promise((resolve, reject) => {
@@ -59,6 +59,12 @@ export class NativeOwner {
   }
   async start(launch: NativeLaunch) { return nativeObservation.parse(await this.request('start', { launch })) }
   async inspect() { return nativeObservation.parse(await this.request('inspect')) }
+  async endpoint(port: number) {
+    return z.object({ port: z.number().int(), listeners: z.array(z.object({ pid: z.number().int().positive(), created: z.string(), member: z.boolean(), loopback: z.boolean() }).strict()).max(128) }).strict().parse(await this.request('endpoint', { port }))
+  }
+  async processes() {
+    return z.object({ processes: z.array(z.object({ pid: z.number().int().positive(), created: z.string() }).strict()).max(128) }).strict().parse(await this.request('processes'))
+  }
   reconcile(sessionId: string, pid: number, created: string | null) { return this.request('reconcile', { sessionId, pid, created }) }
   async stop(graceMs: number, forceMs: number, graceful: boolean) {
     return nativeObservation.parse(await this.request('stop', { graceMs, forceMs, graceful }, graceMs + forceMs + 10000))

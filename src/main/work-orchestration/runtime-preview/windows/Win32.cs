@@ -35,6 +35,9 @@ internal static class Win32
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool QueryInformationJobObject(IntPtr job, int type, out Accounting info, int size, IntPtr returned);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool QueryInformationJobObject(IntPtr job, int type, IntPtr info, int size, IntPtr returned);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool TerminateJobObject(IntPtr job, uint code);
+#if PREVIEW_TEST
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool TerminateProcess(IntPtr process, uint code);
+#endif
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool IsProcessInJob(IntPtr process, IntPtr job, out bool member);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
@@ -51,6 +54,7 @@ internal static class Win32
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern IntPtr CreateEvent(IntPtr security, bool manual, bool initial, string name);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern IntPtr OpenEvent(uint access, bool inherit, string name);
     [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool SetEvent(IntPtr handle);
+    [DllImport("iphlpapi.dll", SetLastError = true)] internal static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool sorted, uint family, int tableClass, uint reserved);
 
     internal static void Check(bool ok, string code)
     {

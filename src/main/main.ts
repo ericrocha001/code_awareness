@@ -96,10 +96,10 @@ import { orchestrationContinuumReader } from './ipc/orchestration-continuum-read
 import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
 import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
 import { PreviewRepositories } from './work-orchestration/preview-repositories'
+import { isRuntimePreview } from './work-orchestration/runtime-preview/electron-mode'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
-import { GitService } from './core/git-service'
 
 
 
@@ -166,6 +166,7 @@ const traceSink = {
   }
 }
 const mcpLifecycle = new McpLifecycle({
+  disabled: isRuntimePreview(),
   activity: channelActivity,
   trace: traceSink,
   systemHealth,
@@ -196,7 +197,7 @@ let channelProjection: ChannelStateProjection | null = null
 
 // Single instance lock ANTES de app.whenReady() — evita race condition de duas janelas.
 // Se outra instância já está rodando, esta encerra imediatamente.
-const gotTheLock = app.requestSingleInstanceLock()
+const gotTheLock = isRuntimePreview() || app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 } else {
@@ -243,6 +244,7 @@ function createWindow(): void {
     height: 800,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#18181B' : '#F9FAFB',
     webPreferences: {
+      additionalArguments: isRuntimePreview() ? ['--runtime-preview'] : [],
       preload: join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
@@ -294,11 +296,11 @@ app.whenReady().then(async () => {
   // Registra o protocolo codeawareness:// no SO — deve ser chamado no whenReady.
   // No Windows em modo dev, o executável é o Electron e o app é o argv[1];
   // sem esses argumentos extras o protocolo seria registrado com o caminho errado.
-  if (process.defaultApp) {
+  if (!isRuntimePreview() && process.defaultApp) {
     if (process.argv.length >= 2) {
       app.setAsDefaultProtocolClient('codeawareness', process.execPath, [resolve(process.argv[1])])
     }
-  } else {
+  } else if (!isRuntimePreview()) {
     app.setAsDefaultProtocolClient('codeawareness')
   }
 
@@ -346,7 +348,9 @@ app.whenReady().then(async () => {
   console.info('[Local Agent Channel] Profile', {
     appName: app.getName(), profileMatchesDefault: normalizeProfile(app.getPath('userData')) === normalizeProfile(expectedProfile)
   })
-  try { await localAgentChannel.start() } catch (error) { console.error('[Local Agent Channel] Unavailable', localChannelStartupDiagnostic(error)) }
+  if (!isRuntimePreview()) {
+    try { await localAgentChannel.start() } catch (error) { console.error('[Local Agent Channel] Unavailable', localChannelStartupDiagnostic(error)) }
+  }
 
   void (async () => {
     if (academyService.store.list().length === 0) {

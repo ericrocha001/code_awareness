@@ -101,6 +101,11 @@
     ],
     "extraResources": [
       {
+        "from": "scripts/runtime-preview",
+        "to": "runtime-preview/sdk",
+        "filter": ["launch.cjs", "cooperation.cjs", "build-identity.cjs"]
+      },
+      {
         "from": "out/runtime-preview/production/preview-owner.exe",
         "to": "runtime-preview/preview-owner.exe"
       },

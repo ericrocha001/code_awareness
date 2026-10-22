@@ -15,6 +15,12 @@ export const previewProfileSchema = z.object({
     manifestHash: z.string().regex(/^[a-f0-9]{64}$/), lockfileHash: z.string().regex(/^[a-f0-9]{64}$/),
     abi: text, materialization: relativePath }).strict(),
   cooperation: z.object({ manifest: relativePath, fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  adapter: z.object({ version: z.literal(1), kind: z.enum(['VITE_WEB', 'NODE_WEB', 'ELECTRON']),
+    port: z.number().int().min(1024).max(65535),
+    configFile: relativePath, runtimeExecutable: relativePath.optional(), runtimeExecutableHash: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    nativeModules: z.array(z.string().regex(/^(@[a-z0-9_-]+\/)?[a-z0-9_-]+$/)).max(16),
+    artifacts: z.array(z.object({ component: z.enum(['WEB', 'ELECTRON_MAIN', 'ELECTRON_PRELOAD', 'ELECTRON_RENDERER']), path: relativePath }).strict()).min(1).max(12)
+  }).strict().optional(),
   security: z.object({ mode: z.enum(['profile_only', 'container', 'VM']), requirements: z.array(z.object({
     capability: z.enum(['FILESYSTEM_WRITE_SEPARATION', 'NETWORK_EGRESS_RESTRICTION', 'SECRET_ISOLATION', 'PROCESS_PRIVILEGE_SEPARATION', 'SYSTEM_RESOURCE_RESTRICTION']), guarantee: text
   }).strict()).max(32) }).strict(),

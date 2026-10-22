@@ -3,6 +3,12 @@
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+declare const globalThis: typeof global & { __RUNTIME_PREVIEW_BUILDS__?: unknown[] }
+
+if (process.argv.includes('--runtime-preview')) {
+  ipcRenderer.send('runtime-preview:preload-initialized', { builds: globalThis.__RUNTIME_PREVIEW_BUILDS__ ?? [], sandboxed: process.sandboxed, contextIsolated: process.contextIsolated })
+  contextBridge.exposeInMainWorld('__runtimePreview', { initialized: (report: unknown) => ipcRenderer.send('runtime-preview:renderer-initialized', report) })
+}
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'

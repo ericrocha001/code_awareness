@@ -7,10 +7,12 @@ import { previewPath, type PreviewPreflightService } from '../preview-preflight'
 import type { PreviewRepositories } from '../preview-repositories'
 import { NativeOwner, nativeObservation, type NativeObservation } from './native-owner'
 import { PreviewSessionStore, sessionSchema, type PreviewSessionRecord } from './session-store'
+import { PreviewStackAdapter, diagnosticBootstrapAllowed, verifyEndpointFree } from './adapters'
 
 export interface PreparedPreview {
   profile: PreviewProfile; worktree: string; gitFingerprint: string; preflight: PreviewPreflight;
   guard: () => Promise<void>
+  observeSource?: () => Promise<NonNullable<PreviewPreflight['snapshot']>>
 }
 export interface PreviewLaunchAuthority { prepare(selection: PreviewSelection): Promise<PreparedPreview> }
 export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
@@ -25,9 +27,19 @@ export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
     if (!profile || !await this.profiles.approved(profile) || previewFingerprint(profile) !== selection.fingerprint) throw new Error('PROFILE_APPROVAL_REQUIRED')
     if (identity.repositoryId !== selection.repositoryId || identity.record.generation !== selection.generation) throw new Error('WORKTREE_STALE')
     const gitFingerprint = previewFingerprint(result.snapshot)
-    return { profile, worktree: identity.record.path, gitFingerprint, preflight: result, guard: async () => {
+    return { profile, worktree: identity.record.path, gitFingerprint, preflight: result, observeSource: async () => {
+      context.guard()
+      const current = await context.git.getCoordinationIdentity(selection.worktreeId)
+      if (current.repositoryId !== selection.repositoryId || current.record.generation !== selection.generation || current.record.path !== identity.record.path) throw new Error('WORKTREE_STALE')
+      const snapshot = await context.git.getCoordinationSnapshot(selection.worktreeId)
+      if (snapshot.snapshot.branch !== result.snapshot?.branch || snapshot.record.detached || snapshot.record.locked || snapshot.conflictCount || snapshot.snapshot.operation) throw new Error('WORKTREE_CONTEXT_CHANGED')
+      const approved = (await this.profiles.profiles(selection.repositoryId)).find(p => p.profileId === selection.profileId)
+      if (!approved || previewFingerprint(approved) !== selection.fingerprint || !await this.profiles.approved(approved)) throw new Error('PROFILE_CHANGED')
+      context.guard()
+      return { ...snapshot.snapshot, dirty: snapshot.stagedCount + snapshot.unstagedCount + snapshot.untrackedCount > 0 }
+    }, guard: async () => {
       const current = await check()
-      if (current.status !== 'SUPPORTED' || previewFingerprint(current.snapshot) !== gitFingerprint || !await this.profiles.approved(profile)) throw new Error('LAUNCH_EVIDENCE_CHANGED')
+      if ((current.status !== 'SUPPORTED' && !diagnosticBootstrapAllowed(current, profile)) || previewFingerprint(current.snapshot) !== gitFingerprint || current.dependencyBasis !== result.dependencyBasis || !await this.profiles.approved(profile)) throw new Error('LAUNCH_EVIDENCE_CHANGED')
     } }
   }
 }
@@ -42,8 +54,10 @@ class SessionPersistenceFailure extends Error {
 export class RuntimePreviewRunner {
   private tail: Promise<unknown> = Promise.resolve()
   private readonly owners = new Map<string, NativeOwner>()
+  private readonly adapters = new Map<string, PreviewStackAdapter>()
+  private readonly sources = new Map<string, NonNullable<PreparedPreview['observeSource']>>()
   constructor(private readonly store: PreviewSessionStore, private readonly authority: PreviewLaunchAuthority,
-    private readonly helper: { executable: string; fingerprint: string }) {}
+    private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }) {}
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const operation = this.tail.then(fn); this.tail = operation.catch(() => {}); return operation
   }
@@ -69,6 +83,9 @@ export class RuntimePreviewRunner {
     return new NativeOwner(this.helper.executable)
   }
   start(input: { operationId: string; selection: PreviewSelection }): Promise<PreviewSessionRecord> {
+    const selection = sessionSchema.shape.selection.safeParse(input.selection)
+    if (!selection.success) return Promise.reject(selection.error)
+    input = { operationId: input.operationId, selection: selection.data }
     return this.command(async () => {
       if (!sessionSchema.shape.operationId.safeParse(input.operationId).success) throw new Error('INVALID_OPERATION_ID')
       const previous = this.store.list().find(r => r.operationId === input.operationId)
@@ -79,11 +96,11 @@ export class RuntimePreviewRunner {
       if (this.store.active()) throw new Error('PREVIEW_SESSION_BUSY')
       const prepared = await this.authority.prepare(input.selection)
       const { profile, preflight } = prepared
-      if (preflight.status !== 'SUPPORTED') throw new Error('PREFLIGHT_' + preflight.status)
+      if (preflight.status !== 'SUPPORTED' && !diagnosticBootstrapAllowed(preflight, profile)) throw new Error('PREFLIGHT_' + preflight.status)
       if (selectionKey(preflight.selection) !== selectionKey(input.selection) || previewFingerprint(profile) !== input.selection.fingerprint || preflight.profileRevision !== profile.revision || profile.repositoryId !== input.selection.repositoryId) throw new Error('LAUNCH_IDENTITY_MISMATCH')
       if (profile.shutdown.spawn !== 'JOB_LIST_AT_CREATE') throw new Error('SAFE_SPAWN_UNAVAILABLE')
       if (profile.security.mode !== 'profile_only' || profile.security.requirements.length) throw new Error('SECURITY_ISOLATION_UNAVAILABLE')
-      if (profile.resources.some(r => r.strategy === 'SESSION_ENDPOINT')) throw new Error('RESOURCE_ADAPTER_REQUIRED')
+      if (profile.resources.some(r => r.strategy === 'SESSION_ENDPOINT') && !profile.adapter) throw new Error('RESOURCE_ADAPTER_REQUIRED')
       if (Object.keys(profile.env).some(k => reserved.test(k))) throw new Error('RESERVED_ENVIRONMENT')
       this.store.assertExternal(prepared.worktree)
       const executable = await realpath(profile.command.executable)
@@ -93,14 +110,14 @@ export class RuntimePreviewRunner {
       await prepared.guard()
       const sessionId = randomUUID()
       const at = new Date().toISOString()
-      const missingScope = (stage: PreviewSessionRecord['coverage'][number]['stage'], component: PreviewSessionRecord['coverage'][number]['component']): PreviewSessionRecord['coverage'][number] => ({ stage, component, status: 'NOT_OBSERVED', fingerprint: null, evidenceRef: null, at, reasonCode: 'APPLICATION_ADAPTER_NOT_IN_U2' })
+      const missingScope = (stage: PreviewSessionRecord['coverage'][number]['stage'], component: PreviewSessionRecord['coverage'][number]['component']): PreviewSessionRecord['coverage'][number] => ({ stage, component, status: 'NOT_OBSERVED', fingerprint: null, evidenceRef: null, at, reasonCode: stage === 'BEHAVIOR' ? 'FEATURE_ACCEPTANCE_NOT_EVALUATED' : 'ADAPTER_EVIDENCE_NOT_OBSERVED' })
       let record: PreviewSessionRecord = { schemaVersion: 1, persistence: 'PERSISTED', sessionId, operationId: input.operationId, selection: input.selection,
         profileRevision: profile.revision, gitFingerprint: prepared.gitFingerprint, revision: 0, at, startedAt: at, endedAt: null, sourceSnapshot: preflight.snapshot ?? null, state: 'PREPARING',
         reconciliation: 'NOT_REQUIRED', failure: null, resources: 'RESERVED', process: null, readiness: 'NOT_OBSERVED', liveness: 'NOT_OBSERVED',
         recoveryObservation: null, resourceInventory: [
           { name: 'process-owner', kind: 'JOB', reference: sessionId, state: 'RESERVED' },
           { name: 'graceful-stop', kind: 'STOP_EVENT', reference: sessionId, state: 'RESERVED' },
-          ...profile.resources.map(r => ({ name: r.name, kind: r.strategy as 'SESSION_DIRECTORY' | 'DISABLED', reference: sessionId + '/runtime', state: r.strategy === 'DISABLED' ? 'RELEASED' as const : 'RESERVED' as const }))
+          ...profile.resources.map(r => ({ name: r.name, kind: r.strategy, reference: r.strategy === 'SESSION_ENDPOINT' ? `127.0.0.1:${profile.adapter!.port}` : sessionId + '/runtime', state: r.strategy === 'DISABLED' ? 'RELEASED' as const : 'RESERVED' as const }))
         ],
         attestation: { artifact: 'NOT_OBSERVED', loadedCode: 'NOT_OBSERVED' },
         coverage: [
@@ -111,8 +128,15 @@ export class RuntimePreviewRunner {
         shutdown: { graceMs: profile.shutdown.graceMs, forceMs: profile.shutdown.forceMs, graceful: profile.shutdown.graceful === 'SESSION_EVENT' } }
       this.store.reserve(record)
       let native: NativeOwner | undefined
+      let adapter: PreviewStackAdapter | undefined
       let createRequested = false
       try {
+        if (profile.adapter) {
+          if (!this.helper.sdkDirectory) throw new Error('TRUSTED_SDK_REQUIRED')
+          adapter = await PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory)
+          this.adapters.set(sessionId, adapter)
+          if (prepared.observeSource) this.sources.set(sessionId, prepared.observeSource)
+        }
         native = await this.owner(); this.owners.set(sessionId, native)
         await prepared.guard()
         const runtime = this.store.runtime(sessionId)
@@ -121,16 +145,28 @@ export class RuntimePreviewRunner {
           slotKey: bytesFingerprint(this.store.root.toLowerCase()), executable, executableHash: profile.command.executableHash, cwd, args: profile.command.args, spawn: 'JOB_LIST_AT_CREATE',
           graceful: profile.shutdown.graceful ?? 'NONE', graceMs: profile.shutdown.graceMs, forceMs: profile.shutdown.forceMs, hostPid: process.pid,
           env: { ...profile.env, SystemRoot: process.env.SystemRoot!, TEMP: runtime, TMP: runtime, APPDATA: runtime, LOCALAPPDATA: runtime, USERPROFILE: runtime, HOME: runtime,
-            PREVIEW_SESSION_ID: sessionId, PREVIEW_SESSION_DIRECTORY: runtime } })
+            PREVIEW_SESSION_ID: sessionId, PREVIEW_SESSION_DIRECTORY: runtime, ...adapter?.environment() } })
         if (!observation.assignedAtCreation || !observation.ownerOutsideJob || !observation.pid || !observation.created) throw new Error('OWNERSHIP_UNVERIFIED')
         await prepared.guard()
+        let stack: Awaited<ReturnType<PreviewStackAdapter['observe']>> | undefined
+        if (adapter) {
+          await adapter.permit(native, async actual => {
+            await prepared.guard()
+            record = this.change(record, { process: observation, runtimeEvidence: { ...actual, preflight: preflight.status === 'SUPPORTED' ? 'SUPPORTED' : 'UNKNOWN', at: new Date().toISOString(), scope: 'DECLARED_INSTALL_SCRIPTS' } })
+          })
+          stack = await adapter.awaitReady(native)
+          await prepared.guard()
+        }
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE' })
+        if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
         return record
       } catch (error) {
         try { await native?.stop(0, profile.shutdown.forceMs, false) } catch { }
         let ownerExited = false
         try { await native?.shutdown(); ownerExited = true } catch { }
         this.owners.delete(sessionId)
+        this.adapters.delete(sessionId)
+        this.sources.delete(sessionId)
         // A missing create acknowledgement is not proof that CreateProcess never ran.
         const proof = this.store.nativeJournal(sessionId).at(-1)
         const observation = nativeObservation.safeParse(proof?.evidence)
@@ -155,10 +191,13 @@ export class RuntimePreviewRunner {
       try {
         const observation = await owner.stop(record.shutdown.graceMs, record.shutdown.forceMs, record.shutdown.graceful)
         if (!drained(observation)) return this.change(record, { state: 'CLEANUP_INCOMPLETE', process: observation, resources: 'UNVERIFIABLE', failure: 'DRAIN_UNVERIFIED', liveness: 'UNVERIFIABLE' })
+        await this.adapters.get(sessionId)?.released(owner)
         await owner.shutdown()
         this.store.releaseResources(sessionId)
         record = this.change(record, { state: 'STOPPED', process: observation, resources: 'RELEASED', failure: null, liveness: 'NOT_OBSERVED' })
         this.store.release(sessionId); this.owners.delete(sessionId)
+        this.adapters.delete(sessionId)
+        this.sources.delete(sessionId)
         return record
       } catch {
         return this.change(this.store.read(sessionId), { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'STOP_UNVERIFIED', liveness: 'UNVERIFIABLE' })
@@ -187,14 +226,40 @@ export class RuntimePreviewRunner {
         if (observation.rootSignaled && observation.knownHandlesClosed && observation.activeProcesses === 0) {
           const final = await owner.stop(0, record.shutdown.forceMs, false)
           if (!drained(final)) throw new Error('DRAIN_UNVERIFIED')
+          await this.adapters.get(sessionId)?.released(owner)
           await owner.shutdown(); this.store.releaseResources(sessionId)
           record = this.change(record, { state: 'STOPPED', process: final, resources: 'RELEASED', liveness: 'NOT_OBSERVED', failure: null })
           this.store.release(sessionId); this.owners.delete(sessionId)
+          this.adapters.delete(sessionId); this.sources.delete(sessionId)
           return record
         }
         if (previewFingerprint(record.process) !== previewFingerprint(observation)) {
           if (record.revision >= 224) throw new Error('SESSION_EVENT_CAPACITY')
           record = this.change(record, { process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE' })
+        }
+        const adapter = this.adapters.get(sessionId)
+        if (adapter) {
+          let stack: Awaited<ReturnType<PreviewStackAdapter['observe']>>
+          let sourceObservation: PreviewSessionRecord['sourceObservation']
+          try {
+            const source = await this.sources.get(sessionId)?.()
+            if (source) sourceObservation = { at: new Date().toISOString(), fingerprint: previewFingerprint(source), snapshot: source }
+            stack = await adapter.observe(owner)
+          }
+          catch (error) {
+            stack = { coverage: record.coverage.filter(c => !['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)).map(c => ({ ...c, status: 'UNVERIFIABLE', reasonCode: 'CURRENT_PROBE_UNVERIFIABLE' })), readiness: 'UNVERIFIABLE', attestation: { artifact: 'UNVERIFIABLE', loadedCode: 'UNVERIFIABLE' }, failure: error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'PROBE_UNVERIFIABLE' }
+          }
+          const coverage = [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage]
+          if (this.sources.has(sessionId) && !sourceObservation) {
+            const target = coverage.find(c => c.stage === 'TARGET_CHECKOUT')!
+            Object.assign(target, { status: 'UNVERIFIABLE', at: new Date().toISOString(), reasonCode: stack.failure ?? 'CURRENT_SOURCE_UNVERIFIABLE' })
+          }
+          if (sourceObservation) {
+            const target = coverage.find(c => c.stage === 'TARGET_CHECKOUT')!
+            Object.assign(target, { status: 'VERIFIED', at: sourceObservation.at, fingerprint: sourceObservation.fingerprint, evidenceRef: 'sourceObservation', reasonCode: 'CURRENT_GIT_SOURCE_OBSERVED' })
+          }
+          if (record.revision >= 224) throw new Error('SESSION_EVENT_CAPACITY')
+          record = this.change(record, { ...stack, coverage, ...(sourceObservation ? { sourceObservation } : {}) })
         }
         return record
       } catch { owner.close(); this.owners.delete(sessionId) }
@@ -210,12 +275,23 @@ export class RuntimePreviewRunner {
       } finally { await observer.shutdown() }
     }
     if (supervisorExited && proof?.phase === 'DRAINED' && observation.success && terminalProof(observation.data)) {
+      for (const resource of record.resourceInventory.filter(r => r.kind === 'SESSION_ENDPOINT')) {
+        const match = /^127\.0\.0\.1:(\d+)$/.exec(resource.reference)
+        const port = Number(match?.[1])
+        try {
+          if (!match || port < 1024 || port > 65535) throw new Error('INVALID_ENDPOINT_RECEIPT')
+          await verifyEndpointFree(port)
+        } catch {
+          return this.change(record, { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', readiness: 'UNVERIFIABLE', attestation: { artifact: 'UNVERIFIABLE', loadedCode: 'UNVERIFIABLE' }, failure: 'RECOVERED_ENDPOINT_UNVERIFIABLE', liveness: 'NOT_OBSERVED' })
+        }
+      }
       this.store.releaseResources(sessionId)
       record = this.change(record, { state: observation.data.assignedAtCreation ? 'STOPPED' : 'FAILED', resources: 'RELEASED', process: observation.data, reconciliation: 'OBSERVED', failure: null, liveness: 'NOT_OBSERVED' })
       if (this.store.active() === sessionId) this.store.release(sessionId)
+      this.adapters.delete(sessionId); this.sources.delete(sessionId)
       return record
     }
-    if (record.state !== 'OWNERSHIP_UNVERIFIED') record = this.change(record, { state: 'OWNERSHIP_UNVERIFIED', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'OWNER_LOST_OR_UNREACHABLE', liveness: 'UNVERIFIABLE' })
+    if (record.state !== 'OWNERSHIP_UNVERIFIED') record = this.change(record, { state: 'OWNERSHIP_UNVERIFIED', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'OWNER_LOST_OR_UNREACHABLE', liveness: 'UNVERIFIABLE', readiness: 'UNVERIFIABLE', attestation: { artifact: 'UNVERIFIABLE', loadedCode: 'UNVERIFIABLE' } })
     // Read-only observation cannot establish ownership or prove a destroyed Job drained.
     const observer = await this.owner()
     try {
