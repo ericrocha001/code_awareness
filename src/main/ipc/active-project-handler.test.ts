@@ -7,6 +7,7 @@ import { McpLifecycle } from '../mcp/mcp-lifecycle'
 import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import { registerActiveProjectHandlers } from './active-project-handler'
 import { registerCodeMapHandlers } from './code-map-handler'
+import { RepositoryRuntimeService } from '../repository-catalog/repository-runtime-service'
 
 const { handlers, send } = vi.hoisted(() => ({ handlers: new Map<string, Function>(), send: vi.fn() }))
 vi.mock('electron', () => ({
@@ -41,9 +42,12 @@ function setup(failMcp = false) {
     getRelationships: vi.fn(async () => ({ files: [] })), inspectFiles: vi.fn(async () => ({ files: [] })),
     readCode: vi.fn(async () => [])
   }
-  projects.onChanged(({ project }) => project
-    ? mcp.activate(project.id, bindProjectNavigation(navigation, project.path))
-    : mcp.deactivate())
+  let selectionRevision = -1
+  projects.onChanged(({ project, revision }) => {
+    if (selectionRevision === revision) return
+    selectionRevision = revision
+    return project ? mcp.activate(project.id, bindProjectNavigation(navigation, project.path)) : mcp.deactivate()
+  })
   registerActiveProjectHandlers(projects)
   registerCodeMapHandlers(registry as unknown as CodeMapService, projects)
   cleanup.push(async () => { await projects.dispose(); await mcp.dispose() })
@@ -62,9 +66,25 @@ async function discover(mcp: McpLifecycle) {
 }
 
 describe('active project authority and MCP integration', () => {
+  it('serves the selected catalog context over real MCP before slow CodeMap fails, without restarting the Channel', async () => {
+    const { projects, mcp, registry, invoke } = setup()
+    let rejectOpen!: (error: Error) => void
+    const runtime = new RepositoryRuntimeService({ resolveAvailable: () => ({ id: 'logical-A', name: 'A', status: 'ACTIVE',
+      localCheckout: { path: '/projects/A', availability: 'AVAILABLE', gitState: 'GIT' }, github: null, createdAt: '', updatedAt: '' }) },
+      { ...registry, openRepository: () => new Promise<void>((_, reject) => { rejectOpen = reject }) }, projects)
+    await runtime.activate('logical-A')
+    expect(invoke('project:get-active')).toMatchObject({ project: { id: 'logical-A' }, context: { repositoryId: 'logical-A', capabilities: { codeMap: { state: 'INITIALIZING' } } } })
+    const ready = mcp.getState()
+    expect(await discover(mcp)).toBe('[.]\n/projects/A')
+    rejectOpen(new Error('controlled open failure'))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(mcp.getState()).toEqual(ready)
+    expect(await discover(mcp)).toBe('[.]\n/projects/A')
+    expect(invoke('project:get-active').context.capabilities.codeMap).toEqual({ state: 'UNAVAILABLE', reasonCode: 'CODEMAP_OPEN_FAILED' })
+  })
   it('opens without selecting, confirms A then B, and rehydrates the same canonical state', async () => {
     const { invoke, projects, mcp, navigation } = setup()
-    expect(invoke('project:get-active')).toEqual({ revision: 0, project: null })
+    expect(invoke('project:get-active')).toMatchObject({ revision: 0, project: null, context: { identity: 'UNBOUND' } })
     const a = await invoke('code-map:open-repository', '/projects/A')
     const b = await invoke('code-map:open-repository', '/projects/B')
     expect(a.projectId).toBe('id-A')

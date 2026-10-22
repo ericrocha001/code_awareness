@@ -111,7 +111,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     let mounted = true;
     const receive = (state: ActiveProjectState) => {
-      if (mounted) setActiveProjectState((previous) => state.revision > previous.revision ? state : previous);
+      if (mounted) setActiveProjectState((previous) => state.revision > previous.revision ||
+        state.revision === previous.revision && (state.context?.revision ?? 0) > (previous.context?.revision ?? 0)
+          ? state.revision === previous.revision ? { ...state, project: previous.project } : state : previous);
     };
     const unsubscribe = window.codeAwareness.onActiveProjectChanged(receive);
     window.codeAwareness.getActiveProject().then(receive).catch(() => {

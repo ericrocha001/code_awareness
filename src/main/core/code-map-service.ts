@@ -20,6 +20,7 @@ import { COMPRESSION_TOTAL_FAILURE_MARKER, type CompressionPort } from './compre
 import type { ContentIdentityPort } from './content-identity-port'
 import { telemetryService } from './telemetry-service'
 import type { ActiveProject } from '../../shared/types/active-project-types'
+import type { CapabilityReadiness } from '../../shared/types/active-project-types'
 import type { PersistedSymbolReference } from './symbol-reference-resolver'
 import { RepositoryFileMembership } from './repository-file-membership'
 import { GitService } from './git-service'
@@ -68,6 +69,11 @@ export class CodeMapService {
       path: model.getRepoPath(),
       name: basename(model.getRepoPath())
     }))
+  }
+
+  getReadiness(repoPath: string): CapabilityReadiness {
+    const instance = instances.get(repoPath.replace(/\\/g, '/').replace(/\/$/, ''))
+    return instance ? { state: instance.model.readiness.getState() } : { state: 'UNAVAILABLE', reasonCode: 'REPOSITORY_NOT_OPEN' }
   }
 
   /**

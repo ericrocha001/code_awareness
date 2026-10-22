@@ -62,6 +62,18 @@ it('does not overwrite a newer event with an older hydration response', async ()
   expect(current().activeProject.id).toBe('B')
 })
 
+it('accepts newer readiness on the same selection without replacing its project or accepting stale snapshots', async () => {
+  render(<App />)
+  await waitFor(() => expect(current().activeProject?.id).toBe('A'))
+  const project = current().activeProject
+  const context = { revision: 2, mode: 'HOST', identity: 'IDENTITY_BOUND', repositoryId: 'A', activeCheckout: { path: project.path, basis: 'REPOSITORY_CATALOG' },
+    legacyCodeMapProjectId: null, sessionId: null, dataPolicy: 'HOST_CANONICAL', capabilities: { codeMap: { state: 'DEGRADED' }, continuum: { state: 'READY' }, channel: { state: 'UNINITIALIZED' } } } as const
+  act(() => receive({ ...state('A', 1), context }))
+  expect(current().activeProject).toBe(project)
+  act(() => receive({ ...state('old', 0), context: { ...context, revision: 100 } }))
+  expect(current().activeProject).toBe(project)
+})
+
 it('does not report an obsolete catalog selection when activation completes out of order', async () => {
   let finishA!: (value: { success: boolean }) => void
   vi.mocked(window.codeAwareness.activateRepository).mockImplementationOnce(() => new Promise((resolve) => { finishA = resolve }))

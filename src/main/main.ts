@@ -422,7 +422,8 @@ app.whenReady().then(async () => {
 
   const dashService = new DashService(codeMapService)
   const contextNavigation = new ContextEngine(codeMapService)
-  activeProjects = new ActiveProjectService(codeMapService)
+  activeProjects = new ActiveProjectService(codeMapService, path => repositoryCatalog?.findByPath(path) ?? null,
+    isRuntimePreview() ? { mode: 'PREVIEW', sessionId: process.env.PREVIEW_SESSION_ID! } : { mode: 'HOST' })
   const gitManagement = new GitManagementController(activeProjects)
   registerGitManagementHandlers(gitManagement)
   const workOrchestration = new WorkOrchestrationController(activeProjects, change => {
@@ -474,7 +475,10 @@ app.whenReady().then(async () => {
     activeValidationExecution = null
     continuumSession.deactivate()
   })
-  activeProjects.onChanged(({ project }) => {
+  let boundProjectRevision = -1
+  activeProjects.onChanged(({ project, revision }) => {
+    if (revision === boundProjectRevision) return
+    boundProjectRevision = revision
     if (!project) {
       void mcpLifecycle.deactivate()
       continuumSession.deactivate()
@@ -482,15 +486,18 @@ app.whenReady().then(async () => {
     }
 
     let continuum = undefined
+    activeProjects!.updateCapability(revision, 'continuum', { state: 'INITIALIZING' })
     try {
       const report = continuumSession.activate(project.path)
       if (report && report.discovered > 0) {
         console.log(`[Continuum] Ingestion: discovered=${report.discovered} ingested=${report.ingested} rejected=${report.rejected} retryable=${report.retryableFailures}`)
       }
       continuum = continuumSession.getActiveService() ?? undefined
+      activeProjects!.updateCapability(revision, 'continuum', { state: continuum ? 'READY' : 'UNAVAILABLE', ...(!continuum ? { reasonCode: 'CONTINUUM_UNAVAILABLE' } : {}) })
     } catch (error: any) {
       // Continuum is auxiliary context — never block project opening on its failure.
       console.error('[Continuum] Session activation failed, continuing without Continuum:', error?.message)
+      activeProjects!.updateCapability(revision, 'continuum', { state: 'UNAVAILABLE', reasonCode: 'CONTINUUM_ACTIVATION_FAILED' })
     }
 
     const gitRepositoryId = repositoryCatalog?.findByPath(project.path)?.id
@@ -530,6 +537,7 @@ app.whenReady().then(async () => {
       ingress: repositoryFileIngress,
       isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision
     })
+    activeProjects!.updateCapability(revision, 'channel', { state: 'INITIALIZING' })
     void mcpLifecycle.activateContext({
       projectId: project.id,
       repoRoot: project.path,
@@ -551,6 +559,14 @@ app.whenReady().then(async () => {
   registerConnectionHandlers(remoteAccess)
   channelProjection = new ChannelStateProjection(remoteAccess, activeProjects, mcpLifecycle,
     () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, channelFunctionalHealth)
+  const unsubscribeContextChannel = channelProjection.onChanged(state => {
+    const active = activeProjects?.getState()
+    if (!active?.project || state.activeProject?.id !== active.project.id) return
+    activeProjects!.updateCapability(active.revision, 'channel', state.availability === 'READY' ? { state: 'READY' }
+      : state.availability === 'CONNECTING' ? { state: 'INITIALIZING' }
+      : { state: state.availability === 'ERROR' ? 'DEGRADED' : 'UNAVAILABLE', reasonCode: state.availability })
+  })
+  app.on('before-quit', unsubscribeContextChannel)
   registerChannelHandlers(channelProjection)
   registerLocalMcpClientHandlers(createDesktopClientSetup(app, process.resourcesPath), process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href)
   registerSystemHealthHandlers(systemHealth)
