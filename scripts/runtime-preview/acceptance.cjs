@@ -72,8 +72,8 @@ async function main() {
   const selection = { repositoryId, worktreeId: selected.worktreeId, generation: selected.generation, profileId: profile.profileId, fingerprint: hash(JSON.stringify(canonical)) }
   const { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } = get('work-orchestration/runtime-preview/runner')
   const { PreviewSessionStore } = get('work-orchestration/runtime-preview/session-store')
-  const binary = build(process.argv.includes('--faults')).owner, store = new PreviewSessionStore(path.join(directory, 'sessions'))
-  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profiles, new PreviewPreflightService(profiles)), { executable: binary, fingerprint: hash(fs.readFileSync(binary)), sdkDirectory: path.join(root, 'scripts/runtime-preview') })
+  const nativeBuild = build(process.argv.includes('--faults')), binary = nativeBuild.owner, store = new PreviewSessionStore(path.join(directory, 'sessions'))
+  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profiles, new PreviewPreflightService(profiles)), { executable: binary, fingerprint: nativeBuild.fingerprint, sdkDirectory: path.join(root, 'scripts/runtime-preview') })
   const session = await runner.start({ operationId: randomUUID(), selection })
   const output = path.join(root, '.code-awareness/u3/' + kind + '-latest.json')
   const save = result => { fs.writeFileSync(output, JSON.stringify({ directory, target, repositoryRoot, port, ...result }, null, 2)); console.log(JSON.stringify({ directory, target, port, state: result.session.state, readiness: result.session.readiness, failure: result.session.failure, attestation: result.session.attestation })) }

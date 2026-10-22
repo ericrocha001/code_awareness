@@ -15,7 +15,7 @@
     "prebuild": "npm run native:doctor",
     "build": "electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && npm run native:bundle-guard",
     "runtime-preview:build": "node scripts/runtime-preview/build.cjs",
-    "test:runtime-preview:windows": "node scripts/test-output.cjs run -- node --test --test-concurrency=1 scripts/runtime-preview/windows.test.cjs",
+    "test:runtime-preview:windows": "node scripts/test-output.cjs run -- node --test --test-concurrency=1 scripts/runtime-preview/build.test.cjs scripts/runtime-preview/windows.test.cjs",
     "preview": "electron-vite preview",
     "typecheck": "node scripts/typecheck-gate.cjs",
     "typecheck:baseline": "node scripts/typecheck-gate.cjs --update",
@@ -90,6 +90,8 @@
     "vitest": "3.2.7"
   },
   "build": {
+    "beforePack": "./scripts/runtime-preview/pack.cjs",
+    "afterPack": "./scripts/runtime-preview/pack.cjs",
     "appId": "com.ericrocha.codeawareness",
     "productName": "Code Awareness",
     "directories": {
@@ -97,6 +99,7 @@
     },
     "files": [
       "out/**/*",
+      "!out/runtime-preview/**/*",
       "package.json"
     ],
     "extraResources": [
@@ -104,10 +107,6 @@
         "from": "scripts/runtime-preview",
         "to": "runtime-preview/sdk",
         "filter": ["launch.cjs", "cooperation.cjs", "build-identity.cjs"]
-      },
-      {
-        "from": "out/runtime-preview/production/preview-owner.exe",
-        "to": "runtime-preview/preview-owner.exe"
       },
       {
         "from": "out/local-mcp/launcher.cjs",
