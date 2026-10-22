@@ -299,3 +299,38 @@ test('simultaneous independent controllers cannot acquire two persistent active 
   const id = fixture.store.active()
   assert.equal((await winner.stop(id)).state, 'STOPPED')
 })
+
+test('launch cleanup failure stays structured; missing native launch receipt remains inconclusive', async () => {
+  const fixture = fixtureRunner(), release = fixture.store.releaseResources.bind(fixture.store), prepare = fixture.authority.prepare.bind(fixture.authority)
+  let checks = 0
+  fixture.authority.prepare = async () => ({ ...await prepare(), guard: async () => { if (++checks === 2) throw new Error('GIT_STATE_CHANGED') } })
+  fixture.store.releaseResources = () => { throw new Error('CONTROLLED_RESOURCE_LOCK') }
+  const failed = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
+  assert.equal(failed.state, 'CLEANUP_INCOMPLETE'); assert.equal(failed.failure, 'RESOURCE_RELEASE_UNVERIFIED')
+  assert.equal(failed.resources, 'UNVERIFIABLE'); assert.equal(fixture.store.active(), failed.sessionId)
+  fixture.store.releaseResources = release
+  const recovered = new RuntimePreviewRunner(fixture.store, fixture.authority, fixture.helper)
+  const final = await recovered.inspect(failed.sessionId)
+  assert.equal(final.state, 'OWNERSHIP_UNVERIFIED'); assert.equal(final.resources, 'UNVERIFIABLE'); assert.equal(fixture.store.active(), failed.sessionId)
+})
+
+test('recovery never reports STOPPED while runtime directories remain unresolved', async () => {
+  const fixture = fixtureRunner(), started = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
+  const native = fixture.runner.owners.get(started.sessionId)
+  await native.stop(1000, 2000, true); await native.shutdown()
+  const release = fixture.store.releaseResources.bind(fixture.store)
+  fixture.store.releaseResources = () => { throw new Error('CONTROLLED_RESOURCE_LOCK') }
+  const recovered = new RuntimePreviewRunner(fixture.store, fixture.authority, fixture.helper)
+  const incomplete = await recovered.inspect(started.sessionId)
+  assert.equal(incomplete.state, 'CLEANUP_INCOMPLETE'); assert.equal(incomplete.failure, 'RESOURCE_RELEASE_UNVERIFIED')
+  fixture.store.releaseResources = release
+  assert.equal((await recovered.inspect(started.sessionId)).state, 'STOPPED')
+})
+
+test('retired caller context after native creation drains the owned process before launch acknowledgement', async () => {
+  const fixture = fixtureRunner(); let guards = 0
+  const record = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection, guard: () => { if (++guards === 3) throw new Error('PROJECT_CONTEXT_CHANGED') } })
+  assert.equal(record.state, 'FAILED'); assert.equal(record.failure, 'PROJECT_CONTEXT_CHANGED')
+  assert.equal(record.resources, 'RELEASED'); assert.equal(record.process.activeProcesses, 0)
+  assert.equal(record.process.rootSignaled, true); assert.equal(fixture.store.active(), undefined)
+})

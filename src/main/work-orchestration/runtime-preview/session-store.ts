@@ -21,6 +21,7 @@ export const sessionSchema = z.object({
     reference: z.string().max(2048), state: z.enum(['RESERVED', 'RELEASED', 'UNVERIFIABLE']) }).strict()).max(34),
   recoveryObservation: z.object({ jobPresent: z.boolean(), jobQueryError: z.number().int(), activeProcesses: z.number().int().nonnegative().nullable(),
     sameProcessAlive: z.boolean().nullable(), adopted: z.literal(false), terminated: z.literal(false) }).strict().nullable(),
+  validationLinks: z.array(z.object({ bindingId: z.string().max(128), executionId: z.string().max(512), criterionId: z.string().max(128), proofId: z.string().max(128), evidenceRevision: z.number().int().min(0).max(255), sourceFingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict()).max(16).optional(),
   readiness: z.enum(['NOT_OBSERVED', 'READY', 'NOT_READY', 'UNVERIFIABLE']), liveness: z.enum(['NOT_OBSERVED', 'VERIFIED', 'UNVERIFIABLE']),
   attestation: z.object({ artifact: z.enum(['NOT_OBSERVED', 'VERIFIED', 'UNVERIFIABLE', 'STALE']), loadedCode: z.enum(['NOT_OBSERVED', 'VERIFIED', 'UNVERIFIABLE', 'STALE']) }).strict(),
   coverage: z.array(z.object({ stage: z.enum(['TARGET_CHECKOUT', 'ENDPOINT', 'SERVED_ARTIFACT', 'LOADED_COMPONENT', 'BEHAVIOR']),
@@ -72,19 +73,23 @@ export class PreviewSessionStore {
     this.assertSafe(this.directory(record.sessionId))
     this.immutable(join(this.directory(record.sessionId), String(record.revision).padStart(3, '0') + '.json'), record)
   }
-  read(id: string): PreviewSessionRecord {
+  read(id: string, revision?: number): PreviewSessionRecord {
+    if (revision !== undefined && (!Number.isInteger(revision) || revision < 0 || revision > 255)) throw new Error('INVALID_SESSION_REVISION')
     const directory = this.directory(id); this.assertSafe(directory)
     const files = readdirSync(directory).filter(n => /^\d{3}\.json$/.test(n)).sort()
     if (!files.length || files.length > 256) throw new Error('SESSION_RECORD_UNVERIFIABLE')
     let latest: PreviewSessionRecord | undefined
+    let selected: PreviewSessionRecord | undefined
     for (const [index, name] of files.entries()) {
       const path = join(directory, name); this.assertSafe(path)
       if (lstatSync(path).size > 32768) throw new Error('SESSION_RECORD_LIMIT')
       const value = sessionSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
       if (value.sessionId !== id || value.revision !== index || (latest && (value.operationId !== latest.operationId || value.profileRevision !== latest.profileRevision || value.gitFingerprint !== latest.gitFingerprint || JSON.stringify(value.selection) !== JSON.stringify(latest.selection)))) throw new Error('SESSION_RECORD_UNVERIFIABLE')
       latest = value
+      if (value.revision === revision) selected = value
     }
-    return latest!
+    if (revision !== undefined && !selected) throw new Error('SESSION_REVISION_NOT_FOUND')
+    return revision === undefined ? latest! : selected!
   }
   list() { return readdirSync(this.root).filter(n => z.string().uuid().safeParse(n).success).map(id => this.read(id)) }
   active(): string | undefined {

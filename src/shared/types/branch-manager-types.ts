@@ -6,6 +6,7 @@ import type { WorktreeRemovalExecute, WorktreeRemovalPreview } from './worktree-
 import type { GitOperationalResult } from './git-management-types'
 import type { ExecutionBindingPage, ExecutionDocumentPage } from './execution-branch-types'
 export type BranchManagerOperation =
+  | { action: 'PREVIEW_RUNTIME'; request: import('./runtime-preview-operations').RuntimePreviewRequest }
   | { action: 'PREVIEW_PROFILES'; repositoryId: string }
   | { action: 'PREVIEW_WORKTREES'; repositoryId: string }
   | { action: 'PREVIEW_PREFLIGHT'; selection: import('./runtime-preview-types').PreviewSelection }
@@ -22,6 +23,7 @@ export type BranchManagerOperation =
   | { action: 'EXECUTE_REMOVAL'; request: WorktreeRemovalExecute }
 export interface BranchManagerRequest { context: OrchestrationContext; operation: BranchManagerOperation }
 export type BranchManagerData =
+  | { kind: 'PREVIEW_RUNTIME'; result: import('./runtime-preview-operations').RuntimePreviewResult }
   | { kind: 'PREVIEW_PROFILES'; profiles: import('./runtime-preview-types').PreviewProfileSummary[] }
   | { kind: 'PREVIEW_WORKTREES'; repositoryId: string; worktrees: import('./branch-orchestration-types').BranchWorktree[] }
   | { kind: 'PREVIEW_PREFLIGHT'; preflight: import('./runtime-preview-types').PreviewPreflight }

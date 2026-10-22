@@ -82,11 +82,12 @@ export class RuntimePreviewRunner {
     if (bytesFingerprint(await readFile(this.helper.executable)) !== this.helper.fingerprint) throw new Error('NATIVE_HELPER_CHANGED')
     return new NativeOwner(this.helper.executable)
   }
-  start(input: { operationId: string; selection: PreviewSelection }): Promise<PreviewSessionRecord> {
+  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void }): Promise<PreviewSessionRecord> {
     const selection = sessionSchema.shape.selection.safeParse(input.selection)
     if (!selection.success) return Promise.reject(selection.error)
-    input = { operationId: input.operationId, selection: selection.data }
+    input = { operationId: input.operationId, selection: selection.data, guard: input.guard }
     return this.command(async () => {
+      input.guard?.()
       if (!sessionSchema.shape.operationId.safeParse(input.operationId).success) throw new Error('INVALID_OPERATION_ID')
       const previous = this.store.list().find(r => r.operationId === input.operationId)
       if (previous) {
@@ -139,6 +140,7 @@ export class RuntimePreviewRunner {
         }
         native = await this.owner(); this.owners.set(sessionId, native)
         await prepared.guard()
+        input.guard?.()
         const runtime = this.store.runtime(sessionId)
         createRequested = true
         const observation = await native.start({ sessionId, operationId: input.operationId, directory: this.store.directory(sessionId),
@@ -152,11 +154,13 @@ export class RuntimePreviewRunner {
         if (adapter) {
           await adapter.permit(native, async actual => {
             await prepared.guard()
+            input.guard?.()
             record = this.change(record, { process: observation, runtimeEvidence: { ...actual, preflight: preflight.status === 'SUPPORTED' ? 'SUPPORTED' : 'UNKNOWN', at: new Date().toISOString(), scope: 'DECLARED_INSTALL_SCRIPTS' } })
           })
           stack = await adapter.awaitReady(native)
           await prepared.guard()
         }
+        input.guard?.()
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE' })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
         return record
@@ -171,7 +175,8 @@ export class RuntimePreviewRunner {
         const proof = this.store.nativeJournal(sessionId).at(-1)
         const observation = nativeObservation.safeParse(proof?.evidence)
         if (ownerExited && ((!createRequested) || (proof?.phase === 'DRAINED' && observation.success && terminalProof(observation.data)))) {
-          this.store.releaseResources(sessionId)
+          try { this.store.releaseResources(sessionId) }
+          catch { return this.change(this.store.read(sessionId), { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', process: observation.success ? observation.data : null, failure: 'RESOURCE_RELEASE_UNVERIFIED', readiness: 'UNVERIFIABLE', liveness: 'NOT_OBSERVED' }) }
           const reason = error instanceof Error && /^[A-Z_0-9:]{1,160}$/.test(error.message) ? error.message : 'LAUNCH_FAILED'
           record = this.change(this.store.read(sessionId), { state: 'FAILED', resources: 'RELEASED', process: observation.success ? observation.data : null, failure: reason })
           this.store.release(sessionId)
@@ -216,6 +221,16 @@ export class RuntimePreviewRunner {
     })
   }
   inspect(sessionId: string) { return this.command(() => this.inspectInternal(sessionId)) }
+  linkValidation(sessionId: string, link: import('../../../shared/types/runtime-preview-operations').PreviewValidationLink, expectedRevision: number, guard: () => Promise<void>) {
+    return this.command(async () => {
+      const record = this.store.read(sessionId)
+      if (record.revision !== expectedRevision) throw new Error('SESSION_CHANGED')
+      if ((record.validationLinks ?? []).some(value => JSON.stringify(value) === JSON.stringify(link))) return record
+      if ((record.validationLinks?.length ?? 0) >= 16) throw new Error('VALIDATION_LINK_LIMIT')
+      await guard()
+      return this.change(record, { validationLinks: [...(record.validationLinks ?? []), link] })
+    })
+  }
   private async inspectInternal(sessionId: string): Promise<PreviewSessionRecord> {
     let record = this.store.read(sessionId)
     if (record.state === 'STOPPED' || record.state === 'FAILED') return record
@@ -285,7 +300,8 @@ export class RuntimePreviewRunner {
           return this.change(record, { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', readiness: 'UNVERIFIABLE', attestation: { artifact: 'UNVERIFIABLE', loadedCode: 'UNVERIFIABLE' }, failure: 'RECOVERED_ENDPOINT_UNVERIFIABLE', liveness: 'NOT_OBSERVED' })
         }
       }
-      this.store.releaseResources(sessionId)
+      try { this.store.releaseResources(sessionId) }
+      catch { return this.change(record, { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', process: observation.data, failure: 'RESOURCE_RELEASE_UNVERIFIED', readiness: 'UNVERIFIABLE', liveness: 'NOT_OBSERVED' }) }
       record = this.change(record, { state: observation.data.assignedAtCreation ? 'STOPPED' : 'FAILED', resources: 'RELEASED', process: observation.data, reconciliation: 'OBSERVED', failure: null, liveness: 'NOT_OBSERVED' })
       if (this.store.active() === sessionId) this.store.release(sessionId)
       this.adapters.delete(sessionId); this.sources.delete(sessionId)

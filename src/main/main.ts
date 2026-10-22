@@ -3,7 +3,7 @@
 */
 
 import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage, powerMonitor } from 'electron'
-import { existsSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'node:url'
 import { registerFileHandlers } from './ipc/file-handler'
@@ -97,6 +97,11 @@ import { BranchOrchestrationController, registerBranchOrchestrationHandlers } fr
 import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
 import { PreviewRepositories } from './work-orchestration/preview-repositories'
 import { isRuntimePreview } from './work-orchestration/runtime-preview/electron-mode'
+import { resolvePreviewHelper } from './work-orchestration/runtime-preview/host-helper'
+import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orchestration/runtime-preview/runner'
+import { PreviewSessionStore } from './work-orchestration/runtime-preview/session-store'
+import { RuntimePreviewOperations } from './work-orchestration/runtime-preview/operations'
+import { PreviewPreflightService } from './work-orchestration/preview-preflight'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
@@ -424,19 +429,34 @@ app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:changed', change)
   })
   registerWorkOrchestrationHandlers(workOrchestration)
+  const previewDirectory = join(app.getPath('userData'), 'work-orchestration')
+  mkdirSync(join(previewDirectory, 'preview-profiles'), { recursive: true })
+  const previewProfiles = new PreviewProfileStore(join(previewDirectory, 'preview-profiles'))
+  const previewRepositories = new PreviewRepositories(repositoryCatalog, (path, identity) => new GitOperationsService(path, gitService, gitTransport, identity, true))
+  const confirmPreview = async (profile: import('./work-orchestration/preview-profile').PreviewProfile) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false
+    const response = await dialog.showMessageBox(mainWindow, { type: 'warning', title: 'Aprovar perfil de preview',
+      message: `Revisar e aprovar ${profile.profileId} revisão ${profile.revision}?`,
+      detail: `Repositório: ${profile.repositoryId}\nRuntime: ${profile.runtime} ${profile.runtimeVersion}\nComando: ${profile.command.executable} ${profile.command.args.join(' ')}\nCwd relativo: ${profile.command.cwd}\nModo: ${profile.security.mode}\nGarantias exigidas: ${JSON.stringify(profile.security.requirements)}\nDestinos: ${profile.network.destinations.join(', ')}\nRede aberta consentida: ${profile.network.openNetworkConsent}\nPerfil operacional não é sandbox. Esta aprovação não reduz requisitos nem inicia processos.`,
+      buttons: ['Cancelar', 'Aprovar esta revisão e política'], defaultId: 0, cancelId: 0, noLink: true })
+    return response.response === 1
+  }
+  let runtimePreview: RuntimePreviewOperations | undefined
+  if (!isRuntimePreview() && process.platform === 'win32') {
+    try {
+      const helper = resolvePreviewHelper({ packaged: app.isPackaged, resources: process.resourcesPath, root: app.getAppPath(), developmentBuild: process.env.CODE_AWARENESS_PREVIEW_NATIVE_BUILD })
+      const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
+      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper)
+      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession)
+    } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
+  }
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
     const response = await dialog.showMessageBox({ type: 'warning', title: 'Liberar e remover Worktree',
       message: 'Confirme que a IDE e os agentes desta Worktree foram encerrados e liberaram o diretório.',
       detail: `${preview.worktree.path}\nBranch preservada: ${preview.preservationRef}\nHEAD: ${preview.preservationHead}\n\nA remoção será revalidada. A branch e seus commits serão mantidos.`,
       buttons: ['Cancelar', 'IDE e agentes liberados; remover Worktree'], defaultId: 0, cancelId: 0, noLink: true })
     return response.response === 1
-  }, continuumSession, new PreviewProfileStore(join(app.getPath('userData'), 'work-orchestration', 'preview-profiles')), async profile => {
-    const response = await dialog.showMessageBox({ type: 'warning', title: 'Aprovar perfil de preview',
-      message: `Revisar e aprovar ${profile.profileId} revisão ${profile.revision}?`,
-      detail: `Repositório: ${profile.repositoryId}\nRuntime: ${profile.runtime} ${profile.runtimeVersion}\nComando: ${profile.command.executable} ${profile.command.args.join(' ')}\nCwd relativo: ${profile.command.cwd}\nModo: ${profile.security.mode}\nGarantias exigidas: ${JSON.stringify(profile.security.requirements)}\nDestinos: ${profile.network.destinations.join(', ')}\nRede aberta consentida: ${profile.network.openNetworkConsent}\nPerfil operacional não é sandbox. Esta aprovação não reduz requisitos nem inicia processos.`,
-      buttons: ['Cancelar', 'Aprovar esta revisão e política'], defaultId: 0, cancelId: 0, noLink: true })
-    return response.response === 1
-  }, new PreviewRepositories(repositoryCatalog, (path, identity) => new GitOperationsService(path, gitService, gitTransport, identity, true)))
+  }, continuumSession, previewProfiles, confirmPreview, previewRepositories, runtimePreview)
   registerBranchOrchestrationHandlers(branchOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))
@@ -517,6 +537,7 @@ app.whenReady().then(async () => {
       continuum,
       visualContinuum: continuum,
       validationExecution: activeValidationExecution,
+      ...(runtimePreview ? { runtimePreview: { service: runtimePreview, isCurrent: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision } } : {}),
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
       githubIntegration,

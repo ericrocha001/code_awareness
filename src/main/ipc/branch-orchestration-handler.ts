@@ -11,13 +11,14 @@ import { PreviewPreflightService } from '../work-orchestration/preview-preflight
 import { PreviewProfileStore } from '../work-orchestration/preview-profile-store'
 import { previewFingerprint, type PreviewProfile } from '../work-orchestration/preview-profile'
 import type { PreviewRepositories } from '../work-orchestration/preview-repositories'
+import { previewRequestSchema, type RuntimePreviewOperations } from '../work-orchestration/runtime-preview/operations'
 
 export class BranchOrchestrationController {
   private active: { git: GitOperationsService; github: Pick<GitHubIntegrationService, 'branchPullRequests' | 'pullRequestCommits' | 'assessBranchDiscard'>; path: string; projectId: string; revision: number } | null = null
   private readonly mutations = new Set<Promise<unknown>>()
   private readonly previewPreflight: PreviewPreflightService | undefined
   constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly confirmRelease: (preview: WorktreeRemovalPreview) => Promise<boolean>, private readonly continuum?: RepositoryContinuumSession,
-    private readonly previewStore?: PreviewProfileStore, private readonly confirmProfile?: (profile: PreviewProfile) => Promise<boolean>, private readonly previewRepositories?: PreviewRepositories) {
+    private readonly previewStore?: PreviewProfileStore, private readonly confirmProfile?: (profile: PreviewProfile) => Promise<boolean>, private readonly previewRepositories?: PreviewRepositories, private readonly runtimePreview?: RuntimePreviewOperations) {
     this.previewPreflight = previewStore ? new PreviewPreflightService(previewStore) : undefined
   }
   bind(git: GitOperationsService, github: Pick<GitHubIntegrationService, 'branchPullRequests' | 'pullRequestCommits' | 'assessBranchDiscard'>, path: string) {
@@ -39,6 +40,10 @@ export class BranchOrchestrationController {
         const remote = (inventory: Parameters<GitHubIntegrationService['assessBranchDiscard']>[1], branch: Parameters<GitHubIntegrationService['assessBranchDiscard']>[2]) => github.assessBranchDiscard(path, inventory, branch)
         let data: BranchManagerData
         switch (operation.action) {
+          case 'PREVIEW_RUNTIME': {
+            if (!this.runtimePreview) throw new Error('PREVIEW_UNAVAILABLE')
+            data = { kind: 'PREVIEW_RUNTIME', result: await this.runtimePreview.handle(operation.request, guard) }; break
+          }
           case 'PREVIEW_PROFILES': {
             if (!this.previewPreflight || !this.previewRepositories) throw new Error('PREVIEW_UNAVAILABLE')
             const target = this.previewRepositories.resolve(operation.repositoryId)
@@ -105,6 +110,7 @@ function valid(value: BranchManagerRequest): boolean {
   if (!keys(value, ['context', 'operation']) || !keys(value.context, ['projectId', 'revision']) || !text(value.context.projectId) || !Number.isSafeInteger(value.context.revision) || value.context.revision < 0) return false
   const op = value.operation
   if (!op || typeof op !== 'object') return false
+  if (op.action === 'PREVIEW_RUNTIME') return keys(op, ['action', 'request']) && previewRequestSchema.safeParse(op.request).success
   if (op.action === 'PREVIEW_PROFILES' || op.action === 'PREVIEW_WORKTREES') return keys(op, ['action', 'repositoryId']) && text(op.repositoryId)
   if (op.action === 'PREVIEW_PREFLIGHT' || op.action === 'PREVIEW_APPROVE') return keys(op, ['action', 'selection']) && keys(op.selection, ['repositoryId', 'worktreeId', 'generation', 'profileId', 'fingerprint']) && [op.selection.repositoryId, op.selection.worktreeId, op.selection.generation, op.selection.profileId, op.selection.fingerprint].every(v => text(v))
   if (op.action === 'INVENTORY') return keys(op, ['action'])
