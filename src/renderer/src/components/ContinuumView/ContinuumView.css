@@ -102,10 +102,10 @@
 .continuum-active-filters h3 { margin: 0; font-size: 12px; color: var(--text-secondary); }
 .continuum-active-filters > div { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 4px 6px; border: 1px solid var(--border); border-radius: 6px; font-size: 11px; }
 .continuum-active-filters > div > span { min-width: 0; overflow-wrap: anywhere; }
-.continuum-export-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.continuum-export-actions { display: flex; gap: 6px; }
 .continuum-export-feedback { font-size: 12px; overflow-wrap: anywhere; }
 .continuum-view .continuum-icon-button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 30px; height: 30px; padding: 0; }
-.continuum-tag-manager { position: absolute; inset: 100px 24px 24px auto; z-index: 5; width: min(600px, calc(100% - 48px)); overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); box-shadow: 0 12px 48px #0006; font-size: 12px; }
+.continuum-tag-manager { position: fixed; inset: 0; margin: auto; max-height: min(640px, calc(100vh - 48px)); width: min(560px, calc(100vw - 48px)); overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); color: var(--text-primary); box-shadow: 0 12px 48px #0006; font-size: 12px; }
 .continuum-tag-manager header { display: flex; align-items: center; justify-content: space-between; }
 .continuum-tag-manager h2 { font-size: 17px; }
 .continuum-tag-manager form { display: grid; gap: 10px; margin-top: 16px; }
@@ -113,16 +113,10 @@
 .continuum-tag-manager input, .continuum-tag-manager textarea { min-width: 0; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
 .continuum-tag-list > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
 .continuum-tag-manager button, .continuum-tag-list button, .continuum-tag-confirmation button { border: 1px solid var(--border); border-radius: 6px; padding: 6px; background: var(--bg-primary); }
-.continuum-artifact-tags input, .continuum-tag-selection input { accent-color: var(--accent); }
-.continuum-tag-list code { color: var(--text-secondary); margin-right: auto; overflow-wrap: anywhere; }
 .continuum-tag-dot { display: inline-block; flex-shrink: 0; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
-.continuum-artifact-tags { margin: 0 0 12px; border: 1px solid var(--border-subtle); border-radius: 8px; padding: 8px; font-size: 12px; }
-.continuum-artifact-tags label { display: inline-flex; align-items: center; gap: 5px; margin: 4px 12px 4px 0; }
-.continuum-artifact-tags p { color: var(--text-secondary); }
 .continuum-tag-confirmation { padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
 .continuum-tag-confirmation ul { max-height: 160px; overflow: auto; overflow-wrap: anywhere; }
 .continuum-tag-confirmation button { margin-right: 8px; }
-.continuum-tag-selection { display: flex; justify-content: flex-end; align-items: center; gap: 4px; font-size: 10px; color: var(--text-secondary); margin: 0 14px 4px; }
 .continuum-bundle-composer { position: absolute; inset: 100px 24px 24px auto; width: min(760px, calc(100% - 48px)); z-index: 6; overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); box-shadow: 0 12px 48px #0006; font-size: 12px; }
 .continuum-bundle-composer header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .continuum-bundle-composer h2 { font-size: 17px; overflow-wrap: anywhere; }
@@ -141,3 +135,30 @@
 .continuum-view-switch { display: flex; gap: 4px; }
 .continuum-view-switch button { padding: 6px 9px; border: 1px solid var(--border); border-radius: 7px; color: var(--text-secondary); background: var(--bg-primary); }
 .continuum-view-switch button[aria-selected=true] { color: var(--text-primary); border-color: var(--accent); background: var(--selected-bg); }
+
+.continuum-header { flex-wrap: wrap; }
+.continuum-header .continuum-publish { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+.continuum-inspector .continuum-pane-heading { position: relative; overflow: visible; }
+.continuum-inspector-actions { display: flex; gap: 6px; align-items: center; margin-left: auto; }
+.continuum-inspector-actions .continuum-export-feedback { position: absolute; top: 100%; right: 8px; z-index: 4; max-width: 300px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); box-shadow: 0 6px 20px #0003; }
+.continuum-tag-anchor { position: relative; }
+.continuum-tag-count { font-size: 9px; }
+.continuum-tag-popover { position: absolute; top: calc(100% + 8px); right: 0; z-index: 5; width: 280px; max-width: calc(100vw - 64px); padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-secondary); box-shadow: 0 12px 36px #0005; font-size: 12px; }
+.continuum-tag-popover input { width: 100%; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
+.continuum-tag-popover button { padding: 8px; background: var(--bg-primary); border: 1px solid var(--border-subtle); border-radius: 6px; text-align: left; }
+.continuum-tag-results { max-height: 220px; overflow: auto; display: grid; gap: 4px; margin-top: 8px; }
+.continuum-tag-results button { display: flex; align-items: center; gap: 6px; }
+.continuum-tag-results button > span:nth-child(2) { flex: 1; overflow-wrap: anywhere; }
+.continuum-tag-results button[aria-pressed=true] { border-color: var(--accent); background: var(--selected-bg); }
+.continuum-tag-manager::backdrop { background: #0006; }
+.continuum-tag-name { flex: 1; min-width: 0; display: flex; align-items: center; text-align: left; gap: 6px; }
+.continuum-tag-name > span:nth-child(2) { flex: 1; overflow-wrap: anywhere; }
+.continuum-tag-options { position: relative; }
+.continuum-tag-options summary { cursor: pointer; list-style: none; padding: 6px; }
+.continuum-tag-options > div { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
+.continuum-tag-options[open] { flex-basis: 100%; }
+.continuum-tag-manager form details label { margin: 8px 0; }
+.continuum-header .sb-root { flex: 1 1 180px; max-width: none; }
+@container (max-width: 1000px) {
+  .continuum-header .sb-root { order: 1; flex-basis: 100%; margin-left: 0; }
+}

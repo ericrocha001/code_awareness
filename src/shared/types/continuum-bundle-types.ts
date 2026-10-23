@@ -6,3 +6,7 @@ export interface ContinuumBundlePreview {
 }
 export interface ContinuumBundlePrepare { repositoryId: string; slug: string; objective?: string; order?: string[] }
 export interface ContinuumBundleExport { repositoryId: string; snapshotId: string; intent: 'copy' | 'markdown' | 'zip' }
+export interface ContinuumBundleQuick { repositoryId: string; slug: string; intent: ContinuumBundleExport['intent'] }
+export interface ContinuumBundleReceipt {
+  repositoryId: string; slug: string; snapshotId: string; count: number; markdownBytes: number; tokenCount: number; tokenizerEncoding: string; hasVisuals: boolean; outcome: 'preview' | 'copied' | 'saved' | 'cancelled'
+}

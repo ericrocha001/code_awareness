@@ -16,7 +16,9 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   tags() { this.assertActive(); this.reconcile?.(); this.assertActive(); return this.store.tags() }
   mutateTags(request: ContinuumTagMutation) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
-    if (request.intent === 'create' || request.intent === 'edit') this.store.saveTag(request.tag, request.intent === 'create')
+    if (request.repositoryId !== this.store.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+    if (request.intent === 'quick-create') this.store.createQuickTag(request.name, request.color, request.description, request.selected)
+    else if (request.intent === 'create' || request.intent === 'edit') this.store.saveTag(request.tag, request.intent === 'create')
     else if (request.intent === 'delete') this.store.deleteTag(request.slug)
     else if (request.intent === 'assign') {
       if (request.confirmed !== true) throw new Error('TAG_CONFIRMATION_REQUIRED')

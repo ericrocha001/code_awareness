@@ -110,3 +110,18 @@ it('allows immutable import replay after human tagging without authorizing impor
   const changed = editArtifactTags(rawMarkdown, ['architecture'])
   expect(() => f.service.importArtifact('inbox:fixture', { ...input, rawMarkdown: changed, metadata: parseArtifactMarkdown(changed).metadata })).toThrow('IDENTITY_CONFLICT')
 })
+it('creates by name and assigns atomically, reuses exact identities and rolls back catalog on CAS failure', () => {
+  const f = setup(), one = f.service.publish(markdown('One'))
+  const request = { repositoryId: 'catalog-A', intent: 'quick-create' as const, name: 'Arquitetura Técnica', selected: [{ artifactId: one.artifactId, expectedRevision: 99 }] }
+  expect(() => f.service.mutateTags(request)).toThrow('REVISION_CONFLICT')
+  expect(f.service.tags()).toEqual([])
+  const original = f.service.get(one.artifactId)!
+  f.service.mutateTags({ ...request, selected: [{ artifactId: one.artifactId, expectedRevision: 1 }] })
+  expect(f.service.tags()).toEqual([{ slug: 'arquitetura-tecnica', name: 'Arquitetura Técnica', color: '#7852ee', description: '', count: 1 }])
+  expect(parseArtifactMarkdown(f.service.get(one.artifactId)!.rawMarkdown).body).toBe(parseArtifactMarkdown(original.rawMarkdown).body)
+  f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'quick-create', name: 'arquitetura técnica' })
+  expect(f.service.tags()).toHaveLength(1)
+  expect(() => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'quick-create', name: 'Arquitetura Tecnica' })).toThrow('TAG_IDENTITY_CONFLICT')
+  expect(() => f.service.mutateTags({ ...request, repositoryId: 'other' })).toThrow('REPOSITORY_CONTEXT_CHANGED')
+  expect(f.service.get(one.artifactId)!.revision).toBe(2)
+})

@@ -400,7 +400,7 @@ function revealFacet(key: string) {
   if (!screen.queryByRole('checkbox', { name: key })) fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
   const checkbox = screen.getByRole('checkbox', { name: key }) as HTMLInputElement
   if (!checkbox.checked) fireEvent.click(checkbox)
-  fireEvent.click(screen.getByRole('button', { name: 'Expand All' }))
+  const expand = screen.queryByRole('button', { name: 'Expandir tudo' }); if (expand) fireEvent.click(expand)
 }
 
 it('persists free facet visibility by catalog identity without refetching and keeps hidden criteria removable', async () => {
@@ -459,11 +459,14 @@ it('expands and collapses visible groups and months while allowing individual na
   const groups = [...document.querySelectorAll<HTMLDetailsElement>('.continuum-facet-groups details')]
   expect(groups).toHaveLength(2)
   expect(groups.every(group => !group.open)).toBe(true)
-  fireEvent.click(screen.getByRole('button', { name: 'Expand All' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Expandir tudo' }))
   expect(groups.every(group => group.open)).toBe(true)
   fireEvent.click(groups[1].querySelector('summary')!)
   expect(groups[1].open).toBe(false)
-  fireEvent.click(screen.getByRole('button', { name: 'Collapse All' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Expandir tudo' })).toBeTruthy())
+  fireEvent.click(screen.getByRole('button', { name: 'Expandir tudo' }))
+  expect(groups.every(group => group.open)).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Recolher tudo' }))
   expect(groups.every(group => !group.open)).toBe(true)
 })
 
@@ -475,7 +478,7 @@ it('exports only a loaded selection, locks both actions and reports save cancell
   expect(screen.queryByRole('button', { name: 'Copiar' })).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: /First artifact/ }))
   await screen.findByRole('button', { name: 'Copiar' })
-  for (const name of ['Copiar', 'Salvar como…', 'Personalizar filtros', 'Expand All', 'Collapse All', 'Limpar']) {
+  for (const name of ['Copiar', 'Salvar como…', 'Personalizar filtros', 'Expandir tudo', 'Limpar']) {
     const action = screen.getByRole('button', { name })
     expect(action.textContent).toBe('')
     expect(action.getAttribute('title')).toBe(name)

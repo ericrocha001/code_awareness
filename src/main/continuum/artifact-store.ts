@@ -1,5 +1,5 @@
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
-import { artifactTags, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
+import { artifactTags, quickTag, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
 import { metadataPeriod, validatePeriods } from './temporal-metadata'
 import { ArtifactGraph } from './artifact-graph'
@@ -50,6 +50,16 @@ export class ArtifactStore {
   saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
   deleteTag(slug: string) { this.tagIndex.delete(slug) }
   requireTag(slug: string) { this.tagIndex.require(slug) }
+  createQuickTag(name: string, color?: string, description?: string, selected?: ContinuumTagAssignment[]) {
+    const definition = quickTag(name, color, description)
+    return this.db.transaction(() => {
+      const existing = this.tags().find(tag => tag.slug === definition.slug)
+      if (existing && existing.name.normalize('NFKC').toLocaleLowerCase('en') !== definition.name.normalize('NFKC').toLocaleLowerCase('en')) throw new Error('TAG_IDENTITY_CONFLICT: escolha outro nome')
+      if (!existing) this.saveTag(definition, true)
+      const artifacts = selected === undefined ? [] : this.assignTag(definition.slug, selected, true)
+      return { state: existing ? 'EXISTING' as const : 'CREATED' as const, tag: this.tags().find(tag => tag.slug === definition.slug)!, artifacts }
+    }).immediate()
+  }
   assignTag(slug: string, selected: ContinuumTagAssignment[], assigned: boolean): Artifact[] {
     this.tagIndex.require(slug)
     if (!Array.isArray(selected) || !selected.length || selected.length > 100 || new Set(selected.map(item => item.artifactId)).size !== selected.length || typeof assigned !== "boolean") throw new Error("INVALID_TAG_SELECTION")

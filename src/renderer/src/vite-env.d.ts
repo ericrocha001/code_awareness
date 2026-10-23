@@ -1,4 +1,4 @@
-import type { ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../../shared/types/continuum-bundle-types'
+import type { ContinuumBundleQuick, ContinuumBundleReceipt, ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../../shared/types/continuum-bundle-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 /*
 -T ---
@@ -56,6 +56,7 @@ declare global {
       getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
       getContinuumTags: (repositoryId: string) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
       mutateContinuumTags: (request: ContinuumTagMutation) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
+      quickContinuumBundle: (request: ContinuumBundleQuick) => Promise<ContinuumBundleReceipt>
       prepareContinuumBundle: (request: ContinuumBundlePrepare) => Promise<ContinuumBundlePreview>
       exportContinuumBundle: (request: ContinuumBundleExport) => Promise<{ outcome: 'copied' | 'saved' | 'cancelled'; snapshotId: string }>
       exportContinuumArtifact: (request: ContinuumExportRequest) => Promise<ContinuumExportReceipt>
