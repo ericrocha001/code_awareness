@@ -115,3 +115,14 @@ it('does not send a competing inspect while the launch operation is pending', as
   expect(query).toHaveBeenCalledTimes(1)
   expect(screen.queryByText('Em execução')).toBeNull()
 })
+
+it('preserves receipt capacity for stop instead of exhausting the session with automatic inspections', async () => {
+  const record = session('RUNNING', { revision: 192, observation: 'HISTORICAL' })
+  const query = vi.fn(async ({ request }) => reply(request.action === 'LIST' ? list([record]) : { kind: 'SESSION', session: session('STOPPED'), pending: false }))
+  render(<Harness query={query}/>); await screen.findByText('Estado não confirmado')
+  expect(query.mock.calls.map(([r]) => r.request.action)).toEqual(['LIST'])
+  const stop = screen.getByRole('button', { name: 'Encerrar aplicativo: topic' })
+  expect((stop as HTMLButtonElement).disabled).toBe(false)
+  fireEvent.click(stop)
+  await waitFor(() => expect(query.mock.calls.some(([r]) => r.request.action === 'STOP')).toBe(true))
+})

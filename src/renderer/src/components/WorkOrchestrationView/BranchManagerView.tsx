@@ -139,7 +139,7 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
     <header className="wo-header"><div className="wo-feature-identity"><span className="wo-feature-icon"><GitBranch size={34}/></span><div><h1>Work Orchestration</h1><p>Branches, entregas e ambientes de trabalho</p></div></div><button onClick={() => void refresh()} disabled={loading || busy || !active}><RefreshCw size={16}/> Atualizar</button></header>
     <div className="bm-toolbar"><label>Filtrar branches <input value={filter} onChange={e => { setFilter(e.target.value); setLimit(50) }} placeholder="Nome ou referência"/></label><span>{inventory ? `${inventory.branches.length} branches` : loading ? 'Lendo inventário Git…' : 'Inventário indisponível'}</span></div>
     {error && <p role="alert" className="wo-warning">{error}</p>}{receipt && <p role="status" className="bm-receipt">{receipt}</p>}
-    {runtime.uncertain && <div className="bm-app-recovery" role="alert"><span>{runtime.notice?.message}</span><button disabled={!active} onClick={runtime.reconcile}>Verificar estado do aplicativo</button><details><summary>Diagnóstico</summary><code>{runtime.notice?.code}</code></details></div>}
+    {runtime.uncertain && <div className="bm-app-recovery" role="alert"><span>{runtime.notice?.message}</span>{!runtime.observationPaused && <button disabled={!active} onClick={runtime.reconcile}>Verificar estado do aplicativo</button>}<details><summary>Diagnóstico</summary><code>{runtime.notice?.code}</code></details></div>}
     {stale && <p role="status" className="wo-warning">Estado precisa de atualização antes de agir.</p>}
 
     <div className={`bm-layout${branch ? ' bm-has-selection' : ''}`}>

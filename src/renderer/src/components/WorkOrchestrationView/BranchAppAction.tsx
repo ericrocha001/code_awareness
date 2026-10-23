@@ -17,6 +17,7 @@ export function useBranchAppRuntime(repositoryId: string | undefined, query: (op
   const [session, setSession] = useState<PreviewSessionView | null>(null), [notice, setNotice] = useState<Notice | null>(null)
   const [pending, setPending] = useState<{ ref: string; stop: boolean } | null>(null), [uncertain, setUncertain] = useState(false)
   const [retry, setRetry] = useState(0), [ready, setReady] = useState(false)
+  const [observationPaused, setObservationPaused] = useState(false)
   const [verifiedSession, setVerifiedSession] = useState<string | null>(null)
   const inspection = useRef<{ sessionId: string; operationId: string } | null>(null)
   const commandBusy = useRef(false), mutation = useRef(0)
@@ -44,7 +45,7 @@ export function useBranchAppRuntime(repositoryId: string | undefined, query: (op
     } else throw Error('PREVIEW_UNAVAILABLE')
   }, [])
   useEffect(() => {
-    epoch.current++; inspection.current = null; setVerifiedSession(null); commandBusy.current = false; intent.current = null; waiting.current = null; working.current = false
+    epoch.current++; setObservationPaused(false); inspection.current = null; setVerifiedSession(null); commandBusy.current = false; intent.current = null; waiting.current = null; working.current = false
     setSession(null); setNotice(null); setPending(null); setUncertain(false); setReady(false)
   }, [repositoryId, query])
   useEffect(() => {
@@ -77,6 +78,12 @@ export function useBranchAppRuntime(repositoryId: string | undefined, query: (op
           if (value.failure) setNotice({ ref: 'refs/heads/' + value.source?.branch, message: value.termination?.kind === 'UNEXPECTED_EXIT' ? 'O aplicativo saiu inesperadamente. O diagnóstico foi preservado.' : 'O encerramento exige atenção. Consulte os detalhes.', code: value.failure })
         }
         const record = list.sessions.find(unresolvedPreview) ?? list.sessions.find(s => s.sessionId === observed.current?.sessionId)
+        // Keep receipt capacity available for stop and recovery instead of exhausting the bounded history.
+        if (record?.state === 'RUNNING' && record.revision >= 192 && !list.pendingOperationId && !waiting.current) {
+          setSession(record); setVerifiedSession(null); setReady(true); setUncertain(true); setObservationPaused(true)
+          setNotice({ ref: '', message: 'Observação automática pausada para preservar o histórico de encerramento. O aplicativo não foi encerrado.', code: 'AUTOMATIC_OBSERVATION_LIMIT' })
+          return
+        }
         if (record && !list.pendingOperationId && !completedInspection) {
           inspection.current = { sessionId: record.sessionId, operationId: record.operationId }
           const value = await call({ action: 'INSPECT', sessionId: record.sessionId })
@@ -101,7 +108,7 @@ export function useBranchAppRuntime(repositoryId: string | undefined, query: (op
   const execute = async (request: RuntimePreviewRequest, ref: string, stop = false) => {
     if (commandBusy.current || !enabled || !repositoryId) return
     const version = epoch.current
-    commandBusy.current = true; mutation.current++; inspection.current = null; setPending({ ref, stop }); setNotice(null)
+    commandBusy.current = true; setObservationPaused(false); mutation.current++; inspection.current = null; setPending({ ref, stop }); setNotice(null)
     try {
       const data = await call(request)
       if (version !== epoch.current) return
@@ -119,7 +126,7 @@ export function useBranchAppRuntime(repositoryId: string | undefined, query: (op
     void execute(intent.current, branch.ref)
   }
   const stop = (value: PreviewSessionView, ref: string) => { if (commandBusy.current) return; waiting.current = { operationId: value.operationId, ref }; void execute({ action: 'STOP', sessionId: value.sessionId }, ref, true) }
-  return { session, notice, pending, uncertain, ready, verifiedSession, start, stop, reconcile: () => setRetry(n => n + 1) }
+  return { session, notice, pending, uncertain, ready, verifiedSession, observationPaused, start, stop, reconcile: () => setRetry(n => n + 1) }
 }
 export function BranchAppAction({ branch, runtime, disabled }: { branch: BranchRecord; runtime: ReturnType<typeof useBranchAppRuntime>; disabled: boolean }) {
   const { session, notice, pending, uncertain } = runtime
