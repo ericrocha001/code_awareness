@@ -1,25 +1,60 @@
-import type { ActiveProject, ActiveProjectState } from '../../shared/types/active-project-types'
+import type { ActiveContext, ActiveContextCapability, ActiveProject, ActiveProjectState, CapabilityReadiness } from '../../shared/types/active-project-types'
+import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
 
 interface OpenProjects {
   getOpenProjects(): ActiveProject[]
   closeRepository(repoPath: string): void
+  getReadiness?(repoPath: string): CapabilityReadiness
 }
 
 type ProjectListener = (state: ActiveProjectState) => void | Promise<void>
+export type ActiveInstance = { mode: 'HOST' } | { mode: 'PREVIEW'; sessionId: string;
+  target?: { repositoryId: string; path: string; worktreeId: string; generation: string };
+  dataPolicy?: 'EMPTY' | 'REPOSITORY_SNAPSHOT'; dataOrigin?: ActiveContext['dataOrigin'] }
+const normalized = (path: string) => path.replace(/\\/g, '/').replace(/\/$/, '')
+const emptyContext = (): ActiveContext => ({ revision: 0, mode: 'HOST', identity: 'UNBOUND', repositoryId: null, activeCheckout: null,
+  legacyCodeMapProjectId: null, sessionId: null, dataPolicy: 'HOST_CANONICAL',
+  capabilities: { codeMap: { state: 'UNINITIALIZED' }, continuum: { state: 'UNINITIALIZED' }, channel: { state: 'UNINITIALIZED' } } })
 
 export class ActiveProjectService {
-  private activeProjectId: string | null = null
+  private project: ActiveProject | null = null
+  private context: ActiveContext
+  private intention = 0
+  private requestedPath: string | null = null
   private revision = 0
   private readonly listeners = new Set<ProjectListener>()
   private readonly beforeChange = new Set<() => Promise<void>>()
   private transition: Promise<unknown> = Promise.resolve()
   private disposed = false
 
-  constructor(private readonly projects: OpenProjects) {}
+  constructor(private readonly projects: OpenProjects, private readonly repositoryByPath?: (path: string) => RepositoryRecord | null,
+    private readonly instance: ActiveInstance = { mode: 'HOST' }) {
+    this.context = this.initialContext()
+  }
+
+  private initialContext(): ActiveContext {
+    return { ...emptyContext(), mode: this.instance.mode, sessionId: this.instance.mode === 'PREVIEW' ? this.instance.sessionId : null,
+      dataPolicy: this.instance.mode === 'PREVIEW' ? this.instance.dataPolicy ?? 'EMPTY' : 'HOST_CANONICAL',
+      ...(this.instance.mode === 'PREVIEW' && this.instance.target ? { worktree: { worktreeId: this.instance.target.worktreeId, generation: this.instance.target.generation }, dataOrigin: this.instance.dataOrigin } : {}) }
+  }
+
+  assertContextSelection(target?: { repositoryId?: string; path?: string }): void {
+    if (this.instance.mode !== 'PREVIEW') return
+    const fixed = this.instance.target
+    if (!target || !fixed || (target.repositoryId !== undefined && target.repositoryId !== fixed.repositoryId) ||
+      (target.path !== undefined && normalized(target.path).toLowerCase() !== normalized(fixed.path).toLowerCase())) {
+      throw Object.assign(new Error('PREVIEW_CONTEXT_LOCKED'), { code: 'PREVIEW_CONTEXT_LOCKED' })
+    }
+  }
 
   getState(): ActiveProjectState {
-    const project = this.projects.getOpenProjects().find((entry) => entry.id === this.activeProjectId)
-    return { revision: this.revision, project: project ? { ...project } : null }
+    if (this.project && this.context.legacyCodeMapProjectId && this.projects.getReadiness) {
+      const readiness = this.projects.getReadiness(this.project.path)
+      if (JSON.stringify(readiness) !== JSON.stringify(this.context.capabilities.codeMap)) {
+        this.context = { ...this.context, revision: this.context.revision + 1, capabilities: { ...this.context.capabilities, codeMap: { ...readiness } } }
+      }
+    }
+    return { revision: this.revision, project: this.project ? { ...this.project } : null, context: structuredClone(this.context) }
   }
 
   onChanged(listener: ProjectListener): () => void {
@@ -33,30 +68,57 @@ export class ActiveProjectService {
   }
 
   activate(projectId: string | null): Promise<ActiveProjectState> {
+    if (this.instance.mode === 'PREVIEW') return Promise.reject(Object.assign(new Error('PREVIEW_CONTEXT_LOCKED'), { code: 'PREVIEW_CONTEXT_LOCKED' }))
+    if (projectId === null) return this.request(null, null, 'LEGACY_CODEMAP')
+    const legacy = this.projects.getOpenProjects().find(entry => entry.id === projectId)
+    if (!legacy) {
+      if (this.project?.id === projectId) return this.request(this.project, this.context.repositoryId, this.context.activeCheckout!.basis)
+      return Promise.reject(new Error('Project is not open'))
+    }
+    const repository = this.repositoryByPath?.(legacy.path)
+    return repository ? this.bind(repository) : this.request(legacy, null, 'LEGACY_CODEMAP')
+  }
+
+  bind(repository: RepositoryRecord, isCurrent: () => boolean = () => true): Promise<ActiveProjectState> {
+    this.assertContextSelection({ repositoryId: repository.id, path: repository.localCheckout?.path })
+    if (!repository.localCheckout || repository.localCheckout.availability !== 'AVAILABLE') return Promise.reject(new Error('LOCAL_CHECKOUT_UNAVAILABLE'))
+    return this.request({ id: repository.id, path: normalized(repository.localCheckout.path), name: repository.name }, repository.id, 'REPOSITORY_CATALOG', isCurrent)
+  }
+
+  updateCapability(selectionRevision: number, capability: ActiveContextCapability, readiness: CapabilityReadiness, legacyCodeMapProjectId?: string): void {
+    if (this.disposed || !this.project || this.revision !== selectionRevision) return
+    const next = { ...this.context, capabilities: { ...this.context.capabilities, [capability]: { ...readiness } },
+      ...(legacyCodeMapProjectId !== undefined ? { legacyCodeMapProjectId } : {}) }
+    if (JSON.stringify(next) === JSON.stringify(this.context)) return
+    this.context = { ...next, revision: this.context.revision + 1 }
+    void this.publish()
+  }
+
+  private request(project: ActiveProject | null, repositoryId: string | null, basis: 'REPOSITORY_CATALOG' | 'LEGACY_CODEMAP', isCurrent: () => boolean = () => true): Promise<ActiveProjectState> {
     if (this.disposed) return Promise.reject(new Error('Application is shutting down'))
+    const intention = ++this.intention, current = () => !this.disposed && intention === this.intention && isCurrent()
+    this.requestedPath = project?.path ?? null
     return this.enqueue(async () => {
-      if (this.disposed) throw new Error('Application is shutting down')
-      if (projectId !== null && !this.projects.getOpenProjects().some((entry) => entry.id === projectId)) {
-        throw new Error('Project is not open')
-      }
-      await this.select(projectId)
+      if (current()) await this.select(project, repositoryId, basis, current)
       return this.getState()
     })
   }
 
   closeRepository(repoPath: string): Promise<void> {
+    this.assertContextSelection()
     if (this.disposed) return Promise.reject(new Error('Application is shutting down'))
+    if (this.requestedPath === normalized(repoPath)) ++this.intention
     return this.enqueue(async () => {
       const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
-      const project = this.projects.getOpenProjects().find((entry) => entry.path === normalizedPath)
-      if (project && project.id === this.activeProjectId) await this.select(null)
+      if (this.project?.path === normalizedPath) await this.select(null, null, 'LEGACY_CODEMAP')
       this.projects.closeRepository(repoPath)
     })
   }
 
   async dispose(): Promise<void> {
     this.disposed = true
-    await this.enqueue(() => this.select(null))
+    ++this.intention
+    await this.enqueue(() => this.select(null, null, 'LEGACY_CODEMAP'))
     this.listeners.clear()
     this.beforeChange.clear()
   }
@@ -67,13 +129,22 @@ export class ActiveProjectService {
     return result
   }
 
-  private async select(projectId: string | null): Promise<void> {
-    if (this.activeProjectId === projectId) return
-    for (const listener of this.beforeChange) await listener()
-    this.activeProjectId = projectId
+  private async select(project: ActiveProject | null, repositoryId: string | null, basis: 'REPOSITORY_CATALOG' | 'LEGACY_CODEMAP', isCurrent: () => boolean = () => true): Promise<void> {
+    if (this.project?.id === project?.id && this.project?.path === project?.path) return
+    for (const listener of this.beforeChange) { await listener(); if (!isCurrent()) return }
+    if (!isCurrent()) return
+    this.project = project ? { ...project } : null
     this.revision++
+    this.context = { ...this.initialContext(), revision: this.context.revision + 1, repositoryId,
+      identity: repositoryId ? 'IDENTITY_BOUND' : 'UNBOUND', activeCheckout: project ? { path: project.path, basis } : null,
+      legacyCodeMapProjectId: project && !repositoryId ? project.id : null }
+    await this.publish()
+  }
+
+  private async publish(): Promise<void> {
+    const state = this.getState()
     await Promise.all(Array.from(this.listeners, async (listener) => {
-      try { await listener(this.getState()) } catch { console.error('[Active Project] Observer failed') }
+      try { await listener(structuredClone(state)) } catch { console.error('[Active Project] Observer failed') }
     }))
   }
 }

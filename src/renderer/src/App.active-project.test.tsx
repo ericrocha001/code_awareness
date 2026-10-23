@@ -52,14 +52,40 @@ it('rehydrates from main and only renders confirmed selection changes', async ()
   view.unmount()
   expect(unsubscribe).toHaveBeenCalledTimes(1)
 })
+it('identifies the fixed preview context separately from capability readiness and locks the switcher', async () => {
+  const preview: ActiveProjectState = { ...state('A', 1), context: { revision: 1, mode: 'PREVIEW', identity: 'IDENTITY_BOUND', repositoryId: 'logical-A',
+    activeCheckout: { path: '/projects/A', basis: 'REPOSITORY_CATALOG' }, legacyCodeMapProjectId: null, sessionId: 'preview-session', dataPolicy: 'REPOSITORY_SNAPSHOT',
+    capabilities: { codeMap: { state: 'INITIALIZING' }, continuum: { state: 'READY' }, channel: { state: 'UNAVAILABLE' } } } }
+  vi.mocked(window.codeAwareness.getActiveProject).mockResolvedValue(preview)
+  const view = render(<App />)
+  await waitFor(() => expect(current().selectionLocked).toBe(true))
+  expect(view.getByRole('status').textContent).toContain('Runtime Preview · REPOSITORY_SNAPSHOT')
+  expect(view.getByRole('status').textContent).toContain('logical-A')
+  expect(view.getByRole('status').textContent).toContain('Code Map: INITIALIZING')
+  expect(view.getByRole('status').textContent).not.toContain('VALIDATED')
+})
 
 it('does not overwrite a newer event with an older hydration response', async () => {
   let hydrate!: (value: ActiveProjectState) => void
   vi.mocked(window.codeAwareness.getActiveProject).mockReturnValue(new Promise((resolve) => { hydrate = resolve }))
-  render(<App />)
+  const view = render(<App />)
+  expect(sidebar).not.toHaveBeenCalled()
+  expect(view.getByRole('status').textContent).toContain('Carregando contexto')
   act(() => receive(state('B', 2)))
   await act(async () => hydrate(state('A', 1)))
   expect(current().activeProject.id).toBe('B')
+})
+
+it('accepts newer readiness on the same selection without replacing its project or accepting stale snapshots', async () => {
+  render(<App />)
+  await waitFor(() => expect(current().activeProject?.id).toBe('A'))
+  const project = current().activeProject
+  const context = { revision: 2, mode: 'HOST', identity: 'IDENTITY_BOUND', repositoryId: 'A', activeCheckout: { path: project.path, basis: 'REPOSITORY_CATALOG' },
+    legacyCodeMapProjectId: null, sessionId: null, dataPolicy: 'HOST_CANONICAL', capabilities: { codeMap: { state: 'DEGRADED' }, continuum: { state: 'READY' }, channel: { state: 'UNINITIALIZED' } } } as const
+  act(() => receive({ ...state('A', 1), context }))
+  expect(current().activeProject).toBe(project)
+  act(() => receive({ ...state('old', 0), context: { ...context, revision: 100 } }))
+  expect(current().activeProject).toBe(project)
 })
 
 it('does not report an obsolete catalog selection when activation completes out of order', async () => {

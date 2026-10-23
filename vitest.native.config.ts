@@ -1,9 +1,10 @@
-import { defineConfig } from 'vitest/config'
-import { nativeTestFiles } from './scripts/test-runtime-lanes.cjs'
+import { configDefaults, defineConfig } from 'vitest/config'
+import { nativeTestFiles, checkoutTestExclude } from './scripts/test-runtime-lanes.cjs'
 
 export default defineConfig({
   test: {
     fileParallelism: false,
-    include: nativeTestFiles
+    include: nativeTestFiles,
+    exclude: [...configDefaults.exclude, ...checkoutTestExclude]
   }
 })

@@ -8,6 +8,7 @@ import { WorkspaceService } from '../core/workspace-service'
 import { RepositoryCatalogService } from './repository-catalog-service'
 import { RepositoryCatalogStore } from './repository-catalog-store'
 import { RepositoryRuntimeService } from './repository-runtime-service'
+import { ActiveProjectService } from '../core/active-project-service'
 
 const roots: string[] = []
 const settings = (values: Partial<AppSettings> = {}): AppSettings => ({
@@ -121,12 +122,13 @@ describe('Repository Catalog', () => {
       openRepository: vi.fn(async () => undefined),
       getOpenProjects: vi.fn(() => [activeState.project!])
     }
-    const active = { getState: vi.fn(() => ({ revision: 0, project: null })), activate: vi.fn(async () => activeState) }
+    const active = new ActiveProjectService({ ...codeMap, closeRepository: () => {} })
     const runtime = new RepositoryRuntimeService(catalog, codeMap, active)
     const gitRecord = catalog.findByPath(git)!
-    await expect(runtime.activate(gitRecord.id)).resolves.toEqual(activeState)
+    await expect(runtime.activate(gitRecord.id)).resolves.toMatchObject({ project: { id: gitRecord.id, path: activeState.project!.path } })
     expect(codeMap.openRepository).toHaveBeenCalledWith(git)
-    expect(active.activate).toHaveBeenCalledWith('runtime-id')
+    await new Promise(resolve => setImmediate(resolve))
+    expect(active.getState().context?.legacyCodeMapProjectId).toBe('runtime-id')
 
     rmSync(nonGit, { recursive: true, force: true })
     await catalog.refresh(settings())
@@ -150,15 +152,16 @@ describe('Repository Catalog', () => {
       getOpenProjects: vi.fn(() => [{ id: 'B', path: b.replace(/\\/g, '/'), name: 'b' }])
     }
     const stateB: ActiveProjectState = { revision: 1, project: { id: 'B', path: b.replace(/\\/g, '/'), name: 'b' } }
-    const active = { getState: vi.fn(() => stateB), activate: vi.fn(async () => stateB) }
+    const active = new ActiveProjectService({ ...codeMap, closeRepository: () => {} })
     const runtime = new RepositoryRuntimeService(catalog, codeMap, active)
 
     const first = runtime.activate(recordA.id)
+    await first
     await runtime.activate(recordB.id)
     finishA()
     await first
-    expect(active.activate).toHaveBeenCalledTimes(1)
-    expect(active.activate).toHaveBeenCalledWith('B')
+    await new Promise(resolve => setImmediate(resolve))
+    expect(active.getState()).toMatchObject({ project: { id: recordB.id, path: stateB.project!.path }, context: { repositoryId: recordB.id, legacyCodeMapProjectId: 'B' } })
     store.close()
   })
 })

@@ -15,6 +15,7 @@ export type McpLifecycleState =
   | { status: 'ERROR'; available: false; error: 'MCP_START_FAILED' | 'MCP_SERVER_FAILED' }
 
 interface McpLifecycleOptions {
+  disabled?: boolean
   createServer?: (navigation: ProjectContextNavigation, artifactReader?: IArtifactReader) => Server
   createContextServer?: (context: McpProjectContext) => Server
   log?: (state: McpLifecycleState) => void
@@ -43,8 +44,10 @@ export class McpLifecycle {
   private readonly listeners = new Set<(state: McpLifecycleState) => void | Promise<void>>()
   private readonly createServer: (context: McpProjectContext) => Server
   private readonly log: (state: McpLifecycleState) => void
+  private readonly disabled: boolean
 
   constructor(options: McpLifecycleOptions = {}) {
+    this.disabled = options.disabled ?? false
     this.activity = options.activity ?? new ChannelActivityMonitor()
     this.createServer = options.createContextServer ?? (options.createServer
       ? ((context) => options.createServer!(context.navigation, context.artifactReader))
@@ -102,6 +105,7 @@ export class McpLifecycle {
   }
 
   activateContext(context: McpProjectContext): Promise<void> {
+    if (this.disabled) return Promise.resolve()
     if (this.disposed) return this.transition
     if (
       this.requested?.projectId === context.projectId &&

@@ -10,7 +10,7 @@ export function registerActiveProjectHandlers(projects: ActiveProjectService): v
     try {
       return { success: true, data: await projects.activate(projectId) }
     } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : 'Project activation failed' }
+      return { success: false, code: error instanceof Error ? error.message : 'PROJECT_ACTIVATION_FAILED', error: error instanceof Error ? error.message : 'Project activation failed' }
     }
   })
   projects.onChanged((state) => {

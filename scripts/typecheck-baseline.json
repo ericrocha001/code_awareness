@@ -867,14 +867,6 @@
     },
     {
       "project": "node",
-      "file": "src/main/main.ts",
-      "code": 2300,
-      "category": "Error",
-      "message": "Duplicate identifier 'GitService'.",
-      "count": 2
-    },
-    {
-      "project": "node",
       "file": "src/main/mcp/channel-mcp-adapter.test.ts",
       "code": 2322,
       "category": "Error",
@@ -1067,7 +1059,7 @@
     },
     {
       "project": "web",
-      "file": "src/renderer/src/components/FileCollection/controllers/useFileViewLazyMount.test.tsx",
+      "file": "src/renderer/src/components/FileCollection/FileView.tsx",
       "code": 2322,
       "category": "Error",
       "message": "Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'LegacyRef<HTMLDivElement> | undefined'.\n  Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'RefObject<HTMLDivElement>'.\n    Type 'HTMLDivElement | null' is not assignable to type 'HTMLDivElement'.\n      Type 'null' is not assignable to type 'HTMLDivElement'.",
@@ -1075,7 +1067,7 @@
     },
     {
       "project": "web",
-      "file": "src/renderer/src/components/FileCollection/FileView.tsx",
+      "file": "src/renderer/src/components/FileCollection/controllers/useFileViewLazyMount.test.tsx",
       "code": 2322,
       "category": "Error",
       "message": "Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'LegacyRef<HTMLDivElement> | undefined'.\n  Type 'RefObject<HTMLDivElement | null>' is not assignable to type 'RefObject<HTMLDivElement>'.\n    Type 'HTMLDivElement | null' is not assignable to type 'HTMLDivElement'.\n      Type 'null' is not assignable to type 'HTMLDivElement'.",

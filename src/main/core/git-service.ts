@@ -974,6 +974,9 @@ export class GitService implements FileListingPort {
         proc.kill()
         reject(new Error('Git process timed out'))
       }, options?.timeoutMs ?? GIT_TIMEOUT_MS)
+      const streamFailure = (error: Error) => { clearTimeout(timer); proc.kill(); reject(error) }
+      proc.stdout.on('error', streamFailure)
+      proc.stderr.on('error', streamFailure)
 
       proc.stdout.on('data', (chunk: Buffer) => {
         outputBytes += chunk.length

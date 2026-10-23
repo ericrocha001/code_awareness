@@ -12,11 +12,13 @@ const sameLocalPath = (left: string, right: string) =>
 
 interface ProjectSwitcherProps {
   activeProject: { path: string; name: string } | null
+  disabled?: boolean
   onSelectRepository: (repositoryId: string) => void
 }
 
 export const ProjectSwitcher: React.FC<ProjectSwitcherProps> = ({
   activeProject,
+  disabled = false,
   onSelectRepository
 }) => {
   const [repositories, setRepositories] = useState<RepositoryRecord[]>([])
@@ -105,6 +107,8 @@ export const ProjectSwitcher: React.FC<ProjectSwitcherProps> = ({
   return (
     <div className="project-switcher-container" ref={containerRef}>
       <button
+        disabled={disabled}
+        title={disabled ? 'Contexto fixo do Runtime Preview. Reinicie a sessão para trocar o alvo.' : undefined}
         ref={buttonRef}
         className={`project-switcher-btn ${isOpen ? 'open' : ''}`}
         onClick={() => setIsOpen(!isOpen)}
@@ -131,7 +135,7 @@ export const ProjectSwitcher: React.FC<ProjectSwitcherProps> = ({
         </svg>
       </button>
 
-      {isOpen && createPortal(
+      {isOpen && !disabled && createPortal(
         <div
           ref={dropdownRef}
           id={popoverId}

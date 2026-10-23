@@ -2,6 +2,16 @@ import { describe, expect, it } from 'vitest'
 import { RepositoryChangeReadiness } from './repository-change-readiness'
 
 describe('repository causal readiness', () => {
+  it('projects actual pending, failed and recovered work without changing readiness barriers', () => {
+    const readiness = new RepositoryChangeReadiness()
+    expect(readiness.getState()).toBe('READY')
+    const id = readiness.accept(0, 'a.ts')
+    expect(readiness.getState()).toBe('INITIALIZING')
+    readiness.fail(id, new Error('controlled'))
+    expect(readiness.getState()).toBe('DEGRADED')
+    readiness.recover('a.ts')
+    expect(readiness.getState()).toBe('READY')
+  })
   it('rejects unfinished barriers on repository close and preserves completed phases', async () => {
     const readiness = new RepositoryChangeReadiness()
     const id = readiness.accept()
