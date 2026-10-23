@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import * as tokenizer from '../core/tokenizer'
-import { ArtifactStore, ArtifactRevisionConflictError, computeContentHash } from './artifact-store'
+import { ArtifactStore, ArtifactRevisionConflictError, ArtifactContentIntegrityError, computeContentHash } from './artifact-store'
 import { fixture, withFixtureDatabase } from './continuum-test-fixtures'
 import type { CreateArtifactInput } from './continuum-types'
 const cleanup: (() => void)[] = []
@@ -166,6 +166,42 @@ describe('Repository Artifact Store', () => {
 
     // 7. Repository isolation: store with different repository cannot access this database
     expect(() => new ArtifactStore(path, 'catalog-other')).toThrow(/REPOSITORY_SCOPE_MISMATCH/)
+  })
+
+  it('strictly validates YAML and tags in validate(), rejecting malformed frontmatter and tag divergence', () => {
+    const { store } = setup()
+    expect(() => store.create(input('bad-tags', {
+      rawMarkdown: '---\nname: T\ndescription: D\nkind: DECISION\ntags: [tag-a]\n---\nBody\n',
+      metadata: { name: 'T', description: 'D', kind: 'DECISION', tags: ['tag-b'] }
+    }))).toThrow(/TAGS_SOURCE_MISMATCH/)
+
+    expect(() => store.create(input('bad-yaml', {
+      rawMarkdown: '---\nnot valid YAML [\n---\nBody\n'
+    }))).toThrow(/invalid YAML|frontmatter/)
+  })
+
+  it('rejects stale or concurrently modified revisions during token measurement, preventing cross-revision cache pollution', () => {
+    const { store } = setup()
+    const a = store.create(input('A', { rawMarkdown: '# Revision 1\r\nInitial content\r\n' }))
+
+    expect(() => store.measureTokenCount(a.artifactId, 999, a.contentHash, a.rawMarkdown)).toThrow(ArtifactRevisionConflictError)
+    expect(() => store.measureTokenCount(a.artifactId, a.revision, 'wrong-hash', a.rawMarkdown)).toThrow(ArtifactRevisionConflictError)
+
+    expect(() => store.measureTokenCountBatch([
+      { artifactId: a.artifactId, revision: 999, contentHash: a.contentHash }
+    ])).toThrow(ArtifactRevisionConflictError)
+
+    expect(() => store.measureTokenCount(a.artifactId, a.revision, a.contentHash, 'Tampered markdown')).toThrow(ArtifactContentIntegrityError)
+
+    const updated = store.update({ artifactId: 'A', expectedRevision: 1, metadata: a.metadata, rawMarkdown: '# Revision 2\r\nNew content\r\n' })
+    expect(updated.revision).toBe(2)
+
+    expect(() => store.measureTokenCountBatch([
+      { artifactId: 'A', revision: 1, contentHash: a.contentHash }
+    ])).toThrow(ArtifactRevisionConflictError)
+
+    const measureRev2 = store.measureTokenCount(updated.artifactId, updated.revision, updated.contentHash, updated.rawMarkdown)
+    expect(measureRev2.rawMarkdownTokenCount).toBe(tokenizer.countCanonicalTokens(updated.rawMarkdown).tokenCount)
   })
 })
 

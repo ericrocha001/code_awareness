@@ -60,7 +60,7 @@ export class ArtifactTokenCache {
    */
   measureBatch(
     entries: Array<{ artifactId: string; revision: number; contentHash: string }>,
-    loadMarkdown: (ids: string[]) => Map<string, string>
+    loadMarkdown: (misses: Array<{ artifactId: string; revision: number; contentHash: string }>) => Map<string, string>
   ): Map<string, TokenCountResult> {
     const tokenizer = getCanonicalTokenizer()
     const results = new Map<string, TokenCountResult>()
@@ -83,7 +83,7 @@ export class ArtifactTokenCache {
     }
 
     if (misses.length > 0) {
-      const markdowns = loadMarkdown(misses.map(m => m.artifactId))
+      const markdowns = loadMarkdown(misses)
       const insert = this.db.prepare(
         `INSERT OR REPLACE INTO artifact_token_cache (artifact_id, revision, content_hash, tokenizer_id, tokenizer_encoding, raw_markdown_token_count)
          VALUES (?, ?, ?, ?, ?, ?)`

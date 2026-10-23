@@ -42,7 +42,7 @@ interface ArtifactRow {
 interface DiscoveryRow {
   revision: number
   artifact_id: string; name: string; description: string | null; kind: string; status: string | null
-  updated_at: string; relation_count: number
+  updated_at: string; relation_count: number; content_hash: string
 }
 
 export class ArtifactStore {
@@ -215,11 +215,8 @@ export class ArtifactStore {
   }
 
   private validate(input: CreateArtifactInput, legacy: boolean, visual = false): CreateArtifactInput {
-    let sourceTags: string[] | undefined
-    try {
-      sourceTags = /^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown) ? parseArtifactMarkdown(input.rawMarkdown, true).metadata.tags : undefined
-    } catch { /* Malformed or legacy frontmatter */ }
-    if (sourceTags !== undefined && JSON.stringify(artifactTags(sourceTags)) !== JSON.stringify(artifactTags(input.metadata.tags))) throw new Error('TAGS_SOURCE_MISMATCH')
+    const sourceTags = /^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown) ? parseArtifactMarkdown(input.rawMarkdown, true).metadata.tags : undefined
+    if (JSON.stringify(artifactTags(sourceTags)) !== JSON.stringify(artifactTags(input.metadata.tags))) throw new Error('TAGS_SOURCE_MISMATCH')
     if (input.metadata.media !== undefined || (!visual && input.metadata.kind === 'VISUAL_REFERENCE')) throw new Error('RESERVED_VISUAL_METADATA')
     if (typeof input.artifactId !== 'string' || !input.artifactId.trim()) throw new Error('INVALID_ARGUMENT: artifactId is required')
     if (legacy) {
@@ -384,7 +381,7 @@ export class ArtifactStore {
       if (!cursor || cursor.signature !== signature || typeof cursor.updatedAt !== 'string' || typeof cursor.artifactId !== 'string') throw new Error('INVALID_ARGUMENT: cursor does not match repository or filters')
       clauses.push('(a.updated_at < ? OR (a.updated_at = ? AND a.artifact_id < ?))'); params.push(cursor.updatedAt, cursor.updatedAt, cursor.artifactId)
     }
-    const rows = this.db.prepare(`SELECT a.artifact_id, a.revision, a.name, a.description, a.kind, a.status, a.updated_at,
+    const rows = this.db.prepare(`SELECT a.artifact_id, a.revision, a.content_hash, a.name, a.description, a.kind, a.status, a.updated_at,
       (SELECT count(*) FROM artifact_relations r WHERE r.source_id = a.artifact_id OR r.target_id = a.artifact_id) AS relation_count
       FROM artifacts a ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
       ORDER BY a.updated_at DESC, a.artifact_id DESC LIMIT ?`).all(...params, limit + 1) as DiscoveryRow[]
@@ -403,10 +400,7 @@ export class ArtifactStore {
     })
     const last = selected[selected.length - 1]
     if (includeRawMarkdownTokenCount === true && selected.length > 0) {
-      const entries = selected.map(row => ({ artifactId: row.artifact_id, revision: row.revision, contentHash: '' }))
-      const hashes = this.db.prepare(`SELECT artifact_id, content_hash FROM artifacts WHERE artifact_id IN (${selected.map(() => '?').join(',')})`).all(...selected.map(r => r.artifact_id)) as { artifact_id: string; content_hash: string }[]
-      const hashMap = new Map(hashes.map(h => [h.artifact_id, h.content_hash]))
-      for (const entry of entries) entry.contentHash = hashMap.get(entry.artifactId) ?? ''
+      const entries = selected.map(row => ({ artifactId: row.artifact_id, revision: row.revision, contentHash: row.content_hash }))
       const counts = this.measureTokenCountBatch(entries)
       const tokenizer = counts.size > 0 ? [...counts.values()][0] : undefined
       for (const record of artifacts) {
@@ -441,19 +435,44 @@ export class ArtifactStore {
     }).immediate()
   }
   measureTokenCount(artifactId: string, revision: number, contentHash: string, rawMarkdown: string) {
+    const current = this.get(artifactId)
+    if (!current || current.revision !== revision || current.contentHash !== contentHash) {
+      throw new ArtifactRevisionConflictError(artifactId, current?.revision ?? 0)
+    }
+    if (computeContentHash(rawMarkdown) !== contentHash) {
+      throw new ArtifactContentIntegrityError()
+    }
     return this.tokenCache.measure(artifactId, revision, contentHash, rawMarkdown)
   }
 
   measureTokenCountBatch(entries: Array<{ artifactId: string; revision: number; contentHash: string }>) {
-    const loadMarkdown = (ids: string[]) => {
-      const map = new Map<string, string>()
-      for (const id of ids) {
-        const row = this.db.prepare('SELECT raw_markdown FROM artifacts WHERE artifact_id = ?').get(id) as { raw_markdown: string } | undefined
-        if (row) map.set(id, row.raw_markdown)
+    return this.db.transaction(() => {
+      const currentRows = this.db.prepare(
+        `SELECT artifact_id, revision, content_hash, raw_markdown FROM artifacts WHERE artifact_id IN (${entries.map(() => '?').join(',')})`
+      ).all(...entries.map(e => e.artifactId)) as { artifact_id: string; revision: number; content_hash: string; raw_markdown: string }[]
+
+      const currentMap = new Map(currentRows.map(r => [r.artifact_id, r]))
+      for (const entry of entries) {
+        const current = currentMap.get(entry.artifactId)
+        if (!current || current.revision !== entry.revision || current.content_hash !== entry.contentHash) {
+          throw new ArtifactRevisionConflictError(entry.artifactId, current?.revision ?? 0)
+        }
       }
-      return map
-    }
-    return this.tokenCache.measureBatch(entries, loadMarkdown)
+
+      const loadMarkdown = (misses: Array<{ artifactId: string; revision: number; contentHash: string }>) => {
+        const map = new Map<string, string>()
+        for (const miss of misses) {
+          const current = currentMap.get(miss.artifactId)!
+          if (computeContentHash(current.raw_markdown) !== miss.contentHash) {
+            throw new ArtifactContentIntegrityError()
+          }
+          map.set(miss.artifactId, current.raw_markdown)
+        }
+        return map
+      }
+
+      return this.tokenCache.measureBatch(entries, loadMarkdown)
+    }).immediate()
   }
 
   migrationComplete(source: string): boolean { return !!this.db.prepare('SELECT 1 FROM legacy_migrations WHERE source = ?').get(source) }

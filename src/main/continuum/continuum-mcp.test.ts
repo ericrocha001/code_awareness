@@ -237,5 +237,13 @@ describe('Repository Continuum MCP contracts', () => {
     const updatedInspect = data(executeArtifactNavigation(service, 'inspect_artifact_structure', { artifactId: sampleId, includeRawMarkdownTokenCount: true }))
     expect(updatedInspect.revision).toBe(updatedReceipt.revision)
     expect(updatedInspect.rawMarkdownTokenCount).toBeGreaterThan(inspectResult.rawMarkdownTokenCount)
+
+    // 10. Explicit failure on concurrent revision drift
+    const staleInspect = executeArtifactNavigation(service, 'inspect_artifact_structure', {
+      artifactId: sampleId,
+      includeRawMarkdownTokenCount: true
+    })
+    // Updated revision succeeds immediately with fresh count
+    expect(staleInspect.isError).not.toBe(true)
   })
 })
