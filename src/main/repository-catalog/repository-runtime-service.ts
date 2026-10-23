@@ -20,6 +20,16 @@ export class RepositoryRuntimeService {
     private readonly activeProjects: ActiveProjectRuntime
   ) {}
 
+  async restoreLastActive(repositoryId?: string): Promise<ActiveProjectState> {
+    const state = this.activeProjects.getState()
+    if (!repositoryId || state.context?.mode !== 'HOST' || state.project || this.activationRevision !== 0) return state
+    try { return await this.activate(repositoryId) }
+    catch {
+      console.warn('[Active Project] LAST_REPOSITORY_RESTORE_UNAVAILABLE')
+      return this.activeProjects.getState()
+    }
+  }
+
   async activate(repositoryId: string): Promise<ActiveProjectState> {
     const repository = this.catalog.resolveAvailable(repositoryId)
     const revision = ++this.activationRevision

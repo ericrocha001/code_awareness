@@ -476,13 +476,17 @@ app.whenReady().then(async () => {
     continuumSession.deactivate()
   })
   let boundProjectRevision = -1
-  activeProjects.onChanged(({ project, revision }) => {
+  activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
     boundProjectRevision = revision
     if (!project) {
       void mcpLifecycle.deactivate()
       continuumSession.deactivate()
       return
+    }
+    if (context?.mode === 'HOST' && context.identity === 'IDENTITY_BOUND' && context.repositoryId === project.id && activeProjects!.getState().revision === revision) {
+      try { settingsService.rememberActiveRepository(context.repositoryId) }
+      catch { console.warn('[Active Project] LAST_REPOSITORY_PERSISTENCE_FAILED') }
     }
 
     let continuum = undefined
@@ -642,7 +646,7 @@ app.whenReady().then(async () => {
       if (state.context?.identity !== 'IDENTITY_BOUND' || state.context.repositoryId !== previewContext.selection.repositoryId || state.context.capabilities.continuum.state !== 'READY') throw new Error('PREVIEW_CONTEXT_ACTIVATION_FAILED')
       bindPreviewContext(state.context.repositoryId, state.project!.path)
     } catch (error) { failPreviewBootstrap(app, error) }
-  }
+  } else if (!isRuntimePreview()) await repositoryRuntime.restoreLastActive(settingsService.loadSettings().lastActiveRepositoryId)
   createWindow()
 
   // Registra handler IPC e atalhos F12 / Ctrl+Shift+I para DevTools

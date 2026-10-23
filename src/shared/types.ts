@@ -20,6 +20,7 @@ export interface ProjectPreferences {
 }
 
 export interface AppSettings {
+  lastActiveRepositoryId?: string
   hiddenNavigationItems?: string[]
   ngrokDomain?: string
   remoteAccessEnabled?: boolean
