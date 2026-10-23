@@ -25,10 +25,14 @@ internal sealed class PreviewOwner : IDisposable
     private IntPtr job, root, shutdown;
     private uint rootPid; private string rootCreated;
     private bool used, rootSignaled, launched, stopped, jobClosed, eventClosed;
+    private uint? rootExitCode;
+    private string rootExitAt, rootExitReason = "ROOT_NOT_EXITED";
+    private bool rootExitJournaled;
     private Mutex slot; private bool ownsSlot;
     private string directory, sessionId, operationId, phase;
 #if PREVIEW_TEST
     private IntPtr leakedReference;
+    private bool exitCodeUnavailable;
 #endif
     private static string JobName(string id) { return "Local\\CodeAwareness.Preview." + id; }
     private static string EventName(string id) { return "Local\\CodeAwareness.Preview.Stop." + id; }
@@ -54,6 +58,9 @@ internal sealed class PreviewOwner : IDisposable
     {
         if (used) throw new Exception("OWNER_ALREADY_USED");
         used = true;
+#if PREVIEW_TEST
+        exitCodeUnavailable = launch.fault == "exit-code-unavailable";
+#endif
         Guid parsed;
         if (!Guid.TryParse(launch.sessionId, out parsed) || !Guid.TryParse(launch.operationId, out parsed) || !Path.IsPathRooted(launch.directory) || !Path.IsPathRooted(launch.executable) || !Path.IsPathRooted(launch.cwd) || launch.spawn != "JOB_LIST_AT_CREATE") throw new Exception("INVALID_LAUNCH");
         if (launch.forceMs < 1 || launch.forceMs > 120000 || launch.graceMs < 0 || launch.graceMs > 120000 || (launch.graceful != "NONE" && launch.graceful != "SESSION_EVENT")) throw new Exception("INVALID_SHUTDOWN");
@@ -134,11 +141,28 @@ internal sealed class PreviewOwner : IDisposable
     }
     private void ReleaseExitedRoot()
     {
-        if (root == IntPtr.Zero) return;
-        uint wait = Win32.WaitForSingleObject(root, 0);
-        if (wait == Win32.WaitSignaled) { rootSignaled = true; Win32.Check(Win32.CloseHandle(root), "PROCESS_HANDLE_CLOSE_FAILED"); root = IntPtr.Zero; }
-        else if (wait != Win32.WaitTimeout) throw new NativeFailure("PROCESS_WAIT_FAILED", Marshal.GetLastWin32Error());
+        if (root != IntPtr.Zero) {
+            uint wait = Win32.WaitForSingleObject(root, 0);
+            if (wait == Win32.WaitSignaled) {
+                if (!rootSignaled) {
+                    rootSignaled = true; rootExitAt = DateTime.UtcNow.ToString("o");
+                    uint code;
+#if PREVIEW_TEST
+                    if (exitCodeUnavailable) rootExitReason = "EXIT_CODE_UNAVAILABLE";
+                    else
+#endif
+                    if (Win32.GetExitCodeProcess(root, out code)) { rootExitCode = code; rootExitReason = "EXIT_CODE_OBSERVED"; }
+                    else rootExitReason = "EXIT_CODE_UNAVAILABLE";
+                }
+                Win32.Check(Win32.CloseHandle(root), "PROCESS_HANDLE_CLOSE_FAILED"); root = IntPtr.Zero;
+            } else if (wait != Win32.WaitTimeout) throw new NativeFailure("PROCESS_WAIT_FAILED", Marshal.GetLastWin32Error());
+        }
+        if (rootSignaled && !rootExitJournaled) {
+            Journal("ROOT_EXITED", new { pid = rootPid, created = rootCreated, rootExit = RootExit() });
+            rootExitJournaled = true;
+        }
     }
+    private object RootExit() { return new { status = rootExitCode.HasValue ? "KNOWN" : "UNKNOWN", code = rootExitCode, reasonCode = launched ? rootExitReason : "ROOT_NOT_CREATED", observedAt = rootExitAt }; }
     private bool HandlesClosed()
     {
 #if PREVIEW_TEST
@@ -150,7 +174,7 @@ internal sealed class PreviewOwner : IDisposable
     {
         if (job == IntPtr.Zero && !stopped) throw new Exception("OWNERSHIP_UNVERIFIED");
         ReleaseExitedRoot();
-        return new { pid = rootPid, created = rootCreated, rootSignaled = rootSignaled, knownHandlesClosed = HandlesClosed(), activeProcesses = jobClosed ? 0 : Win32.Active(job), jobClosed = jobClosed, eventClosed = eventClosed, assignedAtCreation = launched, ownerOutsideJob = jobClosed || !Member(Win32.GetCurrentProcess()), phase = phase };
+        return new { pid = rootPid, created = rootCreated, rootSignaled = rootSignaled, knownHandlesClosed = HandlesClosed(), activeProcesses = jobClosed ? 0 : Win32.Active(job), jobClosed = jobClosed, eventClosed = eventClosed, assignedAtCreation = launched, ownerOutsideJob = jobClosed || !Member(Win32.GetCurrentProcess()), phase = phase, rootExit = RootExit() };
     }
     private bool Drained()
     {
