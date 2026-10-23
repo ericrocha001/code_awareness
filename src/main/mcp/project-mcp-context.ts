@@ -24,4 +24,5 @@ export interface McpProjectContext {
   githubPrIsActive?: () => boolean
   repositoryFileIngress?: RepositoryFileIngress
   repositoryFileEditing?: RepositoryFileEditing
+  runtimePreview?: { service: import('../work-orchestration/runtime-preview/operations').RuntimePreviewOperations; isCurrent: () => boolean }
 }

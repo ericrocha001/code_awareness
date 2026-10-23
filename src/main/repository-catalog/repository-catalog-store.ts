@@ -65,6 +65,18 @@ export class RepositoryCatalogStore {
 
   close(): void { this.db.close() }
 
+  provisionPreviewIdentity(repositoryId: string, input: RepositoryCatalogUpsert): RepositoryRecord {
+    this.db.transaction(() => {
+      if (this.list(true).length || !repositoryId.trim()) throw new Error('PREVIEW_CATALOG_NOT_EMPTY')
+      const now = new Date().toISOString()
+      this.db.prepare(`INSERT INTO repository_catalog_records
+        (id,name,status,checkout_path,normalized_checkout_path,availability,git_state,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?)`).run(repositoryId, input.name, input.status, input.path, input.normalizedPath, input.availability, input.gitState, now, now)
+      this.markLegacyMigrationComplete()
+    })()
+    return this.get(repositoryId)
+  }
+
   list(includeHidden = false): RepositoryRecord[] {
     const sql = includeHidden
       ? `${RECORD_SELECT} ORDER BY r.name COLLATE NOCASE, r.id`

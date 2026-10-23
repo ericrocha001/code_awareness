@@ -1,5 +1,13 @@
 # Local test output
 
+Vitest discovery is relative to the selected checkout root and limited to the existing
+`src`, `infra`, `docs` and `scripts` trees. The shared lane registry excludes
+`.code-awareness` evidence storage at every depth. Native, Git Heavy and benchmark
+suite lists and lane-specific exclusions remain authoritative. A child Worktree
+selected as its own execution root can collect its own tests normally.
+`npm run test:lanes:guard:test` checks this boundary with real Vitest collection,
+without executing the fixture test or benchmark bodies.
+
 The existing Node/Vitest, Electron, database, Git and UI npm entrypoints use
 `test-output.cjs` to capture full stdout/stderr in `.code-awareness/test-output/<id>`.
 Nested wrappers inherit the outer capture; tests, assertions and runner flags remain

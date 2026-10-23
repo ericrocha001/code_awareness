@@ -1,0 +1,33 @@
+const { test } = require('node:test')
+const assert = require('node:assert/strict')
+const fs = require('node:fs')
+const path = require('node:path')
+const { readMainBundle, moduleHasExternalRequire, moduleLooksBundled } = require('./native-bundle-guard.cjs')
+const root = path.resolve('.code-awareness/native-build/guard')
+fs.mkdirSync(root, { recursive: true })
+function fixture() { return fs.mkdtempSync(path.join(root, 'case-')) }
+test('checks native externals in reachable chunks and ignores unrelated stale outputs', () => {
+  const target = fixture(), entry = path.join(target, 'main.js')
+  fs.writeFileSync(entry, 'void Promise.resolve().then(() => require("./main-chunk.js"))')
+  fs.writeFileSync(path.join(target, 'main-chunk.js'), 'require("better-sqlite3"); require("./main.js")')
+  fs.writeFileSync(path.join(target, 'stale.js'), 'node_modules/better-sqlite3/index.js')
+  const source = readMainBundle(entry)
+  assert.equal(moduleHasExternalRequire(source, 'better-sqlite3'), true)
+  assert.equal(moduleLooksBundled(source, 'better-sqlite3'), false)
+})
+test('retains bundled native module rejection through a bootstrap', () => {
+  const target = fixture(), entry = path.join(target, 'main.js')
+  fs.writeFileSync(entry, 'require("./chunk.js")')
+  fs.writeFileSync(path.join(target, 'chunk.js'), 'node_modules/better-sqlite3/index.js')
+  assert.equal(moduleLooksBundled(readMainBundle(entry), 'better-sqlite3'), true)
+})
+test('missing reachable chunks fail closed', () => {
+  const target = fixture(), entry = path.join(target, 'main.js'); fs.writeFileSync(entry, 'require("./missing.js")')
+  assert.throws(() => readMainBundle(entry), /ENOENT/)
+})
+test('reachable chunks cannot escape the output directory', () => {
+  const target = fixture(), entry = path.join(target, 'main.js')
+  fs.writeFileSync(path.join(root, 'outside.js'), 'require("better-sqlite3")')
+  fs.writeFileSync(entry, 'require("../outside.js")')
+  assert.throws(() => readMainBundle(entry), /MAIN_BUNDLE_CHUNK_OUTSIDE_OUTPUT/)
+})

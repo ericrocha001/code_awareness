@@ -16,7 +16,7 @@ export interface ActiveRepositorySession {
 interface LiveRepositorySession extends ActiveRepositorySession {
   readonly store: ArtifactStore
   readonly service: ContinuumService
-  readonly ingestor: ArtifactIngestor
+  readonly ingestor?: ArtifactIngestor
 }
 export class RepositoryContinuumSession {
   private currentSession: LiveRepositorySession | null = null
@@ -24,12 +24,13 @@ export class RepositoryContinuumSession {
   private unsubscribeService?: () => void
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private changed(): void { for (const listener of this.listeners) { try { listener() } catch (error) { console.error('[Continuum] Session notification failed:', error) } } }
-  constructor(private readonly storageBaseDir: string, private readonly catalog: RepositoryContinuumCatalog) {}
+  constructor(private readonly storageBaseDir: string, private readonly catalog: RepositoryContinuumCatalog, private readonly options: { ingestCheckout?: boolean } = {}) {}
 
   activate(repositoryPath: string): IngestionReport {
     const repository = this.catalog.findByPath(repositoryPath)
     if (!repository) throw new Error('REPOSITORY_NOT_FOUND: checkout is absent from the Repository Catalog')
-    if (this.currentSession?.repositoryId === repository.id && this.currentSession.repositoryPath === repositoryPath) return this.currentSession.ingestor.ingestPending()
+    const emptyReport = (): IngestionReport => ({ discovered: 0, ingested: 0, rejected: 0, retryableFailures: 0, failures: [] })
+    if (this.currentSession?.repositoryId === repository.id && this.currentSession.repositoryPath === repositoryPath) return this.currentSession.ingestor?.ingestPending() ?? emptyReport()
     this.deactivate()
     const locator = deriveRepositoryKey(repositoryPath)
     const dbPath = join(this.storageBaseDir, 'repositories', Buffer.from(repository.id).toString('base64url'), 'continuum.db')
@@ -38,9 +39,11 @@ export class RepositoryContinuumSession {
       store.registerLocator(locator)
       let ingestor: ArtifactIngestor | undefined
       const service = new ContinuumService(store, () => ingestor?.ingestPending(), () => this.currentSession?.store === store)
-      migrateLegacyStore(join(this.storageBaseDir, locator, 'continuum.db'), locator, store, service)
-      ingestor = new ArtifactIngestor(new ArtifactInbox(repositoryPath), service, locator)
-      const report = ingestor.ingestPending()
+      if (this.options.ingestCheckout !== false) {
+        migrateLegacyStore(join(this.storageBaseDir, locator, 'continuum.db'), locator, store, service)
+        ingestor = new ArtifactIngestor(new ArtifactInbox(repositoryPath), service, locator)
+      }
+      const report = ingestor?.ingestPending() ?? emptyReport()
       this.currentSession = { repositoryId: repository.id, repositoryPath, dbPath, store, service, ingestor }
       this.unsubscribeService = service.onChanged(() => this.changed())
       this.changed()

@@ -14,6 +14,7 @@ import { WorktreeCommitsDisclosure } from './WorktreeCommitsDisclosure'
 import './WorkOrchestrationView.css'
 import './BranchManagerView.css'
 import { BranchExecutions, type ArtifactNavigation } from './BranchExecutions'
+import { RuntimePreviewPreflight } from './RuntimePreviewPreflight'
 
 const date = (at: string | null) => at ? new Date(at).toLocaleString('pt-BR') : 'Desconhecida'
 const relationLabel = { CONFIRMED_CURRENT: 'Origem corrente confirmada', CONFIRMED_HISTORICAL: 'Vínculo histórico comprovado', CANDIDATE: 'Candidato — HEAD divergente', AMBIGUOUS: 'Associação ambígua', UNKNOWN: 'Origem não confirmada' }
@@ -171,6 +172,7 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
           {history && <><p>{history.mode === 'REACHABLE' ? 'História alcançável do HEAD — inclui ancestrais herdados.' : `Exclusivos em relação a ${history.base?.ref} · ${history.base?.head.slice(0, 8)}`}</p><ul className="bm-commits">{history.commits.map(c => <li key={c.sha}><button disabled={!onCommit} onClick={() => openCommit(c.sha)}>{c.title} · {c.sha.slice(0, 8)}</button><small>Data do commit: {date(c.committedAt)}</small></li>)}</ul>{!history.commits.length && <p>Nenhum commit nesta comparação.</p>}{history.nextCursor && <button disabled={busy || stale} onClick={() => readHistory(history.mode, history.nextCursor!)}>Mais commits</button>}</>}
         </section>
         <section><h3>Worktrees associadas</h3>{branchTrees.length ? <ul className="bm-trees">{branchTrees.map(renderTree)}</ul> : <p>Sem checkout associado a esta referência.</p>}</section>
+        <RuntimePreviewPreflight key={`${inventory!.repositoryId}:${branch.key}`} repositoryId={inventory!.repositoryId} worktrees={branchTrees} query={query} disabled={!active || stale}/>
         {branch.namespace === 'LOCAL' && <button className="bm-danger" disabled={busy || stale || !baseRef || baseRef === branch.ref} onClick={() => void run({ action: 'PREPARE_DISCARD', ref: branch.ref, revision: branch.revision, baseRef }, data => { if (data.kind === 'DISCARD_PREVIEW') { setConsent(false); setPreview({ kind: 'DISCARD', value: data.preview }) } })}>Preparar descarte da branch…</button>}
       </aside>}
       {tree && <aside className="bm-detail bm-tree-detail" aria-label="Contexto da Worktree"><header><h2>{tree.branch ?? 'Detached HEAD'}</h2><button aria-label="Fechar contexto" onClick={() => setTree(null)}><X size={16}/></button></header><p>{tree.path}</p><p>{tree.observation === 'VERIFIED' ? 'Observação verificada' : 'Observação indisponível'}{tree.reason && ` · ${tree.reason}`}</p><WorktreeCommitsDisclosure tree={tree} context={{ projectId: projectId!, revision }} active={active && !stale} onCommit={onCommit}/><LocalChangesInspector tree={tree} query={worktreeQuery} revalidate={() => void observe(tree)} stale={() => setTree(value => value && { ...value, observation: 'STALE' })}/><WorktreeDocumentContext tree={tree} query={worktreeQuery}/></aside>}

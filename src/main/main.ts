@@ -3,7 +3,7 @@
 */
 
 import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage, powerMonitor } from 'electron'
-import { existsSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'node:url'
 import { registerFileHandlers } from './ipc/file-handler'
@@ -94,10 +94,19 @@ import { GitManagementController, registerGitManagementHandlers } from './ipc/gi
 import { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './ipc/work-orchestration-handler'
 import { orchestrationContinuumReader } from './ipc/orchestration-continuum-reader'
 import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
+import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
+import { PreviewRepositories } from './work-orchestration/preview-repositories'
+import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap } from './work-orchestration/runtime-preview/electron-mode'
+import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtime-preview/context-data'
+import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
+import { resolvePreviewHelper } from './work-orchestration/runtime-preview/host-helper'
+import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orchestration/runtime-preview/runner'
+import { PreviewSessionStore } from './work-orchestration/runtime-preview/session-store'
+import { RuntimePreviewOperations } from './work-orchestration/runtime-preview/operations'
+import { PreviewPreflightService } from './work-orchestration/preview-preflight'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
-import { GitService } from './core/git-service'
 
 
 
@@ -135,7 +144,7 @@ const validationLedger = new ValidationLedger(
 )
 const continuumSession = new RepositoryContinuumSession(join(app.getPath('userData'), 'continuum'), {
   findByPath: path => repositoryCatalog?.findByPath(path) ?? null
-})
+}, { ingestCheckout: !isRuntimePreview() })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const localAgentChannel = new LocalChannelHost(
   [new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)],
@@ -164,6 +173,7 @@ const traceSink = {
   }
 }
 const mcpLifecycle = new McpLifecycle({
+  disabled: isRuntimePreview(),
   activity: channelActivity,
   trace: traceSink,
   systemHealth,
@@ -194,7 +204,7 @@ let channelProjection: ChannelStateProjection | null = null
 
 // Single instance lock ANTES de app.whenReady() — evita race condition de duas janelas.
 // Se outra instância já está rodando, esta encerra imediatamente.
-const gotTheLock = app.requestSingleInstanceLock()
+const gotTheLock = isRuntimePreview() || app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 } else {
@@ -241,6 +251,7 @@ function createWindow(): void {
     height: 800,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#18181B' : '#F9FAFB',
     webPreferences: {
+      additionalArguments: isRuntimePreview() ? ['--runtime-preview'] : [],
       preload: join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
@@ -292,11 +303,11 @@ app.whenReady().then(async () => {
   // Registra o protocolo codeawareness:// no SO — deve ser chamado no whenReady.
   // No Windows em modo dev, o executável é o Electron e o app é o argv[1];
   // sem esses argumentos extras o protocolo seria registrado com o caminho errado.
-  if (process.defaultApp) {
+  if (!isRuntimePreview() && process.defaultApp) {
     if (process.argv.length >= 2) {
       app.setAsDefaultProtocolClient('codeawareness', process.execPath, [resolve(process.argv[1])])
     }
-  } else {
+  } else if (!isRuntimePreview()) {
     app.setAsDefaultProtocolClient('codeawareness')
   }
 
@@ -312,7 +323,7 @@ app.whenReady().then(async () => {
   const workspaceService = new WorkspaceService()
   const repositoryCatalogStore = new RepositoryCatalogStore(desktopProfilePaths(app.getPath('userData')).repositoryCatalogPath)
   repositoryCatalog = new RepositoryCatalogService(repositoryCatalogStore, workspaceService, academyService)
-  await repositoryCatalog.initialize(settingsService.loadSettings())
+  if (!isRuntimePreview()) await repositoryCatalog.initialize(settingsService.loadSettings())
   await runtimeIdentityProvider.bindSourceOrigin(repositoryCatalog.listAvailable().map(record => ({
     repositoryId: record.id, rootPath: record.localCheckout!.path
   })))
@@ -344,7 +355,9 @@ app.whenReady().then(async () => {
   console.info('[Local Agent Channel] Profile', {
     appName: app.getName(), profileMatchesDefault: normalizeProfile(app.getPath('userData')) === normalizeProfile(expectedProfile)
   })
-  try { await localAgentChannel.start() } catch (error) { console.error('[Local Agent Channel] Unavailable', localChannelStartupDiagnostic(error)) }
+  if (!isRuntimePreview()) {
+    try { await localAgentChannel.start() } catch (error) { console.error('[Local Agent Channel] Unavailable', localChannelStartupDiagnostic(error)) }
+  }
 
   void (async () => {
     if (academyService.store.list().length === 0) {
@@ -411,20 +424,40 @@ app.whenReady().then(async () => {
 
   const dashService = new DashService(codeMapService)
   const contextNavigation = new ContextEngine(codeMapService)
-  activeProjects = new ActiveProjectService(codeMapService)
+  const previewContext = previewBootstrapContext()
+  activeProjects = new ActiveProjectService(codeMapService, path => repositoryCatalog?.findByPath(path) ?? null,
+    previewContext ? { mode: 'PREVIEW', sessionId: previewContext.sessionId,
+      target: { ...previewContext.selection, path: previewContext.worktree }, dataPolicy: previewContext.data.policy,
+      dataOrigin: { at: previewContext.data.at, digest: previewContext.data.digest, artifacts: previewContext.data.artifacts, media: previewContext.data.media } } : { mode: 'HOST' })
   const gitManagement = new GitManagementController(activeProjects)
   registerGitManagementHandlers(gitManagement)
   const workOrchestration = new WorkOrchestrationController(activeProjects, change => {
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('work-orchestration:changed', change)
   })
   registerWorkOrchestrationHandlers(workOrchestration)
+  const previewDirectory = join(app.getPath('userData'), 'work-orchestration')
+  mkdirSync(join(previewDirectory, 'preview-profiles'), { recursive: true })
+  const previewProfiles = new PreviewProfileStore(join(previewDirectory, 'preview-profiles'))
+  const previewRepositories = new PreviewRepositories(repositoryCatalog, (path, identity) => new GitOperationsService(path, gitService, gitTransport, identity, true))
+  const contextProvisioner = new RepositoryPreviewContextProvisioner(repositoryCatalog, continuumSession.getStorageBaseDir())
+  const confirmPreview = async (profile: import('./work-orchestration/preview-profile').PreviewProfile) =>
+    !!mainWindow && !mainWindow.isDestroyed() && confirmPreviewProfile(mainWindow, profile, contextProvisioner)
+  let runtimePreview: RuntimePreviewOperations | undefined
+  if (!isRuntimePreview() && process.platform === 'win32') {
+    try {
+      const helper = resolvePreviewHelper({ packaged: app.isPackaged, resources: process.resourcesPath, root: app.getAppPath(), developmentBuild: process.env.CODE_AWARENESS_PREVIEW_NATIVE_BUILD })
+      const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
+      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner)
+      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession)
+    } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
+  }
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
     const response = await dialog.showMessageBox({ type: 'warning', title: 'Liberar e remover Worktree',
       message: 'Confirme que a IDE e os agentes desta Worktree foram encerrados e liberaram o diretório.',
       detail: `${preview.worktree.path}\nBranch preservada: ${preview.preservationRef}\nHEAD: ${preview.preservationHead}\n\nA remoção será revalidada. A branch e seus commits serão mantidos.`,
       buttons: ['Cancelar', 'IDE e agentes liberados; remover Worktree'], defaultId: 0, cancelId: 0, noLink: true })
     return response.response === 1
-  }, continuumSession)
+  }, continuumSession, previewProfiles, confirmPreview, previewRepositories, runtimePreview)
   registerBranchOrchestrationHandlers(branchOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))
@@ -442,7 +475,10 @@ app.whenReady().then(async () => {
     activeValidationExecution = null
     continuumSession.deactivate()
   })
-  activeProjects.onChanged(({ project }) => {
+  let boundProjectRevision = -1
+  activeProjects.onChanged(({ project, revision }) => {
+    if (revision === boundProjectRevision) return
+    boundProjectRevision = revision
     if (!project) {
       void mcpLifecycle.deactivate()
       continuumSession.deactivate()
@@ -450,15 +486,18 @@ app.whenReady().then(async () => {
     }
 
     let continuum = undefined
+    activeProjects!.updateCapability(revision, 'continuum', { state: 'INITIALIZING' })
     try {
       const report = continuumSession.activate(project.path)
       if (report && report.discovered > 0) {
         console.log(`[Continuum] Ingestion: discovered=${report.discovered} ingested=${report.ingested} rejected=${report.rejected} retryable=${report.retryableFailures}`)
       }
       continuum = continuumSession.getActiveService() ?? undefined
+      activeProjects!.updateCapability(revision, 'continuum', { state: continuum ? 'READY' : 'UNAVAILABLE', ...(!continuum ? { reasonCode: 'CONTINUUM_UNAVAILABLE' } : {}) })
     } catch (error: any) {
       // Continuum is auxiliary context — never block project opening on its failure.
       console.error('[Continuum] Session activation failed, continuing without Continuum:', error?.message)
+      activeProjects!.updateCapability(revision, 'continuum', { state: 'UNAVAILABLE', reasonCode: 'CONTINUUM_ACTIVATION_FAILED' })
     }
 
     const gitRepositoryId = repositoryCatalog?.findByPath(project.path)?.id
@@ -498,6 +537,7 @@ app.whenReady().then(async () => {
       ingress: repositoryFileIngress,
       isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision
     })
+    activeProjects!.updateCapability(revision, 'channel', { state: 'INITIALIZING' })
     void mcpLifecycle.activateContext({
       projectId: project.id,
       repoRoot: project.path,
@@ -505,6 +545,7 @@ app.whenReady().then(async () => {
       continuum,
       visualContinuum: continuum,
       validationExecution: activeValidationExecution,
+      ...(runtimePreview ? { runtimePreview: { service: runtimePreview, isCurrent: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision } } : {}),
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
       githubIntegration,
@@ -518,6 +559,14 @@ app.whenReady().then(async () => {
   registerConnectionHandlers(remoteAccess)
   channelProjection = new ChannelStateProjection(remoteAccess, activeProjects, mcpLifecycle,
     () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, channelFunctionalHealth)
+  const unsubscribeContextChannel = channelProjection.onChanged(state => {
+    const active = activeProjects?.getState()
+    if (!active?.project || state.activeProject?.id !== active.project.id) return
+    activeProjects!.updateCapability(active.revision, 'channel', state.availability === 'READY' ? { state: 'READY' }
+      : state.availability === 'CONNECTING' ? { state: 'INITIALIZING' }
+      : { state: state.availability === 'ERROR' ? 'DEGRADED' : 'UNAVAILABLE', reasonCode: state.availability })
+  })
+  app.on('before-quit', unsubscribeContextChannel)
   registerChannelHandlers(channelProjection)
   registerLocalMcpClientHandlers(createDesktopClientSetup(app, process.resourcesPath), process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href)
   registerSystemHealthHandlers(systemHealth)
@@ -576,7 +625,7 @@ app.whenReady().then(async () => {
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
   registerGitHandlers(watcherService, settingsService, compressionService, codeAwarenessIgnoreService)
-  registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime)
+  registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime, target => activeProjects!.assertContextSelection(target))
   registerGitHubHandlers(githubIntegration)
   registerCheckpointHandlers(checkpointService, dbAdapter)
   registerRestoreHandlers(restoreService)
@@ -587,6 +636,13 @@ app.whenReady().then(async () => {
   registerDashHandlers(dashService)
 
 
+  if (previewContext) {
+    try {
+      const state = await repositoryRuntime.activate(previewContext.selection.repositoryId)
+      if (state.context?.identity !== 'IDENTITY_BOUND' || state.context.repositoryId !== previewContext.selection.repositoryId || state.context.capabilities.continuum.state !== 'READY') throw new Error('PREVIEW_CONTEXT_ACTIVATION_FAILED')
+      bindPreviewContext(state.context.repositoryId, state.project!.path)
+    } catch (error) { failPreviewBootstrap(app, error) }
+  }
   createWindow()
 
   // Registra handler IPC e atalhos F12 / Ctrl+Shift+I para DevTools

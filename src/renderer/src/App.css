@@ -24,6 +24,19 @@
   transition: margin-left 0.25s ease;
 }
 
+.runtime-preview-banner {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-color, #495463);
+  background: var(--bg-secondary, #202731);
+  color: var(--text-primary, #eef2f7);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 /* Error Banner styling */
 .error-banner {
   background-color: rgba(248, 81, 73, 0.05);

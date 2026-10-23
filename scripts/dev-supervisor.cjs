@@ -3,6 +3,11 @@ const path = require('node:path')
 const { createDevSupervisor, createDevRuntimeEnvironment } = require('./dev-supervisor-core.cjs')
 
 const projectRoot = path.resolve(__dirname, '..')
+let nativePreviewBuild
+if (process.platform === 'win32') {
+  try { nativePreviewBuild = JSON.stringify(require('./runtime-preview/build.cjs').build(false)) }
+  catch { console.warn('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
+}
 const supervisor = createDevSupervisor({
   spawnRuntime({ port, token }) {
     const executable = process.platform === 'win32' ? (process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe') : 'npm'
@@ -14,7 +19,7 @@ const supervisor = createDevSupervisor({
       stdio: 'inherit',
       windowsHide: true,
       shell: false,
-      env: createDevRuntimeEnvironment(process.env, { port, token })
+      env: { ...createDevRuntimeEnvironment(process.env, { port, token }), CODE_AWARENESS_PREVIEW_NATIVE_BUILD: nativePreviewBuild ?? '' }
     })
   },
   onFinalExit(code) {

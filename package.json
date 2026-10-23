@@ -13,7 +13,9 @@
     "dev": "node scripts/dev-supervisor.cjs",
     "dev:runtime": "electron-vite dev",
     "prebuild": "npm run native:doctor",
-    "build": "electron-vite build && node scripts/local-mcp/build.cjs && npm run native:bundle-guard",
+    "build": "electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && npm run native:bundle-guard",
+    "runtime-preview:build": "node scripts/runtime-preview/build.cjs",
+    "test:runtime-preview:windows": "node scripts/test-output.cjs run -- node --test --test-concurrency=1 scripts/runtime-preview/build.test.cjs scripts/runtime-preview/windows.test.cjs",
     "preview": "electron-vite preview",
     "typecheck": "node scripts/typecheck-gate.cjs",
     "typecheck:baseline": "node scripts/typecheck-gate.cjs --update",
@@ -24,7 +26,7 @@
     "test:node": "npm run test:lanes:guard && node scripts/test-output.cjs run -- node node_modules/vitest/vitest.mjs run",
     "test:native": "npm run native:doctor && npm run test:lanes:guard && node scripts/run-vitest-electron.cjs run --config vitest.native.config.ts",
     "test:lanes:guard": "node scripts/test-output.cjs run -- node scripts/test-runtime-policy.cjs",
-    "test:lanes:guard:test": "node scripts/test-output.cjs run -- node scripts/test-runtime-policy.test.cjs",
+    "test:lanes:guard:test": "node scripts/test-output.cjs run -- node --test scripts/test-runtime-policy.test.cjs scripts/test-discovery.test.cjs",
     "test:domain": "npm run test:node",
     "test:db": "npm run native:doctor && npm run test:db:adapter && npm run test:db:codemap",
     "test:db:adapter": "node scripts/test-output.cjs run -- electron scripts/run-adapter-tests-electron.js",
@@ -89,6 +91,8 @@
     "vitest": "3.2.7"
   },
   "build": {
+    "beforePack": "./scripts/runtime-preview/pack.cjs",
+    "afterPack": "./scripts/runtime-preview/pack.cjs",
     "appId": "com.ericrocha.codeawareness",
     "productName": "Code Awareness",
     "directories": {
@@ -96,9 +100,15 @@
     },
     "files": [
       "out/**/*",
+      "!out/runtime-preview/**/*",
       "package.json"
     ],
     "extraResources": [
+      {
+        "from": "scripts/runtime-preview",
+        "to": "runtime-preview/sdk",
+        "filter": ["launch.cjs", "cooperation.cjs", "build-identity.cjs"]
+      },
       {
         "from": "out/local-mcp/launcher.cjs",
         "to": "local-mcp/launcher.cjs"

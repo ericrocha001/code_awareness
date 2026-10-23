@@ -5,6 +5,12 @@ import type { ContinuumTag, ContinuumTagMutation } from '../shared/types/continu
 */
 
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
+declare const globalThis: typeof global & { __RUNTIME_PREVIEW_BUILDS__?: unknown[] }
+
+if (process.argv.includes('--runtime-preview')) {
+  ipcRenderer.send('runtime-preview:preload-initialized', { builds: globalThis.__RUNTIME_PREVIEW_BUILDS__ ?? [], sandboxed: process.sandboxed, contextIsolated: process.contextIsolated })
+  contextBridge.exposeInMainWorld('__runtimePreview', { initialized: (report: unknown) => ipcRenderer.send('runtime-preview:renderer-initialized', report) })
+}
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { DashExecutionResult } from '../shared/types/dash-types'
 import type { ActiveProjectState } from '../shared/types/active-project-types'
@@ -136,7 +142,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     return () => ipcRenderer.removeListener('connection:changed', handler)
   },
   getActiveProject: (): Promise<ActiveProjectState> => ipcRenderer.invoke('project:get-active'),
-  activateProject: (projectId: string | null): Promise<{ success: boolean; data?: ActiveProjectState; error?: string }> =>
+  activateProject: (projectId: string | null): Promise<{ success: boolean; data?: ActiveProjectState; error?: string; code?: string }> =>
     ipcRenderer.invoke('project:activate', projectId),
   onActiveProjectChanged: (callback: (state: ActiveProjectState) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, state: ActiveProjectState): void => callback(state)
@@ -210,7 +216,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   importRepositoryRoot: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:import-root'),
   importLocalRepository: (): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:import-local'),
   hideRepository: (repositoryId: string): Promise<RepositoryRecord[]> => ipcRenderer.invoke('repositories:hide', repositoryId),
-  activateRepository: (repositoryId: string): Promise<{ success: boolean; data?: ActiveProjectState; error?: string }> => ipcRenderer.invoke('repositories:activate', repositoryId),
+  activateRepository: (repositoryId: string): Promise<{ success: boolean; data?: ActiveProjectState; error?: string; code?: string }> => ipcRenderer.invoke('repositories:activate', repositoryId),
   getGitHubStatus: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:get-status'),
   connectGitHub: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:connect'),
   cancelGitHubConnect: (): Promise<GitHubStatusProjection> => ipcRenderer.invoke('github:cancel-connect'),

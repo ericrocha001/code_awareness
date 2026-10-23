@@ -51,6 +51,7 @@ import type { RepositoryFileIngress } from '../repository-file-ingress/repositor
 import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../repository-file-ingress/repository-file-ingress-mcp'
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 import { REPOSITORY_FILE_EDITING_TOOLS, executeRepositoryFileEditing } from '../repository-file-ingress/repository-file-editing-mcp'
+import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orchestration/runtime-preview/mcp'
 
 const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file'])
 const literalReadOutputSchema = {
@@ -89,6 +90,7 @@ export class ChannelMcpAdapter {
   private readonly academy: AcademyService | undefined
   private readonly repositoryFileIngress?: RepositoryFileIngress
   private readonly repositoryFileEditing?: RepositoryFileEditing
+  private readonly runtimePreview?: McpProjectContext['runtimePreview']
 
   constructor(
     context: McpProjectContext,
@@ -138,6 +140,7 @@ export class ChannelMcpAdapter {
       this.githubContext = { githubIntegration: context.githubIntegration, repoRoot: context.repoRoot, githubPrIsActive: context.githubPrIsActive }
       this.repositoryFileIngress = context.repositoryFileIngress
       this.repositoryFileEditing = context.repositoryFileEditing
+      this.runtimePreview = context.runtimePreview
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
     } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
@@ -191,6 +194,7 @@ export class ChannelMcpAdapter {
     if (this.continuum && 'inspectStructure' in this.continuum && 'readSection' in this.continuum) tools.push(INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL)
     if (this.visualContinuum) tools.push(PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL)
     if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
+    if (this.runtimePreview) tools.push(...RUNTIME_PREVIEW_TOOLS)
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
@@ -254,6 +258,7 @@ export class ChannelMcpAdapter {
   }
 
   private capabilityForTool(name: string): string | undefined {
+    if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return 'Work Orchestration'
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
     if (name === IMPORT_REPOSITORY_FILE_TOOL.name) return 'Repository File Ingress'
     if (CODE_NAVIGATION_MCP_TOOLS.some(tool => tool.name === name)) return 'Code Navigation'
@@ -268,6 +273,7 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return this.runtimePreview ? executeRuntimePreviewTool(this.runtimePreview.service, name, args, () => { if (!this.runtimePreview?.isCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : { content: [{ type: 'text', text: JSON.stringify({ success: false, code: 'PREVIEW_UNAVAILABLE' }) }], isError: true }
     if (GITHUB_PR_TOOLS.some(tool => tool.name === name) && this.githubContext?.githubIntegration) {
       return executeGitHubPrTool(this.githubContext.githubIntegration, this.githubContext.repoRoot, name, args, {
         isActive: this.githubContext.githubPrIsActive ?? (() => false),

@@ -6,7 +6,8 @@ import type { RepositoryRuntimeService } from '../repository-catalog/repository-
 export function registerWorkspaceHandlers(
   settingsService: SettingsService,
   repositories: RepositoryCatalogService,
-  runtime: RepositoryRuntimeService
+  runtime: RepositoryRuntimeService,
+  assertSelection: (target?: { repositoryId?: string; path?: string }) => void = () => {}
 ): void {
   const chooseDirectory = async (event: Electron.IpcMainInvokeEvent, title: string): Promise<string | null> => {
     const win = BrowserWindow.fromWebContents(event.sender) as BrowserWindow
@@ -15,6 +16,7 @@ export function registerWorkspaceHandlers(
   }
 
   const importRoot = async (event: Electron.IpcMainInvokeEvent) => {
+    assertSelection()
     const rootPath = await chooseDirectory(event, 'Adicionar Pasta Raiz (Múltiplos Repositórios)')
     if (rootPath) {
       const settings = settingsService.loadSettings()
@@ -28,6 +30,7 @@ export function registerWorkspaceHandlers(
   }
 
   const importLocal = async (event: Electron.IpcMainInvokeEvent) => {
+    assertSelection()
     const checkoutPath = await chooseDirectory(event, 'Adicionar Repositório Local')
     if (checkoutPath) {
       const settings = settingsService.loadSettings()
@@ -41,6 +44,7 @@ export function registerWorkspaceHandlers(
   }
 
   const hide = (repositoryId: string) => {
+    assertSelection()
     const record = repositories.store.get(repositoryId)
     const settings = settingsService.loadSettings()
     const checkoutPath = record.localCheckout?.path
@@ -53,7 +57,7 @@ export function registerWorkspaceHandlers(
   }
 
   ipcMain.handle('repositories:list', () => repositories.list())
-  ipcMain.handle('repositories:refresh', () => repositories.refresh(settingsService.loadSettings()))
+  ipcMain.handle('repositories:refresh', () => { assertSelection(); return repositories.refresh(settingsService.loadSettings()) })
   ipcMain.handle('repositories:import-root', importRoot)
   ipcMain.handle('repositories:import-local', importLocal)
   ipcMain.handle('repositories:hide', (_event, repositoryId: unknown) => {
@@ -63,9 +67,10 @@ export function registerWorkspaceHandlers(
   ipcMain.handle('repositories:activate', async (_event, repositoryId: unknown) => {
     if (typeof repositoryId !== 'string' || !repositoryId) return { success: false, error: 'INVALID_REPOSITORY_ID' }
     try {
+      assertSelection({ repositoryId })
       return { success: true, data: await runtime.activate(repositoryId) }
     } catch (error) {
-      return { success: false, error: error instanceof Error ? error.message : String(error) }
+      return { success: false, code: error instanceof Error ? error.message : 'REPOSITORY_ACTIVATION_FAILED', error: error instanceof Error ? error.message : String(error) }
     }
   })
 

@@ -16,6 +16,7 @@ interface GlobalSidebarProps {
   orchestrationAlerts?: number;
   setActiveTab: (tab: Tab) => void;
   activeProject: { path: string; name: string } | null;
+  selectionLocked?: boolean;
   onSelectRepository: (repositoryId: string) => void;
   onOpenTags: () => void;
   onOpenIgnored: () => void;
@@ -30,6 +31,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
   orchestrationAlerts = 0,
   setActiveTab,
   activeProject,
+  selectionLocked,
   onSelectRepository,
   onOpenTags,
   onOpenIgnored,
@@ -48,6 +50,7 @@ export const GlobalSidebar: React.FC<GlobalSidebarProps> = ({
         isSidebarOpen={isSidebarOpen}
       />
       <GlobalSidebarProject
+        selectionLocked={selectionLocked}
         activeProject={activeProject}
         onSelectRepository={onSelectRepository}
       />

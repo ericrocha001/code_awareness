@@ -1,6 +1,7 @@
 const nativeTestFiles = Object.freeze([
   'src/main/continuum/context-bundle.test.ts',
   'src/main/continuum/artifact-tags.test.ts',
+  'src/main/work-orchestration/runtime-preview/context-data.test.ts',
   'src/main/continuum/artifact-structure.test.ts',
   'src/main/continuum/artifact-navigation.test.ts',
   'src/main/continuum/execution-branch.test.ts',
@@ -51,4 +52,9 @@ const nativeTestFiles = Object.freeze([
   'src/main/github/github-integration.test.ts'
 ])
 
-module.exports = { nativeTestFiles }
+const checkoutTestRoots = ['src', 'infra', 'docs', 'scripts']
+const checkoutTestInclude = Object.freeze(checkoutTestRoots.map(root => `${root}/**/*.{test,spec}.?(c|m)[jt]s?(x)`))
+const checkoutGitTestInclude = Object.freeze(checkoutTestRoots.map(root => `${root}/**/*.git.test.ts`))
+const checkoutTestExclude = Object.freeze(['**/.code-awareness/**'])
+
+module.exports = { nativeTestFiles, checkoutTestInclude, checkoutGitTestInclude, checkoutTestExclude }

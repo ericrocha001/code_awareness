@@ -62,4 +62,9 @@ export class RepositoryChangeReadiness {
     const reached = phases.indexOf(phase) + 1
     return [...this.changes.values()].every(change => !change.failed && change.reached >= reached)
   }
+
+  getState(): 'INITIALIZING' | 'READY' | 'DEGRADED' {
+    if ([...this.changes.values()].some(change => change.failed)) return 'DEGRADED'
+    return this.changes.size ? 'INITIALIZING' : 'READY'
+  }
 }

@@ -101,7 +101,7 @@ declare global {
       disconnect: () => Promise<ConnectionResult>
       onConnectionChanged: (callback: (state: ConnectionState) => void) => () => void
       getActiveProject: () => Promise<ActiveProjectState>
-      activateProject: (projectId: string | null) => Promise<{ success: boolean; data?: ActiveProjectState; error?: string }>
+      activateProject: (projectId: string | null) => Promise<{ success: boolean; data?: ActiveProjectState; error?: string; code?: string }>
       onActiveProjectChanged: (callback: (state: ActiveProjectState) => void) => () => void
       saveMarkdown: (markdown: string, repoName: string) => Promise<{ success: boolean; error?: string }>
       saveXml: (xml: string, repoName: string) => Promise<{ success: boolean; error?: string }>
@@ -130,7 +130,7 @@ declare global {
       importRepositoryRoot: () => Promise<RepositoryRecord[]>
       importLocalRepository: () => Promise<RepositoryRecord[]>
       hideRepository: (repositoryId: string) => Promise<RepositoryRecord[]>
-      activateRepository: (repositoryId: string) => Promise<{ success: boolean; data?: ActiveProjectState; error?: string }>
+      activateRepository: (repositoryId: string) => Promise<{ success: boolean; data?: ActiveProjectState; error?: string; code?: string }>
       getGitHubStatus: () => Promise<GitHubStatusProjection>
       connectGitHub: () => Promise<GitHubStatusProjection>
       cancelGitHubConnect: () => Promise<GitHubStatusProjection>
@@ -299,8 +299,8 @@ declare global {
       onDeepLink: (callback: (url: string) => void) => () => void
 
       // ─── Code Map ─────────────────────────────────────────────────────────────
-      openRepository: (repoPath: string) => Promise<{ success: boolean; projectId?: string; error?: string }>
-      closeRepository: (repoPath: string) => Promise<{ success: boolean; error?: string }>
+      openRepository: (repoPath: string) => Promise<{ success: boolean; projectId?: string; error?: string; code?: string }>
+      closeRepository: (repoPath: string) => Promise<{ success: boolean; error?: string; code?: string }>
       indexRepository: (repoPath: string) => Promise<{ success: boolean; data?: { filesIndexed: number; elementsExtracted: number }; error?: string }>
       synchronizeModified: (repoPath: string) => Promise<{ success: boolean; data?: { filesUpdated: number; errors: string[] }; error?: string }>
       getRepository: (repoPath: string) => Promise<{ success: boolean; data?: import('../../shared/types').CodeMapRepository | null; error?: string }>

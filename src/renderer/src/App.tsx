@@ -111,7 +111,9 @@ export const App: React.FC = () => {
   useEffect(() => {
     let mounted = true;
     const receive = (state: ActiveProjectState) => {
-      if (mounted) setActiveProjectState((previous) => state.revision > previous.revision ? state : previous);
+      if (mounted) setActiveProjectState((previous) => state.revision > previous.revision ||
+        state.revision === previous.revision && (state.context?.revision ?? 0) > (previous.context?.revision ?? 0)
+          ? state.revision === previous.revision ? { ...state, project: previous.project } : state : previous);
     };
     const unsubscribe = window.codeAwareness.onActiveProjectChanged(receive);
     window.codeAwareness.getActiveProject().then(receive).catch(() => {
@@ -153,11 +155,14 @@ export const App: React.FC = () => {
     }
   }, [handleStatusMessage]);
 
+  if (activeProjectState.revision < 0) return <div role={statusMessage?.isError ? 'alert' : 'status'}>{statusMessage?.text ?? 'Carregando contexto da instância…'}</div>;
+
   return (
     <div
       className={`app-layout ${sidebarPreferences.sidebarOpen ? "sidebar-open" : "sidebar-closed"}`}
     >
       <GlobalSidebar
+        selectionLocked={activeProjectState.context?.mode === 'PREVIEW'}
         items={navigation.items}
         onOpenSettings={() => setIsSettingsOpen(true)}
         isSidebarOpen={sidebarPreferences.sidebarOpen}
@@ -176,6 +181,14 @@ export const App: React.FC = () => {
       />
 
       <main className="app-main">
+        {activeProjectState.context?.mode === 'PREVIEW' && <div className="runtime-preview-banner" role="status">
+          <strong>Runtime Preview · {activeProjectState.context.dataPolicy}</strong>
+          <span>{activeProjectState.context.repositoryId} · sessão {activeProjectState.context.sessionId}</span>
+          <span>{activeProjectState.context.activeCheckout?.path}</span>
+          <span>Identidade: {activeProjectState.context.identity} · Continuum: {activeProjectState.context.capabilities.continuum.state} · Code Map: {activeProjectState.context.capabilities.codeMap.state}</span>
+          {activeProjectState.context.dataOrigin && <span>Dados: {activeProjectState.context.dataOrigin.artifacts} Artifacts · {activeProjectState.context.dataOrigin.media} mídias · fotografia {activeProjectState.context.dataOrigin.at}</span>}
+          <span>Contexto fixo. As alterações de dados ficam nesta sessão.</span>
+        </div>}
         {activeTab === "git-management" && <GitManagementView key={`git-management:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} commitIntent={commitIntent} onIntentConsumed={id => setCommitIntent(previous => previous?.requestId === id ? null : previous)} />}
         <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} onArtifact={intent => { setArtifactIntent(intent); setActiveTab("continuum"); }} onCommit={intent => {
           if (intent.projectId !== commitContext.current.project?.id || intent.revision !== commitContext.current.revision) return;
@@ -186,6 +199,7 @@ export const App: React.FC = () => {
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} artifactIntent={artifactIntent} />}
         {activeTab === "home" && (
           <HomeView
+            selectionLocked={activeProjectState.context?.mode === 'PREVIEW'}
             activeProject={activeProject}
             onSelectRepository={setActiveRepository}
             onStatusMessage={handleStatusMessage}

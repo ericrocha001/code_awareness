@@ -15,11 +15,12 @@ const sameLocalPath = (left: string, right: string) =>
 
 interface HomeViewProps {
   activeProject: { path: string; name: string } | null
+  selectionLocked?: boolean
   onSelectRepository: (repositoryId: string) => void
   onStatusMessage: (message: string, isError?: boolean) => void
 }
 
-export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectRepository, onStatusMessage }) => {
+export const HomeView: React.FC<HomeViewProps> = ({ activeProject, selectionLocked = false, onSelectRepository, onStatusMessage }) => {
   const [repositories, setRepositories] = useState<RepositoryRecord[]>([])
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [repositoryToHide, setRepositoryToHide] = useState<RepositoryRecord | null>(null)
@@ -35,7 +36,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectRepos
 
   const loadRepositories = async () => {
     try {
-      setRepositories(await window.codeAwareness.refreshRepositories())
+      setRepositories(await (selectionLocked ? window.codeAwareness.listRepositories() : window.codeAwareness.refreshRepositories()))
     } catch (err) {
       console.error('Erro ao carregar repositórios:', err)
       onStatusMessage('Falha ao atualizar o catálogo de repositórios', true)
@@ -45,7 +46,7 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectRepos
   // Effect de carregamento inicial
   useEffect(() => {
     void loadRepositories()
-    void loadGitHubStatus()
+    if (!selectionLocked) void loadGitHubStatus()
   }, [])
 
   useEffect(() => {
@@ -128,6 +129,8 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, onSelectRepos
       || repository.github?.fullName.toLocaleLowerCase().includes(query)
     )
   }, [repositories, searchQuery])
+
+  if (selectionLocked) return <div className="home-container"><h2>{activeProject?.name}</h2><p>{activeProject?.path}</p><p>Contexto fixo do Runtime Preview. Use o Continuum para testar o corpus privado. Reinicie a sessão para trocar de repositório ou Worktree.</p><button disabled>Trocar projeto</button></div>
 
   return (
     <div className="home-container">

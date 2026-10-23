@@ -41,6 +41,17 @@ function setup(factory?: (navigation: ProjectContextNavigation) => Server) {
 }
 
 describe('MCP lifecycle', () => {
+  it('keeps preview activation disabled before any endpoint or context server is created', async () => {
+    const createServer = vi.fn(), createContextServer = vi.fn()
+    const lifecycle = new McpLifecycle({ disabled: true, createServer, createContextServer })
+    lifecycles.push(lifecycle)
+    await lifecycle.activate('preview', navigation('preview'))
+    expect(lifecycle.getState()).toEqual({ status: 'STOPPED', available: false })
+    expect(createServer).not.toHaveBeenCalled()
+    expect(createContextServer).not.toHaveBeenCalled()
+    expect(lifecycle.getLocalEndpoint('preview')).toMatchObject({ status: 'UNAVAILABLE' })
+  })
+
   it('serves the supplied project on loopback, replaces bindings and closes the endpoint', async () => {
     const servers: Server[] = []
     const { lifecycle, states } = setup((port) => {
