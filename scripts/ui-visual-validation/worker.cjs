@@ -12,7 +12,13 @@ app.setPath('crashDumps', path.join(config.temporary, 'crashes'))
 app.disableHardwareAcceleration()
 const receipt = { status: 'PASS', runtime: { electron: process.versions.electron, chromium: process.versions.chrome, platform: process.platform }, checks: [], captures: [] }
 app.whenReady().then(async () => {
+  const scenario = require(config.scenario)
   const window = new BrowserWindow({ width: 1280, height: 800, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } })
+  let nativeDialogs
+  if (scenario.nativeDialogs) {
+    receipt.nativeDialogs = []
+    nativeDialogs = require('./native-dialogs.cjs').createController({ window, temporary: config.temporary, definitions: scenario.nativeDialogs.fixtures, records: receipt.nativeDialogs })
+  }
   const evaluate = (fn, ...args) => window.webContents.executeJavaScript(`(${fn.toString()})(...${JSON.stringify(args)})`, true)
   const check = (name, passed) => { receipt.checks.push({ name, passed: !!passed }); if (!passed) throw Object.assign(new Error(name), { code: 'CHECK_FAILED' }) }
   check('Profile and session isolated', ['userData', 'sessionData', 'logs', 'crashDumps'].every(key => app.getPath(key).startsWith(config.temporary + path.sep)))
@@ -22,7 +28,7 @@ app.whenReady().then(async () => {
     throw Object.assign(new Error('Renderer condition timed out'), { code: 'WAIT_TIMEOUT' })
   }
   const context = {
-    ...config, window, evaluate, waitFor, check,
+    ...config, window, evaluate, waitFor, check, ...(nativeDialogs ? { nativeDialogs } : {}),
     load: file => window.loadFile(file),
     viewport: async (width, height) => { window.setContentSize(width, height); await waitFor((w, h) => innerWidth === w && innerHeight === h, width, height) },
     click: async selector => {
@@ -61,7 +67,14 @@ app.whenReady().then(async () => {
       return image
     }
   }
-  try { await require(config.scenario).run(context) }
+  try { await scenario.run(context) }
   catch (error) { receipt.status = 'FAIL'; receipt.reason = error.code || 'SCENARIO_FAILED'; receipt.message = error.stack }
-  finally { window.destroy(); if (process.send) process.send(receipt, () => app.quit()); else app.quit() }
+  finally {
+    if (nativeDialogs) {
+      await nativeDialogs.dispose()
+      for (const owned of BrowserWindow.getAllWindows()) owned.destroy()
+      receipt.nativeDialogCleanup = 'PASS'
+    } else window.destroy()
+    if (process.send) process.send(receipt, () => app.quit()); else app.quit()
+  }
 }).catch(error => { if (process.send) process.send({ status: 'FAIL', reason: 'WINDOW_START_FAILED', message: error.message }, () => app.quit()); else app.quit() })

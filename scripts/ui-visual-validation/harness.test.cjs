@@ -17,6 +17,13 @@ test('startup error has stable reason and cleanup', async () => {
   assert.equal(receipt.reason, 'ELECTRON_START_FAILED')
   assert.equal(receipt.cleanup, 'PASS')
 })
+test('unbounded or invalid deadlines are refused before Electron starts', async () => {
+  for (const timeout of [0, NaN, 120001]) {
+    const receipt = await run({ timeout })
+    assert.equal(receipt.reason, 'TIMEOUT_INVALID')
+    assert.equal(receipt.processId, undefined)
+  }
+})
 test('unwritable output is classified', async () => {
   const folder = fs.mkdtempSync(path.join(os.tmpdir(), 'ca-ui-output-test-'))
   try { const file = path.join(folder, 'file'); fs.writeFileSync(file, 'occupied'); assert.equal((await run({ output: file })).reason, 'OUTPUT_UNWRITABLE') }
