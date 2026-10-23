@@ -14,10 +14,10 @@ import { artifactTags, type ContinuumTagMutation, type ContinuumTagAssignment } 
 import { ContextBundle } from './context-bundle'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
-  createTag(request: { name: string; color?: string; description?: string; selected?: ContinuumTagAssignment[] }) {
+  createTag(request: { name: string; selected?: ContinuumTagAssignment[] }) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     if (request.selected && request.selected.length !== 1) throw new Error('TAG_SELECTION_LIMIT: one explicitly requested Artifact per call')
-    const result = this.store.createQuickTag(request.name, request.color, request.description, request.selected)
+    const result = this.store.createQuickTag(request.name, request.selected)
     this.changed()
     return { state: 'PERSISTED' as const, creation: result.state, tag: result.tag, artifacts: result.artifacts.map(artifact => this.receipt(artifact)) }
   }
@@ -43,7 +43,10 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   mutateTags(request: ContinuumTagMutation) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     if (request.repositoryId !== this.store.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED')
-    if (request.intent === 'quick-create') this.store.createQuickTag(request.name, request.color, request.description, request.selected)
+    if (request.intent === 'quick-create') {
+      if (Object.keys(request).some(key => !['repositoryId', 'intent', 'name', 'selected'].includes(key))) throw new Error('INVALID_TAG_OPERATION')
+      this.store.createQuickTag(request.name, request.selected)
+    }
     else if (request.intent === 'create' || request.intent === 'edit') this.store.saveTag(request.tag, request.intent === 'create')
     else if (request.intent === 'delete') this.store.deleteTag(request.slug)
     else if (request.intent === 'assign') {

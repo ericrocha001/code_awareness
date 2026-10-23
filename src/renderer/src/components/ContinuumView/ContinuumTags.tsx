@@ -38,7 +38,7 @@ export function ArtifactTagEditor({ repositoryId, artifact, tags, onChanged }: {
         <input ref={input} aria-label="Buscar ou criar tag" placeholder="Buscar ou criar tag…" value={query} disabled={pending} maxLength={80} onChange={event => setQuery(event.target.value)} />
         {query.trim() && !exact && <button type="submit" disabled={pending}>Criar “{query.trim()}” e atribuir ↵</button>}
       </form>
-      <div className="continuum-tag-results">{tags.filter(tag => `${tag.name} ${tag.slug}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())).map(tag => <button key={tag.slug} disabled={pending} aria-pressed={assigned(tag.slug)} onClick={() => select(tag.slug, !assigned(tag.slug))}><span className="continuum-tag-dot" style={{ backgroundColor: tag.color }} /><span>{tag.name}</span>{assigned(tag.slug) && <Check size={14} />}</button>)}</div>
+      <div className="continuum-tag-results">{tags.filter(tag => `${tag.name} ${tag.slug}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())).map(tag => <button key={tag.slug} disabled={pending} aria-pressed={assigned(tag.slug)} onClick={() => select(tag.slug, !assigned(tag.slug))}><span>{tag.name}</span>{assigned(tag.slug) && <Check size={14} />}</button>)}</div>
       {!tags.length && !query && <p>Digite um nome e pressione Enter.</p>}
       {error && <p role="alert">{error} <button onClick={onChanged}>Atualizar revisão</button></p>}
     </div>}
@@ -48,7 +48,7 @@ export function ArtifactTagEditor({ repositoryId, artifact, tags, onChanged }: {
 export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, onChanged, onClose }: {
   repositoryId: string; tags: ContinuumTag[]; onFilter(slug: string): void; onBundle?(slug: string): void; onChanged(): void; onClose(): void
 }) {
-  const [name, setName] = useState(''), [color, setColor] = useState('#7852ee'), [description, setDescription] = useState(''), [editing, setEditing] = useState<string | null>(null)
+  const [name, setName] = useState(''), [editing, setEditing] = useState<string | null>(null)
   const [pending, setPending] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
   const modal = useRef<HTMLDialogElement>(null), busy = useRef(false), context = useRef<string | null>(repositoryId)
   context.current = repositoryId
@@ -63,7 +63,7 @@ export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, on
   const mutate = (operation: ContinuumTagMutation) => run(async () => {
     const result = await window.codeAwareness.mutateContinuumTags(operation)
     if (context.current !== repositoryId || result.repositoryId !== repositoryId) return
-    onChanged(); setName(''); setDescription(''); setColor('#7852ee'); setEditing(null); setMessage('Tag salva.')
+    onChanged(); setName(''); setEditing(null); setMessage('Tag salva.')
   })
   const bundle = (slug: string, intent: ContinuumBundleQuick['intent']) => run(async () => {
     const receipt = await window.codeAwareness.quickContinuumBundle({ repositoryId, slug, intent })
@@ -73,23 +73,18 @@ export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, on
   return <dialog ref={modal} className="continuum-tag-manager" aria-label="Tags e pacotes" onCancel={onClose}>
     <header><h2>Tags e pacotes</h2><button className="continuum-icon-button" aria-label="Fechar tags" title="Fechar tags" onClick={onClose}><X size={16} /></button></header>
     <div className="continuum-tag-list">{tags.map(tag => <div key={tag.slug}>
-      <button className="continuum-tag-name" title={tag.description || 'Ver membros'} onClick={() => onFilter(tag.slug)}><span className="continuum-tag-dot" style={{ backgroundColor: tag.color }} /><span>{tag.name}</span><small>{tag.count}</small></button>
+      <button className="continuum-tag-name" title="Ver membros" onClick={() => onFilter(tag.slug)}><span>{tag.name}</span><small>{tag.count}</small></button>
       <button disabled={pending} onClick={() => bundle(tag.slug, 'copy')} aria-label={`Copiar contexto ${tag.name}`}>Copiar contexto</button>
       <details className="continuum-tag-options"><summary aria-label={`Opções ${tag.name}`} title="Opções"><MoreHorizontal size={16} /></summary><div>
         <button disabled={pending} onClick={() => bundle(tag.slug, 'markdown')}>Salvar Markdown</button><button disabled={pending} onClick={() => bundle(tag.slug, 'zip')}>Salvar ZIP</button>
         {onBundle && <button onClick={() => onBundle(tag.slug)}>Revisar pacote…</button>}
-        <button disabled={pending} onClick={() => { setEditing(tag.slug); setName(tag.name); setColor(tag.color); setDescription(tag.description) }}>Editar tag</button>
+        <button disabled={pending} onClick={() => { setEditing(tag.slug); setName(tag.name) }}>Editar tag</button>
         <button aria-label={`Excluir tag ${tag.slug}`} title={tag.count ? 'Remova as associações antes de excluir' : 'Excluir tag vazia'} disabled={pending || tag.count > 0} onClick={() => mutate({ repositoryId, intent: 'delete', slug: tag.slug })}>Excluir tag vazia</button>
       </div></details>
     </div>)}</div>
-    <form onSubmit={event => { event.preventDefault(); if (!name.trim()) return; void mutate(editing ? { repositoryId, intent: 'edit', tag: { slug: editing, name, color, description } } : { repositoryId, intent: 'quick-create', name, color, description }) }}>
+    <form onSubmit={event => { event.preventDefault(); if (!name.trim()) return; void mutate(editing ? { repositoryId, intent: 'edit', tag: { slug: editing, name } } : { repositoryId, intent: 'quick-create', name }) }}>
       <label>{editing ? 'Editar nome' : 'Nova tag'}<input aria-label="Nome da tag" placeholder="Nome da tag" required maxLength={80} value={name} disabled={pending} onChange={event => setName(event.target.value)} /></label>
-      <details key={editing ?? 'create'} open={editing ? true : undefined}><summary>Opções avançadas</summary>
-        {editing && <label>Slug<input aria-label="Slug da tag" value={editing} disabled /></label>}
-        <label>Cor<input aria-label="Cor da tag" type="color" value={color} disabled={pending} onChange={event => setColor(event.target.value)} /></label>
-        <label>Objetivo<textarea aria-label="Objetivo da tag" maxLength={500} value={description} disabled={pending} onChange={event => setDescription(event.target.value)} /></label>
-      </details>
-      <div><button type="submit" disabled={pending}>{editing ? 'Salvar tag' : 'Criar tag'}</button>{editing && <button type="button" onClick={() => { setEditing(null); setName(''); setColor('#7852ee'); setDescription('') }}>Cancelar edição</button>}</div>
+      <div><button type="submit" disabled={pending}>{editing ? 'Salvar tag' : 'Criar tag'}</button>{editing && <button type="button" onClick={() => { setEditing(null); setName('') }}>Cancelar edição</button>}</div>
     </form>
     {error && <p role="alert">{error} Tente novamente para gerar uma cópia atualizada.</p>}{message && <p role="status">{message}</p>}
   </dialog>

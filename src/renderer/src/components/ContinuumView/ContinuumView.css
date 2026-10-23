@@ -110,10 +110,9 @@
 .continuum-tag-manager h2 { font-size: 17px; }
 .continuum-tag-manager form { display: grid; gap: 10px; margin-top: 16px; }
 .continuum-tag-manager form label { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 8px; }
-.continuum-tag-manager input, .continuum-tag-manager textarea { min-width: 0; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
+.continuum-tag-manager input { min-width: 0; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
 .continuum-tag-list > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
 .continuum-tag-manager button, .continuum-tag-list button, .continuum-tag-confirmation button { border: 1px solid var(--border); border-radius: 6px; padding: 6px; background: var(--bg-primary); }
-.continuum-tag-dot { display: inline-block; flex-shrink: 0; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; }
 .continuum-tag-confirmation { padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
 .continuum-tag-confirmation ul { max-height: 160px; overflow: auto; overflow-wrap: anywhere; }
 .continuum-tag-confirmation button { margin-right: 8px; }
@@ -121,7 +120,7 @@
 .continuum-bundle-composer header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .continuum-bundle-composer h2 { font-size: 17px; overflow-wrap: anywhere; }
 .continuum-bundle-composer label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
-.continuum-bundle-composer input, .continuum-bundle-composer textarea { padding: 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--bg-primary); }
+.continuum-bundle-composer textarea { padding: 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--bg-primary); }
 .continuum-bundle-composer textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); font-size: 11px; }
 .continuum-bundle-composer button { border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--bg-primary); }
 .continuum-bundle-composer ol { padding: 0; list-style: none; max-height: 240px; overflow: auto; }
@@ -148,16 +147,15 @@
 .continuum-tag-popover button { padding: 8px; background: var(--bg-primary); border: 1px solid var(--border-subtle); border-radius: 6px; text-align: left; }
 .continuum-tag-results { max-height: 220px; overflow: auto; display: grid; gap: 4px; margin-top: 8px; }
 .continuum-tag-results button { display: flex; align-items: center; gap: 6px; }
-.continuum-tag-results button > span:nth-child(2) { flex: 1; overflow-wrap: anywhere; }
+.continuum-tag-results button > span { flex: 1; overflow-wrap: anywhere; }
 .continuum-tag-results button[aria-pressed=true] { border-color: var(--accent); background: var(--selected-bg); }
 .continuum-tag-manager::backdrop { background: #0006; }
 .continuum-tag-name { flex: 1; min-width: 0; display: flex; align-items: center; text-align: left; gap: 6px; }
-.continuum-tag-name > span:nth-child(2) { flex: 1; overflow-wrap: anywhere; }
+.continuum-tag-name > span { flex: 1; overflow-wrap: anywhere; }
 .continuum-tag-options { position: relative; }
 .continuum-tag-options summary { cursor: pointer; list-style: none; padding: 6px; }
 .continuum-tag-options > div { display: grid; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-secondary); }
 .continuum-tag-options[open] { flex-basis: 100%; }
-.continuum-tag-manager form details label { margin: 8px 0; }
 .continuum-header .sb-root { flex: 1 1 180px; max-width: none; }
 @container (max-width: 1000px) {
   .continuum-header .sb-root { order: 1; flex-basis: 100%; margin-left: 0; }

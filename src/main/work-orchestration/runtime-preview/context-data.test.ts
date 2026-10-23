@@ -32,7 +32,7 @@ function setup(policy: 'EMPTY' | 'REPOSITORY_SNAPSHOT' = 'REPOSITORY_SNAPSHOT') 
 describe('private preview corpus provisioning with real SQLite', () => {
   it('backs up committed WAL, revisions and actual media; retains logical identity and isolates writes', async () => {
     const f = setup()
-    f.service.mutateTags({ repositoryId: 'logical-repository', intent: 'create', tag: { slug: 'canonical', name: 'Canonical', color: '#7852ee', description: 'Human fixture' } })
+    f.service.mutateTags({ repositoryId: 'logical-repository', intent: 'create', tag: { slug: 'canonical', name: 'Canonical' } })
     const receipt = f.service.publishHuman(markdown('Selected', 'tags: [canonical]\n'), true)
     const image = await sharp({ create: { width: 2, height: 2, channels: 4, background: 'red' } }).webp({ lossless: true }).toBuffer()
     const visual = await f.service.publishVisual(markdown('Image').replace('kind: DECISION', 'kind: VISUAL_REFERENCE'), image)

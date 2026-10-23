@@ -3,7 +3,7 @@ import { ArrowDown, ArrowUp, Copy, Download, Package, RefreshCw, X } from 'lucid
 import type { ContinuumBundlePreview, ContinuumBundleExport } from '../../../../shared/types/continuum-bundle-types'
 
 export function ContinuumBundleComposer({ repositoryId, slug, onClose }: { repositoryId: string; slug: string; onClose(): void }) {
-  const [preview, setPreview] = useState<ContinuumBundlePreview | null>(null), [objective, setObjective] = useState('')
+  const [preview, setPreview] = useState<ContinuumBundlePreview | null>(null)
   const [order, setOrder] = useState<string[]>([]), [dirty, setDirty] = useState(false), [pending, setPending] = useState(false)
   const [error, setError] = useState(''), [message, setMessage] = useState('')
   const generation = useRef(0), busy = useRef(false)
@@ -12,10 +12,10 @@ export function ContinuumBundleComposer({ repositoryId, slug, onClose }: { repos
     const current = ++generation.current
     busy.current = true; setPending(true); setError(''); setMessage('')
     try {
-      const result = await window.codeAwareness.prepareContinuumBundle({ repositoryId, slug, ...(!initial ? { objective, order } : {}) })
+      const result = await window.codeAwareness.prepareContinuumBundle({ repositoryId, slug, ...(!initial ? { order } : {}) })
       if (current !== generation.current) return
       if (result.repositoryId !== repositoryId || result.slug !== slug) throw new Error('BUNDLE_CONTEXT_CHANGED')
-      setPreview(result); setObjective(result.objective); setOrder(result.members.map(member => member.artifactId)); setDirty(false)
+      setPreview(result); setOrder(result.members.map(member => member.artifactId)); setDirty(false)
     } catch (reason) { if (current === generation.current) { setError(String(reason)); setPreview(null) } }
     finally { busy.current = false; if (current === generation.current) setPending(false) }
   }
@@ -37,7 +37,6 @@ export function ContinuumBundleComposer({ repositoryId, slug, onClose }: { repos
   return <section className="continuum-bundle-composer" role="dialog" aria-label="Context Bundle" aria-busy={pending}>
     <header><h2>Context Bundle · {preview?.tagName ?? slug}</h2><button className="continuum-icon-button" aria-label="Fechar Context Bundle" title="Fechar Context Bundle" onClick={onClose}><X size={16} /></button></header>
     <p>Fotografia documental para outra IA. O conteúdo pode ser histórico e não comprova o estado atual do código ou runtime.</p>
-    <label>Objetivo opcional<input aria-label="Objetivo do Context Bundle" maxLength={1000} value={objective} disabled={pending} onChange={event => { setObjective(event.target.value); setDirty(true); setMessage('') }} /></label>
     <div className="continuum-export-actions">
       <button className="continuum-icon-button" aria-label="Regenerar Context Bundle" title="Regenerar Context Bundle" disabled={pending} onClick={() => prepare()}><RefreshCw size={16} /></button>
       <button className="continuum-icon-button" aria-label="Copiar Context Bundle" title="Copiar Context Bundle" disabled={pending || dirty || !members.length} onClick={() => exportBundle('copy')}><Copy size={16} /></button>

@@ -10,7 +10,7 @@ const raw = '\uFEFF---\r\nname: Literal\r\ndescription: d\r\nkind: DOCUMENT\r\nt
 const sender = { id: 1, isDestroyed: () => false, once: vi.fn() }
 const service = {
   assertActive: () => { if (current !== 'A') throw new Error('REPOSITORY_CONTEXT_CHANGED') },
-  tags: () => [{ slug: 'architecture', name: 'Architecture', description: 'Purpose' }],
+  tags: () => [{ slug: 'architecture', name: 'Architecture' }],
   list: () => ({ artifacts: [{ artifactId: 'one' }] }),
   get: () => ({ artifactId: 'one', revision, contentHash: 'hash-' + revision, rawMarkdown: raw, metadata: { name: 'One', kind: 'DOCUMENT', tags: ['architecture'] } })
 }

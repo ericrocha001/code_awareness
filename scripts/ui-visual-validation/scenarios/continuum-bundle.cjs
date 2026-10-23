@@ -14,7 +14,7 @@ exports.run = async ctx => {
   const runtime = await require('./continuum-runtime.cjs').setup(ctx)
   ipcMain.handle = handle
   const service = runtime.session.getActiveService()
-  service.mutateTags({ repositoryId: 'acceptance-A', intent: 'create', tag: { slug: 'architecture', name: 'Architecture', color: '#7852ee', description: 'Isolated portability acceptance' } })
+  service.mutateTags({ repositoryId: 'acceptance-A', intent: 'create', tag: { slug: 'architecture', name: 'Architecture' } })
   const raw = '\uFEFF---\r\nname: Literal bundle source\r\ndescription: Synthetic portability proof\r\nkind: DOCUMENT\r\ntags: [architecture]\r\n---\r\n# ç 日本語 🚀\r\n\r\n| a | b |\r\n|---|---|\r\n|1|2|\r\n```ts\r\nconst literal = `${value}`\r\n```\r\n'
   const one = service.publishHuman(raw, true), two = service.publishHuman(raw.replace('Literal bundle source', 'Second bundle source'), true)
   const media = await sharp({ create: { width: 240, height: 120, channels: 4, background: '#7852ee80' } }).webp({ lossless: true }).toBuffer()
@@ -35,6 +35,7 @@ exports.run = async ctx => {
     ctx.check('Tagged sources are outside the visible first page', await ctx.evaluate(ids => [...document.querySelectorAll('.continuum-item')].every(item => !ids.includes(item.dataset.artifactId)), [...before.keys()]))
     await ctx.click('.continuum-header button')
     await ctx.waitFor(() => !!document.querySelector('[aria-label="Copiar contexto Architecture"]'))
+    ctx.check('Tags expose only a name field without color or objective', await ctx.evaluate(() => document.querySelectorAll('.continuum-tag-manager form input').length === 1 && !document.querySelector('.continuum-tag-manager input[type=color], .continuum-tag-manager textarea')))
     await ctx.click('[aria-label="Copiar contexto Architecture"]')
     await ctx.waitFor(() => document.querySelector('.continuum-tag-manager [role=status]')?.textContent.includes('Copiado'))
     ctx.check('One click copies all current literal members without a composer', clipboard.readText().includes(raw) && !await ctx.evaluate(() => !!document.querySelector('.continuum-bundle-composer')))
@@ -47,6 +48,7 @@ exports.run = async ctx => {
     await ctx.evaluate(() => [...document.querySelectorAll('.continuum-tag-options button')].find(button => button.textContent === 'Revisar pacote…').click())
     await ctx.waitFor(() => document.querySelectorAll('.continuum-bundle-composer li').length === 3)
     ctx.check('Bundle resolves all current tag members independently of Timeline', preview.members.length === 3 && preview.markdown.includes(raw))
+    ctx.check('Composer and exported header no longer carry an objective', !('objective' in preview) && !preview.markdown.includes('\nObjective:') && !await ctx.evaluate(() => !!document.querySelector('[aria-label="Objetivo do Context Bundle"]')))
     await ctx.capture('bundle-preview-dark')
     await ctx.click('[aria-label="Copiar Context Bundle"]')
     await ctx.waitFor(() => document.querySelector('.continuum-bundle-composer')?.textContent.includes('Context Bundle copiado.'))

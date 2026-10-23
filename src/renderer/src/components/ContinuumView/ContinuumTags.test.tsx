@@ -3,7 +3,7 @@ import React from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { ArtifactTagEditor, ContinuumTagManager } from './ContinuumTags'
-const tags = [{ slug: 'architecture', name: 'Architecture', color: '#7852ee', description: 'Purpose', count: 2 }]
+const tags = [{ slug: 'architecture', name: 'Architecture', count: 2 }]
 const artifact = { artifactId: 'one', revision: 7, metadata: { name: 'One', tags: ['architecture'] }, body: '# exact', createdAt: '', updatedAt: '' }
 beforeEach(() => {
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
@@ -61,8 +61,10 @@ it('copies once without opening composer, warns about pixels, protects deletion 
   expect(filter).toHaveBeenCalledWith('architecture')
   fireEvent.click(document.querySelector('summary[aria-label]')!)
   fireEvent.click(screen.getByRole('button', { name: 'Editar tag' }))
-  expect((screen.getByLabelText('Slug da tag') as HTMLInputElement).disabled).toBe(true)
+  expect(screen.queryByLabelText('Slug da tag')).toBeNull()
+  expect(screen.queryByLabelText('Cor da tag')).toBeNull()
+  expect(screen.queryByLabelText('Objetivo da tag')).toBeNull()
   fireEvent.change(screen.getByLabelText('Nome da tag'), { target: { value: 'Renamed' } })
   fireEvent.click(screen.getByRole('button', { name: 'Salvar tag' }))
-  await waitFor(() => expect(window.codeAwareness.mutateContinuumTags).toHaveBeenCalledWith({ repositoryId: 'A', intent: 'edit', tag: { slug: 'architecture', name: 'Renamed', color: '#7852ee', description: 'Purpose' } }))
+  await waitFor(() => expect(window.codeAwareness.mutateContinuumTags).toHaveBeenCalledWith({ repositoryId: 'A', intent: 'edit', tag: { slug: 'architecture', name: 'Renamed' } }))
 })

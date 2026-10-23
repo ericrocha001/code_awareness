@@ -48,6 +48,11 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     expect((await local('list_continuum_tags', { ...scope, worktreeId: 'forged' })).error.code).toBe('WORKTREE_UNLINKED')
     const created = await read('create_continuum_tag', { name: 'Contexto rápido', selected })
     expect(created).toMatchObject({ state: 'PERSISTED', creation: 'CREATED', tag: { slug: 'contexto-rapido', count: 1 }, artifacts: [{ revision: 2 }] })
+    expect(created.tag).toEqual({ slug: 'contexto-rapido', name: 'Contexto rápido', count: 1 })
+    for (const removed of [{ color: '#123456' }, { description: 'Removed objective' }]) {
+      expect((await call('create_continuum_tag', { name: 'Rejected field', ...removed })).isError).toBe(true)
+      expect((await local('create_continuum_tag', { ...scope, name: 'Rejected field', ...removed })).error.code).toBe('INVALID_ARGUMENT')
+    }
     expect((await read('create_continuum_tag', { name: 'Contexto rápido' })).creation).toBe('EXISTING')
     expect((await call('create_continuum_tag', { name: 'Contexto rapido' })).isError).toBe(true)
     expect((await call('create_continuum_tag', { name: 'Orphan', selected })).isError).toBe(true)
@@ -62,7 +67,7 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     expect((await call('update_artifact', { artifactId: one.artifactId, expectedRevision: 2, rawMarkdown: markdown('Removed') })).isError).toBe(true)
     expect((await local('update', { ...scope, artifactId: one.artifactId, expectedRevision: 2, rawMarkdown: markdown('Removed') })).error.code).toBe('HUMAN_TAG_AUTHORSHIP_REQUIRED')
     const preview = await read('create_context_bundle', { tag: 'contexto-rapido' })
-    expect(preview).toMatchObject({ outcome: 'preview', count: 1, hasVisuals: false }); expect(preview).not.toHaveProperty('markdown')
+    expect(preview).toMatchObject({ outcome: 'preview', count: 1, hasVisuals: false }); expect(preview).not.toHaveProperty('markdown'); expect(preview).not.toHaveProperty('objective')
     expect((await local('create_context_bundle', { ...scope, tag: 'contexto-rapido', action: 'preview' })).result).toMatchObject({ count: 1, outcome: 'preview' })
     expect((await call('create_context_bundle', { tag: 'contexto-rapido', action: 'zip', path: '/arbitrary' })).isError).toBe(true)
     expect((await local('create_context_bundle', { ...scope, tag: 'contexto-rapido', action: 'markdown' })).error.code).toBe('INTERACTIVE_SESSION_REQUIRED')

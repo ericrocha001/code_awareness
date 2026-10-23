@@ -50,8 +50,8 @@ export class ArtifactStore {
   saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
   deleteTag(slug: string) { this.tagIndex.delete(slug) }
   requireTag(slug: string) { this.tagIndex.require(slug) }
-  createQuickTag(name: string, color?: string, description?: string, selected?: ContinuumTagAssignment[]) {
-    const definition = quickTag(name, color, description)
+  createQuickTag(name: string, selected?: ContinuumTagAssignment[]) {
+    const definition = quickTag(name)
     return this.db.transaction(() => {
       const existing = this.tags().find(tag => tag.slug === definition.slug)
       if (existing && existing.name.normalize('NFKC').toLocaleLowerCase('en') !== definition.name.normalize('NFKC').toLocaleLowerCase('en')) throw new Error('TAG_IDENTITY_CONFLICT: escolha outro nome')

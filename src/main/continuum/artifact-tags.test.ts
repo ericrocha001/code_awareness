@@ -10,7 +10,7 @@ import { executeListArtifacts, executePublishArtifact, executeUpdateArtifact } f
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.reverse().forEach(close => close()); cleanup.length = 0 })
 function setup() { const f = fixture(); cleanup.push(f.close); return f }
-const tag = (slug: string) => ({ slug, name: slug, color: '#7852ee', description: 'Human purpose' })
+const tag = (slug: string) => ({ slug, name: slug })
 const createTag = (f: ReturnType<typeof setup>, slug: string) => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'create', tag: tag(slug) })
 const assign = (f: ReturnType<typeof setup>, slug: string, artifactId: string, expectedRevision: number, assigned = true) => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'assign', slug, selected: [{ artifactId, expectedRevision }], assigned, confirmed: true })
 
@@ -45,7 +45,7 @@ it('queries membership independently of exact array equality, composes filters a
   const reopened = new ArtifactStore(f.path, 'catalog-A'); cleanup.push(() => reopened.close())
   expect(reopened.tags().find(t => t.slug === 'architecture')!.count).toBe(35)
   expect(reopened.list({ tag: 'onboarding', limit: 100 }).artifacts).toHaveLength(35)
-  withFixtureDatabase(f.path, db => expect(db.prepare('SELECT count(*) AS n FROM continuum_tag_migrations').get()).toEqual({ n: 1 }))
+  withFixtureDatabase(f.path, db => expect(db.prepare('SELECT count(*) AS n FROM continuum_tag_migrations WHERE version = 1').get()).toEqual({ n: 1 }))
 })
 
 it('enforces human authorship through MCP and service/CLI paths while allowing text revisions preserving tags', () => {
@@ -69,7 +69,7 @@ it('uses all-or-nothing CAS for explicit selections and refuses deletion in use 
   expect(f.service.get(one.artifactId)!.revision).toBe(1)
   assign(f, 'architecture', one.artifactId, 1)
   expect(() => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'delete', slug: 'architecture' })).toThrow('TAG_IN_USE')
-  f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'edit', tag: { ...tag('architecture'), name: 'Architecture renamed', color: '#112233' } })
+  f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'edit', tag: { ...tag('architecture'), name: 'Architecture renamed' } })
   expect(f.service.get(one.artifactId)!.metadata.tags).toEqual(['architecture'])
   assign(f, 'architecture', one.artifactId, 2, false)
   f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'delete', slug: 'architecture' })
@@ -117,11 +117,38 @@ it('creates by name and assigns atomically, reuses exact identities and rolls ba
   expect(f.service.tags()).toEqual([])
   const original = f.service.get(one.artifactId)!
   f.service.mutateTags({ ...request, selected: [{ artifactId: one.artifactId, expectedRevision: 1 }] })
-  expect(f.service.tags()).toEqual([{ slug: 'arquitetura-tecnica', name: 'Arquitetura Técnica', color: '#7852ee', description: '', count: 1 }])
+  expect(f.service.tags()).toEqual([{ slug: 'arquitetura-tecnica', name: 'Arquitetura Técnica', count: 1 }])
   expect(parseArtifactMarkdown(f.service.get(one.artifactId)!.rawMarkdown).body).toBe(parseArtifactMarkdown(original.rawMarkdown).body)
   f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'quick-create', name: 'arquitetura técnica' })
   expect(f.service.tags()).toHaveLength(1)
   expect(() => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'quick-create', name: 'Arquitetura Tecnica' })).toThrow('TAG_IDENTITY_CONFLICT')
   expect(() => f.service.mutateTags({ ...request, repositoryId: 'other' })).toThrow('REPOSITORY_CONTEXT_CHANGED')
   expect(f.service.get(one.artifactId)!.revision).toBe(2)
+})
+it('migrates legacy tag fields away without changing names, memberships, history or original media', async () => {
+  const f = setup(); createTag(f, 'architecture'); createTag(f, 'onboarding')
+  f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'edit', tag: { slug: 'architecture', name: 'Architecture display' } })
+  const one = f.service.publish(markdown('Migrated source'))
+  assign(f, 'architecture', one.artifactId, 1); assign(f, 'onboarding', one.artifactId, 2)
+  const data = await sharp({ create: { width: 2, height: 2, channels: 4, background: '#7852ee' } }).webp({ lossless: true }).toBuffer()
+  const visual = await f.service.publishVisual(markdown('Migrated visual').replace('kind: DECISION', 'kind: VISUAL_REFERENCE'), data)
+  assign(f, 'architecture', visual.artifactId, 1)
+  const before = f.service.get(one.artifactId)!, original = f.service.getVisual(visual.artifactId)
+  const history = withFixtureDatabase(f.path, db => db.prepare('SELECT * FROM artifact_revisions ORDER BY artifact_id, revision').all())
+  f.store.close()
+  withFixtureDatabase(f.path, db => {
+    db.exec("ALTER TABLE continuum_tags ADD COLUMN color TEXT NOT NULL DEFAULT '#123456'; ALTER TABLE continuum_tags ADD COLUMN description TEXT NOT NULL DEFAULT 'Legacy objective'")
+    db.prepare('DELETE FROM continuum_tag_migrations WHERE version = 2').run()
+  }, false)
+  const reopened = new ArtifactStore(f.path, 'catalog-A'); cleanup.push(() => reopened.close())
+  expect(reopened.tags()).toEqual([{ slug: 'architecture', name: 'Architecture display', count: 2 }, { slug: 'onboarding', name: 'onboarding', count: 1 }])
+  expect(reopened.get(one.artifactId)).toEqual(before)
+  expect(reopened.getVisual(visual.artifactId).data).toEqual(data)
+  expect(reopened.getVisual(visual.artifactId).media).toEqual(original.media)
+  withFixtureDatabase(f.path, db => {
+    expect((db.pragma('table_info(continuum_tags)') as { name: string }[]).map(column => column.name)).toEqual(['slug', 'name'])
+    expect(db.prepare('SELECT * FROM artifact_revisions ORDER BY artifact_id, revision').all()).toEqual(history)
+    expect(db.pragma('foreign_key_check')).toEqual([])
+    expect(db.prepare('SELECT version FROM continuum_tag_migrations ORDER BY version').all()).toEqual([{ version: 1 }, { version: 2 }])
+  })
 })

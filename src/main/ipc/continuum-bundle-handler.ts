@@ -44,7 +44,7 @@ export function registerContinuumBundleHandlers(session: RepositoryContinuumSess
     if (busy.has(event.sender.id)) throw new Error('BUNDLE_BUSY')
     busy.add(event.sender.id)
     try {
-      const snapshot = prepare(request)
+      const snapshot = prepare({ repositoryId: request.repositoryId, slug: request.slug })
       const result = await exporter(event.sender, { ...request, snapshotId: snapshot.bundle.preview.snapshotId }, snapshot)
       const { markdownBytes, tokenCount, tokenizerEncoding, hasVisuals, members, slug } = snapshot.bundle.preview
       return { ...result, repositoryId: request.repositoryId, slug, count: members.length, markdownBytes, tokenCount, tokenizerEncoding, hasVisuals }

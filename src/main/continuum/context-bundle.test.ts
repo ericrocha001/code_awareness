@@ -9,7 +9,7 @@ const cleanups: (() => void)[] = []
 afterEach(() => { cleanups.reverse().forEach(close => close()); cleanups.length = 0 })
 function setup() {
   const f = fixture(); cleanups.push(f.close)
-  f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'create', tag: { slug: 'architecture', name: 'Architecture', color: '#7852ee', description: 'Read these sources' } })
+  f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'create', tag: { slug: 'architecture', name: 'Architecture' } })
   return f
 }
 const request = { repositoryId: 'catalog-A', slug: 'architecture' }
@@ -69,8 +69,11 @@ it('resolves the whole tag beyond the visible timeline and preserves literal sou
   expect(bundle.preview.markdownBytes).toBe(Buffer.byteLength(bundle.preview.markdown))
   expect(bundle.preview.tokenCount).toBe(countCanonicalTokens(bundle.preview.markdown).tokenCount)
   expect(bundle.preview.tokenizerEncoding).toBe('cl100k_base')
+  expect(bundle.preview).not.toHaveProperty('objective')
+  expect(bundle.preview.markdown).not.toContain('\nObjective:')
+  expect(() => ContextBundle.prepare(f.service, Object.assign({}, request, { objective: 'Removed' }))).toThrow('INVALID_BUNDLE_REQUEST')
   expect(f.service.get(ids[0])!.rawMarkdown).toBe(raw)
-  const reordered = ContextBundle.prepare(f.service, { ...request, order: [...ids].reverse(), objective: 'Human objective' })
+  const reordered = ContextBundle.prepare(f.service, { ...request, order: [...ids].reverse() })
   expect(reordered.preview.members.map(item => item.artifactId)).toEqual([...ids].reverse())
 })
 it('regenerates current revisions and membership, and refuses exporting a stale snapshot', () => {
