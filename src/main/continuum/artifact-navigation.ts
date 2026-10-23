@@ -8,11 +8,11 @@ export function navigationQuery(input: unknown, read: true): SectionQuery
 export function navigationQuery(input: unknown, read: boolean): StructureQuery | SectionQuery {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('INVALID_ARGUMENT')
   const q = input as Record<string, unknown>
-  const allowed = read ? ['artifactId', 'sectionId', 'expectedRevision', 'includeDescendants', 'blockId', 'cursor'] : ['artifactId', 'sectionId', 'includeBlocks', 'limit', 'cursor']
+  const allowed = read ? ['artifactId', 'sectionId', 'expectedRevision', 'includeDescendants', 'blockId', 'cursor'] : ['artifactId', 'sectionId', 'includeBlocks', 'limit', 'cursor', 'includeRawMarkdownTokenCount']
   if (Object.keys(q).some(k => !allowed.includes(k))) throw new Error('INVALID_ARGUMENT')
   for (const key of ['artifactId', ...(read ? ['sectionId'] : [])]) if (typeof q[key] !== 'string' || !(q[key] as string).trim()) throw new Error('INVALID_ARGUMENT')
   for (const key of ['sectionId', 'blockId', 'cursor']) if (q[key] !== undefined && (typeof q[key] !== 'string' || !(q[key] as string).trim() || (q[key] as string).length > 4096)) throw new Error('INVALID_ARGUMENT')
-  for (const key of ['includeBlocks', 'includeDescendants']) if (q[key] !== undefined && typeof q[key] !== 'boolean') throw new Error('INVALID_ARGUMENT')
+  for (const key of ['includeBlocks', 'includeDescendants', 'includeRawMarkdownTokenCount']) if (q[key] !== undefined && typeof q[key] !== 'boolean') throw new Error('INVALID_ARGUMENT')
   if (read && (!Number.isSafeInteger(q.expectedRevision) || Number(q.expectedRevision) < 1)) throw new Error('INVALID_ARGUMENT')
   if (!read && q.limit !== undefined && (!Number.isSafeInteger(q.limit) || Number(q.limit) < 1 || Number(q.limit) > 100)) throw new Error('INVALID_ARGUMENT')
   if (!read && q.includeBlocks === true && !q.sectionId) throw new Error('INVALID_ARGUMENT: sectionId required for blocks')
@@ -54,9 +54,13 @@ export class ArtifactNavigation {
     const entries = q.includeBlocks ? extractBlocks(a.rawMarkdown, outline[sectionIndex]).map((block, i) => ({ ...block, blockId: this.selector(a, q.sectionId!, i) }))
       : outline.map((s, i) => ({ start: s.start, end: s.end, startLine: s.startLine, endLine: s.endLine, title: s.title, level: s.level, hasChildren: s.hasChildren, sectionId: this.selector(a, 'section', i), parentSectionId: s.parent === null ? null : this.selector(a, 'section', s.parent) })).filter((_, i) => !q.sectionId || i === sectionIndex)
     const { offset } = this.resume(q.cursor, scope, 0, entries.length), end = Math.min(offset + limit, entries.length)
+    const tokenFields = q.includeRawMarkdownTokenCount === true
+      ? this.store.measureTokenCount(a.artifactId, a.revision, a.contentHash, a.rawMarkdown)
+      : undefined
     return { artifactId: a.artifactId, revision: a.revision, contentHash: a.contentHash,
       ...(q.includeBlocks ? { blocks: entries.slice(offset, end) as StructurePage['blocks'] } : { sections: entries.slice(offset, end) as StructurePage['sections'] }),
-      ...(end < entries.length ? { nextCursor: this.cursor(scope, end) } : {}) }
+      ...(end < entries.length ? { nextCursor: this.cursor(scope, end) } : {}),
+      ...(tokenFields ? { rawMarkdownTokenCount: tokenFields.rawMarkdownTokenCount, tokenizerId: tokenFields.tokenizerId, tokenizerEncoding: tokenFields.tokenizerEncoding } : {}) }
   }
   read(input: SectionQuery): SectionPage {
     const q = navigationQuery(input, true), a = this.artifact(q.artifactId)

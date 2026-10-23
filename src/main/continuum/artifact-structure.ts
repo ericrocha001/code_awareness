@@ -13,11 +13,11 @@ export interface LiteralRange { start: number; end: number; startLine: number; e
 export interface OutlineSection extends LiteralRange {
   title: string; level: number; parent: number | null; ownEnd: number; hasChildren: boolean
 }
-export interface StructureQuery { artifactId: string; limit?: number; cursor?: string; sectionId?: string; includeBlocks?: boolean }
+export interface StructureQuery { artifactId: string; limit?: number; cursor?: string; sectionId?: string; includeBlocks?: boolean; includeRawMarkdownTokenCount?: boolean }
 export interface SectionQuery { artifactId: string; sectionId: string; expectedRevision: number; includeDescendants?: boolean; blockId?: string; cursor?: string }
 export interface StructureSection extends LiteralRange { sectionId: string; title: string; level: number; parentSectionId: string | null; hasChildren: boolean }
 export interface StructureBlock extends LiteralRange { blockId: string; type: string }
-export interface StructurePage { artifactId: string; revision: number; contentHash: string; sections?: StructureSection[]; blocks?: StructureBlock[]; nextCursor?: string }
+export interface StructurePage { artifactId: string; revision: number; contentHash: string; sections?: StructureSection[]; blocks?: StructureBlock[]; nextCursor?: string; rawMarkdownTokenCount?: number; tokenizerId?: string; tokenizerEncoding?: string }
 export interface SectionPage extends LiteralRange { artifactId: string; sectionId: string; blockId?: string; revision: number; contentHash: string; content: string; nextCursor?: string }
 
 export function literalRange(raw: string, start: number, end: number): LiteralRange {
