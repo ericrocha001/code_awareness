@@ -19,12 +19,54 @@ function setup() {
 }
 
 describe('catalog-bound active context', () => {
-  it('preserves the instance mode independently of focus and does not claim an authenticated repository before selection', async () => {
+  it('restores the logical repository before CodeMap readiness and skips duplicate restoration', async () => {
+    const { projects, runtime, codeMap } = setup()
+    const restored = await runtime.restoreLastActive('A')
+    expect(restored).toMatchObject({ project: { id: 'A' }, context: { identity: 'IDENTITY_BOUND', capabilities: { codeMap: { state: 'INITIALIZING' } } } })
+    expect(codeMap.openRepository).toHaveBeenCalledExactlyOnceWith('/A')
+    await runtime.restoreLastActive('A')
+    expect(codeMap.openRepository).toHaveBeenCalledTimes(1)
+    expect(projects.getState().project?.id).toBe('A')
+  })
+  it('leaves empty startup unbound and allows manual choice after unavailable restoration', async () => {
+    const { projects, runtime } = setup()
+    expect((await runtime.restoreLastActive()).project).toBeNull()
+    expect((await runtime.restoreLastActive('unknown')).project).toBeNull()
+    expect(projects.getState().context?.identity).toBe('UNBOUND')
+    expect((await runtime.activate('B')).project?.id).toBe('B')
+  })
+  it('never replaces a newer explicit choice, including a restoration still binding', async () => {
+    const { projects, runtime } = setup(), barrier = deferred()
+    projects.onBeforeChange(() => barrier.promise)
+    const restored = runtime.restoreLastActive('A'); await flush()
+    const explicit = runtime.activate('B'); barrier.resolve()
+    await Promise.all([restored, explicit])
+    expect(projects.getState().project?.id).toBe('B')
+    await runtime.restoreLastActive('A')
+    expect(projects.getState().project?.id).toBe('B')
+  })
+  it('never restores HOST preference into PREVIEW context', async () => {
     const projects = new ActiveProjectService({ getOpenProjects: () => [], closeRepository: () => {} }, undefined,
-      { mode: 'PREVIEW', sessionId: 'approved-bootstrap-session' })
+      { mode: 'PREVIEW', sessionId: 'approved-preview' })
+    const catalog = { resolveAvailable: vi.fn(() => record('B')) }, codeMap = { getOpenProjects: () => [], openRepository: vi.fn(async () => {}) }
+    const runtime = new RepositoryRuntimeService(catalog, codeMap, projects)
+    expect((await runtime.restoreLastActive('B')).context?.mode).toBe('PREVIEW')
+    expect(catalog.resolveAvailable).not.toHaveBeenCalled(); expect(codeMap.openRepository).not.toHaveBeenCalled()
+  })
+  it.each(['REPOSITORY_NOT_FOUND', 'REPOSITORY_HIDDEN', 'LOCAL_CHECKOUT_UNAVAILABLE'])('keeps startup unbound and manual activation available on %s', async reason => {
+    const { projects, codeMap } = setup()
+    const runtime = new RepositoryRuntimeService({ resolveAvailable: id => { if (id === 'A') throw Error(reason); return record('B') } }, codeMap, projects)
+    expect((await runtime.restoreLastActive('A')).project).toBeNull()
+    expect(codeMap.openRepository).not.toHaveBeenCalled()
+    expect((await runtime.activate('B')).project?.id).toBe('B')
+  })
+  it('preserves fixed preview context and does not claim an authenticated repository before selection', async () => {
+    const projects = new ActiveProjectService({ getOpenProjects: () => [], closeRepository: () => {} }, undefined,
+      { mode: 'PREVIEW', sessionId: 'approved-bootstrap-session', target: { repositoryId: 'A', worktreeId: 'tree', generation: 'generation', path: '/A' } })
     expect(projects.getState().context).toMatchObject({ mode: 'PREVIEW', sessionId: 'approved-bootstrap-session', repositoryId: null, identity: 'UNBOUND', dataPolicy: 'EMPTY' })
-    await projects.bind(record('A')); await projects.bind(record('B'))
-    expect(projects.getState().context).toMatchObject({ mode: 'PREVIEW', sessionId: 'approved-bootstrap-session', repositoryId: 'B', dataPolicy: 'EMPTY' })
+    await projects.bind(record('A'))
+    expect(() => projects.bind(record('B'))).toThrow('PREVIEW_CONTEXT_LOCKED')
+    expect(projects.getState().context).toMatchObject({ mode: 'PREVIEW', sessionId: 'approved-bootstrap-session', repositoryId: 'A', dataPolicy: 'EMPTY' })
     await projects.dispose()
     expect(projects.getState().context).toMatchObject({ mode: 'PREVIEW', sessionId: 'approved-bootstrap-session', identity: 'UNBOUND' })
   })
