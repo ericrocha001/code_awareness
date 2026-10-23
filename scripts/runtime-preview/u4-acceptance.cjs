@@ -5,7 +5,8 @@ const net = require('node:net')
 const assert = require('node:assert/strict')
 const { randomUUID, createHash } = require('node:crypto')
 const { execFileSync, spawn } = require('node:child_process')
-const branchApp = process.argv.includes('--branch-app')
+const branchAppUI = process.argv.includes('--branch-app-ui')
+const branchApp = process.argv.includes('--branch-app') || branchAppUI
 const contextual = process.argv.includes('--context') || branchApp, snapshot = process.argv.includes('--snapshot') || branchApp
 const root = process.cwd(), output = path.join(root, branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
 fs.mkdirSync(output, { recursive: true })
@@ -200,6 +201,11 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     const response = await branchRequest({ action: 'PREVIEW_RUNTIME', request: { action: 'WORKTREES', repositoryId: selections[kind].repositoryId } })
     assert.equal(response.success, true); save('ipc-' + kind + '-worktrees', response)
   }
+  if (branchAppUI) {
+    active = { revision: 1, project: { id: electronRepository.id, path: root, name: 'Code Awareness UI acceptance' } }
+    controller.bind((await repositories.open(electronRepository.id)).git, { branchPullRequests: async () => ({ repositoryId: electronRepository.id, relations: [], received: [], orphaned: [], catalog: { coverage: 'UNAVAILABLE', reason: 'ISOLATED_ACCEPTANCE', items: [], observedAt: new Date().toISOString() }, at: new Date().toISOString() }) }, root)
+  }
+  let uiWindow
   const uiRoot = path.join(output, 'ui'); fs.mkdirSync(uiRoot, { recursive: true })
   fs.writeFileSync(path.join(uiRoot, 'index.html'), '<html><body><div id="root"></div><script type="module" src="/entry.tsx"></script></body></html>')
   fs.writeFileSync(path.join(uiRoot, 'entry.tsx'), `import React from 'react';import{createRoot}from'react-dom/client';import{BranchManagerView}from'/src/renderer/src/components/WorkOrchestrationView/BranchManagerView';import'/src/renderer/src/index.css';const state=${JSON.stringify(active)};const request=async operation=>{const response=await fetch('/u4-branch',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(operation)});return response.json()};window.codeAwareness={getBranchOrchestration:request,listRepositories:async()=>${JSON.stringify([webRepository, electronRepository])},onContinuumChanged:()=>()=>{},onWorkOrchestrationChanged:()=>()=>{},activateRepository:()=>{throw Error('ACTIVE_PROJECT_MUST_NOT_CHANGE')}};createRoot(document.getElementById('root')).render(<div className="dark" style={{height:'100vh'}}><BranchManagerView active={true} state={state} onClose={()=>{}}/></div>);`)
@@ -222,6 +228,35 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     try {
       if (command.startsWith('select ')) currentKind = command.slice(7)
       const selection = selections[currentKind]; assert.ok(selection)
+      if (branchAppUI && command === 'ui-open') {
+        uiWindow = new BrowserWindow({ title: 'Work Orchestration — aceitação isolada', show: true, width: 1440, height: 900, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
+        await uiWindow.loadURL(`http://127.0.0.1:${ui.httpServer.address().port}`)
+        save('ui-open', { success: true, source: root, branch: execFileSync('git', ['branch', '--show-current'], { cwd: root, encoding: 'utf8', windowsHide: true }).trim() })
+      }
+      if (branchAppUI && ['ui-run', 'ui-stop', 'ui-details'].includes(command)) {
+        assert.ok(uiWindow)
+        const ref = execFileSync('git', ['branch', '--show-current'], { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
+        const label = (command === 'ui-run' ? 'Rodar aplicativo: ' : command === 'ui-stop' ? 'Encerrar aplicativo: ' : 'Detalhes: ') + ref
+        const clicked = await uiWindow.webContents.executeJavaScript(`(() => {const button=[...document.querySelectorAll('button')].find(b=>b.getAttribute('aria-label')===${JSON.stringify(label)});if(!button||button.disabled)return false;button.scrollIntoView({block:'center'});button.click();return true})()`, true)
+        assert.equal(clicked, true); save(command, { success: true, label })
+      }
+      if (branchAppUI && /^ui-capture(?:-(light|dark|narrow|running|stopped|details|cancelled))?$/.test(command)) {
+        assert.ok(uiWindow)
+        if (command.endsWith('-dark')) await uiWindow.webContents.executeJavaScript("document.body.dataset.theme='dark'")
+        if (command.endsWith('-light')) await uiWindow.webContents.executeJavaScript("document.body.dataset.theme='light'")
+        if (command.endsWith('-narrow')) uiWindow.setContentSize(700, 850)
+        else uiWindow.setContentSize(1440, 900)
+        const state = await uiWindow.webContents.executeJavaScript("({text:document.querySelector('.bm-list')?.innerText, aside:!!document.querySelector('.bm-detail'), buttons:[...document.querySelectorAll('.bm-card button')].slice(0,6).map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})), overflow:document.documentElement.scrollWidth>innerWidth})")
+        fs.writeFileSync(path.join(output, 'ui-session-records.json'), JSON.stringify(store.list().map(record => store.read(record.sessionId)), null, 2))
+        uiWindow.webContents.invalidate()
+        await uiWindow.webContents.executeJavaScript('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))')
+        const capture = await uiWindow.webContents.capturePage(undefined, { stayHidden: true })
+        assert.equal(capture.isEmpty(), false, 'UI_CAPTURE_EMPTY')
+        fs.writeFileSync(path.join(output, command + '.png'), capture.toPNG()); save(command, { success: true, ...state })
+      }
+      if (branchAppUI && command === 'ui-close-details') {
+        await uiWindow.webContents.executeJavaScript("document.querySelector('[aria-label=\"Fechar detalhes\"]')?.click()", true)
+      }
       if (command === 'run-branch' || command === 'replay-branch') {
         assert.ok(branchApp)
         if (command === 'run-branch') {
@@ -316,7 +351,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
       }
       if (command === 'history') await mcp('list_runtime_previews', { repositoryId: selection.repositoryId, limit: 10 })
       if (command === 'stop') { await mcp('stop_runtime_preview', { sessionId }); const completed = await service.pendingResult() ?? (await mcp('list_runtime_previews', { repositoryId: selection.repositoryId })).data?.lastOperation?.result; save('stop-complete', completed); assert.equal(completed?.data?.session?.state, 'STOPPED') }
-      if (command === 'quit') { assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state))); if (diagnosticTimer) clearInterval(diagnosticTimer); for (const item of diagnosticWatchers.values()) item.close(); watcher.close(); await ui.close(); await new Promise(resolve => server.close(resolve)); continuum.dispose(); catalogStore.close(); window.destroy(); app.exit(0); break }
+      if (command === 'quit') { assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state))); if (diagnosticTimer) clearInterval(diagnosticTimer); for (const item of diagnosticWatchers.values()) item.close(); watcher.close(); await ui.close(); await new Promise(resolve => server.close(resolve)); continuum.dispose(); catalogStore.close(); uiWindow?.destroy(); window.destroy(); app.exit(0); break }
     } catch (error) { save('command-error', { success: false, code: error.message }); console.error(error.stack) }
   }
 }

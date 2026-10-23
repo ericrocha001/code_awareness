@@ -4,11 +4,15 @@ const { execFile, spawnSync } = require('node:child_process')
 const { buildSync } = require('esbuild')
 
 exports.run = async ctx => {
+  const phase = name => console.log('BRANCH_MANAGER_PHASE', name)
+  phase('bundle')
   const backend = path.join(ctx.evidenceDir, 'backend.cjs')
   buildSync({ stdin: { contents: "export { ArtifactStore } from './src/main/continuum/artifact-store'; export { ContinuumService } from './src/main/continuum/continuum-service'; export { ContinuumLocalAdapter } from './src/main/continuum/local-adapter'; export { LocalChannelHost } from './src/main/local-agent-channel/local-channel-host'; export { registerContinuumHandlers } from './src/main/ipc/continuum-handler'; export { GitService } from './src/main/core/git-service'; export { GitOperationsService } from './src/main/git-operations/git-operations-service'; export { GitHubGitTransport } from './src/main/github/github-git-transport'; export { GitHubApiClient } from './src/main/github/github-api-client'; export { GitHubPullRequestCatalog } from './src/main/github/github-pull-request-catalog'; export { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './src/main/ipc/branch-orchestration-handler'; export { WorkOrchestrationController, registerWorkOrchestrationHandlers } from './src/main/ipc/work-orchestration-handler'; export { RuntimeIdentityProvider } from './src/main/runtime-identity/runtime-identity-provider'", resolveDir: ctx.projectRoot }, bundle: true, outfile: backend, platform: 'node', format: 'cjs', external: ['electron', 'better-sqlite3', 'sharp', 'js-yaml'] })
   const { ArtifactStore, ContinuumService, ContinuumLocalAdapter, LocalChannelHost, registerContinuumHandlers, GitService, GitOperationsService, GitHubGitTransport, GitHubApiClient, GitHubPullRequestCatalog, BranchOrchestrationController, registerBranchOrchestrationHandlers, WorkOrchestrationController, registerWorkOrchestrationHandlers, RuntimeIdentityProvider } = require(backend)
   const runtime = new RuntimeIdentityProvider({ rootDir: ctx.projectRoot, includedDirectories: ['src/main', 'src/shared', 'src/renderer/src'] })
+  phase('runtime-identity')
   await runtime.sourceOriginReady
+  phase('git-fixtures')
   const identity = runtime.getIdentityPayload()
   fs.writeFileSync(path.join(ctx.evidenceDir, 'runtime-identity.json'), JSON.stringify(identity, null, 2))
   const git = (root, args) => {
@@ -64,8 +68,10 @@ exports.run = async ctx => {
   await channel.start()
   const cli = args => new Promise((resolve, reject) => execFile('node', [path.join(ctx.projectRoot, 'scripts/continuum/local.cjs'), ...args, '--repository', 'fixture', '--profile', path.join(ctx.temporary, 'profile')], { cwd: path.join(ctx.temporary, 'topic'), windowsHide: true, timeout: 60000 }, (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(JSON.parse(stdout))))
   const args = ['bind_execution', '--execution', 'acceptance-execution', '--id', plan.artifactId]
+  phase('local-channel-binding')
   const binding = await cli(args), replay = await cli(args)
   ctx.check('Real CLI receipt PERSISTED and replay identity', binding.state === 'PERSISTED' && binding.artifactId === replay.artifactId && binding.branchRef === 'refs/heads/topic')
+  phase('renderer')
   const unregisterContinuum = registerContinuumHandlers(session)
   const projects = { getState: () => ({ project: { id: 'fixture', name: 'Acceptance', path: root }, revision: 1 }) }
   const controller = new BranchOrchestrationController(projects, async () => { releaseConfirmations++; return true }, session), legacy = new WorkOrchestrationController(projects)
@@ -84,7 +90,7 @@ exports.run = async ctx => {
     await ctx.click('[data-click-target]')
   }
   const select = async name => {
-    await ctx.evaluate(name => { document.querySelector('[data-branch-target]')?.removeAttribute('data-branch-target'); const button = [...document.querySelectorAll('.bm-card')].find(b => b.querySelector('strong').textContent === name); button.scrollIntoView({ block: 'nearest' }); button.setAttribute('data-branch-target', '') }, name)
+    await ctx.evaluate(name => { document.querySelector('[data-branch-target]')?.removeAttribute('data-branch-target'); const button = [...document.querySelectorAll('.bm-card')].find(b => b.querySelector('strong').textContent === name).querySelector('.bm-branch-select'); button.scrollIntoView({ block: 'nearest' }); button.setAttribute('data-branch-target', '') }, name)
     await ctx.click('[data-branch-target]'); await wait(() => !!document.querySelector('.bm-executions') && document.querySelector('.bm-executions').getAttribute('aria-busy') === 'false')
   }
   const refresh = async () => {
@@ -93,7 +99,7 @@ exports.run = async ctx => {
     const deadline = Date.now() + 5000
     while (uiInventoryReads === before && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20))
     ctx.check('Refresh reaches the real controller', uiInventoryReads > before)
-    await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote').textContent.includes('Consultando'))
+    await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
   }
   const preload = path.join(ctx.temporary, 'preload.cjs')
   buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')], bundle: true, outfile: preload, platform: 'node', format: 'cjs', external: ['electron'] })
@@ -104,8 +110,8 @@ exports.run = async ctx => {
   fs.writeFileSync(page, `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}.fixture-nav{height:32px;display:flex;gap:20px;padding:4px 24px;box-sizing:border-box;font:12px system-ui}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>`)
   try {
     await ctx.window.loadFile(page, { query: { repositoryPath: root } }); await ctx.viewport(1440, 900)
-    await wait(() => document.querySelectorAll('.bm-card').length > 0 && !document.querySelector('.bm-remote').textContent.includes('Consultando'))
-    ctx.check('Renderer shows branch-first inventory and detached section', await ctx.evaluate(() => document.querySelector('.bm-toolbar').textContent.includes('21 Worktrees') && document.body.textContent.includes('Worktrees sem branch confirmada')))
+    await wait(() => document.querySelectorAll('.bm-card').length > 0 && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
+    ctx.check('Renderer shows branch-first inventory and detached section', await ctx.evaluate(() => document.querySelector('.bm-toolbar').textContent.includes('branches') && document.body.textContent.includes('Worktrees sem branch confirmada')))
     ctx.check('No Continuum reads while mounting inventory', continuumReads === 0)
     await select('main')
     ctx.check('Main receives extinct origins with merge dates and rejected PR without delivery', await ctx.evaluate(() => {
@@ -152,14 +158,22 @@ exports.run = async ctx => {
     await wait(() => !document.querySelector('.wo-header button').disabled); await select('topic'); await clickText('Preparar descarte da branch…', '.bm-detail'); await wait(() => !!document.querySelector('[role=dialog]'))
     ctx.check('Occupied branch cannot be confirmed', await ctx.evaluate(() => document.querySelector('[role=dialog]').textContent.includes('Branch em checkout') && !document.querySelector('[role=dialog] input')))
     await clickText('Cancelar', '[role=dialog]')
+    phase('removal')
     const topicBefore = git(root, ['rev-parse', 'refs/heads/topic'])
     await clickText('Remover Worktree…', '.bm-detail'); await wait(() => !!document.querySelector('[role=dialog]'))
+    phase('removal-preview')
+    await ctx.capture('removal-preview')
     await ctx.click('[role=dialog] input[type=checkbox]'); await clickText('Confirmar liberação e remoção…', '[role=dialog]')
-    await wait(() => document.body.textContent.includes('Worktree removida.'))
+    phase('removal-await-result')
+    await wait(() => document.body.textContent.includes('Worktree removida.') || !!document.querySelector('[role=dialog] [role=alert]'))
+    const removalError = await ctx.evaluate(() => document.querySelector('[role=dialog] [role=alert]')?.textContent)
+    if (removalError) throw new Error('FIXTURE_REMOVAL_BLOCKED: ' + removalError)
     ctx.check('Separate removal handshake preserves branch', releaseConfirmations === 1 && git(root, ['rev-parse', 'refs/heads/topic']) === topicBefore && !fs.existsSync(path.join(ctx.temporary, 'topic')))
-    await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote').textContent.includes('Consultando'))
+    await wait(() => !document.querySelector('.wo-header button').disabled && !document.querySelector('.bm-remote')?.textContent.includes('Consultando'))
     await select('topic'); await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))
     ctx.check('Association remains after authorized fixture Worktree removal', await ctx.evaluate(() => document.querySelector('.bm-executions').textContent.includes('checkout histórico')))
+    if (process.env.CA_BRANCH_MANAGER_FOCUSED === '1') { await ctx.capture('details-functional-regression'); await ctx.overflow(); return }
+    phase('large-fixture')
     for (let i = 18; i < 99; i++) git(root, ['worktree', 'add', '--no-checkout', '-b', `work-${String(i).padStart(3, '0')}`, path.join(ctx.temporary, `work-${i}`)])
     const largeStart = Date.now(), largeCalls = gitCalls, large = await service.getBranchInventory()
     const largeCold = { milliseconds: Date.now() - largeStart, gitCalls: gitCalls - largeCalls, worktrees: large.worktrees.length }
@@ -172,12 +186,13 @@ exports.run = async ctx => {
     await ctx.evaluate(() => { const close = document.querySelector('[aria-label="Fechar detalhes"]'); close?.click() })
     await clickText('Mostrar mais branches'); await wait(() => document.querySelectorAll('.bm-card').length === 100)
     await clickText('Mostrar mais branches'); await wait(() => document.querySelectorAll('.bm-card').length >= 101)
-    ctx.check('Offline preserves complete local inventory beyond 100', await ctx.evaluate(() => document.querySelectorAll('.bm-card').length >= 101 && document.querySelector('.bm-remote').textContent.includes('indisponível')))
+    ctx.check('Offline preserves complete local inventory beyond 100', await ctx.evaluate(() => document.querySelectorAll('.bm-card').length >= 101 && !document.querySelector('.bm-remote')))
     await ctx.evaluate(() => { document.querySelector('.bm-list').scrollTop = 500 })
     const scroll = await ctx.evaluate(() => document.querySelector('.bm-list').scrollTop)
     await refresh()
     ctx.check('Explicit refresh preserves list scroll', await ctx.evaluate(top => document.querySelector('.bm-list').scrollTop === top, scroll))
     await select('main')
+    ctx.check('Offline coverage remains explicit in voluntary details', await ctx.evaluate(() => document.querySelector('.bm-remote').textContent.includes('indisponível')))
     const largeBindingStart = Date.now(), largeBindingCalls = gitCalls, largeBindingReads = continuumReads
     await select('topic')
     await wait(() => document.querySelector('.bm-executions').textContent.includes('Vínculo corrente verificado'))

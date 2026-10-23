@@ -14,7 +14,8 @@ import { WorktreeCommitsDisclosure } from './WorktreeCommitsDisclosure'
 import './WorkOrchestrationView.css'
 import './BranchManagerView.css'
 import { BranchExecutions, type ArtifactNavigation } from './BranchExecutions'
-import { RuntimePreviewPreflight } from './RuntimePreviewPreflight'
+import { RuntimePreviewSession } from './RuntimePreviewSession'
+import { BranchAppAction, useBranchAppRuntime } from './BranchAppAction'
 
 const date = (at: string | null) => at ? new Date(at).toLocaleString('pt-BR') : 'Desconhecida'
 const relationLabel = { CONFIRMED_CURRENT: 'Origem corrente confirmada', CONFIRMED_HISTORICAL: 'Vínculo histórico comprovado', CANDIDATE: 'Candidato — HEAD divergente', AMBIGUOUS: 'Associação ambígua', UNKNOWN: 'Origem não confirmada' }
@@ -26,20 +27,12 @@ const prState = (pr: PullRequestRecord) => pr.merged || pr.mergedAt ? 'Integrado
 const prEvent = (pr: PullRequestRecord) => Math.max(...[pr.createdAt, pr.updatedAt, pr.mergedAt].map(at => at ? Date.parse(at) || 0 : 0))
 const orderPrs = <T extends { pullRequest: PullRequestRecord }>(relations: T[]) => [...relations].sort((a, b) => prEvent(b.pullRequest) - prEvent(a.pullRequest) || b.pullRequest.number - a.pullRequest.number || a.pullRequest.id.localeCompare(b.pullRequest.id))
 
-function prSummary(prs: BranchPullRequests | null, branch: BranchRecord, stale: boolean) {
-  if (!prs) return 'PR não observado'
-  const sent = prs.relations.filter(r => r.branchKey === branch.key && r.branchRevision === branch.revision)
-  const received = prs.received.filter(r => r.branchKey === branch.key && r.branchRevision === branch.revision)
-  if (!sent.length && !received.length) return !stale && prs.catalog.coverage === 'COMPLETE' ? 'Nenhum PR observado' : 'PR não conclusivo'
-  const confirmed = sent.filter(r => r.classification === 'CONFIRMED_CURRENT' || r.classification === 'CONFIRMED_HISTORICAL').length
-  const integrated = received.filter(r => r.pullRequest.merged || r.pullRequest.mergedAt).length
-  return sent.length + ' enviado(s) · ' + confirmed + ' origem(ns) confirmada(s) · ' + (sent.length - confirmed) + ' sem confirmação · ' + received.length + ' recebido(s) · ' + integrated + ' integrado(s) no GitHub'
-}
 
 type Preview = { kind: 'DISCARD'; value: BranchDiscardPreview } | { kind: 'REMOVAL'; value: WorktreeRemovalPreview }
 
 export function BranchManagerView({ state, active = true, onCommit, onArtifact }: { state: ActiveProjectState; active?: boolean; onCommit?: (intent: CommitNavigationIntent) => void; onArtifact?: (intent: ArtifactNavigation) => void }) {
   const [inventory, setInventory] = useState<BranchInventory | null>(null), [prs, setPrs] = useState<BranchPullRequests | null>(null)
+  const [advanced, setAdvanced] = useState(false)
   const [selected, setSelected] = useState<string | null>(null), [filter, setFilter] = useState(''), [limit, setLimit] = useState(50)
   const [baseRef, setBaseRef] = useState('refs/heads/main'), [history, setHistory] = useState<BranchHistoryPage | null>(null)
   const [prCommits, setPrCommits] = useState<PullRequestCommitsPage | null>(null), [tree, setTree] = useState<ObservableWorktree | null>(null)
@@ -57,6 +50,7 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
     if (result.context.projectId !== projectId || result.context.revision !== revision) throw new Error('PROJECT_CONTEXT_CHANGED')
     return result.data
   }, [projectId, revision])
+  const runtime = useBranchAppRuntime(inventory?.repositoryId, query, active)
   const refresh = useCallback(async () => {
     if (!projectId || refreshing.current) return
     refreshing.current = true
@@ -84,7 +78,8 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
   }, [refresh])
   useEffect(() => {
     if (!active) { detailEpoch.current++; setPreview(null); setTree(null); setStale(true); setBusy(false) }
-  }, [active])
+    else void refresh()
+  }, [active, refresh])
   useEffect(() => {
     if (preview) { previousFocus.current = document.activeElement as HTMLElement; dialog.current?.focus() }
     else previousFocus.current?.focus()
@@ -92,7 +87,7 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
   useEffect(() => { if (selected) detail.current?.focus({ preventScroll: true }); else detailReturnFocus.current?.focus({ preventScroll: true }) }, [selected])
   const branch = inventory?.branches.find(b => b.key === selected) ?? null
   const worktreeQuery = (extra: Pick<OrchestrationRequest, 'changes' | 'documents'>) => window.codeAwareness.getWorkOrchestration({ context: { projectId: projectId!, revision }, ...extra })
-  const choose = (record: BranchRecord) => { detailReturnFocus.current = document.activeElement as HTMLElement; detailEpoch.current++; setSelected(record.key); setHistory(null); setPrCommits(null); setTree(null); setError('') }
+  const choose = (record: BranchRecord) => { detailReturnFocus.current = document.activeElement as HTMLElement; detailEpoch.current++; setSelected(record.key); setAdvanced(false); setHistory(null); setPrCommits(null); setTree(null); setError('') }
   const run = async (operation: BranchManagerOperation, apply: (data: BranchManagerData) => void) => {
     const request = detailEpoch.current, version = epoch.current
     setBusy(true); setError('')
@@ -142,23 +137,24 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
   const branchTrees = branch ? inventory?.worktrees.filter(w => branch.worktrees.some(link => link.worktreeId === w.worktreeId && link.generation === w.generation)) ?? [] : []
   return <main className="wo-view bm-view" aria-label="Gestor por branch">
     <header className="wo-header"><div className="wo-feature-identity"><span className="wo-feature-icon"><GitBranch size={34}/></span><div><h1>Work Orchestration</h1><p>Branches, entregas e ambientes de trabalho</p></div></div><button onClick={() => void refresh()} disabled={loading || busy || !active}><RefreshCw size={16}/> Atualizar</button></header>
-    <div className="bm-toolbar"><label>Filtrar branches <input value={filter} onChange={e => { setFilter(e.target.value); setLimit(50) }} placeholder="Nome ou referência"/></label><span>{inventory ? `Inventário completo · ${inventory.branches.length} branches · ${inventory.worktrees.length} Worktrees` : loading ? 'Lendo inventário Git…' : 'Inventário indisponível'}</span></div>
+    <div className="bm-toolbar"><label>Filtrar branches <input value={filter} onChange={e => { setFilter(e.target.value); setLimit(50) }} placeholder="Nome ou referência"/></label><span>{inventory ? `${inventory.branches.length} branches` : loading ? 'Lendo inventário Git…' : 'Inventário indisponível'}</span></div>
     {error && <p role="alert" className="wo-warning">{error}</p>}{receipt && <p role="status" className="bm-receipt">{receipt}</p>}
+    {runtime.uncertain && <div className="bm-app-recovery" role="alert"><span>{runtime.notice?.message}</span><button disabled={!active} onClick={runtime.reconcile}>Verificar estado do aplicativo</button><details><summary>Diagnóstico</summary><code>{runtime.notice?.code}</code></details></div>}
     {stale && <p role="status" className="wo-warning">Estado precisa de atualização antes de agir.</p>}
-    <div className="bm-remote" role="status">{remoteLoading ? 'Consultando PRs… O inventário local já está disponível.' : prs ? prs.catalog.coverage === 'COMPLETE' ? `GitHub · ${prs.catalog.items.length} PRs observados em ${date(prs.catalog.observedAt)}` : `PRs: cobertura ${prs.catalog.coverage === 'PARTIAL' ? 'parcial' : 'indisponível'} · ${prs.catalog.reason ?? 'não conclusiva'} · observado em ${date(prs.catalog.observedAt)}` : 'PRs ainda não observados'}</div>
+
     <div className={`bm-layout${branch ? ' bm-has-selection' : ''}`}>
       <section className="bm-list" aria-label="Timeline de branches"><h2>Branches <small>{visible.length}</small></h2>
-        {visible.slice(0, limit).map((record, index, rows) => <React.Fragment key={record.key}>{(index === 0 || !!record.creation.at !== !!rows[index - 1].creation.at) && <h3>{record.creation.at ? 'Criação com evidência' : 'Data de criação desconhecida'}</h3>}<button disabled={busy} className={`bm-card${selected === record.key ? ' selected' : ''}`} aria-pressed={selected === record.key} onClick={() => choose(record)}>
-          <span className="bm-card-title"><GitBranch size={17}/><strong title={record.ref}>{record.name}</strong><small>{record.namespace === 'TRACKING' ? 'Tracking local' : 'Local'}</small></span>
-          <span className="bm-card-meta">{record.worktrees.length ? `${record.worktrees.length} Worktree(s)` : 'Sem checkout associado'} · HEAD {record.head.slice(0, 8)}</span>
-          <span className="bm-card-meta">{record.creation.at ? `Criada em ${date(record.creation.at)} · ${record.creation.source === 'APP_RECEIPT' ? 'recibo do app' : 'histórico local'}` : `Último commit: ${date(record.lastCommitAt)}`}</span>
-          <span className="bm-pr-summary">{prSummary(prs, record, stale)}</span>
-        </button></React.Fragment>)}
+        {visible.slice(0, limit).map(record => <article key={record.key} className={`bm-card${selected === record.key ? ' selected' : ''}`} aria-label={record.name}>
+          <button className="bm-branch-select" disabled={busy} aria-label={`Detalhes: ${record.name}`} aria-expanded={selected === record.key} onClick={() => choose(record)}><GitBranch size={17}/><strong title={record.ref}>{record.name}</strong><span>Detalhes</span></button>
+          <BranchAppAction branch={record} runtime={runtime} disabled={!active || stale || busy || loading}/>
+        </article>)}
+
         {!visible.length && inventory && <p>Nenhuma branch neste filtro.</p>}{visible.length > limit && <button onClick={() => setLimit(n => n + 50)}>Mostrar mais branches</button>}
-        {!!inventory?.unassignedWorktrees.length && <section aria-label="Worktrees sem branch confirmada"><h2>Worktrees sem branch confirmada</h2><ul className="bm-trees">{inventory.unassignedWorktrees.map(renderTree)}</ul></section>}
+        {!!inventory?.unassignedWorktrees.length && <details aria-label="Worktrees sem branch confirmada"><summary>Worktrees sem branch confirmada ({inventory.unassignedWorktrees.length})</summary><ul className="bm-trees">{inventory.unassignedWorktrees.map(renderTree)}</ul></details>}
         {!!prs?.orphaned.length && <details><summary>PRs sem vínculo corrente confirmado ({prs.orphaned.length})</summary><ul className="bm-pr-list">{prs.orphaned.map(pr => <li key={pr.id}>#{pr.number} · {pr.title}<small>{pr.head.repository ?? 'Origem removida'}:{pr.head.ref} · {pr.head.sha.slice(0, 8)}</small><span>{pr.merged ? 'Integrado no GitHub' : pr.state === 'open' ? 'Aberto' : 'Fechado sem merge'}</span></li>)}</ul></details>}
       </section>
       {branch && <aside className="bm-detail" ref={detail} tabIndex={-1} aria-label="Detalhes da branch" onKeyDown={event => { if (event.key === 'Escape' && !busy) { detailEpoch.current++; setSelected(null); setTree(null) } }}><header><h2 title={branch.ref}>{branch.name}</h2><button disabled={busy} aria-label="Fechar detalhes" onClick={() => { detailEpoch.current++; setSelected(null); setTree(null) }}><X size={16}/></button></header>
+    <div className="bm-remote" role="status">{remoteLoading ? 'Consultando PRs… O inventário local já está disponível.' : prs ? prs.catalog.coverage === 'COMPLETE' ? `GitHub · ${prs.catalog.items.length} PRs observados em ${date(prs.catalog.observedAt)}` : `PRs: cobertura ${prs.catalog.coverage === 'PARTIAL' ? 'parcial' : 'indisponível'} · ${prs.catalog.reason ?? 'não conclusiva'} · observado em ${date(prs.catalog.observedAt)}` : 'PRs ainda não observados'}</div>
         <dl><dt>Referência</dt><dd>{branch.ref}</dd><dt>HEAD observado</dt><dd>{branch.head}</dd><dt>Criação</dt><dd>{date(branch.creation.at)}{branch.creation.at && ` · ${branch.creation.source === 'APP_RECEIPT' ? 'Recibo do app' : 'Evidência histórica local'}`}</dd><dt>Último commit</dt><dd>{date(branch.lastCommitAt)}</dd>{branch.upstream && <><dt>Upstream local</dt><dd>{branch.upstream}</dd></>}</dl>
         <BranchExecutions branch={branch} active={active} query={query} onArtifact={onArtifact}/><section><h3>PRs e entregas</h3>
           <p>Destino declarado pelo GitHub; não comprova geração da branch ou commits no HEAD local.</p>
@@ -172,7 +168,7 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
           {history && <><p>{history.mode === 'REACHABLE' ? 'História alcançável do HEAD — inclui ancestrais herdados.' : `Exclusivos em relação a ${history.base?.ref} · ${history.base?.head.slice(0, 8)}`}</p><ul className="bm-commits">{history.commits.map(c => <li key={c.sha}><button disabled={!onCommit} onClick={() => openCommit(c.sha)}>{c.title} · {c.sha.slice(0, 8)}</button><small>Data do commit: {date(c.committedAt)}</small></li>)}</ul>{!history.commits.length && <p>Nenhum commit nesta comparação.</p>}{history.nextCursor && <button disabled={busy || stale} onClick={() => readHistory(history.mode, history.nextCursor!)}>Mais commits</button>}</>}
         </section>
         <section><h3>Worktrees associadas</h3>{branchTrees.length ? <ul className="bm-trees">{branchTrees.map(renderTree)}</ul> : <p>Sem checkout associado a esta referência.</p>}</section>
-        <RuntimePreviewPreflight key={`${inventory!.repositoryId}:${branch.key}`} repositoryId={inventory!.repositoryId} worktrees={branchTrees} query={query} disabled={!active || stale}/>
+        <details className="bm-advanced" open={advanced} onToggle={event => setAdvanced(event.currentTarget.open)}><summary>Diagnóstico e qualificação avançados</summary>{advanced && branchTrees.map(tree => <section key={tree.worktreeId}><h3>{tree.path}</h3><RuntimePreviewSession selection={null} repositoryId={inventory!.repositoryId} worktreeId={tree.worktreeId} startAllowed={false} disabled={!active || stale} query={query} inspectionOnly/></section>)}</details>
         {branch.namespace === 'LOCAL' && <button className="bm-danger" disabled={busy || stale || !baseRef || baseRef === branch.ref} onClick={() => void run({ action: 'PREPARE_DISCARD', ref: branch.ref, revision: branch.revision, baseRef }, data => { if (data.kind === 'DISCARD_PREVIEW') { setConsent(false); setPreview({ kind: 'DISCARD', value: data.preview }) } })}>Preparar descarte da branch…</button>}
       </aside>}
       {tree && <aside className="bm-detail bm-tree-detail" aria-label="Contexto da Worktree"><header><h2>{tree.branch ?? 'Detached HEAD'}</h2><button aria-label="Fechar contexto" onClick={() => setTree(null)}><X size={16}/></button></header><p>{tree.path}</p><p>{tree.observation === 'VERIFIED' ? 'Observação verificada' : 'Observação indisponível'}{tree.reason && ` · ${tree.reason}`}</p><WorktreeCommitsDisclosure tree={tree} context={{ projectId: projectId!, revision }} active={active && !stale} onCommit={onCommit}/><LocalChangesInspector tree={tree} query={worktreeQuery} revalidate={() => void observe(tree)} stale={() => setTree(value => value && { ...value, observation: 'STALE' })}/><WorktreeDocumentContext tree={tree} query={worktreeQuery}/></aside>}
