@@ -76,7 +76,8 @@ export class RuntimePreviewOperations {
       state: record.state, readiness: record.readiness, liveness: record.liveness, resources: record.resources, failure: record.failure,
       observation: this.pending && !current ? 'IN_PROGRESS' : record.persistence !== 'PERSISTED' || ['OWNERSHIP_UNVERIFIED', 'CLEANUP_INCOMPLETE'].includes(record.state) ? 'UNVERIFIABLE' : current && !['STOPPED', 'FAILED'].includes(record.state) ? 'CURRENT' : 'HISTORICAL',
       source: record.sourceObservation?.snapshot ?? record.sourceSnapshot, coverage, qualifications, endpoint,
-      at: record.at, startedAt: record.startedAt, endedAt: record.endedAt, process: processView(record) }
+      at: record.at, startedAt: record.startedAt, endedAt: record.endedAt, process: processView(record),
+      ...(record.termination ? { termination: { kind: record.termination.kind, reasonCode: record.termination.reasonCode, rootExit: record.termination.rootExit } } : {}) }
   }
   private inconclusive(link: PreviewValidationLink, reason: string): PreviewQualification {
     return { ...link, status: 'INCONCLUSIVE', observedStatus: 'UNVERIFIABLE', reasons: [reason], at: new Date().toISOString(), evidenceAt: null, scope: [] }
@@ -182,7 +183,7 @@ export class RuntimePreviewOperations {
       if (request.action === 'STOP') return this.mutate('stop:' + record.sessionId, record.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.stop(record.sessionId), true), pending: false } }))
       if (request.action === 'EVIDENCE') {
         const evidence = this.store.read(record.sessionId, request.revision)
-        const entries = request.section === 'COVERAGE' ? evidence.coverage : request.section === 'SOURCE' ? [{ selection: evidence.selection, source: evidence.sourceObservation?.snapshot ?? evidence.sourceSnapshot, at: evidence.at }] : [{ process: processView(evidence), compatibility: evidence.runtimeEvidence ?? null, ...(evidence.context ? { data: evidence.context.data, context: { repositoryId: evidence.context.selection.repositoryId, worktreeId: evidence.context.selection.worktreeId, generation: evidence.context.selection.generation, mode: evidence.context.mode } } : {}) }, ...evidence.resourceInventory.map(r => ({ name: r.name, kind: r.kind, state: r.state }))]
+        const entries = request.section === 'COVERAGE' ? evidence.coverage : request.section === 'SOURCE' ? [{ selection: evidence.selection, source: evidence.sourceObservation?.snapshot ?? evidence.sourceSnapshot, at: evidence.at }] : [{ process: processView(evidence), compatibility: evidence.runtimeEvidence ?? null, termination: evidence.termination ?? null, stopIntent: evidence.stopIntent ?? null, ...(evidence.context ? { data: evidence.context.data, context: { repositoryId: evidence.context.selection.repositoryId, worktreeId: evidence.context.selection.worktreeId, generation: evidence.context.selection.generation, mode: evidence.context.mode } } : {}) }, ...evidence.resourceInventory.map(r => ({ name: r.name, kind: r.kind, state: r.state }))]
         const offset = request.offset ?? 0, page = entries.slice(offset, offset + (request.limit ?? 8))
         return { success: true, data: { kind: 'EVIDENCE', sessionId: record.sessionId, revision: evidence.revision, section: request.section, entries: page, nextOffset: offset + page.length < entries.length ? offset + page.length : null } }
       }

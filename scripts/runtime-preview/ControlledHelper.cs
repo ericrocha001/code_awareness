@@ -40,6 +40,7 @@ internal static class ControlledHelper
             File.WriteAllText(Path.Combine(directory, "port.txt"), ((IPEndPoint)listener.LocalEndpoint).Port.ToString());
         }
         File.WriteAllText(Path.Combine(directory, Process.GetCurrentProcess().Id + ".ready"), Win32.Creation(Win32.GetCurrentProcess()).ToString());
+        if (mode.StartsWith("exit:")) { if (eventHandle != IntPtr.Zero) Win32.CloseHandle(eventHandle); return Int32.Parse(mode.Substring(5)); }
         if (mode == "orphan") return 0;
         if (mode == "ignore" || eventHandle == IntPtr.Zero) Thread.Sleep(120000);
         else Win32.WaitForSingleObject(eventHandle, 120000);

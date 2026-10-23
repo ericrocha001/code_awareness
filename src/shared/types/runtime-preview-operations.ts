@@ -19,6 +19,8 @@ export interface PreviewSessionView {
   source: PreviewPreflight['snapshot'] | null; coverage: PreviewCoverage[]
   qualifications: PreviewQualification[]; endpoint: string | null
   process: { rootExited: boolean; activeProcesses: number; handlesClosed: boolean; assignedAtCreation: boolean } | null
+  termination?: { kind: 'STOP_REQUESTED' | 'UNEXPECTED_EXIT' | 'STARTUP_FAILURE' | 'UNKNOWN'; reasonCode: string;
+    rootExit: { status: 'KNOWN' | 'UNKNOWN'; code: number | null; reasonCode: string; observedAt: string | null } }
 }
 export type RuntimePreviewRequest =
   | { action: 'PROFILES' | 'WORKTREES'; repositoryId: string }

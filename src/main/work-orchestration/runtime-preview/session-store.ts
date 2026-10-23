@@ -2,15 +2,25 @@ import { closeSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openS
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
-import { nativeObservation } from './native-owner'
+import { nativeObservation, rootExitSchema } from './native-owner'
 import { previewContextManifest } from './context-contract'
 
 const selectionSchema = z.object({ repositoryId: z.string(), worktreeId: z.string(), generation: z.string(), profileId: z.string(), fingerprint: z.string() }).strict()
+export const terminationSchema = z.object({
+  kind: z.enum(['STOP_REQUESTED', 'UNEXPECTED_EXIT', 'STARTUP_FAILURE', 'UNKNOWN']),
+  reasonCode: z.string().min(1).max(160), observedAt: z.string().max(64), rootExit: rootExitSchema,
+  supervisor: z.object({ status: z.enum(['RESPONDING', 'EXITED', 'UNKNOWN']), phase: z.string().max(80).nullable(),
+    pid: z.number().int().positive().nullable(), created: z.string().max(64).nullable() }).strict(),
+  supervisorExit: z.object({ observedAt: z.string().max(64) }).strict().optional(),
+  process: nativeObservation.nullable()
+}).strict()
 export const sessionSchema = z.object({
   schemaVersion: z.literal(1), sessionId: z.string().uuid(), operationId: z.string().uuid(), selection: selectionSchema,
   persistence: z.enum(['PERSISTED', 'UNVERIFIABLE']),
   profileRevision: z.number().int().positive(), gitFingerprint: z.string(), revision: z.number().int().nonnegative(), at: z.string(),
   startedAt: z.string(), endedAt: z.string().nullable(),
+  stopIntent: z.object({ requestedAt: z.string().max(64) }).strict().optional(),
+  termination: terminationSchema.optional(),
   context: previewContextManifest.optional(),
   sourceSnapshot: z.object({ head: z.string().nullable(), branch: z.string().nullable(), indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict().nullable(),
   sourceObservation: z.object({ at: z.string(), fingerprint: z.string(), snapshot: z.object({ head: z.string().nullable(), branch: z.string().nullable(), indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict() }).strict().optional(),
@@ -88,6 +98,13 @@ export class PreviewSessionStore {
       const value = sessionSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
       if (value.sessionId !== id || value.revision !== index || (latest && (value.operationId !== latest.operationId || value.profileRevision !== latest.profileRevision || value.gitFingerprint !== latest.gitFingerprint || JSON.stringify(value.selection) !== JSON.stringify(latest.selection)))) throw new Error('SESSION_RECORD_UNVERIFIABLE')
       if (latest?.context && JSON.stringify(latest.context) !== JSON.stringify(value.context)) throw new Error('SESSION_CONTEXT_CHANGED')
+      if (latest?.stopIntent && JSON.stringify(latest.stopIntent) !== JSON.stringify(value.stopIntent)) throw new Error('SESSION_STOP_INTENT_CHANGED')
+      if (latest?.termination && latest.termination.kind !== 'UNKNOWN') {
+        const { supervisorExit: beforeExit, ...before } = latest.termination
+        const { supervisorExit: afterExit, ...after } = value.termination ?? {}
+        if (JSON.stringify(before) !== JSON.stringify(after) || beforeExit && JSON.stringify(beforeExit) !== JSON.stringify(afterExit)) throw new Error('SESSION_TERMINATION_CHANGED')
+      }
+      if (latest && ['FAILED', 'STOPPED'].includes(latest.state) && (value.state !== latest.state || value.failure !== latest.failure || value.resources !== latest.resources || value.endedAt !== latest.endedAt || JSON.stringify(value.termination) !== JSON.stringify(latest.termination) || JSON.stringify(value.stopIntent) !== JSON.stringify(latest.stopIntent))) throw new Error('SESSION_TERMINAL_CHANGED')
       latest = value
       if (value.revision === revision) selected = value
     }
