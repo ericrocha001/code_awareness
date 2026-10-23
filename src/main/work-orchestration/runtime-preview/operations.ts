@@ -11,10 +11,13 @@ import type { RuntimePreviewRunner } from './runner'
 import type { ValidationLedger } from '../../validation-ledger/validation-ledger'
 import { captureValidationSource, validationSourceFingerprint } from '../../validation-execution/validation-source'
 import type { RepositoryContinuumSession } from '../../continuum/project-continuum-session'
+import type { CodeAwarenessProfileResolver } from './code-awareness-profile'
 
 const text = z.string().min(1).max(128).regex(/^[^\0\r\n]+$/), id = z.string().uuid()
 const selection = z.object({ repositoryId: text, worktreeId: text, generation: text, profileId: text, fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 export const previewRequestSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('RUN_BRANCH_APP'), repositoryId: text, ref: z.string().min(1).max(512).regex(/^[^\0\r\n]+$/), revision: text, operationId: id,
+    worktree: z.object({ worktreeId: text, generation: text }).strict().optional() }).strict(),
   z.object({ action: z.literal('PROFILES'), repositoryId: text }).strict(),
   z.object({ action: z.literal('WORKTREES'), repositoryId: text }).strict(),
   ...(['PREFLIGHT', 'AUTHORIZE'] as const).map(action => z.object({ action: z.literal(action), selection }).strict()),
@@ -34,11 +37,13 @@ const processView = (record: PreviewSessionRecord): PreviewSessionView['process'
 export class RuntimePreviewOperations {
   private pending?: Pending
   private lastOperation: { operationId: string; code: string | null; result: RuntimePreviewResult } | null = null
+  private lastOperationKey: string | null = null
   private readonly preflight: PreviewPreflightService
   constructor(private readonly repositories: PreviewRepositories, private readonly profiles: PreviewProfileStore,
     private readonly store: PreviewSessionStore, private readonly runner: RuntimePreviewRunner,
     private readonly confirm: (profile: PreviewProfile) => Promise<boolean>, private readonly ledger?: Pick<ValidationLedger, 'getProofWithFreshness'>,
-    private readonly continuum?: Pick<RepositoryContinuumSession, 'getActiveService' | 'getActiveSession'>) {
+    private readonly continuum?: Pick<RepositoryContinuumSession, 'getActiveService' | 'getActiveSession'>,
+    private readonly branchProfiles?: Pick<CodeAwarenessProfileResolver, 'resolve'>) {
     this.preflight = new PreviewPreflightService(profiles)
   }
   private record(sessionId: string) {
@@ -55,6 +60,66 @@ export class RuntimePreviewOperations {
     const context = await this.repositories.open(target.repositoryId, target.worktreeId)
     const value = await this.preflight.check(context.git, target); context.guard()
     return { kind: 'PREFLIGHT' as const, preflight: value, startAllowed: value.status === 'SUPPORTED' || diagnosticBootstrapAllowed(value, await this.profile(target)) }
+  }
+  private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void): Promise<RuntimePreviewResult> {
+    const blocked = (reasonCode: string, message: string, details = {}): RuntimePreviewResult => ({ success: true, data: { kind: 'BRANCH_APP', reasonCode, message, ...details } })
+    if (!this.branchProfiles) return blocked('APP_HOST_UNSUPPORTED', 'Esta instalação não oferece um perfil seguro para rodar o Code Awareness.')
+    const context = await this.repositories.open(request.repositoryId), inventory = await context.git.getBranchInventory()
+    const observedBranch = inventory.branches.find(b => b.ref === request.ref && b.repositoryId === request.repositoryId)
+    const branch = observedBranch ? structuredClone(observedBranch) : undefined
+    if (!branch || branch.revision !== request.revision || branch.generation === 'UNKNOWN') throw new Error('BRANCH_CHANGED')
+    if (branch.namespace !== 'LOCAL' || !branch.worktrees.length) return blocked('BRANCH_CHECKOUT_REQUIRED', 'Esta branch precisa de um checkout local compatível antes de rodar.')
+    const candidates = inventory.worktrees.filter(w => branch.worktrees.some(b => b.worktreeId === w.worktreeId && b.generation === w.generation) && w.branch === branch.name && w.head === branch.head)
+    if (request.worktree && !candidates.some(w => w.worktreeId === request.worktree!.worktreeId && w.generation === request.worktree!.generation)) throw new Error('WORKTREE_STALE')
+    if (!request.worktree && candidates.length > 1) return blocked('BRANCH_CHECKOUT_AMBIGUOUS', 'Há mais de um checkout desta branch. Escolha qual deseja executar.', { candidates })
+    const observedTree = request.worktree ? candidates.find(w => w.worktreeId === request.worktree!.worktreeId)! : candidates[0]
+    const tree = observedTree ? structuredClone(observedTree) : undefined
+    if (!tree || tree.detached || tree.locked || tree.missing || tree.prunable) return blocked('APP_CHECKOUT_UNAVAILABLE', 'O checkout desta branch não está disponível para execução.')
+    const verify = async () => {
+      guard(); context.guard()
+      const current = await context.git.getBranchInventory(), selected = current.branches.find(b => b.ref === branch.ref)
+      if (!selected || selected.revision !== branch.revision || selected.generation !== branch.generation || selected.head !== branch.head || !selected.worktrees.some(w => w.worktreeId === tree.worktreeId && w.generation === tree.generation)) throw new Error('BRANCH_CHANGED')
+      const identity = await context.git.getCoordinationIdentity(tree.worktreeId)
+      if (identity.repositoryId !== request.repositoryId || identity.record.generation !== tree.generation || identity.record.path !== tree.path || identity.record.head !== branch.head || identity.record.branch !== branch.name || identity.record.locked || identity.record.missing || identity.record.detached || identity.record.prunable) throw new Error('WORKTREE_STALE')
+      guard(); context.guard()
+    }
+    await verify()
+    const active = this.store.list().find(r => !['STOPPED', 'FAILED'].includes(r.state) || r.resources !== 'RELEASED')
+    if (active) {
+      if (active.operationId === request.operationId && active.selection.repositoryId === request.repositoryId && active.selection.worktreeId === tree.worktreeId && active.selection.generation === tree.generation && active.sourceSnapshot?.branch === branch.name && active.sourceSnapshot.head === branch.head) return { success: true, data: { kind: 'SESSION', session: await this.view(active, false), pending: false } }
+      return blocked('PREVIEW_SESSION_ACTIVE', 'Já existe um aplicativo de preview ativo. Encerre essa sessão explicitamente antes de rodar outra branch.', { activeSession: await this.view(active, false) })
+    }
+    let profile: PreviewProfile
+    try { profile = await this.branchProfiles.resolve(request.repositoryId, tree.worktreeId, tree.path) }
+    catch (error) {
+      const result = failure(error)
+      const code = !result.success ? result.code : 'APP_PROFILE_UNAVAILABLE'
+      const messages: Record<string, string> = {
+        APP_CHECKOUT_UNSUPPORTED: 'Este checkout não contém um aplicativo Code Awareness suportado.',
+        APP_COOPERATION_MISSING: 'Falta o bootstrap V5 neste checkout. Use uma branch compatível; o checkout não será adaptado automaticamente.',
+        APP_COOPERATION_INCOMPATIBLE: 'O bootstrap deste checkout difere do contrato suportado pelo host. É necessária revisão de compatibilidade.',
+        APP_RUNTIME_UNAVAILABLE: 'O Electron desta Worktree não está disponível. Prepare as dependências em uma operação separada e autorizada.',
+        APP_RUNTIME_INCOMPATIBLE: 'O Electron instalado nesta Worktree é incompatível com o runtime suportado pelo host.',
+        APP_HOST_PROFILE_UNAVAILABLE: 'Esta instalação do host não dispõe do template necessário para formar um perfil seguro.',
+        APP_NODE_UNAVAILABLE: 'O Node necessário ao lançamento não está disponível no ambiente do host.',
+        APP_GIT_UNAVAILABLE: 'O Git necessário à identidade do preview não está disponível no ambiente do host.',
+        APP_PROFILE_POLICY_CHANGED: 'A política do perfil foi alterada e exige revisão independente. Nenhuma garantia foi reduzida.'
+      }
+      return blocked(code, messages[code] ?? 'Não foi possível formar um perfil seguro para este checkout. Confira a compatibilidade V5 e as dependências desta Worktree nos detalhes.')
+    }
+    const target = { repositoryId: request.repositoryId, worktreeId: tree.worktreeId, generation: tree.generation, profileId: profile.profileId, fingerprint: previewFingerprint(profile) }
+    const before = await this.check(target)
+    if (before.preflight.diagnostics.some(d => !['PROFILE_APPROVAL_REQUIRED', 'ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: before.preflight })
+    await verify()
+    if (!await this.profiles.approved(profile)) {
+      try { await this.profiles.approve(profile, this.confirm, () => { guard(); context.guard() }) }
+      catch (error) { if (error instanceof Error && error.message === 'PROFILE_APPROVAL_REQUIRED') return blocked('PROFILE_APPROVAL_REQUIRED', 'Execução cancelada. Nenhum aplicativo foi iniciado.'); throw error }
+    }
+    await verify()
+    const checked = await this.check(target)
+    if (!checked.startAllowed) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: checked.preflight })
+    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify })
+    return { success: true, data: { kind: 'SESSION', session: await this.view(record, true), pending: false } }
   }
   private async view(record: PreviewSessionRecord, current: boolean, known?: PreviewQualification): Promise<PreviewSessionView> {
     const coverage = record.coverage.map(c => ({ ...c }))
@@ -129,6 +194,10 @@ export class RuntimePreviewOperations {
     return { ...link, status: reasons.length || proof.status === 'ERROR' ? 'INCONCLUSIVE' : proof.status === 'PASSED' ? 'PASSED' : 'FAILED', observedStatus: ['MANUAL_ACCEPTANCE', 'E2E'].includes(proof.kind) ? proof.status : 'NOT_OBSERVED', reasons, at: new Date().toISOString(), evidenceAt: evidence.at, scope }
   }
   private mutate(key: string, operationId: string, work: () => Promise<RuntimePreviewResult>): RuntimePreviewResult {
+    if (key.startsWith('run-branch:') && this.lastOperation?.operationId === operationId) {
+      if (this.lastOperationKey !== key) throw new Error('OPERATION_ID_CONFLICT')
+      return structuredClone(this.lastOperation.result)
+    }
     if (this.pending && this.pending.key !== key && !key.startsWith('stop:')) throw new Error('PREVIEW_OPERATION_BUSY')
     if (!this.pending || this.pending.key !== key) {
       const pending: Pending = { key, operationId, work: Promise.resolve().then(work).catch(failure) }
@@ -139,6 +208,7 @@ export class RuntimePreviewOperations {
           if (completed.data.session.observation === 'CURRENT') completed.data.session.observation = 'HISTORICAL'
         }
         this.lastOperation = { operationId, code: result.success ? null : result.code, result: completed }
+        this.lastOperationKey = key
         if (this.pending === pending) this.pending = undefined
       })
     }
@@ -150,6 +220,7 @@ export class RuntimePreviewOperations {
     const request = parsed.data as RuntimePreviewRequest
     try {
       guard()
+      if (request.action === 'RUN_BRANCH_APP') return this.mutate('run-branch:' + request.operationId + ':' + previewFingerprint(request), request.operationId, () => this.runBranch(request, guard))
       if (request.action === 'PROFILES') { const context = this.repositories.resolve(request.repositoryId); const profiles = await this.preflight.list(request.repositoryId); context.guard(); guard(); return { success: true, data: { kind: 'PROFILES', profiles } } }
       if (request.action === 'WORKTREES') { const context = await this.repositories.open(request.repositoryId); context.guard(); guard(); return { success: true, data: { kind: 'WORKTREES', repositoryId: request.repositoryId, worktrees: context.worktrees } } }
       if (request.action === 'PREFLIGHT') return this.mutate('preflight:' + previewFingerprint(request.selection), previewFingerprint(request.selection), async () => { const data = await this.check(request.selection); guard(); return { success: true, data } })

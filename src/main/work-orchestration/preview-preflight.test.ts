@@ -187,3 +187,27 @@ it('returns UNKNOWN for missing materialization evidence instead of declaring in
   expect(result.status).toBe('UNKNOWN')
   expect(result.diagnostics.map(d => d.reasonCode)).toEqual(['DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'])
 })
+
+it('persists a host default once, preserves advanced profiles and reuses its approved fingerprint', async () => {
+  const candidate = { ...profile, profileId: 'default' }
+  const resolved = await store.provideDefault('default', async () => candidate)
+  await store.approve(resolved, async () => true)
+  const bytes = await readFile(join(directory, 'profiles.json'), 'utf8')
+  expect(await store.provideDefault('default', async current => current!)).toEqual(resolved)
+  expect(await readFile(join(directory, 'profiles.json'), 'utf8')).toBe(bytes)
+  expect((await store.profiles('repo')).map(p => p.profileId)).toEqual(['web', 'default'])
+  expect(await store.approved(resolved)).toBe(true)
+  const changed = await store.provideDefault('default', async current => ({ ...current!, runtimeVersion: 'different' }))
+  expect(changed.revision).toBe(2); expect(await store.approved(changed)).toBe(false)
+})
+it('serializes concurrent default resolution without duplicating profiles', async () => {
+  await Promise.all(Array.from({ length: 4 }, () => store.provideDefault('default', async () => ({ ...profile, profileId: 'default' }))))
+  expect((await store.profiles('repo')).filter(p => p.profileId === 'default')).toHaveLength(1)
+})
+it('rejects an externally modified profile store instead of overwriting it', async () => {
+  await expect(store.provideDefault('default', async () => {
+    await writeFile(join(directory, 'profiles.json'), JSON.stringify([{ ...profile, revision: 2 }]))
+    return { ...profile, profileId: 'default' }
+  })).rejects.toThrow('PROFILE_CHANGED')
+  expect((await store.profiles('repo'))[0].revision).toBe(2)
+})

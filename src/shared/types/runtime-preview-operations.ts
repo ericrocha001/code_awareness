@@ -21,6 +21,7 @@ export interface PreviewSessionView {
   process: { rootExited: boolean; activeProcesses: number; handlesClosed: boolean; assignedAtCreation: boolean } | null
 }
 export type RuntimePreviewRequest =
+  | { action: 'RUN_BRANCH_APP'; repositoryId: string; ref: string; revision: string; operationId: string; worktree?: { worktreeId: string; generation: string } }
   | { action: 'PROFILES' | 'WORKTREES'; repositoryId: string }
   | { action: 'PREFLIGHT' | 'AUTHORIZE'; selection: PreviewSelection }
   | { action: 'START'; selection: PreviewSelection; operationId: string }
@@ -30,6 +31,7 @@ export type RuntimePreviewRequest =
   | { action: 'EVIDENCE'; sessionId: string; revision?: number; section: 'COVERAGE' | 'SOURCE' | 'RUNTIME'; offset?: number; limit?: number }
   | { action: 'QUALIFY'; sessionId: string; bindingId: string; criterionId: string; proofId: string }
 export type RuntimePreviewData =
+  | { kind: 'BRANCH_APP'; reasonCode: string; message: string; candidates?: BranchWorktree[]; preflight?: PreviewPreflight; activeSession?: PreviewSessionView }
   | { kind: 'PROFILES'; profiles: PreviewProfileSummary[] }
   | { kind: 'WORKTREES'; repositoryId: string; worktrees: BranchWorktree[] }
   | { kind: 'PREFLIGHT'; preflight: PreviewPreflight; startAllowed: boolean }

@@ -90,6 +90,7 @@ export class PreviewStackAdapter {
   }
   async observe(owner: NativeOwner): Promise<Pick<PreviewSessionRecord, 'coverage' | 'readiness' | 'attestation' | 'failure'> & { processEvidence?: PreviewSessionRecord['processEvidence'] }> {
     const port = this.profile.adapter!.port, proof = await owner.endpoint(port)
+    if (!proof.listeners.length) throw new Error('ENDPOINT_NOT_OBSERVED')
     if (proof.listeners.length !== 1 || !proof.listeners[0].member || !proof.listeners[0].loopback) throw new Error('WRONG_ENDPOINT_OWNER')
     const listener = proof.listeners[0], challenge = randomUUID()
     const response = await fetch(`http://127.0.0.1:${port}/__runtime_preview__/evidence`, { headers: { 'X-Preview-Token': this.token, 'X-Preview-Challenge': challenge }, redirect: 'error', signal: AbortSignal.timeout(2000) })
@@ -143,10 +144,7 @@ export class PreviewStackAdapter {
       } catch (error) { if (error instanceof Error && /^PREVIEW_[A-Z_]+$/.test(error.message)) throw error }
       const state = await owner.inspect(); if (state.rootSignaled) throw new Error('BOOTSTRAP_FAILURE')
       try { return await this.observe(owner) } catch (error) {
-        if (error instanceof Error && ['WRONG_ENDPOINT_OWNER', 'WRONG_CHECKOUT'].includes(error.message)) {
-          const listener = await owner.endpoint(this.profile.adapter!.port)
-          if (listener.listeners.length) throw error
-        }
+        if (error instanceof Error && ['WRONG_ENDPOINT_OWNER', 'WRONG_CHECKOUT'].includes(error.message)) throw error
       }
       await new Promise(resolve => setTimeout(resolve, 100))
     }

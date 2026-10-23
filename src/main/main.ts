@@ -99,6 +99,7 @@ import { PreviewRepositories } from './work-orchestration/preview-repositories'
 import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap } from './work-orchestration/runtime-preview/electron-mode'
 import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtime-preview/context-data'
 import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
+import { CodeAwarenessProfileResolver } from './work-orchestration/runtime-preview/code-awareness-profile'
 import { resolvePreviewHelper } from './work-orchestration/runtime-preview/host-helper'
 import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orchestration/runtime-preview/runner'
 import { PreviewSessionStore } from './work-orchestration/runtime-preview/session-store'
@@ -448,7 +449,8 @@ app.whenReady().then(async () => {
       const helper = resolvePreviewHelper({ packaged: app.isPackaged, resources: process.resourcesPath, root: app.getAppPath(), developmentBuild: process.env.CODE_AWARENESS_PREVIEW_NATIVE_BUILD })
       const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
       const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner)
-      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession)
+      const branchProfiles = new CodeAwarenessProfileResolver(previewProfiles, { root: app.getAppPath(), executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules })
+      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles)
     } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
   }
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
