@@ -448,8 +448,8 @@ export class ArtifactStore {
   measureTokenCountBatch(entries: Array<{ artifactId: string; revision: number; contentHash: string }>) {
     return this.db.transaction(() => {
       const currentRows = this.db.prepare(
-        `SELECT artifact_id, revision, content_hash, raw_markdown FROM artifacts WHERE artifact_id IN (${entries.map(() => '?').join(',')})`
-      ).all(...entries.map(e => e.artifactId)) as { artifact_id: string; revision: number; content_hash: string; raw_markdown: string }[]
+        `SELECT artifact_id, revision, content_hash FROM artifacts WHERE artifact_id IN (${entries.map(() => '?').join(',')})`
+      ).all(...entries.map(e => e.artifactId)) as { artifact_id: string; revision: number; content_hash: string }[]
 
       const currentMap = new Map(currentRows.map(r => [r.artifact_id, r]))
       for (const entry of entries) {
@@ -461,12 +461,20 @@ export class ArtifactStore {
 
       const loadMarkdown = (misses: Array<{ artifactId: string; revision: number; contentHash: string }>) => {
         const map = new Map<string, string>()
+        if (misses.length === 0) return map
+        const missRows = this.db.prepare(
+          `SELECT artifact_id, revision, content_hash, raw_markdown FROM artifacts WHERE artifact_id IN (${misses.map(() => '?').join(',')})`
+        ).all(...misses.map(m => m.artifactId)) as { artifact_id: string; revision: number; content_hash: string; raw_markdown: string }[]
+        const missMap = new Map(missRows.map(r => [r.artifact_id, r]))
         for (const miss of misses) {
-          const current = currentMap.get(miss.artifactId)!
-          if (computeContentHash(current.raw_markdown) !== miss.contentHash) {
+          const row = missMap.get(miss.artifactId)
+          if (!row || row.revision !== miss.revision || row.content_hash !== miss.contentHash) {
+            throw new ArtifactRevisionConflictError(miss.artifactId, row?.revision ?? 0)
+          }
+          if (computeContentHash(row.raw_markdown) !== miss.contentHash) {
             throw new ArtifactContentIntegrityError()
           }
-          map.set(miss.artifactId, current.raw_markdown)
+          map.set(miss.artifactId, row.raw_markdown)
         }
         return map
       }

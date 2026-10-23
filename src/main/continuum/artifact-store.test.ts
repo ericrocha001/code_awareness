@@ -203,6 +203,49 @@ describe('Repository Artifact Store', () => {
     const measureRev2 = store.measureTokenCount(updated.artifactId, updated.revision, updated.contentHash, updated.rawMarkdown)
     expect(measureRev2.rawMarkdownTokenCount).toBe(tokenizer.countCanonicalTokens(updated.rawMarkdown).tokenCount)
   })
+
+  it('does not retrieve raw_markdown from SQLite nor retokenize documents on subsequent queries with valid cache', () => {
+    const { store } = setup()
+    for (let i = 0; i < 5; i++) {
+      store.create(input(`doc-${i}`, { rawMarkdown: `# Document ${i}\r\nBody text ${i}\r\n` }))
+    }
+
+    // First query with includeRawMarkdownTokenCount warms the cache
+    const firstPage = store.list({ includeRawMarkdownTokenCount: true })
+    expect(firstPage.artifacts).toHaveLength(5)
+    for (const record of firstPage.artifacts) {
+      expect(record.rawMarkdownTokenCount).toBeGreaterThan(0)
+    }
+
+    // Spy on tokenizer to verify zero retokenization on second query
+    const tokenizerSpy = vi.spyOn(tokenizer, 'countCanonicalTokens')
+
+    // Spy on db.prepare to intercept all SQL statements executed during the second query
+    const db = (store as unknown as { db: { prepare: (...args: unknown[]) => unknown } }).db
+    const originalPrepare = db.prepare.bind(db)
+    const executedSqls: string[] = []
+    const prepareSpy = vi.spyOn(db, 'prepare').mockImplementation(((sql: string) => {
+      executedSqls.push(sql)
+      return originalPrepare(sql)
+    }) as unknown as typeof db.prepare)
+
+    // Second query to the same page
+    const secondPage = store.list({ includeRawMarkdownTokenCount: true })
+    expect(secondPage.artifacts).toHaveLength(5)
+    for (let i = 0; i < 5; i++) {
+      expect(secondPage.artifacts[i].rawMarkdownTokenCount).toBe(firstPage.artifacts[i].rawMarkdownTokenCount)
+    }
+
+    // Zero retokenization
+    expect(tokenizerSpy).not.toHaveBeenCalled()
+
+    // Zero raw_markdown body retrieved from SQLite (queries only artifact_token_cache and metadata)
+    const rawMarkdownQueries = executedSqls.filter(sql => /\braw_markdown\b(?!_)/i.test(sql))
+    expect(rawMarkdownQueries).toHaveLength(0)
+
+    prepareSpy.mockRestore()
+    tokenizerSpy.mockRestore()
+  })
 })
 
 it('aggregates lexical ISO periods compactly and filters before pagination without changing exact metadata', () => {
