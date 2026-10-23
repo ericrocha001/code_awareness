@@ -83,7 +83,7 @@ export class RuntimePreviewRunner {
     if (bytesFingerprint(await readFile(this.helper.executable)) !== this.helper.fingerprint) throw new Error('NATIVE_HELPER_CHANGED')
     return new NativeOwner(this.helper.executable)
   }
-private termination(record: PreviewSessionRecord, kind: NonNullable<PreviewSessionRecord['termination']>['kind'], reasonCode: string,
+  private termination(record: PreviewSessionRecord, kind: NonNullable<PreviewSessionRecord['termination']>['kind'], reasonCode: string,
     observation: NativeObservation | null, status: 'RESPONDING' | 'EXITED' | 'UNKNOWN') {
     if (record.termination && record.termination.kind !== 'UNKNOWN') return record
     const journal = this.store.nativeJournal(record.sessionId).at(-1)
