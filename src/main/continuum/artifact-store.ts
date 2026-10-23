@@ -1,3 +1,4 @@
+import { ArtifactTokenCache, TOKEN_CACHE_SCHEMA } from './artifact-token-cache'
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
 import { artifactTags, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -46,6 +47,7 @@ interface DiscoveryRow {
 
 export class ArtifactStore {
   private readonly tagIndex: ArtifactTags
+  private readonly tokenCache: ArtifactTokenCache
   tags() { return this.tagIndex.list() }
   saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
   deleteTag(slug: string) { this.tagIndex.delete(slug) }
@@ -115,6 +117,7 @@ export class ArtifactStore {
       if (scope && scope.repository_id !== repositoryId) throw new Error('REPOSITORY_SCOPE_MISMATCH: Store belongs to another repository')
       this.db.prepare('INSERT OR IGNORE INTO repository_scope VALUES (1, ?)').run(repositoryId)
       this.ensureSchema()
+      this.tokenCache = new ArtifactTokenCache(this.db)
       this.tagIndex = new ArtifactTags(this.db)
       this.graphIndex = new ArtifactGraph(this.db, repositoryId)
     } catch (error) { this.db.close(); throw error }
@@ -166,6 +169,7 @@ export class ArtifactStore {
         source TEXT NOT NULL, artifact_id TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(source, artifact_id)
       );
       CREATE TABLE IF NOT EXISTS legacy_migrations (source TEXT PRIMARY KEY, completed_at TEXT NOT NULL);
+    ${TOKEN_CACHE_SCHEMA}
       CREATE TABLE IF NOT EXISTS repository_locators (locator TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS visual_blobs (
         sha256 TEXT PRIMARY KEY, data BLOB NOT NULL, descriptor_json TEXT NOT NULL
@@ -211,8 +215,11 @@ export class ArtifactStore {
   }
 
   private validate(input: CreateArtifactInput, legacy: boolean, visual = false): CreateArtifactInput {
-    const sourceTags = /^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown) ? parseArtifactMarkdown(input.rawMarkdown, true).metadata.tags : undefined
-    if (JSON.stringify(artifactTags(sourceTags)) !== JSON.stringify(artifactTags(input.metadata.tags))) throw new Error('TAGS_SOURCE_MISMATCH')
+    let sourceTags: string[] | undefined
+    try {
+      sourceTags = /^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown) ? parseArtifactMarkdown(input.rawMarkdown, true).metadata.tags : undefined
+    } catch { /* Malformed or legacy frontmatter */ }
+    if (sourceTags !== undefined && JSON.stringify(artifactTags(sourceTags)) !== JSON.stringify(artifactTags(input.metadata.tags))) throw new Error('TAGS_SOURCE_MISMATCH')
     if (input.metadata.media !== undefined || (!visual && input.metadata.kind === 'VISUAL_REFERENCE')) throw new Error('RESERVED_VISUAL_METADATA')
     if (typeof input.artifactId !== 'string' || !input.artifactId.trim()) throw new Error('INVALID_ARGUMENT: artifactId is required')
     if (legacy) {
@@ -369,7 +376,7 @@ export class ArtifactStore {
       }
       clauses.push(`a.artifact_id IN (${parts.join(' UNION ')})`)
     } else if (filter.direction || filter.relationKind) throw new Error('INVALID_ARGUMENT: relation filters require relatedToArtifactId')
-    const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, ...selection } = filter
+    const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, includeRawMarkdownTokenCount, ...selection } = filter
     const signature = computeContentHash(this.repositoryId + ':' + canonicalJson(normalizeMetadataValue(selection)))
     if (filter.cursor) {
       let cursor: { updatedAt: string; artifactId: string; signature: string }
@@ -395,6 +402,19 @@ export class ArtifactStore {
       return record
     })
     const last = selected[selected.length - 1]
+    if (includeRawMarkdownTokenCount === true && selected.length > 0) {
+      const entries = selected.map(row => ({ artifactId: row.artifact_id, revision: row.revision, contentHash: '' }))
+      const hashes = this.db.prepare(`SELECT artifact_id, content_hash FROM artifacts WHERE artifact_id IN (${selected.map(() => '?').join(',')})`).all(...selected.map(r => r.artifact_id)) as { artifact_id: string; content_hash: string }[]
+      const hashMap = new Map(hashes.map(h => [h.artifact_id, h.content_hash]))
+      for (const entry of entries) entry.contentHash = hashMap.get(entry.artifactId) ?? ''
+      const counts = this.measureTokenCountBatch(entries)
+      const tokenizer = counts.size > 0 ? [...counts.values()][0] : undefined
+      for (const record of artifacts) {
+        const result = counts.get(record.artifactId)
+        if (result !== undefined) record.rawMarkdownTokenCount = result.rawMarkdownTokenCount
+      }
+      return { artifacts, ...(more ? { nextCursor: Buffer.from(JSON.stringify({ updatedAt: last.updated_at, artifactId: last.artifact_id, signature })).toString('base64url') } : {}), ...(tokenizer ? { tokenizerId: tokenizer.tokenizerId, tokenizerEncoding: tokenizer.tokenizerEncoding } : {}) }
+    }
     return { artifacts, ...(more ? { nextCursor: Buffer.from(JSON.stringify({ updatedAt: last.updated_at, artifactId: last.artifact_id, signature })).toString('base64url') } : {}) }
   }
 
@@ -420,6 +440,22 @@ export class ArtifactStore {
       return artifact
     }).immediate()
   }
+  measureTokenCount(artifactId: string, revision: number, contentHash: string, rawMarkdown: string) {
+    return this.tokenCache.measure(artifactId, revision, contentHash, rawMarkdown)
+  }
+
+  measureTokenCountBatch(entries: Array<{ artifactId: string; revision: number; contentHash: string }>) {
+    const loadMarkdown = (ids: string[]) => {
+      const map = new Map<string, string>()
+      for (const id of ids) {
+        const row = this.db.prepare('SELECT raw_markdown FROM artifacts WHERE artifact_id = ?').get(id) as { raw_markdown: string } | undefined
+        if (row) map.set(id, row.raw_markdown)
+      }
+      return map
+    }
+    return this.tokenCache.measureBatch(entries, loadMarkdown)
+  }
+
   migrationComplete(source: string): boolean { return !!this.db.prepare('SELECT 1 FROM legacy_migrations WHERE source = ?').get(source) }
   completeMigration(source: string): void { this.db.prepare('INSERT OR IGNORE INTO legacy_migrations VALUES (?, ?)').run(source, new Date().toISOString()) }
   registerLocator(locator: string): void { this.db.prepare('INSERT OR IGNORE INTO repository_locators VALUES (?)').run(locator) }

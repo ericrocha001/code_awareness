@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import * as tokenizer from '../core/tokenizer'
 import { ArtifactStore, ArtifactRevisionConflictError, computeContentHash } from './artifact-store'
 import { fixture, withFixtureDatabase } from './continuum-test-fixtures'
 import type { CreateArtifactInput } from './continuum-types'
@@ -102,6 +103,69 @@ describe('Repository Artifact Store', () => {
     expect(store.list({ updatedBefore: '2026-10-01T00:00:00Z', limit: 100 }).artifacts).toHaveLength(25)
     expect(() => store.list({ limit: 0 })).toThrow(/limit/); expect(() => store.list({ cursor: 'bad' })).toThrow(/cursor/)
     expect(() => store.list({ kind: 'OTHER', cursor: store.list({ limit: 1 }).nextCursor })).toThrow(/cursor/)
+  })
+
+  it('anticipates token counts with lazy revision cache, hit re-use across restart, invalidation on content update and no backfill on normal queries', () => {
+    const { store, path } = setup()
+    const a = store.create(input('A', { rawMarkdown: '# Title A\r\n\r\nUnicode \u00e7 \u65e5\u672c\u8a9e \ud83d\ude80 `code`\r\n' }))
+    const b = store.create(input('B', { rawMarkdown: '# Title B\r\nShort text\r\n' }))
+
+    // 1. Normal queries and creation do not calculate or backfill tokens
+    withFixtureDatabase(path, db => {
+      const count = db.prepare('SELECT count(*) AS n FROM artifact_token_cache').get() as { n: number }
+      expect(count.n).toBe(0)
+    })
+    store.list()
+    withFixtureDatabase(path, db => {
+      const count = db.prepare('SELECT count(*) AS n FROM artifact_token_cache').get() as { n: number }
+      expect(count.n).toBe(0)
+    })
+
+    // 2. First calculation measures literal rawMarkdown exactly matching countCanonicalTokens
+    const spy = vi.spyOn(tokenizer, 'countCanonicalTokens')
+    const firstMeasure = store.measureTokenCount(a.artifactId, a.revision, a.contentHash, a.rawMarkdown)
+    const expected = tokenizer.countCanonicalTokens(a.rawMarkdown)
+    expect(firstMeasure.rawMarkdownTokenCount).toBe(expected.tokenCount)
+    expect(firstMeasure.tokenizerId).toBe(expected.tokenizerId)
+    expect(firstMeasure.tokenizerEncoding).toBe(expected.tokenizerEncoding)
+    expect(spy).toHaveBeenCalled()
+    spy.mockClear()
+
+    // 3. Second call is a cache hit and does not retokenize
+    const secondMeasure = store.measureTokenCount(a.artifactId, a.revision, a.contentHash, a.rawMarkdown)
+    expect(secondMeasure).toEqual(firstMeasure)
+    expect(spy).not.toHaveBeenCalled()
+
+    // 4. Restart reuses the persisted cache without retokenizing
+    store.close()
+    const reopened = new ArtifactStore(path, 'catalog-A')
+    cleanup.push(() => reopened.close())
+    const restartedMeasure = reopened.measureTokenCount(a.artifactId, a.revision, a.contentHash, a.rawMarkdown)
+    expect(restartedMeasure).toEqual(firstMeasure)
+    expect(spy).not.toHaveBeenCalled()
+
+    // 5. Content update produces a new revision and invalidates the old cache entry
+    const updated = reopened.update({ artifactId: 'A', expectedRevision: 1, metadata: a.metadata, rawMarkdown: '# Title A Updated\r\n' })
+    const updatedMeasure = reopened.measureTokenCount(updated.artifactId, updated.revision, updated.contentHash, updated.rawMarkdown)
+    expect(updatedMeasure.rawMarkdownTokenCount).toBe(tokenizer.countCanonicalTokens(updated.rawMarkdown).tokenCount)
+    expect(spy).toHaveBeenCalled()
+    spy.mockClear()
+
+    // 6. Batch measurement fetches only misses
+    const expectedBTokens = tokenizer.countCanonicalTokens(b.rawMarkdown).tokenCount
+    spy.mockClear()
+    const batchResults = reopened.measureTokenCountBatch([
+      { artifactId: 'A', revision: updated.revision, contentHash: updated.contentHash },
+      { artifactId: 'B', revision: b.revision, contentHash: b.contentHash }
+    ])
+    expect(batchResults.get('A')!.rawMarkdownTokenCount).toBe(updatedMeasure.rawMarkdownTokenCount)
+    expect(batchResults.get('B')!.rawMarkdownTokenCount).toBe(expectedBTokens)
+    // A was already cached, so only B was calculated
+    expect(spy).toHaveBeenCalledTimes(1)
+    spy.mockRestore()
+
+    // 7. Repository isolation: store with different repository cannot access this database
+    expect(() => new ArtifactStore(path, 'catalog-other')).toThrow(/REPOSITORY_SCOPE_MISMATCH/)
   })
 })
 
