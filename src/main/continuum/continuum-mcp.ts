@@ -14,7 +14,7 @@ function tool(name: string, description: string, properties: Record<string, unkn
 }
 export const LIST_ARTIFACTS_TOOL = tool('list_artifacts', 'Discover only the active repository Continuum through intersecting metadata filters and a bounded cursor page. Returns small discovery records, never Markdown or expanded relations. Navigate one graph hop, select deliberately, then get_artifact.', {
   query: string, kind: string, status: string,
-  tag: { ...string, description: 'Membership in one canonical human-authored tag slug, including Artifacts with multiple tags. Combine with other filters; agents may read tags but cannot change them.' },
+  tag: { ...string, description: 'Membership in one canonical tag slug, including Artifacts with multiple tags. Combine with other filters; mutations require dedicated tag tools and explicit user request.' },
   metadata: { type: 'object', additionalProperties: true, description: 'Exact equality filters for extensible metadata, including canonical executionId when available.' },
   metadataKeys: { type: 'array', items: string, maxItems: 20, uniqueItems: true, description: 'Only these additional metadata keys are projected.' },
   relatedToArtifactId: string, direction: { type: 'string', enum: ['inbound', 'outbound', 'both'] }, relationKind: string,

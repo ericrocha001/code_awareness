@@ -5,11 +5,16 @@ import { renameSync, rmSync, writeFileSync } from 'node:fs'
 import type { ContextBundle } from './context-bundle'
 import type { ContinuumBundleExport } from '../../shared/types/continuum-bundle-types'
 
+export function exportAgentContextBundle(bundle: ContextBundle, intent: ContinuumBundleExport['intent'], assertContext: () => void) {
+  return exportContextBundle(bundle, intent, assertContext, BrowserWindow?.getFocusedWindow?.() ?? null)
+}
+
 export async function exportContextBundle(bundle: ContextBundle, intent: ContinuumBundleExport['intent'], assertContext: () => void, parent: BrowserWindow | null) {
   assertContext()
   if (!bundle.preview.members.length) throw new Error('BUNDLE_EMPTY')
   const snapshotId = bundle.preview.snapshotId
   if (intent === 'copy') {
+    if (!clipboard?.writeText) throw new Error('INTERACTIVE_SESSION_REQUIRED: native clipboard unavailable')
     clipboard.writeText(bundle.preview.markdown)
     return { outcome: 'copied' as const, snapshotId }
   }

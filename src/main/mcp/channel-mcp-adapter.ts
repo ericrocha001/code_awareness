@@ -1,3 +1,4 @@
+import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, supportsContinuumAgent } from '../continuum/continuum-agent'
 import { createHash, randomUUID } from 'node:crypto'
 import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
 import { GITHUB_PR_TOOLS, executeGitHubPrTool } from '../github/github-pr-mcp'
@@ -191,6 +192,7 @@ export class ChannelMcpAdapter {
       )
     }
     if (this.continuum) tools.push(PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL)
+    if (supportsContinuumAgent(this.continuum)) tools.push(...CONTINUUM_AGENT_TOOLS)
     if (this.continuum && 'inspectStructure' in this.continuum && 'readSection' in this.continuum) tools.push(INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL)
     if (this.visualContinuum) tools.push(PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL)
     if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
@@ -265,7 +267,7 @@ export class ChannelMcpAdapter {
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name) || GITHUB_PR_TOOLS.some(tool => tool.name === name) || name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
-    if ([LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
+    if ([...CONTINUUM_AGENT_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
     if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name) return 'Runtime Identity/Restart'
     if (name === SYSTEM_HEALTH_MCP_TOOL.name) return 'System Health'
@@ -322,6 +324,11 @@ export class ChannelMcpAdapter {
         : { content: [{ type: 'text', text: 'RUNTIME_RESTART_UNAVAILABLE' }], isError: true }
     }
 
+    if (CONTINUUM_AGENT_TOOLS.some(tool => tool.name === name)) {
+      if (!supportsContinuumAgent(this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
+      try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args)) }] } }
+      catch (error) { return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true } }
+    }
     if (name === 'inspect_artifact_structure' || name === 'read_artifact_section') {
       if (!this.continuum || !('inspectStructure' in this.continuum) || !('readSection' in this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
       return executeArtifactNavigation(this.continuum as IContinuumService & import('../continuum/continuum-types').IArtifactStructureReader, name, args)

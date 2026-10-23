@@ -10,9 +10,35 @@ import { parseArtifactMarkdown } from './artifact-metadata'
 import { legacyInput } from './legacy-artifact-migrator'
 import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
-import { artifactTags, type ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
+import { artifactTags, type ContinuumTagMutation, type ContinuumTagAssignment } from '../../shared/types/continuum-tag-types'
+import { ContextBundle } from './context-bundle'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
+  createTag(request: { name: string; color?: string; description?: string; selected?: ContinuumTagAssignment[] }) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    if (request.selected && request.selected.length !== 1) throw new Error('TAG_SELECTION_LIMIT: one explicitly requested Artifact per call')
+    const result = this.store.createQuickTag(request.name, request.color, request.description, request.selected)
+    this.changed()
+    return { state: 'PERSISTED' as const, creation: result.state, tag: result.tag, artifacts: result.artifacts.map(artifact => this.receipt(artifact)) }
+  }
+  assignTag(request: { slug: string; selected: ContinuumTagAssignment[]; operation: 'add' | 'remove' }) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    if (request.selected.length !== 1 || !['add', 'remove'].includes(request.operation)) throw new Error('TAG_SELECTION_LIMIT: one explicitly requested Artifact per call')
+    const artifacts = this.store.assignTag(request.slug, request.selected, request.operation === 'add')
+    this.changed()
+    return { state: 'PERSISTED' as const, slug: request.slug, artifacts: artifacts.map(artifact => this.receipt(artifact)) }
+  }
+  async createContextBundle(request: { tag: string; action: 'preview' | 'copy' | 'markdown' | 'zip' }, connected: () => boolean = () => true) {
+    this.assertActive()
+    const bundle = ContextBundle.prepare(this, { repositoryId: this.store.repositoryId, slug: request.tag })
+    const assertContext = () => { this.assertActive(); if (!connected()) throw new Error('IPC_CLOSED'); bundle.assertFresh() }
+    assertContext()
+    if (!bundle.preview.members.length) throw new Error('BUNDLE_EMPTY')
+    const result = request.action === 'preview' ? { outcome: 'preview' as const, snapshotId: bundle.preview.snapshotId }
+      : await (await import('./bundle-export.js')).exportAgentContextBundle(bundle, request.action, assertContext)
+    const { repositoryId, slug, markdownBytes, tokenCount, tokenizerEncoding, hasVisuals, members } = bundle.preview
+    return { ...result, repositoryId, slug, count: members.length, markdownBytes, tokenCount, tokenizerEncoding, hasVisuals }
+  }
   tags() { this.assertActive(); this.reconcile?.(); this.assertActive(); return this.store.tags() }
   mutateTags(request: ContinuumTagMutation) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
@@ -28,7 +54,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     return this.store.tags()
   }
   private assertAgentTags(metadata: { tags?: unknown }, prior?: { tags?: unknown }) {
-    if (JSON.stringify(metadata.tags) !== JSON.stringify(prior?.tags)) throw new Error('HUMAN_TAG_AUTHORSHIP_REQUIRED: agents may query tags but cannot create, change or remove them')
+    if (JSON.stringify(metadata.tags) !== JSON.stringify(prior?.tags)) throw new Error('HUMAN_TAG_AUTHORSHIP_REQUIRED: generic Markdown routes cannot change tags; use dedicated tag operations on explicit user request')
   }
   publishHuman(rawMarkdown: string, confirmedTags = false): ArtifactReceipt {
     this.assertActive(); this.reconcile?.(); this.assertActive()
