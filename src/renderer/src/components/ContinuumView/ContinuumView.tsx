@@ -1,12 +1,16 @@
+import { ContinuumBundleComposer } from './ContinuumBundleComposer'
+import type { ContinuumTag } from '../../../../shared/types/continuum-tag-types'
+import { ArtifactTagEditor, ContinuumTagManager } from './ContinuumTags'
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
+import { Copy, Download, FilterX, Tags, Package, Infinity, FileText, Image as ImageIcon, X } from 'lucide-react'
 import Markdown from 'markdown-to-jsx'
 import type { ActiveProject } from '../../../../shared/types/active-project-types'
-import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar, ContinuumPeriod } from '../../../../shared/types/continuum-ui-types'
+import type { ContinuumDetail, ContinuumFacet, ContinuumItem, ContinuumScalar, ContinuumPeriod, ContinuumExportRequest } from '../../../../shared/types/continuum-ui-types'
 import { SearchBox } from '../shared/SearchBox/SearchBox'
 import { ColumnResizer } from '../shared/ColumnResizer/ColumnResizer'
 import { useContinuumColumns } from './useContinuumColumns'
 import { VisualThumbnail, thumbnailQueue } from './VisualThumbnail'
+import { ContextFilters } from './ContextFilters'
 import './ContinuumView.css'
 const ContinuumGraph = React.lazy(() => import('./ContinuumGraph').then(module => ({ default: module.ContinuumGraph })))
 
@@ -31,8 +35,38 @@ function VisualPreview({ repositoryId, artifactId }: { repositoryId: string; art
   return error ? <p role="alert">{error}</p> : url ? <img className="continuum-visual-preview" src={url} alt="Referência visual canônica" onError={() => setError('Não foi possível renderizar a referência visual.')} /> : <p role="status">Carregando referência visual…</p>
 }
 
-function Inspector({ artifact, repositoryId, preview }: { artifact: ContinuumDetail; repositoryId: string; preview: boolean }) {
+function ExportActions({ repositoryId, artifactId }: { repositoryId: string; artifactId: string }) {
+  const busy = useRef(false)
+  const mounted = useRef(true)
+  const [pending, setPending] = useState(false)
+  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false } }, [])
+  const execute = async (intent: ContinuumExportRequest['intent']) => {
+    if (busy.current) return
+    busy.current = true; setPending(true); setMessage(''); setError('')
+    try {
+      const result = await window.codeAwareness.exportContinuumArtifact({ repositoryId, artifactId, intent })
+      if (!mounted.current) return
+      if (result.repositoryId !== repositoryId || result.artifactId !== artifactId) throw new Error('EXPORT_CONTEXT_CHANGED')
+      setMessage(result.outcome === 'cancelled' ? 'Salvamento cancelado.' : result.outcome === 'saved' ? 'Artifact salvo.' : 'Copiado para a área de transferência.')
+    } catch (reason) { if (mounted.current) setError(String(reason)) }
+    finally { busy.current = false; if (mounted.current) setPending(false) }
+  }
   return <>
+    <div className="continuum-export-actions" aria-busy={pending}>
+      <button className="continuum-icon-button" aria-label="Copiar" title="Copiar" disabled={pending} onClick={() => execute('copy')}><Copy size={16} aria-hidden="true" /></button>
+      <button className="continuum-icon-button" aria-label="Salvar como…" title="Salvar como…" disabled={pending} onClick={() => execute('save')}><Download size={16} aria-hidden="true" /></button>
+    </div>
+    {message && <p className="continuum-export-feedback" role="status">{message}</p>}
+    {error && <p className="continuum-export-feedback" role="alert">{error}</p>}
+  </>
+}
+
+function Inspector({ artifact, repositoryId, preview, tags, onChanged }: { artifact: ContinuumDetail; repositoryId: string; preview: boolean; tags: ContinuumTag[]; onChanged(): void }) {
+  return <>
+    <ArtifactTagEditor key={`${repositoryId}:${artifact.artifactId}:${artifact.revision}`} repositoryId={repositoryId} artifact={artifact} tags={tags} onChanged={onChanged} />
+    <ExportActions key={`${repositoryId}:${artifact.artifactId}:${artifact.revision}`} repositoryId={repositoryId} artifactId={artifact.artifactId} />
     <div className="continuum-detail-heading"><FileText size={24} /><h3>{String(artifact.metadata.name)}</h3></div>
     <p className="continuum-identity">{artifact.artifactId}</p>
     {preview && artifact.metadata.kind === 'VISUAL_REFERENCE' && <VisualPreview key={`${repositoryId}:${artifact.artifactId}`} repositoryId={repositoryId} artifactId={artifact.artifactId} />}
@@ -48,6 +82,12 @@ function Inspector({ artifact, repositoryId, preview }: { artifact: ContinuumDet
 }
 
 export function ContinuumView({ activeProject, artifactIntent }: { activeProject: ActiveProject | null; artifactIntent?: { repositoryId: string; artifactId: string } | null }) {
+  const [bundleSlug, setBundleSlug] = useState<string | null>(null)
+  const [tags, setTags] = useState<ContinuumTag[]>([])
+  const [tag, setTag] = useState<string | undefined>()
+  const [tagManager, setTagManager] = useState(false)
+  const [tagSelection, setTagSelection] = useState<Record<string, number>>({})
+  const [markdownDraft, setMarkdownDraft] = useState<{ repositoryId: string; fileName: string; rawMarkdown: string } | null>(null)
   const [view, setView] = useState<'timeline' | 'graph'>('timeline')
   const [repositoryId, setRepositoryId] = useState<string | null>(null)
   const [facets, setFacets] = useState<ContinuumFacet[]>([])
@@ -127,6 +167,15 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     finally { publicationBusy.current = false; setPublishing(false) }
   }
 
+  const confirmMarkdownTags = async () => {
+    if (!markdownDraft || publishing || markdownDraft.repositoryId !== repositoryId) return
+    setPublishing(true); setPublicationError('')
+    try {
+      await window.codeAwareness.publishContinuumArtifact({ ...markdownDraft, confirmedTags: true })
+      if (currentPath.current === path) { setMarkdownDraft(null); setPublicationMessage('Artifact publicado com tags confirmadas.'); setRefresh(value => value + 1) }
+    } catch (reason) { setPublicationError(String(reason)) }
+    finally { setPublishing(false) }
+  }
   const publishMarkdown = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     event.target.value = ''
@@ -141,14 +190,19 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
         rawMarkdown = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(await file.arrayBuffer())
       } catch { throw new Error('Não foi possível ler o arquivo como UTF-8 válido.') }
       if (!context || context.path !== currentPath.current) throw new Error('O repositório ativo mudou. Selecione o arquivo novamente.')
-      const receipt = await window.codeAwareness.publishContinuumArtifact({ repositoryId: context.repositoryId, fileName: file.name, rawMarkdown })
+      let receipt
+      try { receipt = await window.codeAwareness.publishContinuumArtifact({ repositoryId: context.repositoryId, fileName: file.name, rawMarkdown }) }
+      catch (reason) {
+        if (String(reason).includes('TAGS_CONFIRMATION_REQUIRED') && currentPath.current === path) { setMarkdownDraft({ repositoryId: context.repositoryId, fileName: file.name, rawMarkdown }); setPublicationMessage(String(reason)); return }
+        throw reason
+      }
       setPublicationMessage(`Artifact publicado: ${receipt.artifactId}. A busca e os filtros ativos podem ocultá-lo na timeline.`)
     } catch (reason) { setPublicationError(String(reason)) }
     finally { publicationBusy.current = false; setPublishing(false) }
   }
 
   useEffect(() => {
-    setRepositoryId(null); setFacets([]); setItems([]); setMetadata({}); setPeriods({}); setQuery('')
+    setRepositoryId(null); setFacets([]); setItems([]); setMetadata({}); setPeriods({}); setTag(undefined); setQuery('')
     setSelectedId(null); setArtifact(null); setCursor(undefined); setError(''); setInspectorOpen(false)
     setLoading(false); setFacetsLoading(false)
     publicationGeneration.current++; setVisualDraft(null); publicationContext.current = null
@@ -159,6 +213,16 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   useEffect(() => {
     if (repositoryId && artifactIntent?.repositoryId === repositoryId) { setSelectedId(artifactIntent.artifactId); setInspectorOpen(true) }
   }, [repositoryId, artifactIntent])
+
+  useEffect(() => {
+    let cancelled = false
+    if (repositoryId && window.codeAwareness.getContinuumTags) window.codeAwareness.getContinuumTags(repositoryId).then(result => {
+      if (!cancelled && currentPath.current === path && result.repositoryId === repositoryId) {
+        setTags(result.tags); setTag(previous => previous && !result.tags.some(tag => tag.slug === previous) ? undefined : previous)
+      }
+    }).catch(reason => { if (!cancelled) setError(String(reason)) })
+    return () => { cancelled = true }
+  }, [repositoryId, refresh])
 
   useEffect(() => window.codeAwareness.onContinuumChanged(() => setRefresh(value => value + 1)), [])
 
@@ -193,14 +257,14 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     setItems([]); setCursor(undefined)
     if (!repositoryId) return
     setLoading(true)
-    window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(Object.keys(periods).length ? { periods } : {}) }).then(result => {
+    window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}) }).then(result => {
       if (cancelled || currentPath.current !== path || generation !== listGeneration.current) return
       setItems(result.repositoryId === repositoryId ? result.artifacts : [])
       setCursor(result.nextCursor); setError('')
     }).catch(reason => { if (!cancelled) setError(String(reason)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [repositoryId, query, metadata, periods, refresh])
+  }, [repositoryId, query, metadata, periods, tag, refresh])
 
   useEffect(() => {
     let cancelled = false
@@ -229,7 +293,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     const generation = listGeneration.current
     setLoading(true)
     try {
-      const result = await window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(Object.keys(periods).length ? { periods } : {}), cursor })
+      const result = await window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}), cursor })
       if (currentPath.current !== path || generation !== listGeneration.current || result.repositoryId !== repositoryId) return
       setItems(previous => [...previous, ...result.artifacts.filter(item => !previous.some(old => old.artifactId === item.artifactId))])
       setCursor(result.nextCursor); setError('')
@@ -253,6 +317,9 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
       <button className="continuum-publish" disabled={!path || !repositoryId || publishing} onClick={chooseVisual}>Publicar WebP</button>
       <input ref={visualInput} type="file" accept=".webp,image/webp" hidden aria-label="Arquivo WebP" onChange={selectVisual} />
     </header>
+    {markdownDraft && <div className="continuum-tag-confirmation"><p>Publicar {markdownDraft.fileName} com as tags canônicas declaradas no YAML?</p><button disabled={publishing} onClick={confirmMarkdownTags}>Confirmar tags do Markdown</button><button disabled={publishing} onClick={() => setMarkdownDraft(null)}>Cancelar</button></div>}
+    {bundleSlug && repositoryId && <ContinuumBundleComposer key={`${repositoryId}:${bundleSlug}`} repositoryId={repositoryId} slug={bundleSlug} onClose={() => setBundleSlug(null)} />}
+    {tagManager && repositoryId && <ContinuumTagManager key={repositoryId} repositoryId={repositoryId} tags={tags} onBundle={slug => { setBundleSlug(slug); setTagManager(false) }} selected={Object.entries(tagSelection).map(([artifactId, expectedRevision]) => ({ artifactId, expectedRevision }))} onFilter={slug => { setTag(slug); setTagManager(false) }} onChanged={() => { setTagSelection({}); setRefresh(value => value + 1) }} onClose={() => setTagManager(false)} />}
     {visualDraft && <form className="continuum-visual-publication" onSubmit={publishVisual}>
       <strong>{visualDraft.file.name}</strong>
       <label>Nome<input required value={visualName} onChange={event => setVisualName(event.target.value)} disabled={publishing} /></label>
@@ -274,28 +341,12 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
       {error && <div className="continuum-error" role="alert">{error}<button onClick={() => setRefresh(value => value + 1)}>Tentar novamente</button></div>}
       <div className="continuum-workspace" ref={columns.workspace} style={columns.style}>
         <aside className="continuum-pane continuum-context" aria-label="Context">
-          <div className="continuum-pane-heading"><h2>Context</h2><button disabled={!Object.keys(metadata).length && !Object.keys(periods).length} onClick={() => { setMetadata({}); setPeriods({}) }}>Limpar</button></div>
+          <div className="continuum-pane-heading"><h2>Context</h2><button className="continuum-icon-button" aria-label="Gerar Context Bundle" title="Gerar Context Bundle" disabled={!tag} onClick={() => tag && setBundleSlug(tag)}><Package size={16} /></button><button className="continuum-icon-button" aria-label="Gerenciar tags" title="Gerenciar tags" disabled={!repositoryId} onClick={() => setTagManager(true)}><Tags size={16} /></button><button className="continuum-icon-button" aria-label="Limpar" title="Limpar" disabled={!Object.keys(metadata).length && !Object.keys(periods).length && !tag} onClick={() => { setMetadata({}); setPeriods({}) }}><FilterX size={16} aria-hidden="true" /></button></div>
           <div className="continuum-pane-scroll">
-            {facets.map(facet => <details key={facet.key} open><summary title={facet.key}>{facet.key}</summary>
-              <div className="continuum-facet-values">
-                {facet.years?.map(year => <div className="continuum-facet-year" key={year.year}>
-                  <button aria-label={`${facet.key} ${year.year}`} aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === undefined}
-                    onClick={() => choosePeriod(facet.key, { year: year.year })}><span>{year.year}</span><small>{year.count}</small></button>
-                  <details open><summary aria-label={`months for ${facet.key} ${year.year}`}>months</summary>
-                  <div className="continuum-facet-months">{year.months.map(month => <button key={month.month}
-                    aria-label={`${facet.key} ${year.year}-${String(month.month).padStart(2, '0')}`}
-                    aria-pressed={periods[facet.key]?.year === year.year && periods[facet.key]?.month === month.month}
-                    onClick={() => choosePeriod(facet.key, { year: year.year, month: month.month })}>
-                    <span>{new Intl.DateTimeFormat('en-US', { month: 'long', timeZone: 'UTC' }).format(new Date(Date.UTC(2000, month.month - 1, 1))).toLowerCase()}</span><small>{month.count}</small>
-                  </button>)}</div></details>
-                </div>)}
-                {facet.values.map(entry => {
-                const selected = metadata[facet.key] === entry.value
-                return <button key={JSON.stringify(entry.value)} aria-pressed={selected} title={`${typeof entry.value}: ${String(entry.value)}`}
-                  onClick={() => { setPeriods(previous => { const next = { ...previous }; delete next[facet.key]; return next }); setMetadata(previous => { const next = { ...previous }; if (selected) delete next[facet.key]; else next[facet.key] = entry.value; return next }) }}>
-                  <span>{String(entry.value)}</span><small>{entry.count}</small></button>
-              })}</div>
-            </details>)}
+            {repositoryId && boundPath.current === path && <ContextFilters key={`${path}:${repositoryId}`} repositoryId={repositoryId} facets={[...facets, ...(tags.length ? [{ key: 'tags', values: tags.map(tag => ({ value: tag.slug, count: tag.count })) }] : [])]} metadata={{ ...metadata, ...(tag ? { tags: tag } : {}) }} periods={periods}
+              choosePeriod={choosePeriod}
+              chooseValue={(key, value) => { if (key === 'tags') { setTag(previous => previous === value ? undefined : String(value)); return }; setPeriods(previous => { const next = { ...previous }; delete next[key]; return next }); setMetadata(previous => { const next = { ...previous }; if (previous[key] === value) delete next[key]; else next[key] = value; return next }) }}
+              remove={key => { if (key === 'tags') { setTag(undefined); return }; setMetadata(previous => { const next = { ...previous }; delete next[key]; return next }); setPeriods(previous => { const next = { ...previous }; delete next[key]; return next }) }} />}
             {!loading && !facets.length && <p className="continuum-hint">Nenhuma metadata disponível.</p>}
           </div>
         </aside>
@@ -309,12 +360,13 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
               buttons[mode === 'timeline' ? 1 : 0].focus()
             }}>{mode === 'timeline' ? 'Timeline' : 'Graph'}</button>)}
           </div></div>
-          {view === 'graph' && repositoryId && boundPath.current === path && <React.Suspense fallback={<p role="status">Carregando Graph…</p>}><ContinuumGraph key={`${path}:${repositoryId}`} repositoryId={repositoryId} query={query} metadata={metadata} periods={periods} refresh={refresh} selectedId={selectedId} onSelect={id => { setSelectedId(id); setInspectorOpen(true) }} /></React.Suspense>}
+          {view === 'graph' && repositoryId && boundPath.current === path && <React.Suspense fallback={<p role="status">Carregando Graph…</p>}><ContinuumGraph key={`${path}:${repositoryId}`} repositoryId={repositoryId} query={query} tag={tag} metadata={metadata} periods={periods} refresh={refresh} selectedId={selectedId} onSelect={id => { setSelectedId(id); setInspectorOpen(true) }} /></React.Suspense>}
           <div className="continuum-pane-scroll" hidden={view !== 'timeline'} aria-busy={loading} ref={timelineScroll}>
             {loading && <p role="status" className="continuum-hint">Carregando artifacts…</p>}
             {items.map((item, index) => <React.Fragment key={`${repositoryId}:${item.artifactId}`}>
               {(index === 0 || new Date(items[index - 1].updatedAt).toDateString() !== new Date(item.updatedAt).toDateString()) &&
                 <div className="continuum-date">{new Date(item.updatedAt).toLocaleDateString(undefined, { dateStyle: 'long' })}</div>}
+              <label className="continuum-tag-selection"><input type="checkbox" aria-label={`Selecionar ${item.name} para tags`} disabled={!item.revision} checked={tagSelection[item.artifactId] !== undefined} onChange={event => setTagSelection(previous => { const next = { ...previous }; if (event.target.checked && item.revision) next[item.artifactId] = item.revision; else delete next[item.artifactId]; return next })} />Marcar</label>
               <button data-artifact-id={item.artifactId} className={`continuum-item${selectedId === item.artifactId ? ' selected' : ''}`} aria-pressed={selectedId === item.artifactId}
                 onClick={() => { setSelectedId(item.artifactId); setInspectorOpen(true) }}>
                 <span className="continuum-node" />{item.kind === 'VISUAL_REFERENCE' && repositoryId
@@ -332,7 +384,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
           <div className="continuum-pane-heading"><h2>Inspector</h2><button className="continuum-close" aria-label="Fechar inspector" onClick={() => setInspectorOpen(false)}><X size={17} /></button></div>
           <div className="continuum-pane-scroll" aria-busy={detailLoading}>
             {detailError && <p role="alert">{detailError}</p>}
-            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact && repositoryId && boundPath.current === path ? <Inspector artifact={artifact} repositoryId={repositoryId} preview={inspectorOpen} /> :
+            {detailLoading ? <p role="status" className="continuum-hint">Carregando artifact…</p> : artifact && artifact.artifactId === selectedId && repositoryId && boundPath.current === path ? <Inspector artifact={artifact} repositoryId={repositoryId} preview={inspectorOpen} tags={tags} onChanged={() => setRefresh(value => value + 1)} /> :
               <div className="continuum-empty"><FileText size={32} /><h3>Nenhum artifact selecionado</h3><p>Selecione um artifact para ler seu conteúdo e metadata.</p></div>}
           </div>
         </aside>

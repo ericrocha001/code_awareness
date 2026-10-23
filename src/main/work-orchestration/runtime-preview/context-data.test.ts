@@ -31,7 +31,9 @@ function setup(policy: 'EMPTY' | 'REPOSITORY_SNAPSHOT' = 'REPOSITORY_SNAPSHOT') 
 }
 describe('private preview corpus provisioning with real SQLite', () => {
   it('backs up committed WAL, revisions and actual media; retains logical identity and isolates writes', async () => {
-    const f = setup(), receipt = f.service.publish(markdown('Selected', 'tags: [canonical]\n'))
+    const f = setup()
+    f.service.mutateTags({ repositoryId: 'logical-repository', intent: 'create', tag: { slug: 'canonical', name: 'Canonical', color: '#7852ee', description: 'Human fixture' } })
+    const receipt = f.service.publishHuman(markdown('Selected', 'tags: [canonical]\n'), true)
     const image = await sharp({ create: { width: 2, height: 2, channels: 4, background: 'red' } }).webp({ lossless: true }).toBuffer()
     const visual = await f.service.publishVisual(markdown('Image').replace('kind: DECISION', 'kind: VISUAL_REFERENCE'), image)
     f.service.update(receipt.artifactId, 1, markdown('Selected revision 2', 'tags: [canonical]\n'))
@@ -46,7 +48,10 @@ describe('private preview corpus provisioning with real SQLite', () => {
       const service = new ContinuumService(copy)
       expect(service.get(receipt.artifactId)?.revision).toBe(2)
       expect(service.getVisual(visual.artifactId).data).toEqual(image)
-      service.update(receipt.artifactId, 2, markdown('Private only', 'tags: [preview]\n'))
+      expect(service.tags()).toMatchObject([{ slug: 'canonical', count: 1 }])
+      expect(service.list({ tag: 'canonical' }).artifacts.map(artifact => artifact.artifactId)).toEqual([receipt.artifactId])
+      expect(() => service.update(receipt.artifactId, 2, markdown('Private only', 'tags: [preview]\n'))).toThrow('HUMAN_TAG_AUTHORSHIP_REQUIRED')
+      service.update(receipt.artifactId, 2, markdown('Private only', 'tags: [canonical]\n'))
       expect(f.service.get(receipt.artifactId)?.metadata.name).toBe('Selected revision 2')
     } finally { copy.close() }
     expect([f.file, f.file + '-wal'].map(file => bytesFingerprint(readFileSync(file)))).toEqual(before)

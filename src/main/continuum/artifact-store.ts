@@ -1,3 +1,6 @@
+import { ArtifactTags, editArtifactTags } from './artifact-tags'
+import { artifactTags, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
+import { parseArtifactMarkdown } from './artifact-metadata'
 import { metadataPeriod, validatePeriods } from './temporal-metadata'
 import { ArtifactGraph } from './artifact-graph'
 import { ArtifactSuggestions } from './artifact-suggestions'
@@ -36,11 +39,31 @@ interface ArtifactRow {
   content_hash: string; provenance_json: string
 }
 interface DiscoveryRow {
+  revision: number
   artifact_id: string; name: string; description: string | null; kind: string; status: string | null
   updated_at: string; relation_count: number
 }
 
 export class ArtifactStore {
+  private readonly tagIndex: ArtifactTags
+  tags() { return this.tagIndex.list() }
+  saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
+  deleteTag(slug: string) { this.tagIndex.delete(slug) }
+  requireTag(slug: string) { this.tagIndex.require(slug) }
+  assignTag(slug: string, selected: ContinuumTagAssignment[], assigned: boolean): Artifact[] {
+    this.tagIndex.require(slug)
+    if (!Array.isArray(selected) || !selected.length || selected.length > 100 || new Set(selected.map(item => item.artifactId)).size !== selected.length || typeof assigned !== "boolean") throw new Error("INVALID_TAG_SELECTION")
+    return this.db.transaction(() => selected.map(item => {
+      const current = this.get(item.artifactId)
+      if (!current) throw new Error("ARTIFACT_NOT_FOUND")
+      if (current.revision !== item.expectedRevision) throw new ArtifactRevisionConflictError(item.artifactId, current.revision)
+      const prior = artifactTags(current.metadata.tags)
+      const tags = assigned ? [...new Set([...prior, slug])] : prior.filter(tag => tag !== slug)
+      if (JSON.stringify(tags) === JSON.stringify(prior)) return current
+      const rawMarkdown = editArtifactTags(current.rawMarkdown, tags)
+      return this.update({ artifactId: item.artifactId, expectedRevision: item.expectedRevision, rawMarkdown, metadata: parseArtifactMarkdown(rawMarkdown, true).metadata })
+    })).immediate()
+  }
   private structureSecret?: string
   inspectStructure(query: StructureQuery) { return new ArtifactNavigation(this).inspect(query) }
   readSection(query: SectionQuery) { return new ArtifactNavigation(this).read(query) }
@@ -92,6 +115,7 @@ export class ArtifactStore {
       if (scope && scope.repository_id !== repositoryId) throw new Error('REPOSITORY_SCOPE_MISMATCH: Store belongs to another repository')
       this.db.prepare('INSERT OR IGNORE INTO repository_scope VALUES (1, ?)').run(repositoryId)
       this.ensureSchema()
+      this.tagIndex = new ArtifactTags(this.db)
       this.graphIndex = new ArtifactGraph(this.db, repositoryId)
     } catch (error) { this.db.close(); throw error }
   }
@@ -187,6 +211,8 @@ export class ArtifactStore {
   }
 
   private validate(input: CreateArtifactInput, legacy: boolean, visual = false): CreateArtifactInput {
+    const sourceTags = /^(?:\uFEFF)?---\r?\n/.test(input.rawMarkdown) ? parseArtifactMarkdown(input.rawMarkdown, true).metadata.tags : undefined
+    if (JSON.stringify(artifactTags(sourceTags)) !== JSON.stringify(artifactTags(input.metadata.tags))) throw new Error('TAGS_SOURCE_MISMATCH')
     if (input.metadata.media !== undefined || (!visual && input.metadata.kind === 'VISUAL_REFERENCE')) throw new Error('RESERVED_VISUAL_METADATA')
     if (typeof input.artifactId !== 'string' || !input.artifactId.trim()) throw new Error('INVALID_ARGUMENT: artifactId is required')
     if (legacy) {
@@ -209,6 +235,7 @@ export class ArtifactStore {
     const insert = this.db.prepare('INSERT INTO artifact_metadata(artifact_id, key, value_json) VALUES (?, ?, ?)')
     for (const [key, value] of Object.entries(artifact.metadata)) if (value !== undefined) insert.run(artifact.artifactId, key, canonicalJson(value as MetadataValue))
     this.db.prepare('INSERT INTO artifact_revisions(artifact_id, revision, snapshot_json) VALUES (?, ?, ?)').run(artifact.artifactId, artifact.revision, JSON.stringify(artifact))
+    this.tagIndex.project(artifact.artifactId, artifact.metadata.tags)
     this.graphIndex.project(artifact)
   }
 
@@ -306,8 +333,10 @@ export class ArtifactStore {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('INVALID_ARGUMENT: limit must be 1-100')
     if (filter.direction && !['inbound', 'outbound', 'both'].includes(filter.direction)) throw new Error('INVALID_ARGUMENT: invalid direction')
     if (filter.metadataKeys && (filter.metadataKeys.length > 20 || filter.metadataKeys.some(key => typeof key !== 'string' || !key.trim() || ['__proto__', 'constructor', 'prototype'].includes(key)))) throw new Error('INVALID_ARGUMENT: invalid metadataKeys')
+    if (filter.tag !== undefined) validateTagSlug(filter.tag)
     const clauses: string[] = []
     const params: (string | number)[] = []
+    if (filter.tag !== undefined) { clauses.push('a.artifact_id IN (SELECT artifact_id FROM artifact_tags WHERE slug = ?)'); params.push(filter.tag) }
     for (const key of ['kind', 'status'] as const) if (filter[key] !== undefined) { clauses.push(`a.${key} = ?`); params.push(filter[key]!) }
     if (filter.query) {
       if ([...filter.query].length >= 3) { clauses.push('a.rowid IN (SELECT rowid FROM artifact_search WHERE artifact_search MATCH ?)'); params.push('"' + filter.query.replace(/"/g, '""') + '"') }
@@ -348,14 +377,14 @@ export class ArtifactStore {
       if (!cursor || cursor.signature !== signature || typeof cursor.updatedAt !== 'string' || typeof cursor.artifactId !== 'string') throw new Error('INVALID_ARGUMENT: cursor does not match repository or filters')
       clauses.push('(a.updated_at < ? OR (a.updated_at = ? AND a.artifact_id < ?))'); params.push(cursor.updatedAt, cursor.updatedAt, cursor.artifactId)
     }
-    const rows = this.db.prepare(`SELECT a.artifact_id, a.name, a.description, a.kind, a.status, a.updated_at,
+    const rows = this.db.prepare(`SELECT a.artifact_id, a.revision, a.name, a.description, a.kind, a.status, a.updated_at,
       (SELECT count(*) FROM artifact_relations r WHERE r.source_id = a.artifact_id OR r.target_id = a.artifact_id) AS relation_count
       FROM artifacts a ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
       ORDER BY a.updated_at DESC, a.artifact_id DESC LIMIT ?`).all(...params, limit + 1) as DiscoveryRow[]
     const more = rows.length > limit
     const selected = rows.slice(0, limit)
     const artifacts: ArtifactDiscoveryRecord[] = selected.map(row => {
-      const record: ArtifactDiscoveryRecord = { artifactId: row.artifact_id, name: row.name, kind: row.kind,
+      const record: ArtifactDiscoveryRecord = { revision: row.revision, artifactId: row.artifact_id, name: row.name, kind: row.kind,
         updatedAt: row.updated_at, relationCount: row.relation_count,
         ...(row.description !== null ? { description: row.description } : {}), ...(row.status !== null ? { status: row.status } : {}) }
       if (filter.metadataKeys?.length) {

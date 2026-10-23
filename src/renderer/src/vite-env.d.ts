@@ -1,3 +1,5 @@
+import type { ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../../shared/types/continuum-bundle-types'
+import type { ContinuumTag, ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 /*
 -T ---
 */
@@ -11,7 +13,7 @@ import type { OrchestrationRequest, OrchestrationResult, OrchestrationData } fro
 import type { OrchestrationAttentionChange } from '../../shared/types/work-orchestration-attention-types'
 import type { GitCommitCorrelationRequest, GitCommitCorrelationPage } from '../../shared/types/git-commit-correlation-types'
 import type { GitHistoryRequest, GitHistoryPage, GitManagementResult, GitManagementContext, GitOverview, GitCommitRequest, GitCommitDetail, GitPatchRequest, GitPatch, GitMutationRequest, GitOperationalResult } from '../../shared/types/git-management-types'
-import type { ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../../shared/types/continuum-ui-types'
+import type { ContinuumExportRequest, ContinuumExportReceipt, ContinuumChange, ContinuumFacets, ContinuumListRequest, ContinuumSelection, ContinuumTimeline, ContinuumPublishRequest, ContinuumPublishReceipt } from '../../shared/types/continuum-ui-types'
 import type { ContinuumGraphRequest, ContinuumGraph } from '../../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionRequest, ContinuumSuggestions } from '../../shared/types/continuum-suggestion-types'
 import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '../../shared/types/continuum-ui-types'
@@ -52,6 +54,11 @@ declare global {
       getContinuumVisual: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
       getContinuumVisualThumbnail: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
       getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
+      getContinuumTags: (repositoryId: string) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
+      mutateContinuumTags: (request: ContinuumTagMutation) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
+      prepareContinuumBundle: (request: ContinuumBundlePrepare) => Promise<ContinuumBundlePreview>
+      exportContinuumBundle: (request: ContinuumBundleExport) => Promise<{ outcome: 'copied' | 'saved' | 'cancelled'; snapshotId: string }>
+      exportContinuumArtifact: (request: ContinuumExportRequest) => Promise<ContinuumExportReceipt>
       getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
       onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void
       getAcademySnapshot: () => Promise<AcademySnapshot>

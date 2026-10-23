@@ -7,6 +7,20 @@ import { parseArtifactMarkdown } from '../continuum/artifact-metadata'
 const { handlers, send } = vi.hoisted(() => ({ handlers: new Map<string, Function>(), send: vi.fn() }))
 vi.mock('electron', () => ({ ipcMain: { handle: (key: string, handler: Function) => handlers.set(key, handler) }, BrowserWindow: { getAllWindows: () => [{ isDestroyed: () => false, webContents: { send } }] } }))
 beforeEach(() => { handlers.clear(); send.mockClear() })
+it('binds human tag mutation and upload confirmation to the active repository and forwards tag membership', () => {
+  const mutateTags = vi.fn(() => []), tags = vi.fn(() => []), list = vi.fn(() => ({ artifacts: [] })), publishHuman = vi.fn()
+  registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }), getActiveService: () => ({ mutateTags, tags, list, publishHuman }), onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
+  const mutation = { repositoryId: 'A', intent: 'assign', slug: 'architecture', selected: [{ artifactId: 'one', expectedRevision: 3 }], assigned: true, confirmed: true }
+  expect(() => handlers.get('continuum:mutate-tags')!({}, { ...mutation, repositoryId: 'B' })).toThrow('REPOSITORY_UNAVAILABLE')
+  expect(mutateTags).not.toHaveBeenCalled()
+  handlers.get('continuum:mutate-tags')!({}, mutation)
+  expect(mutateTags).toHaveBeenCalledWith(mutation)
+  handlers.get('continuum:list')!({}, { repositoryId: 'A', tag: 'architecture' })
+  expect(list).toHaveBeenCalledWith({ tag: 'architecture', limit: 30 })
+  const rawMarkdown = '---\nname: Human\ndescription: d\nkind: DOCUMENT\ntags: [architecture]\n---\n# body'
+  handlers.get('continuum:publish')!({}, { repositoryId: 'A', fileName: 'human.md', rawMarkdown, confirmedTags: true })
+  expect(publishHuman).toHaveBeenCalledWith(rawMarkdown, true)
+})
 it('scopes suggestions and rejects a result if reconciliation changes the active repository', () => {
   let current = 'A'
   const suggestions = vi.fn(() => ({ repositoryId: 'A', suggestions: [] }))
@@ -53,7 +67,7 @@ it('exposes scoped reads and publication, resolves catalog identity and separate
   const service = { list: vi.fn(() => ({ artifacts: [{ artifactId: 'a', name: 'A' }], nextCursor: 'cursor' })), facets: vi.fn(() => [{ key: 'unknown', values: [{ value: false, count: 1 }] }]),
     get: vi.fn(() => ({ artifactId: 'a', revision: 2, metadata: { name: 'A', kind: 'UNSEEN' }, createdAt: 'created', updatedAt: 'updated', rawMarkdown: '---\nname: A\ndescription: Read A\nkind: UNSEEN\n---\n# Body\nç 🚀' })) }
   registerContinuumHandlers({ getActiveSession: () => current, getActiveService: () => current ? service : null, onChanged: (listener: () => void) => { changed = listener; return () => {} } } as unknown as RepositoryContinuumSession)
-  expect([...handlers.keys()].sort()).toEqual(['continuum:facets', 'continuum:get', 'continuum:get-visual', 'continuum:get-visual-thumbnail', 'continuum:graph', 'continuum:list', 'continuum:publish', 'continuum:publish-visual', 'continuum:suggestions'])
+  expect([...handlers.keys()].sort()).toEqual(['continuum:export', 'continuum:facets', 'continuum:get', 'continuum:get-visual', 'continuum:get-visual-thumbnail', 'continuum:graph', 'continuum:list', 'continuum:publish', 'continuum:publish-visual', 'continuum:suggestions', 'continuum:tags', 'continuum:mutate-tags', 'continuum:prepare-bundle', 'continuum:export-bundle'].sort())
   const read = (channel: string, ...args: unknown[]) => handlers.get(channel)!({}, ...args)
   expect(read('continuum:facets', '/A')).toMatchObject({ repositoryId: 'catalog-A', facets: [{ key: 'unknown' }] })
   expect(read('continuum:facets', '/B')).toEqual({ repositoryId: null, facets: [] })
@@ -80,7 +94,7 @@ it('publishes exact text once and rejects invalid documents or stale/unavailable
     return { success: true, artifactId: 'new', revision: 1, updatedAt: 'now' }
   })
   registerContinuumHandlers({ getActiveSession: () => current ? { repositoryId: current } : null,
-    getActiveService: () => current ? { publish } : null, onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
+    getActiveService: () => current ? { publishHuman: publish } : null, onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
   const invoke = (repositoryId: string, rawMarkdown: unknown, fileName: unknown = 'Exact.md') => handlers.get('continuum:publish')!({}, { repositoryId, rawMarkdown, fileName })
   const text = '\uFEFF---\r\nname: Exact\r\ndescription: Read exact\r\nkind: CUSTOM\r\n---\r\n# ç 日本語 🚀 `${literal}` $(command)\r\n'
   expect(invoke('A', text)).toEqual({ success: true, artifactId: 'new', revision: 1, updatedAt: 'now' })
@@ -100,7 +114,7 @@ it('publishes exact text once and rejects invalid documents or stale/unavailable
 it('adds only default metadata to body-only files, preserving BOM, whitespace and CRLF with safe YAML values', () => {
   const texts: string[] = []
   registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }),
-    getActiveService: () => ({ publish: (text: string) => { parseArtifactMarkdown(text); texts.push(text); return { success: true, artifactId: 'new', revision: 1, updatedAt: 'now' } } }),
+    getActiveService: () => ({ publishHuman: (text: string) => { parseArtifactMarkdown(text); texts.push(text); return { success: true, artifactId: 'new', revision: 1, updatedAt: 'now' } } }),
     onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
   const invoke = (fileName: unknown, rawMarkdown: string) => handlers.get('continuum:publish')!({}, { repositoryId: 'A', fileName, rawMarkdown })
   const original = '\uFEFF\r\n# Obsidian\r\n\r\n  ç 日本語 🚀 `${literal}` $(command)  \r\n\r\n'

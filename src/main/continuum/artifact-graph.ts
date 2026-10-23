@@ -70,7 +70,7 @@ export class ArtifactGraph {
     if (query.artifactIds !== undefined && (!Array.isArray(query.artifactIds) || query.artifactIds.length > 100 || query.artifactIds.some(id => typeof id !== 'string' || !id.trim()))) throw new Error('INVALID_ARGUMENT: bounded artifactIds required')
     if (query.expand !== undefined && typeof query.expand !== 'boolean') throw new Error('INVALID_ARGUMENT: expand must be boolean')
     if (query.direction !== undefined && !['inbound', 'outbound', 'both'].includes(query.direction)) throw new Error('INVALID_ARGUMENT: invalid direction')
-    for (const key of ['query', 'kind', 'status', 'relationKind'] as const) if (query[key] !== undefined && typeof query[key] !== 'string') throw new Error('INVALID_ARGUMENT: invalid ' + key)
+    for (const key of ['query', 'kind', 'status', 'tag', 'relationKind'] as const) if (query[key] !== undefined && typeof query[key] !== 'string') throw new Error('INVALID_ARGUMENT: invalid ' + key)
     if (query.expectedRevision !== undefined && (!Number.isSafeInteger(query.expectedRevision) || query.expectedRevision < 0)) throw new Error('INVALID_ARGUMENT: invalid graph revision')
     const backfill = this.backfill()
     return this.db.transaction((): ContinuumGraph => {
@@ -82,12 +82,12 @@ export class ArtifactGraph {
         const exists = this.db.prepare('SELECT 1 FROM artifacts WHERE artifact_id = ?')
         ids = [...new Set(query.artifactIds)].sort()
         for (const id of ids) if (!exists.get(id)) throw new Error('ARTIFACT_NOT_FOUND: ' + id)
-        if (query.query !== undefined || query.kind !== undefined || query.status !== undefined || query.metadata !== undefined || query.periods !== undefined) throw new Error('INVALID_ARGUMENT: select artifactIds or filters')
+        if (query.query !== undefined || query.kind !== undefined || query.status !== undefined || query.metadata !== undefined || query.periods !== undefined || query.tag !== undefined) throw new Error('INVALID_ARGUMENT: select artifactIds or filters')
         nodesTruncated = ids.length > nodeLimit
         ids = ids.slice(0, nodeLimit)
       } else {
         const filter: ListArtifactsFilter = { limit: nodeLimit }
-        for (const key of ['query', 'kind', 'status', 'metadata', 'periods'] as const) if (query[key] !== undefined) Object.assign(filter, { [key]: query[key] })
+        for (const key of ['query', 'kind', 'status', 'metadata', 'periods', 'tag'] as const) if (query[key] !== undefined) Object.assign(filter, { [key]: query[key] })
         const page = list(filter)
         ids = page.artifacts.map(a => a.artifactId); nodesTruncated = !!page.nextCursor
       }

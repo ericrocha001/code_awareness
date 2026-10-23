@@ -32,6 +32,7 @@ beforeEach(() => {
     publishContinuumArtifact: vi.fn(async () => ({ success: true, artifactId: 'new', revision: 1, updatedAt: 'now' })),
     publishContinuumVisual: vi.fn(async () => ({ success: true, artifactId: 'visual', revision: 1, updatedAt: 'now' })),
     getContinuumVisual: vi.fn(async (repositoryId, artifactId) => ({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1, 2]) })),
+    exportContinuumArtifact: vi.fn(async request => ({ repositoryId: request.repositoryId, artifactId: request.artifactId, outcome: request.intent === 'copy' ? 'copied' : 'saved' })),
     getContinuumVisualThumbnail: vi.fn(async (repositoryId, artifactId) => ({ repositoryId, artifactId, mimeType: 'image/webp', data: new Uint8Array([1, 2]) }))
   } as unknown as Window['codeAwareness']
 })
@@ -278,7 +279,7 @@ it('provides navigation and an empty state without querying another repository',
 it('derives typed filters, search and generic detail from the read API and refreshes on local changes', async () => {
   const { unmount } = render(<ContinuumView activeProject={project} />)
   expect(await screen.findByText('First artifact')).toBeTruthy()
-  expect(screen.getByText('futureUnknownKey')).toBeTruthy()
+  revealFacet('futureUnknownKey')
   fireEvent.click(screen.getByRole('button', { name: 'false 2' }))
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: '', metadata: { futureUnknownKey: false } }))
   fireEvent.change(screen.getByRole('textbox', { name: 'Buscar no Continuum' }), { target: { value: 'First' } })
@@ -291,7 +292,8 @@ it('derives typed filters, search and generic detail from the read API and refre
   expect(screen.queryByRole('button', { name: /criar|editar|apagar|novo artifact|continuar/i })).toBeNull()
   body = '# Updated body'; facets = [{ key: 'brandNew', values: [{ value: 7, count: 1 }] }]
   act(() => receive({ repositoryId: 'catalog-A' }))
-  expect(await screen.findByText('brandNew')).toBeTruthy()
+  await screen.findByRole('heading', { name: 'Updated body' })
+  revealFacet('brandNew')
   expect(await screen.findByRole('heading', { name: 'Updated body' })).toBeTruthy()
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: 'First', metadata: {} }))
   unmount(); expect(unsubscribe).toHaveBeenCalled()
@@ -302,6 +304,7 @@ it('clears repository state and discards a detail response arriving after a repo
   vi.mocked(window.codeAwareness.getContinuumArtifact).mockImplementation(() => new Promise(done => { resolve = done }))
   const { rerender } = render(<ContinuumView activeProject={project} />)
   fireEvent.click(await screen.findByRole('button', { name: /First artifact/ }))
+  revealFacet('futureUnknownKey')
   fireEvent.click(screen.getByRole('button', { name: 'false 2' }))
   rerender(<ContinuumView activeProject={{ id: 'workspace-B', path: '/B', name: 'B' }} />)
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-B', query: '', metadata: {} }))
@@ -341,7 +344,10 @@ it('renders read errors and treats raw HTML as text', async () => {
 it('selects year/month hierarchies, intersects exact facets, resets pagination and prunes vanished periods', async () => {
   facets.push({ key: 'occurred', values: [{ value: 'invalid date', count: 1 }], years: [{ year: 2026, count: 8, months: [{ month: 11, count: 3 }, { month: 10, count: 5 }] }] })
   const view = render(<ContinuumView activeProject={project} />)
-  const month = await screen.findByRole('button', { name: 'occurred 2026-10' })
+  await screen.findByText('First artifact')
+  revealFacet('futureUnknownKey')
+  revealFacet('occurred')
+  const month = screen.getByRole('button', { name: 'occurred 2026-10' })
   const context = within(screen.getByRole('complementary', { name: 'Context' }))
   expect(context.getByText('months').getAttribute('aria-label')).toBe('months for occurred 2026')
   expect(within(month).getByText('october')).toBeTruthy()
@@ -388,4 +394,124 @@ it('carries periods through search and pagination, discarding an older page afte
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: 'Current', metadata: {}, periods: { date: { year: 2026 } } }))
   await act(async () => finish({ repositoryId: 'catalog-A', artifacts: [{ artifactId: 'stale', name: 'Old month page', kind: 'PLAN', updatedAt: '2026-10-01T00:00:00Z', relationCount: 0 }] }))
   expect(screen.queryByRole('button', { name: /Old month page/ })).toBeNull()
+})
+
+function revealFacet(key: string) {
+  if (!screen.queryByRole('checkbox', { name: key })) fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
+  const checkbox = screen.getByRole('checkbox', { name: key }) as HTMLInputElement
+  if (!checkbox.checked) fireEvent.click(checkbox)
+  fireEvent.click(screen.getByRole('button', { name: 'Expand All' }))
+}
+
+it('persists free facet visibility by catalog identity without refetching and keeps hidden criteria removable', async () => {
+  facets.push({ key: 'kind', values: [{ value: 'DOCUMENT', count: 1 }] })
+  vi.mocked(window.codeAwareness.getContinuumFacets).mockImplementation(async path => ({ repositoryId: path === '/A' ? 'catalog-A' : 'catalog-B', facets }))
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  expect(document.querySelectorAll('.continuum-facet-groups details[open]').length).toBe(0)
+  expect(document.querySelectorAll('.continuum-facet-groups > details').length).toBe(1)
+  const calls = vi.mocked(window.codeAwareness.listContinuumArtifacts).mock.calls.length
+  const facetCalls = vi.mocked(window.codeAwareness.getContinuumFacets).mock.calls.length
+  revealFacet('futureUnknownKey')
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(calls)
+  expect(window.codeAwareness.getContinuumFacets).toHaveBeenCalledTimes(facetCalls)
+  fireEvent.click(screen.getByRole('button', { name: 'false 2' }))
+  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({ metadata: { futureUnknownKey: false } })))
+  const filteredCalls = vi.mocked(window.codeAwareness.listContinuumArtifacts).mock.calls.length
+  fireEvent.click(screen.getByRole('checkbox', { name: 'futureUnknownKey' }))
+  expect(screen.queryByRole('button', { name: 'false 2' })).toBeNull()
+  expect(within(screen.getByRole('region', { name: 'Filtros ativos' })).getByText(/futureUnknownKey: false/)).toBeTruthy()
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(filteredCalls)
+  fireEvent.click(screen.getByRole('button', { name: 'Limpar' }))
+  expect((screen.getByRole('checkbox', { name: 'futureUnknownKey' }) as HTMLInputElement).checked).toBe(false)
+  revealFacet('futureUnknownKey')
+  facets = facets.filter(facet => facet.key !== 'futureUnknownKey')
+  act(() => receive({ repositoryId: 'catalog-A' }))
+  await waitFor(() => expect(screen.queryByRole('checkbox', { name: 'futureUnknownKey' })).toBeNull())
+  facets.push({ key: 'futureUnknownKey', values: [{ value: false, count: 2 }] }, { key: 'newTechnical', values: [{ value: 5, count: 1 }] }, { key: 'feature', values: [{ value: 'new', count: 1 }] })
+  act(() => receive({ repositoryId: 'catalog-A' }))
+  expect((await screen.findByRole('checkbox', { name: 'futureUnknownKey' }) as HTMLInputElement).checked).toBe(true)
+  expect((screen.getByRole('checkbox', { name: 'newTechnical' }) as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByRole('checkbox', { name: 'feature' }) as HTMLInputElement).checked).toBe(false)
+  view.unmount()
+  const restarted = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  expect(document.querySelectorAll('.continuum-facet-groups > details').length).toBe(2)
+  expect(document.querySelectorAll('.continuum-facet-groups details[open]').length).toBe(0)
+  restarted.rerender(<ContinuumView activeProject={{ ...project, path: '/B' }} />)
+  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({ repositoryId: 'catalog-B' })))
+  expect(localStorage.getItem('continuum:visible-facets:catalog-B')).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
+  expect((screen.getByRole('checkbox', { name: 'futureUnknownKey' }) as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByRole('checkbox', { name: 'feature' }) as HTMLInputElement).checked).toBe(true)
+  restarted.rerender(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Restaurar padrão' }))
+  expect(document.querySelectorAll('.continuum-facet-groups > details').length).toBe(2)
+  expect(localStorage.getItem('continuum:visible-facets:catalog-A')).toBeNull()
+})
+
+it('expands and collapses visible groups and months while allowing individual native toggles', async () => {
+  facets = [{ key: 'date', values: [], years: [{ year: 2026, count: 2, months: [{ month: 10, count: 2 }] }] }]
+  render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  const groups = [...document.querySelectorAll<HTMLDetailsElement>('.continuum-facet-groups details')]
+  expect(groups).toHaveLength(2)
+  expect(groups.every(group => !group.open)).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Expand All' }))
+  expect(groups.every(group => group.open)).toBe(true)
+  fireEvent.click(groups[1].querySelector('summary')!)
+  expect(groups[1].open).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse All' }))
+  expect(groups.every(group => !group.open)).toBe(true)
+})
+
+
+it('exports only a loaded selection, locks both actions and reports save cancellation and errors explicitly', async () => {
+  let finish!: (result: any) => void
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  expect(screen.queryByRole('button', { name: 'Copiar' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: /First artifact/ }))
+  await screen.findByRole('button', { name: 'Copiar' })
+  for (const name of ['Copiar', 'Salvar como…', 'Personalizar filtros', 'Expand All', 'Collapse All', 'Limpar']) {
+    const action = screen.getByRole('button', { name })
+    expect(action.textContent).toBe('')
+    expect(action.getAttribute('title')).toBe(name)
+    expect(action.querySelector('svg')).toBeTruthy()
+  }
+  vi.mocked(window.codeAwareness.exportContinuumArtifact).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  fireEvent.click(screen.getByRole('button', { name: 'Copiar' }))
+  expect(window.codeAwareness.exportContinuumArtifact).toHaveBeenCalledWith({ repositoryId: 'catalog-A', artifactId: 'one', intent: 'copy' })
+  expect((screen.getByRole('button', { name: 'Salvar como…' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Copiar' }))
+  expect(window.codeAwareness.exportContinuumArtifact).toHaveBeenCalledTimes(1)
+  await act(async () => finish({ repositoryId: 'catalog-A', artifactId: 'one', outcome: 'copied' }))
+  expect(screen.getByText('Copiado para a área de transferência.')).toBeTruthy()
+  vi.mocked(window.codeAwareness.exportContinuumArtifact).mockResolvedValueOnce({ repositoryId: 'catalog-A', artifactId: 'one', outcome: 'cancelled' })
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar como…' }))
+  expect(await screen.findByText('Salvamento cancelado.')).toBeTruthy()
+  vi.mocked(window.codeAwareness.exportContinuumArtifact).mockRejectedValueOnce(new Error('EACCES'))
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar como…' }))
+  expect(await screen.findByRole('alert')).toHaveProperty('textContent', expect.stringContaining('EACCES'))
+  vi.mocked(window.codeAwareness.exportContinuumArtifact).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  fireEvent.click(screen.getByRole('button', { name: 'Copiar' }))
+  view.rerender(<ContinuumView activeProject={{ ...project, path: '/B' }} />)
+  await act(async () => finish({ repositoryId: 'catalog-A', artifactId: 'one', outcome: 'copied' }))
+  expect(screen.queryByText('Copiado para a área de transferência.')).toBeNull()
+})
+
+it('discards export feedback after selection changes in the same repository', async () => {
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockResolvedValue({ repositoryId: 'catalog-A', artifacts: ['one', 'two'].map(id => ({ artifactId: id, name: id, kind: 'DOCUMENT', updatedAt: '', relationCount: 0 })) })
+  let finish!: (result: any) => void
+  render(<ContinuumView activeProject={project} />)
+  fireEvent.click(await screen.findByRole('button', { name: /one DOCUMENT/ }))
+  await screen.findByRole('button', { name: 'Copiar' })
+  vi.mocked(window.codeAwareness.exportContinuumArtifact).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  fireEvent.click(screen.getByRole('button', { name: 'Copiar' }))
+  fireEvent.click(screen.getByRole('button', { name: /two DOCUMENT/ }))
+  await screen.findByRole('button', { name: 'Copiar' })
+  await act(async () => finish({ repositoryId: 'catalog-A', artifactId: 'one', outcome: 'copied' }))
+  expect(screen.queryByText('Copiado para a área de transferência.')).toBeNull()
 })

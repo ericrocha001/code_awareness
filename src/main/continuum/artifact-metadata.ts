@@ -1,3 +1,4 @@
+import { artifactTags } from '../../shared/types/continuum-tag-types'
 import { load, dump, JSON_SCHEMA } from 'js-yaml'
 import type { ArtifactMetadata, ArtifactRelation, MetadataValue } from './continuum-types'
 
@@ -34,6 +35,7 @@ export function validateMetadata(value: unknown, legacy = false): ArtifactMetada
   for (const key of ['description', 'status']) {
     if (normalized[key] !== undefined && (typeof normalized[key] !== 'string' || !(normalized[key] as string).trim())) throw new Error(`INVALID_ARGUMENT: ${key} must be a non-empty string`)
   }
+  artifactTags(normalized.tags)
   if (normalized.relations !== undefined) {
     if (!Array.isArray(normalized.relations)) throw new Error('INVALID_ARGUMENT: relations must be an array')
     const seen = new Set<string>()

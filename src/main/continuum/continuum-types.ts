@@ -6,6 +6,7 @@ export interface IArtifactSuggestionReader { suggestions(query: ContinuumSuggest
 export type MetadataValue = null | boolean | number | string | MetadataValue[] | { [key: string]: MetadataValue }
 export interface ArtifactRelation { artifactId: string; kind: string }
 export interface ArtifactMetadata {
+  tags?: string[]
   name: string
   description?: string
   kind: string
@@ -24,6 +25,7 @@ export interface Artifact {
   provenance: Record<string, MetadataValue>
 }
 export interface ArtifactDiscoveryRecord {
+  revision?: number
   artifactId: string
   name: string
   description?: string
@@ -34,6 +36,7 @@ export interface ArtifactDiscoveryRecord {
   metadata?: Record<string, MetadataValue>
 }
 export interface ListArtifactsFilter {
+  tag?: string
   query?: string
   kind?: string
   status?: string

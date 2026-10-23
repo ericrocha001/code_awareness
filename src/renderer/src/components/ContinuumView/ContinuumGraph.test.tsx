@@ -45,7 +45,7 @@ it('uses capped scoped queries with temporal filters, isolated nodes and no whol
   expect(window.codeAwareness.getContinuumArtifact).not.toHaveBeenCalled()
   expect(screen.getByText(/recorte incompleto/)).toBeTruthy()
   expect(window.codeAwareness.getContinuumSuggestions).not.toHaveBeenCalled()
-  expect(cores[0].edges().map(edge => edge.style('line-style'))).toEqual(['solid', 'dotted'])
+  await waitFor(() => expect(cores[0].edges().map(edge => edge.style('line-style'))).toEqual(['solid', 'dotted']))
 })
 
 it('keeps Timeline selection, list requests and Inspector shared across both views', async () => {
