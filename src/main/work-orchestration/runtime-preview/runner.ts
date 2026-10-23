@@ -83,7 +83,7 @@ export class RuntimePreviewRunner {
     if (bytesFingerprint(await readFile(this.helper.executable)) !== this.helper.fingerprint) throw new Error('NATIVE_HELPER_CHANGED')
     return new NativeOwner(this.helper.executable)
   }
-  private termination(record: PreviewSessionRecord, kind: NonNullable<PreviewSessionRecord['termination']>['kind'], reasonCode: string,
+private termination(record: PreviewSessionRecord, kind: NonNullable<PreviewSessionRecord['termination']>['kind'], reasonCode: string,
     observation: NativeObservation | null, status: 'RESPONDING' | 'EXITED' | 'UNKNOWN') {
     if (record.termination && record.termination.kind !== 'UNKNOWN') return record
     const journal = this.store.nativeJournal(record.sessionId).at(-1)
@@ -100,12 +100,13 @@ export class RuntimePreviewRunner {
     if (!record.termination || record.termination.supervisorExit) return record
     return this.change(record, { termination: { ...record.termination, supervisorExit: { observedAt: new Date().toISOString() } } })
   }
-  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void }): Promise<PreviewSessionRecord> {
+  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void> }): Promise<PreviewSessionRecord> {
+
     const selection = sessionSchema.shape.selection.safeParse(input.selection)
     if (!selection.success) return Promise.reject(selection.error)
     input = { operationId: input.operationId, selection: selection.data, guard: input.guard }
     return this.command(async () => {
-      input.guard?.()
+      await input.guard?.()
       if (!sessionSchema.shape.operationId.safeParse(input.operationId).success) throw new Error('INVALID_OPERATION_ID')
       const previous = this.store.list().find(r => r.operationId === input.operationId)
       if (previous) {
@@ -155,7 +156,7 @@ export class RuntimePreviewRunner {
           const context = await this.contextProvisioner.prepare({ profile, selection: input.selection, sessionId,
             directory: this.store.runtime(sessionId), worktree: prepared.worktree, source: preflight.snapshot })
           await prepared.guard()
-          input.guard?.()
+          await input.guard?.()
           record = this.change(record, { context })
         }
         if (profile.adapter) {
@@ -166,7 +167,7 @@ export class RuntimePreviewRunner {
         }
         native = await this.owner(); this.owners.set(sessionId, native)
         await prepared.guard()
-        input.guard?.()
+        await input.guard?.()
         const runtime = this.store.runtime(sessionId)
         createRequested = true
         const observation = await native.start({ sessionId, operationId: input.operationId, directory: this.store.directory(sessionId),
@@ -180,13 +181,13 @@ export class RuntimePreviewRunner {
         if (adapter) {
           await adapter.permit(native, async actual => {
             await prepared.guard()
-            input.guard?.()
+            await input.guard?.()
             record = this.change(record, { process: observation, runtimeEvidence: { ...actual, preflight: preflight.status === 'SUPPORTED' ? 'SUPPORTED' : 'UNKNOWN', at: new Date().toISOString(), scope: 'DECLARED_INSTALL_SCRIPTS' } })
           })
           stack = await adapter.awaitReady(native)
           await prepared.guard()
         }
-        input.guard?.()
+        await input.guard?.()
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE' })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
         return record

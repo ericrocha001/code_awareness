@@ -4,7 +4,32 @@ import { randomUUID } from 'node:crypto'
 import { previewProfileSchema, previewFingerprint, type PreviewProfile } from './preview-profile'
 
 export class PreviewProfileStore {
+  private defaults: Promise<unknown> = Promise.resolve()
   constructor(private readonly directory: string) {}
+  provideDefault(profileId: string, resolve: (current?: PreviewProfile) => Promise<PreviewProfile>): Promise<PreviewProfile> {
+    const work = this.defaults.then(async () => {
+      const file = join(this.directory, 'profiles.json')
+      const read = async () => { try { return await readFile(file, 'utf8') } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '[]'; throw error } }
+      const before = await read(), all = previewProfileSchema.array().max(100).parse(JSON.parse(before))
+      if (new Set(all.map(p => p.profileId)).size !== all.length) throw new Error('PROFILE_ID_CONFLICT')
+      const current = all.find(p => p.profileId === profileId), candidate = previewProfileSchema.parse(await resolve(current))
+      if (candidate.profileId !== profileId || current && candidate.repositoryId !== current.repositoryId) throw new Error('PROFILE_ID_CONFLICT')
+      if (current && previewFingerprint(candidate) === previewFingerprint(current)) return current
+      const profile = { ...candidate, revision: current ? current.revision + 1 : 1 }
+      const next = all.filter(p => p.profileId !== profileId); next.push(profile)
+      if (next.length > 100) throw new Error('PROFILE_LIMIT_REACHED')
+      await mkdir(this.directory, { recursive: true })
+      const temporary = join(this.directory, `profile-${randomUUID()}.tmp`)
+      await writeFile(temporary, JSON.stringify(next), { flag: 'wx' })
+      try {
+        if (before !== await read()) throw new Error('PROFILE_CHANGED')
+        await rename(temporary, file)
+      } finally { await rm(temporary, { force: true }) }
+      return profile
+    })
+    this.defaults = work.catch(() => {})
+    return work
+  }
   async profiles(repositoryId: string): Promise<PreviewProfile[]> {
     let raw: string
     try { raw = await readFile(join(this.directory, 'profiles.json'), 'utf8') }

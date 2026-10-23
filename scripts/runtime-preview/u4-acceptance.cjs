@@ -5,9 +5,16 @@ const net = require('node:net')
 const assert = require('node:assert/strict')
 const { randomUUID, createHash } = require('node:crypto')
 const { execFileSync, spawn } = require('node:child_process')
-const contextual = process.argv.includes('--context'), snapshot = process.argv.includes('--snapshot')
-const root = process.cwd(), output = path.join(root, contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
+const branchApp = process.argv.includes('--branch-app')
+const contextual = process.argv.includes('--context') || branchApp, snapshot = process.argv.includes('--snapshot') || branchApp
+const root = process.cwd(), output = path.join(root, branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
 fs.mkdirSync(output, { recursive: true })
+if (branchApp) process.on('uncaughtException', error => {
+  fs.writeFileSync(path.join(output, 'harness-uncaught.txt'), String(error.stack))
+  console.error('HARNESS_UNCAUGHT_EXCEPTION', error.message)
+  if (process.versions.electron) require('electron').app.exit(1)
+  else process.exit(1)
+})
 if (!process.versions.electron) {
   const env = { ...process.env, U4_NODE: process.execPath, U4_NODE_VERSION: process.versions.node, U4_NODE_ABI: process.versions.modules,
     U4_CANONICAL_USER_DATA: path.join(process.env.APPDATA, 'code-awareness') }
@@ -32,7 +39,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const external = Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies }).filter(name => !['mdast-util-from-markdown', 'micromark-extension-gfm', 'mdast-util-gfm', 'mdast-util-to-string'].includes(name))
   require('esbuild').buildSync({ entryPoints: entries.map(file => 'src/main/' + file + '.ts'), outdir: bundle, platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
   const get = name => require(path.join(bundle, name + '.js'))
-  require('esbuild').buildSync({ entryPoints: ['context-data', 'authorization', 'context-bootstrap'].map(file => 'src/main/work-orchestration/runtime-preview/' + file + '.ts'), outdir: path.join(bundle, 'work-orchestration/runtime-preview'), platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
+  require('esbuild').buildSync({ entryPoints: ['context-data', 'authorization', 'context-bootstrap', 'code-awareness-profile'].map(file => 'src/main/work-orchestration/runtime-preview/' + file + '.ts'), outdir: path.join(bundle, 'work-orchestration/runtime-preview'), platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
   const base = path.join(directory, 'base'), target = path.join(directory, 'feature')
   fs.mkdirSync(path.join(base, 'runtime'), { recursive: true }); fs.mkdirSync(path.join(base, 'app'))
   for (const file of ['launch.cjs', 'cooperation.cjs']) fs.copyFileSync(path.join(root, 'scripts/runtime-preview', file), path.join(base, 'runtime', file))
@@ -78,16 +85,43 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     assert.ok(tree)
     selections[kind] = { repositoryId: repository.id, worktreeId: tree.worktreeId, generation: tree.generation, profileId: profile.profileId }
   }
-  const profileDirectory = path.join(directory, 'profiles'); fs.mkdirSync(profileDirectory); fs.writeFileSync(path.join(profileDirectory, 'profiles.json'), JSON.stringify(profiles))
+  const reuseProfileIndex = process.argv.indexOf('--branch-profiles')
+  const profileDirectory = branchApp && reuseProfileIndex >= 0 ? fs.realpathSync(process.argv[reuseProfileIndex + 1]) : path.join(directory, 'profiles')
+  if (reuseProfileIndex < 0) { fs.mkdirSync(profileDirectory); fs.writeFileSync(path.join(profileDirectory, 'profiles.json'), JSON.stringify(profiles.filter(p => !branchApp || p.runtime !== 'ELECTRON_DEV'))) }
   const { PreviewProfileStore } = get('work-orchestration/preview-profile-store'), { PreviewPreflightService } = get('work-orchestration/preview-preflight')
   const profileStore = new PreviewProfileStore(profileDirectory)
-  for (const kind of ['web', 'electron']) selections[kind].fingerprint = hash(JSON.stringify((await profileStore.profiles(selections[kind].repositoryId))[0]))
+  for (const kind of ['web', 'electron']) if (!branchApp) selections[kind].fingerprint = hash(JSON.stringify((await profileStore.profiles(selections[kind].repositoryId))[0]))
   const faults = process.argv.includes('--faults'), build = require('./build.cjs').build(faults)
   const resolveHelper = get('work-orchestration/runtime-preview/host-helper').resolvePreviewHelper
   const helperConfig = { packaged: false, resources: '', root, developmentBuild: JSON.stringify(build) }
   if (faults) assert.throws(() => resolveHelper(helperConfig), /PREVIEW_HELPER_BUILD_INVALID/)
   const helper = faults ? { executable: build.owner, fingerprint: build.fingerprint, sdkDirectory: path.join(root, 'scripts/runtime-preview') } : resolveHelper(helperConfig)
   const store = new (get('work-orchestration/runtime-preview/session-store').PreviewSessionStore)(path.join(directory, 'sessions'))
+  const retained = new Map(), diagnosticWatchers = new Map()
+  const retainDiagnostics = () => {
+    if (!branchApp) return
+    for (const record of store.list()) {
+      const runtime = store.runtime(record.sessionId)
+      if (!fs.existsSync(runtime) || diagnosticWatchers.has(record.sessionId)) continue
+      const capture = () => {
+        for (const name of ['bootstrap.stdout.log', 'bootstrap.stderr.log', 'bootstrap-failure.json']) {
+          const file = path.join(runtime, name)
+          try {
+            const stat = fs.statSync(file), key = record.sessionId + ':' + name
+            if (stat.size > 65536 || retained.get(key) === stat.mtimeMs) continue
+            fs.writeFileSync(path.join(output, record.sessionId + '-' + name), fs.readFileSync(file))
+            retained.set(key, stat.mtimeMs)
+          } catch (error) { if (error.code !== 'ENOENT') console.error('DIAGNOSTIC_CAPTURE_UNAVAILABLE') }
+        }
+      }
+      try {
+        const watcher = fs.watch(runtime, capture)
+        watcher.on('error', error => { console.error('DIAGNOSTIC_WATCH_UNAVAILABLE', error.code); watcher.close(); diagnosticWatchers.delete(record.sessionId) })
+        diagnosticWatchers.set(record.sessionId, watcher); capture()
+      } catch (error) { if (error.code !== 'ENOENT') console.error('DIAGNOSTIC_WATCH_UNAVAILABLE', error.code) }
+    }
+  }
+  const diagnosticTimer = branchApp ? setInterval(retainDiagnostics, 1000) : undefined
   const { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } = get('work-orchestration/runtime-preview/runner')
   const provisionerModule = get('work-orchestration/runtime-preview/context-data')
   const provisioner = new provisionerModule.RepositoryPreviewContextProvisioner(catalog, path.join(contextual && snapshot ? process.env.U4_CANONICAL_USER_DATA : directory, 'continuum'))
@@ -115,7 +149,8 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     try { return await get('work-orchestration/runtime-preview/authorization').confirmPreviewProfile(authorizationWindow, profile, provisioner) }
     finally { authorizationWindow.hide() }
   }
-  const service = new (get('work-orchestration/runtime-preview/operations').RuntimePreviewOperations)(repositories, profileStore, store, runner, confirmation, ledger, continuum)
+  const branchProfiles = branchApp ? new (get('work-orchestration/runtime-preview/code-awareness-profile').CodeAwarenessProfileResolver)(profileStore, { root, executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules }) : undefined
+  const service = new (get('work-orchestration/runtime-preview/operations').RuntimePreviewOperations)(repositories, profileStore, store, runner, confirmation, ledger, continuum, branchProfiles)
   let active = { revision: 1, project: { id: webRepository.id, path: base, name: 'U4 controlled Web' } }
   const activeGit = (await repositories.open(webRepository.id)).git
   const { BranchOrchestrationController, registerBranchOrchestrationHandlers } = get('ipc/branch-orchestration-handler')
@@ -173,7 +208,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   await ui.listen()
   console.log(JSON.stringify({ ready: true, ui: `http://127.0.0.1:${ui.httpServer.address().port}`, web: profiles[0].probes.readiness.address, directory }))
   fs.writeFileSync(path.join(output, 'identity.json'), JSON.stringify({ directory, selections, profiles, root, canonicalDataOrigin: snapshot ? 'PRIMARY_SELECTED_REPOSITORY' : 'NONE' }))
-  let currentKind = 'web', sessionId, bindingId, proofId
+  let currentKind = branchApp ? 'electron' : 'web', sessionId, bindingId, proofId, branchIntent
   const commandFile = path.join(output, 'commands.json')
   fs.writeFileSync(commandFile, '[]')
   let consumed = 0, wake
@@ -187,6 +222,21 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     try {
       if (command.startsWith('select ')) currentKind = command.slice(7)
       const selection = selections[currentKind]; assert.ok(selection)
+      if (command === 'run-branch' || command === 'replay-branch') {
+        assert.ok(branchApp)
+        if (command === 'run-branch') {
+          const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
+          const tree = inventory.worktrees.find(w => path.resolve(w.path).toLowerCase() === root.toLowerCase())
+          const branch = inventory.branches.find(b => b.worktrees.some(w => w.worktreeId === tree.worktreeId && w.generation === tree.generation))
+          assert.ok(branch)
+          branchIntent = { action: 'RUN_BRANCH_APP', repositoryId: electronRepository.id, ref: branch.ref, revision: branch.revision, operationId: randomUUID() }
+        }
+        assert.ok(branchIntent)
+        const response = await branchRequest({ action: 'PREVIEW_RUNTIME', request: branchIntent }); save('branch-intent-ipc', response)
+        const completed = await service.pendingResult(); const result = completed ?? response.data?.result
+        save('branch-app-complete', result)
+        if (result?.data?.session) { sessionId = result.data.session.sessionId; Object.assign(selections.electron, result.data.session.selection) }
+      }
       if (command.startsWith('bootstrap-fault ')) bootstrapFault = command.slice(16)
       if (command === 'deny' || command === 'approve') {
         approvalAllowed = command === 'approve'
@@ -265,8 +315,8 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         await mcp('inspect_runtime_preview', { sessionId }); const recovered = await service.pendingResult(); save('recovery-released-complete', recovered); assert.equal(recovered.data.session.state, 'STOPPED')
       }
       if (command === 'history') await mcp('list_runtime_previews', { repositoryId: selection.repositoryId, limit: 10 })
-      if (command === 'stop') { await mcp('stop_runtime_preview', { sessionId }); const completed = await service.pendingResult(); save('stop-complete', completed); assert.equal(completed?.data?.session?.state, 'STOPPED') }
-      if (command === 'quit') { assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state))); watcher.close(); await ui.close(); await new Promise(resolve => server.close(resolve)); continuum.dispose(); catalogStore.close(); window.destroy(); app.exit(0); break }
+      if (command === 'stop') { await mcp('stop_runtime_preview', { sessionId }); const completed = await service.pendingResult() ?? (await mcp('list_runtime_previews', { repositoryId: selection.repositoryId })).data?.lastOperation?.result; save('stop-complete', completed); assert.equal(completed?.data?.session?.state, 'STOPPED') }
+      if (command === 'quit') { assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state))); if (diagnosticTimer) clearInterval(diagnosticTimer); for (const item of diagnosticWatchers.values()) item.close(); watcher.close(); await ui.close(); await new Promise(resolve => server.close(resolve)); continuum.dispose(); catalogStore.close(); window.destroy(); app.exit(0); break }
     } catch (error) { save('command-error', { success: false, code: error.message }); console.error(error.stack) }
   }
 }

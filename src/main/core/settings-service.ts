@@ -20,6 +20,8 @@ const DEFAULT_SETTINGS = {
   projectPreferences: {},
   compressionSettings: DEFAULT_COMPRESSION_SETTINGS,
 } as AppSettings
+const repositoryPreference = (value: unknown): string | undefined =>
+  typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value) ? value : undefined
 
 export class SettingsService {
   private readonly listeners = new Set<() => void>()
@@ -76,6 +78,7 @@ export class SettingsService {
       merged.transportKind = rest.transportKind === 'relay' ? 'relay' : 'ngrok'
       merged.individualProjects = rest.individualProjects || []
       merged.hiddenProjects = rest.hiddenProjects || []
+      merged.lastActiveRepositoryId = repositoryPreference(rest.lastActiveRepositoryId)
       merged.tags = rest.tags || {}
       merged.fileTags = rest.fileTags || {}
       // Defesa em profundidade: se for array (inválido), usa objeto vazio
@@ -110,6 +113,17 @@ export class SettingsService {
   }
 
   saveSettings(settings: AppSettings): void {
+    this.writeSettings({ ...settings, lastActiveRepositoryId: this.loadSettings().lastActiveRepositoryId })
+  }
+
+  rememberActiveRepository(repositoryId: string): void {
+    const id = repositoryPreference(repositoryId)
+    if (!id) throw new Error('INVALID_REPOSITORY_ID')
+    const settings = this.loadSettings()
+    if (settings.lastActiveRepositoryId !== id) this.writeSettings({ ...settings, lastActiveRepositoryId: id })
+  }
+
+  private writeSettings(settings: AppSettings): void {
     const configDir = app.getPath('userData')
     const configFile = this.getConfigFile()
     if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
