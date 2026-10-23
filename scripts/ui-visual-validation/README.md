@@ -19,6 +19,56 @@ These scenarios prove real Chromium rendering and the exercised interactions, no
 The Continuum scenario renders the actual product component and styles with explicitly synthetic read API fixtures.
 Scenarios remain opt-in; they are not added to the global validation gate.
 
+## Native Windows Open/Save (opt-in)
+
+`native-dialogs` is a real Electron Main/Windows acceptance scenario:
+`npm run harness:ui:scenario -- native-dialogs --timeout-ms 90000`. It requires an interactive Windows
+desktop, Windows PowerShell and UI Automation. Unsupported environments fail explicitly;
+they never produce simulated acceptance. No administrator privileges are required.
+
+A scenario opts in by exporting `nativeDialogs = { fixtures: [{ name: 'input.md',
+type: 'OPEN' }, { name: 'output.md', type: 'SAVE' }] }`. Only predefined local basenames
+with `.md`, `.txt`, `.webp` or `.zip` extensions are accepted. Use
+`ctx.nativeDialogs.fixture(name)` to prepare a fixture in the execution's temporary
+sandbox. Links/junctions, traversal, network paths, alternate streams, unknown names
+and existing Save destinations are rejected. Fixtures are removed with the isolated
+profile; copy relevant hashes/proofs to the evidence directory before teardown.
+
+In Main, call `await ctx.nativeDialogs.run({ type: 'OPEN', fixture: 'input.md' },
+() => dialog.showOpenDialog(ctx.window, { properties: ['openFile'] }))`.
+Use `type: 'SAVE'` with `dialog.showSaveDialog`, or `action: 'CANCEL'` to cancel either
+flow. The callback must return the actual Electron dialog promise. The controller
+compares its canceled/filePaths/filePath result with the declared operation and fixture.
+Defaults are `action: 'CONFIRM'` and an eight-second dialog deadline; `timeout` is bounded
+to 500–15000 ms, with five additional seconds for helper startup/shutdown. Operations
+on a controller are sequential. Pending operations are abandoned during disposal.
+
+Only opt-in scenarios reveal their isolated owner via `showInactive()`. PID and native
+HWND are captured in Main. The helper enumerates only that process's thread windows,
+requires a unique visible `#32770` with the exact owner HWND, and rechecks ownership
+before mutation. UIA Value/Invoke patterns are preferred; known Win32 control IDs
+1001 or classic edt1/1148, and buttons 1/2, cover the observed Common Dialog variants.
+Cancel uses the validated Win32 button because UIA Invoke returned without dismissing
+the real Windows dialog in acceptance. Confirm prefers UIA when its patterns and native
+control identity are available. Labels, titles and screen
+coordinates are not selectors. Structured UTF-8 stdin transports arguments without
+shell interpolation. Receipts record PID/owner/dialog, method, operation, ownership,
+actual result and helper termination, excluding fixture contents, paths and UI labels.
+
+Failures distinguish `UNSUPPORTED_PLATFORM`, `DIALOG_NOT_FOUND`, `OWNER_MISMATCH`,
+`CONTROL_UNAVAILABLE`, `DIALOG_TIMEOUT`, `CANCEL_FAILED` and `HELPER_FAILED`.
+Disposal stops tracked helpers and destroys only this worker's Electron windows;
+the parent deadline kills the worker process tree and verifies sandbox removal.
+`--timeout-ms` explicitly overrides the usual 30000 ms scenario deadline, up to 120000 ms;
+the native acceptance scenario uses 90000 ms to cover its positive and negative flows.
+Renderer `click`/`input`, hidden captures, comparison and HTML file chooser interception
+retain their existing behavior. This API does not operate arbitrary desktop windows.
+
+Directed regressions: `node --test scripts/ui-visual-validation/native-dialogs.test.cjs`.
+The Windows ownership test is explicitly skipped elsewhere; that skip is not native
+runtime proof. Run the native scenario plus the existing preflight/comparator regressions
+for Windows acceptance.
+
 ## Approved reference comparison (opt-in)
 
 Compare an explicitly selected approved PNG with a user-supplied application screenshot,
