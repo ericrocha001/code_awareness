@@ -19,6 +19,7 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
       receipt.source = { observedAt: new Date().toISOString(), observation: 'SCENARIO_START', checkout: projectRoot, head: git(['rev-parse', 'HEAD']), branch: git(['branch', '--show-current']), changes: git(['-c', 'core.fsmonitor=false', 'status', '--porcelain']) }
     }
     require('../test-output.cjs').protectDirectory(evidenceDir)
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 120000) throw Object.assign(new Error('Scenario timeout must be 1–120000 ms'), { code: 'TIMEOUT_INVALID' })
     for (const name of ['runtime.log', 'runtime.stdout.log', 'runtime.stderr.log']) logFiles.push(fs.openSync(path.join(evidenceDir, name), 'wx', 0o600))
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ca-ui-visual-'))
     const config = { projectRoot, evidenceDir, temporary, scenario: path.resolve(__dirname, 'scenarios', `${scenario}.cjs`) }
@@ -84,7 +85,13 @@ module.exports = { run }
 if (require.main === module) {
   Promise.resolve().then(() => {
     const args = process.argv.slice(3)
-    return run({ scenario: process.argv[2] || 'preflight', ...(args.length ? { comparison: require('./compare.cjs').parseArguments(args, true) } : {}) })
+    const timeoutIndex = args.indexOf('--timeout-ms')
+    let timeout
+    if (timeoutIndex >= 0) {
+      timeout = Number(args[timeoutIndex + 1])
+      args.splice(timeoutIndex, 2)
+    }
+    return run({ scenario: process.argv[2] || 'preflight', ...(timeout !== undefined ? { timeout } : {}), ...(args.length ? { comparison: require('./compare.cjs').parseArguments(args, true) } : {}) })
   }).then(receipt => { console.log(JSON.stringify(receipt, null, 2)); process.exitCode = receipt.status === 'PASS' && (!receipt.comparison || receipt.comparison.state === 'READY_FOR_REVIEW') ? 0 : 1 })
     .catch(error => { console.error(JSON.stringify({ status: 'FAIL', reason: error.code || 'ARGUMENT_INVALID', message: error.message })); process.exitCode = 1 })
 }
