@@ -11,10 +11,14 @@ node scripts/local-agent/local.cjs continuum publish --repository <repositoryId>
 node scripts/local-agent/local.cjs continuum update --repository <repositoryId> --id <artifactId> --revision <revision> --file handoff.md
 node scripts/local-agent/local.cjs academy list --status ACTIVE
 node scripts/local-agent/local.cjs academy get --id <skillId>
+node scripts/local-agent/local.cjs academy history --id <skillId> --metadata-only true
+node scripts/local-agent/local.cjs academy history --id <skillId> --version <version>
 node scripts/local-agent/local.cjs academy create --scope GLOBAL --file package.json
 node scripts/local-agent/local.cjs academy create --scope PROJECT --projects '["destinationId"]' --file package.json
 node scripts/local-agent/local.cjs academy update --id <skillId> --version <observedVersion> --file package.json
 node scripts/local-agent/local.cjs academy delivery_status --id <skillId> [--version <observedVersion>]
+node scripts/local-agent/local.cjs academy change_impact --file impact-request.json
+node scripts/local-agent/local.cjs academy verify_change_impact --file freshness-request.json
 ```
 
 Continuum conserva seleção explícita por RepositoryRecord.id e comprovação de checkout/worktree Git. Descoberta não contém Markdown; `get --format markdown` emite conteúdo literal sem newline adicional. [Fluxo do implementador](../continuum/LOCAL.md) continua válido.
@@ -28,6 +32,26 @@ Uma escrita Academy confirma persistência imediatamente (`state: 'PERSISTED'`) 
 `VERSION_CONFLICT` exige reler a versão e reavaliar. Create recusa nome ativo duplicado. Erros de scope/projetos, token, protocolo ou operação encerram sem sucesso falso. Archive/restore, conflitos, Git e releases não fazem parte deste canal. Depois de perder a resposta de uma escrita, consulte ID ou nome e versão/hash antes de reenviar; não existe retry automático.
 
 O protocolo `code-awareness-local/v1` exige domínio, ação e args explícitos, com schemas fechados e operações registradas. Há um request por conexão, limite de 8 MiB de request/16 MiB de response, deadline absoluto de 15 segundos e no máximo 16 conexões. Não há truncamento silencioso nem fallback offline. Processos do mesmo usuário com acesso ao perfil integram o contexto autorizado.
+
+## Histórico seletivo da Academy
+
+`academy history --id <skillId> --metadata-only true` descobre versões em ordem decrescente sem ler ou retornar seus packages. A metadata contém `skillId`, `version`, `origin`, `createdAt` e `packageHash`. Use `--version <inteiro positivo seguro>` para obter uma única `AcademySkillVersion`, com package literal completo e hash canônico. Nenhum conteúdo é truncado; os limites atuais do transporte continuam aplicáveis.
+
+Os seletores são mutuamente exclusivos, inclusive `--metadata-only false` junto de `--version`. Versões zero, fracionárias, inseguras e strings não numéricas são recusadas. Skill ausente produz `SKILL_NOT_FOUND`; versão ausente de uma Skill existente produz `VERSION_NOT_FOUND`. Skills arquivadas continuam consultáveis. Sem seletores (ou com `--metadata-only false` isolado), retorna-se intencionalmente o array integral legado.
+
+O MCP oferece os mesmos modos na operação existente `get_academy_skill_history`: `{skillId, metadataOnly:true}`, `{skillId, version:n}` ou `{skillId}`. MCP e Local Agent Channel delegam ao serviço canônico; nenhuma consulta grava versões, reconcilia distribuição ou executa scripts.
+
+## Change Impact Preflight
+
+`change_impact` recebe JSON completo da consulta em `--file`, sem escrever na Academy ou executar scripts. Modo candidato: `{ "skillId": "id", "expectedVersion": 3, "package": { "skillMd": "...", "artifacts": {} } }`. Modo retrospectivo: `{ "skillId": "id", "baseVersion": 2, "targetVersion": 3 }`. Os modos são exclusivos. O MCP expõe os mesmos contratos por `analyze_academy_change_impact` e `verify_academy_change_impact`.
+
+A resposta contém diff literal, propriedades de frontmatter quando resolvíveis e possíveis consumidores diretos ACTIVE no alcance canônico atual. Menções negativas e exemplos continuam sendo evidência textual, sem classificação automática de dependência ou compatibilidade. Ausência de referências detectadas não demonstra ausência de impacto; aliases e dependências implícitas não são resolvidos. GLOBAL pode alcançar qualquer projeto; PROJECT cruza associações compartilhadas, preservando alcance desconhecido como ambíguo. O escopo histórico não é reconstruído.
+
+`changes`, `consumers` e `evidence` aceitam `offset` (padrão 0), `limit` (padrões 10/10/2, máximo 50), `textOffset` (0) e `textLimit` (400 caracteres, máximo 4000). A janela textual se aplica a changes/evidence. Cada página informa `total` e `nextOffset`; cada trecho informa offset, totalCharacters e nextOffset. Reenvie a consulta com os offsets para recuperar conteúdo omitido; `consumerId` seleciona um candidato. Reanalise se o fingerprint mudar durante o aprofundamento. Offsets não são cursores persistidos.
+
+`verify_change_impact` recebe `{ "snapshot": <snapshot retornado>, "candidateHash": "<sha256 opcional>" }`. O snapshot é uma identidade consultiva sem estado persistido e sua leitura usa uma transação SQLite consistente. Cobre fonte, base imutável, candidato e todo o conjunto elegível (inclusive Skills sem referências), com versões, status, escopos e associações ordenados. A verificação retorna CURRENT, STALE ou UNKNOWN e razões observáveis. Sem novo hash, o candidato não é reobservado: verifica-se somente a identidade de conteúdo fornecida anteriormente. Para outro candidato, use o hash canônico de seu package completo ou reanalise.
+
+Freshness não cria lock, recibo durável ou garantia atômica até o update. Mudanças podem ocorrer depois da consulta; `expectedVersion` continua protegendo apenas a Skill editada. UNKNOWN nunca deve ser tratado como CURRENT.
 
 ## Compatibilidade e aceitação
 

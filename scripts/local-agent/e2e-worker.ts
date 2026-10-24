@@ -10,6 +10,7 @@ import { LocalChannelHost, LOCAL_MAX_BYTES } from '../../src/main/local-agent-ch
 import { ContinuumLocalAdapter } from '../../src/main/continuum/local-adapter'
 import { AcademyLocalAdapter } from '../../src/main/academy/local-adapter'
 import { AcademyService } from '../../src/main/academy/academy-service'
+import { executeAcademyTool } from '../../src/main/academy/academy-mcp'
 import { createConnection } from 'node:net'
 import { executePublishArtifact, executeGetArtifact, executeArtifactNavigation } from '../../src/main/continuum/continuum-mcp'
 import sharp from 'sharp'
@@ -190,7 +191,7 @@ process.once('message', async (input: { temporary: string; node: string; cli: st
     assert.equal(globalDelivery.status, 'CONVERGED')
     assert.deepEqual((await generic(['academy', 'get', '--id', globalSkill.skillId])).current.package, skillRaw)
     assert.equal(readFileSync(join(worktree, '.skills/local-global/SKILL.md'), 'utf8'), skillRaw.skillMd)
-    const projectRaw = skillPackage('local-project')
+    const projectRaw = skillPackage('local-project', 'Não use `local-global` sem revisão.')
     writeFileSync(packageFile, JSON.stringify(projectRaw))
     const projectSkill = await generic(['academy', 'create', '--scope', 'PROJECT', '--projects', JSON.stringify([destination.id]), '--file', packageFile])
     assert.equal(projectSkill.distribution.status, 'PENDING')
@@ -198,6 +199,18 @@ process.once('message', async (input: { temporary: string; node: string; cli: st
     const projectDelivery = await generic(['academy', 'delivery_status', '--id', projectSkill.skillId])
     assert.equal(projectDelivery.status, 'CONVERGED')
     assert.equal(academy.store.isAssigned(projectSkill.skillId, otherDestination.id), false)
+    const impactFile = join(input.temporary, 'impact.json')
+    const impactInput = { skillId: globalSkill.skillId, expectedVersion: 1, package: skillPackage('local-global', 'candidate only') }
+    writeFileSync(impactFile, JSON.stringify(impactInput))
+    const impact = await generic(['academy', 'change_impact', '--file', impactFile])
+    const remoteImpact = await executeAcademyTool(academy, 'analyze_academy_change_impact', impactInput)
+    assert.deepEqual(impact, JSON.parse((remoteImpact.content[0] as { text: string }).text))
+    assert.equal(impact.totalCandidates, 1)
+    assert.equal(impact.consumers.items[0].evidence.items[0].changeLink, 'POR_SKILL')
+    assert.equal(academy.history(globalSkill.skillId).length, 1)
+    assert.equal(readFileSync(join(worktree, '.skills/local-global/SKILL.md'), 'utf8'), skillRaw.skillMd)
+    writeFileSync(impactFile, JSON.stringify({ snapshot: impact.snapshot }))
+    assert.equal((await generic(['academy', 'verify_change_impact', '--file', impactFile])).state, 'CURRENT')
     writeFileSync(packageFile, JSON.stringify(skillPackage('local-project', 'updated')))
     const projectUpdated = await generic(['academy', 'update', '--id', projectSkill.skillId, '--version', '1', '--file', packageFile])
     assert.equal(projectUpdated.state, 'PERSISTED')
@@ -206,6 +219,23 @@ process.once('message', async (input: { temporary: string; node: string; cli: st
     await academy.waitForReconciliation()
     const updatedDelivery = await generic(['academy', 'delivery_status', '--id', projectSkill.skillId, '--version', '2'])
     assert.equal(updatedDelivery.status, 'CONVERGED')
+    const historyMetadata = await generic(['academy', 'history', '--id', projectSkill.skillId, '--metadata-only', 'true'])
+    assert.deepEqual(historyMetadata.map((version: { version: number }) => version.version), [2, 1])
+    assert.ok(historyMetadata.every((version: object) => !('package' in version)))
+    const historicalVersion = await generic(['academy', 'history', '--id', projectSkill.skillId, '--version', '1'])
+    assert.deepEqual(historicalVersion.package, projectRaw)
+    const historyMcp = await executeAcademyTool(academy, 'get_academy_skill_history', { skillId: projectSkill.skillId, version: 1 })
+    assert.deepEqual(historicalVersion, JSON.parse((historyMcp.content[0] as { text: string }).text))
+    assert.deepEqual(await generic(['academy', 'history', '--id', projectSkill.skillId]), academy.history(projectSkill.skillId))
+    await generic(['academy', 'history', '--id', projectSkill.skillId, '--metadata-only', 'false', '--version', '1'], input.temporary, 'INVALID_ARGUMENT')
+    for (const invalid of ['0', '1.2', 'abc', '9007199254740992']) await generic(['academy', 'history', '--id', projectSkill.skillId, '--version', invalid], input.temporary, 'INVALID_ARGUMENT')
+    await generic(['academy', 'history', '--id', projectSkill.skillId, '--version', '3'], input.temporary, 'VERSION_NOT_FOUND')
+    await assert.rejects(connect(genericDescriptor, { domain: 'academy', action: 'history', args: { skillId: projectSkill.skillId, version: '1' } }), { code: 'INVALID_ARGUMENT' })
+    const staleImpact = await generic(['academy', 'verify_change_impact', '--file', impactFile])
+    assert.equal(staleImpact.state, 'STALE')
+    assert.ok(staleImpact.reasons.includes('CONSUMER_CHANGED'))
+    writeFileSync(impactFile, JSON.stringify({ ...impactInput, baseVersion: 1 }))
+    await generic(['academy', 'change_impact', '--file', impactFile], input.temporary, 'INVALID_ARGUMENT')
     await generic(['academy', 'update', '--id', projectSkill.skillId, '--version', '1', '--file', packageFile], input.temporary, 'VERSION_CONFLICT')
     await generic(['academy', 'create', '--scope', 'GLOBAL', '--file', packageFile], input.temporary, 'DUPLICATE_SKILL_NAME')
     writeFileSync(packageFile, JSON.stringify(skillPackage('invalid-project')))

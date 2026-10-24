@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { AcademyService } from './academy-service'
 import { AcademyLocalAdapter } from './local-adapter'
 import { registerApplicationShutdown } from '../application-shutdown'
+import { executeAcademyTool } from './academy-mcp'
 import type { AcademyMutationReceipt, AcademySkillDeliveryStatus } from '../../shared/types/academy-types'
 
 const context = { connected: () => true }
@@ -18,6 +19,27 @@ describe('Academy local adapter over canonical service', () => {
     for (const service of services.splice(0)) await service.close()
     for (const path of paths.splice(0)) rmSync(path, { recursive: true, force: true })
     vi.restoreAllMocks()
+  })
+
+  it('delegates all history modes and selector protection identically to MCP without writing', async () => {
+    const { service, operations } = setup()
+    const skill = service.store.create({ package: pkg('historical'), scope: 'GLOBAL', origin: 'IMPORT' })
+    service.store.update({ skillId: skill.id, expectedVersion: 1, package: pkg('historical', 'new'), origin: 'UI' })
+    const before = service.snapshot(), history = service.history(skill.id)
+    for (const options of [{}, { metadataOnly: true }, { metadataOnly: false }, { version: 1 }]) {
+      const args = { skillId: skill.id, ...options }
+      const remote = await executeAcademyTool(service, 'get_academy_skill_history', args)
+      expect(remote.isError).toBeUndefined()
+      expect(operations.history.execute(args, context)).toEqual(JSON.parse(remote.content[0].text))
+    }
+    for (const options of [{ version: 0 }, { version: 1.2 }, { version: '1' }, { version: Number.MAX_SAFE_INTEGER + 1 }, { version: 1, metadataOnly: false }, { version: 1, metadataOnly: true }, { metadataOnly: 'true' }, { hidden: true }]) {
+      const args = { skillId: skill.id, ...options }
+      expect(() => operations.history.execute(args, context)).toThrow('INVALID_ARGUMENT')
+      expect(JSON.parse((await executeAcademyTool(service, 'get_academy_skill_history', args)).content[0].text).error).toBe('INVALID_ARGUMENT')
+    }
+    expect(() => operations.history.execute({ skillId: skill.id, version: 3 }, context)).toThrow('VERSION_NOT_FOUND')
+    expect(() => operations.history.execute({ skillId: 'absent', version: 1 }, context)).toThrow('SKILL_NOT_FOUND')
+    expect(service.snapshot()).toEqual(before); expect(service.history(skill.id)).toEqual(history)
   })
 
   it('persists GLOBAL/PROJECT packages with LOCAL_CLI origin, managed distribution and version preconditions', async () => {
