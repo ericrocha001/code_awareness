@@ -10,7 +10,7 @@ async function main(args = process.argv.slice(2)) {
   if (domain === 'continuum') return continuum(args, channel)
   if (domain !== 'academy' && domain !== 'status') fail('INVALID_ARGUMENT')
   const action = domain === 'status' ? 'status' : args.shift()
-  const allowed = domain === 'status' ? ['--profile'] : { list: ['--profile', '--status'], get: ['--profile', '--id'], create: ['--profile', '--file', '--scope', '--projects'], update: ['--profile', '--file', '--id', '--version', '--scope', '--projects'] }[action]
+  const allowed = domain === 'status' ? ['--profile'] : { list: ['--profile', '--status'], get: ['--profile', '--id'], create: ['--profile', '--file', '--scope', '--projects'], update: ['--profile', '--file', '--id', '--version', '--scope', '--projects'], delivery_status: ['--profile', '--id', '--version'] }[action]
   if (!allowed) fail('INVALID_ARGUMENT')
   const options = {}
   for (let index = 0; index < args.length; index += 2) {
@@ -21,7 +21,7 @@ async function main(args = process.argv.slice(2)) {
   const request = {}
   if (domain === 'status') return connect(descriptor, { domain: 'channel', action, args: request })
   if (options['--status']) request.status = options['--status']
-  if (['get', 'update'].includes(action)) {
+  if (['get', 'update', 'delivery_status'].includes(action)) {
     if (!options['--id']) fail('INVALID_ARGUMENT')
     request.skillId = options['--id']
   }
@@ -35,6 +35,10 @@ async function main(args = process.argv.slice(2)) {
     if (options['--projects']) { try { request.projectIds = JSON.parse(options['--projects']) } catch { fail('INVALID_ARGUMENT') } }
   }
   if (action === 'update') {
+    request.expectedVersion = Number(options['--version'])
+    if (!Number.isSafeInteger(request.expectedVersion) || request.expectedVersion < 1) fail('INVALID_ARGUMENT')
+  }
+  if (action === 'delivery_status' && options['--version']) {
     request.expectedVersion = Number(options['--version'])
     if (!Number.isSafeInteger(request.expectedVersion) || request.expectedVersion < 1) fail('INVALID_ARGUMENT')
   }

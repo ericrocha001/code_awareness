@@ -158,7 +158,13 @@ export const AcademyView: React.FC = () => {
         ? await window.codeAwareness.updateAcademySkill({ skillId: selected.id, expectedVersion: selected.currentVersion, package: { skillMd, artifacts }, scope, projectIds })
         : await window.codeAwareness.createAcademySkill({ package: { skillMd, artifacts }, scope, projectIds })
       setIsEditing(false)
-      showMessage(`Versão ${detail.currentVersion} salva.`)
+      const delivery = await window.codeAwareness.getAcademyDeliveryStatus(detail.id, detail.currentVersion).catch(() => null)
+      const deliveryText = delivery?.status === 'NOT_APPLICABLE'
+        ? 'sem destinos aplicáveis'
+        : delivery?.status === 'CONVERGED'
+        ? 'distribuída'
+        : 'distribuição pendente'
+      showMessage(`Versão ${detail.currentVersion} salva (${deliveryText}).`)
       await refresh(detail.id)
     } catch (error) { reportError(error) }
   }

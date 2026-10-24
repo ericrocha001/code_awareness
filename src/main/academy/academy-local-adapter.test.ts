@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AcademyService } from './academy-service'
 import { AcademyLocalAdapter } from './local-adapter'
-import type { AcademyMutationReceipt } from '../../shared/types/academy-types'
+import type { AcademyMutationReceipt, AcademySkillDeliveryStatus } from '../../shared/types/academy-types'
 
 const context = { connected: () => true }
 const pkg = (name: string, content = 'literal ç 漢字 ` ${x} $(cmd)\r\n') => ({ skillMd: `---\nname: ${name}\ndescription: Local test\n---\n${content}`, artifacts: { 'references/usage.md': content } })
@@ -20,20 +20,27 @@ describe('Academy local adapter over canonical service', () => {
     const other = await service.registerDestination(second, 'second'); service.watcher.stop()
     const raw = pkg('local-test')
     const created = await operations.create.execute({ package: raw, scope: 'PROJECT', projectIds: [destination.id] }, context) as AcademyMutationReceipt
-    expect(created).toMatchObject({ state: 'PERSISTED', version: 1, distribution: { status: 'CONVERGED' } })
+    expect(created).toMatchObject({ state: 'PERSISTED', version: 1, distribution: { status: 'PENDING' } })
     expect('package' in created).toBe(false)
     expect(service.get(created.skillId).current).toMatchObject({ origin: 'LOCAL_CLI', package: raw })
     expect(service.store.isAssigned(created.skillId, other.id)).toBe(false)
+    await service.waitForReconciliation()
+    const initialDelivery = await operations.delivery_status.execute({ skillId: created.skillId }, context) as AcademySkillDeliveryStatus
+    expect(initialDelivery.status).toBe('CONVERGED')
     expect(readFileSync(join(root, '.skills/local-test/SKILL.md'), 'utf8')).toBe(raw.skillMd)
     const changed = pkg('local-test', 'new content\r\n')
     const updated = await operations.update.execute({ skillId: created.skillId, expectedVersion: 1, package: changed }, context) as AcademyMutationReceipt
-    expect(updated).toMatchObject({ version: 2, projectIds: [destination.id], distribution: { status: 'CONVERGED' } })
+    expect(updated).toMatchObject({ version: 2, projectIds: [destination.id], distribution: { status: 'PENDING' } })
     expect(service.history(created.skillId).find(value => value.version === 1)?.package).toEqual(raw)
+    await service.waitForReconciliation()
     await expect(operations.update.execute({ skillId: created.skillId, expectedVersion: 1, package: raw }, context)).rejects.toMatchObject({ code: 'VERSION_CONFLICT' })
     await expect(operations.create.execute({ package: changed, scope: 'GLOBAL' }, context)).rejects.toMatchObject({ code: 'DUPLICATE_SKILL_NAME' })
     const moved = await operations.update.execute({ skillId: created.skillId, expectedVersion: 2, package: changed, scope: 'GLOBAL' }, context) as AcademyMutationReceipt
-    expect(moved).toMatchObject({ version: 3, scope: 'GLOBAL', projectIds: [], distribution: { status: 'CONVERGED' } })
+    expect(moved).toMatchObject({ version: 3, scope: 'GLOBAL', projectIds: [], distribution: { status: 'PENDING' } })
+    await service.waitForReconciliation()
     expect(service.distribution.states(created.skillId).every(state => state.status === 'CURRENT')).toBe(true)
+    const delivery = await operations.delivery_status.execute({ skillId: created.skillId }, context) as AcademySkillDeliveryStatus
+    expect(delivery.status).toBe('CONVERGED')
     expect(operations.list.execute({}, context)).toEqual(service.list())
   }, 60000)
   it('rejects invalid scope/associations, hidden fields and packages before changing the Store', async () => {
@@ -46,16 +53,21 @@ describe('Academy local adapter over canonical service', () => {
     await expect(Promise.resolve().then(() => operations.create.execute({ package: pkg('disconnected'), scope: 'GLOBAL' }, { connected: () => false }))).rejects.toThrow('IPC_CLOSED')
     expect(service.list()).toEqual([])
   })
-  it('reports persistence separately when reconciliation fails after commit, without lying about rollback', async () => {
+  it('reports persistence immediately even if destinations fail, without rolling back commit', async () => {
     const { service, operations } = setup()
     const notified = vi.fn(); service.onCanonicalChange(notified)
-    vi.spyOn(service, 'reconcileAll').mockRejectedValueOnce(new Error('transport failed'))
+    const root = directory()
+    await service.registerDestination(root, 'dest')
+    vi.spyOn(service.projections, 'reconcileDestination').mockRejectedValueOnce(new Error('filesystem disk full'))
     const created = await operations.create.execute({ package: pkg('committed'), scope: 'GLOBAL' }, context) as AcademyMutationReceipt
-    expect(created).toMatchObject({ state: 'PERSISTED', version: 1, distribution: { status: 'ERROR', errorCode: 'RECONCILIATION_FAILED' } })
+    expect(created).toMatchObject({ state: 'PERSISTED', version: 1, distribution: { status: 'PENDING' } })
     expect(service.get(created.skillId).current.packageHash).toBe(created.packageHash)
     expect(notified).toHaveBeenCalledOnce()
-    const updated = await operations.update.execute({ skillId: created.skillId, expectedVersion: 1, package: pkg('committed', 'fixed') }, context) as AcademyMutationReceipt
-    expect(updated).toMatchObject({ version: 2, distribution: { status: 'NOT_APPLICABLE' } })
-    expect(service.history(created.skillId).every(version => version.origin === 'LOCAL_CLI')).toBe(true)
+    await service.waitForReconciliation()
+    const delivery = await operations.delivery_status.execute({ skillId: created.skillId }, context) as AcademySkillDeliveryStatus
+    expect(delivery.status).toBe('PENDING') // Still pending due to error in projection
+    const noDestService = setup()
+    const unassigned = await noDestService.operations.create.execute({ package: pkg('no-dest'), scope: 'GLOBAL' }, context) as AcademyMutationReceipt
+    expect(unassigned).toMatchObject({ state: 'PERSISTED', version: 1, distribution: { status: 'NOT_APPLICABLE' } })
   })
 })

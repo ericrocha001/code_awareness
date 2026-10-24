@@ -9,7 +9,12 @@ const identity = ({ project, file, code, category, message }) => JSON.stringify(
 const sortDiagnostics = diagnostics => diagnostics.sort((a, b) => identity(a) < identity(b) ? -1 : identity(a) > identity(b) ? 1 : 0)
 
 function normalizedMessage(message, root) {
-  return ts.flattenDiagnosticMessageText(message, '\n').replaceAll(root.replaceAll('\\', '/'), '<root>').replaceAll(root.replaceAll('/', '\\'), '<root>').replaceAll('\r\n', '\n').trim()
+  let text = ts.flattenDiagnosticMessageText(message, '\n')
+  try {
+    const realNodeModules = fs.realpathSync(path.join(root, 'node_modules'))
+    text = text.replaceAll(realNodeModules.replaceAll('\\', '/'), '<root>/node_modules').replaceAll(realNodeModules.replaceAll('/', '\\'), '<root>/node_modules')
+  } catch {}
+  return text.replaceAll(root.replaceAll('\\', '/'), '<root>').replaceAll(root.replaceAll('/', '\\'), '<root>').replaceAll('\r\n', '\n').trim()
 }
 
 function compactDiagnostic(diagnostic, root) {

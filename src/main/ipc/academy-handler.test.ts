@@ -23,7 +23,8 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
   const service = {
     snapshot: vi.fn(), get: vi.fn(), history: vi.fn(), create: vi.fn(async (value) => value), update: vi.fn(async (value) => value),
     archive: vi.fn(), restore: vi.fn(), setDestinationEnabled: vi.fn(), import: vi.fn(), resolveConflict: vi.fn(),
-    getDistributionHealth: vi.fn(), listDistributionStates: vi.fn(), reconcileDistribution: vi.fn(),
+    getDistributionHealth: vi.fn(), listDistributionStates: vi.fn(), reconcileDistribution: vi.fn(), getDeliveryStatus: vi.fn(),
+
     bootstrapOpenAiPlugin: vi.fn(), getOpenAiPublicationState: vi.fn(), listOpenAiReleases: vi.fn(),
     prepareOpenAiRelease: vi.fn(), confirmOpenAiUpload: vi.fn(), getOpenAiRelease: vi.fn(() => ({ artifactPath: 'C:/release.zip' })),
     store: { listDestinations: vi.fn(() => [{ id: 'repo', path: 'C:/repo' }]) }
@@ -31,7 +32,7 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
   registerAcademyHandlers(service as any)
   const handlers = new Map(handle.mock.calls.map(([channel, handler]) => [channel, handler]))
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:snapshot', 'academy:create', 'academy:update', 'academy:import-destination', 'academy:resolve-conflict']))
-  expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:distribution-health', 'academy:distribution-states', 'academy:distribution-reconcile']))
+  expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:distribution-health', 'academy:distribution-states', 'academy:distribution-reconcile', 'academy:delivery-status']))
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:openai-state', 'academy:openai-prepare', 'academy:openai-confirm-upload', 'academy:openai-reveal']))
   await handlers.get('academy:create')!({}, { package: { skillMd: 'x', artifacts: {} }, scope: 'GLOBAL' })
   expect(service.create).toHaveBeenCalledWith(expect.objectContaining({ origin: 'UI' }))

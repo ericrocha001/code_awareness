@@ -83,6 +83,10 @@ export class AcademyDistributionService {
     try { result = await adapter[operation]({ destination, skill, previous }) } catch (error) {
       result = { status: 'ERROR', distributedVersion: null, distributedHash: null, errorCode: 'DISTRIBUTION_ERROR', errorMessage: error instanceof Error ? error.message : String(error), exposureName: previous?.exposureName ?? skill.name, linkMechanism: previous?.linkMechanism ?? null }
     }
+    const latest = this.store.get(skill.id)
+    if (latest.currentVersion !== skill.currentVersion || latest.current.packageHash !== skill.current.packageHash) {
+      return { status: 'PENDING', distributedVersion: result.distributedVersion, distributedHash: result.distributedHash, errorCode: null, errorMessage: null, exposureName: result.exposureName, linkMechanism: result.linkMechanism }
+    }
     this.persist(skill, destinationId, target, result)
     return result
   }

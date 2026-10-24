@@ -23,6 +23,7 @@ beforeEach(() => {
     createAcademySkill: vi.fn(async () => detail), updateAcademySkill: vi.fn(async () => ({ ...detail, currentVersion: 2, current: { ...detail.current, version: 2 } })),
     archiveAcademySkill: vi.fn(async () => ({ ...detail, status: 'ARCHIVED' })), restoreAcademySkill: vi.fn(async () => detail),
     setAcademyDestinationEnabled: vi.fn(), importAcademyDestination: vi.fn(async () => []), resolveAcademyConflict: vi.fn(async () => detail),
+    getAcademyDeliveryStatus: vi.fn(async () => ({ skillId: detail.id, version: detail.currentVersion, packageHash: detail.current.packageHash, status: 'CONVERGED', destinations: [] })),
     getAcademyDistributionHealth: vi.fn(async () => ({ targets: [{ target: 'FILESYSTEM_NATIVE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }, { target: 'CLAUDE_CODE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }, { target: 'ANTIGRAVITY', convergence: 'DEGRADED', current: 0, pending: 0, drifted: 0, missing: 0, error: 1, lastReconciledAt: detail.updatedAt }] })),
     listAcademyDistributionStates: vi.fn(async () => []), reconcileAcademyDistribution: vi.fn(async () => ({ health: { targets: [] }, states: [] })),
     bootstrapAcademyOpenAiPlugin: vi.fn(), getAcademyOpenAiPublicationState: vi.fn(async () => ({
@@ -83,7 +84,7 @@ it('lists, opens in VIEW and updates a canonical skill with expectedVersion', as
   fireEvent.change(editor, { target: { value: `${detail.current.package.skillMd}\nUpdated` } })
   fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
   await waitFor(() => expect(window.codeAwareness.updateAcademySkill).toHaveBeenCalledWith(expect.objectContaining({ skillId: 'skill-1', expectedVersion: 1 })))
-  expect(await screen.findByText('Versão 2 salva.')).toBeTruthy()
+  expect(await screen.findByText(/Versão 2 salva/)).toBeTruthy()
 })
 
 it('cancels an edit without persistence and creates a new skill only on save', async () => {

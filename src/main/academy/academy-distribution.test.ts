@@ -18,6 +18,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       const destination = await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('safe', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       const adapter = new SkillBridgeDistributionAdapter(target, directory as '.claude' | '.agents', target)
       expect(await adapter.reconcile({ destination, skill: { ...skill, name: '../../escape' }, previous: null })).toMatchObject({ status: 'ERROR', errorCode: 'PATH_ESCAPE' })
       expect(() => lstatSync(join(repo, 'escape'))).toThrow()
@@ -29,6 +30,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('broken-own', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       const physical = join(repo, '.skills', skill.name)
       const bridge = join(repo, directory, 'skills', skill.name)
       rmSync(physical, { recursive: true })
@@ -42,6 +44,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
       expect(service.distribution.states(skill.id).every((state) => state.status === 'CURRENT')).toBe(true)
     } finally { service.close() }
   })
+
   it('preserves a conflicting regular file', async () => {
     const data = root(); const repo = root()
     mkdirSync(join(repo, directory, 'skills'), { recursive: true })
@@ -51,22 +54,28 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('file-conflict', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       expect(service.distribution.states(skill.id).find((state) => state.target === target)).toMatchObject({ status: 'ERROR', errorCode: 'ENTRY_CONFLICT' })
       await service.archive(skill.id, 1)
+      await service.waitForReconciliation()
       expect(readFileSync(path, 'utf8')).toBe('private file')
     } finally { service.close() }
   })
+
   it('preserves a replaced external link when archiving and disabling its project', async () => {
     const data = root(); const repo = root(); const outside = root(); const service = new AcademyService(join(data, 'academy.db'))
     try {
       const destination = await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('protected', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       const bridge = join(repo, directory, 'skills', 'protected')
       rmSync(bridge)
       symlinkSync(outside, bridge, process.platform === 'win32' ? 'junction' : 'dir')
       await service.archive(skill.id, 1)
+      await service.waitForReconciliation()
       expect(normalized(bridge)).toBe(normalized(outside))
       await service.setDestinationEnabled(destination.id, false)
+      await service.waitForReconciliation()
       expect(normalized(bridge)).toBe(normalized(outside))
       expect(service.distribution.states(skill.id).find((state) => state.target === target)?.errorCode).toBe('LINK_TARGET_INCORRECT')
     } finally { service.close() }
@@ -79,6 +88,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('escape', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       expect(service.distribution.states(skill.id).find((state) => state.target === target)).toMatchObject({ status: 'ERROR', errorCode: 'PATH_ESCAPE' })
       expect(() => lstatSync(join(outside, 'skills'))).toThrow()
       expect(service.distribution.states(skill.id).filter((state) => state.target !== target).every((state) => state.status === 'CURRENT')).toBe(true)
@@ -91,8 +101,10 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       const destination = await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('restart', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       skillId = skill.id
       await service.setDestinationEnabled(destination.id, false)
+      await service.waitForReconciliation()
       expect(() => lstatSync(join(repo, directory, 'skills', 'restart'))).toThrow()
       await service.setDestinationEnabled(destination.id, true)
     } finally { service.close() }
@@ -103,12 +115,14 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
       expect(normalized(join(repo, directory, 'skills', 'restart'))).toBe(normalized(join(repo, '.skills', 'restart')))
     } finally { reopened.close() }
   })
+
   it('shares one physical package through a current idempotent consumer bridge', async () => {
     const data = root(); const repo = root(); const service = new AcademyService(join(data, 'academy.db'))
     try {
       await service.registerDestination(repo, 'repo')
       service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('shared', '# v1'), artifacts: { 'guide.md': 'guide' } }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       const physical = join(repo, '.skills/shared')
       const bridge = join(repo, directory + '/skills/shared')
       expect(lstatSync(physical).isSymbolicLink()).toBe(false)
@@ -131,6 +145,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('health', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       rmSync(join(repo, directory + '/skills/health'))
       await service.distribution.verifyAll()
       expect(service.store.getDistributionState(skill.id, service.store.listDestinations()[0].id, target)?.status).toBe('MISSING')
@@ -158,6 +173,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('conflict', '# canonical'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       expect(service.get(skill.id).currentVersion).toBe(1)
       expect(readFileSync(join(repo, '.skills/conflict/SKILL.md'), 'utf8')).toContain('# canonical')
       expect(readFileSync(join(repo, directory + '/skills/conflict/private.md'), 'utf8')).toBe('user content')
@@ -175,6 +191,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('external', '# safe'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       expect(service.distribution.states(skill.id).find((state) => state.target === target)).toMatchObject({ status: 'ERROR', errorCode: 'LINK_TARGET_INCORRECT' })
       expect(normalized(join(repo, directory + '/skills/external'))).toBe(normalized(outside))
     } finally { service.close() }
@@ -186,12 +203,15 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
       const a = await service.registerDestination(repoA, 'A'); await service.registerDestination(repoB, 'B'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('old-name', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
       await service.update({ skillId: skill.id, expectedVersion: 1, package: { skillMd: md('new-name', '# v2'), artifacts: {} }, scope: 'PROJECT', projectIds: [a.id], origin: 'UI' })
+      await service.waitForReconciliation()
       expect(() => lstatSync(join(repoA, directory + '/skills/old-name'))).toThrow()
       expect(lstatSync(join(repoA, directory + '/skills/new-name')).isSymbolicLink()).toBe(true)
       expect(() => lstatSync(join(repoB, directory + '/skills/new-name'))).toThrow()
       await service.archive(skill.id, 2)
+      await service.waitForReconciliation()
       expect(() => lstatSync(join(repoA, directory + '/skills/new-name'))).toThrow()
       await service.restore(skill.id, 2)
+      await service.waitForReconciliation()
       expect(lstatSync(join(repoA, directory + '/skills/new-name')).isSymbolicLink()).toBe(true)
       expect(service.get(skill.id).id).toBe(skill.id)
     } finally { service.close() }
@@ -202,6 +222,7 @@ describe.each([{ target: 'CLAUDE_CODE' as const, directory: '.claude' }, { targe
     try {
       await service.registerDestination(repo, 'repo'); service.watcher.stop()
       const skill = await service.create({ package: { skillMd: md('repair', '# v1'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       const bridge = join(repo, directory + '/skills/repair')
       const missingTarget = join(repo, directory, 'missing-target')
       rmSync(bridge)

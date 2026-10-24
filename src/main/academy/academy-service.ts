@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createTwoFilesPatch } from 'diff'
 import { basename, join, resolve } from 'node:path'
-import type { AcademyConflictBatch, AcademyConflictReview, AcademyCreateInput, AcademyPackage, AcademySnapshot, AcademyUpdateInput, AcademySkillDetail, AcademyMutationReceipt } from '../../shared/types/academy-types'
+import type { AcademyConflictBatch, AcademyConflictReview, AcademyCreateInput, AcademyPackage, AcademySnapshot, AcademyUpdateInput, AcademySkillDetail, AcademyMutationReceipt, AcademySkillDeliveryStatus, AcademySkillDeliveryDestinationStatus, AcademyDeliveryConvergence, AcademyDistributionTarget } from '../../shared/types/academy-types'
 import { AcademyImporter } from './academy-importer'
 import { AcademyProjectionService } from './academy-projection-service'
 import { AcademyStore } from './academy-store'
@@ -14,6 +14,8 @@ import { OpenAiPluginPublicationService } from './publication/openai-plugin-publ
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
 
+const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE', 'ANTIGRAVITY']
+
 export class AcademyService {
   readonly store: AcademyStore
   readonly projections: AcademyProjectionService
@@ -24,6 +26,11 @@ export class AcademyService {
   readonly openAiPublication: OpenAiPluginPublicationService
   gitSync: AcademyGitSyncService | null = null
   private readonly canonicalChangeListeners: Set<() => void> = new Set()
+  private readonly distributionChangeListeners: Set<() => void> = new Set()
+  private isClosed = false
+  private readonly reconcilingDestinations = new Set<string>()
+  private readonly dirtyDestinations = new Set<string>()
+  private readonly destinationPassPromises = new Map<string, Promise<void>>()
   private readonly conflictReviews = new Map<string, AcademyConflictReview>()
   private readonly conflictReviewContexts = new Map<string, string>()
   private readonly conflictBatches = new Map<string, AcademyConflictBatch>()
@@ -44,6 +51,10 @@ export class AcademyService {
     this.onCanonicalChange(() => gitSync.notifyCanonicalChange())
   }
 
+  private assertNotClosed(): void {
+    if (this.isClosed) throw new Error('ACADEMY_SERVICE_CLOSED')
+  }
+
   onCanonicalChange(listener: () => void): () => void {
     this.canonicalChangeListeners.add(listener)
     return () => this.canonicalChangeListeners.delete(listener)
@@ -52,6 +63,17 @@ export class AcademyService {
   emitCanonicalChange(): void {
     for (const listener of this.canonicalChangeListeners) {
       try { listener() } catch (err) { console.error('[Academy] Canonical listener error:', err) }
+    }
+  }
+
+  onDistributionChange(listener: () => void): () => void {
+    this.distributionChangeListeners.add(listener)
+    return () => this.distributionChangeListeners.delete(listener)
+  }
+
+  emitDistributionChange(): void {
+    for (const listener of this.distributionChangeListeners) {
+      try { listener() } catch (err) { console.error('[Academy] Distribution listener error:', err) }
     }
   }
 
@@ -78,35 +100,115 @@ export class AcademyService {
   list(status?: 'ACTIVE' | 'ARCHIVED') { return this.store.list(status) }
   get(id: string) { return this.store.get(id) }
   history(id: string) { return this.store.history(id) }
+  scheduleDestinationReconciliation(destinationId: string): Promise<void> {
+    if (this.isClosed) return Promise.resolve()
+    if (this.reconcilingDestinations.has(destinationId)) {
+      this.dirtyDestinations.add(destinationId)
+      return this.destinationPassPromises.get(destinationId) ?? Promise.resolve()
+    }
+    this.reconcilingDestinations.add(destinationId)
+    const promise = (async () => {
+      try {
+        while (!this.isClosed) {
+          this.dirtyDestinations.delete(destinationId)
+          try {
+            await this.projections.reconcileDestination(destinationId)
+            if (this.isClosed) break
+            await this.distribution.reconcileDestination(destinationId)
+          } catch (error) {
+            console.error(`[Academy] Reconciliation error for destination ${destinationId}:`, error)
+          }
+          if (!this.dirtyDestinations.has(destinationId) || this.isClosed) {
+            break
+          }
+        }
+      } finally {
+        this.reconcilingDestinations.delete(destinationId)
+        this.destinationPassPromises.delete(destinationId)
+        this.openAiPublication.refreshDrift()
+        this.emitDistributionChange()
+      }
+    })()
+    this.destinationPassPromises.set(destinationId, promise)
+    return promise
+  }
+
+  scheduleReconciliationForSkill(skillId: string): void {
+    if (this.isClosed) return
+    const destinations = this.store.listDestinations().filter(d =>
+      d.enabled && (
+        this.store.isAssigned(skillId, d.id) ||
+        this.store.getProjection(skillId, d.id) !== null ||
+        this.store.listDistributionStates(skillId).some(s => s.destinationId === d.id)
+      )
+    )
+    for (const destination of destinations) {
+      this.scheduleDestinationReconciliation(destination.id)
+    }
+    this.openAiPublication.refreshDrift()
+  }
+
+  async waitForReconciliation(): Promise<void> {
+    while (this.destinationPassPromises.size > 0) {
+      const promises = [...this.destinationPassPromises.values()]
+      await Promise.allSettled(promises)
+    }
+  }
+
+  private immediateReceipt(value: AcademySkillDetail): AcademyMutationReceipt {
+    const destinations = this.store.listDestinations().filter(
+      destination => destination.enabled && this.store.isAssigned(value.id, destination.id)
+    )
+    const distributionStatus = destinations.length === 0 ? 'NOT_APPLICABLE' : 'PENDING'
+    return {
+      state: 'PERSISTED',
+      skillId: value.id,
+      name: value.name,
+      version: value.currentVersion,
+      packageHash: value.current.packageHash,
+      scope: value.scope,
+      projectIds: value.projectIds,
+      distribution: { status: distributionStatus }
+    }
+  }
+
   async create(input: AcademyCreateInput): Promise<AcademySkillDetail>
   async create(input: AcademyCreateInput, mode: 'RECEIPT'): Promise<AcademyMutationReceipt>
   async create(input: AcademyCreateInput, mode?: 'RECEIPT') {
+    this.assertNotClosed()
     const value = this.store.create(input)
-    if (mode === 'RECEIPT') return this.reconcileReceipt(value)
-    await this.reconcileAll(); return value
+    this.emitCanonicalChange()
+    this.scheduleReconciliationForSkill(value.id)
+    if (mode === 'RECEIPT') return this.immediateReceipt(value)
+    return value
   }
+
   async update(input: AcademyUpdateInput): Promise<AcademySkillDetail>
   async update(input: AcademyUpdateInput, mode: 'RECEIPT'): Promise<AcademyMutationReceipt>
   async update(input: AcademyUpdateInput, mode?: 'RECEIPT') {
+    this.assertNotClosed()
     const value = this.store.update(input)
-    if (mode === 'RECEIPT') return this.reconcileReceipt(value)
-    await this.reconcileAll(); return value
+    this.emitCanonicalChange()
+    this.scheduleReconciliationForSkill(value.id)
+    if (mode === 'RECEIPT') return this.immediateReceipt(value)
+    return value
   }
-  private async reconcileReceipt(value: AcademySkillDetail): Promise<AcademyMutationReceipt> {
-    const receipt: AcademyMutationReceipt = { state: 'PERSISTED', skillId: value.id, name: value.name, version: value.currentVersion, packageHash: value.current.packageHash, scope: value.scope, projectIds: value.projectIds, distribution: { status: 'NOT_APPLICABLE' } }
-    try {
-      await this.reconcileAll()
-      const destinations = this.store.listDestinations().filter(destination => destination.enabled && this.store.isAssigned(value.id, destination.id))
-      const states = this.distribution.states(value.id).filter(state => destinations.some(destination => destination.id === state.destinationId))
-      receipt.distribution.status = destinations.length === 0 ? 'NOT_APPLICABLE' : states.length === destinations.length * this.distribution.health().targets.length && states.every(state => state.status === 'CURRENT' && state.canonicalVersion === value.currentVersion && state.distributedHash === value.current.packageHash) ? 'CONVERGED' : 'DEGRADED'
-    } catch {
-      receipt.distribution = { status: 'ERROR', errorCode: 'RECONCILIATION_FAILED' }
-      this.emitCanonicalChange()
-    }
-    return receipt
+
+  async archive(id: string, expectedVersion: number) {
+    this.assertNotClosed()
+    const value = this.store.archive(id, expectedVersion)
+    this.emitCanonicalChange()
+    this.scheduleReconciliationForSkill(value.id)
+    return value
   }
-  async archive(id: string, expectedVersion: number) { const value = this.store.archive(id, expectedVersion); await this.reconcileAll(); return value }
-  async restore(id: string, expectedVersion: number) { const value = this.store.restore(id, expectedVersion); await this.reconcileAll(); return value }
+
+  async restore(id: string, expectedVersion: number) {
+    this.assertNotClosed()
+    const value = this.store.restore(id, expectedVersion)
+    this.emitCanonicalChange()
+    this.scheduleReconciliationForSkill(value.id)
+    return value
+  }
   async registerDestination(path: string, name: string, enabled = true) {
     const isGitRepo = this.isGitPublicationPath(path)
     const effectiveEnabled = isGitRepo ? false : enabled
@@ -257,10 +359,89 @@ export class AcademyService {
     return reviewed.conflict.skillId
   }
   async reconcileAll(): Promise<void> {
-    await this.projections.reconcileAll()
-    await this.distribution.reconcileAll()
+    this.assertNotClosed()
+    for (const destination of this.store.listDestinations().filter((item) => item.enabled)) {
+      this.scheduleDestinationReconciliation(destination.id)
+    }
+    await this.waitForReconciliation()
     this.openAiPublication.refreshDrift()
     this.emitCanonicalChange()
+  }
+
+  getDeliveryStatus(skillId: string, expectedVersion?: number): AcademySkillDeliveryStatus {
+    this.assertNotClosed()
+    const skill = this.store.get(skillId)
+    const targetVersion = expectedVersion ?? skill.currentVersion
+    const isSuperseded = expectedVersion !== undefined && expectedVersion < skill.currentVersion
+    const targetHash = targetVersion === skill.currentVersion
+      ? skill.current.packageHash
+      : (this.store.history(skillId).find(v => v.version === targetVersion)?.packageHash ?? null)
+
+    const destinations = this.store.listDestinations().filter(d => d.enabled && this.store.isAssigned(skill.id, d.id))
+    if (destinations.length === 0) {
+      return {
+        skillId: skill.id,
+        version: targetVersion,
+        packageHash: targetHash ?? skill.current.packageHash,
+        status: 'NOT_APPLICABLE',
+        destinations: []
+      }
+    }
+
+    const items: AcademySkillDeliveryDestinationStatus[] = []
+    for (const destination of destinations) {
+      for (const target of TARGETS) {
+        const state = this.store.getDistributionState(skill.id, destination.id, target)
+        if (!state || state.canonicalVersion !== targetVersion || state.canonicalHash !== targetHash) {
+          items.push({
+            destinationId: destination.id,
+            destinationName: destination.name,
+            target,
+            status: 'PENDING',
+            canonicalVersion: targetVersion,
+            distributedVersion: state?.distributedVersion ?? null,
+            distributedHash: state?.distributedHash ?? null,
+            errorCode: null,
+            errorMessage: null,
+            checkedAt: state?.checkedAt ?? new Date().toISOString()
+          })
+        } else {
+          items.push({
+            destinationId: destination.id,
+            destinationName: destination.name,
+            target,
+            status: state.status,
+            canonicalVersion: state.canonicalVersion,
+            distributedVersion: state.distributedVersion,
+            distributedHash: state.distributedHash,
+            errorCode: state.errorCode,
+            errorMessage: state.errorMessage,
+            checkedAt: state.checkedAt
+          })
+        }
+      }
+    }
+
+    let overallStatus: AcademyDeliveryConvergence
+    if (isSuperseded) {
+      overallStatus = 'DEGRADED'
+    } else if (items.some(i => i.status === 'ERROR')) {
+      overallStatus = items.every(i => i.status === 'ERROR') ? 'ERROR' : 'DEGRADED'
+    } else if (items.some(i => i.status === 'DRIFTED' || i.status === 'MISSING')) {
+      overallStatus = 'DEGRADED'
+    } else if (items.every(i => i.status === 'CURRENT')) {
+      overallStatus = 'CONVERGED'
+    } else {
+      overallStatus = 'PENDING'
+    }
+
+    return {
+      skillId: skill.id,
+      version: targetVersion,
+      packageHash: targetHash ?? skill.current.packageHash,
+      status: overallStatus,
+      destinations: items
+    }
   }
   async getDistributionHealth() { await this.distribution.verifyAll(); return this.distribution.health() }
   async listDistributionStates(skillId?: string) { await this.distribution.verifyAll(); return this.distribution.states(skillId) }
@@ -312,8 +493,53 @@ export class AcademyService {
   getOpenAiRelease(id: string) { return this.openAiPublication.getRelease(id) }
   prepareOpenAiRelease() { this.initializePluginPackage(); return this.openAiPublication.prepareRelease() }
   confirmOpenAiUpload(releaseId: string, artifactHash: string) { return this.openAiPublication.confirmUpload(releaseId, artifactHash) }
-  start(): void { this.watcher.start() }
-  close(): void { this.watcher.stop(); this.store.close() }
+  start(): void {
+    this.assertNotClosed()
+    this.watcher.start()
+    this.recoverPendingReconciliations()
+  }
+
+  private recoverPendingReconciliations(): void {
+    const destinations = this.store.listDestinations().filter(d => d.enabled)
+    for (const destination of destinations) {
+      let needsReconcile = false
+      for (const summary of this.store.list()) {
+        const skill = this.store.get(summary.id)
+        const shouldExist = destination.enabled && skill.status === 'ACTIVE' && this.store.isAssigned(skill.id, destination.id)
+        const projection = this.store.getProjection(skill.id, destination.id)
+        if (shouldExist) {
+          if (!projection || projection.version !== skill.currentVersion || projection.packageHash !== skill.current.packageHash) {
+            needsReconcile = true
+            break
+          }
+          for (const target of TARGETS) {
+            const state = this.store.getDistributionState(skill.id, destination.id, target)
+            if (!state || state.canonicalVersion !== skill.currentVersion || state.canonicalHash !== skill.current.packageHash || state.status !== 'CURRENT') {
+              needsReconcile = true
+              break
+            }
+          }
+        } else {
+          if (projection || TARGETS.some(t => this.store.getDistributionState(skill.id, destination.id, t) !== null)) {
+            needsReconcile = true
+            break
+          }
+        }
+        if (needsReconcile) break
+      }
+      if (needsReconcile) {
+        this.scheduleDestinationReconciliation(destination.id)
+      }
+    }
+  }
+
+  close(): void {
+    this.isClosed = true
+    this.watcher.stop()
+    this.dirtyDestinations.clear()
+    this.destinationPassPromises.clear()
+    this.store.close()
+  }
 }
 
 export function academyDatabasePath(userData: string): string { return join(userData, 'academy', 'academy.db') }
