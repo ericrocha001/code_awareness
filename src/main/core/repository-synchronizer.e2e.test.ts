@@ -13,6 +13,19 @@ import { RepositorySynchronizer } from './repository-synchronizer'
 import { repositoryEventBus } from './repository-events'
 import { closeRepositoryDatabase } from './repository-database'
 
+const ownedSynchronizers = new Set<RepositorySynchronizer>()
+const ownedModels = new Set<RepositoryModel>()
+class OwnedSynchronizer extends RepositorySynchronizer {
+  constructor(...args: ConstructorParameters<typeof RepositorySynchronizer>) { super(...args); ownedSynchronizers.add(this); ownedModels.add(args[0]) }
+}
+async function drainSynchronizers(): Promise<void> {
+  for (const synchronizer of ownedSynchronizers) synchronizer.dispose()
+  await Promise.all([...ownedSynchronizers].map(synchronizer => synchronizer.awaitDisposed()))
+  ownedSynchronizers.clear()
+  for (const model of ownedModels) model.close()
+  ownedModels.clear()
+}
+
 describe('Sprint 3 — Detecção Verificada', () => {
   let testDir: string
   let model: RepositoryModel
@@ -26,6 +39,7 @@ describe('Sprint 3 — Detecção Verificada', () => {
   // BUGFIX (Windows): o lock do WAL do SQLite pode segurar um handle após fechar a
   // conexão, impedindo a remoção imediata do diretório; faz um pequeno loop de retry.
   afterEach(async () => {
+    await drainSynchronizers()
     synchronizer?.dispose()
     closeRepositoryDatabase(testDir)
     for (let attempt = 0; attempt < 4; attempt++) {
@@ -48,7 +62,7 @@ describe('Sprint 3 — Detecção Verificada', () => {
     model = createRepositoryModel(testDir)
     await model.indexRepository()
     const repositoryId = model.getRepositoryId()
-    synchronizer = new RepositorySynchronizer(model, repositoryId)
+    synchronizer = new OwnedSynchronizer(model, repositoryId)
     return { filePath, repositoryId }
   }
 
@@ -123,7 +137,7 @@ describe('Sprint 3 — Detecção Verificada', () => {
     expect(synchronizer.getModifiedFilesCount()).toBe(0)
   })
 
-  it('deve marcar arquivo legado (contentHash nulo) como sempre modified', async () => {
+  it('deve migrar arquivo legado com hash nulo através do auto-sync', async () => {
     const { repositoryId } = await setupWithFile('sample.ts', 'const a = 1\n')
 
     // Simula arquivo legado: força contentHash para null no banco via model
@@ -144,7 +158,7 @@ describe('Sprint 3 — Detecção Verificada', () => {
 
     // Reabre model e synchronizer com o ID da nova instância (pode diferir da sessão anterior)
     model = createRepositoryModel(testDir)
-    synchronizer = new RepositorySynchronizer(model, model.getRepositoryId())
+    synchronizer = new OwnedSynchronizer(model, model.getRepositoryId())
 
     const filesWithNullHash = model.getFiles()
     expect(filesWithNullHash[0].contentHash).toBeNull()
@@ -153,8 +167,11 @@ describe('Sprint 3 — Detecção Verificada', () => {
 
     await new Promise(resolve => setTimeout(resolve, 1000))
 
+    await synchronizer.waitForIdle()
     const filesAfter = model.getFiles()
-    expect(filesAfter[0].status).toBe('modified')
+    expect(filesAfter[0].status).toBe('indexed')
+    expect(filesAfter[0].contentHash).not.toBeNull()
+    expect(synchronizer.getModifiedFilesCount()).toBe(0)
   })
 
   it('deve remover arquivo deletado automaticamente (auto-sync) e limpar o índice', async () => {
@@ -221,7 +238,8 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     vi.useRealTimers()
   })
 
-  afterEach(() => {
+  afterEach(async () => {
+    await drainSynchronizers()
     closeRepositoryDatabase(testDir)
     if (existsSync(testDir)) {
       rmSync(testDir, { recursive: true, force: true })
@@ -230,7 +248,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
 
   it('não deve executar varredura quando timer está desabilitado', async () => {
     const model = createRepositoryModel(testDir)
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId(), {
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId(), {
       periodicScanIntervalMs: 0 // desabilitado
     })
 
@@ -241,6 +259,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     expect(count).toBe(0)
 
     synchronizer.dispose()
+    await synchronizer.awaitDisposed()
     model.close()
   })
 
@@ -251,7 +270,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     const model = createRepositoryModel(testDir)
     await model.indexRepository()
 
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId(), {
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId(), {
       periodicScanIntervalMs: 100 // 100ms para teste rápido
     })
 
@@ -262,10 +281,13 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     // Aguarda o timer disparar
     await new Promise(resolve => setTimeout(resolve, 200))
 
-    const count = synchronizer.getModifiedFilesCount()
-    expect(count).toBeGreaterThan(0)
+    const expectedHash = createHash('sha256').update('export const x = 999\n').digest('hex')
+    for (let attempt = 0; attempt < 100 && model.getFiles()[0].contentHash !== expectedHash; attempt++) await new Promise(resolve => setTimeout(resolve, 20))
+    expect(model.getFiles()[0].contentHash).toBe(expectedHash)
+    expect(synchronizer.getModifiedFilesCount()).toBe(0)
 
     synchronizer.dispose()
+    await synchronizer.awaitDisposed()
     model.close()
   })
 
@@ -279,7 +301,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     // Marca como modified no banco sem alterar o conteúdo (status obsoleto)
     model.markFileModified('sample.ts')
 
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId(), {
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId(), {
       periodicScanIntervalMs: 100
     })
     // Popula o conjunto em memória a partir do banco
@@ -294,6 +316,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     expect(files[0].status).toBe('indexed')
 
     synchronizer.dispose()
+    await synchronizer.awaitDisposed()
     model.close()
   })
 
@@ -308,7 +331,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     writeFileSync(filePath, 'export const x = 999\n', 'utf-8')
     model.markFileModified('sample.ts')
 
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId(), {
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId(), {
       periodicScanIntervalMs: 100
     })
     synchronizer.reloadModifiedFilesFromDatabase()
@@ -322,6 +345,7 @@ describe('Sprint 10 — Varredura Periódica Barata', () => {
     expect(files[0].status).toBe('modified')
 
     synchronizer.dispose()
+    await synchronizer.awaitDisposed()
     model.close()
   })
 })
@@ -336,6 +360,7 @@ describe('Sprint 15 — reconcileMemoryWithDatabase', () => {
 
   // BUGFIX (Windows): loop de retry para contornar lock do WAL do SQLite.
   afterEach(async () => {
+    await drainSynchronizers()
     closeRepositoryDatabase(testDir)
     for (let attempt = 0; attempt < 4; attempt++) {
       try {
@@ -355,7 +380,7 @@ describe('Sprint 15 — reconcileMemoryWithDatabase', () => {
     const model = createRepositoryModel(testDir)
     await model.indexRepository()
     const repositoryId = model.getRepositoryId()
-    const synchronizer = new RepositorySynchronizer(model, repositoryId)
+    const synchronizer = new OwnedSynchronizer(model, repositoryId)
 
     // Injeta stale modified diretamente no modifiedFiles interno do synchronizer
     // @ts-ignore - acesso interno para teste
@@ -381,7 +406,7 @@ describe('Sprint 15 — reconcileMemoryWithDatabase', () => {
     const model = createRepositoryModel(testDir)
     await model.indexRepository()
     const repositoryId = model.getRepositoryId()
-    const synchronizer = new RepositorySynchronizer(model, repositoryId)
+    const synchronizer = new OwnedSynchronizer(model, repositoryId)
 
     // Força status modified no banco
     const files = model.getFiles()

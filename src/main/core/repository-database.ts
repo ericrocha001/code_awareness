@@ -306,6 +306,10 @@ function ensureSchema(db: BetterSqlite3Database): void {
 
 function ensureProjectionSchema(db: BetterSqlite3Database): void {
   db.exec(`
+    CREATE TABLE IF NOT EXISTS pending_file_changes (
+      repository_id TEXT NOT NULL, relative_path TEXT NOT NULL, revision INTEGER NOT NULL,
+      affected_sources TEXT NOT NULL DEFAULT '[]', PRIMARY KEY(repository_id, relative_path)
+    );
     CREATE TABLE IF NOT EXISTS projection_revisions (
       repository_id TEXT NOT NULL, scope TEXT NOT NULL, revision INTEGER NOT NULL,
       PRIMARY KEY(repository_id, scope)
@@ -348,6 +352,23 @@ function ensureProjectionSchema(db: BetterSqlite3Database): void {
   }
 }
 
+function migrateFileImportFacts(db: BetterSqlite3Database): void {
+  if (db.prepare("SELECT 1 FROM projection_checkpoints WHERE repository_id='' AND scope='@schema' AND phase='file-import-facts' AND version='1' AND state='CLEAN'").get()) return
+  db.transaction(() => {
+    const rows = db.prepare("SELECT f.repository_id, sf.file_id, sf.payload FROM symbol_resolution_facts sf JOIN files f ON f.id=sf.file_id WHERE lower(f.extension)='.css'").all() as Array<{ repository_id: string; file_id: string; payload: string }>
+    const targets = db.prepare("SELECT target_id FROM relationships WHERE source_id=? AND type='imports' AND source_kind='file' AND target_kind='file'")
+    for (const row of rows) {
+      const facts = JSON.parse(row.payload) as SymbolResolutionFacts
+      if (facts.fileImportTargets !== undefined) continue
+      const checkpoint = db.prepare("SELECT * FROM projection_checkpoints WHERE repository_id=? AND scope=? AND phase='FACTS'").get(row.repository_id, row.file_id) as { version: string; revision: number; state: string } | undefined
+      facts.fileImportTargets = (targets.all(row.file_id) as Array<{ target_id: string }>).map(target => target.target_id)
+      db.prepare('UPDATE symbol_resolution_facts SET payload=? WHERE file_id=?').run(JSON.stringify(facts), row.file_id)
+      if (checkpoint) db.prepare("INSERT INTO projection_checkpoints VALUES (?, ?, 'FACTS', ?, ?, ?)").run(row.repository_id, row.file_id, checkpoint.version, checkpoint.revision, checkpoint.state)
+    }
+    db.prepare("INSERT INTO projection_checkpoints VALUES ('', '@schema', 'file-import-facts', '1', 0, 'CLEAN')").run()
+  })()
+}
+
 /** Retorna uma conexão existente ou cria uma nova com WAL mode e schema garantido. */
 function getOrCreateConnection(repoPath: string): BetterSqlite3Database {
   const existing = connections.get(repoPath)
@@ -362,6 +383,7 @@ function getOrCreateConnection(repoPath: string): BetterSqlite3Database {
   db.pragma('foreign_keys = ON')
   ensureSchema(db)
   ensureProjectionSchema(db)
+  migrateFileImportFacts(db)
 
   const conn: DatabaseConnection = { db, repoPath }
   connections.set(repoPath, conn)
@@ -590,6 +612,44 @@ class RepositoryDatabase implements RepositoryRepository {
 
   // ─── Repositórios ─────────────────────────────────────────────────────────
 
+  enqueueFileChanges(repositoryId: string, paths: string[]): Map<string, number> {
+    return this.db.transaction(() => {
+      const revisions = new Map<string, number>()
+      const statement = this.db.prepare(`INSERT INTO pending_file_changes(repository_id, relative_path, revision) VALUES (?, ?, 1)
+        ON CONFLICT(repository_id, relative_path) DO UPDATE SET revision=revision+1 RETURNING revision`)
+      for (const path of new Set(paths)) revisions.set(path, (statement.get(repositoryId, path) as { revision: number }).revision)
+      return revisions
+    })()
+  }
+
+  getPendingFileChanges(repositoryId: string): Array<{ relativePath: string; revision: number; affectedSources: string[] }> {
+    return (this.db.prepare('SELECT relative_path, revision, affected_sources FROM pending_file_changes WHERE repository_id=?').all(repositoryId) as Array<{ relative_path: string; revision: number; affected_sources: string }>).map(row => ({ relativePath: row.relative_path, revision: row.revision, affectedSources: JSON.parse(row.affected_sources) }))
+  }
+
+  completeFileChange(repositoryId: string, relativePath: string, revision: number): boolean {
+    return this.db.prepare('DELETE FROM pending_file_changes WHERE repository_id=? AND relative_path=? AND revision=?').run(repositoryId, relativePath, revision).changes > 0
+  }
+
+  finishSymbolProjection(repositoryId: string, version: string, revision: number): void {
+    this.db.transaction(() => {
+      if (revision !== this.projectionRevision(repositoryId, '@symbols')) throw new Error('PROJECTION_INPUT_CHANGED')
+      this.db.prepare("UPDATE projection_checkpoints SET revision=? WHERE repository_id=? AND phase='SYMBOL_SOURCE' AND state='CLEAN' AND version=?").run(revision, repositoryId, version)
+      this.finishProjection(repositoryId, '', 'SYMBOLS', version, revision)
+    })()
+  }
+
+  replaceResolvedRelationships(repositoryId: string, relationships: CodeMapRelationship[]): void {
+    this.db.transaction(() => {
+      for (const relationship of relationships) if (relationship.repositoryId !== repositoryId || !['imports', 'extends', 'implements'].includes(relationship.type)) throw new Error('RESOLVED_RELATIONSHIP_SCOPE_MISMATCH')
+      const old = this.db.prepare("SELECT * FROM relationships WHERE repository_id=? AND type IN ('extends','implements','imports')").all(repositoryId).map(rowToRelationship)
+      const next = new Map(relationships.map(relationship => [relationship.id, relationship]))
+      const previous = new Map(old.map(relationship => [relationship.id, relationship]))
+      const remove = this.db.prepare('DELETE FROM relationships WHERE id=? AND repository_id=?')
+      for (const relationship of old) if (!next.has(relationship.id)) remove.run(relationship.id, repositoryId)
+      this.saveRelationships(relationships.filter(relationship => JSON.stringify(previous.get(relationship.id)) !== JSON.stringify(relationship)))
+    })()
+  }
+
   countSymbolReferences(repositoryId: string): number {
     return (this.db.prepare('SELECT COUNT(*) AS count FROM symbol_references WHERE repository_id = ?').get(repositoryId) as { count: number }).count
   }
@@ -762,6 +822,22 @@ class RepositoryDatabase implements RepositoryRepository {
     const tx = this.db.transaction(() => {
       const file = this.db.prepare('SELECT repository_id, context_reference FROM files WHERE id = ?').get(fileId) as { repository_id: string; context_reference: string | null } | undefined
       if (file?.context_reference) this.retireContextReference(file.repository_id, file.context_reference)
+      if (file) {
+        const affected = new Set<string>()
+        const queue = [fileId]
+        while (queue.length) {
+          const target = queue.pop()!
+          for (const source of this.getImporterFileIds(target)) if (!affected.has(source)) { affected.add(source); queue.push(source) }
+        }
+        const incoming = this.db.prepare(`SELECT DISTINCT source_file_id AS id FROM symbol_references WHERE target_element_id IN (SELECT id FROM elements WHERE file_id=?)
+          UNION SELECT e.file_id AS id FROM elements e WHERE e.base_class IN (SELECT name FROM elements WHERE file_id=?)
+          UNION SELECT e.file_id AS id FROM element_interfaces i JOIN elements e ON e.id=i.element_id WHERE i.interface_name IN (SELECT name FROM elements WHERE file_id=?)`).all(fileId, fileId, fileId) as Array<{ id: string }>
+        for (const source of incoming) affected.add(source.id)
+        const row = this.db.prepare('SELECT relative_path FROM files WHERE id=?').get(fileId) as { relative_path: string }
+        const previous = this.db.prepare('SELECT affected_sources FROM pending_file_changes WHERE repository_id=? AND relative_path=?').get(file.repository_id, row.relative_path) as { affected_sources: string } | undefined
+        for (const id of previous ? JSON.parse(previous.affected_sources) as string[] : []) affected.add(id)
+        this.db.prepare(`INSERT INTO pending_file_changes VALUES (?, ?, 1, ?) ON CONFLICT(repository_id, relative_path) DO UPDATE SET affected_sources=excluded.affected_sources`).run(file.repository_id, row.relative_path, JSON.stringify([...affected]))
+      }
       // Remove registros das tabelas auxiliares antes dos elementos (integridade referencial manual).
       this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
       this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
@@ -770,7 +846,7 @@ class RepositoryDatabase implements RepositoryRepository {
       this.db.prepare(`DELETE FROM relationships WHERE source_id IN (SELECT id FROM elements WHERE file_id = ?) OR target_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId, fileId)
       // Remove relacionamentos imports onde target_id é o fileId do arquivo deletado
       // (imports usam target_id = file_id, não element_id, então não são cobertos pela query acima)
-      this.db.prepare(`DELETE FROM relationships WHERE type = 'imports' AND target_id = ?`).run(fileId)
+      this.db.prepare('DELETE FROM relationships WHERE source_id = ? OR target_id = ?').run(fileId, fileId)
       this.db.prepare(`DELETE FROM elements WHERE file_id = ?`).run(fileId)
       this.db.prepare(`DELETE FROM files WHERE id = ?`).run(fileId)
     })

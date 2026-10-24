@@ -79,6 +79,12 @@ export interface CodeMapRelationshipRow {
 }
 
 export interface RepositoryRepository {
+  enqueueFileChanges(repositoryId: string, paths: string[]): Map<string, number>
+  getPendingFileChanges(repositoryId: string): Array<{ relativePath: string; revision: number; affectedSources: string[] }>
+  completeFileChange(repositoryId: string, relativePath: string, revision: number): boolean
+  replaceResolvedRelationships(repositoryId: string, relationships: CodeMapRelationship[]): void
+  finishSymbolProjection(repositoryId: string, version: string, revision: number): void
+
   countSymbolReferences(repositoryId: string): number
   projectionCurrent(repositoryId: string, scope: string, phase: string, version: string): boolean
   beginProjection(repositoryId: string, scope: string, phase: string, version: string): number

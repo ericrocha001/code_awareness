@@ -14,9 +14,23 @@ import {
 } from './test-helpers'
 import { RepositoryModel, createRepositoryModel } from './repository-model'
 import { RepositorySynchronizer } from './repository-synchronizer'
+import { RelationshipResolver } from './relationship-resolver'
 import { closeRepositoryDatabase } from './repository-database'
 import { repositoryEventBus } from './repository-events'
 import * as structureReaderModule from './structure-reader'
+
+const ownedSynchronizers = new Set<RepositorySynchronizer>()
+const ownedModels = new Set<RepositoryModel>()
+class OwnedSynchronizer extends RepositorySynchronizer {
+  constructor(...args: ConstructorParameters<typeof RepositorySynchronizer>) { super(...args); ownedSynchronizers.add(this); ownedModels.add(args[0]) }
+}
+async function drainSynchronizers(): Promise<void> {
+  for (const synchronizer of ownedSynchronizers) synchronizer.dispose()
+  await Promise.all([...ownedSynchronizers].map(synchronizer => synchronizer.awaitDisposed()))
+  ownedSynchronizers.clear()
+  for (const model of ownedModels) model.close()
+  ownedModels.clear()
+}
 
 describe('Sprint 5 — Resiliência sob Concorrência', () => {
   let model: RepositoryModel
@@ -24,6 +38,8 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks()
+    await drainSynchronizers()
+    model?.close()
     if (model && repoPath) {
       closeRepositoryDatabase(repoPath)
       await cleanupTestDir(repoPath)
@@ -123,7 +139,7 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
       'src/second.ts': 'export class Second {}\n'
     }))
 
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId())
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId())
 
     model.markFileModified('src/first.ts')
     model.markFileModified('src/second.ts')
@@ -169,7 +185,7 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
       'src/sample.ts': 'export class Sample {}\n'
     }))
 
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId(), {
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId(), {
       periodicScanIntervalMs: 100
     })
 
@@ -182,10 +198,11 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
     // Aguarda debounce + scan periódico
     await new Promise((resolve) => setTimeout(resolve, 600))
 
-    // Deve estar marcado como modified exatamente uma vez sem duplicações
-    expect(synchronizer.getModifiedFilesCount()).toBe(1)
+    await synchronizer.waitForIdle()
+    expect(synchronizer.getModifiedFilesCount()).toBe(0)
+    expect(model.getElementsByRepository().some(element => element.name === 'SampleModified')).toBe(true)
 
-    const invariant = await verifyInvariant(model, repoPath, { expectFullySynced: false })
+    const invariant = await verifyInvariant(model, repoPath)
     expect(invariant.passed).toBe(true)
 
     synchronizer.dispose()
@@ -200,8 +217,9 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
 
     ;({ model, repoPath } = await createAndIndexRepo(initialFiles))
 
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId())
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId())
 
+    const resolution = vi.spyOn(RelationshipResolver.prototype, 'resolve')
     // Modifica todos os 50 arquivos no disco e emite eventos em rápida sucessão
     for (let i = 0; i < 50; i++) {
       const filename = `src/file_${String(i).padStart(2, '0')}.ts`
@@ -213,8 +231,9 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
     // NOTA (Sprint 6): com auto-sync, cada arquivo é reindexado automaticamente após sua
     // confirmação, então modifiedFiles fica vazio (sem pendentes). O critério congelado #2
     // exige "após debounce, elementos novos indexados, status indexed".
-    await new Promise((resolve) => setTimeout(resolve, 7000))
+    await synchronizer.waitForIdle(15000)
 
+    expect(resolution).toHaveBeenCalledTimes(1)
     expect(synchronizer.getModifiedFilesCount()).toBe(0) // auto-sync reindexou todos → sem pendentes
 
     // Todos os 50 arquivos estão indexados com o conteúdo modificado
@@ -235,7 +254,7 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
       'src/race.ts': 'export class Race1 {}\n'
     }))
 
-    const synchronizer = new RepositorySynchronizer(model, model.getRepositoryId())
+    const synchronizer = new OwnedSynchronizer(model, model.getRepositoryId())
 
     writeFileSync(join(repoPath, 'src/race.ts'), 'export class Race2 {}\n', 'utf-8')
     model.markFileModified('src/race.ts')
@@ -243,10 +262,10 @@ describe('Sprint 5 — Resiliência sob Concorrência', () => {
 
     expect(synchronizer.getModifiedFilesCount()).toBe(1)
 
-    // Intercepta updateFileContent para modificar o arquivo novamente e emitir evento no meio do processamento
-    const originalUpdate = model.updateFileContent.bind(model)
-    const spy = vi.spyOn(model, 'updateFileContent').mockImplementation(async (relativePath, correlationId) => {
-      const res = await originalUpdate(relativePath, correlationId)
+    const target = model as unknown as { updateFileStructure(path: string, cid: string, change: number, changed: Set<string>, force: boolean): Promise<boolean> }
+    const originalUpdate = target.updateFileStructure.bind(model)
+    const spy = vi.spyOn(target, 'updateFileStructure').mockImplementation(async (relativePath, ...args) => {
+      const res = await originalUpdate(relativePath, ...args)
       // Durante/após a atualização, altera o disco para Race3 e emite o evento
       writeFileSync(join(repoPath, 'src/race.ts'), 'export class Race3 {}\n', 'utf-8')
       repositoryEventBus.emitFileModified(model.getRepositoryId(), relativePath)
