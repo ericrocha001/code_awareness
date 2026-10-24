@@ -6,6 +6,26 @@ import { ContinuumBundleComposer } from './ContinuumBundleComposer'
 const preview = { repositoryId: 'A', snapshotId: 'snapshot-1', slug: 'architecture', tagName: 'Architecture', tagDescription: 'Decisões aprovadas; exclui propostas.', generatedAt: 'now', members: [{ artifactId: 'one', name: 'First', kind: 'DOCUMENT', revision: 2 }, { artifactId: 'visual', name: 'Visual', kind: 'VISUAL_REFERENCE', revision: 3, mediaPath: 'media/visual.webp' }], markdown: 'EXACT\r\n---\r\n# sources', markdownBytes: 30, tokenCount: 14, tokenizerEncoding: 'cl100k_base', hasVisuals: true }
 beforeEach(() => { window.codeAwareness = { prepareContinuumBundle: vi.fn(async () => preview), exportContinuumBundle: vi.fn(async () => ({ snapshotId: preview.snapshotId, outcome: 'copied' })) } as unknown as Window['codeAwareness'] })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
+it('removes explicit sources, regenerates the actual set and exports only after a deliberate confirmation', async () => {
+  const source = { kind: 'selection' as const, selected: preview.members.map(member => ({ artifactId: member.artifactId, expectedRevision: member.revision })) }
+  window.codeAwareness.discardContinuumBundle = vi.fn(async () => {})
+  vi.mocked(window.codeAwareness.prepareContinuumBundle).mockResolvedValue({ ...preview, slug: '', tagName: 'Seleção avulsa', source })
+  const view = render(<ContinuumBundleComposer repositoryId="A" source={source} preferredIntent="zip" onClose={vi.fn()} />)
+  await screen.findByLabelText('Prévia do Context Bundle')
+  expect(window.codeAwareness.exportContinuumBundle).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Orçamento de tokens'), { target: { value: '1' } })
+  expect(screen.getByText(/excede o orçamento/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Retirar one' }))
+  expect((screen.getByRole('button', { name: 'Copiar Context Bundle' }) as HTMLButtonElement).disabled).toBe(true)
+  vi.mocked(window.codeAwareness.prepareContinuumBundle).mockResolvedValue({ ...preview, slug: '', tagName: 'Seleção avulsa', source: { kind: 'selection', selected: [source.selected[1]] }, members: [preview.members[1]] })
+  fireEvent.click(screen.getByRole('button', { name: 'Regenerar Context Bundle' }))
+  await waitFor(() => expect(window.codeAwareness.prepareContinuumBundle).toHaveBeenLastCalledWith({ repositoryId: 'A', source: { kind: 'selection', selected: [source.selected[1]] }, order: ['visual'] }))
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Salvar pacote ZIP completo' }) as HTMLButtonElement).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar pacote ZIP completo' }))
+  await waitFor(() => expect(window.codeAwareness.exportContinuumBundle).toHaveBeenCalledWith(expect.objectContaining({ intent: 'zip' })))
+  view.unmount()
+  expect(window.codeAwareness.discardContinuumBundle).toHaveBeenCalledWith(preview.snapshotId)
+})
 it('shows coherent members, revision and tokens, warns about visual clipboard limits and exports only the prepared snapshot', async () => {
   render(<ContinuumBundleComposer repositoryId="A" slug="architecture" onClose={vi.fn()} />)
   await waitFor(() => expect((screen.getByLabelText('Prévia do Context Bundle') as HTMLTextAreaElement).value).toBe(preview.markdown.replace(/\r\n/g, '\n')))

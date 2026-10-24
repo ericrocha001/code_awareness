@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { registerContinuumBundleHandlers } from './continuum-bundle-handler'
 import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
 const { handlers, save, writeText } = vi.hoisted(() => ({ handlers: new Map<string, Function>(), save: vi.fn(), writeText: vi.fn() }))
@@ -10,9 +11,11 @@ const raw = '\uFEFF---\r\nname: Literal\r\ndescription: d\r\nkind: DOCUMENT\r\nt
 const sender = { id: 1, isDestroyed: () => false, once: vi.fn() }
 const service = {
   assertActive: () => { if (current !== 'A') throw new Error('REPOSITORY_CONTEXT_CHANGED') },
+  assertRepository: (repositoryId: string) => { if (current !== 'A' || repositoryId !== 'A') throw new Error('REPOSITORY_CONTEXT_CHANGED') },
+  assertSelection: (selected: { artifactId: string; expectedRevision: number }[]) => { if (!selected.length || selected.some(item => item.artifactId !== 'one' || item.expectedRevision !== revision)) throw new Error('REVISION_CONFLICT') },
   tags: () => [{ slug: 'architecture', name: 'Architecture', description: '' }],
   list: () => ({ artifacts: [{ artifactId: 'one' }] }),
-  get: () => ({ artifactId: 'one', revision, contentHash: 'hash-' + revision, rawMarkdown: raw, metadata: { name: 'One', kind: 'DOCUMENT', tags: ['architecture'] } })
+  get: () => ({ artifactId: 'one', revision, contentHash: createHash('sha256').update(raw).digest('hex'), rawMarkdown: raw, metadata: { name: 'One', kind: 'DOCUMENT', tags: ['architecture'] } })
 }
 const prepare = (repositoryId = 'A') => handlers.get('continuum:prepare-bundle')!({ sender }, { repositoryId, slug: 'architecture' })
 const exportBundle = (snapshotId: string, intent = 'copy') => handlers.get('continuum:export-bundle')!({ sender }, { repositoryId: 'A', snapshotId, intent })
@@ -21,6 +24,30 @@ beforeEach(() => {
   registerContinuumBundleHandlers({ getActiveSession: () => ({ repositoryId: current }), getActiveService: () => service } as unknown as RepositoryContinuumSession)
 })
 afterEach(() => rmSync(folder, { recursive: true, force: true }))
+it('exports explicit selections and invalidates their snapshot on composer close without touching clipboard', async () => {
+  const preview = handlers.get('continuum:prepare-bundle')!({ sender }, { repositoryId: 'A', source: { kind: 'selection', selected: [{ artifactId: 'one', expectedRevision: 1 }] } })
+  await exportBundle(preview.snapshotId)
+  expect(writeText).toHaveBeenCalledWith(preview.markdown)
+  handlers.get('continuum:discard-bundle')!({ sender }, preview.snapshotId)
+  writeText.mockClear()
+  await expect(exportBundle(preview.snapshotId)).rejects.toThrow(/BUNDLE_SNAPSHOT_UNAVAILABLE/)
+  expect(writeText).not.toHaveBeenCalled()
+  const fresh = handlers.get('continuum:prepare-bundle')!({ sender }, { repositoryId: 'A', source: { kind: 'selection', selected: [{ artifactId: 'one', expectedRevision: 1 }] } })
+  revision++
+  await expect(exportBundle(fresh.snapshotId)).rejects.toThrow(/REVISION_CONFLICT/)
+  expect(writeText).not.toHaveBeenCalled()
+})
+it('aborts a save waiting in the native dialog if its composer snapshot is discarded', async () => {
+  const preview = prepare()
+  let finish!: (value: object) => void
+  save.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  const pending = exportBundle(preview.snapshotId, 'zip')
+  handlers.get('continuum:discard-bundle')!({ sender }, preview.snapshotId)
+  finish({ canceled: false, filePath: join(folder, 'closed.zip') })
+  await expect(pending).rejects.toThrow(/BUNDLE_SNAPSHOT_UNAVAILABLE/)
+  expect(readdirSync(folder)).toEqual([])
+  expect(writeText).not.toHaveBeenCalled()
+})
 it('copies and saves the exact same prepared composition and refuses wrong repository or sender/snapshot identity', async () => {
   expect(() => prepare('B')).toThrow('REPOSITORY_UNAVAILABLE')
   const preview = prepare()

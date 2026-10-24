@@ -12,6 +12,41 @@ let facets: ContinuumFacet[]
 let body: string
 const intersections = new Map<Element, (entries: { isIntersecting: boolean }[]) => void>()
 const unsubscribe = vi.fn()
+it('keeps bulk selection across pages independently of inspection and clears it on search changes', async () => {
+  const first = { artifactId: 'one', revision: 1, name: 'First', kind: 'DOCUMENT', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0, rawMarkdownTokenCount: 10 }
+  const second = { ...first, artifactId: 'two', name: 'Second', rawMarkdownTokenCount: 20 }
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => ({ repositoryId: request.repositoryId, artifacts: request.cursor ? [second] : [first], ...(!request.cursor ? { nextCursor: 'next' } : {}) }))
+  render(<ContinuumView activeProject={project} />)
+  fireEvent.click(await screen.findByRole('checkbox', { name: 'Selecionar First' }))
+  expect(window.codeAwareness.getContinuumArtifact).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: /First DOCUMENT/ }))
+  await waitFor(() => expect(window.codeAwareness.getContinuumArtifact).toHaveBeenCalledTimes(1))
+  fireEvent.click(screen.getByRole('button', { name: 'Carregar mais' }))
+  fireEvent.click(await screen.findByRole('checkbox', { name: 'Selecionar Second' }))
+  expect(screen.getByText('2 selecionados · ≈ 30 tokens dos documentos')).toBeTruthy()
+  expect((screen.getByRole('checkbox', { name: 'Selecionar First' }) as HTMLInputElement).checked).toBe(true)
+  fireEvent.change(screen.getByLabelText('Buscar no Continuum'), { target: { value: 'Changed' } })
+  await waitFor(() => expect(screen.queryByText(/2 selecionados/)).toBeNull())
+})
+
+it('discards delayed select-all responses after switching repository and reports a total-selection limit', async () => {
+  let finish!: (value: { repositoryId: string; artifacts: never[] }) => void
+  window.codeAwareness.resolveContinuumSelection = vi.fn(() => new Promise<{ repositoryId: string; artifacts: never[] }>(resolve => { finish = resolve }))
+  window.codeAwareness.getContinuumSelectionTokens = vi.fn()
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByRole('button', { name: /First artifact/ })
+  fireEvent.click(screen.getByRole('button', { name: 'Selecionar todos os resultados do filtro' }))
+  expect(window.codeAwareness.resolveContinuumSelection).toHaveBeenCalledWith(expect.objectContaining({ repositoryId: 'catalog-A' }))
+  view.rerender(<ContinuumView activeProject={{ id: 'B', name: 'B', path: '/B' }} />)
+  await act(async () => finish({ repositoryId: 'catalog-A', artifacts: [] }))
+  expect(window.codeAwareness.getContinuumSelectionTokens).not.toHaveBeenCalled()
+  expect(screen.queryByLabelText('Ações em massa')).toBeNull()
+  vi.mocked(window.codeAwareness.resolveContinuumSelection).mockRejectedValue(new Error('SELECTION_LIMIT: refine os filtros'))
+  await waitFor(() => expect((screen.getByRole('button', { name: 'Selecionar todos os resultados do filtro' }) as HTMLButtonElement).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Selecionar todos os resultados do filtro' }))
+  expect((await screen.findByRole('alert')).textContent).toContain('SELECTION_LIMIT')
+  expect(screen.queryByLabelText('Ações em massa')).toBeNull()
+})
 it('distinguishes zero, unavailable and visual text estimates without changing inspection', async () => {
   vi.mocked(window.codeAwareness.listContinuumArtifacts).mockResolvedValue({ repositoryId: 'catalog-A', tokenizerEncoding: 'cl100k_base', artifacts: [
     { artifactId: 'zero', name: 'Zero', kind: 'DOCUMENT', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0, rawMarkdownTokenCount: 0 },

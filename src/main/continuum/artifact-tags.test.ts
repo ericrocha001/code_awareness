@@ -16,6 +16,33 @@ const tag = (slug: string) => ({ slug, name: slug })
 const createTag = (f: ReturnType<typeof setup>, slug: string) => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'create', tag: tag(slug) })
 const assign = (f: ReturnType<typeof setup>, slug: string, artifactId: string, expectedRevision: number, assigned = true) => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'assign', slug, selected: [{ artifactId, expectedRevision }], assigned, confirmed: true })
 
+it('resolves all filtered identities without reading bodies and rejects overflow without a partial selection', async () => {
+  const f = setup()
+  for (let index = 0; index < 101; index++) f.service.publishHuman(markdown(`Selection ${index}`))
+  const get = vi.spyOn(f.service, 'get'), measure = vi.spyOn(f.store, 'measureTokenCountBatch')
+  expect(() => f.service.resolveSelection({ query: 'Selection' })).toThrow(/SELECTION_LIMIT/)
+  const all = f.service.resolveSelection({ query: 'Selection 1' })
+  expect(all).toHaveLength(12)
+  expect(get).not.toHaveBeenCalled(); expect(measure).not.toHaveBeenCalled()
+  expect(all.every(item => item.revision === 1 && !('rawMarkdown' in item))).toBe(true)
+  const totals = await f.service.selectionTokens(all.map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision! })))
+  expect(totals).toHaveLength(12)
+  await expect(f.service.selectionTokens([{ artifactId: all[0].artifactId, expectedRevision: 2 }])).rejects.toThrow(/REVISION_CONFLICT/)
+})
+
+it('rolls back a 100-source quick-create when the last revision conflicts without an orphan tag', () => {
+  const f = setup()
+  const receipts = Array.from({ length: 100 }, (_, index) => f.service.publishHuman(markdown(`Atomic ${index}`, 'tags: []\n')))
+  const selected = receipts.map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision }))
+  selected[99].expectedRevision++
+  expect(() => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'quick-create', name: 'Atomic', selected })).toThrow(/REVISION_CONFLICT/)
+  expect(f.service.tags()).toEqual([])
+  expect(receipts.every(item => f.service.get(item.artifactId)!.revision === 1)).toBe(true)
+  selected[99].expectedRevision--
+  f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'quick-create', name: 'Atomic', selected })
+  expect(f.service.tags()[0].count).toBe(100)
+})
+
 it('sums every tag member in bounded deduplicated batches, reuses cache and refreshes affected revisions', async () => {
   const f = setup()
   for (const slug of ['empty', 'first', 'second']) createTag(f, slug)

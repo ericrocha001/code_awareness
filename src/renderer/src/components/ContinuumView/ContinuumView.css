@@ -38,7 +38,16 @@
 .continuum-facet-values button:hover { background: var(--hover-bg); }
 .continuum-facet-values button[aria-pressed=true] { background: var(--selected-bg); border-color: var(--accent); }
 .continuum-date { font-size: 11px; color: var(--text-secondary); margin: 6px 0 14px; padding-left: 10px; }
-.continuum-item { width: calc(100% - 14px); margin: 0 0 12px 14px; display: flex; position: relative; align-items: flex-start; gap: 12px; padding: 14px; text-align: left; border: 1px solid var(--border-subtle); border-radius: 9px; background: var(--bg-primary); }
+.continuum-selectable-row { display: flex; align-items: flex-start; gap: 6px; }
+.continuum-selectable-row > input { flex: 0 0 auto; margin-top: 20px; accent-color: var(--accent); }
+.continuum-item { flex: 1; min-width: 0; width: calc(100% - 14px); margin: 0 0 12px 14px; display: flex; position: relative; align-items: flex-start; gap: 12px; padding: 14px; text-align: left; border: 1px solid var(--border-subtle); border-radius: 9px; background: var(--bg-primary); }
+.continuum-selection-controls, .continuum-bulk-actions { padding: 8px 14px; display: flex; flex-wrap: wrap; gap: 8px; border-bottom: 1px solid var(--border-subtle); font-size: 11px; }
+.continuum-bulk-actions { background: var(--bg-secondary); }
+.continuum-bulk-actions > div, .continuum-bulk-actions form { display: flex; flex-wrap: wrap; gap: 6px; }
+.continuum-bulk-actions button, .continuum-selection-controls button { font-size: 11px; padding: 5px 7px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 6px; }
+.continuum-bulk-actions button:hover, .continuum-selection-controls button:hover { background: var(--hover-bg); }
+.continuum-bulk-actions button:disabled, .continuum-selection-controls button:disabled { opacity: .5; }
+.continuum-bulk-actions input, .continuum-bundle-composer input { min-width: 0; padding: 6px 8px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 6px; }
 .continuum-item::before { content: ''; position: absolute; left: -12px; top: -12px; bottom: -14px; width: 1px; background: var(--border); }
 .continuum-node { position: absolute; left: -16px; top: 22px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
 .continuum-item > svg { flex-shrink: 0; color: var(--accent); margin-top: 1px; }

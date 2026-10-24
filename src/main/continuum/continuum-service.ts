@@ -42,6 +42,23 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     return { ...result, repositoryId, slug, count: members.length, markdownBytes, tokenCount, tokenizerEncoding, hasVisuals }
   }
   tags() { this.assertActive(); this.reconcile?.(); this.assertActive(); return this.store.tags() }
+  assertRepository(repositoryId: string) { this.assertActive(); if (repositoryId !== this.store.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED') }
+  assertSelection(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) { this.assertActive(); this.store.selectionEntries(selected) }
+  resolveSelection(filter: ListArtifactsFilter) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    return this.store.resolveSelection(filter)
+  }
+  async selectionTokens(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const entries = this.store.selectionEntries(selected)
+    const artifacts: Array<{ artifactId: string; rawMarkdownTokenCount: number }> = []
+    for (let offset = 0; offset < entries.length; offset += 30) {
+      await new Promise<void>(resolve => setImmediate(resolve)); this.assertActive()
+      for (const [artifactId, result] of this.store.measureTokenCountBatch(entries.slice(offset, offset + 30))) artifacts.push({ artifactId, rawMarkdownTokenCount: result.rawMarkdownTokenCount })
+    }
+    this.assertActive(); this.store.selectionEntries(selected)
+    return artifacts
+  }
   async tagTokenTotals(slugs: string[]): Promise<ContinuumTagTokens[]> {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     const members = this.store.tagTokenMembers(slugs)

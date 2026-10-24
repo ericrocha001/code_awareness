@@ -11,6 +11,9 @@ import { ColumnResizer } from '../shared/ColumnResizer/ColumnResizer'
 import { useContinuumColumns } from './useContinuumColumns'
 import { VisualThumbnail, thumbnailQueue } from './VisualThumbnail'
 import { ContextFilters } from './ContextFilters'
+import { useContinuumSelection } from './useContinuumSelection'
+import { ContinuumBulkActions } from './ContinuumBulkActions'
+import type { ContinuumSelectedArtifact } from '../../../../shared/types/continuum-ui-types'
 import './ContinuumView.css'
 const ContinuumGraph = React.lazy(() => import('./ContinuumGraph').then(module => ({ default: module.ContinuumGraph })))
 
@@ -80,7 +83,11 @@ function Inspector({ artifact, repositoryId, preview }: { artifact: ContinuumDet
 }
 
 export function ContinuumView({ activeProject, artifactIntent }: { activeProject: ActiveProject | null; artifactIntent?: { repositoryId: string; artifactId: string } | null }) {
+  const path = activeProject?.path ?? null
+  const root = useRef<HTMLDivElement>(null)
   const [bundleSlug, setBundleSlug] = useState<string | null>(null)
+  const [bundleSelection, setBundleSelection] = useState<{ selected: ContinuumSelectedArtifact[]; intent: 'copy' | 'zip' } | null>(null)
+  const [bulkBusy, setBulkBusy] = useState(false)
   const [tags, setTags] = useState<ContinuumTag[]>([])
   const [tag, setTag] = useState<string | undefined>()
   const [tagManager, setTagManager] = useState(false)
@@ -105,10 +112,16 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   const [error, setError] = useState('')
   const [detailError, setDetailError] = useState('')
   const [refresh, setRefresh] = useState(0)
+  const bulkRequest = useMemo(() => repositoryId ? { repositoryId, query, metadata, periods, ...(tag ? { tag } : {}) } : null, [repositoryId, query, metadata, periods, tag])
+  const bulk = useContinuumSelection(bulkRequest, `${path}:${refresh}`)
+  const bulkContext = JSON.stringify([bulkRequest, path, refresh]), bulkContextRef = useRef(bulkContext)
+  bulkContextRef.current = bulkContext
+  useEffect(() => { setBundleSelection(null); setBulkBusy(false) }, [bulkContext])
+  const bulkPending = bulkBusy || bulk.pending
+  useEffect(() => { root.current?.querySelectorAll<HTMLElement>('.continuum-header, .continuum-context, .continuum-inspector, .continuum-view-switch').forEach(element => { element.inert = bulkPending }) }, [bulkPending])
   useEffect(() => setTagTokens({}), [repositoryId, refresh])
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const listGeneration = useRef(0)
-  const path = activeProject?.path ?? null
   const currentPath = useRef(path)
   const boundPath = useRef<string | null>(null)
   currentPath.current = path
@@ -308,7 +321,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     if (row) { row.scrollIntoView({ block: 'nearest' }); setRevealId(null) }
   }, [revealId, items, loading])
 
-  return <div className="continuum-view">
+  return <div className="continuum-view" ref={root}>
     <header className="continuum-header">
       <div className="continuum-feature-icon"><Infinity size={36} /></div>
       <div className="continuum-feature-title"><h1>CONTINUUM</h1><p>{activeProject?.name ?? 'Contexto durável do repositório'}</p></div>
@@ -321,6 +334,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     </header>
     {markdownDraft && <div className="continuum-tag-confirmation"><p>Publicar {markdownDraft.fileName} com as tags canônicas declaradas no YAML?</p><button disabled={publishing} onClick={confirmMarkdownTags}>Confirmar tags do Markdown</button><button disabled={publishing} onClick={() => setMarkdownDraft(null)}>Cancelar</button></div>}
     {bundleSlug && repositoryId && <ContinuumBundleComposer key={`${repositoryId}:${bundleSlug}`} repositoryId={repositoryId} slug={bundleSlug} onClose={() => setBundleSlug(null)} />}
+    {bundleSelection && repositoryId && <ContinuumBundleComposer key={`${bulkContext}:selection`} repositoryId={repositoryId} source={{ kind: 'selection', selected: bundleSelection.selected }} preferredIntent={bundleSelection.intent} onClose={() => setBundleSelection(null)} />}
     {tagManager && repositoryId && <ContinuumTagManager key={repositoryId} repositoryId={repositoryId} tags={tags} onTokenTotals={totals => setTagTokens(previous => ({ ...previous, ...Object.fromEntries(totals.map(total => [total.slug, total.rawMarkdownTokenCount])) }))} onBundle={slug => { setBundleSlug(slug); setTagManager(false) }} onFilter={slug => { setTag(slug); setTagManager(false) }} onChanged={() => { setRefresh(value => value + 1) }} onClose={() => setTagManager(false)} />}
     {visualDraft && <form className="continuum-visual-publication" onSubmit={publishVisual}>
       <strong>{visualDraft.file.name}</strong>
@@ -363,11 +377,18 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
             }}>{mode === 'timeline' ? 'Timeline' : 'Graph'}</button>)}
           </div></div>
           {view === 'graph' && repositoryId && boundPath.current === path && <React.Suspense fallback={<p role="status">Carregando Graph…</p>}><ContinuumGraph key={`${path}:${repositoryId}`} repositoryId={repositoryId} query={query} tag={tag} metadata={metadata} periods={periods} refresh={refresh} selectedId={selectedId} onSelect={id => { setSelectedId(id); setInspectorOpen(true) }} /></React.Suspense>}
+          {view === 'timeline' && repositoryId && <>
+            <div className="continuum-selection-controls"><button disabled={bulkPending || loading} onClick={() => bulk.replace([...new Map([...bulk.selected, ...items].map(item => [item.artifactId, item])).values()])}>Selecionar carregados</button><button disabled={bulkPending || loading} onClick={() => void bulk.all()}>Selecionar todos os resultados do filtro</button></div>
+            {bulk.error && <p role="alert" className="continuum-hint">{bulk.error}</p>}
+            {bulk.pending && <p role="status">Resolvendo seleção…</p>}
+            {bulk.selected.length > 0 && <ContinuumBulkActions disabled={bulk.pending} key={bulkContext} repositoryId={repositoryId} selected={bulk.selected} tags={tags} onClear={bulk.clear} onChanged={() => setRefresh(value => value + 1)} onBusy={value => { if (bulkContextRef.current === bulkContext) setBulkBusy(value) }} onBundle={(selected, intent) => setBundleSelection({ selected, intent })} />}
+          </>}
           <div className="continuum-pane-scroll" hidden={view !== 'timeline'} aria-busy={loading} ref={timelineScroll}>
             {loading && <p role="status" className="continuum-hint">Carregando artifacts…</p>}
             {items.map((item, index) => <React.Fragment key={`${repositoryId}:${item.artifactId}`}>
               {(index === 0 || new Date(items[index - 1].updatedAt).toDateString() !== new Date(item.updatedAt).toDateString()) &&
                 <div className="continuum-date">{new Date(item.updatedAt).toLocaleDateString(undefined, { dateStyle: 'long' })}</div>}
+              <div className="continuum-selectable-row"><input type="checkbox" aria-label={`Selecionar ${item.name}`} disabled={bulkPending} checked={bulk.selected.some(source => source.artifactId === item.artifactId)} onChange={() => bulk.toggle(item)} />
               <button data-artifact-id={item.artifactId} className={`continuum-item${selectedId === item.artifactId ? ' selected' : ''}`} aria-pressed={selectedId === item.artifactId}
                 onClick={() => { setSelectedId(item.artifactId); setInspectorOpen(true) }}>
                 <span className="continuum-node" />{item.kind === 'VISUAL_REFERENCE' && repositoryId
@@ -375,10 +396,10 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
                 <span className="continuum-item-content"><strong>{item.name}</strong><span className="continuum-badge">{item.kind === 'VISUAL_REFERENCE' ? <><ImageIcon size={13} aria-hidden="true" /> Referência visual</> : item.kind}</span>
                   {item.description && <span className="continuum-description">{item.description}</span>}<time dateTime={item.updatedAt}>{timestamp(item.updatedAt)}</time>
                   <small title="Estimativa cl100k_base do Markdown literal integral, incluindo YAML. Referências visuais contam apenas texto, sem pixels.">{item.rawMarkdownTokenCount === undefined ? 'Tokens indisponíveis' : `≈ ${item.rawMarkdownTokenCount.toLocaleString()} tokens${item.kind === 'VISUAL_REFERENCE' ? ' de texto' : ''}`}</small></span>
-              </button>
+              </button></div>
             </React.Fragment>)}
             {!loading && !items.length && <div className="continuum-empty"><Infinity size={32} /><h3>{repositoryId ? 'Nenhum artifact encontrado' : 'Continuum indisponível'}</h3><p>{query || Object.keys(metadata).length || Object.keys(periods).length ? 'Ajuste a busca ou os filtros.' : 'O contexto deste repositório aparecerá aqui.'}</p></div>}
-            {cursor && <button className="continuum-load-more" disabled={loading} onClick={loadMore}>Carregar mais</button>}
+            {cursor && <button className="continuum-load-more" disabled={loading || bulkPending} onClick={loadMore}>Carregar mais</button>}
           </div>
         </section>
         <div className="continuum-resizer continuum-inspector-resizer"><ColumnResizer onDrag={columns.dragInspector} onDragEnd={columns.persist} /></div>
