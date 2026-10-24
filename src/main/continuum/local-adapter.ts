@@ -1,3 +1,4 @@
+import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, parseContinuumAgentRequest } from './continuum-agent'
 import { GitService } from '../core/git-service'
 import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
 import { GitBranchInventory } from '../git-operations/git-branch-inventory'
@@ -22,6 +23,12 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
       return { value, repositoryId: value.repositoryId, worktreeId: value.worktreeId }
     }
     this.operations = {
+      ...Object.fromEntries(CONTINUUM_AGENT_TOOLS.map(tool => [tool.name, operation(input => {
+        const request = selection(input, Object.keys(tool.inputSchema.properties ?? {}))
+        const { repositoryId: _repository, worktreeId: _worktree, ...args } = request.value
+        parseContinuumAgentRequest(tool.name, args)
+        return { ...request, args }
+      }, async (request, context) => executeContinuumAgent(await this.service(request, context), tool.name, request.args, () => context.connected()))])),
       inspect_artifact_structure: operation(input => {
         const request = selection(input, ['artifactId', 'sectionId', 'includeBlocks', 'limit', 'cursor'])
         const { repositoryId: _repository, worktreeId: _worktree, ...query } = request.value
@@ -83,7 +90,7 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         if (this.session.getActiveSession() !== active) throw new Error('REPOSITORY_MISMATCH')
         return { available: true, repository: { repositoryId: active.repositoryId, checkout: active.repositoryPath }, worktrees: discovery.worktrees.filter(w => !w.missing && !w.prunable).map(w => ({ worktreeId: w.worktreeId, generation: w.generation, path: w.path })) }
       }),
-      list: operation(input => { const request = selection(input, ['filter']); return { ...request, filter: request.value.filter === undefined ? undefined : object(request.value.filter, ['query', 'kind', 'status', 'metadata', 'metadataKeys', 'relatedToArtifactId', 'relationKind', 'direction', 'updatedAfter', 'updatedBefore', 'limit', 'cursor']) as ListArtifactsFilter } }, async (request, context) => (await this.service(request, context)).list(request.filter)),
+      list: operation(input => { const request = selection(input, ['filter']); return { ...request, filter: request.value.filter === undefined ? undefined : object(request.value.filter, ['tag', 'query', 'kind', 'status', 'metadata', 'metadataKeys', 'relatedToArtifactId', 'relationKind', 'direction', 'updatedAfter', 'updatedBefore', 'limit', 'cursor']) as ListArtifactsFilter } }, async (request, context) => (await this.service(request, context)).list(request.filter)),
       get: operation(input => { const request = selection(input, ['artifactId']); return { ...request, artifactId: text(request.value.artifactId) } }, async (request, context) => {
         const artifact = (await this.service(request, context)).get(request.artifactId)
         if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')

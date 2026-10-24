@@ -1,4 +1,5 @@
 const nativeTestFiles = Object.freeze([
+  'src/main/continuum/continuum-agent.test.ts',
   'src/main/continuum/context-bundle.test.ts',
   'src/main/continuum/artifact-tags.test.ts',
   'src/main/work-orchestration/runtime-preview/context-data.test.ts',

@@ -1,4 +1,4 @@
-import type { ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../shared/types/continuum-bundle-types'
+import type { ContinuumBundleQuick, ContinuumBundleReceipt, ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../shared/types/continuum-bundle-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../shared/types/continuum-tag-types'
 /*
 -T ---
@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
   getContinuumTags: (repositoryId: string): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:tags', repositoryId),
   mutateContinuumTags: (request: ContinuumTagMutation): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:mutate-tags', request),
+  quickContinuumBundle: (request: ContinuumBundleQuick): Promise<ContinuumBundleReceipt> => ipcRenderer.invoke('continuum:quick-bundle', request),
   prepareContinuumBundle: (request: ContinuumBundlePrepare): Promise<ContinuumBundlePreview> => ipcRenderer.invoke('continuum:prepare-bundle', request),
   exportContinuumBundle: (request: ContinuumBundleExport): Promise<{ outcome: 'copied' | 'saved' | 'cancelled'; snapshotId: string }> => ipcRenderer.invoke('continuum:export-bundle', request),
   exportContinuumArtifact: (request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => ipcRenderer.invoke('continuum:export', request),
