@@ -337,17 +337,27 @@ function ensureProjectionSchema(db: BetterSqlite3Database): void {
       const file = table === 'files' ? `${row}.id` : table === 'elements' ? `${row}.file_id` : null
       const when = table === 'files' && operation === 'UPDATE'
         ? 'WHEN OLD.content_hash IS NOT NEW.content_hash OR OLD.status IS NOT NEW.status OR OLD.relative_path IS NOT NEW.relative_path' : table === 'symbol_resolution_facts' ? `WHEN ${repo} IS NOT NULL` : ''
-      db.exec(`CREATE TRIGGER IF NOT EXISTS projection_${table}_${operation.toLowerCase()} AFTER ${operation} ON ${table} ${when} BEGIN
+      const triggerName = `projection_${table}_${operation.toLowerCase()}`
+      const sql = `CREATE TRIGGER IF NOT EXISTS ${triggerName} AFTER ${operation} ON ${table} ${when} BEGIN
         INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, '', 1)
           ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;
         ${table !== 'symbol_references' ? `INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, '@symbols', 1)
-          ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;` : `DELETE FROM projection_checkpoints WHERE repository_id=${repo} AND ((phase='SYMBOLS' AND state!='RUNNING') OR (phase='SYMBOL_SOURCE' AND scope=${row}.source_file_id));`}
+          ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;` : `DELETE FROM projection_checkpoints WHERE repository_id=${repo} AND scope='' AND phase='SYMBOLS' AND state!='RUNNING'; DELETE FROM projection_checkpoints WHERE repository_id=${repo} AND scope=${row}.source_file_id AND phase='SYMBOL_SOURCE';`}
         ${!['symbol_resolution_facts', 'symbol_references'].includes(table) ? `INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, '@relationships', 1)
           ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;` : ''}
         ${table === 'symbol_resolution_facts' ? `DELETE FROM projection_checkpoints WHERE repository_id=${repo} AND scope=${row}.file_id AND phase='FACTS';` : ''}
         ${file ? `INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, ${file}, 1)
           ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;` : ''}
-      END`)
+      END`
+      const install = (): void => {
+        if (table === 'symbol_references') {
+          const existing = db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(triggerName) as { sql: string } | undefined
+          if (existing && !existing.sql.includes("AND scope='' AND phase='SYMBOLS'")) db.exec('DROP TRIGGER ' + triggerName)
+        }
+        db.exec(sql)
+      }
+      if (table === 'symbol_references') db.transaction(install)()
+      else install()
     }
   }
 }
@@ -630,6 +640,12 @@ class RepositoryDatabase implements RepositoryRepository {
     return this.db.prepare('DELETE FROM pending_file_changes WHERE repository_id=? AND relative_path=? AND revision=?').run(repositoryId, relativePath, revision).changes > 0
   }
 
+  getUnfinishedSymbolSources(repositoryId: string, version: string): string[] {
+    return (this.db.prepare(`SELECT f.id FROM files f LEFT JOIN projection_checkpoints c
+      ON c.repository_id=f.repository_id AND c.scope=f.id AND c.phase='SYMBOL_SOURCE'
+      WHERE f.repository_id=? AND (c.state IS NOT 'CLEAN' OR c.version IS NOT ?)`).all(repositoryId, version) as Array<{ id: string }>).map(row => row.id)
+  }
+
   finishSymbolProjection(repositoryId: string, version: string, revision: number): void {
     this.db.transaction(() => {
       if (revision !== this.projectionRevision(repositoryId, '@symbols')) throw new Error('PROJECTION_INPUT_CHANGED')
@@ -837,6 +853,7 @@ class RepositoryDatabase implements RepositoryRepository {
         const previous = this.db.prepare('SELECT affected_sources FROM pending_file_changes WHERE repository_id=? AND relative_path=?').get(file.repository_id, row.relative_path) as { affected_sources: string } | undefined
         for (const id of previous ? JSON.parse(previous.affected_sources) as string[] : []) affected.add(id)
         this.db.prepare(`INSERT INTO pending_file_changes VALUES (?, ?, 1, ?) ON CONFLICT(repository_id, relative_path) DO UPDATE SET affected_sources=excluded.affected_sources`).run(file.repository_id, row.relative_path, JSON.stringify([...affected]))
+        this.deleteReplacedSymbolReferences(file.repository_id, fileId, [])
       }
       // Remove registros das tabelas auxiliares antes dos elementos (integridade referencial manual).
       this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
@@ -944,11 +961,45 @@ class RepositoryDatabase implements RepositoryRepository {
     tx()
   }
 
-  /**
-   * Substitui atomicamente o estado indexado de um arquivo (tudo ou nada).
-   * Tudo roda em UMA transação melhor-sqlite3; os mappers (que incluem validateEnum)
-   * executam dentro da transação, portanto entrada envenenada (kind inválido) dispara ROLLBACK total.
-   */
+  private deleteReplacedSymbolReferences(repositoryId: string, fileId: string, retained: string[]): void {
+    const obsolete = (this.db.prepare('SELECT id FROM elements WHERE file_id=? AND id NOT IN (SELECT value FROM json_each(?))')
+      .all(fileId, JSON.stringify(retained)) as Array<{ id: string }>).map(element => element.id)
+    const hasOwn = !!this.db.prepare('SELECT 1 FROM symbol_references WHERE source_file_id=? LIMIT 1').get(fileId)
+    const condition = obsolete.length === 0 ? 'source_file_id=?'
+      : hasOwn ? 'source_file_id=? OR target_element_id IN (SELECT value FROM json_each(?))'
+        : 'target_element_id IN (SELECT value FROM json_each(?))'
+    const parameters = obsolete.length === 0 ? [fileId]
+      : hasOwn ? [fileId, JSON.stringify(obsolete)] : [JSON.stringify(obsolete)]
+    const count = (this.db.prepare('SELECT COUNT(*) AS n FROM symbol_references WHERE ' + condition).get(...parameters) as { n: number }).n
+    if (count === 0) return
+    const triggers = this.db.prepare("SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name='symbol_references'").all() as Array<{ name: string; sql: string }>
+    const projection = triggers.find(trigger => trigger.name === 'projection_symbol_references_delete')
+    const owned = new Set(['projection_symbol_references_insert', 'projection_symbol_references_update', 'projection_symbol_references_delete'])
+    if (count <= 256 || !projection || triggers.some(trigger => !owned.has(trigger.name))) {
+      this.db.prepare('DELETE FROM symbol_references WHERE ' + condition).run(...parameters)
+      return
+    }
+    const sources = this.db.prepare('SELECT DISTINCT source_file_id FROM symbol_references WHERE ' + condition)
+      .all(...parameters) as Array<{ source_file_id: string }>
+    // The caller holds one SQLite transaction: rows, trigger and invalidation all roll back together.
+    if (!this.db.inTransaction) throw new Error('SYMBOL_DELETE_REQUIRES_TRANSACTION')
+    this.db.exec('DROP TRIGGER projection_symbol_references_delete')
+    try {
+      const total = (this.db.prepare('SELECT COUNT(*) AS n FROM symbol_references').get() as { n: number }).n
+      const removed = count === total
+        ? this.db.prepare('DELETE FROM symbol_references').run().changes
+        : this.db.prepare('DELETE FROM symbol_references WHERE ' + condition).run(...parameters).changes
+      if (removed !== count) throw new Error('SYMBOL_DELETE_INPUT_CHANGED')
+      this.db.prepare(`INSERT INTO projection_revisions VALUES (?, '', ?)
+        ON CONFLICT(repository_id, scope) DO UPDATE SET revision=revision+excluded.revision`).run(repositoryId, count)
+      this.db.prepare("DELETE FROM projection_checkpoints WHERE repository_id=? AND scope='' AND phase='SYMBOLS' AND state!='RUNNING'").run(repositoryId)
+      const invalidate = this.db.prepare("DELETE FROM projection_checkpoints WHERE repository_id=? AND scope=? AND phase='SYMBOL_SOURCE'")
+      for (const source of sources) invalidate.run(repositoryId, source.source_file_id)
+    } finally {
+      this.db.exec(projection.sql)
+    }
+  }
+
   replaceIndexedFileState(
     file: CodeMapFile,
     elements: CodeMapElement[],
@@ -966,37 +1017,68 @@ class RepositoryDatabase implements RepositoryRepository {
     ) => {
       const fileId = _file.id
 
-      // 1) Deleta tabelas-filha e relações que tocam os elementos do arquivo
-      this.db.prepare(`DELETE FROM symbol_references WHERE source_file_id = ? OR source_element_id IN (SELECT id FROM elements WHERE file_id = ?) OR target_element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId, fileId, fileId)
+      this.deleteReplacedSymbolReferences(_file.repositoryId, fileId, _elements.map(element => element.id))
       this.db.prepare(`DELETE FROM element_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
       this.db.prepare(`DELETE FROM element_interfaces WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
       this.db.prepare(`DELETE FROM element_decorators WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
       this.db.prepare(`DELETE FROM element_type_parameters WHERE element_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId)
 
-      // 2) Deleta relações de nível ARQUIVO (source_id/target_id = fileId) e as que tocam elementos do arquivo
       this.db.prepare(`DELETE FROM relationships WHERE source_id = ? OR target_id = ?`).run(fileId, fileId)
       this.db.prepare(`DELETE FROM relationships WHERE source_id IN (SELECT id FROM elements WHERE file_id = ?) OR target_id IN (SELECT id FROM elements WHERE file_id = ?)`).run(fileId, fileId)
 
-      // 3) Deleta os elementos antigos
-      this.db.prepare(`DELETE FROM elements WHERE file_id = ?`).run(fileId)
 
-      // 4) Grava o file
       const fileRow = domainToFileRow(_file)
       this.db.prepare(`
-        INSERT OR REPLACE INTO files (id, repository_id, context_reference, relative_path, language, extension, lines, size_bytes, mtime, content_hash, token_count, tokenizer_id, tokenizer_encoding, tokenized_content_hash, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO files (id, repository_id, context_reference, relative_path, language, extension, lines, size_bytes, mtime, content_hash, token_count, tokenizer_id, tokenizer_encoding, tokenized_content_hash, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+          repository_id=excluded.repository_id,
+          context_reference=excluded.context_reference,
+          relative_path=excluded.relative_path,
+          language=excluded.language,
+          extension=excluded.extension,
+          lines=excluded.lines,
+          size_bytes=excluded.size_bytes,
+          mtime=excluded.mtime,
+          content_hash=excluded.content_hash,
+          token_count=excluded.token_count,
+          tokenizer_id=excluded.tokenizer_id,
+          tokenizer_encoding=excluded.tokenizer_encoding,
+          tokenized_content_hash=excluded.tokenized_content_hash,
+          status=excluded.status
       `).run(fileRow.id, fileRow.repository_id, fileRow.context_reference, fileRow.relative_path, fileRow.language, fileRow.extension, fileRow.lines, fileRow.size_bytes, fileRow.mtime, fileRow.content_hash, fileRow.token_count, fileRow.tokenizer_id, fileRow.tokenizer_encoding, fileRow.tokenized_content_hash, fileRow.status)
 
-      // 5) Grava os novos elements (mappers com validateEnum DENTRO da transação)
       const elementInsert = this.db.prepare(`
-        INSERT OR REPLACE INTO elements (
+        INSERT INTO elements (
           id, repository_id, file_id, kind, name, parent_element_id,
           start_line, start_column, start_byte, end_line, end_column, end_byte,
           size_lines, size_bytes, visibility, modifiers, return_type, base_class,
           has_documentation, parameter_count, retrieval_kind, granularity, retrievable,
           declaration_signature
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET
+          repository_id=excluded.repository_id,
+          file_id=excluded.file_id,
+          kind=excluded.kind,
+          name=excluded.name,
+          parent_element_id=excluded.parent_element_id,
+          start_line=excluded.start_line,
+          start_column=excluded.start_column,
+          start_byte=excluded.start_byte,
+          end_line=excluded.end_line,
+          end_column=excluded.end_column,
+          end_byte=excluded.end_byte,
+          size_lines=excluded.size_lines,
+          size_bytes=excluded.size_bytes,
+          visibility=excluded.visibility,
+          modifiers=excluded.modifiers,
+          return_type=excluded.return_type,
+          base_class=excluded.base_class,
+          has_documentation=excluded.has_documentation,
+          parameter_count=excluded.parameter_count,
+          retrieval_kind=excluded.retrieval_kind,
+          granularity=excluded.granularity,
+          retrievable=excluded.retrievable,
+          declaration_signature=excluded.declaration_signature
       `)
       for (const element of _elements) {
         const row = domainToElementRow(element) //lança em kind inválido → rollback
@@ -1009,7 +1091,10 @@ class RepositoryDatabase implements RepositoryRepository {
         )
       }
 
-      // 6) Grava as relações locais do arquivo
+      // Keep stable targets; remove obsolete parents and children together after updating retained children.
+      this.db.prepare('DELETE FROM elements WHERE file_id=? AND id NOT IN (SELECT value FROM json_each(?))')
+        .run(fileId, JSON.stringify(_elements.map(element => element.id)))
+
       const relInsert = this.db.prepare(`
         INSERT OR REPLACE INTO relationships (id, repository_id, source_id, target_id, type, source_kind, target_kind)
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -1019,7 +1104,6 @@ class RepositoryDatabase implements RepositoryRepository {
         relInsert.run(row.id, row.repository_id, row.source_id, row.target_id, row.type, row.source_kind, row.target_kind)
       }
 
-      // 7) Grava as elementInterfaces dos elementos do arquivo
       const deleteIface = this.db.prepare(`DELETE FROM element_interfaces WHERE element_id = ?`)
       const insertIface = this.db.prepare(`INSERT OR REPLACE INTO element_interfaces (element_id, interface_name) VALUES (?, ?)`)
       for (const entry of _elementInterfaces) {
@@ -1110,10 +1194,10 @@ class RepositoryDatabase implements RepositoryRepository {
       .run(facts.fileId, facts.contentHash, JSON.stringify(facts))
   }
 
-  getSymbolResolutionFacts(repositoryId: string): SymbolResolutionFacts[] {
+  getSymbolResolutionFacts(repositoryId: string, fileId?: string): SymbolResolutionFacts[] {
     const rows = this.db.prepare(`SELECT sf.payload FROM symbol_resolution_facts sf
-      JOIN files f ON f.id = sf.file_id WHERE f.repository_id = ? AND f.content_hash = sf.content_hash`)
-      .all(repositoryId) as Array<{ payload: string }>
+      JOIN files f ON f.id = sf.file_id WHERE f.repository_id = ? AND f.content_hash = sf.content_hash ${fileId === undefined ? '' : 'AND f.id = ?'}`)
+      .all(...(fileId === undefined ? [repositoryId] : [repositoryId, fileId])) as Array<{ payload: string }>
     return rows.map((row) => JSON.parse(row.payload) as SymbolResolutionFacts)
   }
 

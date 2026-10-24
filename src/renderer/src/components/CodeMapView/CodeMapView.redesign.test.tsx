@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { CodeMapView } from './CodeMapView'
 
@@ -45,4 +45,39 @@ it('keeps repository totals, selected source and persisted pane widths through s
   fireEvent.click(screen.getByRole('button', { name: 'Exibir Código' }))
   expect((container.querySelector('.cmv-reading-zone') as HTMLElement).style.flexBasis).toBe('40%')
   expect(container.querySelector('.cmp-file-name')?.textContent).toBe('alpha.ts')
+})
+
+
+it('keeps the current tree mounted and usable during a background graph refresh', async () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} disconnect() {} })
+  vi.stubGlobal('matchMedia', () => ({ matches: false, addEventListener() {}, removeEventListener() {} }))
+  let indexed!: (event: { repoPath: string; relativePath: string }) => void
+  const files = [{ id: 'a', repositoryId: 'repo', relativePath: 'alpha.ts', extension: '.ts', language: 'typescript', lines: 1, sizeBytes: 1, mtime: 1, status: 'indexed' }]
+  window.codeAwareness = {
+    openRepository: vi.fn(async () => ({ success: true })),
+    getFiles: vi.fn(async () => ({ success: true, data: files })),
+    getElements: vi.fn(async () => ({ success: true, data: [] })),
+    getRelationships: vi.fn(async () => ({ success: true, data: [] })),
+    getModifiedFilesCount: vi.fn(async () => ({ success: true, data: 0 })),
+    getRepository: vi.fn(async () => ({ success: true, data: { name: 'repo', lastIndexedAt: '2026-10-05T12:00:00Z' } })),
+    getSyncStatus: vi.fn(async () => ({ success: true, data: { lastSyncAt: null } })),
+    getTags: vi.fn(async () => ({ success: true, data: [] })),
+    getFileTags: vi.fn(async () => ({ success: true, data: {} })),
+    getFileContent: vi.fn(async () => ({ success: true, data: { content: 'export const alpha = 1', truncated: false } })),
+    onCodeMapFileConfirmed: vi.fn(() => () => {}),
+    onCodeMapFileIndexed: vi.fn(callback => { indexed = callback; return () => {} })
+  } as unknown as Window['codeAwareness']
+  const view = render(<CodeMapView activeProject={{ path: 'C:/repo', name: 'repo' }} onSelectProject={vi.fn()} onStatusMessage={vi.fn()} />)
+  await screen.findByText('Nenhum source selecionado')
+  const original = view.container.querySelector('[data-type="file"]')!
+  let release!: (value: { success: boolean; data: never[] }) => void
+  const held = new Promise<{ success: boolean; data: never[] }>(resolve => { release = resolve })
+  vi.mocked(window.codeAwareness.getElements).mockImplementationOnce(() => held)
+  act(() => indexed({ repoPath: 'C:/repo', relativePath: 'alpha.ts' }))
+  try {
+    await waitFor(() => expect(window.codeAwareness.getElements).toHaveBeenCalledTimes(2))
+    expect(view.container.contains(original)).toBe(true)
+    fireEvent.click(original)
+    await waitFor(() => expect(window.codeAwareness.getFileContent).toHaveBeenCalledWith('C:/repo', 'alpha.ts'))
+  } finally { await act(async () => release({ success: true, data: [] })) }
 })

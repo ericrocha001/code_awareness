@@ -54,6 +54,119 @@ describe('Code Map U1 — durable projection checkpoints in real SQLite/Electron
     await model!.backfillSymbolReferences()
   }
 
+  it('services the Main event loop during symbol resolution before persistence completes', async () => {
+    await fixture()
+    let serviced = false
+    const pulse = new Promise<void>(resolve => setImmediate(() => { serviced = true; resolve() }))
+    const sources = new Set(model!.getFiles().map(file => file.id))
+    await (model as any).refreshSymbolReferences(sources, 'responsiveness-regression')
+    expect(serviced).toBe(true)
+    await pulse
+    expect(sql!.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+  })
+
+  it('rejects a stale symbol snapshot before writing rows', async () => {
+    await fixture()
+    const db = (model as any).db as ReturnType<typeof createRepositoryDatabase>
+    const persist = vi.spyOn(db, 'replaceSymbolReferencesForFile')
+    const refresh = (model as any).refreshSymbolReferences(new Set(model!.getFiles().map(file => file.id)), 'stale-regression')
+    sql!.prepare("UPDATE projection_revisions SET revision=revision+1 WHERE repository_id=? AND scope='@symbols'").run(model!.getRepositoryId())
+    await expect(refresh).rejects.toThrow('PROJECTION_INPUT_CHANGED')
+    expect(persist).not.toHaveBeenCalled()
+  })
+
+  it('cancels cooperative resolution on close without touching a closed SQLite connection', async () => {
+    await fixture()
+    const refresh = (model as any).refreshSymbolReferences(new Set(model!.getFiles().map(file => file.id)), 'close-regression')
+    model!.close(); model = undefined
+    await expect(refresh).rejects.toThrow('SYMBOL_RESOLUTION_CANCELLED')
+  })
+
+  it('reconciles an interrupted incremental pass before publishing global symbol readiness', async () => {
+    await fixture()
+    const b = model!.getFileByRelativePath('b.ts')!
+    const db = (model as any).db as ReturnType<typeof createRepositoryDatabase>
+    const replace = db.replaceSymbolReferencesForFile.bind(db)
+    vi.spyOn(db, 'replaceSymbolReferencesForFile').mockImplementation((id, rows) => {
+      if (id === b.id) throw new Error('incremental persistence interruption')
+      replace(id, rows)
+    })
+    writeFileSync(join(root, 'target.ts'), 'export function execute(value?: number) { return 2 }\n')
+    const result = await model!.updateFileContents(['target.ts'])
+    expect(result.errors).toHaveLength(1)
+    expect(model!.getPendingFilePaths()).toEqual(['target.ts'])
+    model!.close(); model = undefined
+    vi.restoreAllMocks()
+    service = new CodeMapService(new WatcherService(), compression)
+    await service.openRepository(root)
+    await service.awaitSnapshot(root)
+    const target = service.getElements(root).find(element => element.name === 'execute' && element.kind === 'function')!
+    expect(sql!.prepare('SELECT COUNT(*) AS n FROM symbol_references WHERE target_element_id=?').get(target.id)).toEqual({ n: 2 })
+    expect(sql!.prepare('SELECT COUNT(*) AS n FROM pending_file_changes').get()).toEqual({ n: 0 })
+    expect(service.getReadiness(root).state).toBe('READY')
+  })
+
+  it.each([false, true])('rolls back bulk rows, trigger and revision and preserves unrelated rows (%s)', async (withUnrelated) => {
+    await fixture()
+    writeFileSync(join(root, 'large.ts'), "import { execute } from './target'\nexport function use() { " + 'execute();'.repeat(600) + ' }\n')
+    await model!.updateFileContents(['large.ts'])
+    if (withUnrelated) {
+      writeFileSync(join(root, 'other.ts'), 'export function independent() { return 1 }\n')
+      writeFileSync(join(root, 'other-source.ts'), "import { independent } from './other'\nexport function use() { independent() }\n")
+      await model!.updateFileContents(['other.ts', 'other-source.ts'])
+    }
+    const adapter = (model as any).db as ReturnType<typeof createRepositoryDatabase>
+    const target = model!.getFileByRelativePath('target.ts')!
+    const before = sql!.prepare('SELECT * FROM symbol_references ORDER BY id').all()
+    const revision = adapter.projectionRevision(model!.getRepositoryId(), '')
+    sql!.exec('DROP TRIGGER audit_insert; DROP TRIGGER audit_delete')
+    const triggers = sql!.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='symbol_references' ORDER BY name").all()
+    expect(() => adapter.replaceIndexedFileState({ ...target, contentHash: 'poison' }, [], [], [], [{
+      id: 'poison', repositoryId: model!.getRepositoryId(), sourceFileId: target.id, sourceElementId: null,
+      targetElementId: 'missing', kind: 'call', location: { start: { line: 1, column: 0, byte: 0 }, end: { line: 1, column: 1, byte: 1 } }
+    }])).toThrow()
+    expect(sql!.prepare('SELECT * FROM symbol_references ORDER BY id').all()).toEqual(before)
+    expect(adapter.projectionRevision(model!.getRepositoryId(), '')).toBe(revision)
+    expect(sql!.prepare("SELECT name,sql FROM sqlite_master WHERE type='trigger' AND tbl_name='symbol_references' ORDER BY name").all()).toEqual(triggers)
+    expect(sql!.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    writeFileSync(join(root, 'target.ts'), 'export function execute(value?: number) { return 2 }\n')
+    expect((await model!.updateFileContents(['target.ts'])).errors).toEqual([])
+    const current = model!.getElementsByFile(target.id).find(element => element.kind === 'function')!
+    expect(model!.getSymbolReferencesByTargetElement(current.id)).toHaveLength(602)
+    if (withUnrelated) {
+      const independent = model!.getElementsByRepository().find(element => element.name === 'independent' && element.kind === 'function')!
+      expect(model!.getSymbolReferencesByTargetElement(independent.id)).toHaveLength(1)
+    }
+  })
+
+  it('recovers rows and trigger after real termination before the bulk transaction restores its trigger', async () => {
+    await fixture()
+    writeFileSync(join(root, 'large.ts'), "import { execute } from './target'\nexport function use() { " + 'execute();'.repeat(600) + ' }\n')
+    await model!.updateFileContents(['large.ts'])
+    sql!.exec('DROP TRIGGER audit_insert; DROP TRIGGER audit_delete')
+    const repositoryId = model!.getRepositoryId()
+    const revision = createRepositoryDatabase(root).projectionRevision(repositoryId, '')
+    model!.close(); model = undefined
+    const childFile = join(root, 'code_awareness/interrupt-bulk.cjs')
+    buildSync({ stdin: { contents: `
+      const {createRepositoryModel}=require(${JSON.stringify(resolve('src/main/core/repository-model.ts'))});
+      const root=process.argv[2], model=createRepositoryModel(root), adapter=model.db, raw=adapter.db, prepare=raw.prepare.bind(raw);
+      raw.prepare=sql=>{const stmt=prepare(sql);if(sql!=='DELETE FROM symbol_references')return stmt;
+        return new Proxy(stmt,{get(target,key){const value=target[key];if(typeof value!=='function')return value;
+          return (...args)=>{const result=value.apply(target,args);if(key==='run')process.kill(process.pid,'SIGKILL');return result}}})};
+      const target=model.getFileByRelativePath('target.ts');
+      adapter.replaceIndexedFileState({...target,contentHash:'interrupted'},[],[],[]);
+      process.exit(91);
+    `, resolveDir: process.cwd() }, outfile: childFile, bundle: true, packages: 'external', platform: 'node', format: 'cjs' })
+    expect(() => execFileSync(process.execPath, [childFile, root], { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', NODE_PATH: resolve('node_modules') }, stdio: 'pipe', windowsHide: true, timeout: 30000 })).toThrow()
+    model = createRepositoryModel(root)
+    expect(createRepositoryDatabase(root).projectionRevision(repositoryId, '')).toBe(revision)
+    expect(sql!.prepare('SELECT COUNT(*) AS n FROM symbol_references').get()).toEqual({ n: 602 })
+    expect(sql!.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE type='trigger' AND name='projection_symbol_references_delete'").get()).toEqual({ n: 1 })
+    expect(sql!.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    expect(await model.backfillSymbolReferences()).toBe(602)
+  })
+
   it('reopens twice without extraction, resolver snapshots or symbol DELETE/INSERT, preserving IDs and navigation', async () => {
     await fixture()
     const before = model!.getElementsByRepository()

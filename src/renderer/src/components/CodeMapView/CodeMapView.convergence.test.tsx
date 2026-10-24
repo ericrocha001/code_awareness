@@ -34,6 +34,7 @@ it('refreshes pending state on confirmation and current state on domain completi
   act(() => confirmed({ repoPath: 'C:\\repo', relativePath: 'file.ts' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Code Map Health: Pending' })).toBeTruthy())
   expect(screen.getByRole('button', { name: 'Code Map Health: Pending' }).querySelector('.cmv-spin')).toBeNull()
+  expect(window.codeAwareness.getElements).toHaveBeenCalledTimes(1)
   count = 0
   act(() => indexed({ repoPath: 'C:/repo', relativePath: 'file.ts' }))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Code Map Health: Healthy' })).toBeTruthy())

@@ -83,6 +83,7 @@ export interface RepositoryRepository {
   getPendingFileChanges(repositoryId: string): Array<{ relativePath: string; revision: number; affectedSources: string[] }>
   completeFileChange(repositoryId: string, relativePath: string, revision: number): boolean
   replaceResolvedRelationships(repositoryId: string, relationships: CodeMapRelationship[]): void
+  getUnfinishedSymbolSources(repositoryId: string, version: string): string[]
   finishSymbolProjection(repositoryId: string, version: string, revision: number): void
 
   countSymbolReferences(repositoryId: string): number
@@ -159,8 +160,8 @@ export interface RepositoryRepository {
 
   /**
    * Substitui atomicamente o estado indexado de um arquivo (tudo ou nada).
-   * Dentro de UMA transação: deleta tabelas-filha e relações do arquivo, deleta os elementos antigos,
-   * grava o file, os novos elements, as relações locais do arquivo e as elementInterfaces.
+   * Dentro de uma transação, preserva identidades retidas e substitui os dados estruturais,
+   * relações locais, interfaces, fatos e referências fornecidas.
    * Os mappers (com validação) rodam DENTRO da transação — entrada envenenada causa rollback total.
    */
   replaceIndexedFileState(
@@ -184,7 +185,7 @@ export interface RepositoryRepository {
   replaceSymbolReferencesForFile(sourceFileId: string, references: PersistedSymbolReference[]): void
 
   saveSymbolResolutionFacts(facts: SymbolResolutionFacts): void
-  getSymbolResolutionFacts(repositoryId: string): SymbolResolutionFacts[]
+  getSymbolResolutionFacts(repositoryId: string, fileId?: string): SymbolResolutionFacts[]
   deleteSymbolResolutionFacts(fileId: string): void
 
   getSymbolReferencesByTargetElement(targetElementId: string): PersistedSymbolReference[]

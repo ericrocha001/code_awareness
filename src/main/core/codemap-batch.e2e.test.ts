@@ -5,6 +5,7 @@ import { writeFileSync, unlinkSync, renameSync } from 'fs'
 import { join, resolve } from 'path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRepositoryModel, RepositoryModel } from './repository-model'
+import type { RepositoryFileMembership } from './repository-file-membership'
 import type { SymbolReferenceFile } from './symbol-reference-resolver'
 
 interface ProjectionInternals {
@@ -59,6 +60,84 @@ describe('Code Map U2 — coherent batches and selective projections', () => {
       CREATE TRIGGER audit_rel_delete AFTER DELETE ON relationships BEGIN INSERT INTO audit VALUES (OLD.source_id,'RELATIONSHIPS'); END;
       CREATE TRIGGER audit_rel_insert AFTER INSERT ON relationships BEGIN INSERT INTO audit VALUES (NEW.source_id,'RELATIONSHIPS'); END;`)
   }
+
+  it.each([0, 600])('collects a six-file burst into one symbol snapshot with intake delay %dms', async (intakeDelay) => {
+    await fixture()
+    const paths = Array.from({ length: 6 }, (_, i) => 'burst' + i + '.ts')
+    for (const [i, path] of paths.entries()) write(path, 'export const value = ' + i + '\n')
+    await model.updateFileContents(paths)
+    const membership = { async classifyBatch(paths: string[]) {
+      if (intakeDelay) await new Promise(resolve => setTimeout(resolve, intakeDelay))
+      return new Map(paths.map(path => [path, 'eligible']))
+    } } as unknown as RepositoryFileMembership
+    sync = new RepositorySynchronizer(model, model.getRepositoryId(), { membership })
+    const snapshot = vi.spyOn(model as unknown as ProjectionInternals, 'buildSymbolResolutionSnapshot')
+    const timers = paths.map((path, i) => setTimeout(() => {
+      write(path, 'export const value = ' + (i + 100) + '\n')
+      repositoryEventBus.emitFileModified(model.getRepositoryId(), path)
+    }, i * 120))
+    await new Promise(resolve => setTimeout(resolve, 650))
+    await sync.waitForIdle(10000)
+    for (const timer of timers) clearTimeout(timer)
+    expect(snapshot).toHaveBeenCalledTimes(1)
+    expect(model.readiness.getState()).toBe('READY')
+    expect(model.getPendingFilePaths()).toEqual([])
+    for (const [i, path] of paths.entries()) expect((await model.getFileContent(path))?.content).toContain(String(i + 100))
+    assertIntegrity()
+  })
+
+  it('retains the latest same-path revision received during stabilization without stranding readiness', async () => {
+    await fixture()
+    sync = new RepositorySynchronizer(model, model.getRepositoryId())
+    write('other-target.ts', 'export function standalone() { return 8 }\n')
+    repositoryEventBus.emitFileModified(model.getRepositoryId(), 'other-target.ts')
+    await new Promise(resolve => setTimeout(resolve, 550))
+    write('other-target.ts', 'export function standalone() { return 9 }\n')
+    repositoryEventBus.emitFileModified(model.getRepositoryId(), 'other-target.ts')
+    await sync.waitForIdle(10000)
+    expect(model.readiness.getState()).toBe('READY')
+    expect(model.getPendingFilePaths()).toEqual([])
+    expect((await model.getFileContent('other-target.ts'))?.content).toContain('return 9')
+    assertIntegrity()
+  })
+
+  it('keeps newer edits pending when they arrive inside a symbol persistence commit', async () => {
+    await fixture()
+    const adapter = (model as unknown as { db: ReturnType<typeof createRepositoryDatabase> }).db
+    const replace = adapter.replaceSymbolReferencesForFile.bind(adapter)
+    let newer: Promise<unknown> | undefined
+    let injected = false
+    vi.spyOn(adapter, 'replaceSymbolReferencesForFile').mockImplementation((id, rows) => {
+      replace(id, rows)
+      if (!injected) {
+        injected = true
+        write('target.ts', 'export function renamed() { return 9 }\n')
+        newer = model.updateFileContents(['target.ts'])
+        expect(model.readiness.isReady('SYMBOL_REFERENCES')).toBe(false)
+      }
+    })
+    write('target.ts', 'export class Base { work() { return 2 } }\nexport function execute(value?: number) { return 2 }\n')
+    await model.updateFileContents(['target.ts'])
+    await newer
+    expect(injected).toBe(true)
+    expect(references('source.ts')).toEqual([])
+    expect(model.getPendingFilePaths()).toEqual([])
+    expect(model.readiness.getState()).toBe('READY')
+    assertIntegrity()
+  })
+
+  it('keeps importer rows untouched when a body-only edit preserves every resolution input', async () => {
+    await fixture()
+    const source = model.getFileByRelativePath('source.ts')!
+    const before = references('source.ts')
+    write('target.ts', 'export class Base { work() { return 2 } }\nexport function execute() { return 2 }\n')
+    const refresh = vi.spyOn(model as unknown as ProjectionInternals, 'refreshSymbolReferences')
+    expect((await model.updateFileContents(['target.ts'])).errors).toEqual([])
+    expect(refresh.mock.calls[0][0]).toEqual(new Set([model.getFileByRelativePath('target.ts')!.id]))
+    expect(references('source.ts')).toEqual(before)
+    expect(sql.prepare("SELECT COUNT(*) AS n FROM audit WHERE projection='SYMBOLS' AND source=?").get(source.id)).toEqual({ n: 0 })
+    assertIntegrity()
+  })
 
   it('extracts three changed files once, resolves one graph/symbol snapshot and leaves an unrelated subgraph untouched', async () => {
     await fixture()

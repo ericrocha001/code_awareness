@@ -236,7 +236,7 @@ export function registerCodeMapHandlers(codeMapService: CodeMapService, activePr
       if (!isValidPath(repoPath)) {
         return { success: false, error: 'repoPath é obrigatório e deve ser uma string não vazia' }
       }
-      const result = codeMapService.getElements(repoPath)
+      const result = await codeMapService.getElementsSnapshot(repoPath)
       return { success: true, data: result }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
