@@ -2,6 +2,22 @@ import { describe, expect, it } from 'vitest'
 import { RepositoryChangeReadiness } from './repository-change-readiness'
 
 describe('repository causal readiness', () => {
+  it('finishes superseded changes only through the completed revision of the same path', async () => {
+    const readiness = new RepositoryChangeReadiness()
+    readiness.accept(0, 'a.ts')
+    const completed = readiness.accept(0, 'a.ts')
+    const earlier = readiness.barrier('SYMBOL_REFERENCES')
+    const latest = readiness.accept(0, 'a.ts')
+    const other = readiness.accept(0, 'b.ts')
+    readiness.advancePathThrough('a.ts', completed, 'SYMBOL_REFERENCES')
+    await earlier
+    expect(readiness.isReady('SYMBOL_REFERENCES')).toBe(false)
+    readiness.advancePathThrough('a.ts', latest, 'SYMBOL_REFERENCES')
+    expect(readiness.isReady('SYMBOL_REFERENCES')).toBe(false)
+    readiness.advancePathThrough('b.ts', other, 'SYMBOL_REFERENCES')
+    expect(readiness.getState()).toBe('READY')
+  })
+
   it('projects actual pending, failed and recovered work without changing readiness barriers', () => {
     const readiness = new RepositoryChangeReadiness()
     expect(readiness.getState()).toBe('READY')

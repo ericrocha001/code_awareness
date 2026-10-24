@@ -65,6 +65,43 @@ const SHADOW_KINDS = new Set<CodeMapElement['kind']>([
   'enum'
 ])
 
+type SymbolImports = Pick<ImportResolver, 'resolve'>
+
+interface ResolutionFile extends SymbolReferenceFile {
+  byId: ReadonlyMap<string, CodeMapElement>
+  byName: ReadonlyMap<string, CodeMapElement[]>
+  byParent: ReadonlyMap<string | null, CodeMapElement[]>
+  bindingsByName: ReadonlyMap<string, ImportBinding[]>
+  variables: readonly CodeMapElement[]
+}
+
+function indexResolutionFile(file: SymbolReferenceFile, includeCandidates: boolean): ResolutionFile {
+  const byId = new Map<string, CodeMapElement>()
+  const byName = new Map<string, CodeMapElement[]>()
+  const byParent = new Map<string | null, CodeMapElement[]>()
+  const bindingsByName = new Map<string, ImportBinding[]>()
+  const variables: CodeMapElement[] = []
+  for (const element of file.elements) {
+    if (!byId.has(element.id)) byId.set(element.id, element)
+    const named = byName.get(element.name) ?? []
+    named.push(element); byName.set(element.name, named)
+    const children = byParent.get(element.parentElementId) ?? []
+    children.push(element); byParent.set(element.parentElementId, children)
+    if (element.kind === 'variable' || element.kind === 'constant') variables.push(element)
+  }
+  for (const binding of file.importBindings) {
+    const entries = bindingsByName.get(binding.localName) ?? []
+    entries.push(binding); bindingsByName.set(binding.localName, entries)
+  }
+  return {
+    fileId: file.fileId, relativePath: file.relativePath, elements: file.elements,
+    importBindings: file.importBindings, exportedConstNewBindings: file.exportedConstNewBindings,
+    exportedConstCallBindings: file.exportedConstCallBindings,
+    symbolReferences: includeCandidates ? file.symbolReferences : [],
+    byId, byName, byParent, bindingsByName, variables
+  }
+}
+
 function exactlyOne(elements: CodeMapElement[]): CodeMapElement | null {
   return elements.length === 1 ? elements[0] : null
 }
@@ -73,18 +110,18 @@ function isCompatible(candidate: SymbolReferenceCandidate, element: CodeMapEleme
   return COMPATIBLE_KINDS[candidate.kind].has(element.kind)
 }
 
-function parentOf(file: SymbolReferenceFile, element: CodeMapElement): CodeMapElement | null {
+function parentOf(file: ResolutionFile, element: CodeMapElement): CodeMapElement | null {
   if (!element.parentElementId) return null
-  return file.elements.find((candidate) => candidate.id === element.parentElementId) ?? null
+  return file.byId.get(element.parentElementId) ?? null
 }
 
-function isTopLevelDeclaration(file: SymbolReferenceFile, element: CodeMapElement): boolean {
+function isTopLevelDeclaration(file: ResolutionFile, element: CodeMapElement): boolean {
   if (element.parentElementId === null) return true
   const parent = parentOf(file, element)
   return parent?.kind === 'export' && parent.parentElementId === null
 }
 
-function isDirectExport(file: SymbolReferenceFile, element: CodeMapElement): boolean {
+function isDirectExport(file: ResolutionFile, element: CodeMapElement): boolean {
   const parent = parentOf(file, element)
   return parent?.kind === 'export' && parent.parentElementId === null && parent.name === element.name
 }
@@ -99,7 +136,7 @@ function signatureParameters(element: CodeMapElement): string[] {
 }
 
 function isDescendantOf(
-  file: SymbolReferenceFile,
+  file: ResolutionFile,
   element: CodeMapElement,
   ancestorId: string
 ): boolean {
@@ -119,17 +156,17 @@ function containsCandidate(element: CodeMapElement, candidate: SymbolReferenceCa
 }
 
 function hasReceiverShadow(
-  file: SymbolReferenceFile,
+  file: ResolutionFile,
   receiverName: string,
   sourceElementId: string | null
 ): boolean {
   const source = sourceElementId
-    ? file.elements.find((element) => element.id === sourceElementId) ?? null
+    ? file.byId.get(sourceElementId) ?? null
     : null
 
   if (source && signatureParameters(source).includes(receiverName)) return true
 
-  return file.elements.some((element) => {
+  return (file.byName.get(receiverName) ?? []).some((element) => {
     if (element.name !== receiverName || !SHADOW_KINDS.has(element.kind)) return false
     if (source) {
       return element.id === source.id ||
@@ -141,23 +178,22 @@ function hasReceiverShadow(
 }
 
 function hasPlausibleShadow(
-  file: SymbolReferenceFile,
+  file: ResolutionFile,
   candidate: SymbolReferenceCandidate,
   ignoredElementId: string | null = null
 ): boolean {
   const source = candidate.sourceElementId
-    ? file.elements.find((element) => element.id === candidate.sourceElementId) ?? null
+    ? file.byId.get(candidate.sourceElementId) ?? null
     : null
 
   if (source && signatureParameters(source).includes(candidate.name)) return true
   if ((source?.kind === 'variable' || source?.kind === 'constant') && candidate.kind !== 'type') return true
-  if (source && candidate.kind !== 'type' && file.elements.some((element) =>
-    (element.kind === 'variable' || element.kind === 'constant') &&
+  if (source && candidate.kind !== 'type' && file.variables.some((element) =>
     isDescendantOf(file, element, source.id) &&
     containsCandidate(element, candidate)
   )) return true
 
-  return file.elements.some((element) => {
+  return (file.byName.get(candidate.name) ?? []).some((element) => {
     if (element.id === ignoredElementId) return false
     if (element.name !== candidate.name || !SHADOW_KINDS.has(element.kind)) return false
     if (source) {
@@ -169,8 +205,8 @@ function hasPlausibleShadow(
   })
 }
 
-function localTarget(file: SymbolReferenceFile, candidate: SymbolReferenceCandidate): CodeMapElement | null {
-  const target = exactlyOne(file.elements.filter((element) =>
+function localTarget(file: ResolutionFile, candidate: SymbolReferenceCandidate): CodeMapElement | null {
+  const target = exactlyOne((file.byName.get(candidate.name) ?? []).filter((element) =>
     element.name === candidate.name &&
     isTopLevelDeclaration(file, element) &&
     isCompatible(candidate, element)
@@ -180,22 +216,22 @@ function localTarget(file: SymbolReferenceFile, candidate: SymbolReferenceCandid
 }
 
 function importedTarget(
-  file: SymbolReferenceFile,
-  targetFile: SymbolReferenceFile,
+  file: ResolutionFile,
+  targetFile: ResolutionFile,
   binding: ImportBinding,
   candidate: SymbolReferenceCandidate
 ): CodeMapElement | null {
   if (hasPlausibleShadow(file, candidate)) return null
-  return exactlyOne(targetFile.elements.filter((element) =>
+  return exactlyOne((targetFile.byName.get(binding.importedName) ?? []).filter((element) =>
     element.name === binding.importedName &&
     isDirectExport(targetFile, element) &&
     isCompatible(candidate, element)
   ))
 }
 
-function owningClass(file: SymbolReferenceFile, sourceElementId: string | null): CodeMapElement | null {
+function owningClass(file: ResolutionFile, sourceElementId: string | null): CodeMapElement | null {
   if (!sourceElementId) return null
-  let current = file.elements.find((element) => element.id === sourceElementId) ?? null
+  let current = file.byId.get(sourceElementId) ?? null
   const visited = new Set<string>()
   while (current && !visited.has(current.id)) {
     if (current.kind === 'class') return current
@@ -206,12 +242,12 @@ function owningClass(file: SymbolReferenceFile, sourceElementId: string | null):
 }
 
 function instanceOwnerByName(
-  file: SymbolReferenceFile,
-  filesByPath: ReadonlyMap<string, SymbolReferenceFile>,
-  importResolver: ImportResolver,
+  file: ResolutionFile,
+  filesByPath: ReadonlyMap<string, ResolutionFile>,
+  importResolver: SymbolImports,
   name: string
-): { file: SymbolReferenceFile; element: CodeMapElement } | null {
-  const bindings = file.importBindings.filter((binding) => binding.localName === name)
+): { file: ResolutionFile; element: CodeMapElement } | null {
+  const bindings = (file.bindingsByName.get(name) ?? [])
   if (bindings.length > 1) return null
   if (bindings.length === 1) {
     const binding = bindings[0]
@@ -219,14 +255,14 @@ function instanceOwnerByName(
     if (resolution.status !== 'internal') return null
     const targetFile = filesByPath.get(resolution.targetRelativePath)
     if (!targetFile) return null
-    const target = exactlyOne(targetFile.elements.filter((element) =>
+    const target = exactlyOne((targetFile.byName.get(binding.importedName) ?? []).filter((element) =>
       (element.kind === 'class' || element.kind === 'interface') &&
       element.name === binding.importedName &&
       isDirectExport(targetFile, element)
     ))
     return target ? { file: targetFile, element: target } : null
   }
-  const target = exactlyOne(file.elements.filter((element) =>
+  const target = exactlyOne((file.byName.get(name) ?? []).filter((element) =>
     (element.kind === 'class' || element.kind === 'interface') &&
     element.name === name &&
     isTopLevelDeclaration(file, element)
@@ -235,14 +271,14 @@ function instanceOwnerByName(
 }
 
 function instanceMethodTarget(
-  ownerFile: SymbolReferenceFile,
+  ownerFile: ResolutionFile,
   owner: CodeMapElement,
   methodName: string,
-  filesByPath: ReadonlyMap<string, SymbolReferenceFile>,
-  importResolver: ImportResolver
+  filesByPath: ReadonlyMap<string, ResolutionFile>,
+  importResolver: SymbolImports
 ): CodeMapElement | null {
   if (owner.kind === 'interface') {
-    return exactlyOne(ownerFile.elements.filter((element) =>
+    return exactlyOne((ownerFile.byParent.get(owner.id) ?? []).filter((element) =>
       element.parentElementId === owner.id && element.kind === 'method' && element.name === methodName
     ))
   }
@@ -252,7 +288,7 @@ function instanceMethodTarget(
 
   while (!visited.has(current.element.id)) {
     visited.add(current.element.id)
-    const named = current.file.elements.filter((element) =>
+    const named = (current.file.byParent.get(current.element.id) ?? []).filter((element) =>
       element.parentElementId === current.element.id && element.kind === 'method' && element.name === methodName
     )
     if (named.length > 0) {
@@ -272,11 +308,11 @@ function instanceMethodTarget(
 }
 
 function staticMethodTarget(
-  ownerFile: SymbolReferenceFile,
+  ownerFile: ResolutionFile,
   owner: CodeMapElement,
   methodName: string,
-  filesByPath: ReadonlyMap<string, SymbolReferenceFile>,
-  importResolver: ImportResolver
+  filesByPath: ReadonlyMap<string, ResolutionFile>,
+  importResolver: SymbolImports
 ): CodeMapElement | null {
   if (owner.kind !== 'class') return null
   let current = { file: ownerFile, element: owner }
@@ -285,7 +321,7 @@ function staticMethodTarget(
 
   while (!visited.has(current.element.id)) {
     visited.add(current.element.id)
-    const named = current.file.elements.filter((element) =>
+    const named = (current.file.byParent.get(current.element.id) ?? []).filter((element) =>
       element.parentElementId === current.element.id && element.kind === 'method' && element.name === methodName
     )
     if (named.length > 0) {
@@ -305,12 +341,12 @@ function staticMethodTarget(
 }
 
 function functionByName(
-  file: SymbolReferenceFile,
-  filesByPath: ReadonlyMap<string, SymbolReferenceFile>,
-  importResolver: ImportResolver,
+  file: ResolutionFile,
+  filesByPath: ReadonlyMap<string, ResolutionFile>,
+  importResolver: SymbolImports,
   name: string
-): { file: SymbolReferenceFile; element: CodeMapElement } | null {
-  const bindings = file.importBindings.filter((binding) => binding.localName === name)
+): { file: ResolutionFile; element: CodeMapElement } | null {
+  const bindings = (file.bindingsByName.get(name) ?? [])
   if (bindings.length > 1) return null
   if (bindings.length === 1) {
     const binding = bindings[0]
@@ -318,14 +354,14 @@ function functionByName(
     if (resolution.status !== 'internal') return null
     const targetFile = filesByPath.get(resolution.targetRelativePath)
     if (!targetFile) return null
-    const target = exactlyOne(targetFile.elements.filter((element) =>
+    const target = exactlyOne((targetFile.byName.get(binding.importedName) ?? []).filter((element) =>
       element.kind === 'function' &&
       element.name === binding.importedName &&
       isDirectExport(targetFile, element)
     ))
     return target ? { file: targetFile, element: target } : null
   }
-  const target = exactlyOne(file.elements.filter((element) =>
+  const target = exactlyOne((file.byName.get(name) ?? []).filter((element) =>
     element.kind === 'function' &&
     element.name === name &&
     isTopLevelDeclaration(file, element)
@@ -339,17 +375,17 @@ interface InstancePropertyBinding {
 }
 
 function instancePropertyBindings(
-  file: SymbolReferenceFile,
+  file: ResolutionFile,
   owner: CodeMapElement,
   name: string
 ): InstancePropertyBinding[] {
-  const regular = file.elements
+  const regular = (file.byName.get(name) ?? [])
     .filter((element) => element.parentElementId === owner.id && element.kind === 'property' && element.name === name)
     .map((element) => ({ element, origin: 'class-property' as const }))
-  const constructors = file.elements.filter((element) =>
+  const constructors = (file.byParent.get(owner.id) ?? []).filter((element) =>
     element.parentElementId === owner.id && element.kind === 'method' && element.name === 'constructor'
   )
-  const parameterProperties = file.elements
+  const parameterProperties = (file.byName.get(name) ?? [])
     .filter((element) =>
       element.kind === 'parameter' &&
       element.name === name &&
@@ -361,16 +397,16 @@ function instancePropertyBindings(
 }
 
 function memberTarget(
-  sourceFile: SymbolReferenceFile,
+  sourceFile: ResolutionFile,
   candidate: SymbolReferenceCandidate,
-  filesByPath: ReadonlyMap<string, SymbolReferenceFile>,
-  importResolver: ImportResolver
+  filesByPath: ReadonlyMap<string, ResolutionFile>,
+  importResolver: SymbolImports
 ): CodeMapElement | null {
   if (candidate.receiver === 'this-property') {
     const owner = owningClass(sourceFile, candidate.sourceElementId)
     if (!owner || !candidate.receiverPropertyName || !candidate.receiverTypeName) return null
     const source = candidate.sourceElementId
-      ? sourceFile.elements.find((element) => element.id === candidate.sourceElementId)
+      ? sourceFile.byId.get(candidate.sourceElementId)
       : null
     if (source?.modifiers.includes('static')) return null
     const properties = instancePropertyBindings(sourceFile, owner, candidate.receiverPropertyName)
@@ -399,7 +435,7 @@ function memberTarget(
   }
   if (candidate.receiver === 'identifier' && candidate.receiverName) {
     if (hasReceiverShadow(sourceFile, candidate.receiverName, candidate.sourceElementId)) return null
-    const bindings = sourceFile.importBindings.filter((binding) => binding.localName === candidate.receiverName)
+    const bindings = (sourceFile.bindingsByName.get(candidate.receiverName) ?? [])
     if (bindings.length !== 1) return null
     const binding = bindings[0]
     const resolution = importResolver.resolve(binding.sourceModule, sourceFile.relativePath)
@@ -411,7 +447,7 @@ function memberTarget(
     )
     if (instanceBindings.length === 1) {
       const instanceBinding = instanceBindings[0]
-      const declaration = exporterFile.elements.find((element) =>
+      const declaration = (exporterFile.byName.get(binding.importedName) ?? []).find((element) =>
         element.id === instanceBinding.declarationElementId &&
         element.kind === 'constant' &&
         element.name === binding.importedName &&
@@ -435,7 +471,7 @@ function memberTarget(
     )
     if (callBindings.length === 1) {
       const callBinding = callBindings[0]
-      const declaration = exporterFile.elements.find((element) =>
+      const declaration = (exporterFile.byName.get(binding.importedName) ?? []).find((element) =>
         element.id === callBinding.declarationElementId &&
         element.kind === 'constant' &&
         element.name === binding.importedName &&
@@ -493,7 +529,7 @@ function memberTarget(
       }
     }
 
-    const targetClass = exactlyOne(exporterFile.elements.filter((element) =>
+    const targetClass = exactlyOne((exporterFile.byName.get(binding.importedName) ?? []).filter((element) =>
       element.kind === 'class' &&
       element.name === binding.importedName &&
       isDirectExport(exporterFile, element)
@@ -506,16 +542,29 @@ function memberTarget(
   return null
 }
 
-export function resolveSymbolReferences(
+function* resolveSymbolReferenceSteps(
   repoPath: string,
   files: readonly SymbolReferenceFile[],
   affectedSourceFileIds?: ReadonlySet<string>
-): ResolvedSymbolReference[] {
-  const orderedFiles = [...files].sort((left, right) =>
+): Generator<void, ResolvedSymbolReference[]> {
+  const orderedFiles: ResolutionFile[] = []
+  for (const file of [...files].sort((left, right) =>
     left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0
-  )
-  const importResolver = new ImportResolver(repoPath)
-  importResolver.setFiles(orderedFiles.map((file) => file.relativePath))
+  )) {
+    yield
+    orderedFiles.push(indexResolutionFile(file, !affectedSourceFileIds || affectedSourceFileIds.has(file.fileId)))
+  }
+  const resolver = new ImportResolver(repoPath)
+  resolver.setFiles(orderedFiles.map((file) => file.relativePath))
+  const imports = new Map<string, ReturnType<ImportResolver['resolve']>>()
+  const importResolver: SymbolImports = {
+    resolve(specifier, importer) {
+      const key = JSON.stringify([importer, specifier])
+      let result = imports.get(key)
+      if (!result) { result = resolver.resolve(specifier, importer); imports.set(key, result) }
+      return result
+    }
+  }
   const filesByPath = new Map(orderedFiles.map((file) => [file.relativePath, file]))
   const resolved: ResolvedSymbolReference[] = []
 
@@ -526,6 +575,7 @@ export function resolveSymbolReferences(
       left.location.end.byte - right.location.end.byte
     )
     for (const candidate of candidates) {
+      yield
       if (candidate.receiver) {
         const target = memberTarget(file, candidate, filesByPath, importResolver)
         if (target) {
@@ -539,7 +589,7 @@ export function resolveSymbolReferences(
         }
         continue
       }
-      const bindings = file.importBindings.filter((binding) => binding.localName === candidate.name)
+      const bindings = (file.bindingsByName.get(candidate.name) ?? [])
       let target: CodeMapElement | null = null
 
       if (bindings.length === 1) {
@@ -565,4 +615,37 @@ export function resolveSymbolReferences(
   }
 
   return resolved
+}
+
+export function resolveSymbolReferences(
+  repoPath: string,
+  files: readonly SymbolReferenceFile[],
+  affectedSourceFileIds?: ReadonlySet<string>
+): ResolvedSymbolReference[] {
+  const steps = resolveSymbolReferenceSteps(repoPath, files, affectedSourceFileIds)
+  let step = steps.next()
+  while (!step.done) step = steps.next()
+  return step.value
+}
+
+export async function resolveSymbolReferencesCooperatively(
+  repoPath: string,
+  files: readonly SymbolReferenceFile[],
+  affectedSourceFileIds?: ReadonlySet<string>,
+  assertCurrent: () => void = () => {}
+): Promise<ResolvedSymbolReference[]> {
+  const steps = resolveSymbolReferenceSteps(repoPath, files, affectedSourceFileIds)
+  await new Promise<void>(resolve => setImmediate(resolve))
+  let deadline = performance.now() + 8
+  let step = steps.next()
+  while (!step.done) {
+    if (performance.now() >= deadline) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      assertCurrent()
+      deadline = performance.now() + 8
+    }
+    step = steps.next()
+  }
+  assertCurrent()
+  return step.value
 }

@@ -13,7 +13,7 @@ app.disableHardwareAcceleration()
 const receipt = { status: 'PASS', runtime: { electron: process.versions.electron, chromium: process.versions.chrome, platform: process.platform }, checks: [], captures: [] }
 app.whenReady().then(async () => {
   const scenario = require(config.scenario)
-  const window = new BrowserWindow({ width: 1280, height: 800, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false } })
+  const window = new BrowserWindow({ width: 1280, height: 800, show: false, webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, backgroundThrottling: false, ...(scenario.preload ? { preload: scenario.preload } : {}) } })
   let nativeDialogs
   if (scenario.nativeDialogs) {
     receipt.nativeDialogs = []

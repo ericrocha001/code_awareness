@@ -104,7 +104,7 @@ function buildTree(files: CodeMapFile[]): TreeNode[] {
   return root.children
 }
 
-export const CodeMapTree: React.FC<CodeMapTreeProps> = ({
+export const CodeMapTree = React.memo<CodeMapTreeProps>(({
   files,
   selectedFileId,
   onSelectFile,
@@ -317,4 +317,4 @@ export const CodeMapTree: React.FC<CodeMapTreeProps> = ({
       {tree.map((node) => renderNode(node, 0))}
     </div>
   )
-}
+})

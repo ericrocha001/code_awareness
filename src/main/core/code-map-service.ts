@@ -356,6 +356,11 @@ export class CodeMapService {
     return instance.model.getFiles()
   }
 
+  getElementsSnapshot(repoPath: string): Promise<CodeMapElement[]> {
+    const instance = this.ensureInstance(repoPath)
+    return this.trackWork(instance, () => instance.model.getElementsSnapshot())
+  }
+
   getElements(repoPath: string): CodeMapElement[] {
     const instance = this.ensureInstance(repoPath)
     return instance.model.getElementsByRepository()

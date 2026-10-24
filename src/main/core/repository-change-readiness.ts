@@ -35,6 +35,12 @@ export class RepositoryChangeReadiness {
     if (target === phases.length) this.changes.delete(id)
   }
 
+  advancePathThrough(key: string, id: number, phase: RepositoryChangePhase): void {
+    for (const [previousId, change] of this.changes) {
+      if (previousId <= id && change.key === key) this.advance(previousId, phase)
+    }
+  }
+
   fail(id: number, error: unknown): void {
     const change = this.changes.get(id)
     if (!change) return

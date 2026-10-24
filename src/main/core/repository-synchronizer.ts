@@ -201,42 +201,35 @@ export class RepositorySynchronizer {
       fileCount: filesToProcess.length
     })
 
-    // Change Intake Gate: avalia membership em batch quando disponível
-    let rejectedPaths: Set<string> = new Set()
-    if (this.membership !== null && filesToProcess.length > 0) {
-      const paths = filesToProcess.map(([p]) => p)
-      const indexedPaths = new Set(this.model.getFiles().map(f => f.relativePath))
+    const rejectedPaths = new Set<string>()
+    const classify = async (entries: Array<[string, PendingFileEntry]>): Promise<void> => {
+      if (!this.membership || entries.length === 0) return
+      const paths = entries.map(([path]) => path)
+      const indexedPaths = new Set(this.model.getFiles().map(file => file.relativePath))
       try {
         const classifications = await this.membership.classifyBatch(paths, indexedPaths)
-        for (const [relativePath, classification] of classifications) {
-          const isDeletedIndexed = classification === 'deleted-indexed'
-          const isEligible = classification === 'eligible'
-          const isNew = classification === 'eligible' // covered by eligible
-          const shouldProcess =
-            isEligible ||
-            isDeletedIndexed ||
-            // deleted-unknown: ainda assim processa se o arquivo estava no modifiedFiles
-            (classification === 'deleted-unknown' && this.modifiedFiles.has(relativePath))
-
-          if (!shouldProcess) {
-            rejectedPaths.add(relativePath)
-          }
+        for (const [path, classification] of classifications) {
+          if (classification !== 'eligible' && classification !== 'deleted-indexed' &&
+            !(classification === 'deleted-unknown' && this.modifiedFiles.has(path))) rejectedPaths.add(path)
         }
       } catch {
-        // Falha do membership → fail-open: processa tudo (nunca bloqueia por erro de gate)
+        // Membership failures retain the existing fail-open intake contract.
       }
     }
+    await classify(filesToProcess)
+    const gatheringDeadline = performance.now() + DEBOUNCE_MS
 
     const confirmed = new Map<string, PendingFileEntry>()
     try {
-      for (const [relativePath, metadata] of filesToProcess) {
+      for (let index = 0; index < filesToProcess.length; index++) {
+        const [relativePath, metadata] = filesToProcess[index]
         if (this.isDisposed) break
 
         // Usa o correlationId preservado do evento original (causalidade por path)
         const cid = metadata.correlationId
 
         if (rejectedPaths.has(relativePath)) {
-          this.model.readiness.advance(metadata.changeId, 'SYMBOL_REFERENCES')
+          this.model.readiness.advancePathThrough(relativePath, metadata.changeId, 'SYMBOL_REFERENCES')
           this.harness?.record('rejected')
           telemetryService.log(cid, 'CHANGE_DETECTION', 'INTAKE_REJECTED', { relativePath })
           continue
@@ -248,7 +241,7 @@ export class RepositorySynchronizer {
         try {
           await this.verifyAndMarkIfChanged(relativePath, metadata, cid)
           if (this.modifiedFiles.has(relativePath) && !this.pendingFiles.has(relativePath)) confirmed.set(relativePath, metadata)
-          if (!this.pendingFiles.has(relativePath) && !this.modifiedFiles.has(relativePath)) this.model.readiness.advance(metadata.changeId, 'SYMBOL_REFERENCES')
+          if (!this.pendingFiles.has(relativePath) && !this.modifiedFiles.has(relativePath)) this.model.readiness.advancePathThrough(relativePath, metadata.changeId, 'SYMBOL_REFERENCES')
         } catch (err) {
           if (this.isDisposed) break
           telemetryService.logError(cid, 'CHANGE_DETECTION', 'VERIFY_FAILED', {
@@ -259,6 +252,14 @@ export class RepositorySynchronizer {
           // Em caso de erro não antecipado, marca como modified por segurança
           this.modifiedFiles.add(relativePath)
           this.model.markFileModified(relativePath)
+        }
+        if (performance.now() < gatheringDeadline && this.pendingFiles.size) {
+          const additional = Array.from(this.pendingFiles.entries())
+          this.pendingFiles.clear()
+          if (this.debounceTimer) { clearTimeout(this.debounceTimer); this.debounceTimer = null }
+          for (const [path] of additional) { confirmed.delete(path); rejectedPaths.delete(path) }
+          await classify(additional)
+          filesToProcess.push(...additional)
         }
       }
       if (confirmed.size && !this.isDisposed) await this.synchronizePaths([...confirmed.keys()], batchCorrelationId, new Map([...confirmed].map(([path, entry]) => [path, entry.changeId])), new Map([...confirmed].map(([path, entry]) => [path, entry.correlationId])))
@@ -299,7 +300,7 @@ export class RepositorySynchronizer {
     if (!stabilized) {
       if (metadata.attempts < MAX_STABILIZE_ATTEMPTS) {
         // Re-enfileira com tentativa incrementada para nova verificação após debounce
-        this.pendingFiles.set(relativePath, {
+        if (!this.pendingFiles.has(relativePath)) this.pendingFiles.set(relativePath, {
           addedAt: Date.now(),
           changeId: metadata.changeId,
           attempts: metadata.attempts + 1,

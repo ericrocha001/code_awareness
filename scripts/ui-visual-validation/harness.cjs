@@ -19,7 +19,7 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
       receipt.source = { observedAt: new Date().toISOString(), observation: 'SCENARIO_START', checkout: projectRoot, head: git(['rev-parse', 'HEAD']), branch: git(['branch', '--show-current']), changes: git(['-c', 'core.fsmonitor=false', 'status', '--porcelain']) }
     }
     require('../test-output.cjs').protectDirectory(evidenceDir)
-    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 120000) throw Object.assign(new Error('Scenario timeout must be 1–120000 ms'), { code: 'TIMEOUT_INVALID' })
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > (scenario === 'codemap-convergence' ? 600000 : 120000)) throw Object.assign(new Error('Scenario timeout must be 1–120000 ms'), { code: 'TIMEOUT_INVALID' })
     for (const name of ['runtime.log', 'runtime.stdout.log', 'runtime.stderr.log']) logFiles.push(fs.openSync(path.join(evidenceDir, name), 'wx', 0o600))
     temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'ca-ui-visual-'))
     const config = { projectRoot, evidenceDir, temporary, scenario: path.resolve(__dirname, 'scenarios', `${scenario}.cjs`) }

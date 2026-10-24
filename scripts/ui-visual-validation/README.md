@@ -165,3 +165,29 @@ It no longer assumes a fixed 90-day axis, independent horizontal track guides or
 toolbar geometry. The legacy temporal-window checks elsewhere in `git-management` and
 `git-atlas-grid` are not current Git Atlas acceptance contracts and are not used by this
 comparison path; modernizing those broader scenarios is outside this MVP.
+
+## Code Map incremental convergence (Windows, opt-in)
+
+Run `node scripts/ui-visual-validation/harness.cjs codemap-convergence --timeout-ms 600000`.
+This scenario uses the production CodeMapView, preload, IPC handlers, CodeMapService,
+watcher, extractors and SQLite in a visible Electron window with an isolated profile.
+Only project selection and unrelated empty tags are fixture adapters. It does not boot
+installation, remote integration or the complete application shell.
+
+The owned fixture contains 1,146 files, approximately 54,000 elements and 48,000
+references across 150 importers. It changes a declaration signature, exercises native
+file selection and source rendering during convergence, and measures continuous
+renderer-origin IPC plus Main event-loop pulses across all phases. The acceptance
+budget is 750 ms for both maxima: sub-second interaction while retaining the atomic
+high-fanout SQLite commit, with host scheduling margin. This is not a frame-rate SLA.
+It also checks a body-only edit, a six-file watcher burst, exact reference identities,
+SQLite integrity, durable readiness and two stable reopens without extra projection work.
+
+Initial fixture preparation may exceed the usual two-minute scenario limit; only this
+scenario accepts an explicit deadline up to ten minutes. Initial renderer mounting has
+a separate 30-second setup deadline; synchronization latency measurements start after
+mounting. The fixture is retained in ignored `.code-awareness/codemap-convergence-repository`
+for reruns and interruption recovery. Its ownership marker is inside `code_awareness/`.
+Runtime receipts, phase metrics, source hashes and screenshots stay in the existing
+visual-validation evidence store. They and the fixture are owned reproducibility evidence,
+not application profile data; retain them through review and apply the runner's retention policy.

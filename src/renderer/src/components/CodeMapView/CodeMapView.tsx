@@ -82,6 +82,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
   const isFirstLoadRef = useRef(true)
   // Guard de corrida para carregamento de dados (cancela respostas obsoletas)
   const activeLoadRef = useRef(0)
+  const loadedRepositoryRef = useRef<string | null>(null)
 
   /** Teto da pilha de histórico — descarta o mais antigo quando excedido. */
   const MAX_FILE_HISTORY = 50
@@ -92,7 +93,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
 
   const loadData = useCallback(async (repoPath: string) => {
     const currentLoadId = ++activeLoadRef.current
-    setIsLoading(true)
+    if (loadedRepositoryRef.current !== repoPath) setIsLoading(true)
     try {
       await window.codeAwareness.openRepository(repoPath)
       if (activeLoadRef.current !== currentLoadId) return
@@ -133,6 +134,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
       if (syncStatusResult.success && syncStatusResult.data) {
         setLastSyncAt(syncStatusResult.data.lastSyncAt ?? null)
       }
+      if (filesResult.success && elementsResult.success && relationshipsResult.success) loadedRepositoryRef.current = repoPath
     } catch (err) {
       if (activeLoadRef.current === currentLoadId) {
         onStatusMessage(`Erro ao carregar Code Map: ${err instanceof Error ? err.message : String(err)}`, true)
@@ -153,6 +155,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
     setIntegrityState('unknown')
     setIntegrityModalState({ isOpen: false, issues: [], checkResult: null })
     if (!activeProject) {
+      loadedRepositoryRef.current = null
       setFiles([])
       setElements([])
       setRelationships([])
@@ -173,25 +176,40 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
 
     let debounceTimer: NodeJS.Timeout | null = null
 
-    const triggerReload = (data: { repoPath: string; relativePath: string }) => {
-      // Compara caminhos normalizados (barras invertidas → barras; sem barra final)
-      if (normalizeProjectPath(data.repoPath) === normalizeProjectPath(activeProject.path)) {
-        if (debounceTimer) clearTimeout(debounceTimer)
-        debounceTimer = setTimeout(() => {
-          loadData(activeProject.path)
-        }, 300)
+    let disposed = false
+    let refreshGraph = false
+    const refreshStatus = async () => {
+      const loadId = activeLoadRef.current
+      try {
+        const [count, status] = await Promise.all([
+          window.codeAwareness.getModifiedFilesCount(activeProject.path),
+          window.codeAwareness.getSyncStatus(activeProject.path)
+        ])
+        if (disposed || activeLoadRef.current !== loadId) return
+        if (count.success && count.data !== undefined) setModifiedCount(count.data)
+        if (status.success && status.data) setLastSyncAt(status.data.lastSyncAt ?? null)
+      } catch (error) {
+        if (!disposed) onStatusMessage(`Erro ao atualizar Code Map: ${error instanceof Error ? error.message : String(error)}`, true)
       }
     }
-
-    const unsubConfirmed = window.codeAwareness.onCodeMapFileConfirmed(triggerReload)
-    const unsubIndexed = window.codeAwareness.onCodeMapFileIndexed(triggerReload)
-
+    const scheduleRefresh = (data: { repoPath: string; relativePath: string }, snapshot: boolean) => {
+      if (normalizeProjectPath(data.repoPath) !== normalizeProjectPath(activeProject.path)) return
+      refreshGraph ||= snapshot
+      if (debounceTimer) clearTimeout(debounceTimer)
+      debounceTimer = setTimeout(() => {
+        if (refreshGraph) { refreshGraph = false; void loadData(activeProject.path) }
+        else void refreshStatus()
+      }, 300)
+    }
+    const unsubConfirmed = window.codeAwareness.onCodeMapFileConfirmed(data => scheduleRefresh(data, false))
+    const unsubIndexed = window.codeAwareness.onCodeMapFileIndexed(data => scheduleRefresh(data, true))
     return () => {
+      disposed = true
       if (debounceTimer) clearTimeout(debounceTimer)
       unsubConfirmed()
       unsubIndexed()
     }
-  }, [activeProject, loadData])
+  }, [activeProject, loadData, onStatusMessage])
 
   // Carrega larguras de colunas persistidas ao trocar de projeto
   useEffect(() => {
@@ -618,6 +636,8 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
       return fileId
     })
   }, [])
+
+  const handleSelectTreeFile = useCallback((file: CodeMapFile) => navigateToFile(file.id), [navigateToFile])
 
   // Navega para outro arquivo pelo grafo (chips de dependência do painel)
   const handleNavigateToFile = useCallback(
@@ -1052,7 +1072,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
                     <CodeMapTree
                       files={filteredData.files}
                       selectedFileId={selectedFileId}
-                      onSelectFile={(file) => navigateToFile(file.id)}
+                      onSelectFile={handleSelectTreeFile}
                       expandedNodesOverride={filteredData.expandedNodes}
                       relatedFileIds={relatedFileIds}
                       elementCounts={elementCounts}
@@ -1066,7 +1086,7 @@ export const CodeMapView: React.FC<CodeMapViewProps> = ({
                 <CodeMapTree
                   files={filteredData.files}
                   selectedFileId={selectedFileId}
-                  onSelectFile={(file) => navigateToFile(file.id)}
+                  onSelectFile={handleSelectTreeFile}
                   expandedNodesOverride={filteredData.expandedNodes}
                   relatedFileIds={relatedFileIds}
                   elementCounts={elementCounts}

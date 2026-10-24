@@ -26,13 +26,13 @@ import { telemetryService } from './telemetry-service'
 import type { StructureExtractionPort } from './extraction/structure-extraction-port'
 import { createDefaultExtractors } from './extraction/default-extractors'
 import { extractTextDocument } from './extraction/text-document-extractor'
-import { symbolResolutionFacts } from './symbol-resolution-facts'
+import { symbolResolutionFacts, type SymbolResolutionFacts } from './symbol-resolution-facts'
 import { RepositoryChangeReadiness } from './repository-change-readiness'
 import { RelationshipResolver } from './relationship-resolver'
 import { getCanonicalTokenizer, type TokenizerPort } from './tokenizer'
 import {
   createSymbolReferenceId,
-  resolveSymbolReferences,
+  resolveSymbolReferencesCooperatively,
   type PersistedSymbolReference,
   type SymbolReferenceFile
 } from './symbol-reference-resolver'
@@ -83,6 +83,8 @@ export interface FileChangeBatchResult {
 }
 
 export class RepositoryModel {
+  private readonly elementSnapshots = new Map<string, { revision: number; elements: CodeMapElement[] }>()
+  private closed = false
   private mutationQueue: Promise<void> = Promise.resolve()
   private readonly recoveryChanges = new Map<string, number>()
   readonly readiness = new RepositoryChangeReadiness()
@@ -261,29 +263,67 @@ export class RepositoryModel {
     return updated
   }
 
-  private persistableReferences(files: readonly SymbolReferenceFile[], sources?: ReadonlySet<string>): PersistedSymbolReference[] {
-    return resolveSymbolReferences(this.repoPath, files, sources).map((reference) => ({
+  private async persistableReferences(files: readonly SymbolReferenceFile[], sources?: ReadonlySet<string>, assertCurrent?: () => void): Promise<PersistedSymbolReference[]> {
+    return (await resolveSymbolReferencesCooperatively(this.repoPath, files, sources, assertCurrent)).map((reference) => ({
       ...reference, id: createSymbolReferenceId(this.repositoryId, reference), repositoryId: this.repositoryId
     }))
   }
 
-  private buildSymbolResolutionSnapshot(): SymbolReferenceFile[] {
-    const elementsByFile = new Map<string, CodeMapElement[]>()
-    for (const element of this.db.getElementsByRepository(this.repositoryId)) {
-      const elements = elementsByFile.get(element.fileId) ?? []
-      elements.push(element)
-      elementsByFile.set(element.fileId, elements)
+  private cachedFileElements(fileId: string): CodeMapElement[] {
+    const revision = this.db.projectionRevision(this.repositoryId, fileId)
+    const cached = this.elementSnapshots.get(fileId)
+    if (cached?.revision === revision) return cached.elements
+    const elements = this.db.getElementsByFile(fileId)
+    this.elementSnapshots.set(fileId, { revision, elements })
+    return elements
+  }
+
+  private symbolTargetSurface(elements: CodeMapElement[], facts: SymbolResolutionFacts | undefined): string | null {
+    if (!facts) return null
+    return JSON.stringify([
+      elements.map(element => [element.id, element.name, element.kind, element.parentElementId,
+        element.modifiers, element.visibility, element.returnType, element.baseClass,
+        element.declarationSignature, element.parameterCount]).sort((a, b) => String(a[0]).localeCompare(String(b[0]))),
+      facts.importBindings, facts.exportedConstNewBindings, facts.exportedConstCallBindings, facts.fileImportTargets
+    ])
+  }
+
+  private async loadRepositoryElements(): Promise<CodeMapElement[]> {
+    const elements: CodeMapElement[] = []
+    let deadline = performance.now() + 8
+    const files = this.db.getFilesByRepository(this.repositoryId)
+    const retained = new Set(files.map(file => file.id))
+    for (const id of this.elementSnapshots.keys()) if (!retained.has(id)) this.elementSnapshots.delete(id)
+    for (const file of files) {
+      elements.push(...this.cachedFileElements(file.id))
+      if (performance.now() >= deadline) {
+        await new Promise<void>(resolve => setImmediate(resolve))
+        if (this.closed) throw new Error('SYMBOL_RESOLUTION_CANCELLED')
+        deadline = performance.now() + 8
+      }
     }
-    const facts = new Map(this.db.getSymbolResolutionFacts(this.repositoryId).map((fact) => [fact.fileId, fact]))
-    return this.db.getFilesByRepository(this.repositoryId).map((file) => {
-      const fact = facts.get(file.id)
+    return elements
+  }
+
+  private async buildSymbolResolutionSnapshot(assertCurrent: () => void): Promise<SymbolReferenceFile[]> {
+    const snapshot: SymbolReferenceFile[] = []
+    let deadline = performance.now() + 8
+    for (const file of this.db.getFilesByRepository(this.repositoryId)) {
+      const fact = this.db.getSymbolResolutionFacts(this.repositoryId, file.id)[0]
       if (!fact || fact.contentHash !== file.contentHash) throw new Error(`SYMBOL_RESOLUTION_FACTS_UNAVAILABLE: ${file.relativePath}`)
-      return {
-        fileId: file.id, relativePath: file.relativePath, elements: elementsByFile.get(file.id) ?? [],
+      snapshot.push({
+        fileId: file.id, relativePath: file.relativePath, elements: this.cachedFileElements(file.id),
         importBindings: fact.importBindings, exportedConstNewBindings: fact.exportedConstNewBindings,
         exportedConstCallBindings: fact.exportedConstCallBindings, symbolReferences: fact.symbolReferenceCandidates
+      })
+      if (performance.now() >= deadline) {
+        await new Promise<void>(resolve => setImmediate(resolve))
+        assertCurrent()
+        deadline = performance.now() + 8
       }
-    })
+    }
+    assertCurrent()
+    return snapshot
   }
 
   private async refreshSymbolReferences(sources: ReadonlySet<string>, correlationId: string, factsRegenerated = 0): Promise<number> {
@@ -291,8 +331,18 @@ export class RepositoryModel {
     let phase = 'RESOLUTION'
     telemetryService.log(correlationId, 'CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_STARTED', { repoPath: this.repoPath, affectedSourceCount: sources.size })
     try {
-      const snapshot = this.buildSymbolResolutionSnapshot()
-      const references = this.persistableReferences(snapshot, sources)
+      const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
+      const assertCurrent = (): void => {
+        if (this.closed) throw new Error('SYMBOL_RESOLUTION_CANCELLED')
+        if (revision !== this.db.projectionRevision(this.repositoryId, '@symbols')) throw new Error('PROJECTION_INPUT_CHANGED')
+      }
+      const snapshotStarted = performance.now()
+      const snapshot = await this.buildSymbolResolutionSnapshot(assertCurrent)
+      const snapshotMs = performance.now() - snapshotStarted
+      const resolutionStarted = performance.now()
+      const references = await this.persistableReferences(snapshot, sources, assertCurrent)
+      const resolverMs = performance.now() - resolutionStarted
+      const persistenceStarted = performance.now()
       const grouped = new Map<string, PersistedSymbolReference[]>()
       for (const reference of references) {
         const group = grouped.get(reference.sourceFileId) ?? []
@@ -301,8 +351,9 @@ export class RepositoryModel {
       }
       phase = 'PERSISTENCE'
       const version = this.projectionVersions.structure + ':' + this.projectionVersions.resolver
-      const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
       for (const source of sources) {
+        await new Promise<void>(resolve => setImmediate(resolve))
+        assertCurrent()
         this.db.replaceSymbolReferencesForFile(source, grouped.get(source) ?? [])
         this.db.finishProjection(this.repositoryId, source, 'SYMBOL_SOURCE', version, revision)
       }
@@ -313,6 +364,7 @@ export class RepositoryModel {
       telemetryService.log(correlationId, 'CODE_MAP', 'SYMBOL_REFERENCE_PERSISTENCE_COMPLETED', { repoPath: this.repoPath, resolvedReferenceCount: references.length })
       telemetryService.log(correlationId, 'CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED', { repoPath: this.repoPath,
         affectedSourceCount: sources.size, resolvedReferenceCount: references.length, resolutionFactsLoaded: snapshot.length,
+        snapshotMs, resolverMs, persistenceMs: performance.now() - persistenceStarted,
         factsRegenerated, candidateCount: snapshot.filter((file) => sources.has(file.fileId)).reduce((count, file) => count + file.symbolReferences.length, 0),
         durationMs: Date.now() - startedAt
       })
@@ -331,7 +383,7 @@ export class RepositoryModel {
 
   private async backfillSymbolReferencesState(): Promise<number> {
     const version = this.projectionVersions.structure + ':' + this.projectionVersions.resolver
-    if (this.db.projectionCurrent(this.repositoryId, '', 'SYMBOLS', version)) {
+    if (this.db.projectionCurrent(this.repositoryId, '', 'SYMBOLS', version) && this.db.getUnfinishedSymbolSources(this.repositoryId, version).length === 0) {
       const correlationId = telemetryService.startOperation('BACKFILL_SYMBOL_REFERENCES')
       const count = this.db.countSymbolReferences(this.repositoryId)
       telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_STARTED', { repoPath: this.repoPath })
@@ -382,7 +434,7 @@ export class RepositoryModel {
       }
       regenerated++
     }
-    if (!this.db.projectionCurrent(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)) this.refreshRepositoryRelationships(correlationId)
+    if (!this.db.projectionCurrent(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)) await this.refreshRepositoryRelationships(correlationId)
     for (const change of structuralChanges) this.readiness.advance(change, 'RELATIONSHIPS')
     await new Promise<void>((resolve) => setImmediate(resolve))
     const sources = new Set(this.db.getFilesByRepository(this.repositoryId).filter(file => !this.db.projectionCurrent(this.repositoryId, file.id, 'SYMBOL_SOURCE', version)).map(file => file.id))
@@ -889,12 +941,15 @@ export class RepositoryModel {
     this.readiness.advance(change, 'RELATIONSHIPS')
     await new Promise<void>((resolve) => setImmediate(resolve))
     const symbolsStarted = Date.now()
-    const symbolReferences = this.persistableReferences(symbolReferenceFiles)
+    const symbolReferences = await this.persistableReferences(symbolReferenceFiles)
     for (const file of allFiles) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      if (this.closed) throw new Error('SYMBOL_RESOLUTION_CANCELLED')
       this.db.replaceSymbolReferencesForFile(
         file.id,
         symbolReferences.filter((reference) => reference.sourceFileId === file.id)
       )
+      this.db.finishProjection(this.repositoryId, file.id, 'SYMBOL_SOURCE', this.projectionVersions.structure + ':' + this.projectionVersions.resolver)
     }
 
     this.db.finishProjection(this.repositoryId, '', 'SYMBOLS', this.projectionVersions.structure + ':' + this.projectionVersions.resolver)
@@ -974,8 +1029,8 @@ export class RepositoryModel {
     return relationships
   }
 
-  private refreshRepositoryRelationships(correlationId: string, relativePath?: string): { files: CodeMapFile[]; elements: CodeMapElement[]; relationships: CodeMapRelationship[] } {
-    const allElements = this.db.getElementsByRepository(this.repositoryId)
+  private async refreshRepositoryRelationships(correlationId: string, relativePath?: string): Promise<{ files: CodeMapFile[]; elements: CodeMapElement[]; relationships: CodeMapRelationship[] }> {
+    const allElements = await this.loadRepositoryElements()
     const allFiles = this.db.getFilesByRepository(this.repositoryId)
     const allElementInterfaces = this.db.getElementInterfacesByRepository(this.repositoryId)
 
@@ -1062,8 +1117,12 @@ export class RepositoryModel {
         return { completedPaths: [], changedPaths: [], errors: unique.map(relativePath => ({ relativePath, error: error instanceof Error ? error : new Error(String(error)) })) }
       }
       const oldFiles = this.db.getFilesByRepository(this.repositoryId)
-      const oldElements = this.db.getElementsByRepository(this.repositoryId)
+      const oldElements = await this.loadRepositoryElements()
       const oldRelationships = this.db.getRelationshipsByRepository(this.repositoryId)
+      const previousSurfaces = new Map<string, string | null>()
+      if (!force) for (const file of oldFiles) if (selectedPaths.has(file.relativePath)) {
+        previousSurfaces.set(file.id, this.symbolTargetSurface(oldElements.filter(element => element.fileId === file.id), this.db.getSymbolResolutionFacts(this.repositoryId, file.id)[0]))
+      }
       const changedFiles = new Set<string>()
       const completedPaths: string[] = []
       const errors: FileChangeBatchResult['errors'] = []
@@ -1083,11 +1142,19 @@ export class RepositoryModel {
         if (projectionNeeded) {
           this.db.beginProjection(this.repositoryId, '', 'SYMBOLS', version)
           const relationshipStarted = Date.now()
-          const current = this.refreshRepositoryRelationships(correlationId)
+          const current = await this.refreshRepositoryRelationships(correlationId)
           metrics.relationshipResolutions++
           metrics.phaseDurationMs.relationships += Date.now() - relationshipStarted
-          const affected = this.affectedSymbolSources(changedFiles, oldFiles, oldElements, oldRelationships, current)
-          if (changedFiles.size === 0) for (const file of current.files) if (selectedPaths.has(file.relativePath)) affected.add(file.id)
+          const seeds = new Set(changedFiles)
+          if (changedFiles.size === 0) for (const file of current.files) if (selectedPaths.has(file.relativePath)) seeds.add(file.id)
+          const stableTargets = new Set<string>()
+          for (const fileId of changedFiles) {
+            const previous = previousSurfaces.get(fileId)
+            if (previous && previous === this.symbolTargetSurface(current.elements.filter(element => element.fileId === fileId), this.db.getSymbolResolutionFacts(this.repositoryId, fileId)[0])) stableTargets.add(fileId)
+          }
+          const affected = this.affectedSymbolSources(seeds, oldFiles, oldElements, oldRelationships, current, stableTargets)
+          for (const id of this.db.getUnfinishedSymbolSources(this.repositoryId, version)) affected.add(id)
+          if (changedFiles.size === 0) for (const id of affected) if (this.db.projectionCurrent(this.repositoryId, id, 'SYMBOL_SOURCE', version)) affected.delete(id)
           for (const pending of this.db.getPendingFileChanges(this.repositoryId)) for (const id of pending.affectedSources) affected.add(id)
           const existingIds = new Set(current.files.map(file => file.id))
           for (const id of affected) if (!existingIds.has(id)) affected.delete(id)
@@ -1106,7 +1173,7 @@ export class RepositoryModel {
         }
         for (const path of completedPaths) {
           const completed = this.db.completeFileChange(this.repositoryId, path, revisions.get(path)!)
-          this.readiness.advance(changes.get(path)!, 'SYMBOL_REFERENCES')
+          this.readiness.advancePathThrough(path, changes.get(path)!, 'SYMBOL_REFERENCES')
           if (completed) this.readiness.recover(path)
           const recovery = this.recoveryChanges.get(path)
           if (completed && recovery !== undefined) { this.readiness.advance(recovery, 'SYMBOL_REFERENCES'); this.recoveryChanges.delete(path) }
@@ -1128,7 +1195,7 @@ export class RepositoryModel {
     })
   }
 
-  private affectedSymbolSources(changed: Set<string>, oldFiles: CodeMapFile[], oldElements: CodeMapElement[], oldRelationships: CodeMapRelationship[], current: { files: CodeMapFile[]; elements: CodeMapElement[]; relationships: CodeMapRelationship[] }): Set<string> {
+  private affectedSymbolSources(changed: Set<string>, oldFiles: CodeMapFile[], oldElements: CodeMapElement[], oldRelationships: CodeMapRelationship[], current: { files: CodeMapFile[]; elements: CodeMapElement[]; relationships: CodeMapRelationship[] }, stableTargets: ReadonlySet<string> = new Set()): Set<string> {
     const owners = new Map([...oldElements, ...current.elements].map(element => [element.id, element.fileId]))
     for (const file of [...oldFiles, ...current.files]) owners.set(file.id, file.id)
     const reverse = new Map<string, Set<string>>()
@@ -1145,8 +1212,12 @@ export class RepositoryModel {
       if (!previous.has(relationship.id) || !next.has(relationship.id)) affected.add(source)
     }
     const queue = [...affected]
-    while (queue.length) for (const source of reverse.get(queue.pop()!) ?? []) {
-      if (!affected.has(source)) { affected.add(source); queue.push(source) }
+    while (queue.length) {
+      const target = queue.pop()!
+      if (stableTargets.has(target)) continue
+      for (const source of reverse.get(target) ?? []) {
+        if (!affected.has(source)) { affected.add(source); queue.push(source) }
+      }
     }
     return affected
   }
@@ -1269,8 +1340,12 @@ export class RepositoryModel {
       extractor: extractor ? extension : 'text-fallback'
     })
 
+    await new Promise<void>(resolve => setImmediate(resolve))
+    if (this.closed) throw new Error('SYMBOL_RESOLUTION_CANCELLED')
     this.db.replaceIndexedFileState(fileRecord, structureResult.elements, structureResult.relationships,
       structureResult.elementInterfaces, [], symbolResolutionFacts(fileId, contentHash, structureResult))
+    await new Promise<void>(resolve => setImmediate(resolve))
+    if (this.closed) throw new Error('SYMBOL_RESOLUTION_CANCELLED')
     telemetryService.log(cid, 'CODE_MAP', 'STRUCTURAL_PERSISTENCE_COMPLETED', { repoPath: this.repoPath,
       relativePath,
       elementCount: structureResult.elements.length,
@@ -1340,6 +1415,15 @@ export class RepositoryModel {
 
   getImporterFiles(fileId: string, limit: number): CodeMapFile[] {
     return this.db.getImporterFiles?.(fileId, limit) ?? []
+  }
+
+  async getElementsSnapshot(): Promise<CodeMapElement[]> {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
+      const elements = await this.loadRepositoryElements()
+      if (revision === this.db.projectionRevision(this.repositoryId, '@symbols')) return elements.sort((left, right) => left.location.start.line - right.location.start.line)
+    }
+    throw new Error('PROJECTION_INPUT_CHANGED')
   }
 
   getElementsByRepository(): CodeMapElement[] {
@@ -1612,6 +1696,8 @@ export class RepositoryModel {
   }
 
   close(): void {
+    this.closed = true
+    this.elementSnapshots.clear()
     this.readiness.cancel(new Error('Repository closed before change readiness'))
     closeRepositoryDatabase(this.repoPath)
   }
