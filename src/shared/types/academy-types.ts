@@ -72,6 +72,10 @@ export interface AcademySkillVersion {
   createdAt: string
 }
 
+export type AcademySkillVersionMetadata = Omit<AcademySkillVersion, 'package'>
+export type AcademyHistoryOptions = { metadataOnly?: boolean; version?: never } | { version: number; metadataOnly?: never }
+export type AcademyHistoryResult = AcademySkillVersion[] | AcademySkillVersionMetadata[] | AcademySkillVersion
+
 export interface AcademySkillDetail extends AcademySkillSummary {
   current: AcademySkillVersion
 }

@@ -1,7 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcademyStore } from './academy-store'
 import Database from 'better-sqlite3'
 
@@ -16,6 +16,47 @@ const open = () => {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('AcademyStore', () => {
+  it('discovers metadata and selects an exact immutable package while preserving legacy and archived history', () => {
+    const store = open()
+    try {
+      const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      const selected = store.update({ skillId: skill.id, expectedVersion: 1, package: pkg('alpha', 'literal ç 漢字 ` ${x} $(cmd)\r\n'), origin: 'MCP' }).current
+      const latest = store.update({ skillId: skill.id, expectedVersion: 2, package: pkg('alpha', '# latest'), origin: 'LOCAL_CLI' }).current
+      const full = [latest, selected, skill.current]
+      expect(store.history(skill.id)).toEqual(full)
+      expect(store.history(skill.id, { metadataOnly: true })).toEqual(full.map(({ package: _, ...metadata }) => metadata))
+      expect(store.history(skill.id, { version: 2 })).toEqual(selected)
+      store.archive(skill.id, 3)
+      expect(store.history(skill.id, { version: 2 })).toEqual(selected)
+      expect(store.history(skill.id, { metadataOnly: true })).toHaveLength(3)
+      expect(() => store.history(skill.id, { version: 4 })).toThrowError('VERSION_NOT_FOUND')
+      expect(() => store.history('absent', { metadataOnly: true })).toThrowError('SKILL_NOT_FOUND')
+      expect(() => store.history('absent', { version: 2 })).toThrowError('SKILL_NOT_FOUND')
+    } finally { store.close() }
+  })
+
+  it('projects metadata in SQL and never materializes unselected version bodies', () => {
+    const store = open()
+    const db = (store as unknown as { db: Database.Database }).db
+    const prepare = vi.spyOn(db, 'prepare')
+    try {
+      const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      store.update({ skillId: skill.id, expectedVersion: 1, package: pkg('alpha', 'unselected'), origin: 'MCP' })
+      db.prepare('UPDATE academy_versions SET artifacts_json=? WHERE skill_id=? AND version=2').run('invalid JSON', skill.id)
+      const changesBefore = db.prepare('SELECT total_changes() AS count').get()
+      prepare.mockClear()
+      expect(store.history(skill.id, { metadataOnly: true }).map(v => v.version)).toEqual([2, 1])
+      const metadataSql = prepare.mock.calls.map(([sql]) => String(sql)).filter(sql => sql.includes('academy_versions'))
+      expect(metadataSql).toHaveLength(1)
+      expect(metadataSql[0]).not.toMatch(/\*|skill_md|artifacts_json/)
+      prepare.mockClear()
+      expect(store.history(skill.id, { version: 1 })).toEqual(skill.current)
+      const selectedSql = prepare.mock.calls.map(([sql]) => String(sql)).filter(sql => sql.includes('academy_versions'))
+      expect(selectedSql).toEqual(['SELECT * FROM academy_versions WHERE skill_id=? AND version=?'])
+      expect(db.prepare('SELECT total_changes() AS count').get()).toEqual(changesBefore)
+      expect(() => store.history(skill.id)).toThrow()
+    } finally { prepare.mockRestore(); store.close() }
+  })
   it('migrates legacy distribution states atomically and preserves indexes, foreign keys and restart persistence', () => {
     const store = open()
     const path = store.databasePath

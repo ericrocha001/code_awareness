@@ -7,13 +7,14 @@ import { AcademyImporter } from './academy-importer'
 import { AcademyProjectionService } from './academy-projection-service'
 import { AcademyStore } from './academy-store'
 import { AcademyWatcher } from './academy-watcher'
-import { hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
+import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
 import { observeStableSkillDirectory, readSkillDirectory, removeSkillDirectory, replaceSkillDirectory } from './academy-filesystem'
 import { AcademyDistributionService } from './distribution/academy-distribution-service'
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
 import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
+import type { AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
 const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE', 'ANTIGRAVITY']
 
@@ -100,7 +101,17 @@ export class AcademyService {
   snapshot(): AcademySnapshot { return { skills: this.store.list(), destinations: this.store.listDestinations(), conflicts: this.store.conflictSummaries() } }
   list(status?: 'ACTIVE' | 'ARCHIVED') { return this.store.list(status) }
   get(id: string) { return this.store.get(id) }
-  history(id: string) { return this.store.history(id) }
+  history(id: string): AcademySkillVersion[]
+  history(id: string, options: { metadataOnly: true }): AcademySkillVersionMetadata[]
+  history(id: string, options: { version: number }): AcademySkillVersion
+  history(id: string, options: AcademyHistoryOptions): AcademyHistoryResult
+  history(id: string, options: AcademyHistoryOptions = {}): AcademyHistoryResult {
+    if (!options || typeof options !== 'object' || Array.isArray(options) || Object.keys(options).some(key => !['metadataOnly', 'version'].includes(key))) throw new AcademyError('INVALID_ARGUMENT')
+    const hasMetadata = Object.hasOwn(options, 'metadataOnly'), hasVersion = Object.hasOwn(options, 'version')
+    if (hasMetadata && (hasVersion || typeof options.metadataOnly !== 'boolean')) throw new AcademyError('INVALID_ARGUMENT')
+    if (hasVersion && (!Number.isSafeInteger(options.version) || Number(options.version) < 1)) throw new AcademyError('INVALID_ARGUMENT')
+    return this.store.history(id, options)
+  }
   analyzeChangeImpact(input: unknown) { this.assertNotClosed(); return analyzeAcademyImpact(this.store, input) }
   verifyChangeImpact(input: unknown) { return verifyAcademyImpact(this.store, input) }
   scheduleDestinationReconciliation(destinationId: string): Promise<void> {

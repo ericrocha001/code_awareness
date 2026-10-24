@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import Database from 'better-sqlite3'
-import type { AcademyGitPublicationState } from '../../shared/types/academy-types'
+import type { AcademyGitPublicationState, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 import type { AcademyConflict, AcademyCreateInput, AcademyDestination, AcademyDistributionState, AcademyDistributionStatus, AcademyDistributionTarget, AcademyGitProfile, AcademyGitSyncState, AcademyMarketplaceState, AcademyMarketplaceTakeoverStatus, AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiRelease, AcademyOpenAiReleaseStatus, AcademyPackage, AcademyPluginPackageRevision, AcademySkillDetail, AcademySkillScope, AcademySkillStatus, AcademySkillSummary, AcademySkillVersion, AcademyUpdateInput, AcademyVersionOrigin } from '../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
 
@@ -200,8 +200,17 @@ export class AcademyStore {
     return { ...this.summary(row), current: this.getVersion(id, row.current_version) }
   }
 
-  history(id: string): AcademySkillVersion[] {
+  history(id: string): AcademySkillVersion[]
+  history(id: string, options: { metadataOnly: true }): AcademySkillVersionMetadata[]
+  history(id: string, options: { version: number }): AcademySkillVersion
+  history(id: string, options: AcademyHistoryOptions): AcademyHistoryResult
+  history(id: string, options: AcademyHistoryOptions = {}): AcademyHistoryResult {
     this.skillRow(id)
+    if (options.version !== undefined) return this.getVersion(id, options.version)
+    if (options.metadataOnly) {
+      return (this.db.prepare('SELECT skill_id, version, package_hash, origin, created_at FROM academy_versions WHERE skill_id=? ORDER BY version DESC').all(id) as Row[])
+        .map(row => ({ skillId: row.skill_id, version: row.version, packageHash: row.package_hash, origin: row.origin, createdAt: row.created_at }))
+    }
     return (this.db.prepare('SELECT * FROM academy_versions WHERE skill_id=? ORDER BY version DESC').all(id) as Row[]).map(versionFromRow)
   }
 

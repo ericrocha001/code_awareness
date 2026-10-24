@@ -1,4 +1,4 @@
-import type { AcademyPackage, AcademySkillScope, AcademyCreateInput, AcademyUpdateInput } from '../../shared/types/academy-types'
+import type { AcademyHistoryOptions, AcademyPackage, AcademySkillScope, AcademyCreateInput, AcademyUpdateInput } from '../../shared/types/academy-types'
 import type { AcademyService } from './academy-service'
 import { operation, type LocalChannelAdapter } from '../local-agent-channel/local-channel-types'
 import { object, text, integer, strings, invalid } from '../local-agent-channel/request-validation'
@@ -24,6 +24,10 @@ export class AcademyLocalAdapter implements LocalChannelAdapter {
       return projects
     }
     this.operations = {
+      history: operation(input => {
+        const { skillId, ...options } = object(input, ['skillId', 'metadataOnly', 'version'])
+        return { skillId: text(skillId), options: options as AcademyHistoryOptions }
+      }, ({ skillId, options }) => service.history(skillId, options)),
       change_impact: operation(input => input, input => service.analyzeChangeImpact(input)),
       verify_change_impact: operation(input => input, input => service.verifyChangeImpact(input)),
       list: operation(input => {

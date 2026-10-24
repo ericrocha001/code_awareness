@@ -1,4 +1,4 @@
-import type { AcademyPackage, AcademySkillScope } from '../../shared/types/academy-types'
+import type { AcademyHistoryOptions, AcademyPackage, AcademySkillScope } from '../../shared/types/academy-types'
 import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { AcademyService } from './academy-service'
 import { academyImpactFreshnessSchema, academyImpactSchema } from './academy-impact-schema'
@@ -18,7 +18,7 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
   tool('analyze_academy_change_impact', 'Read-only package change evidence and possible DIRECT consumers from ACTIVE canonical Skills. Mentions are not dependencies or compatibility verdicts. Use changes/consumers/evidence offsets and consumerId for bounded detail. Candidate mode requires expectedVersion plus complete package; retrospective mode requires baseVersion and targetVersion.', academyImpactSchema),
   tool('list_academy_skills', 'List canonical Academy skills and their current status, scope and version.', { type: 'object', properties: { status: { type: 'string', enum: ['ACTIVE', 'ARCHIVED'] } }, additionalProperties: false }),
   tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
-  tool('get_academy_skill_history', 'List immutable versions of one Academy skill.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
+  tool('get_academy_skill_history', 'Read immutable Academy versions. Prefer metadataOnly:true to discover versions without packages, then version:n to retrieve exactly one literal package. These selectors are mutually exclusive, including metadataOnly:false. With only skillId, intentionally returns the complete legacy history in descending version order.', { type: 'object', properties: { skillId: id, metadataOnly: { type: 'boolean' }, version: { ...version, maximum: Number.MAX_SAFE_INTEGER } }, required: ['skillId'], not: { required: ['metadataOnly', 'version'] }, additionalProperties: false }),
   tool('create_academy_skill', 'Create a canonical Academy skill. Confirms SQLite persistence immediately (PERSISTED); projection and consumer distribution are decoupled and scheduled asynchronously. Query get_academy_skill_delivery_status for delivery convergence.', { type: 'object', properties: { package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true } }, required: ['package', 'scope'], additionalProperties: false }),
   tool('update_academy_skill', 'Create a new immutable Academy skill version. expectedVersion is required for optimistic concurrency. Confirms SQLite persistence immediately (PERSISTED); projection and consumer distribution are decoupled and scheduled asynchronously. Query get_academy_skill_delivery_status for delivery convergence.', { type: 'object', properties: { skillId: id, expectedVersion: version, package: packageSchema, scope: { type: 'string', enum: ['GLOBAL', 'PROJECT'] }, projectIds: { type: 'array', items: id, uniqueItems: true } }, required: ['skillId', 'expectedVersion', 'package'], additionalProperties: false }),
   tool('get_academy_skill_delivery_status', 'Inspect the compact, version-aware delivery and convergence status of one Academy skill without downloading packages or scanning the filesystem.', { type: 'object', properties: { skillId: id, expectedVersion: version }, required: ['skillId'], additionalProperties: false }),
@@ -44,7 +44,11 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
       case 'analyze_academy_change_impact': result = service.analyzeChangeImpact(args); break
       case 'list_academy_skills': result = service.list(optionalEnum(values.status, ['ACTIVE', 'ARCHIVED']) as 'ACTIVE' | 'ARCHIVED' | undefined); break
       case 'get_academy_skill': result = service.get(string(values.skillId, 'skillId')); break
-      case 'get_academy_skill_history': result = service.history(string(values.skillId, 'skillId')); break
+      case 'get_academy_skill_history': {
+        const { skillId, ...options } = values
+        result = service.history(string(skillId, 'skillId'), options as AcademyHistoryOptions)
+        break
+      }
       case 'get_academy_skill_delivery_status': result = service.getDeliveryStatus(string(values.skillId, 'skillId'), values.expectedVersion === undefined ? undefined : integer(values.expectedVersion, 'expectedVersion')); break
       case 'create_academy_skill': result = await service.create({ package: pkg(values.package), scope: enumValue(values.scope, ['GLOBAL', 'PROJECT'], 'scope') as AcademySkillScope, projectIds: strings(values.projectIds), origin: 'MCP' }); break
       case 'update_academy_skill': result = await service.update({ skillId: string(values.skillId, 'skillId'), expectedVersion: integer(values.expectedVersion, 'expectedVersion'), package: pkg(values.package), scope: optionalEnum(values.scope, ['GLOBAL', 'PROJECT']) as AcademySkillScope | undefined, projectIds: values.projectIds === undefined ? undefined : strings(values.projectIds), origin: 'MCP' }); break

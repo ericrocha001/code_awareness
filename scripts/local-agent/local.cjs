@@ -10,7 +10,7 @@ async function main(args = process.argv.slice(2)) {
   if (domain === 'continuum') return continuum(args, channel)
   if (domain !== 'academy' && domain !== 'status') fail('INVALID_ARGUMENT')
   const action = domain === 'status' ? 'status' : args.shift()
-  const allowed = domain === 'status' ? ['--profile'] : { change_impact: ['--profile', '--file'], verify_change_impact: ['--profile', '--file'], list: ['--profile', '--status'], get: ['--profile', '--id'], create: ['--profile', '--file', '--scope', '--projects'], update: ['--profile', '--file', '--id', '--version', '--scope', '--projects'], delivery_status: ['--profile', '--id', '--version'] }[action]
+  const allowed = domain === 'status' ? ['--profile'] : { history: ['--profile', '--id', '--metadata-only', '--version'], change_impact: ['--profile', '--file'], verify_change_impact: ['--profile', '--file'], list: ['--profile', '--status'], get: ['--profile', '--id'], create: ['--profile', '--file', '--scope', '--projects'], update: ['--profile', '--file', '--id', '--version', '--scope', '--projects'], delivery_status: ['--profile', '--id', '--version'] }[action]
   if (!allowed) fail('INVALID_ARGUMENT')
   const options = {}
   for (let index = 0; index < args.length; index += 2) {
@@ -30,9 +30,20 @@ async function main(args = process.argv.slice(2)) {
     return connect(descriptor, { domain: 'academy', action, args: input })
   }
   if (options['--status']) request.status = options['--status']
-  if (['get', 'update', 'delivery_status'].includes(action)) {
+  if (['get', 'update', 'delivery_status', 'history'].includes(action)) {
     if (!options['--id']) fail('INVALID_ARGUMENT')
     request.skillId = options['--id']
+  }
+  if (action === 'history') {
+    if (options['--metadata-only'] !== undefined) {
+      if (!['true', 'false'].includes(options['--metadata-only'])) fail('INVALID_ARGUMENT')
+      request.metadataOnly = options['--metadata-only'] === 'true'
+    }
+    if (options['--version'] !== undefined) {
+      if (!/^[1-9][0-9]*$/.test(options['--version'])) fail('INVALID_ARGUMENT')
+      request.version = Number(options['--version'])
+      if (!Number.isSafeInteger(request.version)) fail('INVALID_ARGUMENT')
+    }
   }
   if (['create', 'update'].includes(action)) {
     if (!options['--file'] || action === 'create' && !options['--scope']) fail('INVALID_ARGUMENT')

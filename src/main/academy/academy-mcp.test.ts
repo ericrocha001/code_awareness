@@ -2,7 +2,7 @@ import { textContent } from '../mcp/mcp-test-content'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcademyService } from './academy-service'
 import { ACADEMY_MCP_TOOLS, executeAcademyTool } from './academy-mcp'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
@@ -12,6 +12,41 @@ const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('Academy MCP administration', () => {
+  it('selects history depth without changing legacy results or accepting contradictory/unsafe selectors', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'academy-mcp-history-')); roots.push(root)
+    const service = new AcademyService(join(root, 'academy.db'))
+    try {
+      const first = { skillMd: '---\nname: history\ndescription: Literal historical package\n---\nç 漢字 ` ${x} $(cmd)\r\n', artifacts: { 'scripts/literal.sh': 'do not execute' } }
+      const skill = service.store.create({ package: first, scope: 'GLOBAL', origin: 'UI' })
+      service.store.update({ skillId: skill.id, expectedVersion: 1, package: { ...first, skillMd: first.skillMd + 'second' }, origin: 'MCP' })
+      const before = service.history(skill.id), snapshot = service.snapshot()
+      const history = vi.spyOn(service.store, 'history'), distribution = vi.spyOn(service, 'scheduleReconciliationForSkill')
+      const invoke = (args: object) => executeAcademyTool(service, 'get_academy_skill_history', args)
+      const full = await invoke({ skillId: skill.id })
+      expect(JSON.parse(full.content[0].text)).toEqual(before)
+      const metadata = await invoke({ skillId: skill.id, metadataOnly: true })
+      expect(JSON.parse(metadata.content[0].text)).toEqual(before.map(({ package: _, ...rest }) => rest))
+      expect(history).toHaveBeenLastCalledWith(skill.id, { metadataOnly: true })
+      const selected = await invoke({ skillId: skill.id, version: 1 })
+      expect(JSON.parse(selected.content[0].text)).toEqual(skill.current)
+      expect(history).toHaveBeenLastCalledWith(skill.id, { version: 1 })
+      expect(JSON.parse((await invoke({ skillId: skill.id, metadataOnly: false })).content[0].text)).toEqual(before)
+      for (const options of [{ version: 0 }, { version: -1 }, { version: 1.5 }, { version: Number.MAX_SAFE_INTEGER + 1 }, { version: '1' }, { version: null }, { version: 1, metadataOnly: true }, { version: 1, metadataOnly: false }, { metadataOnly: 'true' }, { unknown: true }]) {
+        const result = await invoke({ skillId: skill.id, ...options })
+        expect(result.isError).toBe(true)
+        expect(JSON.parse(result.content[0].text).error).toBe('INVALID_ARGUMENT')
+      }
+      expect(JSON.parse((await invoke({ skillId: skill.id, version: 3 })).content[0].text).error).toBe('VERSION_NOT_FOUND')
+      expect(JSON.parse((await invoke({ skillId: 'absent', version: 1 })).content[0].text).error).toBe('SKILL_NOT_FOUND')
+      expect(service.snapshot()).toEqual(snapshot)
+      expect(service.history(skill.id)).toEqual(before)
+      expect(distribution).not.toHaveBeenCalled()
+      service.store.archive(skill.id, 2)
+      expect(JSON.parse((await invoke({ skillId: skill.id, version: 1 })).content[0].text)).toEqual(skill.current)
+      expect(ACADEMY_MCP_TOOLS.find(t => t.name === 'get_academy_skill_history')!.description).toContain('metadataOnly:true')
+      history.mockRestore(); distribution.mockRestore()
+    } finally { await service.close() }
+  })
   it('requires a confirmed review and preserves exact reconciled-content inspection through MCP', async () => {
     const root = mkdtempSync(join(tmpdir(), 'academy-mcp-review-')); roots.push(root)
     const service = new AcademyService(join(root, 'academy.db'))
