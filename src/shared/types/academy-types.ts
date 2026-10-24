@@ -117,7 +117,31 @@ export interface AcademyMutationReceipt {
   packageHash: string
   scope: AcademySkillScope
   projectIds: string[]
-  distribution: { status: 'CONVERGED' | 'DEGRADED' | 'NOT_APPLICABLE' | 'ERROR'; errorCode?: string }
+  distribution: { status: 'CONVERGED' | 'DEGRADED' | 'NOT_APPLICABLE' | 'ERROR' | 'PENDING'; errorCode?: string }
+}
+
+export type AcademyDeliveryConvergence = 'PENDING' | 'CONVERGED' | 'DEGRADED' | 'ERROR' | 'NOT_APPLICABLE'
+
+export interface AcademySkillDeliveryDestinationStatus {
+  destinationId: string
+  destinationName: string
+  target: AcademyDistributionTarget
+  status: AcademyDistributionStatus
+  canonicalVersion: number
+  distributedVersion: number | null
+  distributedHash: string | null
+  errorCode: string | null
+  errorMessage: string | null
+  checkedAt: string
+}
+
+export interface AcademySkillDeliveryStatus {
+  skillId: string
+  version: number
+  packageHash: string
+  status: AcademyDeliveryConvergence
+  destinations: AcademySkillDeliveryDestinationStatus[]
+  checkedAt?: string
 }
 
 export interface AcademyUpdateInput {

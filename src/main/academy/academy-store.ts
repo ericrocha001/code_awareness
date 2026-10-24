@@ -135,7 +135,13 @@ export class AcademyStore {
     })()
   }
 
-  close(): void { this.db.close() }
+  get isClosed(): boolean { return !this.db.open }
+
+  close(): void {
+    if (this.db.open) {
+      this.db.close()
+    }
+  }
 
   create(input: AcademyCreateInput): AcademySkillDetail {
     const pkg = normalizeAcademyPackage(input.package)

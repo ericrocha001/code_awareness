@@ -14,6 +14,7 @@ node scripts/local-agent/local.cjs academy get --id <skillId>
 node scripts/local-agent/local.cjs academy create --scope GLOBAL --file package.json
 node scripts/local-agent/local.cjs academy create --scope PROJECT --projects '["destinationId"]' --file package.json
 node scripts/local-agent/local.cjs academy update --id <skillId> --version <observedVersion> --file package.json
+node scripts/local-agent/local.cjs academy delivery_status --id <skillId> [--version <observedVersion>]
 ```
 
 Continuum conserva seleção explícita por RepositoryRecord.id e comprovação de checkout/worktree Git. Descoberta não contém Markdown; `get --format markdown` emite conteúdo literal sem newline adicional. [Fluxo do implementador](../continuum/LOCAL.md) continua válido.
@@ -22,7 +23,7 @@ Academy funciona mesmo sem repositório ativo ou fora de uma pasta Git. `list` r
 
 Em `PROJECT`, `--projects` deve conter IDs existentes de destinos Academy, consultáveis na gestão de destinos do aplicativo. IDs não são deduzidos do checkout ou de repositoryId. Não há fallback para GLOBAL. Em update, omitir scope/projetos preserva associações. Para alterá-las, informe scope e, para PROJECT, a lista integral de destinos; `--scope GLOBAL` limpa associações explícitas. Scope GLOBAL não aceita uma lista não vazia.
 
-Uma escrita Academy retorna `state: PERSISTED`, `skillId`, `version`, `packageHash`, scope/projetos e `distribution.status`: `CONVERGED`, `DEGRADED`, `NOT_APPLICABLE` ou `ERROR`. Persistência não equivale à distribuição. `CONVERGED` exige estados locais confirmados para a versão/hash retornados; não comprova atualização de plugin hospedado ou release remoto. Falha de reconciliação após commit retorna `PERSISTED` com `ERROR`, nunca sugere rollback. Consulte `get` e os diagnósticos do app para reconciliação posterior.
+Uma escrita Academy confirma persistência imediatamente (`state: 'PERSISTED'`) no SQLite. `distribution.status` no recibo imediato indica `PENDING` (quando há destinos atribuídos) ou `NOT_APPLICABLE` (quando não há destinos). Não esperar distribuição síncrona; utilize `academy delivery_status --id <skillId> [--version <versão>]` para consultar a qualquer momento o estado compacto de entrega e convergência (`PENDING`, `CONVERGED`, `DEGRADED`, `ERROR`, `NOT_APPLICABLE`) sem varredura em disco ou download de pacotes. Persistência não equivale a consumidores recarregados.
 
 `VERSION_CONFLICT` exige reler a versão e reavaliar. Create recusa nome ativo duplicado. Erros de scope/projetos, token, protocolo ou operação encerram sem sucesso falso. Archive/restore, conflitos, Git e releases não fazem parte deste canal. Depois de perder a resposta de uma escrita, consulte ID ou nome e versão/hash antes de reenviar; não existe retry automático.
 

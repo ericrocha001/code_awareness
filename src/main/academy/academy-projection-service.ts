@@ -22,11 +22,13 @@ export class AcademyProjectionService {
   }
 
   private async reconcileLocked(destinationId: string): Promise<void> {
+    if (this.store.isClosed) return
     const destination = this.store.listDestinations().find((item) => item.id === destinationId)
     if (!destination) return
     let blocked = false
     try {
       for (const summary of this.store.list()) {
+        if (this.store.isClosed) return
         const skill = this.store.get(summary.id)
         const projection = this.store.getProjection(skill.id, destination.id)
         const directory = join(destination.path, '.skills', skill.name)
@@ -35,8 +37,10 @@ export class AcademyProjectionService {
           ? [join(destination.path, '.skills', projection.skillName), directory] : [directory]
         let skillBlocked = false
         for (const path of paths) {
+          if (this.store.isClosed) return
           const keep = path === directory && shouldExist
           const disk = await observeSkillDirectory(path)
+          if (this.store.isClosed) return
           if (keep && disk.hash === skill.current.packageHash) {
             this.store.setProjection(skill.id, destination.id, skill.currentVersion, disk.hash, skill.name)
             continue
@@ -46,6 +50,7 @@ export class AcademyProjectionService {
           const newProjection = disk.hash === 'DELETED' && (!projection || path === directory && projection.skillName !== skill.name)
           if (!own && !newProjection) {
             const stable = await observeStableSkillDirectory(path)
+            if (this.store.isClosed) return
             if (stable?.hash === disk.hash) this.store.createConflict(skill.id, 'FILESYSTEM', projection?.version ?? null, stable.package, stable.hash, destination.id, path)
             skillBlocked = true
             continue
@@ -53,24 +58,34 @@ export class AcademyProjectionService {
           if (keep) {
             try {
               await replaceSkillDirectory(path, skill.current.package, disk.hash)
+              if (this.store.isClosed) return
               this.store.setProjection(skill.id, destination.id, skill.currentVersion, skill.current.packageHash, skill.name)
             } catch (error: any) {
+              if (this.store.isClosed) return
               if (error.code !== 'PROJECTION_CHANGED') throw error
               const changed = await observeStableSkillDirectory(path)
+              if (this.store.isClosed) return
               if (changed) this.store.createConflict(skill.id, 'FILESYSTEM', projection?.version ?? null, changed.package, changed.hash, destination.id, path)
               skillBlocked = true
             }
           } else {
-            if ((await observeSkillDirectory(path)).hash !== disk.hash) { skillBlocked = true; continue }
+            const currentObs = await observeSkillDirectory(path)
+            if (this.store.isClosed) return
+            if (currentObs.hash !== disk.hash) { skillBlocked = true; continue }
             await removeSkillDirectory(path)
           }
         }
+        if (this.store.isClosed) return
         if (!shouldExist && !skillBlocked) this.store.removeProjection(skill.id, destination.id)
         blocked ||= skillBlocked
       }
-      this.store.markDestination(destination.id, blocked ? 'ERROR' : 'SYNCED', blocked ? 'Synchronization requires conflict review.' : null)
+      if (!this.store.isClosed) {
+        this.store.markDestination(destination.id, blocked ? 'ERROR' : 'SYNCED', blocked ? 'Synchronization requires conflict review.' : null)
+      }
     } catch (error) {
-      this.store.markDestination(destination.id, 'ERROR', error instanceof Error ? error.message : String(error))
+      if (!this.store.isClosed) {
+        this.store.markDestination(destination.id, 'ERROR', error instanceof Error ? error.message : String(error))
+      }
     }
   }
 }

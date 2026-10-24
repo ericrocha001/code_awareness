@@ -36,7 +36,7 @@ describe('Academy MCP administration', () => {
     const service = new AcademyService(join(root, 'academy.db'))
     expect(ACADEMY_MCP_TOOLS.map((item) => item.name)).toContain('update_academy_skill')
     expect(ACADEMY_MCP_TOOLS.map((item) => item.name)).toEqual(expect.arrayContaining([
-      'get_openai_plugin_publication', 'prepare_openai_plugin_release', 'get_openai_plugin_release', 'confirm_openai_plugin_upload'
+      'get_openai_plugin_publication', 'prepare_openai_plugin_release', 'get_openai_plugin_release', 'confirm_openai_plugin_upload', 'get_academy_skill_delivery_status'
     ]))
     const packageValue = { skillMd: '---\nname: via-mcp\ndescription: MCP skill\n---\n# v1\n', artifacts: {} }
     const created = await executeAcademyTool(service, 'create_academy_skill', { package: packageValue, scope: 'GLOBAL' })
@@ -47,6 +47,12 @@ describe('Academy MCP administration', () => {
     expect(JSON.parse(stale.content[0].text).error).toBe('VERSION_CONFLICT')
     const updated = await executeAcademyTool(service, 'update_academy_skill', { skillId: skill.id, expectedVersion: 1, package: { ...packageValue, skillMd: packageValue.skillMd.replace('# v1', '# v2') } })
     expect(JSON.parse(updated.content[0].text).current.origin).toBe('MCP')
+    const delivery = await executeAcademyTool(service, 'get_academy_skill_delivery_status', { skillId: skill.id })
+    expect(delivery.isError).toBeUndefined()
+    expect(JSON.parse(delivery.content[0].text)).toMatchObject({ skillId: skill.id, version: 2, status: 'NOT_APPLICABLE' })
+    const invalidDelivery = await executeAcademyTool(service, 'get_academy_skill_delivery_status', { skillId: skill.id, expectedVersion: 999 })
+    expect(invalidDelivery.isError).toBe(true)
+    expect(invalidDelivery.content[0].text).toContain('VERSION_NOT_FOUND')
     service.close()
   })
 

@@ -20,7 +20,7 @@ import type { ContinuumVisualPublishRequest, ContinuumVisualSelection } from '..
 import type { ConnectionResult, ConnectionState } from '../../shared/types/connection-types'
 import type { ChannelState } from '../../shared/types/channel-state-types'
 import type { SystemHealthState } from '../../shared/types/system-health-types'
-import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput } from '../../shared/types/academy-types'
+import type { AcademyCreateInput, AcademySkillDeliveryStatus, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyImportItem, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput } from '../../shared/types/academy-types'
 import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../../shared/types/github-types'
 
@@ -83,6 +83,7 @@ declare global {
       resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage, approval?: { token: string; confirmed: boolean }) => Promise<AcademySkillDetail>
       getAcademyDistributionHealth: () => Promise<AcademyDistributionHealth>
       listAcademyDistributionStates: (skillId?: string) => Promise<AcademyDistributionState[]>
+      getAcademyDeliveryStatus: (skillId: string, expectedVersion?: number) => Promise<AcademySkillDeliveryStatus>
       reconcileAcademyDistribution: (destinationId?: string) => Promise<{ health: AcademyDistributionHealth; states: AcademyDistributionState[] }>
       bootstrapAcademyOpenAiPlugin: (publishedVersion?: string) => Promise<AcademyOpenAiPluginProfile>
       getAcademyOpenAiPublicationState: () => Promise<AcademyOpenAiPublicationState>
