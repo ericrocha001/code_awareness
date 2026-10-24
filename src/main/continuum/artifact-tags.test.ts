@@ -1,4 +1,5 @@
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, expect, it, vi } from 'vitest'
+import * as tokenizer from '../core/tokenizer'
 import sharp from 'sharp'
 import Database from 'better-sqlite3'
 import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
@@ -14,6 +15,56 @@ function setup() { const f = fixture(); cleanup.push(f.close); return f }
 const tag = (slug: string) => ({ slug, name: slug })
 const createTag = (f: ReturnType<typeof setup>, slug: string) => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'create', tag: tag(slug) })
 const assign = (f: ReturnType<typeof setup>, slug: string, artifactId: string, expectedRevision: number, assigned = true) => f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'assign', slug, selected: [{ artifactId, expectedRevision }], assigned, confirmed: true })
+
+it('sums every tag member in bounded deduplicated batches, reuses cache and refreshes affected revisions', async () => {
+  const f = setup()
+  for (const slug of ['empty', 'first', 'second']) createTag(f, slug)
+  for (let index = 0; index < 65; index++) f.service.publishHuman(markdown(`Member ${index}`, 'tags: [first, second]\n'), true)
+  const measure = vi.spyOn(tokenizer, 'countCanonicalTokens')
+  const totals = await f.service.tagTokenTotals(['empty', 'first', 'second'])
+  expect(totals[0]).toMatchObject({ count: 0, rawMarkdownTokenCount: 0, tokenizerEncoding: 'cl100k_base' })
+  expect(totals[1].count).toBe(65)
+  expect(totals[1].rawMarkdownTokenCount).toBe(totals[2].rawMarkdownTokenCount)
+  expect(measure).toHaveBeenCalledTimes(65)
+  measure.mockClear()
+  expect(await f.service.tagTokenTotals(['first', 'second'])).toEqual(totals.slice(1))
+  expect(measure).not.toHaveBeenCalled()
+  const source = f.service.list({ tag: 'first', limit: 1 }).artifacts[0]
+  assign(f, 'second', source.artifactId, source.revision!, false)
+  const updated = await f.service.tagTokenTotals(['first', 'second'])
+  expect(updated[1].count).toBe(64)
+  expect(measure).toHaveBeenCalledTimes(1)
+  const records = f.service.list({ tag: 'first', limit: 100, includeRawMarkdownTokenCount: true })
+  expect(updated[0].rawMarkdownTokenCount).toBe(records.artifacts.reduce((sum, item) => sum + item.rawMarkdownTokenCount!, 0))
+  measure.mockRestore()
+})
+
+it('rejects partial tag totals on membership drift or repository deactivation', async () => {
+  const f = setup(); createTag(f, 'first')
+  const source = f.service.publishHuman(markdown('Member', 'tags: [first]\n'), true)
+  const pending = f.service.tagTokenTotals(['first'])
+  assign(f, 'first', source.artifactId, source.revision, false)
+  await expect(pending).rejects.toThrow(/TAG_CONTEXT_CHANGED|REVISION_CONFLICT/)
+  let active = true
+  assign(f, 'first', source.artifactId, source.revision + 1)
+  const service = new ContinuumService(f.store, undefined, () => active)
+  const abandoned = service.tagTokenTotals(['first']); active = false
+  await expect(abandoned).rejects.toThrow(/REPOSITORY_CONTEXT_CHANGED/)
+})
+
+it('does not reuse token projections under a different tokenizer identity', async () => {
+  const f = setup(); createTag(f, 'first')
+  f.service.publishHuman(markdown('Member', 'tags: [first]\n'), true)
+  await f.service.tagTokenTotals(['first'])
+  const original = tokenizer.getCanonicalTokenizer()
+  const identity = vi.spyOn(tokenizer, 'getCanonicalTokenizer').mockReturnValue({ ...original, id: 'next-tokenizer', encoding: original.encoding, count: original.count.bind(original) })
+  const measure = vi.spyOn(tokenizer, 'countCanonicalTokens')
+  try {
+    const totals = await f.service.tagTokenTotals(['first'])
+    expect(totals[0].tokenizerId).toBe('next-tokenizer')
+    expect(measure).toHaveBeenCalledTimes(1)
+  } finally { identity.mockRestore(); measure.mockRestore() }
+})
 
 it('edits only the tags node, preserving unknown YAML, comments, Unicode, BOM and literal body', () => {
   const body = '\r\n# ç 🚀\r\n```yaml\r\ntags: untouched\r\n```\r\n'

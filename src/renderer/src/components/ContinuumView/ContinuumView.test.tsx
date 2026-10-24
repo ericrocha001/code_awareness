@@ -12,6 +12,18 @@ let facets: ContinuumFacet[]
 let body: string
 const intersections = new Map<Element, (entries: { isIntersecting: boolean }[]) => void>()
 const unsubscribe = vi.fn()
+it('distinguishes zero, unavailable and visual text estimates without changing inspection', async () => {
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockResolvedValue({ repositoryId: 'catalog-A', tokenizerEncoding: 'cl100k_base', artifacts: [
+    { artifactId: 'zero', name: 'Zero', kind: 'DOCUMENT', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0, rawMarkdownTokenCount: 0 },
+    { artifactId: 'visual', name: 'Visual', kind: 'VISUAL_REFERENCE', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0, rawMarkdownTokenCount: 12 },
+    { artifactId: 'missing', name: 'Missing', kind: 'DOCUMENT', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0 }
+  ] })
+  render(<ContinuumView activeProject={project} />)
+  await screen.findByText('≈ 0 tokens')
+  expect(screen.getByText('≈ 12 tokens de texto')).toBeTruthy()
+  expect(screen.getByText('Tokens indisponíveis')).toBeTruthy()
+  expect(window.codeAwareness.getContinuumArtifact).not.toHaveBeenCalled()
+})
 beforeEach(() => {
   intersections.clear()
   vi.stubGlobal('IntersectionObserver', class {

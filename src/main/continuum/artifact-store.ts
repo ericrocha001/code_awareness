@@ -49,6 +49,13 @@ export class ArtifactStore {
   private readonly tagIndex: ArtifactTags
   private readonly tokenCache: ArtifactTokenCache
   tags() { return this.tagIndex.list() }
+  tagTokenMembers(slugs: string[]) {
+    if (!Array.isArray(slugs) || !slugs.length || slugs.length > 20 || new Set(slugs).size !== slugs.length) throw new Error('INVALID_TAG_SELECTION')
+    for (const slug of slugs) this.tagIndex.require(slug)
+    return this.db.prepare(`SELECT m.slug, a.artifact_id AS artifactId, a.revision, a.content_hash AS contentHash
+      FROM artifact_tags m JOIN artifacts a ON a.artifact_id = m.artifact_id
+      WHERE m.slug IN (${slugs.map(() => '?').join(',')}) ORDER BY m.slug, a.artifact_id`).all(...slugs) as Array<{ slug: string; artifactId: string; revision: number; contentHash: string }>
+  }
   saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
   deleteTag(slug: string) { this.tagIndex.delete(slug) }
   requireTag(slug: string) { this.tagIndex.require(slug) }

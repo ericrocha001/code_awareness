@@ -81,6 +81,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getContinuumVisualThumbnail: (repositoryId: string, artifactId: string): Promise<ContinuumVisualSelection> => ipcRenderer.invoke('continuum:get-visual-thumbnail', repositoryId, artifactId),
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
   getContinuumTags: (repositoryId: string): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:tags', repositoryId),
+  getContinuumTagTokens: (repositoryId: string, slugs: string[]): Promise<{ repositoryId: string; totals: import('../shared/types/continuum-ui-types').ContinuumTagTokens[] }> => ipcRenderer.invoke('continuum:tag-tokens', repositoryId, slugs),
   mutateContinuumTags: (request: ContinuumTagMutation): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:mutate-tags', request),
   quickContinuumBundle: (request: ContinuumBundleQuick): Promise<ContinuumBundleReceipt> => ipcRenderer.invoke('continuum:quick-bundle', request),
   prepareContinuumBundle: (request: ContinuumBundlePrepare): Promise<ContinuumBundlePreview> => ipcRenderer.invoke('continuum:prepare-bundle', request),

@@ -61,6 +61,13 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     return { repositoryId: request.repositoryId, tags: service.mutateTags(request) }
   })
   const exporting = new Set<number>()
+  ipcMain.handle('continuum:tag-tokens', async (_event, repositoryId: string, slugs: string[]) => {
+    const service = active(repositoryId)
+    if (!service) throw new Error('REPOSITORY_UNAVAILABLE')
+    const totals = await service.tagTokenTotals(slugs)
+    if (active(repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+    return { repositoryId, totals }
+  })
   ipcMain.handle('continuum:export', async (event, request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => {
     if (!request || typeof request !== 'object' || typeof request.artifactId !== 'string' || !request.artifactId.trim() || !['copy', 'save'].includes(request.intent)) throw new Error('INVALID_ARGUMENT')
     const service = active(request.repositoryId)
@@ -148,7 +155,9 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (request.metadata !== undefined && (!request.metadata || typeof request.metadata !== 'object' || Array.isArray(request.metadata) ||
       Object.values(request.metadata).some(value => !['string', 'number', 'boolean'].includes(typeof value) || (typeof value === 'number' && !Number.isFinite(value))))) throw new Error('INVALID_ARGUMENT: scalar metadata required')
     validatePeriods(request.periods, request.metadata)
-    return { repositoryId: request.repositoryId, ...service.list({ ...(request.tag !== undefined ? { tag: request.tag } : {}), ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.periods !== undefined ? { periods: request.periods } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30 }) }
+    const result = service.list({ ...(request.tag !== undefined ? { tag: request.tag } : {}), ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.periods !== undefined ? { periods: request.periods } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30, includeRawMarkdownTokenCount: true })
+    if (active(request.repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+    return { repositoryId: request.repositoryId, ...result }
   })
   ipcMain.handle('continuum:graph', (_event, request: ContinuumGraphRequest) => {
     if (!request || typeof request !== 'object') throw new Error('INVALID_ARGUMENT: graph request required')

@@ -12,6 +12,8 @@ import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
 import { artifactTags, type ContinuumTagMutation, type ContinuumTagAssignment } from '../../shared/types/continuum-tag-types'
 import { ContextBundle } from './context-bundle'
+import { getCanonicalTokenizer } from '../core/tokenizer'
+import type { ContinuumTagTokens } from '../../shared/types/continuum-ui-types'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
   createTag(request: { name: string; description?: string; selected?: ContinuumTagAssignment[] }) {
@@ -40,6 +42,28 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     return { ...result, repositoryId, slug, count: members.length, markdownBytes, tokenCount, tokenizerEncoding, hasVisuals }
   }
   tags() { this.assertActive(); this.reconcile?.(); this.assertActive(); return this.store.tags() }
+  async tagTokenTotals(slugs: string[]): Promise<ContinuumTagTokens[]> {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const members = this.store.tagTokenMembers(slugs)
+    const tags = this.store.tags().filter(tag => slugs.includes(tag.slug))
+    const unique = [...new Map(members.map(member => [member.artifactId, member])).values()]
+    const counts = new Map<string, number>()
+    const tokenizer = getCanonicalTokenizer()
+    for (let offset = 0; offset < unique.length; offset += 30) {
+      await new Promise<void>(resolve => setImmediate(resolve))
+      this.assertActive()
+      for (const [id, result] of this.store.measureTokenCountBatch(unique.slice(offset, offset + 30))) counts.set(id, result.rawMarkdownTokenCount)
+    }
+    this.assertActive()
+    if (JSON.stringify(members) !== JSON.stringify(this.store.tagTokenMembers(slugs)) ||
+      JSON.stringify(tags) !== JSON.stringify(this.store.tags().filter(tag => slugs.includes(tag.slug))) ||
+      tokenizer.id !== getCanonicalTokenizer().id || tokenizer.encoding !== getCanonicalTokenizer().encoding) throw new Error('TAG_CONTEXT_CHANGED')
+    return slugs.map(slug => {
+      const sources = members.filter(member => member.slug === slug)
+      if (sources.some(member => !counts.has(member.artifactId))) throw new Error('TOKEN_COUNT_UNAVAILABLE')
+      return { slug, count: sources.length, rawMarkdownTokenCount: sources.reduce((sum, member) => sum + counts.get(member.artifactId)!, 0), tokenizerId: tokenizer.id, tokenizerEncoding: tokenizer.encoding }
+    })
+  }
   mutateTags(request: ContinuumTagMutation) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     if (request.repositoryId !== this.store.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED')

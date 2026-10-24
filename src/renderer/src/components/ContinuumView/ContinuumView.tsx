@@ -84,6 +84,8 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   const [tags, setTags] = useState<ContinuumTag[]>([])
   const [tag, setTag] = useState<string | undefined>()
   const [tagManager, setTagManager] = useState(false)
+  const [tagTokens, setTagTokens] = useState<Record<string, number>>({})
+
   const [markdownDraft, setMarkdownDraft] = useState<{ repositoryId: string; fileName: string; rawMarkdown: string } | null>(null)
   const [view, setView] = useState<'timeline' | 'graph'>('timeline')
   const [repositoryId, setRepositoryId] = useState<string | null>(null)
@@ -97,11 +99,13 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   const [cursor, setCursor] = useState<string | undefined>()
   const [listLoading, setLoading] = useState(false)
   const [facetsLoading, setFacetsLoading] = useState(false)
+
   const loading = listLoading || facetsLoading
   const [detailLoading, setDetailLoading] = useState(false)
   const [error, setError] = useState('')
   const [detailError, setDetailError] = useState('')
   const [refresh, setRefresh] = useState(0)
+  useEffect(() => setTagTokens({}), [repositoryId, refresh])
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const listGeneration = useRef(0)
   const path = activeProject?.path ?? null
@@ -317,7 +321,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     </header>
     {markdownDraft && <div className="continuum-tag-confirmation"><p>Publicar {markdownDraft.fileName} com as tags canônicas declaradas no YAML?</p><button disabled={publishing} onClick={confirmMarkdownTags}>Confirmar tags do Markdown</button><button disabled={publishing} onClick={() => setMarkdownDraft(null)}>Cancelar</button></div>}
     {bundleSlug && repositoryId && <ContinuumBundleComposer key={`${repositoryId}:${bundleSlug}`} repositoryId={repositoryId} slug={bundleSlug} onClose={() => setBundleSlug(null)} />}
-    {tagManager && repositoryId && <ContinuumTagManager key={repositoryId} repositoryId={repositoryId} tags={tags} onBundle={slug => { setBundleSlug(slug); setTagManager(false) }} onFilter={slug => { setTag(slug); setTagManager(false) }} onChanged={() => { setRefresh(value => value + 1) }} onClose={() => setTagManager(false)} />}
+    {tagManager && repositoryId && <ContinuumTagManager key={repositoryId} repositoryId={repositoryId} tags={tags} onTokenTotals={totals => setTagTokens(previous => ({ ...previous, ...Object.fromEntries(totals.map(total => [total.slug, total.rawMarkdownTokenCount])) }))} onBundle={slug => { setBundleSlug(slug); setTagManager(false) }} onFilter={slug => { setTag(slug); setTagManager(false) }} onChanged={() => { setRefresh(value => value + 1) }} onClose={() => setTagManager(false)} />}
     {visualDraft && <form className="continuum-visual-publication" onSubmit={publishVisual}>
       <strong>{visualDraft.file.name}</strong>
       <label>Nome<input required value={visualName} onChange={event => setVisualName(event.target.value)} disabled={publishing} /></label>
@@ -341,7 +345,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
         <aside className="continuum-pane continuum-context" aria-label="Context">
           <div className="continuum-pane-heading"><h2>Context</h2><button className="continuum-icon-button" aria-label="Limpar" title="Limpar" disabled={!Object.keys(metadata).length && !Object.keys(periods).length && !tag} onClick={() => { setMetadata({}); setPeriods({}); setTag(undefined) }}><FilterX size={16} aria-hidden="true" /></button></div>
           <div className="continuum-pane-scroll">
-            {repositoryId && boundPath.current === path && <ContextFilters key={`${path}:${repositoryId}`} repositoryId={repositoryId} facets={[...facets, ...(tags.length ? [{ key: 'tags', values: tags.map(tag => ({ value: tag.slug, count: tag.count })) }] : [])]} metadata={{ ...metadata, ...(tag ? { tags: tag } : {}) }} periods={periods}
+            {repositoryId && boundPath.current === path && <ContextFilters tagTokens={tagTokens} key={`${path}:${repositoryId}`} repositoryId={repositoryId} facets={[...facets, ...(tags.length ? [{ key: 'tags', values: tags.map(tag => ({ value: tag.slug, count: tag.count })) }] : [])]} metadata={{ ...metadata, ...(tag ? { tags: tag } : {}) }} periods={periods}
               choosePeriod={choosePeriod}
               chooseValue={(key, value) => { if (key === 'tags') { setTag(previous => previous === value ? undefined : String(value)); return }; setPeriods(previous => { const next = { ...previous }; delete next[key]; return next }); setMetadata(previous => { const next = { ...previous }; if (previous[key] === value) delete next[key]; else next[key] = value; return next }) }}
               remove={key => { if (key === 'tags') { setTag(undefined); return }; setMetadata(previous => { const next = { ...previous }; delete next[key]; return next }); setPeriods(previous => { const next = { ...previous }; delete next[key]; return next }) }} />}
@@ -369,7 +373,8 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
                 <span className="continuum-node" />{item.kind === 'VISUAL_REFERENCE' && repositoryId
                   ? <VisualThumbnail repositoryId={repositoryId} artifactId={item.artifactId} root={timelineScroll} enqueue={enqueueThumbnail} /> : <FileText size={19} />}
                 <span className="continuum-item-content"><strong>{item.name}</strong><span className="continuum-badge">{item.kind === 'VISUAL_REFERENCE' ? <><ImageIcon size={13} aria-hidden="true" /> Referência visual</> : item.kind}</span>
-                  {item.description && <span className="continuum-description">{item.description}</span>}<time dateTime={item.updatedAt}>{timestamp(item.updatedAt)}</time></span>
+                  {item.description && <span className="continuum-description">{item.description}</span>}<time dateTime={item.updatedAt}>{timestamp(item.updatedAt)}</time>
+                  <small title="Estimativa cl100k_base do Markdown literal integral, incluindo YAML. Referências visuais contam apenas texto, sem pixels.">{item.rawMarkdownTokenCount === undefined ? 'Tokens indisponíveis' : `≈ ${item.rawMarkdownTokenCount.toLocaleString()} tokens${item.kind === 'VISUAL_REFERENCE' ? ' de texto' : ''}`}</small></span>
               </button>
             </React.Fragment>)}
             {!loading && !items.length && <div className="continuum-empty"><Infinity size={32} /><h3>{repositoryId ? 'Nenhum artifact encontrado' : 'Continuum indisponível'}</h3><p>{query || Object.keys(metadata).length || Object.keys(periods).length ? 'Ajuste a busca ou os filtros.' : 'O contexto deste repositório aparecerá aqui.'}</p></div>}

@@ -9,14 +9,15 @@ vi.mock('electron', () => ({ ipcMain: { handle: (key: string, handler: Function)
 beforeEach(() => { handlers.clear(); send.mockClear() })
 it('binds human tag mutation and upload confirmation to the active repository and forwards tag membership', () => {
   const mutateTags = vi.fn(() => []), tags = vi.fn(() => []), list = vi.fn(() => ({ artifacts: [] })), publishHuman = vi.fn()
-  registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }), getActiveService: () => ({ mutateTags, tags, list, publishHuman }), onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
+  const service = { mutateTags, tags, list, publishHuman }
+  registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }), getActiveService: () => service, onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
   const mutation = { repositoryId: 'A', intent: 'assign', slug: 'architecture', selected: [{ artifactId: 'one', expectedRevision: 3 }], assigned: true, confirmed: true }
   expect(() => handlers.get('continuum:mutate-tags')!({}, { ...mutation, repositoryId: 'B' })).toThrow('REPOSITORY_UNAVAILABLE')
   expect(mutateTags).not.toHaveBeenCalled()
   handlers.get('continuum:mutate-tags')!({}, mutation)
   expect(mutateTags).toHaveBeenCalledWith(mutation)
   handlers.get('continuum:list')!({}, { repositoryId: 'A', tag: 'architecture' })
-  expect(list).toHaveBeenCalledWith({ tag: 'architecture', limit: 30 })
+  expect(list).toHaveBeenCalledWith({ tag: 'architecture', limit: 30, includeRawMarkdownTokenCount: true })
   const rawMarkdown = '---\nname: Human\ndescription: d\nkind: DOCUMENT\ntags: [architecture]\n---\n# body'
   handlers.get('continuum:publish')!({}, { repositoryId: 'A', fileName: 'human.md', rawMarkdown, confirmedTags: true })
   expect(publishHuman).toHaveBeenCalledWith(rawMarkdown, true)
@@ -67,12 +68,12 @@ it('exposes scoped reads and publication, resolves catalog identity and separate
   const service = { list: vi.fn(() => ({ artifacts: [{ artifactId: 'a', name: 'A' }], nextCursor: 'cursor' })), facets: vi.fn(() => [{ key: 'unknown', values: [{ value: false, count: 1 }] }]),
     get: vi.fn(() => ({ artifactId: 'a', revision: 2, metadata: { name: 'A', kind: 'UNSEEN' }, createdAt: 'created', updatedAt: 'updated', rawMarkdown: '---\nname: A\ndescription: Read A\nkind: UNSEEN\n---\n# Body\nç 🚀' })) }
   registerContinuumHandlers({ getActiveSession: () => current, getActiveService: () => current ? service : null, onChanged: (listener: () => void) => { changed = listener; return () => {} } } as unknown as RepositoryContinuumSession)
-  expect([...handlers.keys()].sort()).toEqual(['continuum:export', 'continuum:facets', 'continuum:get', 'continuum:get-visual', 'continuum:get-visual-thumbnail', 'continuum:graph', 'continuum:list', 'continuum:publish', 'continuum:publish-visual', 'continuum:suggestions', 'continuum:tags', 'continuum:mutate-tags', 'continuum:prepare-bundle', 'continuum:export-bundle'].sort())
+  expect([...handlers.keys()].sort()).toEqual(['continuum:quick-bundle', 'continuum:tag-tokens', 'continuum:export', 'continuum:facets', 'continuum:get', 'continuum:get-visual', 'continuum:get-visual-thumbnail', 'continuum:graph', 'continuum:list', 'continuum:publish', 'continuum:publish-visual', 'continuum:suggestions', 'continuum:tags', 'continuum:mutate-tags', 'continuum:prepare-bundle', 'continuum:export-bundle'].sort())
   const read = (channel: string, ...args: unknown[]) => handlers.get(channel)!({}, ...args)
   expect(read('continuum:facets', '/A')).toMatchObject({ repositoryId: 'catalog-A', facets: [{ key: 'unknown' }] })
   expect(read('continuum:facets', '/B')).toEqual({ repositoryId: null, facets: [] })
   expect(read('continuum:list', { repositoryId: 'catalog-A', query: 'A', metadata: { unknown: false }, cursor: 'cursor' })).toMatchObject({ repositoryId: 'catalog-A', nextCursor: 'cursor' })
-  expect(service.list).toHaveBeenCalledWith({ query: 'A', metadata: { unknown: false }, cursor: 'cursor', limit: 30 })
+  expect(service.list).toHaveBeenCalledWith({ query: 'A', metadata: { unknown: false }, cursor: 'cursor', limit: 30, includeRawMarkdownTokenCount: true })
   expect(read('continuum:get', 'catalog-A', 'a').artifact).toMatchObject({ body: '# Body\nç 🚀', revision: 2 })
   expect(() => read('continuum:list', { repositoryId: 'catalog-A', metadata: { nested: {} } })).toThrow(/scalar/)
   expect(() => read('continuum:list', { repositoryId: 'catalog-A', query: 12 })).toThrow(/query/)
@@ -135,10 +136,11 @@ it('adds only default metadata to body-only files, preserving BOM, whitespace an
 
 it('validates temporal UI selections strictly and forwards typed periods to the canonical service', () => {
   const list = vi.fn(() => ({ artifacts: [] }))
-  registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }), getActiveService: () => ({ list }), onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
+  const service = { list }
+  registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }), getActiveService: () => service, onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
   const read = (request: unknown) => handlers.get('continuum:list')!({}, request)
   read({ repositoryId: 'A', periods: { arbitraryKey: { year: 2026, month: 10 } }, metadata: { kind: 'PLAN' } })
-  expect(list).toHaveBeenCalledWith({ periods: { arbitraryKey: { year: 2026, month: 10 } }, metadata: { kind: 'PLAN' }, limit: 30 })
+  expect(list).toHaveBeenCalledWith({ periods: { arbitraryKey: { year: 2026, month: 10 } }, metadata: { kind: 'PLAN' }, limit: 30, includeRawMarkdownTokenCount: true })
   for (const periods of [[], null, { date: {} }, { date: { year: '2026' } }, { date: { year: 2026, month: 0 } }, { date: { year: 2026, month: 13 } }, { date: { year: 2026.5 } }, { date: { year: 10000 } }, { date: { year: 2026, extra: true } }, { '': { year: 2026 } }, { constructor: { year: 2026 } }]) expect(() => read({ repositoryId: 'A', periods })).toThrow(/INVALID_ARGUMENT/)
   expect(() => read({ repositoryId: 'A', periods: { date: { year: 2026 } }, metadata: { date: '2026-10-11' } })).toThrow(/conflicting/)
 })

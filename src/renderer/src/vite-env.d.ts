@@ -55,6 +55,7 @@ declare global {
       getContinuumVisualThumbnail: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
       getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
       getContinuumTags: (repositoryId: string) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
+      getContinuumTagTokens: (repositoryId: string, slugs: string[]) => Promise<{ repositoryId: string; totals: import('../../shared/types/continuum-ui-types').ContinuumTagTokens[] }>
       mutateContinuumTags: (request: ContinuumTagMutation) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
       quickContinuumBundle: (request: ContinuumBundleQuick) => Promise<ContinuumBundleReceipt>
       prepareContinuumBundle: (request: ContinuumBundlePrepare) => Promise<ContinuumBundlePreview>
