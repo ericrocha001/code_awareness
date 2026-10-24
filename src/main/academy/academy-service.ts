@@ -36,7 +36,7 @@ export class AcademyService {
   private readonly conflictBatches = new Map<string, AcademyConflictBatch>()
   private readonly batchReviewTokens = new Map<string, Map<string, string>>()
 
-  constructor(databasePath: string, downloadsPath?: string) {
+  constructor(databasePath: string, downloadsPath?: string, private readonly closeTimeoutMs = 2000) {
     this.store = new AcademyStore(databasePath)
     this.projections = new AcademyProjectionService(this.store)
     this.distribution = new AcademyDistributionService(this.store)
@@ -101,7 +101,7 @@ export class AcademyService {
   get(id: string) { return this.store.get(id) }
   history(id: string) { return this.store.history(id) }
   scheduleDestinationReconciliation(destinationId: string): Promise<void> {
-    if (this.isClosed) return Promise.resolve()
+    if (this.isClosed || this.store.isClosed) return Promise.resolve()
     if (this.reconcilingDestinations.has(destinationId)) {
       this.dirtyDestinations.add(destinationId)
       return this.destinationPassPromises.get(destinationId) ?? Promise.resolve()
@@ -109,27 +109,29 @@ export class AcademyService {
     this.reconcilingDestinations.add(destinationId)
     const promise = (async () => {
       try {
-        while (!this.isClosed) {
+        while (!this.isClosed && !this.store.isClosed) {
           this.dirtyDestinations.delete(destinationId)
           try {
             await this.projections.reconcileDestination(destinationId)
-            if (this.isClosed) break
+            if (this.isClosed || this.store.isClosed) break
             await this.distribution.reconcileDestination(destinationId)
           } catch (error) {
-            if (this.isClosed) break
+            if (this.isClosed || this.store.isClosed) break
             console.error(`[Academy] Reconciliation error for destination ${destinationId}:`, error)
             try {
-              this.store.markDestination(destinationId, 'ERROR', error instanceof Error ? error.message : String(error))
+              if (!this.isClosed && !this.store.isClosed) {
+                this.store.markDestination(destinationId, 'ERROR', error instanceof Error ? error.message : String(error))
+              }
             } catch {}
           }
-          if (!this.dirtyDestinations.has(destinationId) || this.isClosed) {
+          if (!this.dirtyDestinations.has(destinationId) || this.isClosed || this.store.isClosed) {
             break
           }
         }
       } finally {
         this.reconcilingDestinations.delete(destinationId)
         this.destinationPassPromises.delete(destinationId)
-        if (!this.isClosed) {
+        if (!this.isClosed && !this.store.isClosed) {
           try {
             this.openAiPublication.refreshDrift()
             this.emitDistributionChange()
@@ -142,7 +144,7 @@ export class AcademyService {
   }
 
   scheduleReconciliationForSkill(skillId: string): void {
-    if (this.isClosed) return
+    if (this.isClosed || this.store.isClosed) return
     const destinations = this.store.listDestinations().filter(d =>
       d.enabled && (
         this.store.isAssigned(skillId, d.id) ||
@@ -153,7 +155,7 @@ export class AcademyService {
     for (const destination of destinations) {
       this.scheduleDestinationReconciliation(destination.id)
     }
-    if (!this.isClosed) {
+    if (!this.isClosed && !this.store.isClosed) {
       try {
         this.openAiPublication.refreshDrift()
       } catch {}
@@ -679,7 +681,7 @@ export class AcademyService {
       const activePromises = [...this.destinationPassPromises.values()]
       await Promise.race([
         Promise.allSettled(activePromises),
-        new Promise(resolve => setTimeout(resolve, 2000))
+        new Promise(resolve => setTimeout(resolve, this.closeTimeoutMs))
       ])
     }
     this.destinationPassPromises.clear()

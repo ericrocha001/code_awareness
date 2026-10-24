@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AcademyService } from './academy-service'
 import { AcademyLocalAdapter } from './local-adapter'
+import { registerApplicationShutdown } from '../application-shutdown'
 import type { AcademyMutationReceipt, AcademySkillDeliveryStatus } from '../../shared/types/academy-types'
 
 const context = { connected: () => true }
@@ -90,13 +91,18 @@ describe('Academy local adapter over canonical service', () => {
     expect(unassigned).toMatchObject({ state: 'PERSISTED', version: 1, distribution: { status: 'NOT_APPLICABLE' } })
   })
 
-  it('safe shutdown drains in-flight reconciliation without unhandled rejections or closed database access (B1)', async () => {
+  it('safe shutdown handles operations exceeding timeout without closed DB access and recovers on restart (B1)', async () => {
     const dir = directory()
     const dbPath = join(dir, 'academy.db')
     const repo = directory()
-    const service = new AcademyService(dbPath)
+    // Timeout curto de encerramento para forçar o fechamento do Store enquanto o reconciliador ainda está bloqueado
+    const service = new AcademyService(dbPath, undefined, 50)
     services.push(service)
     await service.registerDestination(repo, 'repo')
+
+    const unhandledErrors: any[] = []
+    const unhandledHandler = (reason: any) => { unhandledErrors.push(reason) }
+    process.on('unhandledRejection', unhandledHandler)
 
     let unblockAdapter!: () => void
     const slowReconcilePromise = new Promise<void>(resolve => { unblockAdapter = resolve })
@@ -106,22 +112,62 @@ describe('Academy local adapter over canonical service', () => {
       return origReconcile(destId)
     })
 
-    const created = await service.create({ package: pkg('in-flight-test'), scope: 'GLOBAL', origin: 'UI' })
+    const created = await service.create({ package: pkg('in-flight-timeout-test'), scope: 'GLOBAL', origin: 'UI' })
     expect(created.currentVersion).toBe(1)
 
-    // Fechar enquanto a operação está em voo
-    const closePromise = service.close()
-    // Liberar a operação pausada
-    unblockAdapter()
-    await closePromise
+    // Acionar close() que aguarda 50ms e fecha o SQLite mesmo com o reconciliador ainda bloqueado
+    await service.close()
+    expect(service.store.isClosed).toBe(true)
 
-    // Verificar integridade ao reabrir
+    // Liberar o reconciliador SOMENTE DEPOIS que o store já foi fechado
+    unblockAdapter()
+    // Pequeno intervalo para dar chance de qualquer continuação rodar
+    await new Promise(res => setTimeout(res, 50))
+
+    process.off('unhandledRejection', unhandledHandler)
+    expect(unhandledErrors).toEqual([])
+
+    // Reabertura e recuperação comprovada
     const reopened = new AcademyService(dbPath)
     services.push(reopened)
     expect(reopened.get(created.id).currentVersion).toBe(1)
-    await reopened.reconcileAll()
+    reopened.start() // Dispara recoverPendingReconciliations automaticamente
+    await reopened.waitForReconciliation()
     const delivery = reopened.getDeliveryStatus(created.id)
     expect(delivery.status).toBe('CONVERGED')
+  })
+
+  it('integrates with registerApplicationShutdown ensuring awaited disposal before app.quit (B1)', async () => {
+    const dir = directory()
+    const dbPath = join(dir, 'academy.db')
+    const service = new AcademyService(dbPath)
+    services.push(service)
+
+    let beforeQuitHandler: ((event: { preventDefault: () => void }) => void) | undefined
+    const mockApp = {
+      on: vi.fn((event: string, handler: any) => {
+        if (event === 'before-quit') beforeQuitHandler = handler
+      }),
+      quit: vi.fn()
+    }
+
+    let shutdownOrder: string[] = []
+    registerApplicationShutdown(mockApp as any, async () => {
+      shutdownOrder.push('closing_academy')
+      await service.close()
+      shutdownOrder.push('academy_closed')
+    })
+
+    expect(beforeQuitHandler).toBeDefined()
+    const fakeEvent = { preventDefault: vi.fn() }
+    beforeQuitHandler!(fakeEvent)
+
+    expect(fakeEvent.preventDefault).toHaveBeenCalled()
+    expect(mockApp.quit).not.toHaveBeenCalled()
+
+    await vi.waitFor(() => expect(mockApp.quit).toHaveBeenCalled())
+    expect(shutdownOrder).toEqual(['closing_academy', 'academy_closed'])
+    expect(service.store.isClosed).toBe(true)
   })
 
   it('tracks archive and restore delivery lifecycle deterministically without premature convergence (B3)', async () => {
