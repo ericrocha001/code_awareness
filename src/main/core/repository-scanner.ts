@@ -4,8 +4,10 @@
 
 import { readdir, stat, open } from 'fs/promises'
 import { existsSync, readFileSync, statSync } from 'fs'
-import { join, extname, relative } from 'path'
+import { join, extname, relative, dirname } from 'path'
 import ignore, { Ignore } from 'ignore'
+import type { Stats } from 'fs'
+import { createCodeMapWorkMetrics, type CodeMapWorkMetrics } from './codemap-work-metrics'
 import { getLanguageForExtension } from './language-adapter'
 
 const MAX_FILE_SIZE = 2 * 1024 * 1024 // 2MB
@@ -73,6 +75,36 @@ export interface ScannedFile {
   language: string
   sizeBytes: number
   mtime: number
+  observation?: FileObservation
+}
+
+export interface FileObservation {
+  stat: Stats
+  eligible?: boolean
+}
+
+export interface ScanOptions {
+  metrics?: CodeMapWorkMetrics
+  reuseEligibility?: (relativePath: string, observation: FileObservation) => boolean
+  filterEligible?: (paths: string[], observations: ReadonlyMap<string, FileObservation>, metrics: CodeMapWorkMetrics) => Promise<string[]>
+}
+
+export function diskMetadataVersion(stat: Stats, contentHash: string): string {
+  return JSON.stringify([1, stat.dev, stat.ino, stat.size, stat.mtimeMs, stat.ctimeMs, stat.birthtimeMs, stat.mode, contentHash])
+}
+
+export async function observeTextEligibility(filePath: string, observation: FileObservation, metrics?: CodeMapWorkMetrics): Promise<boolean> {
+  if (observation.eligible !== undefined) return observation.eligible
+  if (!observation.stat.isFile() || observation.stat.size > MAX_FILE_SIZE || isKnownBinaryExtension(filePath)) return observation.eligible = false
+  if (metrics) metrics.contentReads++
+  const buffer = Buffer.alloc(4096)
+  const handle = await open(filePath, 'r')
+  try {
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    return observation.eligible = !isBinaryContent(buffer.subarray(0, bytesRead), bytesRead === buffer.length)
+  } finally {
+    await handle.close()
+  }
 }
 
 /** Retorna a linguagem com base na extensão do arquivo. Retorna 'unknown' se não estiver no mapa. */
@@ -130,34 +162,47 @@ export function isBinaryContent(content: Buffer, partial = false): boolean {
 }
 
 /** Lê o .gitignore do repositório e retorna uma instância configurada da biblioteca ignore. Retorna null se não existir. */
-function loadGitignore(repoPath: string): Ignore | null {
+function loadGitignore(repoPath: string, metrics?: CodeMapWorkMetrics): Ignore | null {
   const gitignorePath = join(repoPath, '.gitignore')
-  if (!existsSync(gitignorePath)) {
-    return null
-  }
   try {
     // Normaliza quebras de linha (\r\n → \n) para evitar padrões mal formados no Windows
     const content = readFileSync(gitignorePath, 'utf-8').replace(/\r\n/g, '\n')
+    if (metrics) metrics.ignoreRuleReads++
     return ignore().add(content)
-  } catch {
-    // Se não conseguir ler o .gitignore, retorna null (não filtra por gitignore)
-    return null
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw error
   }
 }
 
-/** Retorna true se o caminho está em uma pasta ignorada ou se o .gitignore diz para ignorar. */
-function shouldIgnore(relativePath: string, gitignore: Ignore | null): boolean {
+export function isFilesystemIgnored(repoPath: string, relativePath: string, cache = new Map<string, Ignore | null>(), metrics?: CodeMapWorkMetrics): boolean {
+  if (isInternalPath(relativePath)) return true
+  const parts = dirname(relativePath).replace(/\\/g, '/').split('/').filter(part => part !== '.')
+  let ignored = false
+  for (let depth = 0; depth <= parts.length; depth++) {
+    const directory = parts.slice(0, depth).join('/')
+    if (!cache.has(directory)) cache.set(directory, loadGitignore(join(repoPath, directory), metrics))
+    const rules = cache.get(directory)
+    if (!rules) continue
+    const scoped = directory ? relativePath.slice(directory.length + 1) : relativePath
+    const scopedParts = scoped.split('/')
+    for (let end = 1; end < scopedParts.length; end++) {
+      if (rules.ignores(scopedParts.slice(0, end).join('/') + '/')) return true
+    }
+    const test = rules.test(scoped)
+    if (test.ignored) ignored = true
+    else if (test.unignored) ignored = false
+  }
+  return ignored
+}
+
+function isInternalPath(relativePath: string): boolean {
   const normalized = relativePath.replace(/\\/g, '/')
   const parts = normalized.split('/')
 
   // Ignora se qualquer parte do caminho estiver em IGNORED_DIRS
   if (parts.some((part) => IGNORED_DIRS.has(part))) {
     return true
-  }
-
-  // Respeita o .gitignore se existir
-  if (gitignore) {
-    return gitignore.ignores(normalized)
   }
 
   return false
@@ -167,66 +212,79 @@ function shouldIgnore(relativePath: string, gitignore: Ignore | null): boolean {
  * Escaneia o repositório e retorna arquivos candidatos à indexação.
  * Filtra binários, arquivos > 2MB, pastas ignoradas e .gitignore.
  */
-export async function scanRepository(repoPath: string): Promise<ScannedFile[]> {
+export async function scanRepository(repoPath: string, options: ScanOptions = {}): Promise<ScannedFile[]> {
   // Validação rápida: repoPath deve existir e ser um diretório
   if (!existsSync(repoPath) || !statSync(repoPath).isDirectory()) {
     throw new Error(`Repository path inválido ou não é um diretório: ${repoPath}`)
   }
 
-  const gitignore = loadGitignore(repoPath)
+  const startedAt = Date.now()
+  const metrics = options.metrics ?? createCodeMapWorkMetrics()
+  const observations = new Map<string, FileObservation>()
   const results: ScannedFile[] = []
+  const ignoreCache = new Map<string, Ignore | null>()
 
   async function walk(dir: string): Promise<void> {
-    let entries
-    try {
-      entries = await readdir(dir, { withFileTypes: true })
-    } catch {
-      return // Diretório inacessível: ignora
-    }
+    const entries = await readdir(dir, { withFileTypes: true })
+    if (!options.filterEligible) ignoreCache.set(relative(repoPath, dir).replace(/\\/g, '/'), entries.some(entry => entry.name === '.gitignore') ? loadGitignore(dir, metrics) : null)
 
     for (const entry of entries) {
       const fullPath = join(dir, entry.name)
       // Caminho relativo ao repositório — é o que o .gitignore espera para casar padrões
       const relativeToRepo = relative(repoPath, fullPath).replace(/\\/g, '/')
 
-      if (shouldIgnore(relativeToRepo, gitignore)) {
+      if (isInternalPath(relativeToRepo)) {
         continue
       }
 
-      try {
-        if (entry.isDirectory()) {
-          await walk(fullPath)
-          continue
-        }
-
-        if (!entry.isFile()) {
-          continue // Symlinks e outros tipos: ignora
-        }
-
-        const fileStat = await stat(fullPath)
-
-        if (!(await isEligibleTextFile(fullPath))) {
-          continue
-        }
-
-        const extension = extname(fullPath)
-
-        results.push({
-          relativePath: relativeToRepo,
-          extension,
-          language: detectLanguage(fullPath),
-          sizeBytes: fileStat.size,
-          mtime: fileStat.mtimeMs
-        })
-      } catch {
-        continue // Arquivo inacessível: ignora
+      if (!options.filterEligible) {
+        if (isFilesystemIgnored(repoPath, relativeToRepo + (entry.isDirectory() ? '/' : ''), ignoreCache, metrics)) continue
       }
+
+      if (entry.isDirectory()) {
+        await walk(fullPath)
+        continue
+      }
+      if (!entry.isFile()) continue
+
+      metrics.filesVisited++
+      metrics.filesStatChecked++
+      let fileStat: Stats
+      try {
+        fileStat = await stat(fullPath)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue
+        throw error
+      }
+      const observation: FileObservation = { stat: fileStat }
+      if (options.reuseEligibility?.(relativeToRepo, observation)) {
+        observation.eligible = true
+        metrics.metadataReused++
+      }
+      observations.set(relativeToRepo, observation)
+
+      results.push({
+        relativePath: relativeToRepo,
+        extension: extname(fullPath),
+        language: detectLanguage(fullPath),
+        sizeBytes: fileStat.size,
+        mtime: fileStat.mtimeMs,
+        observation
+      })
     }
   }
 
-  await walk(repoPath)
-
-  // Ordena por relativePath
-  results.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
-  return results
+  try {
+    await walk(repoPath)
+    const eligible = options.filterEligible
+      ? new Set(await options.filterEligible(results.map(file => file.relativePath), observations, metrics))
+      : new Set<string>()
+    if (!options.filterEligible) for (const file of results) {
+      if (await observeTextEligibility(join(repoPath, file.relativePath), file.observation!, metrics)) eligible.add(file.relativePath)
+    }
+    results.sort((a, b) => a.relativePath.localeCompare(b.relativePath))
+    return results.filter(file => eligible.has(file.relativePath))
+  } finally {
+    metrics.phaseDurationMs.discovery += Date.now() - startedAt
+  }
 }

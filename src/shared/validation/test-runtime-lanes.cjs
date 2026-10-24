@@ -11,6 +11,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/core/codemap-startup.e2e.test.ts',
   'src/main/core/codemap-reopen.e2e.test.ts',
   'src/main/core/codemap-batch.e2e.test.ts',
+  'src/main/core/codemap-reconciliation.e2e.test.ts',
   'src/main/core/codemap-convergence.e2e.test.ts',
   'src/main/core/codemap-system-acceptance.e2e.test.ts',
   'src/main/core/context-reference.e2e.test.ts',
