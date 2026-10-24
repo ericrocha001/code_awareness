@@ -99,6 +99,7 @@ import { PreviewRepositories } from './work-orchestration/preview-repositories'
 import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap } from './work-orchestration/runtime-preview/electron-mode'
 import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtime-preview/context-data'
 import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
+import { CodeAwarenessProfileResolver } from './work-orchestration/runtime-preview/code-awareness-profile'
 import { resolvePreviewHelper } from './work-orchestration/runtime-preview/host-helper'
 import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orchestration/runtime-preview/runner'
 import { PreviewSessionStore } from './work-orchestration/runtime-preview/session-store'
@@ -448,7 +449,8 @@ app.whenReady().then(async () => {
       const helper = resolvePreviewHelper({ packaged: app.isPackaged, resources: process.resourcesPath, root: app.getAppPath(), developmentBuild: process.env.CODE_AWARENESS_PREVIEW_NATIVE_BUILD })
       const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
       const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner)
-      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession)
+      const branchProfiles = new CodeAwarenessProfileResolver(previewProfiles, { root: app.getAppPath(), executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules })
+      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles)
     } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
   }
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
@@ -476,13 +478,17 @@ app.whenReady().then(async () => {
     continuumSession.deactivate()
   })
   let boundProjectRevision = -1
-  activeProjects.onChanged(({ project, revision }) => {
+  activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
     boundProjectRevision = revision
     if (!project) {
       void mcpLifecycle.deactivate()
       continuumSession.deactivate()
       return
+    }
+    if (context?.mode === 'HOST' && context.identity === 'IDENTITY_BOUND' && context.repositoryId === project.id && activeProjects!.getState().revision === revision) {
+      try { settingsService.rememberActiveRepository(context.repositoryId) }
+      catch { console.warn('[Active Project] LAST_REPOSITORY_PERSISTENCE_FAILED') }
     }
 
     let continuum = undefined
@@ -642,7 +648,7 @@ app.whenReady().then(async () => {
       if (state.context?.identity !== 'IDENTITY_BOUND' || state.context.repositoryId !== previewContext.selection.repositoryId || state.context.capabilities.continuum.state !== 'READY') throw new Error('PREVIEW_CONTEXT_ACTIVATION_FAILED')
       bindPreviewContext(state.context.repositoryId, state.project!.path)
     } catch (error) { failPreviewBootstrap(app, error) }
-  }
+  } else if (!isRuntimePreview()) await repositoryRuntime.restoreLastActive(settingsService.loadSettings().lastActiveRepositoryId)
   createWindow()
 
   // Registra handler IPC e atalhos F12 / Ctrl+Shift+I para DevTools

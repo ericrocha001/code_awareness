@@ -2,10 +2,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { z } from 'zod'
 
+export const rootExitSchema = z.object({
+  status: z.enum(['KNOWN', 'UNKNOWN']), code: z.number().int().min(0).max(0xffffffff).nullable(),
+  reasonCode: z.string().min(1).max(80), observedAt: z.string().max(64).nullable()
+}).strict().refine(value => value.status === 'KNOWN' ? value.code !== null && value.observedAt !== null : value.code === null)
 export const nativeObservation = z.object({
   pid: z.number().int().nonnegative(), created: z.string().nullable(), rootSignaled: z.boolean(), knownHandlesClosed: z.boolean(),
   activeProcesses: z.number().int().nonnegative(), jobClosed: z.boolean(), eventClosed: z.boolean(),
-  assignedAtCreation: z.boolean(), ownerOutsideJob: z.boolean(), phase: z.string()
+  assignedAtCreation: z.boolean(), ownerOutsideJob: z.boolean(), phase: z.string(), rootExit: rootExitSchema.optional()
 }).strict()
 export type NativeObservation = z.infer<typeof nativeObservation>
 export interface NativeLaunch {

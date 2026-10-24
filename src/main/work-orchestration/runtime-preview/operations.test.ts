@@ -46,6 +46,19 @@ describe('Runtime Preview bounded operations (contract fixtures)', () => {
     expect(result).toMatchObject({ success: true, data: { kind: 'EVIDENCE', revision: 0, nextOffset: 1 } })
     expect(JSON.stringify(result)).not.toContain('PRIVATE_HANDLE_AND_PATH')
   })
+  it('exposes termination summary separately from the bounded operational receipt', async () => {
+    const { service, store } = setup()
+    const termination = { kind: 'UNEXPECTED_EXIT', reasonCode: 'UNEXPECTED_PROCESS_EXIT', observedAt: record.at,
+      rootExit: { status: 'KNOWN', code: 23, reasonCode: 'EXIT_CODE_OBSERVED', observedAt: record.at },
+      supervisor: { status: 'RESPONDING', phase: 'ROOT_EXITED', pid: 123, created: '100' }, process: null }
+    store.read.mockReturnValue({ ...record, state: 'FAILED', termination } as any)
+    store.list.mockReturnValue([{ ...record, state: 'FAILED', termination }] as any)
+    const listed = await service.handle({ action: 'LIST', repositoryId: 'repo' })
+    expect(listed).toMatchObject({ success: true, data: { sessions: [{ termination: { kind: 'UNEXPECTED_EXIT', rootExit: { code: 23 } } }] } })
+    expect(JSON.stringify(listed)).not.toMatch(/supervisor|PRIVATE_HANDLE_AND_PATH/)
+    const evidence = await service.handle({ action: 'EVIDENCE', sessionId, revision: 0, section: 'RUNTIME', limit: 1 })
+    expect(evidence).toMatchObject({ success: true, data: { entries: [{ termination, stopIntent: null }] } })
+  })
   it('retains an incomplete shutdown and idempotently shares pending stop work', async () => {
     const { service, runner } = setup()
     let finish!: (value: any) => void

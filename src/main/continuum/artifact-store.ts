@@ -1,3 +1,4 @@
+import { ArtifactTokenCache, TOKEN_CACHE_SCHEMA } from './artifact-token-cache'
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
 import { artifactTags, quickTag, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -41,11 +42,12 @@ interface ArtifactRow {
 interface DiscoveryRow {
   revision: number
   artifact_id: string; name: string; description: string | null; kind: string; status: string | null
-  updated_at: string; relation_count: number
+  updated_at: string; relation_count: number; content_hash: string
 }
 
 export class ArtifactStore {
   private readonly tagIndex: ArtifactTags
+  private readonly tokenCache: ArtifactTokenCache
   tags() { return this.tagIndex.list() }
   saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
   deleteTag(slug: string) { this.tagIndex.delete(slug) }
@@ -125,6 +127,7 @@ export class ArtifactStore {
       if (scope && scope.repository_id !== repositoryId) throw new Error('REPOSITORY_SCOPE_MISMATCH: Store belongs to another repository')
       this.db.prepare('INSERT OR IGNORE INTO repository_scope VALUES (1, ?)').run(repositoryId)
       this.ensureSchema()
+      this.tokenCache = new ArtifactTokenCache(this.db)
       this.tagIndex = new ArtifactTags(this.db)
       this.graphIndex = new ArtifactGraph(this.db, repositoryId)
     } catch (error) { this.db.close(); throw error }
@@ -176,6 +179,7 @@ export class ArtifactStore {
         source TEXT NOT NULL, artifact_id TEXT NOT NULL, fingerprint TEXT NOT NULL, PRIMARY KEY(source, artifact_id)
       );
       CREATE TABLE IF NOT EXISTS legacy_migrations (source TEXT PRIMARY KEY, completed_at TEXT NOT NULL);
+    ${TOKEN_CACHE_SCHEMA}
       CREATE TABLE IF NOT EXISTS repository_locators (locator TEXT PRIMARY KEY);
       CREATE TABLE IF NOT EXISTS visual_blobs (
         sha256 TEXT PRIMARY KEY, data BLOB NOT NULL, descriptor_json TEXT NOT NULL
@@ -379,7 +383,7 @@ export class ArtifactStore {
       }
       clauses.push(`a.artifact_id IN (${parts.join(' UNION ')})`)
     } else if (filter.direction || filter.relationKind) throw new Error('INVALID_ARGUMENT: relation filters require relatedToArtifactId')
-    const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, ...selection } = filter
+    const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, includeRawMarkdownTokenCount, ...selection } = filter
     const signature = computeContentHash(this.repositoryId + ':' + canonicalJson(normalizeMetadataValue(selection)))
     if (filter.cursor) {
       let cursor: { updatedAt: string; artifactId: string; signature: string }
@@ -387,7 +391,7 @@ export class ArtifactStore {
       if (!cursor || cursor.signature !== signature || typeof cursor.updatedAt !== 'string' || typeof cursor.artifactId !== 'string') throw new Error('INVALID_ARGUMENT: cursor does not match repository or filters')
       clauses.push('(a.updated_at < ? OR (a.updated_at = ? AND a.artifact_id < ?))'); params.push(cursor.updatedAt, cursor.updatedAt, cursor.artifactId)
     }
-    const rows = this.db.prepare(`SELECT a.artifact_id, a.revision, a.name, a.description, a.kind, a.status, a.updated_at,
+    const rows = this.db.prepare(`SELECT a.artifact_id, a.revision, a.content_hash, a.name, a.description, a.kind, a.status, a.updated_at,
       (SELECT count(*) FROM artifact_relations r WHERE r.source_id = a.artifact_id OR r.target_id = a.artifact_id) AS relation_count
       FROM artifacts a ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
       ORDER BY a.updated_at DESC, a.artifact_id DESC LIMIT ?`).all(...params, limit + 1) as DiscoveryRow[]
@@ -405,6 +409,16 @@ export class ArtifactStore {
       return record
     })
     const last = selected[selected.length - 1]
+    if (includeRawMarkdownTokenCount === true && selected.length > 0) {
+      const entries = selected.map(row => ({ artifactId: row.artifact_id, revision: row.revision, contentHash: row.content_hash }))
+      const counts = this.measureTokenCountBatch(entries)
+      const tokenizer = counts.size > 0 ? [...counts.values()][0] : undefined
+      for (const record of artifacts) {
+        const result = counts.get(record.artifactId)
+        if (result !== undefined) record.rawMarkdownTokenCount = result.rawMarkdownTokenCount
+      }
+      return { artifacts, ...(more ? { nextCursor: Buffer.from(JSON.stringify({ updatedAt: last.updated_at, artifactId: last.artifact_id, signature })).toString('base64url') } : {}), ...(tokenizer ? { tokenizerId: tokenizer.tokenizerId, tokenizerEncoding: tokenizer.tokenizerEncoding } : {}) }
+    }
     return { artifacts, ...(more ? { nextCursor: Buffer.from(JSON.stringify({ updatedAt: last.updated_at, artifactId: last.artifact_id, signature })).toString('base64url') } : {}) }
   }
 
@@ -430,6 +444,55 @@ export class ArtifactStore {
       return artifact
     }).immediate()
   }
+  measureTokenCount(artifactId: string, revision: number, contentHash: string, rawMarkdown: string) {
+    const current = this.get(artifactId)
+    if (!current || current.revision !== revision || current.contentHash !== contentHash) {
+      throw new ArtifactRevisionConflictError(artifactId, current?.revision ?? 0)
+    }
+    if (computeContentHash(rawMarkdown) !== contentHash) {
+      throw new ArtifactContentIntegrityError()
+    }
+    return this.tokenCache.measure(artifactId, revision, contentHash, rawMarkdown)
+  }
+
+  measureTokenCountBatch(entries: Array<{ artifactId: string; revision: number; contentHash: string }>) {
+    return this.db.transaction(() => {
+      const currentRows = this.db.prepare(
+        `SELECT artifact_id, revision, content_hash FROM artifacts WHERE artifact_id IN (${entries.map(() => '?').join(',')})`
+      ).all(...entries.map(e => e.artifactId)) as { artifact_id: string; revision: number; content_hash: string }[]
+
+      const currentMap = new Map(currentRows.map(r => [r.artifact_id, r]))
+      for (const entry of entries) {
+        const current = currentMap.get(entry.artifactId)
+        if (!current || current.revision !== entry.revision || current.content_hash !== entry.contentHash) {
+          throw new ArtifactRevisionConflictError(entry.artifactId, current?.revision ?? 0)
+        }
+      }
+
+      const loadMarkdown = (misses: Array<{ artifactId: string; revision: number; contentHash: string }>) => {
+        const map = new Map<string, string>()
+        if (misses.length === 0) return map
+        const missRows = this.db.prepare(
+          `SELECT artifact_id, revision, content_hash, raw_markdown FROM artifacts WHERE artifact_id IN (${misses.map(() => '?').join(',')})`
+        ).all(...misses.map(m => m.artifactId)) as { artifact_id: string; revision: number; content_hash: string; raw_markdown: string }[]
+        const missMap = new Map(missRows.map(r => [r.artifact_id, r]))
+        for (const miss of misses) {
+          const row = missMap.get(miss.artifactId)
+          if (!row || row.revision !== miss.revision || row.content_hash !== miss.contentHash) {
+            throw new ArtifactRevisionConflictError(miss.artifactId, row?.revision ?? 0)
+          }
+          if (computeContentHash(row.raw_markdown) !== miss.contentHash) {
+            throw new ArtifactContentIntegrityError()
+          }
+          map.set(miss.artifactId, row.raw_markdown)
+        }
+        return map
+      }
+
+      return this.tokenCache.measureBatch(entries, loadMarkdown)
+    }).immediate()
+  }
+
   migrationComplete(source: string): boolean { return !!this.db.prepare('SELECT 1 FROM legacy_migrations WHERE source = ?').get(source) }
   completeMigration(source: string): void { this.db.prepare('INSERT OR IGNORE INTO legacy_migrations VALUES (?, ?)').run(source, new Date().toISOString()) }
   registerLocator(locator: string): void { this.db.prepare('INSERT OR IGNORE INTO repository_locators VALUES (?)').run(locator) }

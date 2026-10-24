@@ -184,13 +184,19 @@ require('esbuild').buildSync({ entryPoints: ['src/main/work-orchestration/runtim
 const { RuntimePreviewRunner } = require(path.join(root, 'bundle/runner.js'))
 const { PreviewSessionStore } = require(path.join(root, 'bundle/session-store.js'))
 const fingerprint = value => hash(JSON.stringify(value))
-function fixtureRunner({ status = 'SUPPORTED', failGuard = false } = {}) {
-  const id = randomUUID(), directory = path.join(root, 'domain-' + id), worktree = path.join(root, 'checkout-' + id)
-  fs.mkdirSync(worktree); fs.writeFileSync(path.join(worktree, 'input'), 'controlled')
+function fixtureRunner({ status = 'SUPPORTED', failGuard = false, mode = 'wait', electron = false } = {}) {
+  const id = randomUUID(), directory = fs.mkdtempSync(path.join(root, 'd-')), worktree = fs.mkdtempSync(path.join(root, 'c-'))
+  fs.writeFileSync(path.join(worktree, 'input'), 'controlled')
   const profile = { schemaVersion: 1, repositoryId: 'controlled-repository', profileId: id, revision: 1, command: { executable: binaries.fixture,
-    executableHash: hash(fs.readFileSync(binaries.fixture)), args: ['wait'], cwd: '.', inputs: [{ path: 'input', fingerprint: hash('controlled') }] },
+    executableHash: hash(fs.readFileSync(binaries.fixture)), args: [mode], cwd: '.', inputs: [{ path: 'input', fingerprint: hash('controlled') }] },
     env: {}, resources: [{ name: 'runtime', strategy: 'SESSION_DIRECTORY' }], security: { mode: 'profile_only', requirements: [] },
     shutdown: { spawn: 'JOB_LIST_AT_CREATE', breakaway: false, killOnJobClose: true, graceMs: 1000, forceMs: 2000, graceful: 'SESSION_EVENT' } }
+  if (electron) {
+    const script = `const {app,BrowserWindow}=require('electron');const fs=require('fs'),path=require('path'),root=process.env.PREVIEW_SESSION_DIRECTORY;for(const key of ['appData','userData','sessionData','home','temp']){const p=path.join(root,key);fs.mkdirSync(p,{recursive:true});app.setPath(key,p)}app.setName('controlled-preview-exit');app.enableSandbox();app.whenReady().then(async()=>{const w=new BrowserWindow({show:false,webPreferences:{sandbox:true,contextIsolation:true,nodeIntegration:false}});await w.loadURL('data:text/html,<h1>Controlled termination acceptance</h1>');fs.writeFileSync(path.join(root,'electron.ready'),String(process.pid));setInterval(()=>{if(fs.existsSync(path.join(root,'exit-request')))app.exit(23)},50)});`
+    fs.writeFileSync(path.join(worktree, 'electron.cjs'), script)
+    profile.command.executable = require('electron'); profile.command.executableHash = hash(fs.readFileSync(profile.command.executable))
+    profile.command.args = [path.join(worktree, 'electron.cjs')]
+  }
   const selection = { repositoryId: profile.repositoryId, profileId: id, worktreeId: id, generation: 'controlled-generation', fingerprint: fingerprint(profile) }
   const store = new PreviewSessionStore(directory), helper = { executable: production.owner, fingerprint: hash(fs.readFileSync(production.owner)) }
   const authority = { async prepare() { return { profile, worktree, gitFingerprint: 'controlled-fixture-identity', preflight: { status, selection, profileRevision: 1 }, guard: async () => { if (failGuard) throw new Error('GIT_STATE_CHANGED') } } } }
@@ -275,12 +281,12 @@ test('DRAINED recovery requires supervisor exit; no adoption of a live owner', a
   assert.equal(fixture.store.active(), started.sessionId)
   await native.shutdown()
   const final = await recovered.inspect(started.sessionId)
-  assert.equal(final.state, 'STOPPED'); assert.equal(final.reconciliation, 'OBSERVED'); assert.equal(fixture.store.active(), undefined)
+  assert.equal(final.state, 'FAILED'); assert.equal(final.failure, 'UNEXPECTED_PROCESS_EXIT'); assert.equal(final.reconciliation, 'OBSERVED'); assert.equal(fixture.store.active(), undefined)
 })
 test('final receipt failure never returns STOPPED; native cleanup remains real and recoverable', async () => {
   const fixture = fixtureRunner(), started = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
   const append = fixture.store.append.bind(fixture.store)
-  fixture.store.append = () => { throw new Error('CONTROLLED_STORAGE_FAILURE') }
+  fixture.store.append = record => { if (record.state === 'STOPPED') throw new Error('CONTROLLED_STORAGE_FAILURE'); append(record) }
   const response = await fixture.runner.stop(started.sessionId)
   assert.equal(response.state, 'CLEANUP_INCOMPLETE'); assert.equal(response.persistence, 'UNVERIFIABLE')
   assert.equal(response.reconciliation, 'REQUIRED'); assert.equal(fixture.store.active(), started.sessionId)
@@ -324,13 +330,103 @@ test('recovery never reports STOPPED while runtime directories remain unresolved
   const incomplete = await recovered.inspect(started.sessionId)
   assert.equal(incomplete.state, 'CLEANUP_INCOMPLETE'); assert.equal(incomplete.failure, 'RESOURCE_RELEASE_UNVERIFIED')
   fixture.store.releaseResources = release
-  assert.equal((await recovered.inspect(started.sessionId)).state, 'STOPPED')
+  assert.equal((await recovered.inspect(started.sessionId)).state, 'FAILED')
 })
 
 test('retired caller context after native creation drains the owned process before launch acknowledgement', async () => {
   const fixture = fixtureRunner(); let guards = 0
   const record = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection, guard: () => { if (++guards === 3) throw new Error('PROJECT_CONTEXT_CHANGED') } })
   assert.equal(record.state, 'FAILED'); assert.equal(record.failure, 'PROJECT_CONTEXT_CHANGED')
+  assert.equal(record.termination.kind, 'STARTUP_FAILURE'); assert.equal(record.termination.reasonCode, 'PROJECT_CONTEXT_CHANGED')
   assert.equal(record.resources, 'RELEASED'); assert.equal(record.process.activeProcesses, 0)
   assert.equal(record.process.rootSignaled, true); assert.equal(fixture.store.active(), undefined)
+})
+
+for (const code of [0, 37, 259]) test('unsolicited real Windows exit preserves literal code ' + code + ' through cleanup and recovery', async () => {
+  const fixture = fixtureRunner({ mode: 'exit:' + code }), operationId = randomUUID()
+  const started = await fixture.runner.start({ operationId, selection: fixture.selection })
+  await until(async () => (await fixture.runner.inspect(started.sessionId)).state === 'FAILED')
+  const failed = fixture.store.read(started.sessionId)
+  assert.equal(failed.failure, 'UNEXPECTED_PROCESS_EXIT'); assert.equal(failed.resources, 'RELEASED')
+  assert.equal(failed.stopIntent, undefined); assert.equal(failed.termination.kind, 'UNEXPECTED_EXIT')
+  assert.equal(failed.termination.rootExit.code, code); assert.equal(failed.termination.rootExit.status, 'KNOWN')
+  assert.equal(failed.termination.supervisor.status, 'RESPONDING')
+  assert.equal(fs.existsSync(fixture.store.runtime(started.sessionId)), false)
+  const journal = fixture.store.nativeJournal(started.sessionId)
+  assert.equal(journal.find(e => e.phase === 'ROOT_EXITED').evidence.rootExit.code, code)
+  const recovered = new RuntimePreviewRunner(new PreviewSessionStore(fixture.store.root), fixture.authority, fixture.helper)
+  assert.deepEqual(await recovered.inspect(started.sessionId), failed)
+  assert.deepEqual(await recovered.stop(started.sessionId), failed)
+  assert.deepEqual(await recovered.start({ operationId, selection: fixture.selection }), failed)
+})
+
+test('a late STOP cannot convert an already exited root or its descendants into an operator stop', async () => {
+  const fixture = fixtureRunner({ mode: 'orphan' }), started = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
+  await until(async () => (await fixture.runner.owners.get(started.sessionId).inspect()).rootSignaled)
+  const result = await fixture.runner.stop(started.sessionId)
+  assert.equal(result.state, 'FAILED'); assert.equal(result.termination.kind, 'UNEXPECTED_EXIT')
+  assert.ok(result.termination.process.activeProcesses > 0); assert.equal(result.process.activeProcesses, 0)
+  assert.equal(result.resources, 'RELEASED'); assert.equal(result.stopIntent, undefined)
+})
+
+test('durable stop intent and termination evidence precede native stop and directory deletion', async () => {
+  const fixture = fixtureRunner(), started = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
+  const owner = fixture.runner.owners.get(started.sessionId), stop = owner.stop.bind(owner), release = fixture.store.releaseResources.bind(fixture.store)
+  owner.stop = async (...args) => { assert.ok(new PreviewSessionStore(fixture.store.root).read(started.sessionId).stopIntent); return stop(...args) }
+  fixture.store.releaseResources = id => { const record = new PreviewSessionStore(fixture.store.root).read(id); assert.equal(record.termination.kind, 'STOP_REQUESTED'); assert.equal(record.termination.rootExit.status, 'KNOWN'); assert.ok(record.termination.supervisorExit); release(id) }
+  const result = await fixture.runner.stop(started.sessionId)
+  assert.equal(result.state, 'STOPPED'); assert.equal(result.resources, 'RELEASED'); assert.equal(result.failure, null)
+})
+
+test('failed intent persistence never sends the native stop command', async () => {
+  const fixture = fixtureRunner(), started = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
+  const owner = fixture.runner.owners.get(started.sessionId), append = fixture.store.append.bind(fixture.store), stop = owner.stop.bind(owner)
+  let commands = 0; owner.stop = async (...args) => { commands++; return stop(...args) }
+  fixture.store.append = () => { throw Error('CONTROLLED_STORAGE_FAILURE') }
+  assert.equal((await fixture.runner.stop(started.sessionId)).state, 'CLEANUP_INCOMPLETE'); assert.equal(commands, 0)
+  assert.ok((await owner.inspect()).activeProcesses > 0)
+  fixture.store.append = append
+  assert.equal((await fixture.runner.stop(started.sessionId)).state, 'STOPPED')
+})
+
+test('unexpected-exit diagnostic persistence failure prevents resource deletion until a safe retry', async () => {
+  const fixture = fixtureRunner({ mode: 'exit:37' }), started = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
+  await until(async () => (await fixture.runner.owners.get(started.sessionId).inspect()).rootSignaled)
+  const append = fixture.store.append.bind(fixture.store), release = fixture.store.releaseResources.bind(fixture.store)
+  let deleted = false
+  fixture.store.releaseResources = id => { deleted = true; release(id) }
+  fixture.store.append = value => { if (value.termination) throw Error('CONTROLLED_DIAGNOSTIC_STORAGE_FAILURE'); append(value) }
+  const incomplete = await fixture.runner.inspect(started.sessionId)
+  assert.equal(incomplete.state, 'CLEANUP_INCOMPLETE'); assert.equal(deleted, false)
+  assert.equal(fs.existsSync(fixture.store.runtime(started.sessionId)), true)
+  fixture.store.append = append
+  const final = await fixture.runner.inspect(started.sessionId)
+  assert.equal(final.state, 'FAILED'); assert.equal(final.resources, 'RELEASED'); assert.equal(final.termination.rootExit.code, 37)
+})
+
+test('native unavailable exit status remains UNKNOWN rather than inferring a crash', async () => {
+  const client = new Client(), spec = launch('exit:37', { fault: 'exit-code-unavailable' })
+  assert.equal((await client.request('start', { launch: spec })).success, true)
+  let observed
+  await until(async () => { observed = await client.request('inspect'); return observed.result.rootSignaled })
+  assert.equal(observed.result.rootExit.status, 'UNKNOWN'); assert.equal(observed.result.rootExit.code, null)
+  assert.equal(observed.result.rootExit.reasonCode, 'EXIT_CODE_UNAVAILABLE')
+  assertDrained(await stop(client)); await client.close()
+})
+
+for (const unexpected of [true, false]) test('real Electron under production Job owner: ' + (unexpected ? 'unrequested app exit' : 'explicit runner stop'), async () => {
+  const fixture = fixtureRunner({ electron: true }), started = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection })
+  await until(() => fs.existsSync(path.join(fixture.store.runtime(started.sessionId), 'electron.ready')), 20000)
+  const members = await fixture.runner.owners.get(started.sessionId).processes()
+  assert.ok(members.processes.length >= 2, 'actual Chromium descendants required')
+  let result
+  if (unexpected) {
+    fs.writeFileSync(path.join(fixture.store.runtime(started.sessionId), 'exit-request'), '')
+    await until(async () => { result = await fixture.runner.inspect(started.sessionId); return result.state === 'FAILED' })
+    assert.equal(result.termination.rootExit.code, 23); assert.equal(result.failure, 'UNEXPECTED_PROCESS_EXIT')
+  } else { result = await fixture.runner.stop(started.sessionId); assert.equal(result.state, 'STOPPED'); assert.equal(result.termination.kind, 'STOP_REQUESTED') }
+  assert.equal(result.resources, 'RELEASED'); assert.equal(result.process.activeProcesses, 0); assert.equal(result.process.knownHandlesClosed, true)
+  assert.ok(result.termination.supervisorExit)
+  assert.equal(process.kill(process.pid, 0), true)
+  fs.writeFileSync(path.join(root, 'electron-' + unexpected + '.json'), JSON.stringify({ sessionId: result.sessionId, members, result }, null, 2))
 })

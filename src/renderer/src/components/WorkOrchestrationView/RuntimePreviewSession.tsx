@@ -3,7 +3,7 @@ import type { PreviewSelection } from '../../../../shared/types/runtime-preview-
 import type { PreviewSessionView, RuntimePreviewData, RuntimePreviewRequest } from '../../../../shared/types/runtime-preview-operations'
 import type { BranchManagerData, BranchManagerOperation } from '../../../../shared/types/branch-manager-types'
 const stages = { TARGET_CHECKOUT: 'Checkout / source', ENDPOINT: 'Endpoint', SERVED_ARTIFACT: 'Artefato servido', LOADED_COMPONENT: 'Componente carregado', BEHAVIOR: 'Comportamento' }
-export function RuntimePreviewSession({ selection, repositoryId, worktreeId, startAllowed, disabled, query }: { selection: PreviewSelection | null; repositoryId: string; worktreeId: string; startAllowed: boolean; disabled: boolean; query: (operation: BranchManagerOperation) => Promise<BranchManagerData> }) {
+export function RuntimePreviewSession({ selection, repositoryId, worktreeId, startAllowed, disabled, query, inspectionOnly = false }: { selection: PreviewSelection | null; repositoryId: string; worktreeId: string; startAllowed: boolean; disabled: boolean; inspectionOnly?: boolean; query: (operation: BranchManagerOperation) => Promise<BranchManagerData> }) {
   const [session, setSession] = useState<PreviewSessionView | null>(null), [history, setHistory] = useState<PreviewSessionView[]>([])
   const [nextCursor, setNextCursor] = useState<string | null>(null), [busy, setBusy] = useState(false), [pending, setPending] = useState(false)
   const [error, setError] = useState(''), [notice, setNotice] = useState('')
@@ -55,11 +55,11 @@ export function RuntimePreviewSession({ selection, repositoryId, worktreeId, sta
   const blocked = disabled || busy
   return <div className="runtime-preview-session">
     <div className="runtime-preview-actions">
-      <button disabled={blocked || !startAllowed || pending} onClick={launch}>Iniciar preview</button>
+      {!inspectionOnly && <button disabled={blocked || !startAllowed || pending} onClick={launch}>Iniciar preview</button>}
       <button disabled={blocked} onClick={() => list()}>Consultar sessões</button>
       {session && <button disabled={blocked} onClick={() => void run({ action: 'INSPECT', sessionId: session.sessionId })}>Inspecionar sessão</button>}
       {session && !['STOPPED', 'FAILED'].includes(session.state) && <button disabled={blocked} onClick={() => void run({ action: 'STOP', sessionId: session.sessionId })}>Parar esta sessão</button>}
-      {session && ['STOPPED', 'FAILED'].includes(session.state) && <button disabled={blocked || pending || !startAllowed} onClick={() => { operation.current = null; launch() }}>Nova sessão</button>}
+      {!inspectionOnly && session && ['STOPPED', 'FAILED'].includes(session.state) && <button disabled={blocked || pending || !startAllowed} onClick={() => { operation.current = null; launch() }}>Nova sessão</button>}
     </div>
     <p className="runtime-preview-note">READY e STOPPED descrevem o runtime. A funcionalidade exige evidência comportamental e identidade comprovada.</p>
     {error && <p role="alert">{error}</p>}{notice && <p role="status">{notice}</p>}

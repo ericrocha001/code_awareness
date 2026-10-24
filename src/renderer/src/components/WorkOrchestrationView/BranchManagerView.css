@@ -69,3 +69,26 @@
 .runtime-preview pre { max-height:240px; overflow:auto; font-size:11px; }
 .runtime-preview [role=alert] { color:var(--error-color,#fda4af); overflow-wrap:anywhere; }
 @container (max-width:850px) { .bm-has-selection .bm-list { display:none; } .bm-detail { flex:1; } .bm-toolbar { flex-wrap:wrap; gap:8px; } .bm-view .wo-feature-icon { width:52px; height:52px; } .bm-view .wo-header h1 { font-size:23px; } .bm-view .wo-header p { font-size:12px; } }
+.bm-list .bm-card { display:flex; flex-direction:row; align-items:center; flex-wrap:wrap; gap:10px 16px; border:1px solid var(--border-subtle); }
+.bm-branch-select { display:flex; flex:1 1 260px; align-items:center; gap:9px; min-width:0; text-align:left; background:transparent; border:0; padding:6px 0; }
+.bm-branch-select svg { color:var(--accent); flex-shrink:0; }
+.bm-branch-select strong { font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.bm-branch-select span { font-size:11px; color:var(--text-secondary); margin-left:auto; }
+.bm-app-action { display:contents; }
+.bm-app-controls { display:flex; align-items:center; gap:12px; margin-left:auto; }
+.bm-app-controls span { font-size:12px; color:var(--text-secondary); }
+.bm-run-app { display:inline-flex; align-items:center; justify-content:center; gap:7px; font-size:12px; white-space:nowrap; }
+.bm-app-notice { flex-basis:100%; font-size:12px; overflow-wrap:anywhere; }
+.bm-app-notice p { margin:2px 0 8px; color:var(--color-error,var(--text-primary)); }
+.bm-app-notice details { color:var(--text-secondary); }
+.bm-app-notice pre { max-height:220px; overflow:auto; white-space:pre-wrap; }
+.bm-app-notice>button { display:block; margin:6px 0; max-width:100%; overflow-wrap:anywhere; text-align:left; }
+.bm-app-recovery { display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:12px; }
+.bm-advanced { border-top:1px solid var(--border-subtle); padding-top:14px; margin:18px 0; }
+.bm-advanced summary { cursor:pointer; font-size:12px; }
+.bm-advanced .runtime-preview { border:0; padding:12px 0; background:transparent; }
+.bm-list .bm-branch-select:hover { background:transparent; }
+.bm-branch-select:focus-visible,.bm-run-app:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
+@container (max-width:600px) { .bm-app-controls { flex-basis:100%; justify-content:flex-end; } .bm-branch-select { flex-basis:100%; } .bm-toolbar input { max-width:60vw; } }
+.bm-view .bm-branch-select { border:0; background:transparent; box-shadow:none; padding:6px 0; }
+.bm-view .bm-run-app { border-color:color-mix(in srgb,var(--accent) 35%,var(--border)); }

@@ -16,21 +16,21 @@ const ok = (data: unknown) => ({ success: true, context: { projectId: 'local', r
 const catalog = { repositoryId: 'local', repository: 'owner/repo', providerRepositoryId: '1', source: 'GITHUB_REST', coverage: 'UNAVAILABLE', observedAt: '2026-01-01T00:00:00Z', revision: 'remote', defaultBranch: 'main', reason: 'NOT_CONNECTED', items: [] }
 const unavailable = { kind: 'PULL_REQUESTS', inventoryRevision: 'one', pullRequests: { repositoryId: 'local', catalog, relations: [], received: [], orphaned: [] } }
 function install(extra: (operation: any) => unknown = () => null, supplied = inventory) {
-  const read = vi.fn(async ({ operation }) => ok(operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory: supplied } : operation.action === 'PULL_REQUESTS' ? unavailable : operation.action === 'EXECUTIONS' ? { kind: 'EXECUTIONS', page: { repositoryId: supplied.repositoryId, branchRef: operation.ref, branchRevision: operation.revision, bindings: [], coverage: 'COMPLETE' } } : await extra(operation)))
+  const read = vi.fn(async ({ operation }) => ok(operation.action === 'INVENTORY' ? { kind: 'INVENTORY', inventory: supplied } : operation.action === 'PULL_REQUESTS' ? unavailable : operation.action === 'PREVIEW_RUNTIME' ? { kind: 'PREVIEW_RUNTIME', result: { success: true, data: { kind: 'SESSIONS', sessions: [], nextCursor: null, pendingOperationId: null, lastOperation: null } } } : operation.action === 'EXECUTIONS' ? { kind: 'EXECUTIONS', page: { repositoryId: supplied.repositoryId, branchRef: operation.ref, branchRevision: operation.revision, bindings: [], coverage: 'COMPLETE' } } : await extra(operation)))
   window.codeAwareness = { getBranchOrchestration: read, onContinuumChanged: () => () => {} } as any
   return read
 }
 it('renders local branches before GitHub resolves, preserves unknown creation and exposes offline coverage', async () => {
   let release!: (result: ReturnType<typeof ok>) => void
   const read = install()
-  read.mockImplementation(async ({ operation }) => operation.action === 'INVENTORY' ? ok({ kind: 'INVENTORY', inventory }) : new Promise(resolve => { release = resolve }))
+  read.mockImplementation(async ({ operation }) => operation.action === 'INVENTORY' ? ok({ kind: 'INVENTORY', inventory }) : operation.action === 'PULL_REQUESTS' ? new Promise(resolve => { release = resolve }) : ok({ kind: 'EXECUTIONS', page: { bindings: [], coverage: 'COMPLETE' } }))
   render(<BranchManagerView state={state}/>)
   await screen.findByText('topic')
-  expect(screen.getByText('Data de criação desconhecida')).toBeTruthy()
+  expect(screen.queryByText('Data de criação desconhecida')).toBeNull()
+  fireEvent.click(screen.getByText('topic'))
   expect(screen.getByText(/O inventário local já está disponível/)).toBeTruthy()
   release(ok(unavailable))
   await screen.findByText(/cobertura indisponível/)
-  fireEvent.click(screen.getByText('topic'))
   expect(screen.getByText('Sem checkout associado a esta referência.')).toBeTruthy()
   expect(screen.queryByText(/Criada em/)).toBeNull()
 })
@@ -93,7 +93,7 @@ it('invalidates actions and drops delayed detail responses when hidden', async (
   await waitFor(() => expect(screen.getByText('Estado precisa de atualização antes de agir.')).toBeTruthy())
   expect(screen.queryByText('Delayed stale result')).toBeNull()
 })
-it('mounts lazily and revalidates only selected executions on tab return while preserving inventory state', async () => {
+it('mounts lazily and revalidates inventory automatically on tab return while preserving selection and filter', async () => {
   const read = install()
   const view = render(<WorkOrchestrationTab state={state} active={false}/>)
   expect(read).not.toHaveBeenCalled()
@@ -104,11 +104,11 @@ it('mounts lazily and revalidates only selected executions on tab return while p
   const count = read.mock.calls.length
   view.rerender(<WorkOrchestrationTab state={state} active={false}/>)
   view.rerender(<WorkOrchestrationTab state={state} active/>)
-  await waitFor(() => expect(read).toHaveBeenCalledTimes(count + 1))
-  expect(read.mock.calls[count][0].operation.action).toBe('EXECUTIONS')
+  await waitFor(() => expect(read.mock.calls.slice(count).some(([r]) => r.operation.action === 'EXECUTIONS')).toBe(true))
+  expect(read.mock.calls.slice(count).every(([r]) => ['EXECUTIONS', 'PREVIEW_RUNTIME', 'INVENTORY', 'PULL_REQUESTS'].includes(r.operation.action))).toBe(true)
   expect((screen.getByPlaceholderText('Nome ou referência') as HTMLInputElement).value).toBe('topic')
   expect(screen.getByRole('complementary', { name: 'Detalhes da branch' })).toBeTruthy()
-  expect(screen.getByText('Estado precisa de atualização antes de agir.')).toBeTruthy()
+  await waitFor(() => expect(screen.queryByText('Estado precisa de atualização antes de agir.')).toBeNull())
 })
 
 const historyCatalog = (coverage: PullRequestCatalog['coverage'] = 'COMPLETE'): PullRequestCatalog => ({
@@ -135,7 +135,7 @@ it('composes catalog and renderer: main receives extinct origins, closed #32 is 
   expect(within(received).getByText('Origem removida:deleted-a → owner/repo:main')).toBeTruthy()
   expect(within(screen.getByRole('region', { name: 'PRs enviados desta branch' })).getByText('Nenhum PR observado nesta direção.')).toBeTruthy()
   expect(screen.getByText(/PRs sem vínculo corrente confirmado/)).toBeTruthy()
-  expect(screen.getByText('main', { selector: 'strong' }).closest('button')?.textContent).toContain('3 recebido(s) · 2 integrado(s) no GitHub')
+  expect(screen.getByText('main', { selector: 'strong' }).closest('article')?.textContent).not.toContain('recebido(s)')
   fireEvent.click(screen.getByText('topic', { selector: 'strong' }))
   expect(within(screen.getByRole('region', { name: 'PRs enviados desta branch' })).getByText('Origem corrente confirmada')).toBeTruthy()
   expect(within(screen.getByRole('region', { name: 'PRs destinados a esta branch' })).queryByText('#1 · History 1')).toBeNull()

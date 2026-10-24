@@ -83,12 +83,30 @@ export class RuntimePreviewRunner {
     if (bytesFingerprint(await readFile(this.helper.executable)) !== this.helper.fingerprint) throw new Error('NATIVE_HELPER_CHANGED')
     return new NativeOwner(this.helper.executable)
   }
-  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void }): Promise<PreviewSessionRecord> {
+  private termination(record: PreviewSessionRecord, kind: NonNullable<PreviewSessionRecord['termination']>['kind'], reasonCode: string,
+    observation: NativeObservation | null, status: 'RESPONDING' | 'EXITED' | 'UNKNOWN') {
+    if (record.termination && record.termination.kind !== 'UNKNOWN') return record
+    const journal = this.store.nativeJournal(record.sessionId).at(-1)
+    return this.change(record, { termination: { kind, reasonCode, observedAt: new Date().toISOString(),
+      rootExit: observation?.rootExit ?? { status: 'UNKNOWN', code: null, reasonCode: 'EXIT_STATUS_NOT_RECORDED', observedAt: null },
+      supervisor: { status, phase: typeof journal?.phase === 'string' ? journal.phase : null,
+        pid: typeof journal?.ownerPid === 'number' ? journal.ownerPid : null, created: typeof journal?.ownerCreated === 'string' ? journal.ownerCreated : null }, process: observation } })
+  }
+  private terminal(record: PreviewSessionRecord) {
+    return record.termination?.kind === 'STOP_REQUESTED' ? { state: 'STOPPED' as const, failure: null } :
+      { state: 'FAILED' as const, failure: record.termination?.reasonCode ?? 'TERMINATION_REASON_UNKNOWN' }
+  }
+  private supervisorExited(record: PreviewSessionRecord) {
+    if (!record.termination || record.termination.supervisorExit) return record
+    return this.change(record, { termination: { ...record.termination, supervisorExit: { observedAt: new Date().toISOString() } } })
+  }
+  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void> }): Promise<PreviewSessionRecord> {
+
     const selection = sessionSchema.shape.selection.safeParse(input.selection)
     if (!selection.success) return Promise.reject(selection.error)
     input = { operationId: input.operationId, selection: selection.data, guard: input.guard }
     return this.command(async () => {
-      input.guard?.()
+      await input.guard?.()
       if (!sessionSchema.shape.operationId.safeParse(input.operationId).success) throw new Error('INVALID_OPERATION_ID')
       const previous = this.store.list().find(r => r.operationId === input.operationId)
       if (previous) {
@@ -138,7 +156,7 @@ export class RuntimePreviewRunner {
           const context = await this.contextProvisioner.prepare({ profile, selection: input.selection, sessionId,
             directory: this.store.runtime(sessionId), worktree: prepared.worktree, source: preflight.snapshot })
           await prepared.guard()
-          input.guard?.()
+          await input.guard?.()
           record = this.change(record, { context })
         }
         if (profile.adapter) {
@@ -149,7 +167,7 @@ export class RuntimePreviewRunner {
         }
         native = await this.owner(); this.owners.set(sessionId, native)
         await prepared.guard()
-        input.guard?.()
+        await input.guard?.()
         const runtime = this.store.runtime(sessionId)
         createRequested = true
         const observation = await native.start({ sessionId, operationId: input.operationId, directory: this.store.directory(sessionId),
@@ -163,13 +181,13 @@ export class RuntimePreviewRunner {
         if (adapter) {
           await adapter.permit(native, async actual => {
             await prepared.guard()
-            input.guard?.()
+            await input.guard?.()
             record = this.change(record, { process: observation, runtimeEvidence: { ...actual, preflight: preflight.status === 'SUPPORTED' ? 'SUPPORTED' : 'UNKNOWN', at: new Date().toISOString(), scope: 'DECLARED_INSTALL_SCRIPTS' } })
           })
           stack = await adapter.awaitReady(native)
           await prepared.guard()
         }
-        input.guard?.()
+        await input.guard?.()
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE' })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
         return record
@@ -183,10 +201,12 @@ export class RuntimePreviewRunner {
         // A missing create acknowledgement is not proof that CreateProcess never ran.
         const proof = this.store.nativeJournal(sessionId).at(-1)
         const observation = nativeObservation.safeParse(proof?.evidence)
+        const reason = error instanceof Error && /^[A-Z_0-9:]{1,160}$/.test(error.message) ? error.message : 'LAUNCH_FAILED'
+        record = this.termination(this.store.read(sessionId), 'STARTUP_FAILURE', reason, observation.success ? observation.data : null, native && ownerExited ? 'EXITED' : 'UNKNOWN')
         if (ownerExited && ((!createRequested) || (proof?.phase === 'DRAINED' && observation.success && terminalProof(observation.data)))) {
+          if (native) record = this.supervisorExited(record)
           try { this.store.releaseResources(sessionId) }
           catch { return this.change(this.store.read(sessionId), { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', process: observation.success ? observation.data : null, failure: 'RESOURCE_RELEASE_UNVERIFIED', readiness: 'UNVERIFIABLE', liveness: 'NOT_OBSERVED' }) }
-          const reason = error instanceof Error && /^[A-Z_0-9:]{1,160}$/.test(error.message) ? error.message : 'LAUNCH_FAILED'
           record = this.change(this.store.read(sessionId), { state: 'FAILED', resources: 'RELEASED', process: observation.success ? observation.data : null, failure: reason })
           this.store.release(sessionId)
         } else record = this.change(this.store.read(sessionId), { state: 'OWNERSHIP_UNVERIFIED', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', liveness: 'UNVERIFIABLE', failure: 'LAUNCH_UNACKNOWLEDGED' })
@@ -200,20 +220,27 @@ export class RuntimePreviewRunner {
       if (record.state === 'STOPPED' || record.state === 'FAILED') return record
       const owner = this.owners.get(sessionId)
       if (!owner) return this.inspectInternal(sessionId)
-      try { record = this.change(record, { state: 'STOPPING' }) }
-      catch (error) { if (!(error instanceof SessionPersistenceFailure)) throw error }
+      if (!record.stopIntent) {
+        try { if ((await owner.inspect()).rootSignaled) return this.inspectInternal(sessionId) }
+        catch { return this.inspectInternal(sessionId) }
+        record = this.change(record, { state: 'STOPPING', stopIntent: { requestedAt: new Date().toISOString() } })
+      }
       try {
         const observation = await owner.stop(record.shutdown.graceMs, record.shutdown.forceMs, record.shutdown.graceful)
+        record = this.termination(record, observation.rootSignaled ? 'STOP_REQUESTED' : 'UNKNOWN', observation.rootSignaled ? 'OPERATOR_STOP' : 'STOP_EXIT_NOT_OBSERVED', observation, 'RESPONDING')
+        record = this.change(record, { process: observation })
         if (!drained(observation)) return this.change(record, { state: 'CLEANUP_INCOMPLETE', process: observation, resources: 'UNVERIFIABLE', failure: 'DRAIN_UNVERIFIED', liveness: 'UNVERIFIABLE' })
         await this.adapters.get(sessionId)?.released(owner)
         await owner.shutdown()
+        record = this.supervisorExited(record)
         this.store.releaseResources(sessionId)
-        record = this.change(record, { state: 'STOPPED', process: observation, resources: 'RELEASED', failure: null, liveness: 'NOT_OBSERVED' })
+        record = this.change(record, { ...this.terminal(record), process: observation, resources: 'RELEASED', liveness: 'NOT_OBSERVED' })
         this.store.release(sessionId); this.owners.delete(sessionId)
         this.adapters.delete(sessionId)
         this.sources.delete(sessionId)
         return record
-      } catch {
+      } catch (error) {
+        if (error instanceof SessionPersistenceFailure) throw error
         return this.change(this.store.read(sessionId), { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'STOP_UNVERIFIED', liveness: 'UNVERIFIABLE' })
       }
     })
@@ -247,12 +274,16 @@ export class RuntimePreviewRunner {
     if (owner) {
       try {
         const observation = await owner.inspect()
-        if (observation.rootSignaled && observation.knownHandlesClosed && observation.activeProcesses === 0) {
+        if (observation.rootSignaled) {
+          record = this.termination(record, record.stopIntent ? 'STOP_REQUESTED' : 'UNEXPECTED_EXIT', record.stopIntent ? 'OPERATOR_STOP' : 'UNEXPECTED_PROCESS_EXIT', observation, 'RESPONDING')
           const final = await owner.stop(0, record.shutdown.forceMs, false)
           if (!drained(final)) throw new Error('DRAIN_UNVERIFIED')
+          record = this.change(record, { process: final })
           await this.adapters.get(sessionId)?.released(owner)
-          await owner.shutdown(); this.store.releaseResources(sessionId)
-          record = this.change(record, { state: 'STOPPED', process: final, resources: 'RELEASED', liveness: 'NOT_OBSERVED', failure: null })
+          await owner.shutdown()
+          record = this.supervisorExited(record)
+          this.store.releaseResources(sessionId)
+          record = this.change(record, { ...this.terminal(record), process: final, resources: 'RELEASED', liveness: 'NOT_OBSERVED', readiness: 'NOT_READY' })
           this.store.release(sessionId); this.owners.delete(sessionId)
           this.adapters.delete(sessionId); this.sources.delete(sessionId)
           return record
@@ -286,7 +317,11 @@ export class RuntimePreviewRunner {
           record = this.change(record, { ...stack, coverage, ...(sourceObservation ? { sourceObservation } : {}) })
         }
         return record
-      } catch { owner.close(); this.owners.delete(sessionId) }
+      } catch (error) {
+        if (error instanceof SessionPersistenceFailure) throw error
+        owner.close(); this.owners.delete(sessionId)
+        if (record.termination && record.termination.kind !== 'UNKNOWN') return this.change(record, { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'TERMINATION_CLEANUP_UNVERIFIED', liveness: 'UNVERIFIABLE' })
+      }
     }
     const proof = this.store.nativeJournal(sessionId).at(-1)
     const observation = nativeObservation.safeParse(proof?.evidence)
@@ -299,6 +334,9 @@ export class RuntimePreviewRunner {
       } finally { await observer.shutdown() }
     }
     if (supervisorExited && proof?.phase === 'DRAINED' && observation.success && terminalProof(observation.data)) {
+      record = this.termination(record, record.stopIntent ? 'STOP_REQUESTED' : observation.data.assignedAtCreation ? 'UNEXPECTED_EXIT' : 'STARTUP_FAILURE',
+        record.stopIntent ? 'OPERATOR_STOP' : observation.data.assignedAtCreation ? 'UNEXPECTED_PROCESS_EXIT' : 'LAUNCH_FAILED', observation.data, 'EXITED')
+      record = this.supervisorExited(record)
       for (const resource of record.resourceInventory.filter(r => r.kind === 'SESSION_ENDPOINT')) {
         const match = /^127\.0\.0\.1:(\d+)$/.exec(resource.reference)
         const port = Number(match?.[1])
@@ -311,11 +349,12 @@ export class RuntimePreviewRunner {
       }
       try { this.store.releaseResources(sessionId) }
       catch { return this.change(record, { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', process: observation.data, failure: 'RESOURCE_RELEASE_UNVERIFIED', readiness: 'UNVERIFIABLE', liveness: 'NOT_OBSERVED' }) }
-      record = this.change(record, { state: observation.data.assignedAtCreation ? 'STOPPED' : 'FAILED', resources: 'RELEASED', process: observation.data, reconciliation: 'OBSERVED', failure: null, liveness: 'NOT_OBSERVED' })
+      record = this.change(record, { ...this.terminal(record), resources: 'RELEASED', process: observation.data, reconciliation: 'OBSERVED', liveness: 'NOT_OBSERVED', readiness: 'NOT_READY' })
       if (this.store.active() === sessionId) this.store.release(sessionId)
       this.adapters.delete(sessionId); this.sources.delete(sessionId)
       return record
     }
+    if (!record.termination) record = this.termination(record, 'UNKNOWN', 'OWNER_LOST_OR_UNREACHABLE', record.process, 'UNKNOWN')
     if (record.state !== 'OWNERSHIP_UNVERIFIED') record = this.change(record, { state: 'OWNERSHIP_UNVERIFIED', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'OWNER_LOST_OR_UNREACHABLE', liveness: 'UNVERIFIABLE', readiness: 'UNVERIFIABLE', attestation: { artifact: 'UNVERIFIABLE', loadedCode: 'UNVERIFIABLE' } })
     // Read-only observation cannot establish ownership or prove a destroyed Job drained.
     const observer = await this.owner()
