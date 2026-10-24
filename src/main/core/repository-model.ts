@@ -16,7 +16,8 @@ import type {
   IntegrityRepair,
   IntegrityCheckOptions
 } from '../../shared/types'
-import { isBinaryContent, isEligibleTextFile, isKnownBinaryExtension, scanRepository } from './repository-scanner'
+import { diskMetadataVersion, isBinaryContent, isFilesystemIgnored, isKnownBinaryExtension, observeTextEligibility, scanRepository, type FileObservation } from './repository-scanner'
+import { createCodeMapWorkMetrics, type CodeMapWorkMetrics } from './codemap-work-metrics'
 import type { MembershipPort } from './repository-file-membership'
 import { getLanguageForExtension } from './language-adapter'
 import { createRepositoryDatabase, closeRepositoryDatabase } from './repository-database'
@@ -72,7 +73,18 @@ export interface FileContent {
 const MAX_SNIPPET_LINES = 300
 const MAX_FILE_CONTENT_BYTES = 2 * 1024 * 1024
 
+// Bump structure for extractor/grammar/facts changes, and resolver for symbol resolution changes.
+export const CODE_MAP_PROJECTION_VERSIONS = { structure: 'structure-1', resolver: 'symbols-1' } as const
+
+export interface FileChangeBatchResult {
+  completedPaths: string[]
+  changedPaths: string[]
+  errors: Array<{ relativePath: string; error: Error }>
+}
+
 export class RepositoryModel {
+  private mutationQueue: Promise<void> = Promise.resolve()
+  private readonly recoveryChanges = new Map<string, number>()
   readonly readiness = new RepositoryChangeReadiness()
   private readonly repoPath: string
   private readonly repositoryId: string
@@ -80,14 +92,27 @@ export class RepositoryModel {
   private readonly extractors: ReadonlyArray<StructureExtractionPort>
   private readonly tokenizer: TokenizerPort
   private readonly membership: MembershipPort | null
+  private readonly projectionVersions: { structure: string; resolver: string }
 
-  constructor(repoPath: string, extractors: StructureExtractionPort[] = [], tokenizer: TokenizerPort = getCanonicalTokenizer(), membership?: MembershipPort) {
+  constructor(repoPath: string, extractors: StructureExtractionPort[] = [], tokenizer: TokenizerPort = getCanonicalTokenizer(), membership?: MembershipPort, projectionVersions: { structure: string; resolver: string } = CODE_MAP_PROJECTION_VERSIONS) {
     this.repoPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
     this.repositoryId = this.generateRepositoryId(this.repoPath)
     this.db = createRepositoryDatabase(this.repoPath)
     this.extractors = extractors
     this.tokenizer = tokenizer
     this.membership = membership ?? null
+    this.projectionVersions = projectionVersions
+    for (const path of this.getPendingFilePaths()) this.recoveryChanges.set(path, this.readiness.accept(0, path))
+  }
+
+  private enqueueMutation<T>(work: () => Promise<T>): Promise<T> {
+    const pending = this.mutationQueue.then(work)
+    this.mutationQueue = pending.then(() => {}, () => {})
+    return pending
+  }
+
+  getPendingFilePaths(): string[] {
+    return this.db.getPendingFileChanges(this.repositoryId).map(change => change.relativePath)
   }
 
   getRepositoryId(): string {
@@ -114,12 +139,37 @@ export class RepositoryModel {
     }
   }
 
+  private scanDisk(metrics: CodeMapWorkMetrics, knownFiles: CodeMapFile[] = []) {
+    const known = new Map(knownFiles.map(file => [file.relativePath, file]))
+    return scanRepository(this.repoPath, {
+      metrics,
+      reuseEligibility: (path, observation) => {
+        const file = known.get(path)
+        return !!file?.contentHash && file.status === 'indexed'
+          && this.db.projectionCurrent(this.repositoryId, file.id, 'DISK_METADATA', diskMetadataVersion(observation.stat, file.contentHash))
+      },
+      filterEligible: this.membership ? (paths, observations, counts) => this.membership!.filterEligible(paths, observations, counts) : undefined
+    })
+  }
+
+  private rememberDiskMetadata(file: CodeMapFile, observation: FileObservation): void {
+    if (file.contentHash) this.db.finishProjection(this.repositoryId, file.id, 'DISK_METADATA', diskMetadataVersion(observation.stat, file.contentHash))
+  }
+
   private generateRepositoryId(repoPath: string): string {
     return createHash('sha256').update(repoPath).digest('hex').substring(0, 16)
   }
 
   private generateFileId(relativePath: string): string {
     return createHash('sha256').update(`${this.repositoryId}:${relativePath}`).digest('hex').substring(0, 16)
+  }
+
+  private allocateFileId(relativePath: string, reserved: Map<string, string> = new Map()): string {
+    let id = this.generateFileId(relativePath), suffix = 0
+    while ((this.db.getFileById(id)?.relativePath ?? reserved.get(id) ?? relativePath) !== relativePath) {
+      id = this.generateFileId(relativePath + ':' + ++suffix)
+    }
+    return id
   }
 
   private generateRelationshipId(sourceId: string, targetId: string, type: CodeMapRelationshipType): string {
@@ -179,6 +229,38 @@ export class RepositoryModel {
     }
   }
 
+  private projectionVersion(phase: string): string {
+    return phase === 'TOKENS' ? this.tokenizer.id + ':' + this.tokenizer.encoding : this.projectionVersions.structure
+  }
+
+  private checkpointExtraction(fileId: string): void {
+    for (const phase of ['STRUCTURE', 'FACTS', 'DOCUMENTS', 'SIGNATURES', 'TOKENS']) {
+      this.db.finishProjection(this.repositoryId, fileId, phase, this.projectionVersion(phase))
+    }
+  }
+
+  private async migrateFiles(phase: string, migrate: (file: CodeMapFile) => Promise<boolean>): Promise<number> {
+    const version = this.projectionVersion(phase)
+    if (this.db.projectionCurrent(this.repositoryId, '', phase, version)) return 0
+    this.db.beginProjection(this.repositoryId, '', phase, version)
+    let updated = 0
+    let processed = 0
+    for (const file of this.db.getFilesByRepository(this.repositoryId)) {
+      if (++processed % 50 === 0) await new Promise<void>(resolve => setImmediate(resolve))
+      if (this.db.projectionCurrent(this.repositoryId, file.id, phase, version)) continue
+      const revision = this.db.beginProjection(this.repositoryId, file.id, phase, version)
+      const changed = await migrate(file)
+      if (changed) updated++
+      else if (revision !== this.db.projectionRevision(this.repositoryId, file.id)) throw new Error('PROJECTION_INPUT_CHANGED')
+      const current = this.db.getFileById(file.id)
+      if (current && current.status === 'indexed') this.db.finishProjection(this.repositoryId, file.id, phase, version)
+      else throw new Error('PROJECTION_FILE_PENDING: ' + file.relativePath)
+    }
+    if (!this.db.projectionFilesCurrent(this.repositoryId, phase, version)) throw new Error('PROJECTION_INPUT_CHANGED')
+    this.db.finishProjection(this.repositoryId, '', phase, version)
+    return updated
+  }
+
   private persistableReferences(files: readonly SymbolReferenceFile[], sources?: ReadonlySet<string>): PersistedSymbolReference[] {
     return resolveSymbolReferences(this.repoPath, files, sources).map((reference) => ({
       ...reference, id: createSymbolReferenceId(this.repositoryId, reference), repositoryId: this.repositoryId
@@ -218,7 +300,16 @@ export class RepositoryModel {
         grouped.set(reference.sourceFileId, group)
       }
       phase = 'PERSISTENCE'
-      for (const source of sources) this.db.replaceSymbolReferencesForFile(source, grouped.get(source) ?? [])
+      const version = this.projectionVersions.structure + ':' + this.projectionVersions.resolver
+      const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
+      for (const source of sources) {
+        this.db.replaceSymbolReferencesForFile(source, grouped.get(source) ?? [])
+        this.db.finishProjection(this.repositoryId, source, 'SYMBOL_SOURCE', version, revision)
+      }
+      const allFiles = this.db.getFilesByRepository(this.repositoryId)
+      if (allFiles.every(file => sources.has(file.id))) {
+        this.db.finishProjection(this.repositoryId, '', 'SYMBOLS', this.projectionVersions.structure + ':' + this.projectionVersions.resolver)
+      }
       telemetryService.log(correlationId, 'CODE_MAP', 'SYMBOL_REFERENCE_PERSISTENCE_COMPLETED', { repoPath: this.repoPath, resolvedReferenceCount: references.length })
       telemetryService.log(correlationId, 'CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED', { repoPath: this.repoPath,
         affectedSourceCount: sources.size, resolvedReferenceCount: references.length, resolutionFactsLoaded: snapshot.length,
@@ -234,7 +325,20 @@ export class RepositoryModel {
     }
   }
 
-  async backfillSymbolReferences(): Promise<number> {
+  backfillSymbolReferences(): Promise<number> {
+    return this.enqueueMutation(() => this.backfillSymbolReferencesState())
+  }
+
+  private async backfillSymbolReferencesState(): Promise<number> {
+    const version = this.projectionVersions.structure + ':' + this.projectionVersions.resolver
+    if (this.db.projectionCurrent(this.repositoryId, '', 'SYMBOLS', version)) {
+      const correlationId = telemetryService.startOperation('BACKFILL_SYMBOL_REFERENCES')
+      const count = this.db.countSymbolReferences(this.repositoryId)
+      telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_STARTED', { repoPath: this.repoPath })
+      telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_COMPLETED', { repoPath: this.repoPath, references: count, factsRegenerated: 0, skipReason: 'PERSISTED_PROJECTION_CURRENT' })
+      return count
+    }
+    this.db.beginProjection(this.repositoryId, '', 'SYMBOLS', version)
     const symbolChange = this.readiness.accept(2)
     const correlationId = telemetryService.startOperation('BACKFILL_SYMBOL_REFERENCES')
     const files = this.db.getFilesByRepository(this.repositoryId)
@@ -244,7 +348,7 @@ export class RepositoryModel {
     telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_STARTED', { repoPath: this.repoPath })
     try {
     for (const file of files) {
-      if (facts.get(file.id)?.contentHash === file.contentHash) continue
+      if (facts.get(file.id)?.contentHash === file.contentHash && this.db.projectionCurrent(this.repositoryId, file.id, 'FACTS', this.projectionVersions.structure)) continue
       let content: string
       try {
         content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
@@ -260,7 +364,7 @@ export class RepositoryModel {
       const input = { repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content }
       const extractor = this.findExtractorForExtension(file.extension)
       const extraction = extractor ? extractor.extract(input) : extractTextDocument(input)
-      if (contentHash !== file.contentHash) {
+      if (contentHash !== file.contentHash || !this.db.projectionCurrent(this.repositoryId, file.id, 'STRUCTURE', this.projectionVersions.structure)) {
         const change = this.readiness.accept(0, file.relativePath)
         structuralChanges.push(change)
         for (const element of extraction.elements) element.fileId = file.id
@@ -270,16 +374,22 @@ export class RepositoryModel {
           sizeBytes: Buffer.byteLength(content, 'utf-8'), mtime: Math.floor(fileStat.mtimeMs),
           ...this.tokenIdentity(content, contentHash, file), status: 'indexed'
         }, extraction.elements, extraction.relationships, extraction.elementInterfaces, [], symbolResolutionFacts(file.id, contentHash, extraction))
+        this.checkpointExtraction(file.id)
         this.readiness.advance(change, 'STRUCTURE')
       } else {
         this.db.saveSymbolResolutionFacts(symbolResolutionFacts(file.id, contentHash, extraction))
+        this.db.finishProjection(this.repositoryId, file.id, 'FACTS', this.projectionVersions.structure)
       }
       regenerated++
     }
-    if (structuralChanges.length > 0) this.refreshRepositoryRelationships(correlationId)
+    if (!this.db.projectionCurrent(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)) this.refreshRepositoryRelationships(correlationId)
     for (const change of structuralChanges) this.readiness.advance(change, 'RELATIONSHIPS')
     await new Promise<void>((resolve) => setImmediate(resolve))
-    const count = await this.refreshSymbolReferences(new Set(files.map((file) => file.id)), correlationId, regenerated)
+    const sources = new Set(this.db.getFilesByRepository(this.repositoryId).filter(file => !this.db.projectionCurrent(this.repositoryId, file.id, 'SYMBOL_SOURCE', version)).map(file => file.id))
+    const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
+    if (sources.size) await this.refreshSymbolReferences(sources, correlationId, regenerated)
+    this.db.finishProjection(this.repositoryId, '', 'SYMBOLS', version, revision)
+    const count = this.db.countSymbolReferences(this.repositoryId)
     for (const change of structuralChanges) this.readiness.advance(change, 'SYMBOL_REFERENCES')
     this.readiness.advance(symbolChange, 'SYMBOL_REFERENCES')
     this.readiness.recover(undefined, 2)
@@ -294,69 +404,48 @@ export class RepositoryModel {
   }
 
   async backfillTokenMetadata(): Promise<number> {
-    let updated = 0
-    let processed = 0
-    for (const file of this.db.getFilesByRepository(this.repositoryId)) {
-      processed++
-      if (processed % 50 === 0) {
-        await new Promise((resolve) => setImmediate(resolve))
-      }
-      if (
-        file.contentHash &&
-        file.tokenizedContentHash === file.contentHash &&
-        file.tokenizerId === this.tokenizer.id &&
-        file.tokenizerEncoding === this.tokenizer.encoding &&
-        typeof file.tokenCount === 'number'
-      ) continue
-
-      try {
-        const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
-        const contentHash = file.contentHash ?? this.calculateContentHash(content)
-        this.db.saveFile({ ...file, contentHash, ...this.tokenIdentity(content, contentHash, file) })
-        updated++
-      } catch {
-        continue
-      }
-    }
-    return updated
+    return this.migrateFiles('TOKENS', async file => {
+      if (file.contentHash && file.tokenizedContentHash === file.contentHash && file.tokenizerId === this.tokenizer.id && file.tokenizerEncoding === this.tokenizer.encoding && typeof file.tokenCount === 'number') return false
+      const revision = this.db.projectionRevision(this.repositoryId, file.id)
+      const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+      if (revision !== this.db.projectionRevision(this.repositoryId, file.id) || this.calculateContentHash(content) !== file.contentHash) throw new Error('PROJECTION_INPUT_CHANGED')
+      this.db.saveFile({ ...file, ...this.tokenIdentity(content, file.contentHash, file) })
+      return true
+    })
   }
 
   async backfillContextReferences(): Promise<number> {
-    return this.db.backfillContextReferences(this.repositoryId)
+    if (this.db.projectionCurrent(this.repositoryId, '', 'CONTEXT', '1')) return 0
+    this.db.beginProjection(this.repositoryId, '', 'CONTEXT', '1')
+    const count = this.db.backfillContextReferences(this.repositoryId)
+    this.db.finishProjection(this.repositoryId, '', 'CONTEXT', '1')
+    return count
   }
 
   async backfillTextDocuments(): Promise<void> {
-    for (const file of this.getFiles()) {
+    await this.migrateFiles('DOCUMENTS', async file => {
       const extractor = this.findExtractorForExtension(file.extension)
       const elements = this.getElementsByFile(file.id)
       if (extractor) {
-        if (!['.json', '.md', '.markdown'].includes(file.extension.toLowerCase()) || elements.some(element => element.kind === 'section')) continue
-        try {
-          const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
-          const result = extractor.extract({ repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content })
-          if (!result.elements.some(element => element.kind === 'section')) continue
-        } catch {
-          continue
-        }
-      } else if (elements.some(element => element.kind === 'document')) {
-        continue
-      }
-      await this.updateFileContent(file.relativePath)
-    }
+        if (!['.json', '.md', '.markdown'].includes(file.extension.toLowerCase()) || elements.some(element => element.kind === 'section')) return false
+        const revision = this.db.projectionRevision(this.repositoryId, file.id)
+        const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+        if (revision !== this.db.projectionRevision(this.repositoryId, file.id) || this.calculateContentHash(content) !== file.contentHash) throw new Error('PROJECTION_INPUT_CHANGED')
+        const result = extractor.extract({ repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content })
+        if (!result.elements.some(element => element.kind === 'section')) return false
+      } else if (elements.some(element => element.kind === 'document')) return false
+      if (!await this.updateFileContent(file.relativePath)) throw new Error('DOCUMENT_PROJECTION_FAILED')
+      return true
+    })
   }
 
   async backfillDeclarationSignatures(): Promise<void> {
-    for (const file of this.getFiles()) {
-      if (file.status !== 'indexed') continue
+    await this.migrateFiles('SIGNATURES', async file => {
       const elements = this.getElementsByFile(file.id)
-      const needsBackfill = elements.some(
-        (element) =>
-          (element.kind === 'function' || element.kind === 'method' || element.kind === 'class') &&
-          element.declarationSignature === null
-      )
-      if (!needsBackfill) continue
-      await this.updateFileContent(file.relativePath)
-    }
+      if (!elements.some(element => ['function', 'method', 'class'].includes(element.kind) && element.declarationSignature === null)) return false
+      if (!await this.updateFileContent(file.relativePath)) throw new Error('SIGNATURE_PROJECTION_FAILED')
+      return true
+    })
   }
 
   pruneKnownBinaryFiles(): number {
@@ -373,11 +462,19 @@ export class RepositoryModel {
    */
   private async verifyContentMatches(
     fullPath: string,
-    expectedHash: string
+    expectedHash: string,
+    observation?: FileObservation,
+    metrics?: CodeMapWorkMetrics
   ): Promise<{ matches: boolean; error?: boolean }> {
     try {
+      if (metrics) metrics.contentReads++
       const content = await readFile(fullPath, 'utf-8')
+      if (metrics) metrics.hashesCalculated++
       const hash = this.calculateContentHash(content)
+      if (observation) {
+        if (metrics) metrics.filesStatChecked++
+        if (diskMetadataVersion(await stat(fullPath), hash) !== diskMetadataVersion(observation.stat, hash)) return { matches: false }
+      }
       return { matches: hash === expectedHash }
     } catch {
       return { matches: false, error: true }
@@ -385,14 +482,19 @@ export class RepositoryModel {
   }
 
 
-  async reconcileWithDisk(
+  reconcileWithDisk(
     correlationIdOrOptions?: string | { correlationId?: string; indexUnexpected?: boolean }
   ): Promise<{ checked: number; markedModified: number; removed: number; healed: number; indexedUnexpected?: number; pendingPaths?: string[] }> {
+    return this.enqueueMutation(() => this.reconcileDiskState(correlationIdOrOptions))
+  }
+
+  private async reconcileDiskState(correlationIdOrOptions?: string | { correlationId?: string; indexUnexpected?: boolean }): Promise<{ checked: number; markedModified: number; removed: number; healed: number; indexedUnexpected?: number; pendingPaths?: string[] }> {
     const options = typeof correlationIdOrOptions === 'string'
       ? { correlationId: correlationIdOrOptions }
       : (correlationIdOrOptions ?? {})
     const cid = options.correlationId ?? telemetryService.startOperation('RECONCILE_DISK')
     const startedAt = Date.now()
+    const metrics = createCodeMapWorkMetrics()
     try {
       const dbFiles = this.db.getFilesByRepository(this.repositoryId)
       telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_STARTED', { checked: dbFiles.length })
@@ -400,12 +502,13 @@ export class RepositoryModel {
       let removed = 0
       let healed = 0
       let processed = 0
-      let scannedFiles: Awaited<ReturnType<typeof scanRepository>> | null = null
+      const scannedFiles = await this.scanDisk(metrics, dbFiles)
+      const scannedByPath = new Map(scannedFiles.map(file => [file.relativePath, file]))
+      const verificationStartedAt = Date.now()
       const movedFileIds = new Set<string>()
       const pendingPaths = new Set<string>()
 
       if (options.indexUnexpected === true && dbFiles.length > 0) {
-        scannedFiles = await this.applyMembership(await scanRepository(this.repoPath))
         const diskPaths = new Set(scannedFiles.map((file) => file.relativePath))
         const indexedPaths = new Set(dbFiles.map((file) => file.relativePath))
         const missingByHash = new Map<string, CodeMapFile[]>()
@@ -417,16 +520,18 @@ export class RepositoryModel {
           entries.push(file)
           missingByHash.set(file.contentHash, entries)
         }
-        for (const file of scannedFiles) {
+        for (const file of missingByHash.size ? scannedFiles : []) {
           if (indexedPaths.has(file.relativePath)) continue
           try {
+            metrics.contentReads++
             const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+            metrics.hashesCalculated++
             const hash = this.calculateContentHash(content)
             const entries = unexpectedByHash.get(hash) ?? []
             entries.push(file.relativePath)
             unexpectedByHash.set(hash, entries)
-          } catch {
-            continue
+          } catch (error) {
+            throw error
           }
         }
         for (const [hash, missing] of missingByHash) {
@@ -449,20 +554,14 @@ export class RepositoryModel {
         }
         try {
           const fullPath = join(this.repoPath, file.relativePath)
-          if (!existsSync(fullPath)) {
+          const scanned = scannedByPath.get(file.relativePath)
+          if (!scanned) {
             this.db.deleteFile(file.id)
             removed++
             continue
           }
 
-          let fileStat
-          try {
-            fileStat = await stat(fullPath)
-          } catch {
-            this.db.deleteFile(file.id)
-            removed++
-            continue
-          }
+          const fileStat = scanned.observation!.stat
 
           const diskMtime = Math.floor(fileStat.mtimeMs)
           const diskSize = fileStat.size
@@ -475,26 +574,35 @@ export class RepositoryModel {
           }
 
           if (file.status === 'indexed') {
-            if (file.mtime === diskMtime && file.sizeBytes === diskSize) {
+            if (this.db.projectionCurrent(this.repositoryId, file.id, 'DISK_METADATA', diskMetadataVersion(fileStat, file.contentHash))) {
               continue
             }
 
-            const check = await this.verifyContentMatches(fullPath, file.contentHash)
+            const check = await this.verifyContentMatches(fullPath, file.contentHash, scanned.observation, metrics)
+            if (check.error) {
+              this.markFileModified(file.relativePath)
+              throw new Error(`RECONCILE_READ_FAILED: ${file.relativePath}`)
+            }
             if (check.matches) {
               if (file.mtime !== diskMtime || file.sizeBytes !== diskSize) {
                 this.updateFileMetadata(file.id, { mtime: diskMtime, sizeBytes: diskSize })
               }
-              telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_HASH_MATCH', { relativePath: file.relativePath })
+              this.rememberDiskMetadata(this.db.getFileById(file.id)!, scanned.observation!)
             } else {
               this.db.updateFileStatus(file.id, 'modified')
               markedModified++
               telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_INDEXED_DIVERGED', { relativePath: file.relativePath })
             }
           } else if (file.status === 'modified') {
-            const check = await this.verifyContentMatches(fullPath, file.contentHash)
+            const check = await this.verifyContentMatches(fullPath, file.contentHash, scanned.observation, metrics)
+            if (check.error) {
+              this.markFileModified(file.relativePath)
+              throw new Error(`RECONCILE_READ_FAILED: ${file.relativePath}`)
+            }
             if (check.matches) {
               this.updateFileMetadata(file.id, { mtime: diskMtime, sizeBytes: diskSize })
               this.db.updateFileStatus(file.id, 'indexed')
+              this.rememberDiskMetadata(this.db.getFileById(file.id)!, scanned.observation!)
               healed++
               telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_STALE_HEALED', { relativePath: file.relativePath })
             } else {
@@ -502,31 +610,35 @@ export class RepositoryModel {
             }
           }
         } catch (err) {
-          console.error(`[RepositoryModel] Erro ao reconciliar arquivo "${file.relativePath}":`, err)
+          throw err
         }
       }
 
       if (options.indexUnexpected === true && dbFiles.length > 0) {
-        const scanned = scannedFiles ?? await this.applyMembership(await scanRepository(this.repoPath))
+        const scanned = scannedFiles
         const dbPaths = new Set(this.db.getFilesByRepository(this.repositoryId).map(file => file.relativePath))
         for (const scannedFile of scanned) {
           if (!dbPaths.has(scannedFile.relativePath)) pendingPaths.add(scannedFile.relativePath)
         }
-        telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_UNEXPECTED_DETECTED', { paths: [...pendingPaths] })
+        telemetryService.log(cid, 'CODE_MAP', 'RECONCILE_UNEXPECTED_DETECTED', { pathCount: pendingPaths.size })
       }
 
+      metrics.phaseDurationMs.verification = Date.now() - verificationStartedAt
       telemetryService.log(cid, "CODE_MAP", "RECONCILE_COMPLETED", {
         checked: dbFiles.length,
         markedModified,
         removed,
         healed,
-        pendingPaths: [...pendingPaths],
+        pendingPathCount: pendingPaths.size,
+        ...metrics,
+        skipReason: metrics.contentReads === 0 ? 'PERSISTED_DISK_METADATA_CURRENT' : null,
         durationMs: Date.now() - startedAt
       })
 
       return { checked: dbFiles.length, markedModified, removed, healed, pendingPaths: [...pendingPaths] }
     } catch (err) {
       telemetryService.logError(cid, "CODE_MAP", "RECONCILE_FAILED", {
+        ...metrics,
         error: err instanceof Error ? err.message : String(err),
         durationMs: Date.now() - startedAt
       })
@@ -545,6 +657,8 @@ export class RepositoryModel {
    * @returns Número de arquivos atualizados com hash.
    */
   async backfillContentHashes(correlationId?: string): Promise<number> {
+    if (this.db.projectionCurrent(this.repositoryId, '', 'HASHES', '1')) return 0
+    this.db.beginProjection(this.repositoryId, '', 'HASHES', '1')
     const cid = correlationId ?? telemetryService.startOperation("BACKFILL_HASHES")
     const startedAt = Date.now()
 
@@ -554,6 +668,7 @@ export class RepositoryModel {
     const legacyFiles = dbFiles.filter((f) => !f.contentHash)
 
     if (legacyFiles.length === 0) {
+      this.db.finishProjection(this.repositoryId, '', 'HASHES', '1')
       telemetryService.log(cid, "CODE_MAP", "BACKFILL_COMPLETED", {
         updated: 0,
         failed: 0,
@@ -613,22 +728,26 @@ export class RepositoryModel {
       durationMs: Date.now() - startedAt
     })
 
+    if (failed === 0) this.db.finishProjection(this.repositoryId, '', 'HASHES', '1')
     return updated
   }
 
   /**
    * Executa o pipeline completo de indexação inicial do repositório.
    */
-  async indexRepository(
-    correlationId?: string
-  ): Promise<{ filesIndexed: number; elementsExtracted: number }> {
+  indexRepository(correlationId?: string): Promise<{ filesIndexed: number; elementsExtracted: number }> {
+    return this.enqueueMutation(() => this.indexRepositoryState(correlationId))
+  }
+
+  private async indexRepositoryState(correlationId?: string): Promise<{ filesIndexed: number; elementsExtracted: number }> {
+    const metrics = createCodeMapWorkMetrics()
+    const recovery = this.db.getPendingFileChanges(this.repositoryId)
     const change = this.readiness.accept()
     const startedAt = Date.now()
     const cid = correlationId ?? telemetryService.startOperation('INDEX_REPOSITORY')
     telemetryService.log(cid, 'CODE_MAP', 'INDEX_STARTED')
     try {
-    const rawScanned = await scanRepository(this.repoPath)
-    const scannedFiles = await this.applyMembership(rawScanned)
+    const scannedFiles = await this.scanDisk(metrics)
     telemetryService.log(cid, 'CODE_MAP', 'INDEX_SCANNED', { fileCount: scannedFiles.length })
 
     this.db.saveRepository({
@@ -653,6 +772,7 @@ export class RepositoryModel {
     // Limpa dados anteriores do repositório para indexação completa limpa
     this.db.deleteAllFiles(this.repositoryId)
 
+    const reservedFileIds = new Map([...previousFiles.values()].map(file => [file.id, file.relativePath]))
     const allElements: CodeMapElement[] = []
     const allLocalRelationships: CodeMapRelationship[] = []
     const allElementInterfaces: Array<{ elementId: string; interfaceNames: string[] }> = []
@@ -663,10 +783,11 @@ export class RepositoryModel {
 
     for (const scanned of scannedFiles) {
       const previousFile = previousFiles.get(scanned.relativePath)
-      const fileId = previousFile?.id ?? this.generateFileId(scanned.relativePath)
+      const fileId = previousFile?.id ?? this.allocateFileId(scanned.relativePath, reservedFileIds)
       const fullPath = join(this.repoPath, scanned.relativePath)
       let content = ''
       try {
+        metrics.contentReads++
         const buffer = await readFile(fullPath)
         if (isBinaryContent(buffer)) continue
         content = buffer.toString('utf-8')
@@ -676,7 +797,11 @@ export class RepositoryModel {
       }
 
       const lines = content.split(/\r?\n/).length
+      metrics.hashesCalculated++
       const contentHash = this.calculateContentHash(content)
+      metrics.filesStatChecked++
+      const afterRead = await stat(fullPath)
+      if (diskMetadataVersion(afterRead, contentHash) !== diskMetadataVersion(scanned.observation!.stat, contentHash)) throw new Error(`INDEX_INPUT_CHANGED: ${scanned.relativePath}`)
       telemetryService.log(cid, 'CODE_MAP', 'HASH_CALCULATED', {
         relativePath: scanned.relativePath,
         hashPrefix: contentHash.substring(0, 8)
@@ -698,9 +823,12 @@ export class RepositoryModel {
       }
 
       const extractor = this.findExtractorForExtension(scanned.extension)
+      const extractionStarted = Date.now()
       const structureResult = extractor
         ? extractor.extract({ repositoryId: this.repositoryId, relativePath: scanned.relativePath, extension: scanned.extension, content })
         : extractTextDocument({ repositoryId: this.repositoryId, relativePath: scanned.relativePath, extension: scanned.extension, content })
+      metrics.filesExtracted++
+      metrics.phaseDurationMs.extraction += Date.now() - extractionStarted
 
       // Substitui o fileId placeholder (que era o relativePath) pelo fileId real gerado
       for (const element of structureResult.elements) {
@@ -710,6 +838,8 @@ export class RepositoryModel {
       this.db.replaceIndexedFileState(fileRecord, structureResult.elements, structureResult.relationships,
         structureResult.elementInterfaces, [], symbolResolutionFacts(fileId, contentHash, structureResult))
 
+      this.checkpointExtraction(fileId)
+      this.rememberDiskMetadata(fileRecord, scanned.observation!)
       allFiles.push(fileRecord)
       allElements.push(...structureResult.elements)
       allLocalRelationships.push(...structureResult.relationships)
@@ -743,6 +873,7 @@ export class RepositoryModel {
     this.readiness.advance(change, 'STRUCTURE')
 
     // Resolve relacionamentos cross-file (extends, implements, imports)
+    const relationshipStarted = Date.now()
     const crossRelationships = this.resolveRelationships(
       allElements,
       allElementInterfaces,
@@ -750,10 +881,14 @@ export class RepositoryModel {
       allFiles
     )
 
-    this.db.saveRelationships(crossRelationships)
+    this.db.replaceResolvedRelationships(this.repositoryId, [...crossRelationships, ...this.resolveFileImports(allFiles)])
+    this.db.finishProjection(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)
+    metrics.relationshipResolutions++
+    metrics.phaseDurationMs.relationships += Date.now() - relationshipStarted
 
     this.readiness.advance(change, 'RELATIONSHIPS')
     await new Promise<void>((resolve) => setImmediate(resolve))
+    const symbolsStarted = Date.now()
     const symbolReferences = this.persistableReferences(symbolReferenceFiles)
     for (const file of allFiles) {
       this.db.replaceSymbolReferencesForFile(
@@ -761,6 +896,11 @@ export class RepositoryModel {
         symbolReferences.filter((reference) => reference.sourceFileId === file.id)
       )
     }
+
+    this.db.finishProjection(this.repositoryId, '', 'SYMBOLS', this.projectionVersions.structure + ':' + this.projectionVersions.resolver)
+    metrics.symbolSourcesResolved += allFiles.length
+    metrics.symbolRowsWritten += symbolReferences.length
+    metrics.phaseDurationMs.symbols += Date.now() - symbolsStarted
 
     // WARNING: o lastIndexedAt só é gravado após a indexação completar com sucesso.
     // Se a indexação falhar no meio (OOM, permissão negada, timeout), o registro permanece
@@ -772,12 +912,19 @@ export class RepositoryModel {
     this.db.updateRepositoryLastIndexedAt(this.repositoryId, nowIso)
     // Indexar também é ficar coerente com o disco — grava o carimbo de última sincronização.
     this.db.updateLastSyncAt(this.repositoryId, nowIso)
+    for (const pending of recovery) this.db.completeFileChange(this.repositoryId, pending.relativePath, pending.revision)
+    const remaining = new Set(this.getPendingFilePaths())
+    for (const [path, pending] of this.recoveryChanges) if (!remaining.has(path)) {
+      this.readiness.advance(pending, 'SYMBOL_REFERENCES')
+      this.recoveryChanges.delete(path)
+    }
 
     const result = {
       filesIndexed: scannedFiles.length,
       elementsExtracted: elementsExtractedCount
     }
     telemetryService.log(cid, 'CODE_MAP', 'INDEX_COMPLETED', {
+      ...metrics,
       filesIndexed: result.filesIndexed,
       elementsExtracted: result.elementsExtracted,
       symbolReferences: symbolReferences.length,
@@ -788,6 +935,7 @@ export class RepositoryModel {
     } catch (err) {
       // try/catch exclusivo para telemetria: loga a falha e relança, mantendo o comportamento externo idêntico.
       telemetryService.logError(cid, 'CODE_MAP', 'INDEX_FAILED', {
+        ...metrics,
         error: err instanceof Error ? err.message : String(err),
         durationMs: Date.now() - startedAt
       })
@@ -811,8 +959,22 @@ export class RepositoryModel {
     return resolver.resolve(elements, elementInterfaces, importSources, files)
   }
 
-  private refreshRepositoryRelationships(correlationId: string, relativePath?: string): void {
-    // Re-resolve relacionamentos cross-file para todo o repositório
+  private resolveFileImports(files: CodeMapFile[]): CodeMapRelationship[] {
+    const byPathIdentity = new Map(files.map(file => [this.generateFileId(file.relativePath), file]))
+    const byId = new Map(files.map(file => [file.id, file]))
+    const relationships: CodeMapRelationship[] = []
+    for (const fact of this.db.getSymbolResolutionFacts(this.repositoryId)) {
+      const source = byId.get(fact.fileId)
+      if (!source) continue
+      for (const targetIdentity of fact.fileImportTargets ?? []) {
+        const target = byPathIdentity.get(targetIdentity)
+        if (target) relationships.push({ id: this.generateRelationshipId(source.id, target.id, 'imports'), repositoryId: this.repositoryId, sourceId: source.id, targetId: target.id, type: 'imports', sourceKind: 'file', targetKind: 'file' })
+      }
+    }
+    return relationships
+  }
+
+  private refreshRepositoryRelationships(correlationId: string, relativePath?: string): { files: CodeMapFile[]; elements: CodeMapElement[]; relationships: CodeMapRelationship[] } {
     const allElements = this.db.getElementsByRepository(this.repositoryId)
     const allFiles = this.db.getFilesByRepository(this.repositoryId)
     const allElementInterfaces = this.db.getElementInterfacesByRepository(this.repositoryId)
@@ -854,87 +1016,202 @@ export class RepositoryModel {
       throw resolveErr
     }
 
-    this.db.saveRelationships(crossRelationships)
+    this.db.replaceResolvedRelationships(this.repositoryId, [...crossRelationships, ...this.resolveFileImports(allFiles)])
+    this.db.finishProjection(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)
     telemetryService.log(correlationId, 'CODE_MAP', 'RELATIONSHIP_RESOLUTION_COMPLETED', { repoPath: this.repoPath,
       relativePath,
       relationshipCount: crossRelationships.length,
       durationMs: Date.now() - relResolutionStartedAt
     })
+    return { files: allFiles, elements: allElements, relationships: this.db.getRelationshipsByRepository(this.repositoryId) }
   }
 
   /**
    * Reindexa um único arquivo modificado. Se o arquivo foi removido do disco, deleta do índice.
    */
   async updateFileContent(relativePath: string, correlationId?: string, acceptedChange?: number): Promise<boolean> {
+    const result = await this.updateFileContents([relativePath], correlationId, acceptedChange === undefined ? undefined : new Map([[relativePath, acceptedChange]]), undefined, true)
+    if (result.errors.length) throw result.errors[0].error
+    return true
+  }
+
+  updateFileContents(paths: string[], correlationId = telemetryService.startOperation('UPDATE_FILE_BATCH'), acceptedChanges?: Map<string, number>, correlations?: Map<string, string>, force = false): Promise<FileChangeBatchResult> {
+    const unique = [...new Set(paths)]
+    const selectedPaths = new Set(unique)
+    if (unique.length === 0) return Promise.resolve({ completedPaths: [], changedPaths: [], errors: [] })
+    const revisions = this.db.enqueueFileChanges(this.repositoryId, unique)
+    const changes = new Map(unique.map(path => [path, acceptedChanges?.get(path) ?? this.readiness.accept(0, path)]))
+    return this.enqueueMutation(async () => {
+      const startedAt = Date.now()
+      const metrics = createCodeMapWorkMetrics()
+      const observations = new Map<string, FileObservation>()
+      let eligible: Set<string>
+      try {
+        for (const path of unique) {
+          metrics.filesVisited++
+          metrics.filesStatChecked++
+          try { observations.set(path, { stat: await stat(join(this.repoPath, path)) }) } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+          }
+        }
+        const ignoreCache = new Map()
+        eligible = new Set(this.membership ? await this.membership.filterEligible(unique, observations, metrics) : unique.filter(path => !isFilesystemIgnored(this.repoPath, path, ignoreCache, metrics)))
+      } catch (error) {
+        for (const change of changes.values()) this.readiness.fail(change, error)
+        telemetryService.logError(correlationId, 'CODE_MAP', 'FILE_BATCH_FAILED', { phase: 'MEMBERSHIP', pathCount: unique.length, error: error instanceof Error ? error.message : String(error) })
+        return { completedPaths: [], changedPaths: [], errors: unique.map(relativePath => ({ relativePath, error: error instanceof Error ? error : new Error(String(error)) })) }
+      }
+      const oldFiles = this.db.getFilesByRepository(this.repositoryId)
+      const oldElements = this.db.getElementsByRepository(this.repositoryId)
+      const oldRelationships = this.db.getRelationshipsByRepository(this.repositoryId)
+      const changedFiles = new Set<string>()
+      const completedPaths: string[] = []
+      const errors: FileChangeBatchResult['errors'] = []
+      for (const path of unique) {
+        try {
+          await this.updateFileStructure(path, correlations?.get(path) ?? correlationId, changes.get(path)!, changedFiles, force, metrics, !eligible.has(path), observations.get(path))
+          completedPaths.push(path)
+        } catch (error) {
+          this.readiness.fail(changes.get(path)!, error)
+          errors.push({ relativePath: path, error: error instanceof Error ? error : new Error(String(error)) })
+        }
+      }
+      const version = this.projectionVersions.structure + ':' + this.projectionVersions.resolver
+      const projectionNeeded = completedPaths.length > 0 && (changedFiles.size > 0 || !this.db.projectionCurrent(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure) || !this.db.projectionCurrent(this.repositoryId, '', 'SYMBOLS', version))
+      let projectionPhase = 'RELATIONSHIPS'
+      try {
+        if (projectionNeeded) {
+          this.db.beginProjection(this.repositoryId, '', 'SYMBOLS', version)
+          const relationshipStarted = Date.now()
+          const current = this.refreshRepositoryRelationships(correlationId)
+          metrics.relationshipResolutions++
+          metrics.phaseDurationMs.relationships += Date.now() - relationshipStarted
+          const affected = this.affectedSymbolSources(changedFiles, oldFiles, oldElements, oldRelationships, current)
+          if (changedFiles.size === 0) for (const file of current.files) if (selectedPaths.has(file.relativePath)) affected.add(file.id)
+          for (const pending of this.db.getPendingFileChanges(this.repositoryId)) for (const id of pending.affectedSources) affected.add(id)
+          const existingIds = new Set(current.files.map(file => file.id))
+          for (const id of affected) if (!existingIds.has(id)) affected.delete(id)
+          for (const path of completedPaths) this.readiness.advance(changes.get(path)!, 'RELATIONSHIPS')
+          await new Promise<void>(resolve => setImmediate(resolve))
+          projectionPhase = 'SYMBOL_REFERENCES'
+          const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
+          if (affected.size) {
+            const symbolsStarted = Date.now()
+            const written = await this.refreshSymbolReferences(affected, correlationId)
+            metrics.symbolSourcesResolved += affected.size
+            metrics.symbolRowsWritten += written
+            metrics.phaseDurationMs.symbols += Date.now() - symbolsStarted
+          }
+          if (!errors.length) this.db.finishSymbolProjection(this.repositoryId, version, revision)
+        }
+        for (const path of completedPaths) {
+          const completed = this.db.completeFileChange(this.repositoryId, path, revisions.get(path)!)
+          this.readiness.advance(changes.get(path)!, 'SYMBOL_REFERENCES')
+          if (completed) this.readiness.recover(path)
+          const recovery = this.recoveryChanges.get(path)
+          if (completed && recovery !== undefined) { this.readiness.advance(recovery, 'SYMBOL_REFERENCES'); this.recoveryChanges.delete(path) }
+          telemetryService.log(correlations?.get(path) ?? correlationId, 'CODE_MAP', 'REINDEX_COMPLETED', { repoPath: this.repoPath, relativePath: path })
+        }
+      } catch (error) {
+        for (const path of completedPaths) {
+          this.readiness.fail(changes.get(path)!, error)
+          telemetryService.logError(correlations?.get(path) ?? correlationId, 'CODE_MAP', 'REINDEX_FAILED', { repoPath: this.repoPath, relativePath: path, phase: projectionPhase, error: error instanceof Error ? error.message : String(error) })
+          errors.push({ relativePath: path, error: error instanceof Error ? error : new Error(String(error)) })
+        }
+        completedPaths.length = 0
+      }
+      telemetryService.log(correlationId, 'CODE_MAP', 'FILE_BATCH_COMPLETED', {
+        ...metrics, pathCount: unique.length, completedCount: completedPaths.length, failedCount: errors.length,
+        skipReason: errors.length ? 'FAILED_PENDING' : projectionNeeded ? null : 'PERSISTED_PROJECTIONS_CURRENT', durationMs: Date.now() - startedAt
+      })
+      return { completedPaths, changedPaths: projectionNeeded ? [...completedPaths] : [], errors }
+    })
+  }
+
+  private affectedSymbolSources(changed: Set<string>, oldFiles: CodeMapFile[], oldElements: CodeMapElement[], oldRelationships: CodeMapRelationship[], current: { files: CodeMapFile[]; elements: CodeMapElement[]; relationships: CodeMapRelationship[] }): Set<string> {
+    const owners = new Map([...oldElements, ...current.elements].map(element => [element.id, element.fileId]))
+    for (const file of [...oldFiles, ...current.files]) owners.set(file.id, file.id)
+    const reverse = new Map<string, Set<string>>()
+    const affected = new Set(changed)
+    const previous = new Set(oldRelationships.map(relationship => relationship.id))
+    const next = new Set(current.relationships.map(relationship => relationship.id))
+    for (const relationship of [...oldRelationships, ...current.relationships]) {
+      if (relationship.type === 'contains') continue
+      const source = owners.get(relationship.sourceId), target = owners.get(relationship.targetId)
+      if (!source || !target) continue
+      const importers = reverse.get(target) ?? new Set<string>()
+      importers.add(source)
+      reverse.set(target, importers)
+      if (!previous.has(relationship.id) || !next.has(relationship.id)) affected.add(source)
+    }
+    const queue = [...affected]
+    while (queue.length) for (const source of reverse.get(queue.pop()!) ?? []) {
+      if (!affected.has(source)) { affected.add(source); queue.push(source) }
+    }
+    return affected
+  }
+
+  private async updateFileStructure(relativePath: string, correlationId: string, acceptedChange: number, changedFiles: Set<string>, force: boolean, metrics = createCodeMapWorkMetrics(), excluded = false, observed?: FileObservation): Promise<boolean> {
     const change = acceptedChange ?? this.readiness.accept(0, relativePath)
-    let phase = 'STRUCTURE'
+    const phase = 'STRUCTURE'
     const startedAt = Date.now()
     const cid = correlationId ?? telemetryService.startOperation('UPDATE_FILE_CONTENT')
     telemetryService.log(cid, 'CODE_MAP', 'REINDEX_STARTED', { repoPath: this.repoPath, relativePath })
     try {
     const fullPath = join(this.repoPath, relativePath)
     const existingFile = this.db.getFileByPath(this.repositoryId, relativePath)
-    const fileId = existingFile?.id ?? this.generateFileId(relativePath)
-    const importerFileIds = existingFile ? this.db.getImporterFileIds(existingFile.id) : []
-    const refreshDirectImporters = async (): Promise<void> => {
-      this.readiness.advance(change, 'RELATIONSHIPS')
-      phase = 'SYMBOL_REFERENCES'
-      await new Promise<void>((resolve) => setImmediate(resolve))
-      await this.refreshSymbolReferences(new Set(importerFileIds.filter((id) => id !== fileId)), cid)
-      this.readiness.advance(change, 'SYMBOL_REFERENCES')
-      this.readiness.recover(relativePath)
+    const fileId = existingFile?.id ?? this.allocateFileId(relativePath)
+    const recordRemoval = (): void => {
+      changedFiles.add(fileId)
+      this.readiness.advance(change, 'STRUCTURE')
     }
 
-    if (!existsSync(fullPath)) {
+    if (excluded || !existsSync(fullPath)) {
       if (existingFile) {
         this.db.deleteFile(existingFile.id)
-        await refreshDirectImporters()
+        recordRemoval()
       }
-      telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', { repoPath: this.repoPath,
+      telemetryService.log(cid, 'CODE_MAP', 'STRUCTURAL_PERSISTENCE_COMPLETED', { repoPath: this.repoPath,
         relativePath,
         durationMs: Date.now() - startedAt,
         removed: true
       })
-      this.readiness.advance(change, 'SYMBOL_REFERENCES')
+      this.readiness.advance(change, 'STRUCTURE')
       return true
     }
 
-    if (!(await isEligibleTextFile(fullPath))) {
+    const observation: FileObservation = observed ?? { stat: await stat(fullPath) }
+    if (!(await observeTextEligibility(fullPath, observation, metrics))) {
       if (existingFile) {
         this.db.deleteFile(existingFile.id)
-        await refreshDirectImporters()
+        recordRemoval()
       }
-      telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', { repoPath: this.repoPath,
+      telemetryService.log(cid, 'CODE_MAP', 'STRUCTURAL_PERSISTENCE_COMPLETED', { repoPath: this.repoPath,
         relativePath,
         durationMs: Date.now() - startedAt,
         removed: true
       })
-      this.readiness.advance(change, 'SYMBOL_REFERENCES')
+      this.readiness.advance(change, 'STRUCTURE')
       return true
     }
 
     let content = ''
     try {
+      metrics.contentReads++
       const buffer = await readFile(fullPath)
       if (isBinaryContent(buffer)) {
         if (existingFile) {
           this.db.deleteFile(existingFile.id)
-          await refreshDirectImporters()
+          recordRemoval()
         }
-        this.readiness.advance(change, 'SYMBOL_REFERENCES')
+        this.readiness.advance(change, 'STRUCTURE')
       return true
       }
       content = buffer.toString('utf-8')
-    } catch {
-      // Se não conseguir ler, deleta do banco
-      this.db.deleteFile(fileId)
-      await refreshDirectImporters()
-      telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', { repoPath: this.repoPath,
-        relativePath,
-        durationMs: Date.now() - startedAt,
-        removed: true
-      })
-      this.readiness.advance(change, 'SYMBOL_REFERENCES')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      if (existingFile) this.db.deleteFile(fileId)
+      recordRemoval()
       return true
     }
 
@@ -942,19 +1219,22 @@ export class RepositoryModel {
     const language = getLanguageForExtension(extension) ?? 'unknown'
     const lines = content.split(/\r?\n/).length
     const sizeBytes = Buffer.byteLength(content, 'utf-8')
+    metrics.hashesCalculated++
     const contentHash = this.calculateContentHash(content)
+    metrics.filesStatChecked++
+    if (diskMetadataVersion(await stat(fullPath), contentHash) !== diskMetadataVersion(observation.stat, contentHash)) throw new Error(`REINDEX_INPUT_CHANGED: ${relativePath}`)
+    if (!force && existingFile?.contentHash === contentHash && this.db.projectionCurrent(this.repositoryId, fileId, 'STRUCTURE', this.projectionVersions.structure)) {
+      this.updateFileMetadata(fileId, { mtime: Math.floor(observation.stat.mtimeMs), sizeBytes })
+      this.rememberDiskMetadata(existingFile, observation)
+      this.readiness.advance(change, 'STRUCTURE')
+      return true
+    }
     telemetryService.log(cid, 'CODE_MAP', 'HASH_CALCULATED', { repoPath: this.repoPath,
       relativePath,
       hashPrefix: contentHash.substring(0, 8)
     })
 
-    let mtime = Date.now()
-    try {
-      const fileStat = await stat(fullPath)
-      mtime = Math.floor(fileStat.mtimeMs)
-    } catch {
-      // Fallback para Date.now() se o stat falhar
-    }
+    const mtime = Math.floor(observation.stat.mtimeMs)
 
     const fileRecord: CodeMapFile = {
       id: fileId,
@@ -972,9 +1252,12 @@ export class RepositoryModel {
     }
 
     const extractor = this.findExtractorForExtension(extension)
+    const extractionStarted = Date.now()
     const structureResult = extractor
       ? extractor.extract({ repositoryId: this.repositoryId, relativePath, extension, content })
       : extractTextDocument({ repositoryId: this.repositoryId, relativePath, extension, content })
+    metrics.filesExtracted++
+    metrics.phaseDurationMs.extraction += Date.now() - extractionStarted
 
     for (const element of structureResult.elements) {
       element.fileId = fileId
@@ -993,22 +1276,10 @@ export class RepositoryModel {
       elementCount: structureResult.elements.length,
       durationMs: Date.now() - startedAt
     })
+    this.checkpointExtraction(fileId)
+    this.rememberDiskMetadata(fileRecord, observation)
+    changedFiles.add(fileId)
     this.readiness.advance(change, 'STRUCTURE')
-    phase = 'RELATIONSHIPS'
-
-    this.refreshRepositoryRelationships(cid, relativePath)
-    this.readiness.advance(change, 'RELATIONSHIPS')
-    phase = 'SYMBOL_REFERENCES'
-    await new Promise<void>((resolve) => setImmediate(resolve))
-    const sourceReferenceCount = await this.refreshSymbolReferences(new Set([fileId, ...importerFileIds, ...this.db.getImporterFileIds(fileId)]), cid)
-    this.readiness.advance(change, 'SYMBOL_REFERENCES')
-    this.readiness.recover(relativePath)
-    telemetryService.log(cid, 'CODE_MAP', 'REINDEX_COMPLETED', { repoPath: this.repoPath,
-      relativePath,
-      symbolReferences: sourceReferenceCount,
-      directImportersReevaluated: importerFileIds.filter((importerFileId) => importerFileId !== fileId).length,
-      durationMs: Date.now() - startedAt
-    })
     return true
     } catch (err) {
       // try/catch exclusivo para telemetria: loga a falha e relança, mantendo o comportamento externo idêntico.
@@ -1029,6 +1300,8 @@ export class RepositoryModel {
     const file = this.db.getFileByPath(this.repositoryId, relativePath)
     if (file) {
       this.db.updateFileStatus(file.id, 'modified')
+    } else {
+      this.db.enqueueFileChanges(this.repositoryId, [relativePath])
     }
   }
 
@@ -1098,11 +1371,15 @@ export class RepositoryModel {
   }
 
   getSyncStatus(): CodeMapSyncStatus {
-    return this.db.getSyncStatus(this.repositoryId)
+    const status = this.db.getSyncStatus(this.repositoryId)
+    let indexedPending = 0
+    for (const path of this.getPendingFilePaths()) if (this.db.getFileByPath(this.repositoryId, path)?.status === 'indexed') indexedPending++
+    return { ...status, indexedFiles: status.indexedFiles - indexedPending, modifiedFiles: status.modifiedFiles + indexedPending }
   }
 
   getModifiedFiles(): CodeMapFile[] {
-    return this.db.getModifiedFilesByRepository(this.repositoryId)
+    const pending = new Set(this.getPendingFilePaths())
+    return this.db.getFilesByRepository(this.repositoryId).filter(file => file.status === 'modified' || pending.has(file.relativePath)).map(file => pending.has(file.relativePath) ? { ...file, status: 'modified' as const } : file)
   }
 
   /**

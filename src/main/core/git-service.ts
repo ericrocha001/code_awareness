@@ -1354,26 +1354,31 @@ export class GitService implements FileListingPort {
    * Usa `git check-ignore --stdin -z` para evitar um processo por path.
    *
    * Retorna um Set com os paths que são ignorados.
-   * Paths fora do repositório ou erros de processo resultam em Set vazio (fail-open: trata como não-ignorado).
+   * O modo estrito preserva falhas operacionais para reconciliação; consumidores legados mantêm fail-open.
    */
-  async checkIgnoreBatch(repoPath: string, relativePaths: string[]): Promise<Set<string>> {
+  async checkIgnoreBatch(repoPath: string, relativePaths: string[], options?: { strict?: boolean }): Promise<Set<string>> {
     if (relativePaths.length === 0) return new Set()
     // Input separado por NUL para lidar com espaços e caracteres especiais
     const input = relativePaths.join('\0') + '\0'
     const ignored = new Set<string>()
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       let stdout = ''
       // exit code 1 = nenhum ignorado; exit code 0 = algum ignorado — ambos são sucesso operacional
       const proc = spawn('git', ['check-ignore', '--stdin', '-z'], { cwd: repoPath, shell: false })
       const timer = setTimeout(() => {
         proc.kill()
+        if (options?.strict) { reject(new Error('GIT_CHECK_IGNORE_TIMEOUT')); return }
         resolve(ignored) // timeout → fail-open
       }, GIT_TIMEOUT_MS)
       proc.stdout.on('data', (chunk: Buffer) => { stdout += chunk.toString() })
+      proc.stdin.on('error', (error) => {
+        if (options?.strict) reject(error)
+      })
       proc.stdin.write(input)
       proc.stdin.end()
-      proc.on('close', () => {
+      proc.on('close', (code) => {
         clearTimeout(timer)
+        if (options?.strict && code !== 0 && code !== 1) { reject(new Error(`GIT_CHECK_IGNORE_FAILED: ${code}`)); return }
         // Saída também é separada por NUL
         for (const p of stdout.split('\0')) {
           const trimmed = p.trim()
@@ -1381,8 +1386,9 @@ export class GitService implements FileListingPort {
         }
         resolve(ignored)
       })
-      proc.on('error', () => {
+      proc.on('error', (error) => {
         clearTimeout(timer)
+        if (options?.strict) { reject(error); return }
         resolve(ignored) // erro de spawn → fail-open
       })
     })

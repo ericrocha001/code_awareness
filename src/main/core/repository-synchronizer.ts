@@ -61,7 +61,7 @@ import { existsSync } from 'fs'
 import { stat, readFile } from 'fs/promises'
 import { join } from 'path'
 import { repositoryEventBus, RepositoryFileEvent } from './repository-events'
-import { RepositoryModel } from './repository-model'
+import { RepositoryModel, type FileChangeBatchResult } from './repository-model'
 import { telemetryService } from './telemetry-service'
 import type { CodeMapFile } from '../../shared/types'
 import type { RepositoryFileMembership } from './repository-file-membership'
@@ -89,6 +89,7 @@ export class RepositorySynchronizer {
   private debounceTimer: NodeJS.Timeout | null = null
   private isProcessingQueue = false
   private isDisposed = false
+  private activeSynchronizations = 0
   private readonly failedPaths = new Set<string>()
   private readonly periodicScanIntervalMs: number
   private periodicScanTimer: NodeJS.Timeout | null = null
@@ -131,22 +132,10 @@ export class RepositorySynchronizer {
   }
 
   private initModifiedFilesFromDatabase(): void {
+    for (const path of this.model.getPendingFilePaths()) this.modifiedFiles.add(path)
     const dbModifiedFiles = this.model.getModifiedFiles()
     for (const file of dbModifiedFiles) {
       this.modifiedFiles.add(file.relativePath)
-    }
-  }
-
-  private async autoReindex(relativePath: string, correlationId: string, changeId?: number): Promise<void> {
-    if (this.isDisposed) return
-    this.harness?.record('reindex')
-    const result = await this.synchronizePaths([relativePath], correlationId, changeId === undefined ? undefined : new Map([[relativePath, changeId]]))
-    if (result.errors.length > 0) {
-      telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_FAILED', {
-        repoPath: this.normalizedRepoPath, relativePath, error: result.errors[0]
-      })
-    } else {
-      telemetryService.log(correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_COMPLETED', { repoPath: this.normalizedRepoPath, relativePath })
     }
   }
 
@@ -198,6 +187,10 @@ export class RepositorySynchronizer {
   private async processQueue(): Promise<void> {
     this.debounceTimer = null
     if (this.isDisposed) return
+    if (this.isProcessingQueue) {
+      this.debounceTimer = setTimeout(() => this.processQueue(), DEBOUNCE_MS)
+      return
+    }
     this.isProcessingQueue = true
 
     const batchCorrelationId = telemetryService.startOperation('PROCESS_QUEUE')
@@ -234,6 +227,7 @@ export class RepositorySynchronizer {
       }
     }
 
+    const confirmed = new Map<string, PendingFileEntry>()
     try {
       for (const [relativePath, metadata] of filesToProcess) {
         if (this.isDisposed) break
@@ -253,6 +247,7 @@ export class RepositorySynchronizer {
 
         try {
           await this.verifyAndMarkIfChanged(relativePath, metadata, cid)
+          if (this.modifiedFiles.has(relativePath) && !this.pendingFiles.has(relativePath)) confirmed.set(relativePath, metadata)
           if (!this.pendingFiles.has(relativePath) && !this.modifiedFiles.has(relativePath)) this.model.readiness.advance(metadata.changeId, 'SYMBOL_REFERENCES')
         } catch (err) {
           if (this.isDisposed) break
@@ -266,8 +261,10 @@ export class RepositorySynchronizer {
           this.model.markFileModified(relativePath)
         }
       }
+      if (confirmed.size && !this.isDisposed) await this.synchronizePaths([...confirmed.keys()], batchCorrelationId, new Map([...confirmed].map(([path, entry]) => [path, entry.changeId])), new Map([...confirmed].map(([path, entry]) => [path, entry.correlationId])))
     } finally {
       this.isProcessingQueue = false
+      if (this.pendingFiles.size && !this.debounceTimer && !this.isDisposed) this.debounceTimer = setTimeout(() => this.processQueue(), DEBOUNCE_MS)
     }
 
     telemetryService.log(batchCorrelationId, 'CHANGE_DETECTION', 'QUEUE_PROCESSED', {
@@ -293,7 +290,6 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_DELETED', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-      await this.autoReindex(relativePath, correlationId, metadata.changeId)
       return
     }
 
@@ -336,7 +332,6 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_NEW', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-      await this.autoReindex(relativePath, correlationId, metadata.changeId)
       return
     }
 
@@ -346,7 +341,6 @@ export class RepositorySynchronizer {
       this.model.markFileModified(relativePath)
       telemetryService.log(correlationId, 'CHANGE_DETECTION', 'LEGACY_FILE_MODIFIED', { relativePath })
       repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-      await this.autoReindex(relativePath, correlationId, metadata.changeId)
       return
     }
 
@@ -370,7 +364,6 @@ export class RepositorySynchronizer {
     this.model.markFileModified(relativePath)
     telemetryService.log(correlationId, 'CHANGE_DETECTION', 'CONFIRMED_MODIFIED', { relativePath })
     repositoryEventBus.emitFileConfirmed(this.normalizedRepoPath, relativePath, correlationId)
-    await this.autoReindex(relativePath, correlationId, metadata.changeId)
   }
 
   /**
@@ -478,46 +471,61 @@ export class RepositorySynchronizer {
   }
 
   async synchronizeModified(correlationId = telemetryService.startOperation('SYNC_BATCH')): Promise<{ filesUpdated: number; errors: string[] }> {
+    for (const path of this.model.getPendingFilePaths()) this.modifiedFiles.add(path)
     return this.synchronizePaths([...this.modifiedFiles], correlationId)
   }
 
   private async synchronizePaths(
     paths: string[],
     correlationId: string,
-    acceptedChanges?: Map<string, number>
+    acceptedChanges?: Map<string, number>,
+    correlations?: Map<string, string>
   ): Promise<{ filesUpdated: number; errors: string[] }> {
-    const startedAt = Date.now()
-    const files = [...new Set(paths)]
-    const changes = new Map(files.map(path => [path, acceptedChanges?.get(path) ?? this.model.readiness.accept(0, path)]))
-    telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_STARTED', { repoPath: this.normalizedRepoPath, fileCount: files.length })
-    const errors: string[] = []
-    let filesUpdated = 0
-    for (const relativePath of files) {
+    if (this.isDisposed) return { filesUpdated: 0, errors: [] }
+    this.activeSynchronizations++
+    try {
+      const startedAt = Date.now()
+      const files = [...new Set(paths)]
+      const changes = new Map(files.map(path => [path, acceptedChanges?.get(path) ?? this.model.readiness.accept(0, path)]))
+      telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_STARTED', { repoPath: this.normalizedRepoPath, fileCount: files.length })
+      const errors: string[] = []
+      let filesUpdated = 0
+      for (const path of files) this.harness?.record('reindex')
+      let result: FileChangeBatchResult
       try {
-        const success = await this.model.updateFileContent(relativePath, correlationId, changes.get(relativePath))
-        if (!success) throw new Error('File did not converge')
-        filesUpdated++
-        this.modifiedFiles.delete(relativePath)
-        this.failedPaths.delete(relativePath)
-        this.model.updateLastSyncAt(new Date().toISOString())
-        telemetryService.log(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGED', { repoPath: this.normalizedRepoPath, relativePath })
-        repositoryEventBus.emitFileIndexed(this.normalizedRepoPath, relativePath, correlationId)
+        result = await this.model.updateFileContents(files, correlationId, changes, correlations)
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        result = { completedPaths: [], changedPaths: [], errors: files.map(relativePath => ({ relativePath, error: error instanceof Error ? error : new Error(String(error)) })) }
+      }
+      const pending = new Set(this.model.getPendingFilePaths())
+      const changed = new Set(result.changedPaths)
+      for (const relativePath of result.completedPaths) {
+        filesUpdated++
+        if (!pending.has(relativePath)) {
+          this.modifiedFiles.delete(relativePath)
+          this.failedPaths.delete(relativePath)
+        }
+        const cid = correlations?.get(relativePath) ?? correlationId
+        telemetryService.log(cid, 'CHANGE_DETECTION', 'FILE_CONVERGED', { repoPath: this.normalizedRepoPath, relativePath })
+        if (changed.has(relativePath)) repositoryEventBus.emitFileIndexed(this.normalizedRepoPath, relativePath, cid)
+      }
+      if (filesUpdated) this.model.updateLastSyncAt(new Date().toISOString())
+      if (correlations) for (const relativePath of result.completedPaths) telemetryService.log(correlations.get(relativePath) ?? correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_COMPLETED', { repoPath: this.normalizedRepoPath, relativePath })
+      for (const { relativePath, error } of result.errors) {
         this.modifiedFiles.add(relativePath)
         this.failedPaths.add(relativePath)
-        this.model.markFileModified(relativePath)
         this.model.readiness.fail(changes.get(relativePath)!, error)
-        errors.push(`${relativePath}: ${message}`)
-        telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGENCE_FAILED', {
-          repoPath: this.normalizedRepoPath, relativePath, error: message, recovery: 'synchronizeModified'
-        })
+        errors.push(`${relativePath}: ${error.message}`)
+        if (correlations) telemetryService.logError(correlations.get(relativePath) ?? correlationId, 'CHANGE_DETECTION', 'AUTO_REINDEX_FAILED', { repoPath: this.normalizedRepoPath, relativePath, error: error.message })
+        telemetryService.logError(correlations?.get(relativePath) ?? correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGENCE_FAILED', { repoPath: this.normalizedRepoPath, relativePath, error: error.message, recovery: 'synchronizeModified' })
       }
+      const payload = { repoPath: this.normalizedRepoPath, filesUpdated, errorCount: errors.length, errors, durationMs: Date.now() - startedAt }
+      if (errors.length > 0) telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_FAILED', payload)
+      else telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_COMPLETED', payload)
+      return { filesUpdated, errors }
+    } finally {
+      this.activeSynchronizations--
     }
-    const payload = { repoPath: this.normalizedRepoPath, filesUpdated, errorCount: errors.length, errors, durationMs: Date.now() - startedAt }
-    if (errors.length > 0) telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_FAILED', payload)
-    else telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_COMPLETED', payload)
-    return { filesUpdated, errors }
   }
 
   /**
@@ -540,9 +548,7 @@ export class RepositorySynchronizer {
    */
   reconcileMemoryWithDatabase(discoveredPaths: string[] = []): number {
     const dbFiles = this.model.getFiles()
-    const dbModifiedPaths = new Set(
-      dbFiles.filter(f => f.status === 'modified').map(f => f.relativePath)
-    )
+    const dbModifiedPaths = new Set([...this.model.getPendingFilePaths(), ...dbFiles.filter(f => f.status === 'modified').map(f => f.relativePath)])
 
     for (const relativePath of Array.from(this.modifiedFiles)) {
       if (!dbModifiedPaths.has(relativePath)) {
@@ -671,6 +677,12 @@ export class RepositorySynchronizer {
       })
     } finally {
       this.isPeriodicScanRunning = false
+    }
+  }
+
+  async awaitDisposed(): Promise<void> {
+    while (this.isProcessingQueue || this.isPeriodicScanRunning || this.activeSynchronizations > 0) {
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
     }
   }
 

@@ -13,7 +13,8 @@
 
 import { existsSync, statSync } from 'fs'
 import { extname, join } from 'path'
-import { isEligibleTextFile, isKnownBinaryExtension } from './repository-scanner'
+import { isEligibleTextFile, isFilesystemIgnored, isKnownBinaryExtension, observeTextEligibility, type FileObservation } from './repository-scanner'
+import type { CodeMapWorkMetrics } from './codemap-work-metrics'
 
 // Pastas internas sempre excluídas do CodeMap — independente de .gitignore
 const INTERNAL_DIRS = new Set([
@@ -60,7 +61,7 @@ export interface MembershipResult {
  */
 export interface MembershipGitService {
   isGitRepository(dirPath: string): Promise<boolean>
-  checkIgnoreBatch(repoPath: string, relativePaths: string[]): Promise<Set<string>>
+  checkIgnoreBatch(repoPath: string, relativePaths: string[], options?: { strict?: boolean }): Promise<Set<string>>
 }
 
 /**
@@ -75,7 +76,7 @@ export interface MembershipPort {
    * Paths ignorados, diretórios, inelegíveis e não-existentes são excluídos.
    * O contrato é idempotente — chamadas repetidas com o mesmo estado produzem o mesmo resultado.
    */
-  filterEligible(relativePaths: string[]): Promise<string[]>
+  filterEligible(relativePaths: string[], observations?: ReadonlyMap<string, FileObservation>, metrics?: CodeMapWorkMetrics): Promise<string[]>
 }
 
 export class RepositoryFileMembership implements MembershipPort {
@@ -91,9 +92,9 @@ export class RepositoryFileMembership implements MembershipPort {
   /**
    * MembershipPort implementation: retorna somente os paths 'eligible'.
    */
-  async filterEligible(relativePaths: string[]): Promise<string[]> {
+  async filterEligible(relativePaths: string[], observations?: ReadonlyMap<string, FileObservation>, metrics?: CodeMapWorkMetrics): Promise<string[]> {
     if (relativePaths.length === 0) return []
-    const classifications = await this.classifyBatch(relativePaths)
+    const classifications = await this.classifyBatch(relativePaths, undefined, observations, metrics)
     const eligible: string[] = []
     for (const [path, cls] of classifications) {
       if (cls === 'eligible') eligible.push(path)
@@ -116,7 +117,9 @@ export class RepositoryFileMembership implements MembershipPort {
    */
   async classifyBatch(
     relativePaths: string[],
-    indexedPaths?: Set<string>
+    indexedPaths?: Set<string>,
+    observations?: ReadonlyMap<string, FileObservation>,
+    metrics?: CodeMapWorkMetrics
   ): Promise<Map<string, FileMembershipClass>> {
     if (this.isGit === null) {
       this.isGit = await this.git.isGitRepository(this.repoPath)
@@ -130,7 +133,7 @@ export class RepositoryFileMembership implements MembershipPort {
 
     for (const rel of relativePaths) {
       const fullPath = join(this.repoPath, rel)
-      if (!existsSync(fullPath)) {
+      if (!observations?.has(rel) && !existsSync(fullPath)) {
         nonExisting.push(rel)
       } else {
         existing.push(rel)
@@ -153,7 +156,7 @@ export class RepositoryFileMembership implements MembershipPort {
     for (const rel of existing) {
       const fullPath = join(this.repoPath, rel)
       try {
-        const s = statSync(fullPath)
+        const s = observations?.get(rel)?.stat ?? statSync(fullPath)
         if (s.isDirectory()) {
           result.set(rel, 'directory')
         } else {
@@ -183,14 +186,15 @@ export class RepositoryFileMembership implements MembershipPort {
     if (this.isGit) {
       // Batch Git: respeita .gitignore da raiz + nested + excludes padrão
       try {
-        ignoredPaths = await this.git.checkIgnoreBatch(this.repoPath, candidatesForIgnoreCheck)
-      } catch {
+        ignoredPaths = await this.git.checkIgnoreBatch(this.repoPath, candidatesForIgnoreCheck, observations ? { strict: true } : undefined)
+      } catch (error) {
+        if (observations) throw error
         // Falha do git → fail-open: nenhum path ignorado
         ignoredPaths = new Set()
       }
     } else {
-      // Não-Git: sem ignorados adicionais além de INTERNAL_DIRS (já filtrado)
-      ignoredPaths = new Set()
+      const cache = new Map()
+      ignoredPaths = new Set(candidatesForIgnoreCheck.filter(path => isFilesystemIgnored(this.repoPath, path, cache, metrics)))
     }
 
     // Classificar candidatos restantes
@@ -202,7 +206,8 @@ export class RepositoryFileMembership implements MembershipPort {
 
       // Verifica elegibilidade (tamanho, binário) — async, necessário apenas aqui
       const fullPath = join(this.repoPath, rel)
-      const eligible = await isEligibleTextFile(fullPath)
+      const observation = observations?.get(rel)
+      const eligible = observation ? await observeTextEligibility(fullPath, observation, metrics) : await isEligibleTextFile(fullPath)
       result.set(rel, eligible ? 'eligible' : 'ineligible')
     }
 

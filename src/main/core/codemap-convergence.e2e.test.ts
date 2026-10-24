@@ -9,6 +9,7 @@ import { telemetryService, type TelemetryEntry } from './telemetry-service'
 import { WatcherService } from './watcher-service'
 
 const compression = {} as CompressionPort
+type StructureUpdater = { updateFileStructure(path: string, cid: string, change: number, changed: Set<string>, force: boolean): Promise<boolean> }
 const paths = ['src/core/BaseService.ts', 'src/core/AdminService.ts', 'src/core/UserService.ts']
 
 describe('CodeMap convergence', () => {
@@ -63,7 +64,7 @@ describe('CodeMap convergence', () => {
       fixture.write(paths[0], 'export class PersistedRecovery {}\n')
       model.markFileModified(paths[0])
       model.close()
-      const spy = vi.spyOn(RepositoryModel.prototype, 'updateFileContent')
+      const spy = vi.spyOn(RepositoryModel.prototype as unknown as StructureUpdater, 'updateFileStructure')
       if (failure) spy.mockRejectedValue(new Error('recovery failure'))
       await service.openRepository(fixture.repoPath)
       await service.awaitMaintenance(fixture.repoPath)
@@ -93,10 +94,11 @@ describe('CodeMap convergence', () => {
       synchronizer = new RepositorySynchronizer(model, model.getRepositoryId())
       fixture.write(paths[0], 'export class PeriodicCurrent {}\n')
       fixture.write(paths[1], 'export class FailingPending {}\n')
-      const realUpdate = model.updateFileContent.bind(model)
-      const update = vi.spyOn(model, 'updateFileContent').mockImplementation((path, cid, change) => {
+      const target = model as unknown as StructureUpdater
+      const realUpdate = target.updateFileStructure.bind(model)
+      const update = vi.spyOn(target, 'updateFileStructure').mockImplementation((path, cid, change, changed, force) => {
         if (path === paths[1]) return Promise.reject(new Error('persistent failure'))
-        return realUpdate(path, cid, change)
+        return realUpdate(path, cid, change, changed, force)
       })
       const scan = () => (synchronizer as unknown as { runPeriodicScan(): Promise<void> }).runPeriodicScan()
       await scan()
@@ -124,6 +126,8 @@ describe('CodeMap convergence', () => {
     const model = createRepositoryModel(fixture.repoPath)
     let synchronizer: RepositorySynchronizer | undefined
     const order: string[] = []
+    const logs: TelemetryEntry[] = []
+    const unsubscribe = telemetryService.subscribe(entry => logs.push(entry))
     const confirmed = () => order.push('confirmed')
     const indexed = () => order.push('indexed')
     repositoryEventBus.onFileConfirmed(confirmed)
@@ -135,15 +139,20 @@ describe('CodeMap convergence', () => {
       repositoryEventBus.emitFileModified(model.getRepositoryId(), paths[0])
       await synchronizer.waitForIdle()
       expect(order).toEqual(['confirmed', 'indexed'])
+      expect(logs.some(entry => entry.event === 'AUTO_REINDEX_COMPLETED')).toBe(true)
+      logs.length = 0
       order.length = 0
       fixture.write(paths[0], 'export class WatcherPending {}\n')
-      vi.spyOn(model, 'updateFileContent').mockRejectedValue(new Error('watcher failure'))
+      vi.spyOn(model as unknown as StructureUpdater, 'updateFileStructure').mockRejectedValue(new Error('watcher failure'))
       repositoryEventBus.emitFileModified(model.getRepositoryId(), paths[0])
       await synchronizer.waitForIdle()
       expect(order).toEqual(['confirmed'])
+      expect(logs.some(entry => entry.event === 'AUTO_REINDEX_FAILED')).toBe(true)
+      expect(logs.some(entry => entry.event === 'AUTO_REINDEX_COMPLETED')).toBe(false)
       expect(synchronizer.getModifiedFilesCount()).toBe(1)
       expect(model.getFileByRelativePath(paths[0])?.status).toBe('modified')
     } finally {
+      unsubscribe()
       repositoryEventBus.off('file:confirmed', confirmed)
       repositoryEventBus.off('file:indexed', indexed)
       synchronizer?.dispose()

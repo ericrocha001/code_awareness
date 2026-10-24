@@ -66,7 +66,6 @@ try {
 } finally {
   await connection.dispose()
   await projects.dispose()
-  await mcp.dispose()
-  codeMap.closeAll()
+  await mcp.dispose().then(() => codeMap.closeAll())
   watcher.stop()
 }
