@@ -79,6 +79,13 @@ export interface CodeMapRelationshipRow {
 }
 
 export interface RepositoryRepository {
+  countSymbolReferences(repositoryId: string): number
+  projectionCurrent(repositoryId: string, scope: string, phase: string, version: string): boolean
+  beginProjection(repositoryId: string, scope: string, phase: string, version: string): number
+  finishProjection(repositoryId: string, scope: string, phase: string, version: string, expectedRevision?: number): void
+  projectionRevision(repositoryId: string, scope: string, phase?: string): number
+  projectionFilesCurrent(repositoryId: string, phase: string, version: string): boolean
+
   // ─── Repositórios ─────────────────────────────────────────────────────────
 
   /** Insere ou atualiza (upsert) um repositório. Usa path como chave de unicidade. */

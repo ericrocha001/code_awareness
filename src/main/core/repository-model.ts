@@ -72,6 +72,9 @@ export interface FileContent {
 const MAX_SNIPPET_LINES = 300
 const MAX_FILE_CONTENT_BYTES = 2 * 1024 * 1024
 
+// Bump structure for extractor/grammar/facts changes, and resolver for symbol resolution changes.
+export const CODE_MAP_PROJECTION_VERSIONS = { structure: 'structure-1', resolver: 'symbols-1' } as const
+
 export class RepositoryModel {
   readonly readiness = new RepositoryChangeReadiness()
   private readonly repoPath: string
@@ -80,14 +83,16 @@ export class RepositoryModel {
   private readonly extractors: ReadonlyArray<StructureExtractionPort>
   private readonly tokenizer: TokenizerPort
   private readonly membership: MembershipPort | null
+  private readonly projectionVersions: { structure: string; resolver: string }
 
-  constructor(repoPath: string, extractors: StructureExtractionPort[] = [], tokenizer: TokenizerPort = getCanonicalTokenizer(), membership?: MembershipPort) {
+  constructor(repoPath: string, extractors: StructureExtractionPort[] = [], tokenizer: TokenizerPort = getCanonicalTokenizer(), membership?: MembershipPort, projectionVersions: { structure: string; resolver: string } = CODE_MAP_PROJECTION_VERSIONS) {
     this.repoPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
     this.repositoryId = this.generateRepositoryId(this.repoPath)
     this.db = createRepositoryDatabase(this.repoPath)
     this.extractors = extractors
     this.tokenizer = tokenizer
     this.membership = membership ?? null
+    this.projectionVersions = projectionVersions
   }
 
   getRepositoryId(): string {
@@ -179,6 +184,38 @@ export class RepositoryModel {
     }
   }
 
+  private projectionVersion(phase: string): string {
+    return phase === 'TOKENS' ? this.tokenizer.id + ':' + this.tokenizer.encoding : this.projectionVersions.structure
+  }
+
+  private checkpointExtraction(fileId: string): void {
+    for (const phase of ['STRUCTURE', 'FACTS', 'DOCUMENTS', 'SIGNATURES', 'TOKENS']) {
+      this.db.finishProjection(this.repositoryId, fileId, phase, this.projectionVersion(phase))
+    }
+  }
+
+  private async migrateFiles(phase: string, migrate: (file: CodeMapFile) => Promise<boolean>): Promise<number> {
+    const version = this.projectionVersion(phase)
+    if (this.db.projectionCurrent(this.repositoryId, '', phase, version)) return 0
+    this.db.beginProjection(this.repositoryId, '', phase, version)
+    let updated = 0
+    let processed = 0
+    for (const file of this.db.getFilesByRepository(this.repositoryId)) {
+      if (++processed % 50 === 0) await new Promise<void>(resolve => setImmediate(resolve))
+      if (this.db.projectionCurrent(this.repositoryId, file.id, phase, version)) continue
+      const revision = this.db.beginProjection(this.repositoryId, file.id, phase, version)
+      const changed = await migrate(file)
+      if (changed) updated++
+      else if (revision !== this.db.projectionRevision(this.repositoryId, file.id)) throw new Error('PROJECTION_INPUT_CHANGED')
+      const current = this.db.getFileById(file.id)
+      if (current && current.status === 'indexed') this.db.finishProjection(this.repositoryId, file.id, phase, version)
+      else throw new Error('PROJECTION_FILE_PENDING: ' + file.relativePath)
+    }
+    if (!this.db.projectionFilesCurrent(this.repositoryId, phase, version)) throw new Error('PROJECTION_INPUT_CHANGED')
+    this.db.finishProjection(this.repositoryId, '', phase, version)
+    return updated
+  }
+
   private persistableReferences(files: readonly SymbolReferenceFile[], sources?: ReadonlySet<string>): PersistedSymbolReference[] {
     return resolveSymbolReferences(this.repoPath, files, sources).map((reference) => ({
       ...reference, id: createSymbolReferenceId(this.repositoryId, reference), repositoryId: this.repositoryId
@@ -218,7 +255,16 @@ export class RepositoryModel {
         grouped.set(reference.sourceFileId, group)
       }
       phase = 'PERSISTENCE'
-      for (const source of sources) this.db.replaceSymbolReferencesForFile(source, grouped.get(source) ?? [])
+      const version = this.projectionVersions.structure + ':' + this.projectionVersions.resolver
+      const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
+      for (const source of sources) {
+        this.db.replaceSymbolReferencesForFile(source, grouped.get(source) ?? [])
+        this.db.finishProjection(this.repositoryId, source, 'SYMBOL_SOURCE', version, revision)
+      }
+      const allFiles = this.db.getFilesByRepository(this.repositoryId)
+      if (allFiles.every(file => sources.has(file.id))) {
+        this.db.finishProjection(this.repositoryId, '', 'SYMBOLS', this.projectionVersions.structure + ':' + this.projectionVersions.resolver)
+      }
       telemetryService.log(correlationId, 'CODE_MAP', 'SYMBOL_REFERENCE_PERSISTENCE_COMPLETED', { repoPath: this.repoPath, resolvedReferenceCount: references.length })
       telemetryService.log(correlationId, 'CODE_MAP', 'SYMBOL_REFERENCE_RESOLUTION_COMPLETED', { repoPath: this.repoPath,
         affectedSourceCount: sources.size, resolvedReferenceCount: references.length, resolutionFactsLoaded: snapshot.length,
@@ -235,6 +281,15 @@ export class RepositoryModel {
   }
 
   async backfillSymbolReferences(): Promise<number> {
+    const version = this.projectionVersions.structure + ':' + this.projectionVersions.resolver
+    if (this.db.projectionCurrent(this.repositoryId, '', 'SYMBOLS', version)) {
+      const correlationId = telemetryService.startOperation('BACKFILL_SYMBOL_REFERENCES')
+      const count = this.db.countSymbolReferences(this.repositoryId)
+      telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_STARTED', { repoPath: this.repoPath })
+      telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_COMPLETED', { repoPath: this.repoPath, references: count, factsRegenerated: 0, skipReason: 'PERSISTED_PROJECTION_CURRENT' })
+      return count
+    }
+    this.db.beginProjection(this.repositoryId, '', 'SYMBOLS', version)
     const symbolChange = this.readiness.accept(2)
     const correlationId = telemetryService.startOperation('BACKFILL_SYMBOL_REFERENCES')
     const files = this.db.getFilesByRepository(this.repositoryId)
@@ -244,7 +299,7 @@ export class RepositoryModel {
     telemetryService.log(correlationId, 'CODE_MAP', 'BACKFILL_SYMBOL_REFERENCES_STARTED', { repoPath: this.repoPath })
     try {
     for (const file of files) {
-      if (facts.get(file.id)?.contentHash === file.contentHash) continue
+      if (facts.get(file.id)?.contentHash === file.contentHash && this.db.projectionCurrent(this.repositoryId, file.id, 'FACTS', this.projectionVersions.structure)) continue
       let content: string
       try {
         content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
@@ -260,7 +315,7 @@ export class RepositoryModel {
       const input = { repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content }
       const extractor = this.findExtractorForExtension(file.extension)
       const extraction = extractor ? extractor.extract(input) : extractTextDocument(input)
-      if (contentHash !== file.contentHash) {
+      if (contentHash !== file.contentHash || !this.db.projectionCurrent(this.repositoryId, file.id, 'STRUCTURE', this.projectionVersions.structure)) {
         const change = this.readiness.accept(0, file.relativePath)
         structuralChanges.push(change)
         for (const element of extraction.elements) element.fileId = file.id
@@ -270,16 +325,22 @@ export class RepositoryModel {
           sizeBytes: Buffer.byteLength(content, 'utf-8'), mtime: Math.floor(fileStat.mtimeMs),
           ...this.tokenIdentity(content, contentHash, file), status: 'indexed'
         }, extraction.elements, extraction.relationships, extraction.elementInterfaces, [], symbolResolutionFacts(file.id, contentHash, extraction))
+        this.checkpointExtraction(file.id)
         this.readiness.advance(change, 'STRUCTURE')
       } else {
         this.db.saveSymbolResolutionFacts(symbolResolutionFacts(file.id, contentHash, extraction))
+        this.db.finishProjection(this.repositoryId, file.id, 'FACTS', this.projectionVersions.structure)
       }
       regenerated++
     }
-    if (structuralChanges.length > 0) this.refreshRepositoryRelationships(correlationId)
+    if (!this.db.projectionCurrent(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)) this.refreshRepositoryRelationships(correlationId)
     for (const change of structuralChanges) this.readiness.advance(change, 'RELATIONSHIPS')
     await new Promise<void>((resolve) => setImmediate(resolve))
-    const count = await this.refreshSymbolReferences(new Set(files.map((file) => file.id)), correlationId, regenerated)
+    const sources = new Set(this.db.getFilesByRepository(this.repositoryId).filter(file => !this.db.projectionCurrent(this.repositoryId, file.id, 'SYMBOL_SOURCE', version)).map(file => file.id))
+    const revision = this.db.projectionRevision(this.repositoryId, '@symbols')
+    if (sources.size) await this.refreshSymbolReferences(sources, correlationId, regenerated)
+    this.db.finishProjection(this.repositoryId, '', 'SYMBOLS', version, revision)
+    const count = this.db.countSymbolReferences(this.repositoryId)
     for (const change of structuralChanges) this.readiness.advance(change, 'SYMBOL_REFERENCES')
     this.readiness.advance(symbolChange, 'SYMBOL_REFERENCES')
     this.readiness.recover(undefined, 2)
@@ -294,69 +355,48 @@ export class RepositoryModel {
   }
 
   async backfillTokenMetadata(): Promise<number> {
-    let updated = 0
-    let processed = 0
-    for (const file of this.db.getFilesByRepository(this.repositoryId)) {
-      processed++
-      if (processed % 50 === 0) {
-        await new Promise((resolve) => setImmediate(resolve))
-      }
-      if (
-        file.contentHash &&
-        file.tokenizedContentHash === file.contentHash &&
-        file.tokenizerId === this.tokenizer.id &&
-        file.tokenizerEncoding === this.tokenizer.encoding &&
-        typeof file.tokenCount === 'number'
-      ) continue
-
-      try {
-        const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
-        const contentHash = file.contentHash ?? this.calculateContentHash(content)
-        this.db.saveFile({ ...file, contentHash, ...this.tokenIdentity(content, contentHash, file) })
-        updated++
-      } catch {
-        continue
-      }
-    }
-    return updated
+    return this.migrateFiles('TOKENS', async file => {
+      if (file.contentHash && file.tokenizedContentHash === file.contentHash && file.tokenizerId === this.tokenizer.id && file.tokenizerEncoding === this.tokenizer.encoding && typeof file.tokenCount === 'number') return false
+      const revision = this.db.projectionRevision(this.repositoryId, file.id)
+      const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+      if (revision !== this.db.projectionRevision(this.repositoryId, file.id) || this.calculateContentHash(content) !== file.contentHash) throw new Error('PROJECTION_INPUT_CHANGED')
+      this.db.saveFile({ ...file, ...this.tokenIdentity(content, file.contentHash, file) })
+      return true
+    })
   }
 
   async backfillContextReferences(): Promise<number> {
-    return this.db.backfillContextReferences(this.repositoryId)
+    if (this.db.projectionCurrent(this.repositoryId, '', 'CONTEXT', '1')) return 0
+    this.db.beginProjection(this.repositoryId, '', 'CONTEXT', '1')
+    const count = this.db.backfillContextReferences(this.repositoryId)
+    this.db.finishProjection(this.repositoryId, '', 'CONTEXT', '1')
+    return count
   }
 
   async backfillTextDocuments(): Promise<void> {
-    for (const file of this.getFiles()) {
+    await this.migrateFiles('DOCUMENTS', async file => {
       const extractor = this.findExtractorForExtension(file.extension)
       const elements = this.getElementsByFile(file.id)
       if (extractor) {
-        if (!['.json', '.md', '.markdown'].includes(file.extension.toLowerCase()) || elements.some(element => element.kind === 'section')) continue
-        try {
-          const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
-          const result = extractor.extract({ repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content })
-          if (!result.elements.some(element => element.kind === 'section')) continue
-        } catch {
-          continue
-        }
-      } else if (elements.some(element => element.kind === 'document')) {
-        continue
-      }
-      await this.updateFileContent(file.relativePath)
-    }
+        if (!['.json', '.md', '.markdown'].includes(file.extension.toLowerCase()) || elements.some(element => element.kind === 'section')) return false
+        const revision = this.db.projectionRevision(this.repositoryId, file.id)
+        const content = await readFile(join(this.repoPath, file.relativePath), 'utf-8')
+        if (revision !== this.db.projectionRevision(this.repositoryId, file.id) || this.calculateContentHash(content) !== file.contentHash) throw new Error('PROJECTION_INPUT_CHANGED')
+        const result = extractor.extract({ repositoryId: this.repositoryId, relativePath: file.relativePath, extension: file.extension, content })
+        if (!result.elements.some(element => element.kind === 'section')) return false
+      } else if (elements.some(element => element.kind === 'document')) return false
+      if (!await this.updateFileContent(file.relativePath)) throw new Error('DOCUMENT_PROJECTION_FAILED')
+      return true
+    })
   }
 
   async backfillDeclarationSignatures(): Promise<void> {
-    for (const file of this.getFiles()) {
-      if (file.status !== 'indexed') continue
+    await this.migrateFiles('SIGNATURES', async file => {
       const elements = this.getElementsByFile(file.id)
-      const needsBackfill = elements.some(
-        (element) =>
-          (element.kind === 'function' || element.kind === 'method' || element.kind === 'class') &&
-          element.declarationSignature === null
-      )
-      if (!needsBackfill) continue
-      await this.updateFileContent(file.relativePath)
-    }
+      if (!elements.some(element => ['function', 'method', 'class'].includes(element.kind) && element.declarationSignature === null)) return false
+      if (!await this.updateFileContent(file.relativePath)) throw new Error('SIGNATURE_PROJECTION_FAILED')
+      return true
+    })
   }
 
   pruneKnownBinaryFiles(): number {
@@ -545,6 +585,8 @@ export class RepositoryModel {
    * @returns Número de arquivos atualizados com hash.
    */
   async backfillContentHashes(correlationId?: string): Promise<number> {
+    if (this.db.projectionCurrent(this.repositoryId, '', 'HASHES', '1')) return 0
+    this.db.beginProjection(this.repositoryId, '', 'HASHES', '1')
     const cid = correlationId ?? telemetryService.startOperation("BACKFILL_HASHES")
     const startedAt = Date.now()
 
@@ -554,6 +596,7 @@ export class RepositoryModel {
     const legacyFiles = dbFiles.filter((f) => !f.contentHash)
 
     if (legacyFiles.length === 0) {
+      this.db.finishProjection(this.repositoryId, '', 'HASHES', '1')
       telemetryService.log(cid, "CODE_MAP", "BACKFILL_COMPLETED", {
         updated: 0,
         failed: 0,
@@ -613,6 +656,7 @@ export class RepositoryModel {
       durationMs: Date.now() - startedAt
     })
 
+    if (failed === 0) this.db.finishProjection(this.repositoryId, '', 'HASHES', '1')
     return updated
   }
 
@@ -710,6 +754,7 @@ export class RepositoryModel {
       this.db.replaceIndexedFileState(fileRecord, structureResult.elements, structureResult.relationships,
         structureResult.elementInterfaces, [], symbolResolutionFacts(fileId, contentHash, structureResult))
 
+      this.checkpointExtraction(fileId)
       allFiles.push(fileRecord)
       allElements.push(...structureResult.elements)
       allLocalRelationships.push(...structureResult.relationships)
@@ -751,6 +796,7 @@ export class RepositoryModel {
     )
 
     this.db.saveRelationships(crossRelationships)
+    this.db.finishProjection(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)
 
     this.readiness.advance(change, 'RELATIONSHIPS')
     await new Promise<void>((resolve) => setImmediate(resolve))
@@ -761,6 +807,8 @@ export class RepositoryModel {
         symbolReferences.filter((reference) => reference.sourceFileId === file.id)
       )
     }
+
+    this.db.finishProjection(this.repositoryId, '', 'SYMBOLS', this.projectionVersions.structure + ':' + this.projectionVersions.resolver)
 
     // WARNING: o lastIndexedAt só é gravado após a indexação completar com sucesso.
     // Se a indexação falhar no meio (OOM, permissão negada, timeout), o registro permanece
@@ -855,6 +903,7 @@ export class RepositoryModel {
     }
 
     this.db.saveRelationships(crossRelationships)
+    this.db.finishProjection(this.repositoryId, '', 'RELATIONSHIPS', this.projectionVersions.structure)
     telemetryService.log(correlationId, 'CODE_MAP', 'RELATIONSHIP_RESOLUTION_COMPLETED', { repoPath: this.repoPath,
       relativePath,
       relationshipCount: crossRelationships.length,
@@ -1000,6 +1049,7 @@ export class RepositoryModel {
     this.readiness.advance(change, 'RELATIONSHIPS')
     phase = 'SYMBOL_REFERENCES'
     await new Promise<void>((resolve) => setImmediate(resolve))
+    this.checkpointExtraction(fileId)
     const sourceReferenceCount = await this.refreshSymbolReferences(new Set([fileId, ...importerFileIds, ...this.db.getImporterFileIds(fileId)]), cid)
     this.readiness.advance(change, 'SYMBOL_REFERENCES')
     this.readiness.recover(relativePath)

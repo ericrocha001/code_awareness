@@ -89,6 +89,7 @@ export class RepositorySynchronizer {
   private debounceTimer: NodeJS.Timeout | null = null
   private isProcessingQueue = false
   private isDisposed = false
+  private activeSynchronizations = 0
   private readonly failedPaths = new Set<string>()
   private readonly periodicScanIntervalMs: number
   private periodicScanTimer: NodeJS.Timeout | null = null
@@ -486,38 +487,44 @@ export class RepositorySynchronizer {
     correlationId: string,
     acceptedChanges?: Map<string, number>
   ): Promise<{ filesUpdated: number; errors: string[] }> {
-    const startedAt = Date.now()
-    const files = [...new Set(paths)]
-    const changes = new Map(files.map(path => [path, acceptedChanges?.get(path) ?? this.model.readiness.accept(0, path)]))
-    telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_STARTED', { repoPath: this.normalizedRepoPath, fileCount: files.length })
-    const errors: string[] = []
-    let filesUpdated = 0
-    for (const relativePath of files) {
-      try {
-        const success = await this.model.updateFileContent(relativePath, correlationId, changes.get(relativePath))
-        if (!success) throw new Error('File did not converge')
-        filesUpdated++
-        this.modifiedFiles.delete(relativePath)
-        this.failedPaths.delete(relativePath)
-        this.model.updateLastSyncAt(new Date().toISOString())
-        telemetryService.log(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGED', { repoPath: this.normalizedRepoPath, relativePath })
-        repositoryEventBus.emitFileIndexed(this.normalizedRepoPath, relativePath, correlationId)
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        this.modifiedFiles.add(relativePath)
-        this.failedPaths.add(relativePath)
-        this.model.markFileModified(relativePath)
-        this.model.readiness.fail(changes.get(relativePath)!, error)
-        errors.push(`${relativePath}: ${message}`)
-        telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGENCE_FAILED', {
-          repoPath: this.normalizedRepoPath, relativePath, error: message, recovery: 'synchronizeModified'
-        })
+    if (this.isDisposed) return { filesUpdated: 0, errors: [] }
+    this.activeSynchronizations++
+    try {
+      const startedAt = Date.now()
+      const files = [...new Set(paths)]
+      const changes = new Map(files.map(path => [path, acceptedChanges?.get(path) ?? this.model.readiness.accept(0, path)]))
+      telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_STARTED', { repoPath: this.normalizedRepoPath, fileCount: files.length })
+      const errors: string[] = []
+      let filesUpdated = 0
+      for (const relativePath of files) {
+        try {
+          const success = await this.model.updateFileContent(relativePath, correlationId, changes.get(relativePath))
+          if (!success) throw new Error('File did not converge')
+          filesUpdated++
+          this.modifiedFiles.delete(relativePath)
+          this.failedPaths.delete(relativePath)
+          this.model.updateLastSyncAt(new Date().toISOString())
+          telemetryService.log(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGED', { repoPath: this.normalizedRepoPath, relativePath })
+          repositoryEventBus.emitFileIndexed(this.normalizedRepoPath, relativePath, correlationId)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          this.modifiedFiles.add(relativePath)
+          this.failedPaths.add(relativePath)
+          this.model.markFileModified(relativePath)
+          this.model.readiness.fail(changes.get(relativePath)!, error)
+          errors.push(`${relativePath}: ${message}`)
+          telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'FILE_CONVERGENCE_FAILED', {
+            repoPath: this.normalizedRepoPath, relativePath, error: message, recovery: 'synchronizeModified'
+          })
+        }
       }
+      const payload = { repoPath: this.normalizedRepoPath, filesUpdated, errorCount: errors.length, errors, durationMs: Date.now() - startedAt }
+      if (errors.length > 0) telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_FAILED', payload)
+      else telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_COMPLETED', payload)
+      return { filesUpdated, errors }
+    } finally {
+      this.activeSynchronizations--
     }
-    const payload = { repoPath: this.normalizedRepoPath, filesUpdated, errorCount: errors.length, errors, durationMs: Date.now() - startedAt }
-    if (errors.length > 0) telemetryService.logError(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_FAILED', payload)
-    else telemetryService.log(correlationId, 'CHANGE_DETECTION', 'SYNC_BATCH_COMPLETED', payload)
-    return { filesUpdated, errors }
   }
 
   /**
@@ -671,6 +678,12 @@ export class RepositorySynchronizer {
       })
     } finally {
       this.isPeriodicScanRunning = false
+    }
+  }
+
+  async awaitDisposed(): Promise<void> {
+    while (this.isProcessingQueue || this.isPeriodicScanRunning || this.activeSynchronizations > 0) {
+      await new Promise<void>(resolve => setTimeout(resolve, 10))
     }
   }
 

@@ -304,6 +304,50 @@ function ensureSchema(db: BetterSqlite3Database): void {
   }
 }
 
+function ensureProjectionSchema(db: BetterSqlite3Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS projection_revisions (
+      repository_id TEXT NOT NULL, scope TEXT NOT NULL, revision INTEGER NOT NULL,
+      PRIMARY KEY(repository_id, scope)
+    );
+    CREATE TABLE IF NOT EXISTS projection_checkpoints (
+      repository_id TEXT NOT NULL, scope TEXT NOT NULL, phase TEXT NOT NULL,
+      version TEXT NOT NULL, revision INTEGER NOT NULL, state TEXT NOT NULL,
+      PRIMARY KEY(repository_id, scope, phase)
+    );
+  `)
+  db.exec(`CREATE TRIGGER IF NOT EXISTS projection_token_metadata AFTER UPDATE ON files
+    WHEN OLD.token_count IS NOT NEW.token_count OR OLD.tokenizer_id IS NOT NEW.tokenizer_id OR OLD.tokenizer_encoding IS NOT NEW.tokenizer_encoding OR OLD.tokenized_content_hash IS NOT NEW.tokenized_content_hash
+    BEGIN
+      INSERT INTO projection_revisions VALUES (NEW.repository_id, '', 1) ON CONFLICT(repository_id, scope) DO UPDATE SET revision=revision+1;
+      DELETE FROM projection_checkpoints WHERE repository_id=NEW.repository_id AND scope=NEW.id AND phase='TOKENS';
+    END;
+    CREATE TRIGGER IF NOT EXISTS projection_context_reference AFTER UPDATE ON files WHEN OLD.context_reference IS NOT NEW.context_reference BEGIN
+      INSERT INTO projection_revisions VALUES (NEW.repository_id, '', 1) ON CONFLICT(repository_id, scope) DO UPDATE SET revision=revision+1;
+    END;`)
+  for (const table of ['files', 'elements', 'relationships', 'symbol_resolution_facts', 'symbol_references']) {
+    for (const operation of ['INSERT', 'UPDATE', 'DELETE']) {
+      const row = operation === 'DELETE' ? 'OLD' : 'NEW'
+      const repo = table === 'symbol_resolution_facts'
+        ? `(SELECT repository_id FROM files WHERE id = ${row}.file_id)` : `${row}.repository_id`
+      const file = table === 'files' ? `${row}.id` : table === 'elements' ? `${row}.file_id` : null
+      const when = table === 'files' && operation === 'UPDATE'
+        ? 'WHEN OLD.content_hash IS NOT NEW.content_hash OR OLD.status IS NOT NEW.status OR OLD.relative_path IS NOT NEW.relative_path' : table === 'symbol_resolution_facts' ? `WHEN ${repo} IS NOT NULL` : ''
+      db.exec(`CREATE TRIGGER IF NOT EXISTS projection_${table}_${operation.toLowerCase()} AFTER ${operation} ON ${table} ${when} BEGIN
+        INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, '', 1)
+          ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;
+        ${table !== 'symbol_references' ? `INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, '@symbols', 1)
+          ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;` : `DELETE FROM projection_checkpoints WHERE repository_id=${repo} AND ((phase='SYMBOLS' AND state!='RUNNING') OR (phase='SYMBOL_SOURCE' AND scope=${row}.source_file_id));`}
+        ${!['symbol_resolution_facts', 'symbol_references'].includes(table) ? `INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, '@relationships', 1)
+          ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;` : ''}
+        ${table === 'symbol_resolution_facts' ? `DELETE FROM projection_checkpoints WHERE repository_id=${repo} AND scope=${row}.file_id AND phase='FACTS';` : ''}
+        ${file ? `INSERT INTO projection_revisions(repository_id, scope, revision) VALUES (${repo}, ${file}, 1)
+          ON CONFLICT(repository_id, scope) DO UPDATE SET revision = revision + 1;` : ''}
+      END`)
+    }
+  }
+}
+
 /** Retorna uma conexão existente ou cria uma nova com WAL mode e schema garantido. */
 function getOrCreateConnection(repoPath: string): BetterSqlite3Database {
   const existing = connections.get(repoPath)
@@ -317,6 +361,7 @@ function getOrCreateConnection(repoPath: string): BetterSqlite3Database {
   db.pragma('journal_mode = WAL')
   db.pragma('foreign_keys = ON')
   ensureSchema(db)
+  ensureProjectionSchema(db)
 
   const conn: DatabaseConnection = { db, repoPath }
   connections.set(repoPath, conn)
@@ -544,6 +589,39 @@ class RepositoryDatabase implements RepositoryRepository {
   }
 
   // ─── Repositórios ─────────────────────────────────────────────────────────
+
+  countSymbolReferences(repositoryId: string): number {
+    return (this.db.prepare('SELECT COUNT(*) AS count FROM symbol_references WHERE repository_id = ?').get(repositoryId) as { count: number }).count
+  }
+
+  projectionRevision(repositoryId: string, scope: string, phase?: string): number {
+    if (phase === 'RELATIONSHIPS') scope = '@relationships'
+    else if (phase === 'SYMBOLS' || phase === 'SYMBOL_SOURCE') scope = '@symbols'
+    return (this.db.prepare('SELECT revision FROM projection_revisions WHERE repository_id = ? AND scope = ?').get(repositoryId, scope) as { revision: number } | undefined)?.revision ?? 0
+  }
+
+  projectionCurrent(repositoryId: string, scope: string, phase: string, version: string): boolean {
+    const checkpoint = this.db.prepare('SELECT version, revision, state FROM projection_checkpoints WHERE repository_id = ? AND scope = ? AND phase = ?').get(repositoryId, scope, phase) as { version: string; revision: number; state: string } | undefined
+    return checkpoint?.state === 'CLEAN' && checkpoint.version === version && checkpoint.revision === this.projectionRevision(repositoryId, scope, phase)
+  }
+
+  beginProjection(repositoryId: string, scope: string, phase: string, version: string): number {
+    const revision = this.projectionRevision(repositoryId, scope, phase)
+    this.db.prepare("INSERT INTO projection_checkpoints VALUES (?, ?, ?, ?, ?, 'RUNNING') ON CONFLICT(repository_id, scope, phase) DO UPDATE SET version=excluded.version, revision=excluded.revision, state='RUNNING'").run(repositoryId, scope, phase, version, revision)
+    return revision
+  }
+
+  finishProjection(repositoryId: string, scope: string, phase: string, version: string, expectedRevision = this.projectionRevision(repositoryId, scope, phase)): void {
+    if (expectedRevision !== this.projectionRevision(repositoryId, scope, phase)) throw new Error('PROJECTION_INPUT_CHANGED')
+    this.db.prepare("INSERT INTO projection_checkpoints VALUES (?, ?, ?, ?, ?, 'CLEAN') ON CONFLICT(repository_id, scope, phase) DO UPDATE SET version=excluded.version, revision=excluded.revision, state='CLEAN'").run(repositoryId, scope, phase, version, expectedRevision)
+  }
+
+  projectionFilesCurrent(repositoryId: string, phase: string, version: string): boolean {
+    return !this.db.prepare(`SELECT 1 FROM files f LEFT JOIN projection_checkpoints c
+      ON c.repository_id=f.repository_id AND c.scope=f.id AND c.phase=?
+      LEFT JOIN projection_revisions r ON r.repository_id=f.repository_id AND r.scope=f.id
+      WHERE f.repository_id=? AND (f.status!='indexed' OR c.state IS NOT 'CLEAN' OR c.version IS NOT ? OR c.revision IS NOT COALESCE(r.revision, 0)) LIMIT 1`).get(phase, repositoryId, version)
+  }
 
   /** Insere ou atualiza (upsert) um repositório. Usa path como chave de unicidade. */
   saveRepository(repository: CodeMapRepository): void {

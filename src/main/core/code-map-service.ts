@@ -47,9 +47,11 @@ interface CodeMapInstance {
   unsubscribeWatcherBridge: () => void
   /** Promise for the background maintenance task (backfill + reconcile). Resolves when done. */
   backgroundMaintenance: Promise<void>
+  activeWork: Set<Promise<unknown>>
 }
 
 const instances = new Map<string, CodeMapInstance>()
+const pendingCloses = new Map<string, Promise<void>>()
 
 export class CodeMapService {
   private readonly watcherService: WatcherService
@@ -110,6 +112,8 @@ export class CodeMapService {
     options?: { periodicScanIntervalMs?: number }
   ): Promise<void> {
     const normalizedPath = repoPath.replace(/\\/g, '/').replace(/\/$/, '')
+    const closing = pendingCloses.get(normalizedPath)
+    if (closing) await closing
     if (instances.has(normalizedPath)) return
 
     const pending = this.pendingOpenRequests.get(normalizedPath)
@@ -191,11 +195,6 @@ export class CodeMapService {
             repoPath: normalizedPath, ...convergence
           })
           if (convergence.errors.length > 0) throw new Error(convergence.errors.join('; '))
-          // Note: backfillSymbolReferences emits BACKFILL_SYMBOL_REFERENCES_STARTED/COMPLETED/FAILED internally.
-          await model.backfillSymbolReferences()
-          model.readiness.advance(symbolInitialization, 'SYMBOL_REFERENCES')
-          await new Promise((resolve) => setImmediate(resolve))
-
           await runStep(
             'MAINTENANCE_CONTEXT_REF_STARTED',
             'MAINTENANCE_CONTEXT_REF_COMPLETED',
@@ -228,6 +227,11 @@ export class CodeMapService {
 
 
           await new Promise((resolve) => setImmediate(resolve))
+          // Note: backfillSymbolReferences emits BACKFILL_SYMBOL_REFERENCES_STARTED/COMPLETED/FAILED internally.
+          await model.backfillSymbolReferences()
+          model.readiness.advance(symbolInitialization, 'SYMBOL_REFERENCES')
+          await new Promise((resolve) => setImmediate(resolve))
+
           // Sync in-memory modified set with the updated DB state.
           synchronizer.reconcileMemoryWithDatabase()
           telemetryService.log(cid, 'CODE_MAP', 'BACKGROUND_MAINTENANCE_COMPLETED', {
@@ -248,7 +252,8 @@ export class CodeMapService {
         model,
         synchronizer,
         unsubscribeWatcherBridge,
-        backgroundMaintenance
+        backgroundMaintenance,
+        activeWork: new Set()
       })
       telemetryService.log(telemetryService.startOperation('REPO_OPEN'), 'CODE_MAP', 'REPO_OPENED', { repoPath: normalizedPath })
       resolveOpen()
@@ -270,36 +275,48 @@ export class CodeMapService {
     const instance = instances.get(normalizedPath)
     if (!instance) return
 
-    instance.synchronizer.dispose()
-    instance.model.close()
     instance.unsubscribeWatcherBridge()
-
+    instance.synchronizer.dispose()
     instances.delete(normalizedPath)
-    telemetryService.log(telemetryService.startOperation('REPO_CLOSE'), 'CODE_MAP', 'REPO_CLOSED', { repoPath: normalizedPath })
+    const closing = (async () => {
+      await instance.backgroundMaintenance
+      await Promise.allSettled(instance.activeWork)
+      await instance.synchronizer.awaitDisposed()
+      instance.model.close()
+      telemetryService.log(telemetryService.startOperation('REPO_CLOSE'), 'CODE_MAP', 'REPO_CLOSED', { repoPath: normalizedPath })
+    })()
+    pendingCloses.set(normalizedPath, closing)
+    void closing.then(() => pendingCloses.delete(normalizedPath), error => {
+      telemetryService.logError(telemetryService.startOperation('REPO_CLOSE'), 'CODE_MAP', 'REPO_CLOSE_FAILED', { repoPath: normalizedPath, error: String(error) })
+    })
   }
 
   async indexRepository(repoPath: string): Promise<{ filesIndexed: number; elementsExtracted: number }> {
     await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
-    return instance.model.indexRepository()
+    return this.trackWork(instance, async () => {
+      await instance.backgroundMaintenance
+      return instance.model.indexRepository()
+    })
   }
 
   async synchronizeModified(repoPath: string): Promise<{ filesUpdated: number; errors: string[] }> {
     await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
-    return instance.synchronizer.synchronizeModified()
+    return this.trackWork(instance, () => instance.synchronizer.synchronizeModified())
   }
 
   async refreshIndex(repoPath: string): Promise<void> {
     await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
-    // Wait for background maintenance first, then run a fresh reconcile + sync.
-    await instance.backgroundMaintenance
-    const cid = telemetryService.startOperation('REFRESH_INDEX')
-    const reconciliation = await instance.model.reconcileWithDisk({ indexUnexpected: true, correlationId: cid })
-    instance.synchronizer.reconcileMemoryWithDatabase(reconciliation.pendingPaths)
-    await instance.synchronizer.synchronizeModified(cid)
-    await instance.model.backfillTokenMetadata()
+    return this.trackWork(instance, async () => {
+      await instance.backgroundMaintenance
+      const cid = telemetryService.startOperation('REFRESH_INDEX')
+      const reconciliation = await instance.model.reconcileWithDisk({ indexUnexpected: true, correlationId: cid })
+      instance.synchronizer.reconcileMemoryWithDatabase(reconciliation.pendingPaths)
+      await instance.synchronizer.synchronizeModified(cid)
+      await instance.model.backfillTokenMetadata()
+    })
   }
 
   /** Awaits the background maintenance (backfill + offline reconcile) that runs after openRepository. */
@@ -395,13 +412,15 @@ export class CodeMapService {
   ): Promise<import('../../shared/types').IntegrityCheckResult> {
     await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
-    const result = await instance.model.verifyIntegrity(options)
+    return this.trackWork(instance, async () => {
+      const result = await instance.model.verifyIntegrity(options)
 
-    // Sempre reconcilia os pendentes do sincronizador com o banco após verificação,
-    // para que ele reflita a cura de status e remoções de forma sincronizada.
-    instance.synchronizer.reconcileMemoryWithDatabase()
+      // Sempre reconcilia os pendentes do sincronizador com o banco após verificação,
+      // para que ele reflita a cura de status e remoções de forma sincronizada.
+      instance.synchronizer.reconcileMemoryWithDatabase()
 
-    return result
+      return result
+    })
   }
 
   private getScopeFiles(
@@ -585,25 +604,32 @@ export class CodeMapService {
 
   getElementCodeSnippet(repoPath: string, elementId: string): Promise<ElementSnippet | null> {
     const instance = this.ensureInstance(repoPath)
-    return instance.model.getElementCodeSnippet(elementId)
+    return this.trackWork(instance, () => instance.model.getElementCodeSnippet(elementId))
   }
 
   async getElementExactSource(repoPath: string, elementId: string): Promise<ExactElementSource | null> {
     await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
-    return instance.model.getElementExactSource(elementId)
+    return this.trackWork(instance, () => instance.model.getElementExactSource(elementId))
   }
 
   async getElementExactSources(repoPath: string, elementIds: string[]): Promise<Map<string, ExactElementSource>> {
     await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
-    return instance.model.getElementExactSources(elementIds)
+    return this.trackWork(instance, () => instance.model.getElementExactSources(elementIds))
   }
 
   async getFileContent(repoPath: string, relativePath: string): Promise<FileContent | null> {
     await this.openRepository(repoPath)
     const instance = this.ensureInstance(repoPath)
-    return instance.model.getFileContent(relativePath)
+    return this.trackWork(instance, () => instance.model.getFileContent(relativePath))
+  }
+
+  private trackWork<T>(instance: CodeMapInstance, work: () => Promise<T>): Promise<T> {
+    const pending = work()
+    instance.activeWork.add(pending)
+    void pending.then(() => instance.activeWork.delete(pending), () => instance.activeWork.delete(pending))
+    return pending
   }
 
   private ensureInstance(repoPath: string): CodeMapInstance {
@@ -615,10 +641,11 @@ export class CodeMapService {
     return instance
   }
 
-  closeAll(): void {
+  async closeAll(): Promise<void> {
     for (const repoPath of Array.from(instances.keys())) {
       this.closeRepository(repoPath)
     }
+    await Promise.all(pendingCloses.values())
   }
 }
 
@@ -634,9 +661,9 @@ export function getCodeMapService(
   return codeMapServiceInstance
 }
 
-export function closeCodeMapService(): void {
+export async function closeCodeMapService(): Promise<void> {
   if (codeMapServiceInstance) {
-    codeMapServiceInstance.closeAll()
+    await codeMapServiceInstance.closeAll()
     codeMapServiceInstance = null
   }
 }

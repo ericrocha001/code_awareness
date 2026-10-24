@@ -50,8 +50,8 @@ server.listen(port, '127.0.0.1', () => {
 })
 
 function close(): void {
-  server.close(() => {
-    codeMap.closeAll()
+  server.close(async () => {
+    await codeMap.closeAll()
     watcher.stop()
     process.exit(0)
   })

@@ -700,7 +700,7 @@ registerApplicationShutdown(app, async () => {
   watcherService.stop()
   // Fecha o Code Map Service (fecha conexões de banco e watchers do Repository Model)
   try {
-    closeCodeMapService()
+    await closeCodeMapService()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Code Map Service:', error)
   }
