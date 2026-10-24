@@ -116,7 +116,11 @@ export class AcademyService {
             if (this.isClosed) break
             await this.distribution.reconcileDestination(destinationId)
           } catch (error) {
+            if (this.isClosed) break
             console.error(`[Academy] Reconciliation error for destination ${destinationId}:`, error)
+            try {
+              this.store.markDestination(destinationId, 'ERROR', error instanceof Error ? error.message : String(error))
+            } catch {}
           }
           if (!this.dirtyDestinations.has(destinationId) || this.isClosed) {
             break
@@ -125,8 +129,12 @@ export class AcademyService {
       } finally {
         this.reconcilingDestinations.delete(destinationId)
         this.destinationPassPromises.delete(destinationId)
-        this.openAiPublication.refreshDrift()
-        this.emitDistributionChange()
+        if (!this.isClosed) {
+          try {
+            this.openAiPublication.refreshDrift()
+            this.emitDistributionChange()
+          } catch {}
+        }
       }
     })()
     this.destinationPassPromises.set(destinationId, promise)
@@ -145,7 +153,11 @@ export class AcademyService {
     for (const destination of destinations) {
       this.scheduleDestinationReconciliation(destination.id)
     }
-    this.openAiPublication.refreshDrift()
+    if (!this.isClosed) {
+      try {
+        this.openAiPublication.refreshDrift()
+      } catch {}
+    }
   }
 
   async waitForReconciliation(): Promise<void> {
@@ -371,53 +383,177 @@ export class AcademyService {
   getDeliveryStatus(skillId: string, expectedVersion?: number): AcademySkillDeliveryStatus {
     this.assertNotClosed()
     const skill = this.store.get(skillId)
-    const targetVersion = expectedVersion ?? skill.currentVersion
-    const isSuperseded = expectedVersion !== undefined && expectedVersion < skill.currentVersion
-    const targetHash = targetVersion === skill.currentVersion
-      ? skill.current.packageHash
-      : (this.store.history(skillId).find(v => v.version === targetVersion)?.packageHash ?? null)
+    if (!skill) {
+      const error = new Error(`SKILL_NOT_FOUND: Skill ${skillId} not found`)
+      ;(error as any).code = 'SKILL_NOT_FOUND'
+      throw error
+    }
 
-    const destinations = this.store.listDestinations().filter(d => d.enabled && this.store.isAssigned(skill.id, d.id))
+    if (expectedVersion !== undefined) {
+      if (!Number.isSafeInteger(expectedVersion) || expectedVersion < 1 || expectedVersion > skill.currentVersion) {
+        const error = new Error(`VERSION_NOT_FOUND: Version ${expectedVersion} does not exist for skill ${skillId}`)
+        ;(error as any).code = 'VERSION_NOT_FOUND'
+        throw error
+      }
+    }
+
+    const targetVersion = expectedVersion ?? skill.currentVersion
+    const isSuperseded = targetVersion < skill.currentVersion
+    let targetHash: string
+    if (targetVersion === skill.currentVersion) {
+      targetHash = skill.current.packageHash
+    } else {
+      const historical = this.store.history(skillId).find(v => v.version === targetVersion)
+      if (!historical) {
+        const error = new Error(`VERSION_NOT_FOUND: Version ${targetVersion} not found in history for skill ${skillId}`)
+        ;(error as any).code = 'VERSION_NOT_FOUND'
+        throw error
+      }
+      targetHash = historical.packageHash
+    }
+
+    const destinations = this.store.listDestinations().filter(d =>
+      d.enabled && (
+        this.store.isAssigned(skill.id, d.id) ||
+        this.store.getProjection(skill.id, d.id) !== null ||
+        this.store.listDistributionStates(skill.id).some(s => s.destinationId === d.id)
+      )
+    )
+
     if (destinations.length === 0) {
       return {
         skillId: skill.id,
         version: targetVersion,
-        packageHash: targetHash ?? skill.current.packageHash,
+        packageHash: targetHash,
         status: 'NOT_APPLICABLE',
         destinations: []
       }
     }
 
     const items: AcademySkillDeliveryDestinationStatus[] = []
-    for (const destination of destinations) {
-      for (const target of TARGETS) {
-        const state = this.store.getDistributionState(skill.id, destination.id, target)
-        if (!state || state.canonicalVersion !== targetVersion || state.canonicalHash !== targetHash) {
-          items.push({
-            destinationId: destination.id,
-            destinationName: destination.name,
-            target,
-            status: 'PENDING',
-            canonicalVersion: targetVersion,
-            distributedVersion: state?.distributedVersion ?? null,
-            distributedHash: state?.distributedHash ?? null,
-            errorCode: null,
-            errorMessage: null,
-            checkedAt: state?.checkedAt ?? new Date().toISOString()
-          })
-        } else {
-          items.push({
-            destinationId: destination.id,
-            destinationName: destination.name,
-            target,
-            status: state.status,
-            canonicalVersion: state.canonicalVersion,
-            distributedVersion: state.distributedVersion,
-            distributedHash: state.distributedHash,
-            errorCode: state.errorCode,
-            errorMessage: state.errorMessage,
-            checkedAt: state.checkedAt
-          })
+
+    if (skill.status === 'ARCHIVED') {
+      for (const destination of destinations) {
+        const isReconciling = this.reconcilingDestinations.has(destination.id) || this.dirtyDestinations.has(destination.id)
+        const hasProjection = this.store.getProjection(skill.id, destination.id) !== null
+        const states = this.store.listDistributionStates(skill.id).filter(s => s.destinationId === destination.id)
+        const hasError = destination.reconciliationStatus === 'ERROR' || states.some(s => s.status === 'ERROR')
+
+        for (const target of TARGETS) {
+          const state = states.find(s => s.target === target)
+          if (hasError) {
+            items.push({
+              destinationId: destination.id,
+              destinationName: destination.name,
+              target,
+              status: 'ERROR',
+              canonicalVersion: targetVersion,
+              distributedVersion: state?.distributedVersion ?? null,
+              distributedHash: state?.distributedHash ?? null,
+              errorCode: state?.errorCode ?? 'RECONCILIATION_FAILED',
+              errorMessage: state?.errorMessage ?? destination.lastError ?? 'Reconciliation failed for destination',
+              checkedAt: state?.checkedAt ?? new Date().toISOString()
+            })
+          } else if (isReconciling || hasProjection || state !== undefined) {
+            items.push({
+              destinationId: destination.id,
+              destinationName: destination.name,
+              target,
+              status: 'PENDING',
+              canonicalVersion: targetVersion,
+              distributedVersion: state?.distributedVersion ?? null,
+              distributedHash: state?.distributedHash ?? null,
+              errorCode: null,
+              errorMessage: null,
+              checkedAt: state?.checkedAt ?? new Date().toISOString()
+            })
+          } else {
+            items.push({
+              destinationId: destination.id,
+              destinationName: destination.name,
+              target,
+              status: 'CURRENT',
+              canonicalVersion: targetVersion,
+              distributedVersion: null,
+              distributedHash: null,
+              errorCode: null,
+              errorMessage: null,
+              checkedAt: new Date().toISOString()
+            })
+          }
+        }
+      }
+    } else {
+      const activeDestinations = destinations.filter(d => this.store.isAssigned(skill.id, d.id))
+      if (activeDestinations.length === 0) {
+        return {
+          skillId: skill.id,
+          version: targetVersion,
+          packageHash: targetHash,
+          status: 'NOT_APPLICABLE',
+          destinations: []
+        }
+      }
+
+      for (const destination of activeDestinations) {
+        const isReconciling = this.reconcilingDestinations.has(destination.id) || this.dirtyDestinations.has(destination.id)
+        const destError = destination.reconciliationStatus === 'ERROR' ? destination.lastError : null
+
+        for (const target of TARGETS) {
+          const state = this.store.getDistributionState(skill.id, destination.id, target)
+          if (state?.status === 'ERROR') {
+            items.push({
+              destinationId: destination.id,
+              destinationName: destination.name,
+              target,
+              status: 'ERROR',
+              canonicalVersion: state.canonicalVersion,
+              distributedVersion: state.distributedVersion,
+              distributedHash: state.distributedHash,
+              errorCode: state.errorCode,
+              errorMessage: state.errorMessage,
+              checkedAt: state.checkedAt
+            })
+          } else if (destError && (!state || state.canonicalVersion !== targetVersion || state.canonicalHash !== targetHash)) {
+            items.push({
+              destinationId: destination.id,
+              destinationName: destination.name,
+              target,
+              status: 'ERROR',
+              canonicalVersion: targetVersion,
+              distributedVersion: state?.distributedVersion ?? null,
+              distributedHash: state?.distributedHash ?? null,
+              errorCode: 'RECONCILIATION_FAILED',
+              errorMessage: destError,
+              checkedAt: state?.checkedAt ?? new Date().toISOString()
+            })
+          } else if (!state || state.canonicalVersion !== targetVersion || state.canonicalHash !== targetHash || isReconciling) {
+            items.push({
+              destinationId: destination.id,
+              destinationName: destination.name,
+              target,
+              status: 'PENDING',
+              canonicalVersion: targetVersion,
+              distributedVersion: state?.distributedVersion ?? null,
+              distributedHash: state?.distributedHash ?? null,
+              errorCode: null,
+              errorMessage: null,
+              checkedAt: state?.checkedAt ?? new Date().toISOString()
+            })
+          } else {
+            items.push({
+              destinationId: destination.id,
+              destinationName: destination.name,
+              target,
+              status: state.status,
+              canonicalVersion: state.canonicalVersion,
+              distributedVersion: state.distributedVersion,
+              distributedHash: state.distributedHash,
+              errorCode: state.errorCode,
+              errorMessage: state.errorMessage,
+              checkedAt: state.checkedAt
+            })
+          }
         }
       }
     }
@@ -429,6 +565,8 @@ export class AcademyService {
       overallStatus = items.every(i => i.status === 'ERROR') ? 'ERROR' : 'DEGRADED'
     } else if (items.some(i => i.status === 'DRIFTED' || i.status === 'MISSING')) {
       overallStatus = 'DEGRADED'
+    } else if (items.some(i => i.status === 'PENDING')) {
+      overallStatus = 'PENDING'
     } else if (items.every(i => i.status === 'CURRENT')) {
       overallStatus = 'CONVERGED'
     } else {
@@ -438,7 +576,7 @@ export class AcademyService {
     return {
       skillId: skill.id,
       version: targetVersion,
-      packageHash: targetHash ?? skill.current.packageHash,
+      packageHash: targetHash,
       status: overallStatus,
       destinations: items
     }
@@ -533,11 +671,19 @@ export class AcademyService {
     }
   }
 
-  close(): void {
+  async close(): Promise<void> {
     this.isClosed = true
     this.watcher.stop()
     this.dirtyDestinations.clear()
+    if (this.destinationPassPromises.size > 0) {
+      const activePromises = [...this.destinationPassPromises.values()]
+      await Promise.race([
+        Promise.allSettled(activePromises),
+        new Promise(resolve => setTimeout(resolve, 2000))
+      ])
+    }
     this.destinationPassPromises.clear()
+    this.reconcilingDestinations.clear()
     this.store.close()
   }
 }

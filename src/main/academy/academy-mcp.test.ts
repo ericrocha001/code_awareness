@@ -50,6 +50,9 @@ describe('Academy MCP administration', () => {
     const delivery = await executeAcademyTool(service, 'get_academy_skill_delivery_status', { skillId: skill.id })
     expect(delivery.isError).toBeUndefined()
     expect(JSON.parse(delivery.content[0].text)).toMatchObject({ skillId: skill.id, version: 2, status: 'NOT_APPLICABLE' })
+    const invalidDelivery = await executeAcademyTool(service, 'get_academy_skill_delivery_status', { skillId: skill.id, expectedVersion: 999 })
+    expect(invalidDelivery.isError).toBe(true)
+    expect(invalidDelivery.content[0].text).toContain('VERSION_NOT_FOUND')
     service.close()
   })
 
