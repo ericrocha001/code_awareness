@@ -24,6 +24,8 @@ export class AcademyLocalAdapter implements LocalChannelAdapter {
       return projects
     }
     this.operations = {
+      change_impact: operation(input => input, input => service.analyzeChangeImpact(input)),
+      verify_change_impact: operation(input => input, input => service.verifyChangeImpact(input)),
       list: operation(input => {
         const value = object(input, ['status'])
         if (value.status !== undefined && value.status !== 'ACTIVE' && value.status !== 'ARCHIVED') invalid()

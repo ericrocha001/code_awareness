@@ -1,6 +1,7 @@
 import type { AcademyPackage, AcademySkillScope } from '../../shared/types/academy-types'
 import type { McpToolDefinition, McpToolResult } from '../mcp/channel-mcp-adapter'
 import type { AcademyService } from './academy-service'
+import { academyImpactFreshnessSchema, academyImpactSchema } from './academy-impact-schema'
 
 const securitySchemes = [{ type: 'oauth2' as const, scopes: [] }]
 const tool = (name: string, description: string, inputSchema: Record<string, unknown>): McpToolDefinition => ({ name, description, inputSchema, securitySchemes })
@@ -13,6 +14,8 @@ const packageSchema = {
 }
 
 export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
+  tool('verify_academy_change_impact', 'Read-only advisory freshness of an impact snapshot: CURRENT/STALE/UNKNOWN with observed reasons. Supply candidateHash to compare a changed candidate without resending its package. Without it, candidate mode checks only the previous content identity. No lock or atomic guarantee until update; expectedVersion protects only the source.', academyImpactFreshnessSchema),
+  tool('analyze_academy_change_impact', 'Read-only package change evidence and possible DIRECT consumers from ACTIVE canonical Skills. Mentions are not dependencies or compatibility verdicts. Use changes/consumers/evidence offsets and consumerId for bounded detail. Candidate mode requires expectedVersion plus complete package; retrospective mode requires baseVersion and targetVersion.', academyImpactSchema),
   tool('list_academy_skills', 'List canonical Academy skills and their current status, scope and version.', { type: 'object', properties: { status: { type: 'string', enum: ['ACTIVE', 'ARCHIVED'] } }, additionalProperties: false }),
   tool('get_academy_skill', 'Read one canonical Academy skill package by stable skill id.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
   tool('get_academy_skill_history', 'List immutable versions of one Academy skill.', { type: 'object', properties: { skillId: id }, required: ['skillId'], additionalProperties: false }),
@@ -37,6 +40,8 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
     const values = objectArgs(args)
     let result: unknown
     switch (name) {
+      case 'verify_academy_change_impact': result = service.verifyChangeImpact(args); break
+      case 'analyze_academy_change_impact': result = service.analyzeChangeImpact(args); break
       case 'list_academy_skills': result = service.list(optionalEnum(values.status, ['ACTIVE', 'ARCHIVED']) as 'ACTIVE' | 'ARCHIVED' | undefined); break
       case 'get_academy_skill': result = service.get(string(values.skillId, 'skillId')); break
       case 'get_academy_skill_history': result = service.history(string(values.skillId, 'skillId')); break

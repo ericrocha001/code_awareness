@@ -16,6 +16,41 @@ export interface AcademyPackage {
   artifacts: Record<string, string>
 }
 
+export interface AcademyImpactWindow {
+  offset?: number
+  limit?: number
+  textOffset?: number
+  textLimit?: number
+}
+
+export type AcademyImpactInput = {
+  skillId: string
+  changes?: AcademyImpactWindow
+  consumers?: AcademyImpactWindow
+  consumerId?: string
+  evidence?: AcademyImpactWindow
+} & ({ expectedVersion: number; package: AcademyPackage; baseVersion?: never; targetVersion?: never } |
+  { baseVersion: number; targetVersion: number; expectedVersion?: never; package?: never })
+
+export interface AcademyImpactSnapshot {
+  schema: 1
+  skillId: string
+  baseVersion: number
+  targetVersion?: number
+  candidateHash: string
+  sourceHash: string
+  baseHash: string
+  catalogHash: string
+  consumerHash: string
+  names: string[]
+  fingerprint: string
+}
+
+export interface AcademyImpactFreshnessInput {
+  snapshot: AcademyImpactSnapshot
+  candidateHash?: string
+}
+
 export interface AcademySkillSummary {
   id: string
   name: string

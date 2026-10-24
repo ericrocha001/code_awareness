@@ -205,6 +205,16 @@ export class AcademyStore {
     return (this.db.prepare('SELECT * FROM academy_versions WHERE skill_id=? ORDER BY version DESC').all(id) as Row[]).map(versionFromRow)
   }
 
+  readImpactCatalog(skillId: string, baseVersion: number, targetVersion?: number) {
+    return this.db.transaction(() => ({
+      source: this.get(skillId),
+      base: this.getVersion(skillId, baseVersion),
+      target: targetVersion === undefined ? undefined : this.getVersion(skillId, targetVersion),
+      skills: this.list('ACTIVE').map(skill => this.get(skill.id)),
+      destinations: this.listDestinations().map(({ id, enabled }) => ({ id, enabled }))
+    }))()
+  }
+
   archive(id: string, expectedVersion: number): AcademySkillDetail {
     return this.setStatus(id, expectedVersion, 'ARCHIVED')
   }

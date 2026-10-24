@@ -13,6 +13,7 @@ import { AcademyDistributionService } from './distribution/academy-distribution-
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
+import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
 
 const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE', 'ANTIGRAVITY']
 
@@ -100,6 +101,8 @@ export class AcademyService {
   list(status?: 'ACTIVE' | 'ARCHIVED') { return this.store.list(status) }
   get(id: string) { return this.store.get(id) }
   history(id: string) { return this.store.history(id) }
+  analyzeChangeImpact(input: unknown) { this.assertNotClosed(); return analyzeAcademyImpact(this.store, input) }
+  verifyChangeImpact(input: unknown) { return verifyAcademyImpact(this.store, input) }
   scheduleDestinationReconciliation(destinationId: string): Promise<void> {
     if (this.isClosed || this.store.isClosed) return Promise.resolve()
     if (this.reconcilingDestinations.has(destinationId)) {

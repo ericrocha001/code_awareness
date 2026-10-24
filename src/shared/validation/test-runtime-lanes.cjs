@@ -35,6 +35,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/continuum/continuum-mcp.test.ts',
   'src/main/continuum/artifact-fidelity.test.ts',
   'src/main/academy/academy-store.test.ts',
+  'src/main/academy/academy-impact.test.ts',
   'src/main/academy/academy-local-adapter.test.ts',
   'src/main/academy/academy-sync.test.ts',
   'src/main/academy/academy-conflicts.test.ts',
