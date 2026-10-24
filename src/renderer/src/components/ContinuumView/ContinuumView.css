@@ -110,7 +110,7 @@
 .continuum-tag-manager h2 { font-size: 17px; }
 .continuum-tag-manager form { display: grid; gap: 10px; margin-top: 16px; }
 .continuum-tag-manager form label { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 8px; }
-.continuum-tag-manager input { min-width: 0; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
+.continuum-tag-manager input, .continuum-tag-manager textarea { min-width: 0; padding: 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); }
 .continuum-tag-list > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
 .continuum-tag-manager button, .continuum-tag-list button, .continuum-tag-confirmation button { border: 1px solid var(--border); border-radius: 6px; padding: 6px; background: var(--bg-primary); }
 .continuum-tag-confirmation { padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
@@ -160,3 +160,6 @@
 @container (max-width: 1000px) {
   .continuum-header .sb-root { order: 1; flex-basis: 100%; margin-left: 0; }
 }
+
+.continuum-tag-manager form .continuum-tag-description { grid-template-columns: 1fr; color: var(--text-secondary); }
+.continuum-tag-description textarea { font: inherit; min-height: 68px; resize: vertical; color: var(--text-primary); }

@@ -1,5 +1,11 @@
-export interface ContinuumTag { slug: string; name: string; count: number }
-export interface ContinuumTagDefinition { slug: string; name: string }
+export interface ContinuumTag { slug: string; name: string; description: string; count: number }
+export interface ContinuumTagDefinition { slug: string; name: string; description?: string }
+export const TAG_DESCRIPTION_MAX_LENGTH = 280
+export function tagDescription(value: unknown): string {
+  if (value === undefined) return ''
+  if (typeof value !== 'string' || value.length > TAG_DESCRIPTION_MAX_LENGTH) throw new Error('INVALID_TAG_DESCRIPTION')
+  return value
+}
 export interface ContinuumTagAssignment { artifactId: string; expectedRevision: number }
 export type ContinuumTagMutation = { repositoryId: string } & (
   { intent: 'quick-create'; name: string; selected?: ContinuumTagAssignment[] } |

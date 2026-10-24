@@ -47,6 +47,7 @@ export function ContinuumBundleComposer({ repositoryId, slug, onClose }: { repos
     {error && <p role="alert">{error}</p>}{message && <p role="status">{message}</p>}
     {dirty && <p>Regere a prévia para aplicar alterações ou obter as revisões atuais antes de exportar.</p>}
     {preview && <>
+      {preview.tagDescription && <p>Critério da coleção (informativo): {preview.tagDescription}</p>}
       <p>{members.length} Artifacts · {preview.markdownBytes.toLocaleString()} bytes · aproximadamente {preview.tokenCount.toLocaleString()} tokens ({preview.tokenizerEncoding}). Estimativa relativa; a IA destinatária pode usar outro encoding.</p>
       {preview.tokenCount > 32000 && <p role="note">Pacote grande: confira a capacidade de contexto da IA destinatária. O conteúdo permanece integral.</p>}
       {preview.hasVisuals && <p role="note">Markdown copia somente texto. Os pixels WebP não são transmitidos pelo clipboard; use o pacote ZIP para incluir as imagens.</p>}

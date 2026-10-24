@@ -1,6 +1,6 @@
 import { ArtifactTokenCache, TOKEN_CACHE_SCHEMA } from './artifact-token-cache'
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
-import { artifactTags, quickTag, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
+import { artifactTags, quickTag, tagDescription, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
 import { metadataPeriod, validatePeriods } from './temporal-metadata'
 import { ArtifactGraph } from './artifact-graph'
@@ -52,8 +52,8 @@ export class ArtifactStore {
   saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
   deleteTag(slug: string) { this.tagIndex.delete(slug) }
   requireTag(slug: string) { this.tagIndex.require(slug) }
-  createQuickTag(name: string, selected?: ContinuumTagAssignment[]) {
-    const definition = quickTag(name)
+  createQuickTag(name: string, selected?: ContinuumTagAssignment[], description?: string) {
+    const definition = { ...quickTag(name), description: tagDescription(description) }
     return this.db.transaction(() => {
       const existing = this.tags().find(tag => tag.slug === definition.slug)
       if (existing && existing.name.normalize('NFKC').toLocaleLowerCase('en') !== definition.name.normalize('NFKC').toLocaleLowerCase('en')) throw new Error('TAG_IDENTITY_CONFLICT: escolha outro nome')

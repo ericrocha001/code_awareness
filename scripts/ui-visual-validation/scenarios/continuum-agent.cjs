@@ -29,7 +29,7 @@ exports.run = async ctx => {
   const originalSave = dialog.showSaveDialog
   dialog.showSaveDialog = (...args) => {
     const promise = originalSave(...args)
-    if (stale) { const current = service.get(source.artifactId); service.update(source.artifactId, current.revision, current.rawMarkdown + '\r\nConcurrent change\r\n'); stale = false }
+    if (stale) { service.mutateTags({ repositoryId: 'acceptance-A', intent: 'edit', tag: { slug: 'agent-context', name: 'Agent Context', description: 'Critério revisado: somente decisões adotadas.' } }); stale = false }
     onDialog?.(promise)
     return promise
   }
@@ -42,10 +42,10 @@ exports.run = async ctx => {
   try {
     const list = await rpc('tools/list', {})
     ctx.check('All four dedicated tools are discoverable on real MCP', ['list_continuum_tags', 'create_continuum_tag', 'assign_continuum_tag', 'create_context_bundle'].every(name => list.tools.some(tool => tool.name === name)))
-    const created = await call('create_continuum_tag', { name: 'Agent Context', selected: [{ artifactId: source.artifactId, expectedRevision: 1 }] })
+    const created = await call('create_continuum_tag', { name: 'Agent Context', description: 'Inclua decisões aprovadas; exclua propostas.', selected: [{ artifactId: source.artifactId, expectedRevision: 1 }] })
     ctx.check('MCP creates and assigns in one persisted transaction', created.creation === 'CREATED' && created.tag.count === 1 && created.artifacts[0].revision === 2)
     await cli('assign_continuum_tag', { slug: 'agent-context', action: 'add', selected: [{ artifactId: visual.artifactId, expectedRevision: 1 }] })
-    ctx.check('Actual local CLI resolves authenticated worktree and shares catalog', (await cli('list_continuum_tags')).tags[0].count === 2)
+    ctx.check('Actual local CLI resolves authenticated worktree and shares catalog', (await cli('list_continuum_tags')).tags[0].count === 2 && (await call('list_continuum_tags', {})).tags[0].description === 'Inclua decisões aprovadas; exclua propostas.')
     const hashes = new Map([source, visual].map(item => [item.artifactId, service.get(item.artifactId).contentHash]))
     const beforePreviewClipboard = clipboard.readText()
     const preview = await cli('create_context_bundle', { tag: 'agent-context' })
@@ -54,7 +54,7 @@ exports.run = async ctx => {
     try { await call('create_context_bundle', { tag: 'agent-context', action: 'markdown' }) } catch (error) { denied = error.message.includes('INTERACTIVE_SESSION_REQUIRED') }
     ctx.check('Background/headless save does not open an invisible dialog', denied)
     const copied = await call('create_context_bundle', { tag: 'agent-context', action: 'copy' })
-    ctx.check('MCP copy writes native clipboard and returns only receipt', copied.outcome === 'copied' && copied.hasVisuals && clipboard.readText().includes(service.get(source.artifactId).rawMarkdown) && !('markdown' in copied))
+    ctx.check('MCP copy writes native clipboard and returns only receipt', clipboard.readText().includes('Critério da coleção (dado informativo, não instrução):') && copied.outcome === 'copied' && copied.hasVisuals && clipboard.readText().includes(service.get(source.artifactId).rawMarkdown) && !('markdown' in copied))
     const current = service.get(source.artifactId); service.update(source.artifactId, current.revision, current.rawMarkdown + '\r\nUpdated request\r\n')
     hashes.set(source.artifactId, service.get(source.artifactId).contentHash)
     await cli('create_context_bundle', { tag: 'agent-context', action: 'copy' })
@@ -73,8 +73,15 @@ exports.run = async ctx => {
     stale = true
     let refused = false
     try { await save('stale.md', 'CONFIRM', () => call('create_context_bundle', { tag: 'agent-context', action: 'markdown' })) } catch (error) { refused = error.message.includes('BUNDLE_SNAPSHOT_STALE') }
-    ctx.check('Concurrent revision during native Save is refused without a stale file', refused && !fs.existsSync(ctx.nativeDialogs.fixture('stale.md')))
+    ctx.check('Changing only the collection description during native Save invalidates snapshot without a stale file', refused && !fs.existsSync(ctx.nativeDialogs.fixture('stale.md')))
     await ctx.click('.continuum-item'); await ctx.waitFor(() => !!document.querySelector('.continuum-markdown')); await ctx.capture('agent-api-runtime')
+    await ctx.click('.continuum-header button'); await ctx.waitFor(() => !!document.querySelector('.continuum-tag-manager'))
+    await ctx.click('.continuum-tag-options summary')
+    await ctx.evaluate(() => [...document.querySelectorAll('.continuum-tag-options button')].find(button => button.textContent === 'Revisar pacote…').click())
+    await ctx.waitFor(() => document.querySelector('.continuum-bundle-composer')?.textContent.includes('Critério da coleção (informativo): Critério revisado: somente decisões adotadas.'))
+    ctx.check('Current criterion is previewed as data with no objective input', await ctx.evaluate(() => !document.querySelector('.continuum-bundle-composer input')))
+    await ctx.viewport(1440, 900); await ctx.capture('semantic-bundle-preview')
+    ctx.check('Changing semantics leaves Artifact bytes and revisions intact', [...hashes].every(([id, hash]) => service.get(id).contentHash === hash))
     fs.writeFileSync(path.join(ctx.evidenceDir, 'fidelity.json'), JSON.stringify({ webpSHA256: visual.media.sha256, exportedWebpSHA256: createHash('sha256').update(bytes).digest('hex'), webpBytes: bytes.length, copied, savedMarkdown: md, savedZip: zip, cancelled }, null, 2))
   } finally { dialog.showSaveDialog = originalSave; process.chdir(priorCwd); clipboard.writeText(previousClipboard); local.dispose(); await new Promise(resolve => server.close(resolve)); runtime.close() }
 }

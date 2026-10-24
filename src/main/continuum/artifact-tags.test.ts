@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest'
 import sharp from 'sharp'
 import Database from 'better-sqlite3'
 import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
+import { ContinuumService } from './continuum-service'
 import { ArtifactStore } from './artifact-store'
 import { editArtifactTags } from './artifact-tags'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -117,7 +118,7 @@ it('creates by name and assigns atomically, reuses exact identities and rolls ba
   expect(f.service.tags()).toEqual([])
   const original = f.service.get(one.artifactId)!
   f.service.mutateTags({ ...request, selected: [{ artifactId: one.artifactId, expectedRevision: 1 }] })
-  expect(f.service.tags()).toEqual([{ slug: 'arquitetura-tecnica', name: 'Arquitetura Técnica', count: 1 }])
+  expect(f.service.tags()).toEqual([{ slug: 'arquitetura-tecnica', name: 'Arquitetura Técnica', description: '', count: 1 }])
   expect(parseArtifactMarkdown(f.service.get(one.artifactId)!.rawMarkdown).body).toBe(parseArtifactMarkdown(original.rawMarkdown).body)
   f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'quick-create', name: 'arquitetura técnica' })
   expect(f.service.tags()).toHaveLength(1)
@@ -125,7 +126,7 @@ it('creates by name and assigns atomically, reuses exact identities and rolls ba
   expect(() => f.service.mutateTags({ ...request, repositoryId: 'other' })).toThrow('REPOSITORY_CONTEXT_CHANGED')
   expect(f.service.get(one.artifactId)!.revision).toBe(2)
 })
-it('migrates legacy tag fields away without changing names, memberships, history or original media', async () => {
+it('adds optional descriptions to a v2 catalog without changing identities, members, history or media and persists edits across restart', async () => {
   const f = setup(); createTag(f, 'architecture'); createTag(f, 'onboarding')
   f.service.mutateTags({ repositoryId: 'catalog-A', intent: 'edit', tag: { slug: 'architecture', name: 'Architecture display' } })
   const one = f.service.publish(markdown('Migrated source'))
@@ -137,18 +138,30 @@ it('migrates legacy tag fields away without changing names, memberships, history
   const history = withFixtureDatabase(f.path, db => db.prepare('SELECT * FROM artifact_revisions ORDER BY artifact_id, revision').all())
   f.store.close()
   withFixtureDatabase(f.path, db => {
-    db.exec("ALTER TABLE continuum_tags ADD COLUMN color TEXT NOT NULL DEFAULT '#123456'; ALTER TABLE continuum_tags ADD COLUMN description TEXT NOT NULL DEFAULT 'Legacy objective'")
-    db.prepare('DELETE FROM continuum_tag_migrations WHERE version = 2').run()
+    db.exec('ALTER TABLE continuum_tags DROP COLUMN description')
+    db.prepare('DELETE FROM continuum_tag_migrations WHERE version = 3').run()
   }, false)
   const reopened = new ArtifactStore(f.path, 'catalog-A'); cleanup.push(() => reopened.close())
-  expect(reopened.tags()).toEqual([{ slug: 'architecture', name: 'Architecture display', count: 2 }, { slug: 'onboarding', name: 'onboarding', count: 1 }])
+  expect(reopened.tags()).toEqual([{ slug: 'architecture', name: 'Architecture display', description: '', count: 2 }, { slug: 'onboarding', name: 'onboarding', description: '', count: 1 }])
   expect(reopened.get(one.artifactId)).toEqual(before)
   expect(reopened.getVisual(visual.artifactId).data).toEqual(data)
   expect(reopened.getVisual(visual.artifactId).media).toEqual(original.media)
   withFixtureDatabase(f.path, db => {
-    expect((db.pragma('table_info(continuum_tags)') as { name: string }[]).map(column => column.name)).toEqual(['slug', 'name'])
+    expect((db.pragma('table_info(continuum_tags)') as { name: string }[]).map(column => column.name)).toEqual(['slug', 'name', 'description'])
     expect(db.prepare('SELECT * FROM artifact_revisions ORDER BY artifact_id, revision').all()).toEqual(history)
     expect(db.pragma('foreign_key_check')).toEqual([])
-    expect(db.prepare('SELECT version FROM continuum_tag_migrations ORDER BY version').all()).toEqual([{ version: 1 }, { version: 2 }])
+    expect(db.prepare('SELECT version FROM continuum_tag_migrations ORDER BY version').all()).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }])
   })
+  const service = new ContinuumService(reopened)
+  const description = 'Inclua decisões aprovadas; exclua propostas e relatos operacionais.'
+  service.mutateTags({ repositoryId: 'catalog-A', intent: 'edit', tag: { slug: 'architecture', name: 'Architecture display', description } })
+  service.mutateTags({ repositoryId: 'catalog-A', intent: 'edit', tag: { slug: 'architecture', name: 'Architecture display' } })
+  expect(service.tags()[0].description).toBe(description)
+  expect(reopened.get(one.artifactId)).toEqual(before)
+  expect(reopened.getVisual(visual.artifactId)).toEqual(original)
+  expect(() => service.mutateTags({ repositoryId: 'catalog-A', intent: 'edit', tag: { slug: 'architecture', name: 'Rejected', description: 'x'.repeat(281) } })).toThrow('INVALID_TAG_DESCRIPTION')
+  reopened.close()
+  const restarted = new ArtifactStore(f.path, 'catalog-A'); cleanup.push(() => restarted.close())
+  expect(restarted.tags()[0]).toEqual({ slug: 'architecture', name: 'Architecture display', description, count: 2 })
+  expect(restarted.get(one.artifactId)).toEqual(before)
 })

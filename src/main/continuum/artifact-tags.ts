@@ -1,6 +1,6 @@
 import type Database from 'better-sqlite3'
 import { isMap, isScalar, parseDocument } from 'yaml'
-import { artifactTags, validateTagSlug, type ContinuumTag, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
+import { artifactTags, tagDescription, validateTagSlug, type ContinuumTag, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
 import type { Artifact } from './continuum-types'
 
@@ -41,6 +41,11 @@ export class ArtifactTags {
       if (columns.some(column => column.name === 'description')) db.exec('ALTER TABLE continuum_tags DROP COLUMN description')
       db.prepare('INSERT INTO continuum_tag_migrations VALUES (2)').run()
     }).immediate()
+    if (!db.prepare('SELECT 1 FROM continuum_tag_migrations WHERE version = 3').get()) db.transaction(() => {
+      const columns = db.pragma('table_info(continuum_tags)') as { name: string }[]
+      if (!columns.some(column => column.name === 'description')) db.exec("ALTER TABLE continuum_tags ADD COLUMN description TEXT NOT NULL DEFAULT ''")
+      db.prepare('INSERT INTO continuum_tag_migrations VALUES (3)').run()
+    }).immediate()
     if (!db.prepare('SELECT 1 FROM continuum_tag_migrations WHERE version = 1').get()) db.transaction(() => {
       const rows = db.prepare('SELECT artifact_id, metadata_json FROM artifacts').all() as { artifact_id: string; metadata_json: string }[]
       for (const row of rows) this.project(row.artifact_id, JSON.parse(row.metadata_json).tags)
@@ -56,17 +61,18 @@ export class ArtifactTags {
     }
   }
   list(): ContinuumTag[] {
-    return this.db.prepare('SELECT t.slug, t.name, (SELECT count(*) FROM artifact_tags m WHERE m.slug = t.slug) AS count FROM continuum_tags t ORDER BY name COLLATE NOCASE, slug').all() as ContinuumTag[]
+    return this.db.prepare('SELECT t.slug, t.name, t.description, (SELECT count(*) FROM artifact_tags m WHERE m.slug = t.slug) AS count FROM continuum_tags t ORDER BY name COLLATE NOCASE, slug').all() as ContinuumTag[]
   }
   require(slug: string): void { validateTagSlug(slug); if (!this.db.prepare('SELECT 1 FROM continuum_tags WHERE slug = ?').get(slug)) throw new Error('TAG_NOT_FOUND: ' + slug) }
   save(tag: ContinuumTagDefinition, create: boolean): void {
     if (!tag || typeof tag !== 'object') throw new Error('INVALID_TAG')
     validateTagSlug(tag.slug)
-    if (typeof tag.name !== 'string' || !tag.name.trim() || tag.name.length > 80 || Object.keys(tag).some(key => !['slug', 'name'].includes(key))) throw new Error('INVALID_TAG')
+    if (typeof tag.name !== 'string' || !tag.name.trim() || tag.name.length > 80 || Object.keys(tag).some(key => !['slug', 'name', 'description'].includes(key))) throw new Error('INVALID_TAG')
+    const description = tagDescription(tag.description)
     if (create) {
       if (this.db.prepare('SELECT 1 FROM continuum_tags WHERE slug = ?').get(tag.slug)) throw new Error('TAG_ALREADY_EXISTS')
-      this.db.prepare('INSERT INTO continuum_tags (slug, name) VALUES (?, ?)').run(tag.slug, tag.name.trim())
-    } else { this.require(tag.slug); this.db.prepare('UPDATE continuum_tags SET name = ? WHERE slug = ?').run(tag.name.trim(), tag.slug) }
+      this.db.prepare('INSERT INTO continuum_tags (slug, name, description) VALUES (?, ?, ?)').run(tag.slug, tag.name.trim(), description)
+    } else { this.require(tag.slug); this.db.prepare('UPDATE continuum_tags SET name = ?, description = coalesce(?, description) WHERE slug = ?').run(tag.name.trim(), tag.description === undefined ? null : description, tag.slug) }
   }
   delete(slug: string): void {
     this.require(slug)

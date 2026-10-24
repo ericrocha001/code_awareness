@@ -3,7 +3,7 @@ import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ContinuumBundleComposer } from './ContinuumBundleComposer'
-const preview = { repositoryId: 'A', snapshotId: 'snapshot-1', slug: 'architecture', tagName: 'Architecture', generatedAt: 'now', members: [{ artifactId: 'one', name: 'First', kind: 'DOCUMENT', revision: 2 }, { artifactId: 'visual', name: 'Visual', kind: 'VISUAL_REFERENCE', revision: 3, mediaPath: 'media/visual.webp' }], markdown: 'EXACT\r\n---\r\n# sources', markdownBytes: 30, tokenCount: 14, tokenizerEncoding: 'cl100k_base', hasVisuals: true }
+const preview = { repositoryId: 'A', snapshotId: 'snapshot-1', slug: 'architecture', tagName: 'Architecture', tagDescription: 'Decisões aprovadas; exclui propostas.', generatedAt: 'now', members: [{ artifactId: 'one', name: 'First', kind: 'DOCUMENT', revision: 2 }, { artifactId: 'visual', name: 'Visual', kind: 'VISUAL_REFERENCE', revision: 3, mediaPath: 'media/visual.webp' }], markdown: 'EXACT\r\n---\r\n# sources', markdownBytes: 30, tokenCount: 14, tokenizerEncoding: 'cl100k_base', hasVisuals: true }
 beforeEach(() => { window.codeAwareness = { prepareContinuumBundle: vi.fn(async () => preview), exportContinuumBundle: vi.fn(async () => ({ snapshotId: preview.snapshotId, outcome: 'copied' })) } as unknown as Window['codeAwareness'] })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 it('shows coherent members, revision and tokens, warns about visual clipboard limits and exports only the prepared snapshot', async () => {
@@ -11,6 +11,7 @@ it('shows coherent members, revision and tokens, warns about visual clipboard li
   await waitFor(() => expect((screen.getByLabelText('Prévia do Context Bundle') as HTMLTextAreaElement).value).toBe(preview.markdown.replace(/\r\n/g, '\n')))
   expect(window.codeAwareness.prepareContinuumBundle).toHaveBeenCalledWith({ repositoryId: 'A', slug: 'architecture' })
   expect(screen.queryByLabelText('Objetivo do Context Bundle')).toBeNull()
+  expect(screen.getByText(/Critério da coleção.*Decisões aprovadas/)).toBeTruthy()
   expect(screen.getByText(/pixels WebP não são transmitidos/)).toBeTruthy()
   expect(screen.getByText(/cl100k_base/)).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Copiar Context Bundle' }))

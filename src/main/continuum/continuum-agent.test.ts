@@ -48,8 +48,8 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     expect((await local('list_continuum_tags', { ...scope, worktreeId: 'forged' })).error.code).toBe('WORKTREE_UNLINKED')
     const created = await read('create_continuum_tag', { name: 'Contexto rápido', selected })
     expect(created).toMatchObject({ state: 'PERSISTED', creation: 'CREATED', tag: { slug: 'contexto-rapido', count: 1 }, artifacts: [{ revision: 2 }] })
-    expect(created.tag).toEqual({ slug: 'contexto-rapido', name: 'Contexto rápido', count: 1 })
-    for (const removed of [{ color: '#123456' }, { description: 'Removed objective' }]) {
+    expect(created.tag).toEqual({ slug: 'contexto-rapido', name: 'Contexto rápido', description: '', count: 1 })
+    for (const removed of [{ color: '#123456' }, { objective: 'Forbidden objective' }, { description: 'x'.repeat(281) }, { description: 123 }]) {
       expect((await call('create_continuum_tag', { name: 'Rejected field', ...removed })).isError).toBe(true)
       expect((await local('create_continuum_tag', { ...scope, name: 'Rejected field', ...removed })).error.code).toBe('INVALID_ARGUMENT')
     }
@@ -58,6 +58,20 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     expect((await call('create_continuum_tag', { name: 'Orphan', selected })).isError).toBe(true)
     expect(service.tags().some(tag => tag.slug === 'orphan')).toBe(false)
     expect((await local('list_continuum_tags', scope)).result.tags[0].count).toBe(1)
+    const description = 'Inclua decisões aprovadas; exclua propostas e metadados operacionais.'
+    const semantic = await local('create_continuum_tag', { ...scope, name: 'Semantic scope', description })
+    expect(semantic.result).toMatchObject({ state: 'PERSISTED', creation: 'CREATED', tag: { slug: 'semantic-scope', description, count: 0 } })
+    expect((await read('list_continuum_tags', {})).tags.find((tag: { slug: string }) => tag.slug === 'semantic-scope').description).toBe(description)
+    expect((await read('create_continuum_tag', { name: 'Semantic scope', description: 'Do not overwrite existing semantics' })).tag.description).toBe(description)
+    expect((await call('create_continuum_tag', { name: 'Atomic failure', description, selected })).isError).toBe(true)
+    expect(service.tags().some(tag => tag.slug === 'atomic-failure')).toBe(false)
+    const catalogBeforeClassification = JSON.stringify(service.tags())
+    await read('list_artifacts', { metadataKeys: ['tags'] })
+    expect((await local('assign_continuum_tag', { ...scope, slug: 'missing-match', action: 'add', selected: [{ artifactId: one.artifactId, expectedRevision: 2 }] })).error.code).toBe('TAG_NOT_FOUND')
+    expect(JSON.stringify(service.tags())).toBe(catalogBeforeClassification)
+    const createSchema = advertised.tools.find((tool: { name: string }) => tool.name === 'create_continuum_tag').inputSchema
+    expect(createSchema.properties.description.maxLength).toBe(280)
+    expect(createSchema.required).toEqual(['name'])
     expect((await local('list', { ...scope, filter: { tag: 'contexto-rapido' } })).result.artifacts.map((a: { artifactId: string }) => a.artifactId)).toEqual([one.artifactId])
     const receipt = await local('assign_continuum_tag', { ...scope, slug: 'contexto-rapido', action: 'add', selected: [{ artifactId: one.artifactId, expectedRevision: 2 }] })
     expect(receipt.result.artifacts[0].revision).toBe(2)

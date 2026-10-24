@@ -14,10 +14,10 @@ import { artifactTags, type ContinuumTagMutation, type ContinuumTagAssignment } 
 import { ContextBundle } from './context-bundle'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
-  createTag(request: { name: string; selected?: ContinuumTagAssignment[] }) {
+  createTag(request: { name: string; description?: string; selected?: ContinuumTagAssignment[] }) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     if (request.selected && request.selected.length !== 1) throw new Error('TAG_SELECTION_LIMIT: one explicitly requested Artifact per call')
-    const result = this.store.createQuickTag(request.name, request.selected)
+    const result = this.store.createQuickTag(request.name, request.selected, request.description)
     this.changed()
     return { state: 'PERSISTED' as const, creation: result.state, tag: result.tag, artifacts: result.artifacts.map(artifact => this.receipt(artifact)) }
   }

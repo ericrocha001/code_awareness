@@ -1,6 +1,6 @@
 export interface ContinuumBundleMember { artifactId: string; name: string; kind: string; revision: number; mediaPath?: string }
 export interface ContinuumBundlePreview {
-  repositoryId: string; snapshotId: string; slug: string; tagName: string; generatedAt: string
+  repositoryId: string; snapshotId: string; slug: string; tagName: string; tagDescription: string; generatedAt: string
   members: ContinuumBundleMember[]; markdown: string; markdownBytes: number; tokenCount: number; tokenizerEncoding: string
   hasVisuals: boolean
 }
