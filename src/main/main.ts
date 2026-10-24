@@ -724,7 +724,7 @@ registerApplicationShutdown(app, async () => {
     console.error('[Main] Erro ao fechar Continuum Session:', error)
   }
   try {
-    academyService.close()
+    await academyService.close()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Academy:', error)
   }

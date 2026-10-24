@@ -1,4 +1,4 @@
-import type { ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../shared/types/continuum-bundle-types'
+import type { ContinuumBundleQuick, ContinuumBundleReceipt, ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../shared/types/continuum-bundle-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../shared/types/continuum-tag-types'
 /*
 -T ---
@@ -30,7 +30,7 @@ import type { ConnectionResult, ConnectionState } from '../shared/types/connecti
 import type { ChannelState } from '../shared/types/channel-state-types'
 import type { LocalMcpClientApi } from '../shared/types/local-mcp-client-types'
 import type { SystemHealthState } from '../shared/types/system-health-types'
-import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem } from '../shared/types/academy-types'
+import type { AcademyCreateInput, AcademyDistributionHealth, AcademyDistributionState, AcademySkillDeliveryStatus, AcademyGitStatusProjection, AcademyOpenAiPluginProfile, AcademyOpenAiPublicationState, AcademyOpenAiRelease, AcademyPackage, AcademyPackageDistributionState, AcademySnapshot, AcademySkillDetail, AcademySkillVersion, AcademyUpdateInput, AcademyImportItem } from '../shared/types/academy-types'
 import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getContinuumFacets: (repositoryPath: string): Promise<ContinuumFacets> => ipcRenderer.invoke('continuum:facets', repositoryPath),
   getContinuumTags: (repositoryId: string): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:tags', repositoryId),
   mutateContinuumTags: (request: ContinuumTagMutation): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:mutate-tags', request),
+  quickContinuumBundle: (request: ContinuumBundleQuick): Promise<ContinuumBundleReceipt> => ipcRenderer.invoke('continuum:quick-bundle', request),
   prepareContinuumBundle: (request: ContinuumBundlePrepare): Promise<ContinuumBundlePreview> => ipcRenderer.invoke('continuum:prepare-bundle', request),
   exportContinuumBundle: (request: ContinuumBundleExport): Promise<{ outcome: 'copied' | 'saved' | 'cancelled'; snapshotId: string }> => ipcRenderer.invoke('continuum:export-bundle', request),
   exportContinuumArtifact: (request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => ipcRenderer.invoke('continuum:export', request),
@@ -106,6 +107,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   resolveAcademyConflict: (id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage, approval?: { token: string; confirmed: boolean }): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:resolve-conflict', id, resolution, reconciledPackage, approval),
   getAcademyDistributionHealth: (): Promise<AcademyDistributionHealth> => ipcRenderer.invoke('academy:distribution-health'),
   listAcademyDistributionStates: (skillId?: string): Promise<AcademyDistributionState[]> => ipcRenderer.invoke('academy:distribution-states', skillId),
+  getAcademyDeliveryStatus: (skillId: string, expectedVersion?: number): Promise<AcademySkillDeliveryStatus> => ipcRenderer.invoke('academy:delivery-status', skillId, expectedVersion),
   reconcileAcademyDistribution: (destinationId?: string): Promise<{ health: AcademyDistributionHealth; states: AcademyDistributionState[] }> => ipcRenderer.invoke('academy:distribution-reconcile', destinationId),
   bootstrapAcademyOpenAiPlugin: (publishedVersion?: string): Promise<AcademyOpenAiPluginProfile> => ipcRenderer.invoke('academy:openai-bootstrap', publishedVersion),
   getAcademyOpenAiPublicationState: (): Promise<AcademyOpenAiPublicationState> => ipcRenderer.invoke('academy:openai-state'),

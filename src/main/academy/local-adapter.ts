@@ -39,7 +39,14 @@ export class AcademyLocalAdapter implements LocalChannelAdapter {
         if (value.projectIds !== undefined && value.scope === undefined) invalid()
         const target = value.scope === undefined ? undefined : scope(value.scope)
         return { skillId: text(value.skillId), expectedVersion: integer(value.expectedVersion), package: pkg(value.package), scope: target, projectIds: target === undefined ? undefined : associations(target, value.projectIds) ?? [], origin: 'LOCAL_CLI' }
-      }, (request, context) => { if (!context.connected()) throw new Error('IPC_CLOSED'); return service.update(request, 'RECEIPT') })
+      }, (request, context) => { if (!context.connected()) throw new Error('IPC_CLOSED'); return service.update(request, 'RECEIPT') }),
+      delivery_status: operation(input => {
+        const value = object(input, ['skillId', 'expectedVersion'])
+        return {
+          skillId: text(value.skillId),
+          expectedVersion: value.expectedVersion === undefined ? undefined : integer(value.expectedVersion)
+        }
+      }, ({ skillId, expectedVersion }) => service.getDeliveryStatus(skillId, expectedVersion))
     }
   }
 }

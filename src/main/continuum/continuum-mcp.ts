@@ -11,21 +11,22 @@ import type { IArtifactStructureReader } from './continuum-types'
 export { visualMarkdown } from './artifact-metadata'
 const string = { type: 'string', minLength: 1 }
 const includeTokenUsage = { type: 'boolean', default: false, description: 'Opt in to local estimated token counts using cl100k_base (not external model billing). Measures JSON.stringify(payload) before tokenUsage; get_artifact also measures literal rawMarkdown.' }
+const includeRawMarkdownTokenCount = { type: 'boolean', default: false, description: 'Opt in to receive rawMarkdownTokenCount per Artifact record, counted on literal rawMarkdown using the canonical cl100k_base tokenizer. Tokenizer identity is reported once in the envelope. Does not alter selection, cursor or ordering. Independent of includeTokenUsage.' }
 function tool(name: string, description: string, properties: Record<string, unknown>, required: string[] = []): McpToolDefinition {
   return { name, description, securitySchemes: [{ type: 'oauth2', scopes: [] }], inputSchema: { type: 'object', properties, ...(required.length ? { required } : {}), additionalProperties: false } }
 }
 export const LIST_ARTIFACTS_TOOL = tool('list_artifacts', 'Discover only the active repository Continuum through intersecting metadata filters and a cursor page of at most 20 Artifacts (default 20). Continue with nextCursor and the same filters. Returns small discovery records, never Markdown or expanded relations. Navigate one graph hop, select deliberately, then get_artifact.', {
   query: string, kind: string, status: string,
-  tag: { ...string, description: 'Membership in one canonical human-authored tag slug, including Artifacts with multiple tags. Combine with other filters; agents may read tags but cannot change them.' },
+  tag: { ...string, description: 'Membership in one canonical tag slug, including Artifacts with multiple tags. Combine with other filters; mutations require dedicated tag tools and explicit user request.' },
   metadata: { type: 'object', additionalProperties: true, description: 'Exact equality filters for extensible metadata, including canonical executionId when available.' },
   metadataKeys: { type: 'array', items: string, maxItems: 20, uniqueItems: true, description: 'Only these additional metadata keys are projected.' },
   relatedToArtifactId: string, direction: { type: 'string', enum: ['inbound', 'outbound', 'both'] }, relationKind: string,
   updatedAfter: { ...string, format: 'date-time' }, updatedBefore: { ...string, format: 'date-time' },
-  limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: string, includeTokenUsage
+  limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: string, includeTokenUsage, includeRawMarkdownTokenCount
 })
 export const GET_ARTIFACT_TOOL = tool('get_artifact', 'Read one explicitly selected Artifact in the active repository, including current revision, metadata and exact Markdown. Relations are identity hints and never expand related content.', { artifactId: string, includeTokenUsage }, ['artifactId'])
 export const INSPECT_ARTIFACT_STRUCTURE_TOOL = tool('inspect_artifact_structure', 'Inspect a selected Artifact outline without its body. Select a sectionId to inspect direct blocks with includeBlocks. IDs and cursors belong to this repository and revision. Metadata before content: list, inspect, then read_artifact_section.', {
-  artifactId: string, sectionId: string, includeBlocks: { type: 'boolean', default: false }, limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 }, cursor: string
+  artifactId: string, sectionId: string, includeBlocks: { type: 'boolean', default: false }, limit: { type: 'integer', minimum: 1, maximum: 100, default: 50 }, cursor: string, includeRawMarkdownTokenCount
 }, ['artifactId'])
 export const READ_ARTIFACT_SECTION_TOOL = tool('read_artifact_section', 'Read a literal original Markdown slice of one section or discovered block, at expectedRevision. Pages contain at most 12288 UTF-16 units. Preserve options when continuing nextCursor. Stale selectors/cursors require a fresh outline.', {
   artifactId: string, sectionId: string, expectedRevision: { type: 'integer', minimum: 1 }, includeDescendants: { type: 'boolean', default: true }, blockId: string, cursor: string
@@ -68,8 +69,8 @@ function argsFor(definition: McpToolDefinition, args: unknown): Record<string, u
 }
 export function executeListArtifacts(reader: IArtifactReader, args: unknown): McpToolResult<McpTextContent> {
   try {
-    const { includeTokenUsage, ...filter } = argsFor(LIST_ARTIFACTS_TOOL, args)
-    const page = reader.list(filter as ListArtifactsFilter)
+    const { includeTokenUsage, includeRawMarkdownTokenCount: includeCount, ...filter } = argsFor(LIST_ARTIFACTS_TOOL, args)
+    const page = reader.list({ ...filter as ListArtifactsFilter, ...(includeCount === true ? { includeRawMarkdownTokenCount: true } : {}) })
     return readingResult({ count: page.artifacts.length, ...page }, includeTokenUsage)
   } catch (error) { return failure(error) }
 }

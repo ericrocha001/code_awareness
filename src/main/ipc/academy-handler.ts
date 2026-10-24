@@ -23,6 +23,7 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:resolve-conflict', (_event, id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage, approval?: { token: string; confirmed: boolean }) => service.resolveConflict(id, resolution, reconciledPackage, approval))
   ipcMain.handle('academy:distribution-health', () => service.getDistributionHealth())
   ipcMain.handle('academy:distribution-states', (_event, skillId?: string) => service.listDistributionStates(skillId))
+  ipcMain.handle('academy:delivery-status', (_event, skillId: string, expectedVersion?: number) => service.getDeliveryStatus(skillId, expectedVersion))
   ipcMain.handle('academy:distribution-reconcile', (_event, destinationId?: string) => service.reconcileDistribution(destinationId))
   ipcMain.handle('academy:openai-bootstrap', (_event, publishedVersion?: string) => service.bootstrapOpenAiPlugin(undefined, publishedVersion))
   ipcMain.handle('academy:openai-state', () => service.getOpenAiPublicationState())

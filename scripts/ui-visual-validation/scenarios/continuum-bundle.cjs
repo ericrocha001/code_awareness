@@ -3,14 +3,18 @@ const path = require('node:path')
 const { createHash } = require('node:crypto')
 const sharp = require('sharp')
 const { clipboard, ipcMain } = require('electron')
+exports.nativeDialogs = { fixtures: [{ name: 'context.md', type: 'SAVE' }, { name: 'context.zip', type: 'SAVE' }] }
 exports.run = async ctx => {
-  let preview
+  let preview, finishDialog
+  const { dialog } = require('electron')
+  const originalSave = dialog.showSaveDialog
+  dialog.showSaveDialog = async (...args) => { const result = await originalSave(...args); finishDialog?.(result); return result }
   const handle = ipcMain.handle
   ipcMain.handle = function (channel, handler) { return handle.call(this, channel, async (...args) => { const value = await handler(...args); if (channel === 'continuum:prepare-bundle') preview = value; return value }) }
   const runtime = await require('./continuum-runtime.cjs').setup(ctx)
   ipcMain.handle = handle
   const service = runtime.session.getActiveService()
-  service.mutateTags({ repositoryId: 'acceptance-A', intent: 'create', tag: { slug: 'architecture', name: 'Architecture', color: '#7852ee', description: 'Isolated portability acceptance' } })
+  service.mutateTags({ repositoryId: 'acceptance-A', intent: 'create', tag: { slug: 'architecture', name: 'Architecture' } })
   const raw = '\uFEFF---\r\nname: Literal bundle source\r\ndescription: Synthetic portability proof\r\nkind: DOCUMENT\r\ntags: [architecture]\r\n---\r\n# ç 日本語 🚀\r\n\r\n| a | b |\r\n|---|---|\r\n|1|2|\r\n```ts\r\nconst literal = `${value}`\r\n```\r\n'
   const one = service.publishHuman(raw, true), two = service.publishHuman(raw.replace('Literal bundle source', 'Second bundle source'), true)
   const media = await sharp({ create: { width: 240, height: 120, channels: 4, background: '#7852ee80' } }).webp({ lossless: true }).toBuffer()
@@ -20,9 +24,8 @@ exports.run = async ctx => {
   const before = new Map([one, two, visual].map(item => [item.artifactId, service.get(item.artifactId).contentHash]))
   const priorClipboard = clipboard.readText()
   const nativeSave = async (label, destination) => {
-    const accepted = require('./native-save-dialog.cjs').accept(ctx, destination)
-    await ctx.click(`[aria-label="${label}"]`)
-    ctx.check('Native Save dialog accepted', (await accepted).includes('NATIVE_SAVE_DIALOG_ACCEPTED'))
+    const accepted = ctx.nativeDialogs.run({ type: 'SAVE', fixture: path.basename(destination) }, async () => { await ctx.click(`[aria-label="${label}"]`); return new Promise(resolve => { finishDialog = resolve }) })
+    await accepted
     await ctx.waitFor(() => document.querySelector('.continuum-bundle-composer')?.textContent.includes('Context Bundle salvo.') || !!document.querySelector('.continuum-bundle-composer [role=alert]'))
     ctx.check('Bundle save completes', await ctx.evaluate(() => !document.querySelector('.continuum-bundle-composer [role=alert]')))
   }
@@ -30,19 +33,30 @@ exports.run = async ctx => {
     await runtime.open(); await ctx.viewport(1440, 900)
     await ctx.waitFor(() => document.querySelectorAll('.continuum-item').length === 30)
     ctx.check('Tagged sources are outside the visible first page', await ctx.evaluate(ids => [...document.querySelectorAll('.continuum-item')].every(item => !ids.includes(item.dataset.artifactId)), [...before.keys()]))
-    await ctx.click('[aria-label="Gerenciar tags"]')
-    await ctx.waitFor(() => !!document.querySelector('[aria-label="Gerar Bundle architecture"]'))
-    await ctx.click('[aria-label="Gerar Bundle architecture"]')
+    await ctx.click('.continuum-header button')
+    await ctx.waitFor(() => !!document.querySelector('[aria-label="Copiar contexto Architecture"]'))
+    ctx.check('Tags expose only a name field without color or objective', await ctx.evaluate(() => document.querySelectorAll('.continuum-tag-manager form input').length === 1 && !document.querySelector('.continuum-tag-manager input[type=color], .continuum-tag-manager textarea')))
+    await ctx.click('[aria-label="Copiar contexto Architecture"]')
+    await ctx.waitFor(() => document.querySelector('.continuum-tag-manager [role=status]')?.textContent.includes('Copiado'))
+    ctx.check('One click copies all current literal members without a composer', clipboard.readText().includes(raw) && !await ctx.evaluate(() => !!document.querySelector('.continuum-bundle-composer')))
+    ctx.check('Visual warning points to complete ZIP', await ctx.evaluate(() => document.querySelector('.continuum-tag-manager [role=status]').textContent.includes('ZIP completo')))
+    for (const theme of ['dark', 'light']) {
+      await ctx.evaluate(theme => { document.body.dataset.theme = theme }, theme)
+      for (const size of [[1440, 900], [1000, 760]]) { await ctx.viewport(...size); await ctx.overflow(); await ctx.capture(`manager-${theme}-${size[0]}`) }
+    }
+    await ctx.click('.continuum-tag-options summary')
+    await ctx.evaluate(() => [...document.querySelectorAll('.continuum-tag-options button')].find(button => button.textContent === 'Revisar pacote…').click())
     await ctx.waitFor(() => document.querySelectorAll('.continuum-bundle-composer li').length === 3)
     ctx.check('Bundle resolves all current tag members independently of Timeline', preview.members.length === 3 && preview.markdown.includes(raw))
+    ctx.check('Composer and exported header no longer carry an objective', !('objective' in preview) && !preview.markdown.includes('\nObjective:') && !await ctx.evaluate(() => !!document.querySelector('[aria-label="Objetivo do Context Bundle"]')))
     await ctx.capture('bundle-preview-dark')
     await ctx.click('[aria-label="Copiar Context Bundle"]')
     await ctx.waitFor(() => document.querySelector('.continuum-bundle-composer')?.textContent.includes('Context Bundle copiado.'))
     ctx.check('Native clipboard equals the prepared literal composition', clipboard.readText() === preview.markdown)
-    const mdPath = path.join(ctx.evidenceDir, 'context.md')
+    const mdPath = ctx.nativeDialogs.fixture('context.md')
     await nativeSave('Salvar Markdown do Bundle', mdPath)
     ctx.check('Saved Markdown equals the same clipboard composition', fs.readFileSync(mdPath, 'utf8') === preview.markdown)
-    const zipPath = path.join(ctx.evidenceDir, 'context.zip')
+    const zipPath = ctx.nativeDialogs.fixture('context.zip')
     await nativeSave('Salvar pacote ZIP completo', zipPath)
     const extract = path.join(ctx.evidenceDir, 'extracted')
     await require('extract-zip')(zipPath, { dir: extract })
@@ -66,5 +80,5 @@ exports.run = async ctx => {
     await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
     await ctx.viewport(1000, 760); await ctx.overflow(); await ctx.capture('bundle-preview-light')
     fs.writeFileSync(path.join(ctx.evidenceDir, 'fidelity.json'), JSON.stringify({ webpBytes: media.length, originalSHA256: visual.media.sha256, extractedSHA256: sha256(extracted), snapshotId: manifest.snapshotId, exportedMembers: manifest.artifacts.length, regeneratedMembers: preview.members.length, tokenizerEncoding: preview.tokenizerEncoding }, null, 2))
-  } finally { clipboard.writeText(priorClipboard); runtime.close() }
+  } finally { dialog.showSaveDialog = originalSave; clipboard.writeText(priorClipboard); runtime.close() }
 }

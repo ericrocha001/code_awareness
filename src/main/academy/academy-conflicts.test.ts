@@ -14,6 +14,7 @@ async function fixture(run: (service: AcademyService, root: string, destinationI
   try {
     const destination = await service.registerDestination(root, 'Test')
     const skill = await service.create({ package: pkg('canonical'), scope: 'GLOBAL', origin: 'UI' })
+    await service.waitForReconciliation()
     expect(service.store.listDestinations()[0].lastError).toBeNull()
     await run(service, root, destination.id, skill.id)
   } finally { service.close(); rmSync(root, { recursive: true, force: true }) }
@@ -39,6 +40,7 @@ describe('Academy conflict safety', () => {
     const first = service.store.listConflicts()[0]
     const review = await service.reviewConflict(first.id)
     await service.resolveConflict(first.id, 'CANONICAL', undefined, { token: review.token, confirmed: true })
+    await service.waitForReconciliation()
     rmSync(directory, { recursive: true })
     await service.watcher.ingest(destination, 'protected')
     expect(service.store.listConflicts()).toHaveLength(1)
@@ -85,6 +87,7 @@ describe('Academy conflict safety', () => {
   it('certifies legacy duplicates against immutable history without regressing canonical versions', () => fixture(async (service, root, destination, skill) => {
     const historical = service.get(skill).current
     await service.update({ skillId: skill, expectedVersion: 1, package: pkg('latest'), origin: 'MCP' })
+    await service.waitForReconciliation()
     service.watcher.stop()
     const db = new Database(service.store.databasePath)
     try {
@@ -121,6 +124,7 @@ describe('Academy conflict safety', () => {
   it('rejects a batch after canonical or filesystem preconditions change', () => fixture(async (service, root, destination, skill) => {
     const first = service.get(skill).current
     await service.update({ skillId: skill, expectedVersion: 1, package: pkg('latest'), origin: 'UI' })
+    await service.waitForReconciliation()
     service.store.createConflict(skill, 'FILESYSTEM', 1, first.package, first.packageHash, destination, join(root, '.skills/protected'))
     const batch = await service.previewConflictBatch()
     expect(batch.entries).toHaveLength(1)
@@ -132,6 +136,7 @@ describe('Academy conflict safety', () => {
   it('allows shared-path historical occurrences to converge within the same batch', () => fixture(async (service, root, destination, skill) => {
     const first = service.get(skill).current
     await service.update({ skillId: skill, expectedVersion: 1, package: pkg('latest'), origin: 'UI' })
+    await service.waitForReconciliation()
     const directory = join(root, '.skills/protected')
     writeFileSync(join(directory, 'SKILL.md'), first.package.skillMd)
     service.store.createConflict(skill, 'FILESYSTEM', 1, first.package, first.packageHash, destination, directory)
@@ -166,6 +171,7 @@ describe('Academy conflict safety', () => {
     try {
       await service.registerDestination(root, 'Test')
       const skill = await service.create({ package: pkg('canonical'), scope: 'GLOBAL', origin: 'UI' })
+      await service.waitForReconciliation()
       service.close()
       rmSync(join(root, '.skills/protected'), { recursive: true })
       service = new AcademyService(join(root, 'academy.db'))

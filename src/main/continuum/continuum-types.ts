@@ -34,6 +34,11 @@ export interface ArtifactDiscoveryRecord {
   updatedAt: string
   relationCount: number
   metadata?: Record<string, MetadataValue>
+  rawMarkdownTokenCount?: number
+}
+export interface RawMarkdownTokenUsageEnvelope {
+  tokenizerId: string
+  tokenizerEncoding: string
 }
 export interface ListArtifactsFilter {
   tag?: string
@@ -50,8 +55,9 @@ export interface ListArtifactsFilter {
   updatedBefore?: string
   limit?: number
   cursor?: string
+  includeRawMarkdownTokenCount?: boolean
 }
-export interface ArtifactPage { artifacts: ArtifactDiscoveryRecord[]; nextCursor?: string }
+export interface ArtifactPage { artifacts: ArtifactDiscoveryRecord[]; nextCursor?: string; tokenizerId?: string; tokenizerEncoding?: string }
 export interface CreateArtifactInput {
   artifactId: string
   metadata: ArtifactMetadata

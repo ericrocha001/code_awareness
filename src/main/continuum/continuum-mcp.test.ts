@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { executeListArtifacts, executeGetArtifact, executePublishArtifact, executeUpdateArtifact, LIST_ARTIFACTS_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL } from './continuum-mcp'
+import { executeListArtifacts, executeGetArtifact, executePublishArtifact, executeUpdateArtifact, executeArtifactNavigation, LIST_ARTIFACTS_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL } from './continuum-mcp'
 import { fixture, markdown } from './continuum-test-fixtures'
 import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import * as tokenizer from '../core/tokenizer'
@@ -154,5 +154,96 @@ describe('Repository Continuum MCP contracts', () => {
     expect(JSON.stringify(discovery).length + JSON.stringify(related).length).toBeLessThan(1000)
     expect(data(executeGetArtifact(service, { artifactId: proof.artifactId })).rawMarkdown).toContain('SELECTED_PROOF')
     expect(JSON.stringify(related)).not.toContain('SELECTED_PROOF')
+  })
+  it('anticipates literal rawMarkdown token count without bodies in list and structure, matching get_artifact on demand', () => {
+    const { service } = setup()
+    for (let i = 0; i < 25; i++) {
+      service.publish(markdown('Item ' + i, `status: ${i < 15 ? 'PENDING' : 'COMPLETED'}\n`, `# Header ${i}\r\nUnicode \u00e7 \u65e5\u672c\u8a9e \ud83d\ude80\r\n` + 'line\r\n'.repeat(i + 1)))
+    }
+
+    const page1Result = executeListArtifacts(service, { limit: 20, includeRawMarkdownTokenCount: true })
+    const page1 = data(page1Result)
+    expect(page1.count).toBe(20)
+    expect(page1.artifacts).toHaveLength(20)
+    expect(page1.tokenizerId).toBe('js-tiktoken@1.0.21')
+    expect(page1.tokenizerEncoding).toBe('cl100k_base')
+    expect(page1.nextCursor).toBeDefined()
+    for (const record of page1.artifacts) {
+      expect(typeof record.rawMarkdownTokenCount).toBe('number')
+      expect(record.rawMarkdownTokenCount).toBeGreaterThan(0)
+      expect(record).not.toHaveProperty('rawMarkdown')
+      expect(record).not.toHaveProperty('tokenizerId')
+    }
+
+    const page2WithoutFlag = data(executeListArtifacts(service, { limit: 20, cursor: page1.nextCursor }))
+    expect(page2WithoutFlag.count).toBe(5)
+    expect(page2WithoutFlag).not.toHaveProperty('tokenizerId')
+    for (const record of page2WithoutFlag.artifacts) {
+      expect(record).not.toHaveProperty('rawMarkdownTokenCount')
+    }
+
+    const page2WithFlag = data(executeListArtifacts(service, { limit: 20, cursor: page1.nextCursor, includeRawMarkdownTokenCount: true }))
+    expect(page2WithFlag.count).toBe(5)
+    expect(page2WithFlag.tokenizerId).toBe('js-tiktoken@1.0.21')
+    for (const record of page2WithFlag.artifacts) {
+      expect(typeof record.rawMarkdownTokenCount).toBe('number')
+    }
+
+    const combined = data(executeListArtifacts(service, { limit: 5, status: 'PENDING', includeRawMarkdownTokenCount: true, includeTokenUsage: true }))
+    expect(combined.count).toBe(5)
+    expect(combined.tokenizerId).toBe('js-tiktoken@1.0.21')
+    expect(combined.tokenUsage).toBeDefined()
+    expect(combined.tokenUsage.payloadTokenCount).toBeGreaterThan(0)
+    for (const record of combined.artifacts) {
+      expect(typeof record.rawMarkdownTokenCount).toBe('number')
+    }
+
+    const sampleId = page1.artifacts[0].artifactId
+    const inspectResult = data(executeArtifactNavigation(service, 'inspect_artifact_structure', { artifactId: sampleId, includeRawMarkdownTokenCount: true }))
+    expect(inspectResult.artifactId).toBe(sampleId)
+    expect(inspectResult.rawMarkdownTokenCount).toBe(page1.artifacts[0].rawMarkdownTokenCount)
+    expect(inspectResult.tokenizerId).toBe('js-tiktoken@1.0.21')
+    expect(inspectResult.tokenizerEncoding).toBe('cl100k_base')
+    expect(inspectResult.sections).toBeDefined()
+    expect(inspectResult).not.toHaveProperty('content')
+
+    const fullArtifact = data(executeGetArtifact(service, { artifactId: sampleId, includeTokenUsage: true }))
+    expect(inspectResult.rawMarkdownTokenCount).toBe(fullArtifact.tokenUsage.rawMarkdownTokenCount)
+
+    for (const badValue of ['true', 1, {}, []]) {
+      const badList = executeListArtifacts(service, { includeRawMarkdownTokenCount: badValue })
+      expect(badList.isError).toBe(true)
+      expect(badList.content[0].text).toContain('includeRawMarkdownTokenCount')
+
+      const badInspect = executeArtifactNavigation(service, 'inspect_artifact_structure', { artifactId: sampleId, includeRawMarkdownTokenCount: badValue })
+      expect(badInspect.isError).toBe(true)
+    }
+
+    const cleanInspect = data(executeArtifactNavigation(service, 'inspect_artifact_structure', { artifactId: sampleId }))
+    expect(cleanInspect).not.toHaveProperty('rawMarkdownTokenCount')
+    expect(cleanInspect).not.toHaveProperty('tokenizerId')
+
+    const cleanList = data(executeListArtifacts(service, { limit: 5 }))
+    expect(cleanList).not.toHaveProperty('tokenizerId')
+    for (const record of cleanList.artifacts) {
+      expect(record).not.toHaveProperty('rawMarkdownTokenCount')
+    }
+
+    const updatedReceipt = data(executeUpdateArtifact(service, {
+      artifactId: sampleId,
+      expectedRevision: fullArtifact.revision,
+      rawMarkdown: fullArtifact.rawMarkdown + '\n\nExtra paragraph for new tokens.'
+    }))
+    const updatedInspect = data(executeArtifactNavigation(service, 'inspect_artifact_structure', { artifactId: sampleId, includeRawMarkdownTokenCount: true }))
+    expect(updatedInspect.revision).toBe(updatedReceipt.revision)
+    expect(updatedInspect.rawMarkdownTokenCount).toBeGreaterThan(inspectResult.rawMarkdownTokenCount)
+
+    // 10. Explicit failure on concurrent revision drift
+    const staleInspect = executeArtifactNavigation(service, 'inspect_artifact_structure', {
+      artifactId: sampleId,
+      includeRawMarkdownTokenCount: true
+    })
+    // Updated revision succeeds immediately with fresh count
+    expect(staleInspect.isError).not.toBe(true)
   })
 })

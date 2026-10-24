@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { ChevronsDownUp, ChevronsUpDown, RotateCcw, SlidersHorizontal, X } from 'lucide-react'
 import type { ContinuumFacet, ContinuumPeriod, ContinuumScalar } from '../../../../shared/types/continuum-ui-types'
 
@@ -25,6 +25,7 @@ export function ContextFilters({ repositoryId, facets, metadata, periods, choose
   const [customizing, setCustomizing] = useState(false)
   const [storageError, setStorageError] = useState('')
   const groups = useRef<HTMLDivElement>(null)
+  const [allOpen, setAllOpen] = useState(false)
   const selected = preference ?? defaults
   const ordered = [...facets].sort((a, b) => a.key.localeCompare(b.key))
   const customization = preference ?? ordered.filter(facet => defaults.includes(facet.key)).map(facet => facet.key)
@@ -36,11 +37,24 @@ export function ContextFilters({ repositoryId, facets, metadata, periods, choose
       setStorageError('')
     } catch { setStorageError('Não foi possível persistir a personalização neste perfil.') }
   }
-  const expand = (open: boolean) => groups.current?.querySelectorAll('details').forEach(group => { group.open = open })
+  useEffect(() => {
+    const root = groups.current
+    if (!root) return
+    const sync = () => {
+      const details = Array.from(root.querySelectorAll('details'))
+      setAllOpen(details.length > 0 && details.every(group => group.open))
+    }
+    root.addEventListener('toggle', sync, true)
+    const observer = new MutationObserver(sync)
+    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['open'] })
+    sync()
+    return () => { root.removeEventListener('toggle', sync, true); observer.disconnect() }
+  }, [])
+  const expand = (open: boolean) => { groups.current?.querySelectorAll('details').forEach(group => { group.open = open }); setAllOpen(open) }
   return <>
     <div className="continuum-context-actions">
       <button className="continuum-icon-button" aria-label="Personalizar filtros" title="Personalizar filtros" aria-expanded={customizing} aria-controls="continuum-facet-options" onClick={() => setCustomizing(value => !value)}><SlidersHorizontal size={16} aria-hidden="true" /></button>
-      <div><button className="continuum-icon-button" aria-label="Expand All" title="Expand All" onClick={() => expand(true)}><ChevronsUpDown size={16} aria-hidden="true" /></button><button className="continuum-icon-button" aria-label="Collapse All" title="Collapse All" onClick={() => expand(false)}><ChevronsDownUp size={16} aria-hidden="true" /></button></div>
+      <div><button className="continuum-icon-button" aria-label={allOpen ? 'Recolher tudo' : 'Expandir tudo'} title={allOpen ? 'Recolher tudo' : 'Expandir tudo'} onClick={() => expand(!allOpen)}>{allOpen ? <ChevronsDownUp size={16} aria-hidden="true" /> : <ChevronsUpDown size={16} aria-hidden="true" />}</button></div>
     </div>
     {customizing && <fieldset id="continuum-facet-options" className="continuum-facet-options">
       <legend>Facetas visíveis</legend>
