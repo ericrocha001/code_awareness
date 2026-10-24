@@ -13,6 +13,48 @@ function setup() {
   return f
 }
 const request = { repositoryId: 'catalog-A', slug: 'architecture' }
+it('exports literal originals and manifest hashes for explicit sources without requiring tags', async () => {
+  const f = setup()
+  const raw = '\uFEFF---\r\nname: Same title\r\ndescription: d\r\nkind: DOCUMENT\r\n---\r\n# ç 日本語 🚀\r\n  literal whitespace\t\r\n'
+  const first = f.service.publishHuman(raw), second = f.service.publishHuman(raw.replace('literal whitespace', 'different body'))
+  const source = { kind: 'selection' as const, selected: [second, first].map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision })) }
+  const bundle = ContextBundle.prepare(f.service, { repositoryId: 'catalog-A', source })
+  expect(bundle.preview.members.map(item => item.artifactId)).toEqual([second.artifactId, first.artifactId])
+  expect(bundle.preview.tokenCount).toBe(countCanonicalTokens(bundle.preview.markdown).tokenCount)
+  const files = unzip(await bundle.zip())
+  expect(files.get(`artifacts/${first.artifactId}.md`)).toEqual(Buffer.from(raw))
+  expect(files.get(`artifacts/${second.artifactId}.md`)).toEqual(Buffer.from(raw.replace('literal whitespace', 'different body')))
+  const manifest = JSON.parse(files.get('manifest.json')!.toString('utf8'))
+  expect(manifest.repositoryId).toBe('catalog-A')
+  for (const member of manifest.artifacts) expect(createHash('sha256').update(files.get(member.markdown.path)!).digest('hex')).toBe(member.markdown.sha256)
+  expect(f.service.tags().every(tag => tag.count === 0)).toBe(true)
+  f.service.update(first.artifactId, 1, raw + 'changed')
+  await expect(bundle.zip()).rejects.toThrow(/REVISION_CONFLICT|BUNDLE_SNAPSHOT_STALE/)
+  expect(() => ContextBundle.prepare(f.service, { repositoryId: 'other', source })).toThrow(/REPOSITORY_CONTEXT_CHANGED/)
+})
+
+it('allows 100 explicit sources while preserving the 50-source tag limit and rejects unsafe or duplicate IDs', () => {
+  const f = setup()
+  const selected = Array.from({ length: 100 }, (_, index) => f.service.publishHuman(markdown(`Selected ${index}`))).map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision }))
+  expect(ContextBundle.prepare(f.service, { repositoryId: 'catalog-A', source: { kind: 'selection', selected } }).preview.members).toHaveLength(100)
+  expect(() => ContextBundle.prepare(f.service, { repositoryId: 'catalog-A', source: { kind: 'selection', selected: [...selected, selected[0]] } })).toThrow(/INVALID_SELECTION/)
+  for (const artifactId of ['../escape', 'con', 'Case', 'case']) f.store.create({ artifactId, rawMarkdown: markdown(artifactId), metadata: { name: artifactId, description: 'd', kind: 'DOCUMENT' } })
+  for (const artifactId of ['../escape', 'con']) expect(() => ContextBundle.prepare(f.service, { repositoryId: 'catalog-A', source: { kind: 'selection', selected: [{ artifactId, expectedRevision: 1 }] } })).toThrow(/UNSAFE_BUNDLE_ARTIFACT_ID/)
+  expect(() => ContextBundle.prepare(f.service, { repositoryId: 'catalog-A', source: { kind: 'selection', selected: [{ artifactId: 'Case', expectedRevision: 1 }, { artifactId: 'case', expectedRevision: 1 }] } })).toThrow(/BUNDLE_ARTIFACT_COLLISION/)
+})
+
+it('preserves an originals-only ZIP when optional textual composition exceeds 8 MiB', async () => {
+  const f = setup()
+  const body = 'x'.repeat(4 * 1024 * 1024 + 1000)
+  const selected = [f.service.publishHuman(markdown('Large one', '', body)), f.service.publishHuman(markdown('Large two', '', body))].map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision }))
+  const bundle = ContextBundle.prepare(f.service, { repositoryId: 'catalog-A', source: { kind: 'selection', selected } })
+  expect(bundle.preview.compositionAvailable).toBe(false)
+  expect(bundle.preview.markdown).toBe('')
+  const files = unzip(await bundle.zip())
+  expect(files.has('context.md')).toBe(false)
+  expect(files.get(`artifacts/${selected[0].artifactId}.md`)!.length).toBeGreaterThan(4 * 1024 * 1024)
+  expect(JSON.parse(files.get('manifest.json')!.toString('utf8')).context).toBeUndefined()
+})
 function unzip(data: Buffer): Map<string, Buffer> {
   const end = data.lastIndexOf(Buffer.from([0x50, 0x4b, 0x05, 0x06]))
   const count = data.readUInt16LE(end + 10), files = new Map<string, Buffer>()
@@ -43,6 +85,13 @@ it('creates an extractable ZIP with the same context, manifest and original WebP
   expect(manifest.artifacts[0]).toMatchObject({ artifactId: visual.artifactId, revision: 2, kind: 'VISUAL_REFERENCE', media: { bytes: data.length, sha256: createHash('sha256').update(data).digest('hex') } })
   expect([...files.keys()]).toHaveLength(3)
   expect(f.service.getVisual(visual.artifactId).data).toEqual(data)
+  const selection = ContextBundle.prepare(f.service, { repositoryId: 'catalog-A', source: { kind: 'selection', selected: [{ artifactId: visual.artifactId, expectedRevision: 2 }] } })
+  const originals = unzip(await selection.zip())
+  expect(originals.get(`media/${visual.artifactId}.webp`)).toEqual(data)
+  expect(originals.get(`artifacts/${visual.artifactId}.md`)!.toString('utf8')).toBe(f.service.get(visual.artifactId)!.rawMarkdown)
+  const read = vi.spyOn(f.service, 'getVisual').mockReturnValue({ ...f.service.getVisual(visual.artifactId), data: Buffer.alloc(64 * 1024 * 1024 + 1) })
+  await expect(selection.zip()).rejects.toThrow(/BUNDLE_LIMIT/)
+  read.mockRestore()
 })
 it('rejects oversized media and context changes during asynchronous ZIP generation without a partial result', async () => {
   const f = setup()

@@ -3,8 +3,11 @@ export type ContinuumMetadataValue = null | ContinuumScalar | ContinuumMetadataV
 export interface ContinuumPeriod { year: number; month?: number }
 export interface ContinuumFacet { key: string; values: { value: ContinuumScalar; count: number }[]; years?: { year: number; count: number; months: { month: number; count: number }[] }[] }
 export interface ContinuumListRequest { tag?: string; repositoryId: string; query?: string; metadata?: Record<string, ContinuumScalar>; periods?: Record<string, ContinuumPeriod>; cursor?: string }
-export interface ContinuumItem { revision?: number; artifactId: string; name: string; description?: string; kind: string; status?: string; updatedAt: string; relationCount: number }
-export interface ContinuumTimeline { repositoryId: string | null; artifacts: ContinuumItem[]; nextCursor?: string }
+export interface ContinuumItem { rawMarkdownTokenCount?: number; revision?: number; artifactId: string; name: string; description?: string; kind: string; status?: string; updatedAt: string; relationCount: number }
+export interface ContinuumTimeline { repositoryId: string | null; artifacts: ContinuumItem[]; nextCursor?: string; tokenizerId?: string; tokenizerEncoding?: string }
+export interface ContinuumTagTokens { slug: string; count: number; rawMarkdownTokenCount: number; tokenizerId: string; tokenizerEncoding: string }
+export interface ContinuumSelectedArtifact { artifactId: string; expectedRevision: number }
+export interface ContinuumResolvedSelection { repositoryId: string; artifacts: ContinuumItem[] }
 export interface ContinuumFacets { repositoryId: string | null; facets: ContinuumFacet[] }
 export interface ContinuumDetail {
   artifactId: string

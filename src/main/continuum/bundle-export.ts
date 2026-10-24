@@ -12,6 +12,7 @@ export function exportAgentContextBundle(bundle: ContextBundle, intent: Continuu
 export async function exportContextBundle(bundle: ContextBundle, intent: ContinuumBundleExport['intent'], assertContext: () => void, parent: BrowserWindow | null) {
   assertContext()
   if (!bundle.preview.members.length) throw new Error('BUNDLE_EMPTY')
+  if (intent !== 'zip' && bundle.preview.compositionAvailable === false) throw new Error('BUNDLE_LIMIT: composição excede 8 MiB; refine a seleção ou salve ZIP com originais')
   const snapshotId = bundle.preview.snapshotId
   if (intent === 'copy') {
     if (!clipboard?.writeText) throw new Error('INTERACTIVE_SESSION_REQUIRED: native clipboard unavailable')
@@ -20,7 +21,7 @@ export async function exportContextBundle(bundle: ContextBundle, intent: Continu
   }
   if (!parent || parent.isDestroyed() || !parent.isVisible()) throw new Error('INTERACTIVE_SESSION_REQUIRED: use Tags e pacotes na janela do aplicativo')
   const extension = intent === 'zip' ? 'zip' : 'md'
-  const result = await dialog.showSaveDialog(parent, { title: 'Salvar Context Bundle', defaultPath: join(app.getPath('downloads'), `${bundle.preview.slug}-context.${extension}`), filters: [{ name: extension === 'zip' ? 'Pacote completo ZIP' : 'Markdown', extensions: [extension] }], properties: ['showOverwriteConfirmation', 'createDirectory', 'dontAddToRecent'] })
+  const result = await dialog.showSaveDialog(parent, { title: 'Salvar Context Bundle', defaultPath: join(app.getPath('downloads'), `${bundle.preview.slug || 'selecao'}-context.${extension}`), filters: [{ name: extension === 'zip' ? 'Pacote completo ZIP' : 'Markdown', extensions: [extension] }], properties: ['showOverwriteConfirmation', 'createDirectory', 'dontAddToRecent'] })
   assertContext()
   if (result.canceled) return { outcome: 'cancelled' as const, snapshotId }
   if (!result.filePath || extname(result.filePath).toLowerCase() !== '.' + extension) throw new Error(`INVALID_EXPORT_EXTENSION: .${extension} obrigatório`)

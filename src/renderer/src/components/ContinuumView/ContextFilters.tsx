@@ -12,7 +12,8 @@ function readPreference(repositoryId: string): string[] | null {
   } catch { return null }
 }
 
-export function ContextFilters({ repositoryId, facets, metadata, periods, chooseValue, choosePeriod, remove }: {
+export function ContextFilters({ repositoryId, facets, metadata, periods, chooseValue, choosePeriod, remove, tagTokens = {} }: {
+  tagTokens?: Record<string, number>
   repositoryId: string
   facets: ContinuumFacet[]
   metadata: Record<string, ContinuumScalar>
@@ -78,7 +79,7 @@ export function ContextFilters({ repositoryId, facets, metadata, periods, choose
               </button>)}</div>
             </details>
           </div>)}
-          {facet.values.map(entry => <button key={JSON.stringify(entry.value)} aria-pressed={metadata[facet.key] === entry.value} title={`${typeof entry.value}: ${String(entry.value)}`} onClick={() => chooseValue(facet.key, entry.value)}><span>{String(entry.value)}</span><small>{entry.count}</small></button>)}
+          {facet.values.map(entry => <button key={JSON.stringify(entry.value)} aria-pressed={metadata[facet.key] === entry.value} title={`${typeof entry.value}: ${String(entry.value)}`} onClick={() => chooseValue(facet.key, entry.value)}><span>{String(entry.value)}</span><small>{entry.count}{facet.key === 'tags' && tagTokens[String(entry.value)] !== undefined ? ` · ≈ ${tagTokens[String(entry.value)].toLocaleString()} tokens dos documentos` : ''}</small></button>)}
         </div>
       </details>)}
     </div>

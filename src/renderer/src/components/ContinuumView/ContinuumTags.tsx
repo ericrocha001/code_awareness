@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Check, MoreHorizontal, Tag, X } from 'lucide-react'
-import type { ContinuumDetail } from '../../../../shared/types/continuum-ui-types'
+import type { ContinuumDetail, ContinuumTagTokens } from '../../../../shared/types/continuum-ui-types'
 import { TAG_DESCRIPTION_MAX_LENGTH, type ContinuumTag, type ContinuumTagMutation } from '../../../../shared/types/continuum-tag-types'
 import type { ContinuumBundleQuick } from '../../../../shared/types/continuum-bundle-types'
 
@@ -45,11 +45,27 @@ export function ArtifactTagEditor({ repositoryId, artifact, tags, onChanged }: {
   </div>
 }
 
-export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, onChanged, onClose }: {
+export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, onChanged, onClose, onTokenTotals }: {
+  onTokenTotals?(totals: ContinuumTagTokens[]): void
   repositoryId: string; tags: ContinuumTag[]; onFilter(slug: string): void; onBundle?(slug: string): void; onChanged(): void; onClose(): void
 }) {
   const [name, setName] = useState(''), [description, setDescription] = useState(''), [editing, setEditing] = useState<string | null>(null)
   const [pending, setPending] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
+  const [totals, setTotals] = useState<ContinuumTagTokens[]>([]), [tokenError, setTokenError] = useState('')
+  useEffect(() => {
+    let cancelled = false
+    setTotals([]); setTokenError('')
+    const load = async () => {
+      for (let offset = 0; offset < tags.length; offset += 20) {
+        const result = await window.codeAwareness.getContinuumTagTokens(repositoryId, tags.slice(offset, offset + 20).map(tag => tag.slug))
+        if (cancelled || result.repositoryId !== repositoryId) return
+        setTotals(previous => [...previous, ...result.totals])
+        onTokenTotals?.(result.totals)
+      }
+    }
+    void load().catch(reason => { if (!cancelled) { setTotals([]); setTokenError(String(reason)) } })
+    return () => { cancelled = true }
+  }, [repositoryId, tags])
   const modal = useRef<HTMLDialogElement>(null), busy = useRef(false), context = useRef<string | null>(repositoryId)
   context.current = repositoryId
   useEffect(() => { modal.current?.showModal(); return () => { context.current = null } }, [])
@@ -73,7 +89,7 @@ export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, on
   return <dialog ref={modal} className="continuum-tag-manager" aria-label="Tags e pacotes" onCancel={onClose}>
     <header><h2>Tags e pacotes</h2><button className="continuum-icon-button" aria-label="Fechar tags" title="Fechar tags" onClick={onClose}><X size={16} /></button></header>
     <div className="continuum-tag-list">{tags.map(tag => <div key={tag.slug}>
-      <button className="continuum-tag-name" title={tag.description || 'Ver membros'} onClick={() => onFilter(tag.slug)}><span>{tag.name}</span><small>{tag.count}</small></button>
+      <button className="continuum-tag-name" title={`${tag.description || 'Ver membros'} · Soma do Markdown integral, incluindo YAML; estimativa cl100k_base. O pacote inclui overhead próprio.`} onClick={() => onFilter(tag.slug)}><span>{tag.name}</span><small>{tag.count} Artifacts · {totals.find(total => total.slug === tag.slug) ? `≈ ${totals.find(total => total.slug === tag.slug)!.rawMarkdownTokenCount.toLocaleString()} tokens dos documentos` : tokenError ? 'Tokens indisponíveis' : 'Calculando tokens…'}</small></button>
       <button disabled={pending} onClick={() => bundle(tag.slug, 'copy')} aria-label={`Copiar contexto ${tag.name}`}>Copiar contexto</button>
       <details className="continuum-tag-options"><summary aria-label={`Opções ${tag.name}`} title="Opções"><MoreHorizontal size={16} /></summary><div>
         <button disabled={pending} onClick={() => bundle(tag.slug, 'markdown')}>Salvar Markdown</button><button disabled={pending} onClick={() => bundle(tag.slug, 'zip')}>Salvar ZIP</button>
@@ -87,6 +103,7 @@ export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, on
       {editing && <label className="continuum-tag-description">Descrição — quando usar esta tag<textarea aria-label="Descrição — quando usar esta tag" placeholder="Ex.: decisões aprovadas sobre a arquitetura; exclui propostas em discussão." maxLength={TAG_DESCRIPTION_MAX_LENGTH} value={description} disabled={pending} onChange={event => setDescription(event.target.value)} /></label>}
       <div><button type="submit" disabled={pending}>{editing ? 'Salvar tag' : 'Criar tag'}</button>{editing && <button type="button" onClick={() => { setEditing(null); setName(''); setDescription('') }}>Cancelar edição</button>}</div>
     </form>
+    {tokenError && <p role="alert">{tokenError}</p>}
     {error && <p role="alert">{error} Tente novamente para gerar uma cópia atualizada.</p>}{message && <p role="status">{message}</p>}
   </dialog>
 }

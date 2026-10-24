@@ -8,6 +8,7 @@ const artifact = { artifactId: 'one', revision: 7, metadata: { name: 'One', tags
 beforeEach(() => {
   HTMLDialogElement.prototype.showModal = function () { this.setAttribute('open', '') }
   window.codeAwareness = { mutateContinuumTags: vi.fn(async () => ({ repositoryId: 'A', tags })), quickContinuumBundle: vi.fn(async () => ({ repositoryId: 'A', outcome: 'copied', count: 2, tokenCount: 20, tokenizerEncoding: 'cl100k_base', hasVisuals: true })) } as unknown as Window['codeAwareness']
+  window.codeAwareness.getContinuumTagTokens = vi.fn(async repositoryId => ({ repositoryId, totals: [{ slug: 'architecture', count: 2, rawMarkdownTokenCount: 42, tokenizerId: 'canonical', tokenizerEncoding: 'cl100k_base' }] }))
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 it('opens a focused nonmodal picker, assigns through CAS, reports conflicts and restores focus on Escape', async () => {
@@ -57,7 +58,7 @@ it('copies once without opening composer, warns about pixels, protects deletion 
   expect((await screen.findByRole('status')).textContent).toContain('salve o ZIP completo')
   expect(window.codeAwareness.quickContinuumBundle).toHaveBeenCalledExactlyOnceWith({ repositoryId: 'A', slug: 'architecture', intent: 'copy' })
   expect(composer).not.toHaveBeenCalled()
-  fireEvent.click(screen.getByRole('button', { name: 'Architecture 2' }))
+  fireEvent.click(screen.getByRole('button', { name: /Architecture 2 Artifacts/ }))
   expect(filter).toHaveBeenCalledWith('architecture')
   fireEvent.click(document.querySelector('summary[aria-label]')!)
   fireEvent.click(screen.getByRole('button', { name: 'Editar tag' }))

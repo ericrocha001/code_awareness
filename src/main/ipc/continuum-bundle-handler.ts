@@ -15,10 +15,11 @@ export function registerContinuumBundleHandlers(session: RepositoryContinuumSess
     if (session.getActiveService() !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
     return { service, bundle }
   }
-  const exporter = async (sender: Electron.WebContents, request: ContinuumBundleExport, snapshot: ReturnType<typeof prepare>) => {
+  const exporter = async (sender: Electron.WebContents, request: ContinuumBundleExport, snapshot: ReturnType<typeof prepare>, requireSnapshot = false) => {
     const { service, bundle } = snapshot
     const assertContext = () => {
       if (session.getActiveSession()?.repositoryId !== request.repositoryId || session.getActiveService() !== service || sender.isDestroyed()) throw new Error('REPOSITORY_CONTEXT_CHANGED')
+      if (requireSnapshot && snapshots.get(sender.id) !== snapshot) throw new Error('BUNDLE_SNAPSHOT_UNAVAILABLE: sessão do compositor encerrada')
       bundle.assertFresh()
     }
     return exportContextBundle(bundle, request.intent, assertContext, BrowserWindow.fromWebContents(sender))
@@ -31,13 +32,16 @@ export function registerContinuumBundleHandlers(session: RepositoryContinuumSess
     snapshots.set(event.sender.id, snapshot)
     return snapshot.bundle.preview
   })
+  ipcMain.handle('continuum:discard-bundle', (event, snapshotId: string) => {
+    if (snapshots.get(event.sender.id)?.bundle.preview.snapshotId === snapshotId) snapshots.delete(event.sender.id)
+  })
   ipcMain.handle('continuum:export-bundle', async (event, request: ContinuumBundleExport) => {
     if (!request || typeof request !== 'object' || !['copy', 'markdown', 'zip'].includes(request.intent)) throw new Error('INVALID_BUNDLE_EXPORT')
     if (busy.has(event.sender.id)) throw new Error('BUNDLE_BUSY')
     const snapshot = snapshots.get(event.sender.id)
     if (!snapshot || snapshot.bundle.preview.snapshotId !== request.snapshotId || snapshot.bundle.preview.repositoryId !== request.repositoryId) throw new Error('BUNDLE_SNAPSHOT_UNAVAILABLE: regenere o pacote')
     busy.add(event.sender.id)
-    try { return await exporter(event.sender, request, snapshot) } finally { busy.delete(event.sender.id) }
+    try { return await exporter(event.sender, request, snapshot, true) } finally { busy.delete(event.sender.id) }
   })
   ipcMain.handle('continuum:quick-bundle', async (event, request: ContinuumBundleQuick) => {
     if (!request || !['copy', 'markdown', 'zip'].includes(request.intent)) throw new Error('INVALID_BUNDLE_EXPORT')

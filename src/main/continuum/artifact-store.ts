@@ -49,6 +49,29 @@ export class ArtifactStore {
   private readonly tagIndex: ArtifactTags
   private readonly tokenCache: ArtifactTokenCache
   tags() { return this.tagIndex.list() }
+  resolveSelection(filter: ListArtifactsFilter) {
+    return this.db.transaction(() => {
+      const page = this.list({ ...filter, cursor: undefined, limit: 100, includeRawMarkdownTokenCount: false })
+      if (page.nextCursor) throw new Error('SELECTION_LIMIT: mais de 100 resultados; refine os filtros')
+      return page.artifacts
+    })()
+  }
+  selectionEntries(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) {
+    if (!Array.isArray(selected) || !selected.length || selected.length > 100 || new Set(selected.map(item => item?.artifactId)).size !== selected.length || selected.some(item => !item || typeof item.artifactId !== 'string' || !Number.isInteger(item.expectedRevision) || item.expectedRevision < 1)) throw new Error('INVALID_SELECTION')
+    const entries = this.db.prepare(`SELECT artifact_id AS artifactId, revision, content_hash AS contentHash FROM artifacts WHERE artifact_id IN (${selected.map(() => '?').join(',')})`).all(...selected.map(item => item.artifactId)) as Array<{ artifactId: string; revision: number; contentHash: string }>
+    for (const item of selected) {
+      const entry = entries.find(entry => entry.artifactId === item.artifactId)
+      if (!entry || entry.revision !== item.expectedRevision) throw new ArtifactRevisionConflictError(item.artifactId, entry?.revision ?? 0)
+    }
+    return entries
+  }
+  tagTokenMembers(slugs: string[]) {
+    if (!Array.isArray(slugs) || !slugs.length || slugs.length > 20 || new Set(slugs).size !== slugs.length) throw new Error('INVALID_TAG_SELECTION')
+    for (const slug of slugs) this.tagIndex.require(slug)
+    return this.db.prepare(`SELECT m.slug, a.artifact_id AS artifactId, a.revision, a.content_hash AS contentHash
+      FROM artifact_tags m JOIN artifacts a ON a.artifact_id = m.artifact_id
+      WHERE m.slug IN (${slugs.map(() => '?').join(',')}) ORDER BY m.slug, a.artifact_id`).all(...slugs) as Array<{ slug: string; artifactId: string; revision: number; contentHash: string }>
+  }
   saveTag(tag: ContinuumTagDefinition, create: boolean) { this.tagIndex.save(tag, create) }
   deleteTag(slug: string) { this.tagIndex.delete(slug) }
   requireTag(slug: string) { this.tagIndex.require(slug) }
