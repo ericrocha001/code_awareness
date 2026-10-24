@@ -35,3 +35,58 @@ test('deadline terminates Electron and cleans isolated profile', async () => {
   assert.equal(receipt.cleanup, 'PASS')
   assert.throws(() => process.kill(receipt.processId, 0), { code: 'ESRCH' })
 })
+
+test('Code Map convergence records checkout and HEAD even when launch is refused', async () => {
+  const receipt = await run({ scenario: 'codemap-convergence', timeout: 0 })
+  assert.equal(receipt.reason, 'TIMEOUT_INVALID')
+  assert.equal(receipt.processId, undefined)
+  assert.equal(receipt.source?.checkout, path.resolve(__dirname, '../..'))
+  assert.equal(receipt.source?.head, require('node:child_process').execFileSync('git', ['rev-parse', 'HEAD'], { cwd: __dirname, encoding: 'utf8' }).trim())
+  assert.equal(receipt.source?.observation, 'SCENARIO_START')
+})
+
+test('Code Map renderer and continuous IPC failures remain FAIL with a healthy Main', async t => {
+  const vm = require('node:vm')
+  const source = fs.readFileSync(path.join(__dirname, 'scenarios/codemap-convergence.cjs'), 'utf8')
+  const assertions = ['Main and continuous production IPC stay below 750ms across all phases', 'No renderer errors'].map(name => {
+    const line = source.split(/\r?\n/).find(line => line.trim().startsWith('ctx.check(') && line.includes(name))
+    assert.ok(line, name)
+    return line.trim()
+  }).join('\n')
+  const controls = [
+    { name: 'healthy control', expected: 'PASS' },
+    { name: 'renderer failure', rendererErrors: ['injected render failure'], expected: 'FAIL' },
+    { name: 'IPC rejection', continuousIpc: { samples: 20, failures: 1 }, expected: 'FAIL' },
+    { name: 'IPC stall', maxIpcMs: 900, expected: 'FAIL' }
+  ]
+  for (const control of controls) await t.test(control.name, async () => {
+    const temporary = path.join(os.tmpdir(), 'ca-ui-gate-control')
+    const paths = {}
+    let destroyed = false
+    const scenario = { run: vm.runInNewContext('(async ctx => {\n' + assertions + '\n})', {
+      maxEventLoopMs: 5, maxIpcMs: control.maxIpcMs ?? 5, pulses: 20,
+      continuousIpc: control.continuousIpc ?? { samples: 20, failures: 0 }, rendererErrors: control.rendererErrors ?? []
+    }) }
+    const receipt = await new Promise((resolve, reject) => {
+      const deadline = setTimeout(() => reject(new Error('Worker control did not finish')), 2000)
+      const electron = { app: {
+        setPath: (key, value) => { paths[key] = value }, getPath: key => paths[key],
+        disableHardwareAcceleration() {}, whenReady: () => Promise.resolve(), quit() {}
+      }, BrowserWindow: class { destroy() { destroyed = true } } }
+      vm.runInNewContext(fs.readFileSync(path.join(__dirname, 'worker.cjs'), 'utf8'), {
+        require: name => name === 'electron' ? electron : name === 'control-scenario' ? scenario : name === 'node:fs'
+          ? { readFileSync: () => JSON.stringify({ temporary, scenario: 'control-scenario' }) }
+          : name === './evidence.cjs' ? require('./evidence.cjs') : require(name),
+        process: { argv: ['', '', 'control-config'], versions: {}, platform: process.platform,
+          send: (result, done) => { clearTimeout(deadline); done(); resolve(result) } },
+        setTimeout, clearTimeout
+      })
+    })
+    assert.equal(receipt.status, control.expected)
+    assert.equal(destroyed, true)
+    if (control.expected === 'FAIL') {
+      assert.equal(receipt.reason, 'CHECK_FAILED')
+      assert.ok(receipt.checks.some(check => !check.passed))
+    }
+  })
+})

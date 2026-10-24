@@ -166,9 +166,32 @@ toolbar geometry. The legacy temporal-window checks elsewhere in `git-management
 `git-atlas-grid` are not current Git Atlas acceptance contracts and are not used by this
 comparison path; modernizing those broader scenarios is outside this MVP.
 
-## Code Map incremental convergence (Windows, opt-in)
+## Code Map incremental convergence (Windows, conditional gate)
+
+Select this existing proof by the semantic reach of the diff and affected contracts,
+following the canonical `validacao-de-implementacoes` Skill. There is no path/glob
+selector or additional validation profile registry in this Harness.
+
+| Decision | Material reach of the change | Required evidence |
+| --- | --- | --- |
+| `REQUIRED: yes / RUN` | Convergence/indexing, SQLite or Main cost, symbol/relationship resolution, watcher/coalescing, readiness through IPC, or tree remount/refetch during background updates | Run the scenario below and retain its actual result. |
+| `REQUIRED: no / NOT_RUN` | Documentation, cosmetic changes, or refactoring demonstrably unable to affect those boundaries | Record a short causal justification; the filename alone is insufficient. |
+
+A documentation example that changes the execution/acceptance contract is not automatically
+exempt. Conversely, an unrelated IPC change does not require this Code Map proof merely
+because it touches an IPC file. If reach is uncertain, inspect the boundary before deciding.
+A required run that is missing, blocked or failed remains a validation gap, never a justified
+`NOT_RUN` or PASS. The selection is procedural; no CI or global test hook is added.
 
 Run `node scripts/ui-visual-validation/harness.cjs codemap-convergence --timeout-ms 600000`.
+
+Use the existing receipt to report `REQUIRED/RUN/NOT_RUN`, the reason, actual checkout/HEAD
+and working-tree changes, Windows/Electron environment, deadline, latency budget, observed
+Main/continuous IPC maxima and result. The runner records source identity at scenario start;
+that snapshot is not proof of a clean checkout or a different running application. Scenario
+source hashes bind the measured Code Map implementation. Renderer errors, failed navigation,
+IPC failures or exceeded IPC budget veto PASS even when the Main is healthy or the batch
+finishes. A healthy Main metric alone cannot satisfy this gate.
 This scenario uses the production CodeMapView, preload, IPC handlers, CodeMapService,
 watcher, extractors and SQLite in a visible Electron window with an isolated profile.
 Only project selection and unrelated empty tags are fixture adapters. It does not boot
