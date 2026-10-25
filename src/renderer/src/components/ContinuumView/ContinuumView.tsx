@@ -122,6 +122,12 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   useEffect(() => setTagTokens({}), [repositoryId, refresh])
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const listGeneration = useRef(0)
+  const listReadyGeneration = useRef<number | null>(null)
+  const paginationKey = `${bulkContext}:${view}`
+  const pagination = useRef({ key: paginationKey, inFlight: false, cursors: new Set<string>() })
+  if (pagination.current.key !== paginationKey) pagination.current = { key: paginationKey, inFlight: false, cursors: new Set<string>() }
+  const [pageState, setPageState] = useState<{ scope: object; pending: boolean; error: string } | null>(null)
+  const currentPage = pageState?.scope === pagination.current ? pageState : null
   const currentPath = useRef(path)
   const boundPath = useRef<string | null>(null)
   currentPath.current = path
@@ -141,6 +147,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   const [publishedVisualId, setPublishedVisualId] = useState<string | null>(null)
   const [revealId, setRevealId] = useState<string | null>(null)
   const timelineScroll = useRef<HTMLDivElement>(null)
+  const pageSentinel = useRef<HTMLDivElement>(null)
   const enqueueThumbnail = useMemo(() => thumbnailQueue(), [])
   const columns = useContinuumColumns(path)
 
@@ -267,17 +274,19 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
 
   useEffect(() => {
     const generation = ++listGeneration.current
+    listReadyGeneration.current = null
     let cancelled = false
     setItems([]); setCursor(undefined)
     if (!repositoryId) return
     setLoading(true)
     window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}) }).then(result => {
       if (cancelled || currentPath.current !== path || generation !== listGeneration.current) return
+      listReadyGeneration.current = result.repositoryId === repositoryId ? generation : null
       setItems(result.repositoryId === repositoryId ? result.artifacts : [])
       setCursor(result.nextCursor); setError('')
     }).catch(reason => { if (!cancelled) setError(String(reason)) })
       .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+    return () => { cancelled = true; listReadyGeneration.current = null; listGeneration.current++ }
   }, [repositoryId, query, metadata, periods, tag, refresh])
 
   useEffect(() => {
@@ -302,18 +311,41 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     })
   }
 
-  const loadMore = async () => {
-    if (!repositoryId || !cursor || loading) return
+  const loadMore = async (retry = false) => {
+    const scope = pagination.current
+    if (!repositoryId || !cursor || loading || bulkPending || view !== 'timeline' || scope.inFlight ||
+      listReadyGeneration.current !== listGeneration.current || (currentPage?.error && !retry)) return
     const generation = listGeneration.current
-    setLoading(true)
+    scope.inFlight = true; scope.cursors.add(cursor)
+    setPageState({ scope, pending: true, error: '' })
     try {
       const result = await window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}), cursor })
-      if (currentPath.current !== path || generation !== listGeneration.current || result.repositoryId !== repositoryId) return
-      setItems(previous => [...previous, ...result.artifacts.filter(item => !previous.some(old => old.artifactId === item.artifactId))])
-      setCursor(result.nextCursor); setError('')
-    } catch (reason) { if (generation === listGeneration.current) setError(String(reason)) }
-    finally { if (generation === listGeneration.current) setLoading(false) }
+      if (scope !== pagination.current || generation !== listGeneration.current) return
+      if (result.repositoryId !== repositoryId) throw new Error('O contexto do repositório mudou; atualize a Timeline.')
+      const ids = new Set(items.map(item => item.artifactId))
+      const added = result.artifacts.filter(item => { if (ids.has(item.artifactId)) return false; ids.add(item.artifactId); return true })
+      if ((result.nextCursor && (scope.cursors.has(result.nextCursor) || !added.length)) || (result.artifacts.length && !added.length)) throw new Error('A paginação não avançou. Tente novamente para obter a próxima página.')
+      setItems(previous => [...previous, ...added])
+      setCursor(result.nextCursor)
+    } catch (reason) {
+      if (scope === pagination.current && generation === listGeneration.current) setPageState({ scope, pending: false, error: String(reason) })
+    } finally {
+      scope.inFlight = false
+      if (scope === pagination.current && generation === listGeneration.current) setPageState(previous => previous?.scope === scope ? { ...previous, pending: false } : previous)
+    }
   }
+
+  useEffect(() => {
+    if (view !== 'timeline' || !repositoryId || !cursor || loading || bulkPending || currentPage?.pending || currentPage?.error ||
+      listReadyGeneration.current !== listGeneration.current || !timelineScroll.current || !pageSentinel.current) return
+    const scope = pagination.current
+    let observing = true
+    const observer = new IntersectionObserver(entries => {
+      if (observing && scope === pagination.current && entries.some(entry => entry.isIntersecting)) void loadMore()
+    }, { root: timelineScroll.current, rootMargin: '240px 0px', threshold: 0 })
+    observer.observe(pageSentinel.current)
+    return () => { observing = false; observer.disconnect() }
+  }, [paginationKey, repositoryId, cursor, loading, bulkPending, currentPage?.pending, currentPage?.error, items])
 
   useEffect(() => {
     if (!revealId || loading) return
@@ -399,7 +431,9 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
               </button></div>
             </React.Fragment>)}
             {!loading && !items.length && <div className="continuum-empty"><Infinity size={32} /><h3>{repositoryId ? 'Nenhum artifact encontrado' : 'Continuum indisponível'}</h3><p>{query || Object.keys(metadata).length || Object.keys(periods).length ? 'Ajuste a busca ou os filtros.' : 'O contexto deste repositório aparecerá aqui.'}</p></div>}
-            {cursor && <button className="continuum-load-more" disabled={loading || bulkPending} onClick={loadMore}>Carregar mais</button>}
+            {currentPage?.pending && <p className="continuum-pagination-status" role="status">Carregando mais…</p>}
+            {currentPage?.error && <div className="continuum-pagination-status" role="alert">{currentPage.error}<button disabled={bulkPending} onClick={() => void loadMore(true)}>Tentar novamente</button></div>}
+            {cursor && <div ref={pageSentinel} className="continuum-page-sentinel" aria-hidden="true" />}
           </div>
         </section>
         <div className="continuum-resizer continuum-inspector-resizer"><ColumnResizer onDrag={columns.dragInspector} onDragEnd={columns.persist} /></div>

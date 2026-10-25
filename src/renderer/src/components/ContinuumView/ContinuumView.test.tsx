@@ -5,12 +5,158 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { ContinuumView } from './ContinuumView'
 import { NAV_ITEMS } from '../../config/navigation'
 import type { ContinuumChange, ContinuumDetail, ContinuumFacet, ContinuumSelection, ContinuumTimeline } from '../../../../shared/types/continuum-ui-types'
+vi.mock('./ContinuumGraph', () => ({ ContinuumGraph: () => <div>Graph fixture</div> }))
 
 const project = { id: 'workspace-id', path: '/A', name: 'Repository A' }
 let receive: (change: ContinuumChange) => void
 let facets: ContinuumFacet[]
 let body: string
 const intersections = new Map<Element, (entries: { isIntersecting: boolean }[]) => void>()
+const intersectionOptions = new Map<Element, IntersectionObserverInit | undefined>()
+async function timelineSentinel() {
+  await waitFor(() => expect(intersections.has(document.querySelector('.continuum-page-sentinel')!)).toBe(true))
+  return document.querySelector('.continuum-page-sentinel')!
+}
+async function reachTimelineEnd() {
+  const sentinel = await timelineSentinel()
+  await act(async () => intersections.get(sentinel)!([{ isIntersecting: true }]))
+}
+function pageItems(start: number, count = 30) {
+  return Array.from({ length: count }, (_, index) => ({ artifactId: `page-${start + index}`, revision: 1, name: `Page item ${start + index}`, kind: 'DOCUMENT', relationCount: 0, rawMarkdownTokenCount: 12, updatedAt: '2026-10-24T12:00:00Z' }))
+}
+
+it('observes only the panel end, requests once per cursor and appends ordered unique cards without moving scroll', async () => {
+  let finish!: (page: ContinuumTimeline) => void
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => request.cursor
+    ? new Promise(resolve => { finish = resolve }) : { repositoryId: request.repositoryId, artifacts: pageItems(0), nextCursor: 'next' })
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('Page item 0')
+  const sentinel = await timelineSentinel(), intersect = intersections.get(sentinel)!
+  const panel = document.querySelector('.continuum-timeline .continuum-pane-scroll') as HTMLDivElement
+  expect(intersectionOptions.get(sentinel)?.root).toBe(panel)
+  expect(intersectionOptions.get(sentinel)?.rootMargin).toBe('240px 0px')
+  expect(screen.queryByRole('button', { name: 'Carregar mais' })).toBeNull()
+  expect(document.querySelectorAll('.continuum-item')).toHaveLength(30)
+  act(() => intersect([{ isIntersecting: false }]))
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(1)
+  panel.scrollTop = 380
+  act(() => { intersect([{ isIntersecting: true }]); intersect([{ isIntersecting: true }]) })
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(2)
+  expect(screen.getByRole('status').textContent).toBe('Carregando mais…')
+  view.rerender(<ContinuumView activeProject={project} />)
+  act(() => intersect([{ isIntersecting: true }]))
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(2)
+  await act(async () => finish({ repositoryId: 'catalog-A', artifacts: [pageItems(0, 1)[0], ...pageItems(30), pageItems(30, 1)[0]] }))
+  expect(document.querySelectorAll('.continuum-item')).toHaveLength(60)
+  expect([...document.querySelectorAll('.continuum-item strong')].map(item => item.textContent)).toEqual(pageItems(0, 60).map(item => item.name))
+  expect(panel.scrollTop).toBe(380)
+  expect(screen.getAllByText('≈ 12 tokens')).toHaveLength(60)
+  expect(document.querySelector('.continuum-page-sentinel')).toBeNull()
+  act(() => intersect([{ isIntersecting: true }]))
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(2)
+})
+
+it('can fill a short panel sequentially and stops observing when the cursor is exhausted', async () => {
+  let finish!: (page: ContinuumTimeline) => void
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => request.cursor
+    ? new Promise(resolve => { finish = resolve }) : { repositoryId: request.repositoryId, artifacts: pageItems(0, 1), nextCursor: 'p1' })
+  render(<ContinuumView activeProject={project} />)
+  for (let index = 1; index <= 2; index++) {
+    await reachTimelineEnd()
+    expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(index + 1)
+    expect(intersections.has(document.querySelector('.continuum-page-sentinel')!)).toBe(false)
+    await act(async () => finish({ repositoryId: 'catalog-A', artifacts: pageItems(index, 1), ...(index === 1 ? { nextCursor: 'p2' } : {}) }))
+  }
+  expect(document.querySelectorAll('.continuum-item')).toHaveLength(3)
+  expect(document.querySelector('.continuum-page-sentinel')).toBeNull()
+})
+
+it('pauses the sentinel during select-all without using pagination to resolve that selection', async () => {
+  let finish!: (value: { repositoryId: string; artifacts: never[] }) => void
+  window.codeAwareness.resolveContinuumSelection = vi.fn(() => new Promise<{ repositoryId: string; artifacts: never[] }>(resolve => { finish = resolve }))
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => ({ repositoryId: request.repositoryId, artifacts: pageItems(request.cursor ? 1 : 0, 1), ...(!request.cursor ? { nextCursor: 'next' } : {}) }))
+  render(<ContinuumView activeProject={project} />)
+  const sentinel = await timelineSentinel(), callback = intersections.get(sentinel)!
+  fireEvent.click(screen.getByRole('button', { name: 'Selecionar todos os resultados do filtro' }))
+  expect(window.codeAwareness.resolveContinuumSelection).toHaveBeenCalledTimes(1)
+  expect(intersections.has(sentinel)).toBe(false)
+  act(() => callback([{ isIntersecting: true }]))
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(1)
+  await act(async () => finish({ repositoryId: 'catalog-A', artifacts: [] }))
+  await reachTimelineEnd()
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(2)
+})
+
+it('suspends a cursor cycle even when the backend returns new IDs on each step', async () => {
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => ({ repositoryId: request.repositoryId,
+    artifacts: pageItems(!request.cursor ? 0 : request.cursor === 'p1' ? 1 : 2, 1), nextCursor: request.cursor === 'p1' ? 'p2' : 'p1' }))
+  render(<ContinuumView activeProject={project} />)
+  await reachTimelineEnd(); await reachTimelineEnd()
+  expect((await screen.findByRole('alert')).textContent).toContain('não avançou')
+  expect(document.querySelectorAll('.continuum-item')).toHaveLength(2)
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(3)
+})
+
+it.each([
+  { artifacts: pageItems(30, 1), nextCursor: 'next' },
+  { artifacts: pageItems(0, 1), nextCursor: 'other' },
+  { artifacts: [], nextCursor: 'other' },
+  { artifacts: pageItems(0, 1) }
+])('suspends nonprogressing pages until an explicit retry: $nextCursor', async result => {
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => ({ repositoryId: request.repositoryId, ...(request.cursor ? result : { artifacts: pageItems(0, 1), nextCursor: 'next' }) }))
+  render(<ContinuumView activeProject={project} />)
+  const sentinel = await timelineSentinel(), oldCallback = intersections.get(sentinel)!
+  await reachTimelineEnd()
+  expect((await screen.findByRole('alert')).textContent).toContain('não avançou')
+  expect(intersections.has(sentinel)).toBe(false)
+  act(() => oldCallback([{ isIntersecting: true }]))
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(2)
+  expect(document.querySelectorAll('.continuum-item')).toHaveLength(1)
+})
+
+it('recovers the same cursor after a failure only on human retry, preserving previous pages', async () => {
+  let attempt = 0
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => {
+    if (!request.cursor) return { repositoryId: request.repositoryId, artifacts: pageItems(0), nextCursor: 'next' }
+    if (++attempt === 1) throw new Error('Offline')
+    return { repositoryId: request.repositoryId, artifacts: pageItems(30) }
+  })
+  render(<ContinuumView activeProject={project} />)
+  const sentinel = await timelineSentinel(), callback = intersections.get(sentinel)!
+  await reachTimelineEnd()
+  expect((await screen.findByRole('alert')).textContent).toContain('Offline')
+  expect(document.querySelectorAll('.continuum-item')).toHaveLength(30)
+  act(() => callback([{ isIntersecting: true }]))
+  expect(attempt).toBe(1)
+  fireEvent.click(screen.getByRole('button', { name: 'Tentar novamente' }))
+  await waitFor(() => expect(document.querySelectorAll('.continuum-item')).toHaveLength(60))
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: '', metadata: {}, cursor: 'next' })
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+it.each(['query', 'period', 'tag', 'repository', 'refresh', 'Graph', 'unmount'])('invalidates late pages and disconnects old observers on %s', async change => {
+  facets.push({ key: 'date', values: [], years: [{ year: 2026, count: 1, months: [] }] })
+  window.codeAwareness.getContinuumTags = vi.fn(async repositoryId => ({ repositoryId, tags: [{ slug: 'topic', name: 'Topic', description: '', count: 1 }] }))
+  let finish!: (page: ContinuumTimeline) => void
+  vi.mocked(window.codeAwareness.listContinuumArtifacts).mockImplementation(async request => request.cursor
+    ? new Promise(resolve => { finish = resolve }) : { repositoryId: request.repositoryId, artifacts: pageItems(0, 1), nextCursor: 'next' })
+  const view = render(<ContinuumView activeProject={project} />)
+  const sentinel = await timelineSentinel(), callback = intersections.get(sentinel)!
+  await reachTimelineEnd()
+  if (change === 'query') fireEvent.change(screen.getByLabelText('Buscar no Continuum'), { target: { value: 'new' } })
+  if (change === 'period') fireEvent.click(screen.getByRole('button', { name: 'date 2026' }))
+  if (change === 'tag') { revealFacet('tags'); fireEvent.click(screen.getByRole('button', { name: /topic 1/ })) }
+  if (change === 'repository') view.rerender(<ContinuumView activeProject={{ id: 'B', name: 'B', path: '/B' }} />)
+  if (change === 'refresh') act(() => receive({ repositoryId: 'catalog-A' }))
+  if (change === 'Graph') fireEvent.click(screen.getByRole('tab', { name: 'Graph' }))
+  if (change === 'unmount') view.unmount()
+  await act(async () => finish({ repositoryId: 'catalog-A', artifacts: [{ ...pageItems(31, 1)[0], name: 'Late page' }], nextCursor: 'late' }))
+  expect(screen.queryByText('Late page')).toBeNull()
+  expect(intersections.has(sentinel)).toBe(false)
+  const calls = vi.mocked(window.codeAwareness.listContinuumArtifacts).mock.calls.length
+  act(() => callback([{ isIntersecting: true }]))
+  expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenCalledTimes(calls)
+})
 const unsubscribe = vi.fn()
 it('keeps bulk selection across pages independently of inspection and clears it on search changes', async () => {
   const first = { artifactId: 'one', revision: 1, name: 'First', kind: 'DOCUMENT', updatedAt: '2026-10-06T18:00:00Z', relationCount: 0, rawMarkdownTokenCount: 10 }
@@ -21,7 +167,7 @@ it('keeps bulk selection across pages independently of inspection and clears it 
   expect(window.codeAwareness.getContinuumArtifact).not.toHaveBeenCalled()
   fireEvent.click(screen.getByRole('button', { name: /First DOCUMENT/ }))
   await waitFor(() => expect(window.codeAwareness.getContinuumArtifact).toHaveBeenCalledTimes(1))
-  fireEvent.click(screen.getByRole('button', { name: 'Carregar mais' }))
+  await reachTimelineEnd()
   fireEvent.click(await screen.findByRole('checkbox', { name: 'Selecionar Second' }))
   expect(screen.getByText('2 selecionados · ≈ 30 tokens dos documentos')).toBeTruthy()
   expect((screen.getByRole('checkbox', { name: 'Selecionar First' }) as HTMLInputElement).checked).toBe(true)
@@ -61,10 +207,11 @@ it('distinguishes zero, unavailable and visual text estimates without changing i
 })
 beforeEach(() => {
   intersections.clear()
+  intersectionOptions.clear()
   vi.stubGlobal('IntersectionObserver', class {
     private targets: Element[] = []
-    constructor(private callback: (entries: { isIntersecting: boolean }[]) => void) {}
-    observe(target: Element) { this.targets.push(target); intersections.set(target, this.callback) }
+    constructor(private callback: (entries: { isIntersecting: boolean }[]) => void, private options?: IntersectionObserverInit) {}
+    observe(target: Element) { this.targets.push(target); intersections.set(target, this.callback); intersectionOptions.set(target, this.options) }
     disconnect() { this.targets.forEach(target => intersections.delete(target)) }
   })
   HTMLElement.prototype.scrollIntoView = vi.fn()
@@ -369,7 +516,7 @@ it('uses the existing cursor and discards late pagination on query changes', asy
     return { repositoryId: request.repositoryId, artifacts: [], ...(request.query ? {} : { nextCursor: 'next' }) }
   })
   render(<ContinuumView activeProject={project} />)
-  fireEvent.click(await screen.findByRole('button', { name: 'Carregar mais' }))
+  await reachTimelineEnd()
   expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: '', metadata: {}, cursor: 'next' })
   fireEvent.change(screen.getByRole('textbox', { name: 'Buscar no Continuum' }), { target: { value: 'different' } })
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: 'different', metadata: {} }))
@@ -434,8 +581,7 @@ it('carries periods through search and pagination, discarding an older page afte
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: '', metadata: {}, periods: { date: { year: 2026, month: 10 } } }))
   fireEvent.change(screen.getByRole('textbox', { name: 'Buscar no Continuum' }), { target: { value: 'Current' } })
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: 'Current', metadata: {}, periods: { date: { year: 2026, month: 10 } } }))
-  await waitFor(() => expect((screen.getByRole('button', { name: 'Carregar mais' }) as HTMLButtonElement).disabled).toBe(false))
-  fireEvent.click(screen.getByRole('button', { name: 'Carregar mais' }))
+  await reachTimelineEnd()
   expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: 'Current', metadata: {}, periods: { date: { year: 2026, month: 10 } }, cursor: 'page-2' })
   fireEvent.click(screen.getByRole('button', { name: 'date 2026' }))
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ repositoryId: 'catalog-A', query: 'Current', metadata: {}, periods: { date: { year: 2026 } } }))

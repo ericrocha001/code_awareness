@@ -82,8 +82,10 @@
 .continuum-thumbnail img { width: 100%; height: 100%; object-fit: contain; }
 .continuum-badge svg { vertical-align: middle; }
 .continuum-publication-feedback button { margin-left: 12px; color: var(--accent); background: var(--bg-primary); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; }
-.continuum-load-more, .continuum-error button { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); }
-.continuum-load-more { display: block; margin: 16px auto; }
+.continuum-pagination-status button, .continuum-error button { padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-primary); color: var(--text-primary); }
+.continuum-page-sentinel { height: 1px; pointer-events: none; }
+.continuum-pagination-status { padding: 8px 14px; color: var(--text-secondary); font-size: 12px; }
+.continuum-pagination-status button { margin-left: 8px; }
 .continuum-error { display: flex; gap: 12px; align-items: center; color: var(--text-primary); font-size: 12px; overflow-wrap: anywhere; }
 .continuum-close { display: none; }
 @container (max-width: 1000px) {
