@@ -52,6 +52,7 @@ export class NativeOwner {
   private fail(error: Error) {
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(error); this.pending = undefined }
   }
+  get available() { return !this.exited }
   private request(action: 'start' | 'inspect' | 'stop' | 'reconcile' | 'endpoint' | 'processes', fields: Record<string, unknown> = {}, timeout = 10000): Promise<unknown> {
     if (this.exited || this.pending) return Promise.reject(new Error(this.exited ? 'OWNER_LOST' : 'NATIVE_REQUEST_BUSY'))
     const id = ++this.sequence

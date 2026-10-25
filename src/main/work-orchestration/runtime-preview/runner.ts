@@ -257,6 +257,7 @@ export class RuntimePreviewRunner {
     })
   }
   inspect(sessionId: string) { return this.command(() => this.inspectInternal(sessionId)) }
+  owns(sessionId: string) { return this.owners.get(sessionId)?.available === true }
   linkValidation(sessionId: string, link: import('../../../shared/types/runtime-preview-operations').PreviewValidationLink, expectedRevision: number, guard: () => Promise<void>) {
     return this.command(async () => {
       const record = this.store.read(sessionId)

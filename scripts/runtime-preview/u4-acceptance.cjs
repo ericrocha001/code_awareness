@@ -6,9 +6,10 @@ const assert = require('node:assert/strict')
 const { randomUUID, createHash } = require('node:crypto')
 const { execFileSync, spawn } = require('node:child_process')
 const branchAppUI = process.argv.includes('--branch-app-ui')
-const branchApp = process.argv.includes('--branch-app') || branchAppUI
+const agentIntent = process.argv.includes('--agent-intent')
+const branchApp = process.argv.includes('--branch-app') || branchAppUI || agentIntent
 const contextual = process.argv.includes('--context') || branchApp, snapshot = process.argv.includes('--snapshot') || branchApp
-const root = process.cwd(), output = path.join(root, branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
+const root = process.cwd(), output = path.join(root, agentIntent ? '.code-awareness/runtime-preview-agent-intent/acceptance' : branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
 fs.mkdirSync(output, { recursive: true })
 if (branchApp) process.on('uncaughtException', error => {
   fs.writeFileSync(path.join(output, 'harness-uncaught.txt'), String(error.stack))
@@ -188,8 +189,8 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   }
   const branchRequest = operation => ipc({ context: { projectId: webRepository.id, revision: 1 }, operation })
   const unauthorized = await fetch(mcpUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); assert.equal(unauthorized.status, 409)
-  const listTools = adapter.listTools().filter(tool => tool.name.includes('runtime_preview'))
-  assert.equal(listTools.length, 12)
+  const listTools = adapter.listTools().filter(tool => tool.name.includes('runtime_preview') || tool.name === 'run_branch_app')
+  assert.equal(listTools.length, 14)
   save('isolated-mcp-tools', { success: true, tools: listTools.map(tool => tool.name), unauthorizedStatus: unauthorized.status })
   for (const [name, args] of [['start_runtime_preview', { selection: selections.web, operationId: randomUUID(), command: 'forbidden' }], ['stop_runtime_preview', { sessionId: 'all' }], ['probe_runtime_preview', { sessionId: randomUUID(), probes: ['SHELL'] }], ['read_runtime_preview_evidence', { sessionId: randomUUID(), section: 'RUNTIME', limit: 1000 }]]) assert.equal((await mcp(name, args)).success, false)
   save('ipc-inventory', await branchRequest({ action: 'INVENTORY' }))
@@ -228,6 +229,26 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     try {
       if (command.startsWith('select ')) currentKind = command.slice(7)
       const selection = selections[currentKind]; assert.ok(selection)
+      if (agentIntent && ['run-agent', 'replay-agent', 'refuse-agent'].includes(command)) {
+        if (command !== 'replay-agent') {
+          const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
+          const tree = inventory.worktrees.find(w => path.resolve(w.path).toLowerCase() === root.toLowerCase())
+          assert.ok(tree && tree.branch && tree.head)
+          branchIntent = { repositoryId: electronRepository.id, branch: tree.branch, expectedHead: command === 'refuse-agent' ? '0'.repeat(40) : tree.head, operationId: randomUUID() }
+        }
+        assert.ok(branchIntent)
+        save('agent-intention', { success: true, ...branchIntent })
+        await mcp('run_branch_app', branchIntent)
+      }
+      if (agentIntent && command === 'agent-status') {
+        const result = await mcp('get_runtime_preview_status', sessionId ? { sessionId } : { operationId: branchIntent.operationId })
+        assert.equal(result.success, true)
+        assert.equal(result.data.kind, 'STATUS')
+        assert.ok(!/coverage|qualifications|lastOperation|resourceInventory/.test(JSON.stringify(result)))
+        if (result.data.sessionId) { sessionId = result.data.sessionId; Object.assign(selections.electron, store.read(sessionId).selection) }
+        save('agent-status', result)
+      }
+      if (agentIntent && command === 'stop-agent') await mcp('stop_runtime_preview', { sessionId })
       if (branchAppUI && command === 'ui-open') {
         uiWindow = new BrowserWindow({ title: 'Work Orchestration — aceitação isolada', show: true, width: 1440, height: 900, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
         await uiWindow.loadURL(`http://127.0.0.1:${ui.httpServer.address().port}`)

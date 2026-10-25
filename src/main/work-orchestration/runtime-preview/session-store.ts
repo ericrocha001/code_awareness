@@ -43,6 +43,14 @@ export const sessionSchema = z.object({
   shutdown: z.object({ graceMs: z.number().int().nonnegative().max(120000), forceMs: z.number().int().positive().max(120000), graceful: z.boolean() }).strict()
 }).strict()
 export type PreviewSessionRecord = z.infer<typeof sessionSchema>
+const intentSchema = z.object({
+  operationId: z.string().uuid(), key: z.string().regex(/^[a-f0-9]{64}$/), repositoryId: z.string().max(128),
+  branch: z.string().max(512), at: z.string().max(64), revision: z.number().int().min(0).max(1),
+  head: z.string().max(128).nullable().optional(), worktreeId: z.string().max(128).nullable().optional(),
+  sessionId: z.string().uuid().nullable(), reasonCode: z.string().max(160).nullable(),
+  phase: z.enum(['PREPARING', 'BLOCKED', 'FAILED', 'UNKNOWN', 'RUNNING'])
+}).strict()
+export type PreviewIntentReceipt = z.infer<typeof intentSchema>
 export class PreviewSessionStore {
   readonly root: string
   constructor(directory: string) {
@@ -70,6 +78,38 @@ export class PreviewSessionStore {
     const fd = openSync(temp, 'wx', 0o600)
     try { writeFileSync(fd, JSON.stringify(value)); fsyncSync(fd) } finally { closeSync(fd) }
     try { linkSync(temp, path) } finally { unlinkSync(temp) }
+  }
+  readIntent(operationId: string): PreviewIntentReceipt | undefined {
+    z.string().uuid().parse(operationId)
+    this.assertSafe(this.root)
+    let result: PreviewIntentReceipt | undefined
+    for (const revision of [0, 1]) {
+      const path = join(this.root, `intent-${operationId}-${revision}.json`)
+      if (!existsSync(path)) break
+      this.assertSafe(path)
+      if (lstatSync(path).size > 4096) throw new Error('INTENT_RECEIPT_LIMIT')
+      const value = intentSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
+      if (value.operationId !== operationId || value.revision !== revision || result && (value.key !== result.key || value.repositoryId !== result.repositoryId || value.branch !== result.branch)) throw new Error('INTENT_RECEIPT_UNVERIFIABLE')
+      result = value
+    }
+    return result
+  }
+  appendIntent(receipt: PreviewIntentReceipt) {
+    intentSchema.parse(receipt)
+    this.assertSafe(this.root)
+    const previous = this.readIntent(receipt.operationId)
+    if (receipt.revision === 0) {
+      if (previous) throw new Error('OPERATION_ID_CONFLICT')
+      if (readdirSync(this.root).filter(n => /^intent-.*-0\.json$/.test(n)).length >= 128) throw new Error('INTENT_RETENTION_LIMIT')
+    } else if (!previous || previous.revision !== 0 || previous.key !== receipt.key || previous.repositoryId !== receipt.repositoryId || previous.branch !== receipt.branch) throw new Error('INTENT_RECEIPT_UNVERIFIABLE')
+    this.immutable(join(this.root, `intent-${receipt.operationId}-${receipt.revision}.json`), receipt)
+  }
+  unresolvedIntent() {
+    const sessions = this.list()
+    return readdirSync(this.root).filter(n => /^intent-[a-f0-9-]{36}-0\.json$/.test(n)).some(name => {
+      const receipt = this.readIntent(name.slice(7, -7))!
+      return receipt.revision === 0 && !sessions.some(session => session.operationId === receipt.operationId)
+    })
   }
   reserve(record: PreviewSessionRecord) {
     if (this.list().length >= 128) throw new Error('SESSION_RETENTION_LIMIT')
