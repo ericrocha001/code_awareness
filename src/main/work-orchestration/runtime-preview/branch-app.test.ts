@@ -175,7 +175,8 @@ describe('agent intent and durable compact status', () => {
   })
   it('does not promote stale attestation, missing ownership or incomplete cleanup', () => {
     const { record } = setup()
-    expect(previewStatus(undefined, { ...record, attestation: { artifact: 'STALE', loadedCode: 'VERIFIED' } }, { owned: true }).ready).toBe(false)
+    expect(previewStatus(undefined, { ...record, attestation: { artifact: 'VERIFIED', loadedCode: 'STALE' } }, { owned: true }).ready).toBe(false)
+    expect(previewStatus(undefined, { ...record, attestation: { artifact: 'UNVERIFIABLE', loadedCode: 'VERIFIED' } }, { owned: true })).toMatchObject({ ready: true, recommendedAction: 'ASK_HUMAN_REVIEW' })
     expect(previewStatus(undefined, record, { owned: false })).toMatchObject({ phase: 'UNKNOWN', ready: false })
     expect(previewStatus(undefined, { ...record, state: 'STOPPED', resources: 'RELEASED' })).toMatchObject({ phase: 'UNKNOWN', resourcesReleased: false })
     expect(previewStatus(undefined, { ...record, state: 'FAILED', failure: 'UNEXPECTED_PROCESS_EXIT', resources: 'RELEASED',

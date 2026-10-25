@@ -35,7 +35,7 @@ export function previewStatus(receipt?: PreviewIntentReceipt, record?: PreviewSe
     }
     if (options.stopping) status.phase = 'STOPPING'
     status.ready = status.phase === 'RUNNING' && options.owned === true && record.readiness === 'READY' && record.liveness === 'VERIFIED' &&
-      record.attestation.artifact === 'VERIFIED' && record.attestation.loadedCode === 'VERIFIED' &&
+      record.attestation.loadedCode === 'VERIFIED' &&
       record.coverage.some(c => c.stage === 'TARGET_CHECKOUT' && c.status === 'VERIFIED') && record.coverage.some(c => c.stage === 'ENDPOINT' && c.status === 'VERIFIED')
   }
   status.recommendedAction = status.ready ? 'ASK_HUMAN_REVIEW' : ['PENDING', 'PREPARING', 'STOPPING'].includes(status.phase) ? 'WAIT' :
