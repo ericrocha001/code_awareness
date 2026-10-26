@@ -12,6 +12,14 @@ import type { ValidationLedger } from '../../validation-ledger/validation-ledger
 import { captureValidationSource, validationSourceFingerprint } from '../../validation-execution/validation-source'
 import type { RepositoryContinuumSession } from '../../continuum/project-continuum-session'
 import type { CodeAwarenessProfileResolver } from './code-awareness-profile'
+import { previewStatus } from './status'
+import type { PreviewIntentReceipt } from './session-store'
+
+export const branchIntentSchema = z.object({ branch: z.string().min(1).max(512).regex(/^[^\0\r\n]+$/), operationId: z.string().uuid(),
+  repositoryId: z.string().min(1).max(128).optional(), expectedHead: z.string().regex(/^[a-f0-9]{40}$/).optional(), worktreeId: z.string().min(1).max(128).optional() }).strict()
+export const statusSelectorSchema = z.union([
+  z.object({ operationId: z.string().uuid() }).strict(), z.object({ sessionId: z.string().uuid() }).strict()
+])
 
 const text = z.string().min(1).max(128).regex(/^[^\0\r\n]+$/), id = z.string().uuid()
 const selection = z.object({ repositoryId: text, worktreeId: text, generation: text, profileId: text, fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
@@ -29,7 +37,7 @@ export const previewRequestSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('QUALIFY'), sessionId: id, bindingId: text, proofId: text, criterionId: text }).strict()
 ])
 const failure = (error: unknown): RuntimePreviewResult => ({ success: false, code: error instanceof Error && /^[A-Z][A-Z_0-9:.-]{0,159}$/.test(error.message) ? error.message : 'PREVIEW_UNAVAILABLE' })
-type Pending = { key: string; operationId: string; work: Promise<RuntimePreviewResult> }
+type Pending = { key: string; operationId: string; work: Promise<RuntimePreviewResult>; intent?: PreviewIntentReceipt }
 const processView = (record: PreviewSessionRecord): PreviewSessionView['process'] => record.process ? {
   rootExited: record.process.rootSignaled, activeProcesses: record.process.activeProcesses, handlesClosed: record.process.knownHandlesClosed, assignedAtCreation: record.process.assignedAtCreation
 } : null
@@ -60,6 +68,69 @@ export class RuntimePreviewOperations {
     const context = await this.repositories.open(target.repositoryId, target.worktreeId)
     const value = await this.preflight.check(context.git, target); context.guard()
     return { kind: 'PREFLIGHT' as const, preflight: value, startAllowed: value.status === 'SUPPORTED' || diagnosticBootstrapAllowed(value, await this.profile(target)) }
+  }
+  async getStatus(input: unknown): Promise<RuntimePreviewResult> {
+    const parsed = statusSelectorSchema.safeParse(input)
+    if (!parsed.success) return { success: false, code: 'INVALID_ARGUMENT' }
+    try {
+      const selector = parsed.data
+      const receipt = 'operationId' in selector ? this.pending?.operationId === selector.operationId && this.pending.intent ? this.pending.intent : this.store.readIntent(selector.operationId) : undefined
+      const record = 'sessionId' in selector ? this.store.read(selector.sessionId) : receipt?.sessionId ? this.store.read(receipt.sessionId) : this.store.list().find(r => r.operationId === selector.operationId)
+      const pending = this.pending?.operationId === (record?.operationId ?? receipt?.operationId ?? ('operationId' in selector ? selector.operationId : null))
+      const stopping = !!record && this.pending?.key === 'stop:' + record.sessionId
+      return { success: true, data: previewStatus(receipt, record, { ...selector, pending, stopping, owned: record ? this.runner.owns(record.sessionId) : false }) }
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'ENOENT') return { success: true, data: previewStatus(undefined, undefined, parsed.data) }
+      return failure(error)
+    }
+  }
+  async runBranchApp(input: unknown, guard: () => void = () => {}): Promise<RuntimePreviewResult> {
+    const parsed = branchIntentSchema.safeParse(input)
+    if (!parsed.success) return { success: false, code: 'INVALID_ARGUMENT' }
+    try {
+      guard()
+      const intent = parsed.data
+      const repositoryId = intent.repositoryId ?? this.continuum?.getActiveSession()?.repositoryId
+      if (!repositoryId) throw new Error('REPOSITORY_REQUIRED')
+      const branch = intent.branch.startsWith('refs/') ? intent.branch : 'refs/heads/' + intent.branch
+      const key = previewFingerprint({ ...intent, repositoryId, branch })
+      const previous = this.store.readIntent(intent.operationId)
+      if (previous) {
+        if (previous.key !== key) throw new Error('OPERATION_ID_CONFLICT')
+        return this.getStatus({ operationId: intent.operationId })
+      }
+      if (this.pending) throw new Error('PREVIEW_OPERATION_BUSY')
+      if (this.store.unresolvedIntent()) throw new Error('PREVIEW_OPERATION_UNCERTAIN')
+      if (this.store.list().some(r => r.operationId === intent.operationId)) throw new Error('OPERATION_ID_CONFLICT')
+      const receipt: PreviewIntentReceipt = { operationId: intent.operationId, key, repositoryId, branch, at: new Date().toISOString(), revision: 0, sessionId: null, reasonCode: null, phase: 'PREPARING' }
+      this.store.appendIntent(receipt)
+      this.mutate('intent:' + intent.operationId, intent.operationId, async () => {
+        let result: RuntimePreviewResult
+        try {
+          const context = await this.repositories.open(repositoryId)
+          const inventory = await context.git.getBranchInventory()
+          context.guard(); guard()
+          const target = inventory.branches.find(b => b.ref === branch && b.repositoryId === repositoryId)
+          if (!target) throw new Error('BRANCH_NOT_FOUND')
+          receipt.head = target.head
+          if (intent.expectedHead && target.head !== intent.expectedHead) throw new Error('EXPECTED_HEAD_MISMATCH')
+          const tree = intent.worktreeId ? inventory.worktrees.find(w => w.worktreeId === intent.worktreeId && target.worktrees.some(t => t.worktreeId === w.worktreeId && t.generation === w.generation)) : undefined
+          if (intent.worktreeId && !tree) throw new Error('WORKTREE_STALE')
+          const candidates = inventory.worktrees.filter(w => target.worktrees.some(t => t.worktreeId === w.worktreeId && t.generation === w.generation) && w.branch === target.name && w.head === target.head)
+          receipt.worktreeId = tree?.worktreeId ?? (candidates.length === 1 ? candidates[0].worktreeId : null)
+          if (this.pending?.operationId === intent.operationId) this.pending.intent = receipt
+          result = await this.runBranch({ action: 'RUN_BRANCH_APP', repositoryId, ref: target.ref, revision: target.revision, operationId: intent.operationId,
+            ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard)
+        } catch (error) { result = failure(error) }
+        const session = result.success && result.data.kind === 'SESSION' ? result.data.session : null
+        const blocked = result.success && result.data.kind === 'BRANCH_APP'
+        const reasonCode = !result.success ? result.code : result.data.kind === 'BRANCH_APP' ? result.data.reasonCode : null
+        this.store.appendIntent({ ...receipt, revision: 1, at: new Date().toISOString(), sessionId: session?.sessionId ?? null,
+          phase: blocked || reasonCode && /BRANCH|HEAD_MISMATCH|WORKTREE|PROFILE|PREFLIGHT/.test(reasonCode) ? 'BLOCKED' : session ? 'RUNNING' : 'FAILED', reasonCode })
+        return result
+      })
+      return this.getStatus({ operationId: intent.operationId })
+    } catch (error) { return failure(error) }
   }
   private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void): Promise<RuntimePreviewResult> {
     const blocked = (reasonCode: string, message: string, details = {}): RuntimePreviewResult => ({ success: true, data: { kind: 'BRANCH_APP', reasonCode, message, ...details } })
@@ -199,7 +270,7 @@ export class RuntimePreviewOperations {
       if (this.lastOperationKey !== key) throw new Error('OPERATION_ID_CONFLICT')
       return structuredClone(this.lastOperation.result)
     }
-    if (this.pending && this.pending.key !== key && !key.startsWith('stop:')) throw new Error('PREVIEW_OPERATION_BUSY')
+    if (this.pending && this.pending.key !== key) throw new Error('PREVIEW_OPERATION_BUSY')
     if (!this.pending || this.pending.key !== key) {
       const pending: Pending = { key, operationId, work: Promise.resolve().then(work).catch(failure) }
       this.pending = pending

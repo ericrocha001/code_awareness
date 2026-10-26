@@ -22,6 +22,19 @@ export interface PreviewSessionView {
   termination?: { kind: 'STOP_REQUESTED' | 'UNEXPECTED_EXIT' | 'STARTUP_FAILURE' | 'UNKNOWN'; reasonCode: string;
     rootExit: { status: 'KNOWN' | 'UNKNOWN'; code: number | null; reasonCode: string; observedAt: string | null } }
 }
+export interface RunBranchAppIntent {
+  branch: string; operationId: string; repositoryId?: string; expectedHead?: string; worktreeId?: string
+}
+export interface RuntimePreviewStatus {
+  kind: 'STATUS'
+  operationId: string | null; sessionId: string | null; revision: string
+  phase: 'PENDING' | 'PREPARING' | 'RUNNING' | 'BLOCKED' | 'FAILED' | 'STOPPING' | 'STOPPED' | 'UNKNOWN'
+  ready: boolean; repositoryId: string | null; branch: string | null; head: string | null; worktreeId: string | null
+  reasonCode: string | null
+  recommendedAction: 'WAIT' | 'REQUEST_NATIVE_APPROVAL' | 'INSPECT_ERROR' | 'ASK_HUMAN_REVIEW' | 'STOP' | 'NONE'
+  resourcesReleased: boolean | null; activeProcesses: number | null; handlesClosed: boolean | null
+  observedAt: string | null
+}
 export type RuntimePreviewRequest =
   | { action: 'RUN_BRANCH_APP'; repositoryId: string; ref: string; revision: string; operationId: string; worktree?: { worktreeId: string; generation: string } }
   | { action: 'PROFILES' | 'WORKTREES'; repositoryId: string }
@@ -33,6 +46,7 @@ export type RuntimePreviewRequest =
   | { action: 'EVIDENCE'; sessionId: string; revision?: number; section: 'COVERAGE' | 'SOURCE' | 'RUNTIME'; offset?: number; limit?: number }
   | { action: 'QUALIFY'; sessionId: string; bindingId: string; criterionId: string; proofId: string }
 export type RuntimePreviewData =
+  | RuntimePreviewStatus
   | { kind: 'BRANCH_APP'; reasonCode: string; message: string; candidates?: BranchWorktree[]; preflight?: PreviewPreflight; activeSession?: PreviewSessionView }
   | { kind: 'PROFILES'; profiles: PreviewProfileSummary[] }
   | { kind: 'WORKTREES'; repositoryId: string; worktrees: BranchWorktree[] }

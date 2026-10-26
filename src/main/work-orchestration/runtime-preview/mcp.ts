@@ -4,6 +4,8 @@ const text = { type: 'string', minLength: 1, maxLength: 128 }
 const selection = { type: 'object', properties: { repositoryId: text, worktreeId: text, generation: text, profileId: text, fingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, required: ['repositoryId', 'worktreeId', 'generation', 'profileId', 'fingerprint'], additionalProperties: false }
 const session = { sessionId: { type: 'string', format: 'uuid' } }
 const definitions = [
+  ['run_branch_app', 'RUN_BRANCH_INTENT', 'Run an exact local branch through the same host-owned workflow as the UI. Stable operationId recovers this intention; native approval and preflight remain required. No checkout creation, install or fetch.', { branch: { type: 'string', minLength: 1, maxLength: 512 }, operationId: { type: 'string', format: 'uuid' }, repositoryId: text, expectedHead: { type: 'string', pattern: '^[a-f0-9]{40}$' }, worktreeId: text }, ['branch', 'operationId']],
+  ['get_runtime_preview_status', 'STATUS', 'Read exactly one operationId OR sessionId as a compact snapshot, without probes or history. READY invites human review and never means feature VALIDATED. UNKNOWN requires explicit reconciliation.', { operationId: { type: 'string', format: 'uuid' }, ...session }, []],
   ['list_runtime_preview_profiles', 'PROFILES', 'List fixed preview profiles and approval revisions for an explicit managed repository.', { repositoryId: text }, ['repositoryId']],
   ['list_runtime_preview_worktrees', 'WORKTREES', 'List managed Worktree identities without activating a project or indexing its code.', { repositoryId: text }, ['repositoryId']],
   ['preflight_runtime_preview', 'PREFLIGHT', 'Read-only compatibility checks; UNKNOWN is never presumed compatible. Reports missing security guarantees and legitimate resolutions.', { selection }, ['selection']],
@@ -17,13 +19,23 @@ const definitions = [
   ['qualify_runtime_preview', 'QUALIFY', 'Link an existing Ledger behavioral proof and certified execution binding. Requires exact checkout/source/session/criterion identity and complete artifact coverage before PASSED.', { ...session, bindingId: text, proofId: text, criterionId: text }, ['sessionId', 'bindingId', 'proofId', 'criterionId']],
   ['stop_runtime_preview', 'STOP', 'Stop only the explicitly identified session. Returns pending completion until convergent process/resource evidence confirms cleanup. No stop-all.', session, ['sessionId']]
 ] as const
-const outputSchema = { type: 'object', properties: { success: { type: 'boolean' }, code: { type: 'string' }, data: { type: 'object', properties: { kind: { type: 'string', enum: ['PROFILES', 'WORKTREES', 'PREFLIGHT', 'SESSION', 'SESSIONS', 'EVIDENCE', 'BINDINGS', 'QUALIFICATION'] } }, required: ['kind'], additionalProperties: true } }, required: ['success'], additionalProperties: false, oneOf: [{ properties: { success: { const: true } }, required: ['data'] }, { properties: { success: { const: false } }, required: ['code'] }] }
-export const RUNTIME_PREVIEW_TOOLS: McpToolDefinition[] = definitions.map(([name, action, description, properties, required]) => ({ name, description, inputSchema: { type: 'object', properties, required: [...required], additionalProperties: false }, outputSchema, securitySchemes: [{ type: 'oauth2', scopes: [] }], annotations: { readOnlyHint: ['PROFILES', 'WORKTREES', 'PREFLIGHT', 'LIST', 'EVIDENCE', 'BINDINGS'].includes(action), destructiveHint: false, idempotentHint: true, openWorldHint: false } }))
+const outputSchema = { type: 'object', properties: { success: { type: 'boolean' }, code: { type: 'string' }, data: { type: 'object', properties: { kind: { type: 'string', enum: ['STATUS', 'PROFILES', 'WORKTREES', 'PREFLIGHT', 'SESSION', 'SESSIONS', 'EVIDENCE', 'BINDINGS', 'QUALIFICATION'] } }, required: ['kind'], additionalProperties: true } }, required: ['success'], additionalProperties: false, oneOf: [{ properties: { success: { const: true } }, required: ['data'] }, { properties: { success: { const: false } }, required: ['code'] }] }
+export const RUNTIME_PREVIEW_TOOLS: McpToolDefinition[] = definitions.map(([name, action, description, properties, required]) => ({ name, description, inputSchema: { type: 'object', properties, required: [...required], additionalProperties: false, ...(action === 'STATUS' ? { oneOf: [{ required: ['operationId'], not: { required: ['sessionId'] } }, { required: ['sessionId'], not: { required: ['operationId'] } }] } : {}) }, outputSchema, securitySchemes: [{ type: 'oauth2', scopes: [] }], annotations: { readOnlyHint: ['STATUS', 'PROFILES', 'WORKTREES', 'PREFLIGHT', 'LIST', 'EVIDENCE', 'BINDINGS'].includes(action), destructiveHint: false, idempotentHint: true, openWorldHint: false } }))
 export async function executeRuntimePreviewTool(service: RuntimePreviewOperations, name: string, args: unknown, guard: () => void): Promise<McpToolResult> {
   const definition = definitions.find(value => value[0] === name)
   if (!definition || !args || typeof args !== 'object' || Array.isArray(args) || 'action' in args) { const result = { success: false, code: 'INVALID_ARGUMENT' }; return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, isError: true } }
+  if (definition[1] === 'RUN_BRANCH_INTENT' || definition[1] === 'STATUS') {
+    guard()
+    const result = definition[1] === 'RUN_BRANCH_INTENT' ? await service.runBranchApp(args, guard) : await service.getStatus(args)
+    guard()
+    return { content: [], structuredContent: result, ...(result.success ? {} : { isError: true }) }
+  }
   let timer: ReturnType<typeof setTimeout> | undefined
   const timeout = new Promise<{ success: false; code: string }>(resolve => { timer = setTimeout(() => resolve({ success: false, code: 'PREVIEW_REQUEST_IN_PROGRESS' }), 10000) })
   const result = await Promise.race([service.handle({ ...args, action: definition[1] }, guard), timeout]).finally(() => clearTimeout(timer))
+  if (result.success && ['START', 'STOP'].includes(definition[1])) {
+    const status = await service.getStatus(definition[1] === 'STOP' ? { sessionId: (args as { sessionId: string }).sessionId } : { operationId: (args as { operationId: string }).operationId })
+    return { content: [], structuredContent: status, ...(status.success ? {} : { isError: true }) }
+  }
   return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, ...(result.success ? {} : { isError: true }) }
 }
