@@ -32,4 +32,15 @@ describe('bounded monotonic startup evidence', () => {
     expect(() => clock.presented((process.hrtime.bigint() + 1000000000n).toString())).toThrow('WINDOW_TIMING_INVALID')
     expect(() => clock.external('abi', '0', '1', 'abi')).toThrow('BOOTSTRAP_TIMING_INVALID')
   })
+  it('records a target probe concurrent with a host guard instead of nesting it in a later host stage', async () => {
+    const clock = new PreviewStartClock()
+    await clock.measure('spawn', async () => {})
+    let start = '', end = ''
+    await clock.measure('guard', async () => { start = process.hrtime.bigint().toString(); await Promise.resolve(); end = process.hrtime.bigint().toString() })
+    await clock.measure('abi', async () => {})
+    clock.external('abi', start, end, 'abi')
+    const result = clock.snapshot(), probe = result.phases.at(-1)!, host = result.phases.find(phase => phase.stage === 'abi')!
+    expect(probe.parent).toBeNull(); expect(probe.after).toEqual([0]); expect(host.after).toContain(probe.id)
+    expect(result.criticalPathMs).toBeLessThanOrEqual(result.totalMs + 1)
+  })
 })

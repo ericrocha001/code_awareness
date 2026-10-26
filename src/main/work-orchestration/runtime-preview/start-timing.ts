@@ -55,14 +55,21 @@ export class PreviewStartClock {
     const startMs = Number(BigInt(startNs)) / 1e6 - this.origin, endMs = Number(BigInt(endNs)) / 1e6 - this.origin
     if (startMs < 0 || endMs < startMs || endMs > now() - this.origin + 10) throw new Error('BOOTSTRAP_TIMING_INVALID')
     if (this.phases.length >= 64) return
-    const parent = [...this.phases].reverse().find(phase => phase.stage === parentStage)?.id ?? null
-    this.phases.push({ id: this.phases.length, stage, parent, after: [], startMs, durationMs: endMs - startMs })
+    const host = [...this.phases].reverse().find(phase => phase.stage === parentStage)
+    if (host && startMs >= host.startMs && endMs <= host.startMs + host.durationMs) {
+      this.phases.push({ id: this.phases.length, stage, parent: host.id, after: [], startMs, durationMs: endMs - startMs })
+    } else {
+      const predecessor = [...this.phases].filter(phase => phase.parent === null && phase.startMs + phase.durationMs <= startMs).sort((a, b) => b.startMs + b.durationMs - a.startMs - a.durationMs)[0]
+      const id = this.phases.length
+      this.phases.push({ id, stage, parent: null, after: predecessor ? [predecessor.id] : [], startMs, durationMs: endMs - startMs })
+      if (host && endMs <= host.startMs) host.after.push(id)
+    }
   }
   snapshot(): PreviewStartTiming {
     const totalMs = now() - this.origin
     const approvalBefore = (limit: number) => this.phases.filter(p => p.stage === 'approval').reduce((sum, p) => sum + Math.max(0, Math.min(p.durationMs, limit - p.startMs)), 0)
     const approvalMs = approvalBefore(totalMs), costs: number[] = []
-    const roots = this.phases.filter(p => p.parent === null)
+    const roots = this.phases.filter(p => p.parent === null).sort((a, b) => a.startMs - b.startMs)
     for (const phase of roots) costs[phase.id] = Math.max(0, ...phase.after.map(id => costs[id] ?? 0)) + phase.durationMs
     const intervals = roots.map(p => [p.startMs, p.startMs + p.durationMs]).sort((a, b) => a[0] - b[0])
     let covered = 0, end = 0

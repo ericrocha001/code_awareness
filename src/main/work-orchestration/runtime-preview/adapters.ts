@@ -10,6 +10,8 @@ import type { NativeOwner } from './native-owner'
 import type { PreviewSessionRecord } from './session-store'
 import { previewDataReceipt, type PreviewContextManifest } from './context-contract'
 import type { PreviewStartClock } from './start-timing'
+import { PreviewBuildCache } from './build-cache'
+import type { PreviewSelection } from '../../../shared/types/runtime-preview-types'
 
 export function diagnosticBootstrapAllowed(result: PreviewPreflight, profile: PreviewProfile) {
   return !!profile.adapter && result.status === 'UNKNOWN' && result.diagnostics.length > 0 && result.diagnostics.every(d => ['ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))
@@ -47,8 +49,10 @@ export class PreviewStackAdapter {
     const events = z.array(z.object({ stage: z.enum(['abi', 'vite']), startNs: monotonicTime.unwrap(), endNs: monotonicTime.unwrap() }).strict()).max(4).parse(JSON.parse(raw.toString()))
     for (const event of events) timing.external(event.stage, event.startNs, event.endNs, event.stage === 'abi' ? 'abi' : 'startup')
   }
-  private constructor(readonly profile: PreviewProfile, readonly worktree: string, readonly directory: string, readonly sessionId: string, private readonly context?: PreviewContextManifest) {}
-  static async prepare(profile: PreviewProfile, worktree: string, directory: string, sessionId: string, sdk: string, context?: PreviewContextManifest) {
+  private configured = false
+  private constructor(readonly profile: PreviewProfile, readonly worktree: string, readonly directory: string, readonly sessionId: string, private context?: PreviewContextManifest) {}
+  static async prepare(profile: PreviewProfile, worktree: string, directory: string, sessionId: string, sdk: string, context?: PreviewContextManifest, deferContext = false, signal?: AbortSignal) {
+    signal?.throwIfAborted()
     const adapter = profile.adapter!
     if ((profile.runtime === 'WEB_DEV_SERVER') !== (adapter.kind !== 'ELECTRON')) throw new Error('ADAPTER_RUNTIME_MISMATCH')
     if (!profile.resources.some(r => r.strategy === 'SESSION_ENDPOINT')) throw new Error('ENDPOINT_RESOURCE_REQUIRED')
@@ -78,14 +82,28 @@ export class PreviewStackAdapter {
     if (profile.probes.readiness.kind !== 'HTTP' || readiness.protocol !== 'http:' || readiness.hostname !== '127.0.0.1' || Number(readiness.port) !== adapter.port || readiness.username || readiness.password || readiness.hash) throw new Error('READINESS_ENDPOINT_INVALID')
     if (profile.command.args.some(a => /no-sandbox|disable.*sandbox/i.test(a))) throw new Error('SANDBOX_DOWNGRADE_FORBIDDEN')
     await verifyEndpointFree(adapter.port)
-    if (!!profile.bootstrap !== !!context) throw new Error('PREVIEW_CONTEXT_REQUIRED')
+    signal?.throwIfAborted()
+    if (!deferContext && !!profile.bootstrap !== !!context) throw new Error('PREVIEW_CONTEXT_REQUIRED')
     const instance = new PreviewStackAdapter(profile, await realpath(worktree), directory, sessionId, context)
-    await writeFile(join(directory, 'configuration.json'), JSON.stringify({ sessionId, token: instance.token, worktree: instance.worktree, directory,
-      profile: previewFingerprint(profile), runtimeVersion: profile.runtimeVersion, abi: profile.dependencies.abi,
-      packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...adapter, ...(context ? { context, approvedProfile: profile } : {}) }), { flag: 'wx', mode: 0o600 })
+    if (!deferContext) await instance.bindContext(context)
     return instance
   }
-  environment() { return { PREVIEW_SESSION_CONFIG: join(this.directory, 'configuration.json') } }
+  async bindContext(context?: PreviewContextManifest) {
+    const { profile, sessionId, directory, worktree } = this
+    if (this.configured || !!profile.bootstrap !== !!context) throw new Error('PREVIEW_CONTEXT_REQUIRED')
+    await writeFile(join(directory, 'configuration.json'), JSON.stringify({ sessionId, token: this.token, worktree, directory,
+      profile: previewFingerprint(profile), runtimeVersion: profile.runtimeVersion, abi: profile.dependencies.abi,
+      packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...profile.adapter!, ...(context ? { context, approvedProfile: profile } : {}) }), { flag: 'wx', mode: 0o600 })
+    this.context = context; this.configured = true
+  }
+  prepareCache(root: string, selection: PreviewSelection, basis: string, signal: AbortSignal) {
+    return PreviewBuildCache.prepare(root, this.worktree, this.directory, this.profile, selection, basis,
+      [this.token, this.sessionId, this.directory, `http://127.0.0.1:${this.profile.adapter!.port}`], signal)
+  }
+  environment() {
+    if (!this.configured) throw new Error('PREVIEW_CONTEXT_REQUIRED')
+    return { PREVIEW_SESSION_CONFIG: join(this.directory, 'configuration.json') }
+  }
   async permit(owner: NativeOwner, persist: (evidence: { runtime: string; abi: string; platform: 'win32'; arch: 'x64'; modules: string[] }) => Promise<void>) {
     const deadline = Date.now() + 15000
     let evidence: unknown

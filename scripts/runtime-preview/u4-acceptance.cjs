@@ -5,6 +5,16 @@ const net = require('node:net')
 const assert = require('node:assert/strict')
 const { randomUUID, createHash } = require('node:crypto')
 const { execFileSync, spawn } = require('node:child_process')
+const execFile = require('node:util').promisify(require('node:child_process').execFile)
+async function hostIo() {
+  try {
+    const result = await execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `Get-CimInstance Win32_Process -Filter 'ProcessId=${process.pid}' | Select-Object ReadTransferCount,WriteTransferCount,ReadOperationCount,WriteOperationCount | ConvertTo-Json -Compress`], { windowsHide: true, timeout: 10000, maxBuffer: 4096 })
+    const counters = JSON.parse(result.stdout)
+    assert.ok(Object.values(counters).every(Number.isFinite))
+    return counters
+  } catch { return null }
+}
 const branchAppUI = process.argv.includes('--branch-app-ui')
 const fastStart = process.argv.includes('--fast-start')
 const agentIntent = process.argv.includes('--agent-intent') || fastStart
@@ -241,16 +251,23 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         }
         assert.ok(branchIntent)
         save('agent-intention', { success: true, ...branchIntent })
-        const started = performance.now(), cpu = process.cpuUsage()
+        const ioBefore = fastStart ? await hostIo() : null
+        const started = performance.now(), cpu = process.cpuUsage(), delayWindows = []
         let previous = started, mainMaxDelayMs = 0
-        const pulse = setInterval(() => { const now = performance.now(); mainMaxDelayMs = Math.max(mainMaxDelayMs, now - previous - 20); previous = now }, 20)
+        const pulse = setInterval(() => {
+          const now = performance.now(), durationMs = Math.max(0, now - previous - 20)
+          mainMaxDelayMs = Math.max(mainMaxDelayMs, durationMs)
+          if (durationMs >= 100) { delayWindows.push({ startMs: previous - started, durationMs }); delayWindows.sort((a, b) => b.durationMs - a.durationMs); delayWindows.length = Math.min(16, delayWindows.length) }
+          previous = now
+        }, 20)
         try {
           await mcp('run_branch_app', branchIntent)
           const complete = service.pendingResult()
-          if (fastStart && complete) void complete.finally(() => {
-            clearInterval(pulse); const used = process.cpuUsage(cpu)
-            save('host-startup-observation', { success: true, operationId: branchIntent.operationId, elapsedMs: performance.now() - started,
-              mainMaxDelayMs, hostProcessCpuMs: (used.user + used.system) / 1000 })
+          if (fastStart && complete) void complete.finally(async () => {
+            clearInterval(pulse); const used = process.cpuUsage(cpu), elapsedMs = performance.now() - started, ioAfter = await hostIo()
+            save('host-startup-observation', { success: true, operationId: branchIntent.operationId,
+              mainMaxDelayMs, delayWindows, hostProcessCpuMs: (used.user + used.system) / 1000, elapsedMs,
+              io: ioBefore && ioAfter ? Object.fromEntries(Object.keys(ioBefore).map(key => [key, ioAfter[key] - ioBefore[key]])) : null })
           })
           else clearInterval(pulse)
         } catch (error) { clearInterval(pulse); throw error }
@@ -265,6 +282,29 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
       }
       if (agentIntent && command === 'stop-agent') await mcp('stop_runtime_preview', { sessionId })
       if (fastStart && command === 'startup-evidence') await mcp('read_runtime_preview_evidence', { sessionId, section: 'RUNTIME', limit: 1 })
+      if (fastStart && command === 'hmr-check') {
+        const file = path.join(root, 'src/renderer/src/App.tsx'), original = fs.readFileSync(file)
+        const observe = async expected => {
+          const deadline = Date.now() + 20000
+          while (Date.now() < deadline) {
+            const record = store.read(sessionId)
+            const evidence = JSON.parse(fs.readFileSync(path.join(store.runtime(sessionId), 'electron-evidence.json'), 'utf8'))
+            if (evidence.rendererModules.some(module => module.path === 'src/renderer/src/App.tsx' && module.sourceDigest === hash(expected))) {
+              const current = await runner.inspect(sessionId)
+              assert.equal(current.readiness, 'READY'); assert.equal(current.attestation.loadedCode, 'VERIFIED')
+              return record.buildCache?.status
+            }
+            await new Promise(resolve => setTimeout(resolve, 50))
+          }
+          throw new Error('HMR_NOT_OBSERVED')
+        }
+        try {
+          const changed = Buffer.concat([original, Buffer.from(`\n;void "runtime-preview-hmr-${randomUUID()}";\n`)])
+          fs.writeFileSync(file, changed); await observe(changed)
+        } finally { fs.writeFileSync(file, original) }
+        const cacheStatus = await observe(original)
+        save('hmr-real-electron', { success: true, sessionId, changedObserved: true, restoredObserved: true, cacheStatus })
+      }
       if (branchAppUI && command === 'ui-open') {
         uiWindow = new BrowserWindow({ title: 'Work Orchestration — aceitação isolada', show: true, width: 1440, height: 900, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
         await uiWindow.loadURL(`http://127.0.0.1:${ui.httpServer.address().port}`)

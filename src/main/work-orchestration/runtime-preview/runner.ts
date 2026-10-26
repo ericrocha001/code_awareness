@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { readFile, realpath } from 'node:fs/promises'
+import { join } from 'node:path'
 import type { PreviewSelection, PreviewPreflight } from '../../../shared/types/runtime-preview-types'
 import { bytesFingerprint, previewFingerprint, type PreviewProfile } from '../preview-profile'
 import type { PreviewProfileStore } from '../preview-profile-store'
@@ -10,6 +11,8 @@ import { PreviewSessionStore, sessionSchema, type PreviewSessionRecord } from '.
 import { PreviewStackAdapter, diagnosticBootstrapAllowed, verifyEndpointFree } from './adapters'
 import type { PreviewContextProvisioner } from './context-data'
 import { PreviewStartClock } from './start-timing'
+import type { PreviewBuildCache } from './build-cache'
+import { prepareTogether } from './preparation'
 
 export interface PreparedPreview {
   profile: PreviewProfile; worktree: string; gitFingerprint: string; preflight: PreviewPreflight;
@@ -155,25 +158,36 @@ export class RuntimePreviewRunner {
       this.store.reserve(record)
       let native: NativeOwner | undefined
       let adapter: PreviewStackAdapter | undefined
+      let cache: PreviewBuildCache | undefined
       let createRequested = false
       try {
-        if (profile.bootstrap) {
+        const [context] = await prepareTogether(async signal => {
+          if (!profile.bootstrap) return undefined
           if (!this.contextProvisioner || !preflight.snapshot) throw new Error('PREVIEW_CONTEXT_PROVISIONER_REQUIRED')
-          const context = await timing.measure('context', () => this.contextProvisioner!.prepare({ profile, selection: input.selection, sessionId,
-            directory: this.store.runtime(sessionId), worktree: prepared.worktree, source: preflight.snapshot!, timing }))
+          return timing.measure('context', () => this.contextProvisioner!.prepare({ profile, selection: input.selection, sessionId,
+            directory: this.store.runtime(sessionId), worktree: prepared.worktree, source: preflight.snapshot!, timing, signal }))
+        }, async signal => {
+          if (!profile.adapter) return
+          if (!this.helper.sdkDirectory) throw new Error('TRUSTED_SDK_REQUIRED')
+          adapter = await timing.measure('adapter', () => PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory!, undefined, true, signal))
+          cache = await timing.measure('cache', () => adapter!.prepareCache(join(this.store.root, 'build-cache'), input.selection,
+            previewFingerprint([preflight.dependencyBasis, preflight.snapshot]), signal))
+          signal.throwIfAborted()
+        })
+        if (context) {
           await prepared.guard()
           await input.guard?.()
           record = this.change(record, { context })
         }
-        if (profile.adapter) {
-          if (!this.helper.sdkDirectory) throw new Error('TRUSTED_SDK_REQUIRED')
-          adapter = await timing.measure('adapter', () => PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory!, record.context))
+        if (adapter) {
+          await adapter.bindContext(record.context)
           this.adapters.set(sessionId, adapter)
           if (prepared.observeSource) this.sources.set(sessionId, prepared.observeSource)
         }
         native = await this.owner(); this.owners.set(sessionId, native)
         await prepared.guard()
         await input.guard?.()
+        await cache?.guard()
         const runtime = this.store.runtime(sessionId)
         createRequested = true
         const observation = await timing.measure('spawn', () => native!.start({ sessionId, operationId: input.operationId, directory: this.store.directory(sessionId),
@@ -188,6 +202,7 @@ export class RuntimePreviewRunner {
           await timing.measure('abi', () => adapter!.permit(native!, async actual => {
             await prepared.guard()
             await input.guard?.()
+            await cache?.guard()
             record = this.change(record, { process: observation, runtimeEvidence: { ...actual, preflight: preflight.status === 'SUPPORTED' ? 'SUPPORTED' : 'UNKNOWN', at: new Date().toISOString(), scope: 'DECLARED_INSTALL_SCRIPTS' } })
           }))
           stack = await timing.measure('startup', () => adapter!.awaitReady(native!))
@@ -196,11 +211,13 @@ export class RuntimePreviewRunner {
           await prepared.guard()
         }
         await input.guard?.()
+        if (cache) await timing.measure('cache', () => cache!.finish(true))
         timing.ready()
-        record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE', startTiming: timing.snapshot() })
+        record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE', startTiming: timing.snapshot(), ...(cache ? { buildCache: cache.receipt } : {}) })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
         return record
       } catch (error) {
+        await cache?.finish(false)
         try { await native?.stop(0, profile.shutdown.forceMs, false) } catch { }
         let ownerExited = !native && !createRequested
         try { await native?.shutdown(); ownerExited = true } catch { }
@@ -211,7 +228,7 @@ export class RuntimePreviewRunner {
         const proof = this.store.nativeJournal(sessionId).at(-1)
         const observation = nativeObservation.safeParse(proof?.evidence)
         const reason = error instanceof Error && /^[A-Z_0-9:]{1,160}$/.test(error.message) ? error.message : 'LAUNCH_FAILED'
-        record = this.change(this.store.read(sessionId), { startTiming: timing.snapshot() })
+        record = this.change(this.store.read(sessionId), { startTiming: timing.snapshot(), ...(cache ? { buildCache: cache.receipt } : {}) })
         record = this.termination(record, 'STARTUP_FAILURE', reason, observation.success ? observation.data : null, native && ownerExited ? 'EXITED' : 'UNKNOWN')
         if (ownerExited && ((!createRequested) || (proof?.phase === 'DRAINED' && observation.success && terminalProof(observation.data)))) {
           if (native) record = this.supervisorExited(record)
