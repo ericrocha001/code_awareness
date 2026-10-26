@@ -94,6 +94,8 @@ export class PreviewBuildCache {
       const scope = relative(worktree, root)
       if (!scope || !(scope === '..' || scope.startsWith('..' + sep) || isAbsolute(scope))) throw new Error('BUILD_CACHE_INSIDE_WORKTREE')
       await fs.mkdir(root, { recursive: true, mode: 0o700 }); await cache.safe(root)
+      signal?.throwIfAborted()
+      await cache.discardStaging()
       const key = await cache.key(); cache.receipt.key = key; cache.receipt.status = 'MISS'
       const partition = join(root, previewFingerprint([selection.repositoryId, selection.worktreeId, selection.generation, cache.worktree]))
       await fs.mkdir(partition, { recursive: true, mode: 0o700 }); await cache.safe(partition)
@@ -136,6 +138,15 @@ export class PreviewBuildCache {
     }
     try { await walk(file) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
     await fs.rm(file, { recursive: true })
+  }
+  private async discardStaging() {
+    for (const partition of await fs.readdir(this.root)) {
+      if (!/^[a-f0-9]{64}$/.test(partition)) continue
+      const folder = join(this.root, partition); await this.safe(folder)
+      for (const name of await fs.readdir(folder)) {
+        if (/^[a-f0-9]{64}-[a-f0-9-]{36}\.tmp$/.test(name)) await this.remove(join(folder, name))
+      }
+    }
   }
   async guard() {
     if (!this.entry || !this.receipt.key) return

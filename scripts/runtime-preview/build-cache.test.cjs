@@ -137,6 +137,17 @@ test('bounds retained entries and removes corrupt siblings without discarding a 
   for (const partition of partitions) entries += (await fs.readdir(path.join(f.cacheRoot, partition))).length
   assert.equal(entries, 8)
 })
+
+test('reclaims orphaned publication staging while preserving committed entries and unrelated paths', async () => {
+  const f = await fixture(), cache = await f.prepare(); await f.materialize(); await cache.finish(true)
+  const partition = path.join(f.cacheRoot, (await fs.readdir(f.cacheRoot))[0])
+  const staging = path.join(partition, cache.receipt.key + '-' + randomUUID() + '.tmp')
+  await fs.mkdir(path.join(staging, 'data'), { recursive: true }); await fs.writeFile(path.join(staging, 'data', 'partial.js'), 'partial')
+  const sentinel = path.join(partition, 'unrelated'); await fs.mkdir(sentinel); await fs.writeFile(path.join(sentinel, 'keep'), 'preserved')
+  const warm = await f.prepare(path.join(f.base, 'recovered'))
+  assert.ok(warm.receipt.restoredBytes > 0); await assert.rejects(fs.access(staging))
+  assert.equal(await fs.readFile(path.join(sentinel, 'keep'), 'utf8'), 'preserved')
+})
 test('rejects drift at consumption, aborts without publication and refuses linked cache roots', async () => {
   const f = await fixture(), original = await f.prepare(); await f.materialize(); await original.finish(true)
   const warm = await f.prepare(path.join(f.base, 'next'))
