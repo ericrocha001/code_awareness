@@ -20,15 +20,15 @@ export interface PreparedPreview {
   observeSource?: () => Promise<NonNullable<PreviewPreflight['snapshot']>>
 }
 type LaunchContext = Awaited<ReturnType<PreviewRepositories['open']>>
-export interface PreviewLaunchAuthority { prepare(selection: PreviewSelection, timing?: PreviewStartClock, context?: LaunchContext): Promise<PreparedPreview> }
+export interface PreviewLaunchAuthority { prepare(selection: PreviewSelection, timing?: PreviewStartClock, context?: LaunchContext, evidence?: PreviewPreflight): Promise<PreparedPreview> }
 export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
   constructor(private readonly repositories: PreviewRepositories, private readonly profiles: PreviewProfileStore,
     private readonly preflight: PreviewPreflightService) {}
-  async prepare(selection: PreviewSelection, timing?: PreviewStartClock, knownContext?: LaunchContext): Promise<PreparedPreview> {
-    const context = knownContext ?? await this.repositories.open(selection.repositoryId, selection.worktreeId)
+  async prepare(selection: PreviewSelection, timing?: PreviewStartClock, knownContext?: LaunchContext, evidence?: PreviewPreflight): Promise<PreparedPreview> {
+    const context = knownContext ?? await (timing ? timing.measure('repository', () => this.repositories.open(selection.repositoryId, selection.worktreeId)) : this.repositories.open(selection.repositoryId, selection.worktreeId))
     context.guard()
     const check = async () => { context.guard(); const run = () => this.preflight.check(context.git, selection, timing); const result = await (timing ? timing.measure('preflight', run) : run()); context.guard(); return result }
-    const result = await check()
+    const result = evidence && this.preflight.canReuse(context.git, selection, evidence) ? evidence : await check()
     const identity = await context.git.getCoordinationIdentity(selection.worktreeId)
     const profile = (await this.profiles.profiles(selection.repositoryId)).find(p => p.profileId === selection.profileId)
     if (!profile || !await this.profiles.approved(profile) || previewFingerprint(profile) !== selection.fingerprint) throw new Error('PROFILE_APPROVAL_REQUIRED')
@@ -45,7 +45,9 @@ export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
       context.guard()
       return { ...snapshot.snapshot, dirty: snapshot.stagedCount + snapshot.unstagedCount + snapshot.untrackedCount > 0 }
     }, guard: async () => {
-      const current = await check()
+      context.guard()
+      const current = await this.preflight.revalidate(context.git, selection, result, timing)
+      context.guard()
       if ((current.status !== 'SUPPORTED' && !diagnosticBootstrapAllowed(current, profile)) || previewFingerprint(current.snapshot) !== gitFingerprint || current.dependencyBasis !== result.dependencyBasis || !await this.profiles.approved(profile)) throw new Error('LAUNCH_EVIDENCE_CHANGED')
     } }
   }
@@ -85,8 +87,8 @@ export class RuntimePreviewRunner {
   private command(fn: () => Promise<PreviewSessionRecord>) {
     return this.serial(fn).catch(error => this.receiptFailure(error))
   }
-  private async owner() {
-    if (bytesFingerprint(await readFile(this.helper.executable)) !== this.helper.fingerprint) throw new Error('NATIVE_HELPER_CHANGED')
+  private async owner(timing?: PreviewStartClock) {
+    if (bytesFingerprint(await (timing ? timing.read(this.helper.executable) : readFile(this.helper.executable))) !== this.helper.fingerprint) throw new Error('NATIVE_HELPER_CHANGED')
     return new NativeOwner(this.helper.executable)
   }
   private termination(record: PreviewSessionRecord, kind: NonNullable<PreviewSessionRecord['termination']>['kind'], reasonCode: string,
@@ -106,14 +108,16 @@ export class RuntimePreviewRunner {
     if (!record.termination || record.termination.supervisorExit) return record
     return this.change(record, { termination: { ...record.termination, supervisorExit: { observedAt: new Date().toISOString() } } })
   }
-  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void>; timing?: PreviewStartClock; launchContext?: LaunchContext }): Promise<PreviewSessionRecord> {
+  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void>; timing?: PreviewStartClock; launchContext?: LaunchContext; preflightEvidence?: PreviewPreflight }): Promise<PreviewSessionRecord> {
 
     const selection = sessionSchema.shape.selection.safeParse(input.selection)
     if (!selection.success) return Promise.reject(selection.error)
-    input = { operationId: input.operationId, selection: selection.data, guard: input.guard, timing: input.timing, launchContext: input.launchContext }
+    input = { operationId: input.operationId, selection: selection.data, guard: input.guard, timing: input.timing, launchContext: input.launchContext, preflightEvidence: input.preflightEvidence }
     const timing = input.timing ?? new PreviewStartClock()
+    const queued = timing.waiting('queue')
     return this.command(async () => {
-      await input.guard?.()
+      queued()
+      if (!input.preflightEvidence) await input.guard?.()
       if (!sessionSchema.shape.operationId.safeParse(input.operationId).success) throw new Error('INVALID_OPERATION_ID')
       const previous = this.store.list().find(r => r.operationId === input.operationId)
       if (previous) {
@@ -121,9 +125,10 @@ export class RuntimePreviewRunner {
         return this.inspectInternal(previous.sessionId)
       }
       if (this.store.active()) throw new Error('PREVIEW_SESSION_BUSY')
-      const prepared = await timing.measure('authority', () => this.authority.prepare(input.selection, timing, input.launchContext))
+      const prepared = await timing.measure('authority', () => this.authority.prepare(input.selection, timing, input.launchContext, input.preflightEvidence))
       const originalGuard = prepared.guard
       prepared.guard = () => timing.measure('guard', originalGuard)
+      const verify = async () => { await prepared.guard(); await input.guard?.() }
       const { profile, preflight } = prepared
       if (preflight.status !== 'SUPPORTED' && !diagnosticBootstrapAllowed(preflight, profile)) throw new Error('PREFLIGHT_' + preflight.status)
       if (selectionKey(preflight.selection) !== selectionKey(input.selection) || previewFingerprint(profile) !== input.selection.fingerprint || preflight.profileRevision !== profile.revision || profile.repositoryId !== input.selection.repositoryId) throw new Error('LAUNCH_IDENTITY_MISMATCH')
@@ -133,10 +138,10 @@ export class RuntimePreviewRunner {
       if (Object.keys(profile.env).some(k => reserved.test(k))) throw new Error('RESERVED_ENVIRONMENT')
       this.store.assertExternal(prepared.worktree)
       const executable = await realpath(profile.command.executable)
-      if (bytesFingerprint(await readFile(executable)) !== profile.command.executableHash) throw new Error('EXECUTABLE_CHANGED')
+      if (bytesFingerprint(await timing.measure('inputs', () => timing.read(executable))) !== profile.command.executableHash) throw new Error('EXECUTABLE_CHANGED')
       const cwd = await previewPath(prepared.worktree, profile.command.cwd)
-      for (const input of profile.command.inputs) if (bytesFingerprint(await readFile(await previewPath(prepared.worktree, input.path))) !== input.fingerprint) throw new Error('COMMAND_INPUT_CHANGED')
-      await prepared.guard()
+      await timing.measure('inputs', async () => { for (const input of profile.command.inputs) if (bytesFingerprint(await timing.read(await previewPath(prepared.worktree, input.path))) !== input.fingerprint) throw new Error('COMMAND_INPUT_CHANGED') })
+      await verify()
       const sessionId = randomUUID()
       const at = new Date().toISOString()
       const missingScope = (stage: PreviewSessionRecord['coverage'][number]['stage'], component: PreviewSessionRecord['coverage'][number]['component']): PreviewSessionRecord['coverage'][number] => ({ stage, component, status: 'NOT_OBSERVED', fingerprint: null, evidenceRef: null, at, reasonCode: stage === 'BEHAVIOR' ? 'FEATURE_ACCEPTANCE_NOT_EVALUATED' : 'ADAPTER_EVIDENCE_NOT_OBSERVED' })
@@ -175,8 +180,6 @@ export class RuntimePreviewRunner {
           signal.throwIfAborted()
         })
         if (context) {
-          await prepared.guard()
-          await input.guard?.()
           record = this.change(record, { context })
         }
         if (adapter) {
@@ -184,9 +187,8 @@ export class RuntimePreviewRunner {
           this.adapters.set(sessionId, adapter)
           if (prepared.observeSource) this.sources.set(sessionId, prepared.observeSource)
         }
-        native = await this.owner(); this.owners.set(sessionId, native)
-        await prepared.guard()
-        await input.guard?.()
+        native = await timing.measure('ownership', () => this.owner(timing)); this.owners.set(sessionId, native)
+        await verify()
         await cache?.guard()
         const runtime = this.store.runtime(sessionId)
         createRequested = true
@@ -196,21 +198,18 @@ export class RuntimePreviewRunner {
           env: { ...profile.env, SystemRoot: process.env.SystemRoot!, TEMP: runtime, TMP: runtime, APPDATA: runtime, LOCALAPPDATA: runtime, USERPROFILE: runtime, HOME: runtime,
             PREVIEW_SESSION_ID: sessionId, PREVIEW_SESSION_DIRECTORY: runtime, ...adapter?.environment() } }))
         if (!observation.assignedAtCreation || !observation.ownerOutsideJob || !observation.pid || !observation.created) throw new Error('OWNERSHIP_UNVERIFIED')
-        await prepared.guard()
         let stack: Awaited<ReturnType<PreviewStackAdapter['observe']>> | undefined
         if (adapter) {
           await timing.measure('abi', () => adapter!.permit(native!, async actual => {
-            await prepared.guard()
-            await input.guard?.()
+            await verify()
             await cache?.guard()
             record = this.change(record, { process: observation, runtimeEvidence: { ...actual, preflight: preflight.status === 'SUPPORTED' ? 'SUPPORTED' : 'UNKNOWN', at: new Date().toISOString(), scope: 'DECLARED_INSTALL_SCRIPTS' } })
           }))
           stack = await timing.measure('startup', () => adapter!.awaitReady(native!))
           await adapter.measureBootstrap(timing)
           if (adapter.presentedAt) timing.presented(adapter.presentedAt)
-          await prepared.guard()
         }
-        await input.guard?.()
+        await verify()
         timing.ready()
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE', startTiming: timing.snapshot(), ...(cache ? { buildCache: cache.receipt } : {}) })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })

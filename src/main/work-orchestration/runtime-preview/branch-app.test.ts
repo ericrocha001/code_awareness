@@ -85,6 +85,17 @@ describe('branch application intent — domain fixtures, no simulated Windows ev
 
 describe('agent intent and durable compact status', () => {
   const intent = () => ({ repositoryId: 'repo', branch: 'topic', operationId: randomUUID() })
+  it('uses one global inventory and the selected target verifier throughout the same intent', async () => {
+    const f = setup(true), context = await f.repositories.open()
+    const verify = vi.fn(async () => {})
+    Object.assign(context.git, { verifyRuntimePreviewTarget: verify })
+    f.repositories.open.mockClear()
+    await f.service.runBranchApp(intent()); await f.service.pendingResult()
+    expect(f.repositories.open).toHaveBeenCalledTimes(1)
+    expect(context.git.getBranchInventory).toHaveBeenCalledTimes(1)
+    expect(verify).toHaveBeenCalled()
+    expect(f.runner.start).toHaveBeenCalledTimes(1)
+  })
   it('uses the UI executor, preserves native consent and recovers exact identity without history output', async () => {
     const f = setup(true), input = intent()
     expect(await executeRuntimePreviewTool(f.service, 'run_branch_app', input, () => {})).toMatchObject({ structuredContent: { data: { phase: 'PREPARING', ready: false } }, content: [] })
@@ -126,7 +137,8 @@ describe('agent intent and durable compact status', () => {
   it('retains uncertain interrupted operations, forbids a new start and never restores READY after restart', async () => {
     const f = setup(true), input = intent()
     let release!: () => void
-    f.repositories.open.mockImplementationOnce(() => new Promise(resolve => { release = () => resolve({ git: { getBranchInventory: async () => f.inventory } as any, guard: vi.fn() }) }))
+    const open = f.repositories.open.getMockImplementation()!
+    f.repositories.open.mockImplementationOnce(() => new Promise(resolve => { release = () => { void open().then(resolve) } }))
     await f.service.runBranchApp(input)
     expect(await f.service.runBranchApp(intent())).toMatchObject({ code: 'PREVIEW_OPERATION_BUSY' })
     const restarted = new RuntimePreviewOperations(f.repositories as any, {} as any, new PreviewSessionStore(f.store.root), { owns: () => false } as any, f.confirm)

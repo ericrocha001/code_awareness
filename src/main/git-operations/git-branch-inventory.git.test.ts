@@ -21,6 +21,25 @@ describe('branch inventory with real Git', () => {
     const registry = new GitWorktreeRegistry(root, git, identity)
     return new GitBranchInventory(root, git, registry, identity)
   }
+  it('verifies only the launch target and refuses ref recreation, HEAD drift and changed checkout selection', async () => {
+    await setup()
+    await gitExec(root, ['branch', 'preview-target'])
+    const path = join(root, 'preview'); await gitExec(root, ['worktree', 'add', path, 'preview-target'])
+    const service = new GitOperationsService(root, git, new GitHubGitTransport(null, git), { repositoryId: 'fixture', isActive: () => true })
+    const inventory = await service.getBranchInventory(), branch = inventory.branches.find(value => value.name === 'preview-target')!
+    const tree = inventory.worktrees.find(value => value.path === path)!
+    const expected = { worktreeId: tree.worktreeId, generation: tree.generation, path, ref: branch.ref, branchGeneration: branch.generation, head: branch.head }
+    await expect(service.verifyRuntimePreviewTarget(expected)).resolves.toBeUndefined()
+    await expect(service.verifyRuntimePreviewTarget({ ...expected, generation: 'replaced' })).rejects.toThrow('WORKTREE_STALE')
+    await expect(service.verifyRuntimePreviewTarget({ ...expected, path: root })).rejects.toThrow('WORKTREE_STALE')
+    await gitExec(path, ['update-ref', '-d', branch.ref]); await gitExec(path, ['update-ref', branch.ref, branch.head])
+    await expect(service.verifyRuntimePreviewTarget(expected)).rejects.toThrow('BRANCH_CHANGED')
+    const updated = (await service.getBranchInventory()).branches.find(value => value.ref === branch.ref)!
+    await gitExec(path, ['commit', '--allow-empty', '-m', 'drift'])
+    await expect(service.verifyRuntimePreviewTarget({ ...expected, branchGeneration: updated.generation })).rejects.toThrow('WORKTREE_STALE')
+    await gitExec(path, ['switch', '--detach'])
+    await expect(service.verifyRuntimePreviewTarget(expected)).rejects.toThrow('WORKTREE_STALE')
+  }, 60000)
   it('includes branches without checkout, tracking refs and detached worktrees; invalidates drift', async () => {
     const reader = await setup()
     await gitExec(root, ['branch', 'topic'])

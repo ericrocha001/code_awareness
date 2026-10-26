@@ -334,8 +334,11 @@ test('recovery never reports STOPPED while runtime directories remain unresolved
 })
 
 test('retired caller context after native creation drains the owned process before launch acknowledgement', async () => {
-  const fixture = fixtureRunner(); let guards = 0
-  const record = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection, guard: () => { if (++guards === 3) throw new Error('PROJECT_CONTEXT_CHANGED') } })
+  const fixture = fixtureRunner()
+  const record = await fixture.runner.start({ operationId: randomUUID(), selection: fixture.selection, guard: () => {
+    const session = fixture.store.active()
+    if (session && fixture.store.nativeJournal(session).some(entry => entry.evidence?.assignedAtCreation && entry.evidence?.pid > 0)) throw new Error('PROJECT_CONTEXT_CHANGED')
+  } })
   assert.equal(record.state, 'FAILED'); assert.equal(record.failure, 'PROJECT_CONTEXT_CHANGED')
   assert.equal(record.termination.kind, 'STARTUP_FAILURE'); assert.equal(record.termination.reasonCode, 'PROJECT_CONTEXT_CHANGED')
   assert.equal(record.resources, 'RELEASED'); assert.equal(record.process.activeProcesses, 0)

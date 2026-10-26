@@ -5,7 +5,7 @@ import type { GitAtlasCoreEvidence, GitAtlasEvidenceQuery, GitAtlasPrEvidence } 
 import type { BranchInventory } from '../../shared/types/branch-orchestration-types'
 import type { BranchPullRequests } from '../../shared/types/branch-pull-request-types'
 import type { AtlasPersistence } from './git-atlas-cache'
-import { GitBranchInventory, recordBranchCreation } from './git-branch-inventory'
+import { GitBranchInventory, recordBranchCreation, chronology } from './git-branch-inventory'
 import { GitBranchDiscard } from './git-branch-discard'
 import type { BranchDiscardExecute, BranchDiscardRemoteReader } from '../../shared/types/branch-discard-types'
 import { randomUUID } from 'node:crypto'
@@ -599,6 +599,15 @@ export class GitOperationsService {
   async getCoordinationIdentity(worktreeId: string) {
     if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     return { repositoryId: this.worktreeRepositoryId!, record: await this.worktrees!.revalidateSelection(worktreeId) }
+  }
+
+  async verifyRuntimePreviewTarget(expected: { worktreeId: string; generation: string; path: string; ref: string; branchGeneration: string; head: string }) {
+    if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
+    const record = await this.worktrees!.revalidateSelection(expected.worktreeId)
+    if (record.generation !== expected.generation || record.path !== expected.path || record.head !== expected.head || record.branch !== expected.ref.slice(11) || record.detached || record.locked || record.missing || record.prunable) fail('WORKTREE_STALE')
+    const common = realpathSync(await this.git.getCommonDirectory(this.repoRoot))
+    if (await this.git.resolveCommit(record.path, expected.ref) !== expected.head || chronology(common, expected.ref).generation !== expected.branchGeneration) fail('BRANCH_CHANGED')
+    if (!this.coordinationIdentity?.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
   }
 
   private correlation() {

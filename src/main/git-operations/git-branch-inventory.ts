@@ -7,7 +7,7 @@ import type { BranchDate, BranchHistoryPage, BranchHistoryQuery, BranchInventory
 
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 
-function chronology(common: string, ref: string): { creation: BranchDate; generation: string } {
+export function chronology(common: string, ref: string): { creation: BranchDate; generation: string } {
   const unknown = { creation: { at: null, source: 'UNKNOWN' as const }, generation: 'UNKNOWN' }
   const file = join(common, 'logs', ref)
   if (!existsSync(file)) return unknown

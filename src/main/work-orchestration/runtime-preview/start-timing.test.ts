@@ -24,9 +24,9 @@ describe('bounded monotonic startup evidence', () => {
   })
   it('does not invent a window signal, bounds receipts and rejects forged timing values', async () => {
     const clock = new PreviewStartClock()
-    for (let index = 0; index < 80; index++) await clock.measure('guard', async () => {})
+    for (let index = 0; index < 112; index++) await clock.measure('guard', async () => {})
     const result = clock.snapshot()
-    expect(result.phases).toHaveLength(64); expect(result.windowMs).toBeNull(); expect(result.readyMs).toBeNull()
+    expect(result.phases).toHaveLength(96); expect(result.windowMs).toBeNull(); expect(result.readyMs).toBeNull()
     expect(startTimingSchema.safeParse({ ...result, privatePath: 'forbidden' }).success).toBe(false)
     expect(() => clock.presented('0')).toThrow('WINDOW_TIMING_INVALID')
     expect(() => clock.presented((process.hrtime.bigint() + 1000000000n).toString())).toThrow('WINDOW_TIMING_INVALID')

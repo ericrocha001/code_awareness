@@ -43,6 +43,44 @@ it('checks a selected dirty worktree without setup, execution or false readiness
   expect(git.getCoordinationSnapshot).toHaveBeenCalledTimes(2)
   expect(await readFile(join(tree, 'package-lock.json'), 'utf8')).toBe(before)
 })
+
+it('reuses only intent-bound evidence while checking current inputs and one directed source snapshot', async () => {
+  await store.approve(profile, async () => true)
+  const git = reader(), service = new PreviewPreflightService(store), target = selection()
+  const result = await service.check(git, target)
+  expect(service.canReuse(git, target, result)).toBe(true)
+  expect(service.canReuse(reader(), target, result)).toBe(false)
+  expect(service.canReuse(git, target, structuredClone(result))).toBe(false)
+  expect(await service.revalidate(git, target, result)).toBe(result)
+  expect(git.getCoordinationIdentity).toHaveBeenCalledTimes(1)
+  expect(git.getCoordinationSnapshot).toHaveBeenCalledTimes(3)
+})
+
+it.each(['head', 'branch', 'generation', 'path', 'profile', 'lock', 'script', 'executable', 'cooperation', 'node_modules', 'materialization', 'approval'])('refuses %s drift at a launch evidence consumption boundary', async fault => {
+  const executable = join(tree, 'runtime.exe'), script = join(tree, 'server.js')
+  await writeFile(executable, 'runtime-A'); await writeFile(script, 'script-A')
+  profile.command.executable = executable; profile.command.executableHash = hash(Buffer.from('runtime-A'))
+  profile.command.inputs.push({ path: 'server.js', fingerprint: hash(Buffer.from('script-A')) })
+  await save(); await store.approve(profile, async () => true)
+  const git = reader(), service = new PreviewPreflightService(store), target = selection()
+  const result = await service.check(git, target)
+  await service.revalidate(git, target, result)
+  const source = await git.getCoordinationSnapshot('tree')
+  if (fault === 'head') source.snapshot.head = 'other'
+  if (fault === 'branch') source.snapshot.branch = 'wrong'
+  if (fault === 'generation') source.record.generation = 'replaced'
+  if (fault === 'path') source.record.path = root
+  if (['head', 'branch', 'generation', 'path'].includes(fault)) git.getCoordinationSnapshot.mockResolvedValue(source)
+  if (fault === 'profile') { profile.revision++; await save() }
+  if (fault === 'lock') await writeFile(join(tree, 'package-lock.json'), '{}')
+  if (fault === 'script') await writeFile(script, 'script-B')
+  if (fault === 'executable') await writeFile(executable, 'runtime-B')
+  if (fault === 'cooperation') await writeFile(join(tree, 'preview.json'), '{"changed":true}')
+  if (fault === 'node_modules') await writeFile(join(tree, 'node_modules/example/package.json'), '{"version":"9.0.0"}')
+  if (fault === 'materialization') await writeFile(join(tree, 'installed.json'), '{}')
+  if (fault === 'approval') vi.spyOn(store, 'approved').mockResolvedValue(false)
+  await expect(service.revalidate(git, target, result)).rejects.toThrow()
+})
 it('blocks network and filesystem requirements with typed enforcement gaps and independent resolution', async () => {
   profile.security.requirements = [{ capability: 'NETWORK_EGRESS_RESTRICTION', guarantee: 'loopback only enforced' }, { capability: 'FILESYSTEM_WRITE_SEPARATION', guarantee: 'no writes outside checkout' }]
   await save(); await store.approve(profile, async () => true)

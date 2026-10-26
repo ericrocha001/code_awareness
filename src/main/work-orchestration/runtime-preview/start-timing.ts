@@ -1,15 +1,18 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { readFile } from 'node:fs/promises'
 import { z } from 'zod'
 
 export const startStage = z.enum(['discovery', 'profile', 'preflight', 'git', 'dependencies', 'approval', 'authority', 'guard', 'context',
-  'context_backup', 'context_sanitize', 'context_vacuum', 'context_validation', 'context_digest', 'adapter', 'spawn', 'startup', 'abi', 'vite', 'cache'])
+  'context_backup', 'context_sanitize', 'context_vacuum', 'context_validation', 'context_digest', 'adapter', 'spawn', 'startup', 'abi', 'vite', 'cache',
+  'queue', 'repository', 'inventory', 'target', 'profile_guard', 'inputs', 'materialization', 'source_guard', 'ownership', 'finalize'])
 const milliseconds = z.number().finite().nonnegative().max(86400000)
 export const startTimingSchema = z.object({
   totalMs: milliseconds, approvalMs: milliseconds, technicalMs: milliseconds, windowMs: milliseconds.nullable(), readyMs: milliseconds.nullable(),
   technicalWindowMs: milliseconds.nullable(), technicalReadyMs: milliseconds.nullable(), hostCpuMs: milliseconds,
   preparationBeforeRequestMs: milliseconds, criticalPathMs: milliseconds, unmeasuredMs: milliseconds,
-  phases: z.array(z.object({ id: z.number().int().min(0).max(63), stage: startStage, parent: z.number().int().min(0).max(63).nullable(),
-    after: z.array(z.number().int().min(0).max(63)).max(64), startMs: milliseconds, durationMs: milliseconds }).strict()).max(64)
+  phases: z.array(z.object({ id: z.number().int().min(0).max(95), stage: startStage, parent: z.number().int().min(0).max(95).nullable(),
+    after: z.array(z.number().int().min(0).max(95)).max(96), startMs: milliseconds, durationMs: milliseconds,
+    cpuMs: milliseconds.optional(), bytesRead: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER).optional() }).strict()).max(96)
 }).strict()
 export type PreviewStartTiming = z.infer<typeof startTimingSchema>
 const now = () => Number(process.hrtime.bigint()) / 1e6
@@ -20,17 +23,21 @@ export class PreviewStartClock {
   private readonly scope = new AsyncLocalStorage<number>()
   private readonly phases: PreviewStartTiming['phases'] = []
   private readonly frontier = new Set<number>()
+  private readonly phaseCpu = new Map<number, NodeJS.CpuUsage>()
   private windowMs: number | null = null
   private readyMs: number | null = null
   private begin(stage: z.infer<typeof startStage>) {
-    if (this.phases.length >= 64) return undefined
+    if (this.phases.length >= 96) return undefined
     const parent = this.scope.getStore() ?? null
     const phase = { id: this.phases.length, stage, parent, after: parent === null ? [...this.frontier] : [], startMs: now() - this.origin, durationMs: 0 }
     this.phases.push(phase)
+    this.phaseCpu.set(phase.id, process.cpuUsage())
     return phase
   }
   private finish(phase: PreviewStartTiming['phases'][number]) {
     phase.durationMs = now() - this.origin - phase.startMs
+    const cpu = process.cpuUsage(this.phaseCpu.get(phase.id)); this.phaseCpu.delete(phase.id)
+    phase.cpuMs = (cpu.user + cpu.system) / 1000
     if (phase.parent === null) { phase.after.forEach(id => this.frontier.delete(id)); this.frontier.add(phase.id) }
   }
   async measure<T>(stage: z.infer<typeof startStage>, work: () => Promise<T>): Promise<T> {
@@ -43,6 +50,15 @@ export class PreviewStartClock {
     if (!phase) return work()
     try { return this.scope.run(phase.id, work) } finally { this.finish(phase) }
   }
+  waiting(stage: z.infer<typeof startStage>) {
+    const phase = this.begin(stage)
+    return () => { if (phase) this.finish(phase) }
+  }
+  async read(file: string) {
+    const bytes = await readFile(file), id = this.scope.getStore()
+    if (id !== undefined) this.phases[id].bytesRead = (this.phases[id].bytesRead ?? 0) + bytes.length
+    return bytes
+  }
   presented(at: string) {
     if (!/^\d{1,24}$/.test(at)) throw new Error('WINDOW_TIMING_INVALID')
     const elapsed = Number(BigInt(at)) / 1e6 - this.origin
@@ -54,7 +70,7 @@ export class PreviewStartClock {
     if (!/^\d{1,24}$/.test(startNs) || !/^\d{1,24}$/.test(endNs)) throw new Error('BOOTSTRAP_TIMING_INVALID')
     const startMs = Number(BigInt(startNs)) / 1e6 - this.origin, endMs = Number(BigInt(endNs)) / 1e6 - this.origin
     if (startMs < 0 || endMs < startMs || endMs > now() - this.origin + 10) throw new Error('BOOTSTRAP_TIMING_INVALID')
-    if (this.phases.length >= 64) return
+    if (this.phases.length >= 96) return
     const host = [...this.phases].reverse().find(phase => phase.stage === parentStage)
     if (host && startMs >= host.startMs && endMs <= host.startMs + host.durationMs) {
       this.phases.push({ id: this.phases.length, stage, parent: host.id, after: [], startMs, durationMs: endMs - startMs })

@@ -39,6 +39,7 @@ export const previewRequestSchema = z.discriminatedUnion('action', [
 ])
 const failure = (error: unknown): RuntimePreviewResult => ({ success: false, code: error instanceof Error && /^[A-Z][A-Z_0-9:.-]{0,159}$/.test(error.message) ? error.message : 'PREVIEW_UNAVAILABLE' })
 type Pending = { key: string; operationId: string; work: Promise<RuntimePreviewResult>; intent?: PreviewIntentReceipt }
+type LaunchResolution = { context: Awaited<ReturnType<PreviewRepositories['open']>>; inventory: import('../../../shared/types/branch-orchestration-types').BranchInventory }
 const processView = (record: PreviewSessionRecord): PreviewSessionView['process'] => record.process ? {
   rootExited: record.process.rootSignaled, activeProcesses: record.process.activeProcesses, handlesClosed: record.process.knownHandlesClosed, assignedAtCreation: record.process.assignedAtCreation
 } : null
@@ -112,8 +113,8 @@ export class RuntimePreviewOperations {
       this.mutate('intent:' + intent.operationId, intent.operationId, async () => {
         let result: RuntimePreviewResult
         try {
-          const context = await this.repositories.open(repositoryId)
-          const inventory = await timing.measure('discovery', () => context.git.getBranchInventory())
+          const context = await timing.measure('repository', () => this.repositories.open(repositoryId))
+          const inventory = await timing.measure('inventory', () => context.git.getBranchInventory())
           context.guard(); guard()
           const target = inventory.branches.find(b => b.ref === branch && b.repositoryId === repositoryId)
           if (!target) throw new Error('BRANCH_NOT_FOUND')
@@ -125,7 +126,7 @@ export class RuntimePreviewOperations {
           receipt.worktreeId = tree?.worktreeId ?? (candidates.length === 1 ? candidates[0].worktreeId : null)
           if (this.pending?.operationId === intent.operationId) this.pending.intent = receipt
           result = await this.runBranch({ action: 'RUN_BRANCH_APP', repositoryId, ref: target.ref, revision: target.revision, operationId: intent.operationId,
-            ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard, timing)
+            ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard, timing, { context, inventory })
         } catch (error) { result = failure(error) }
         const session = result.success && result.data.kind === 'SESSION' ? result.data.session : null
         const blocked = result.success && result.data.kind === 'BRANCH_APP'
@@ -137,10 +138,11 @@ export class RuntimePreviewOperations {
       return this.getStatus({ operationId: intent.operationId })
     } catch (error) { return failure(error) }
   }
-  private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void, timing = new PreviewStartClock()): Promise<RuntimePreviewResult> {
+  private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void, timing = new PreviewStartClock(), known?: LaunchResolution): Promise<RuntimePreviewResult> {
     const blocked = (reasonCode: string, message: string, details = {}): RuntimePreviewResult => ({ success: true, data: { kind: 'BRANCH_APP', reasonCode, message, ...details } })
     if (!this.branchProfiles) return blocked('APP_HOST_UNSUPPORTED', 'Esta instalação não oferece um perfil seguro para rodar o Code Awareness.')
-    const context = await this.repositories.open(request.repositoryId), inventory = await timing.measure('discovery', () => context.git.getBranchInventory())
+    const context = known?.context ?? await timing.measure('repository', () => this.repositories.open(request.repositoryId))
+    const inventory = known?.inventory ?? await timing.measure('inventory', () => context.git.getBranchInventory())
     const observedBranch = inventory.branches.find(b => b.ref === request.ref && b.repositoryId === request.repositoryId)
     const branch = observedBranch ? structuredClone(observedBranch) : undefined
     if (!branch || branch.revision !== request.revision || branch.generation === 'UNKNOWN') throw new Error('BRANCH_CHANGED')
@@ -151,14 +153,18 @@ export class RuntimePreviewOperations {
     const observedTree = request.worktree ? candidates.find(w => w.worktreeId === request.worktree!.worktreeId)! : candidates[0]
     const tree = observedTree ? structuredClone(observedTree) : undefined
     if (!tree || tree.detached || tree.locked || tree.missing || tree.prunable) return blocked('APP_CHECKOUT_UNAVAILABLE', 'O checkout desta branch não está disponível para execução.')
-    const verify = async () => {
+    const verify = () => timing.measure('target', async () => {
       guard(); context.guard()
+      if (context.git.verifyRuntimePreviewTarget) {
+        await context.git.verifyRuntimePreviewTarget({ worktreeId: tree.worktreeId, generation: tree.generation, path: tree.path, ref: branch.ref, branchGeneration: branch.generation, head: branch.head })
+        guard(); context.guard(); return
+      }
       const current = await context.git.getBranchInventory(), selected = current.branches.find(b => b.ref === branch.ref)
       if (!selected || selected.revision !== branch.revision || selected.generation !== branch.generation || selected.head !== branch.head || !selected.worktrees.some(w => w.worktreeId === tree.worktreeId && w.generation === tree.generation)) throw new Error('BRANCH_CHANGED')
       const identity = await context.git.getCoordinationIdentity(tree.worktreeId)
       if (identity.repositoryId !== request.repositoryId || identity.record.generation !== tree.generation || identity.record.path !== tree.path || identity.record.head !== branch.head || identity.record.branch !== branch.name || identity.record.locked || identity.record.missing || identity.record.detached || identity.record.prunable) throw new Error('WORKTREE_STALE')
       guard(); context.guard()
-    }
+    })
     await verify()
     const active = this.store.list().find(r => !['STOPPED', 'FAILED'].includes(r.state) || r.resources !== 'RELEASED')
     if (active) {
@@ -187,14 +193,16 @@ export class RuntimePreviewOperations {
     const before = await this.check(target, timing, context)
     if (before.preflight.diagnostics.some(d => !['PROFILE_APPROVAL_REQUIRED', 'ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: before.preflight })
     await verify()
+    let approvedNow = false
     if (!await this.profiles.approved(profile)) {
       try { await this.profiles.approve(profile, value => timing.measure('approval', () => this.confirm(value)), () => { guard(); context.guard() }) }
       catch (error) { if (error instanceof Error && error.message === 'PROFILE_APPROVAL_REQUIRED') return blocked('PROFILE_APPROVAL_REQUIRED', 'Execução cancelada. Nenhum aplicativo foi iniciado.'); throw error }
+      approvedNow = true
     }
     await verify()
-    const checked = await this.check(target, timing, context)
+    const checked = before.startAllowed && !approvedNow ? before : await this.check(target, timing, context)
     if (!checked.startAllowed) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: checked.preflight })
-    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context })
+    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context, preflightEvidence: checked.preflight })
     return { success: true, data: { kind: 'SESSION', session: await this.view(record, true), pending: false } }
   }
   private async view(record: PreviewSessionRecord, current: boolean, known?: PreviewQualification): Promise<PreviewSessionView> {
