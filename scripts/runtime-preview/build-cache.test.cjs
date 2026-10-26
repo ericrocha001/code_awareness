@@ -13,7 +13,8 @@ async function fixture() {
   const base = path.join(root, randomUUID()), worktree = path.join(base, 'worktree'), directory = path.join(base, 'runtime'), cacheRoot = path.join(base, 'cache')
   const files = ['package.json', 'package-lock.json', 'electron.vite.config.ts', 'scripts/runtime-preview/launch.cjs', 'src/App.tsx',
     'node_modules/vite/package.json', 'node_modules/electron-vite/package.json', 'node_modules/esbuild/package.json',
-    'node_modules/@vitejs/plugin-react/package.json', 'node_modules/vite/dist/node/index.js', 'node_modules/electron-vite/dist/index.mjs', 'node_modules/example/index.js']
+    'node_modules/@vitejs/plugin-react/package.json', 'node_modules/@vitejs/plugin-react/dist/index.js', 'node_modules/esbuild/lib/main.js',
+    'node_modules/vite/dist/node/index.js', 'node_modules/electron-vite/dist/index.mjs', 'node_modules/example/index.js']
   for (const file of files) { const target = path.join(worktree, file); await fs.mkdir(path.dirname(target), { recursive: true }); await fs.writeFile(target, file.endsWith('.json') ? '{}' : 'export const value = "A"\n') }
   await fs.mkdir(directory, { recursive: true })
   const selection = { repositoryId: 'repo', worktreeId: 'tree', generation: 'generation', profileId: 'code-awareness-tree', fingerprint: 'a'.repeat(64) }
@@ -80,7 +81,7 @@ test('partitions Worktrees and generations and invalidates source and lockfile c
   const second = await fixture()
   const isolated = await PreviewBuildCache.prepare(f.cacheRoot, second.worktree, second.directory, second.profile, second.selection, 'verified-installation', second.forbidden)
   assert.notEqual(isolated.receipt.key, original.receipt.key); assert.equal(isolated.receipt.restoredBytes, 0)
-  for (const file of ['src/App.tsx', 'package-lock.json', 'node_modules/vite/package.json']) {
+  for (const file of ['src/App.tsx', 'package-lock.json', 'node_modules/vite/package.json', 'node_modules/@vitejs/plugin-react/dist/index.js']) {
     await fs.writeFile(path.join(f.worktree, file), randomUUID())
     assert.notEqual((await f.prepare(path.join(f.base, randomUUID()))).receipt.key, original.receipt.key)
   }
@@ -91,6 +92,38 @@ test('requires fresh native optimizer evidence and refuses custom optimizer outp
   await fs.writeFile(path.join(f.directory, 'dependency-cache-policy.json'), JSON.stringify({ schemaVersion: 1, nativeOptimizer: false }))
   await cache.finish(true)
   assert.equal(cache.receipt.reasonCode, 'BUILD_CACHE_CUSTOM_OPTIMIZER'); assert.equal(cache.receipt.retainedBytes, 0)
+})
+
+test('isolates two physical Git Worktrees of the same repository', async () => {
+  const f = await fixture(), git = require('node:util').promisify(require('node:child_process').execFile)
+  const run = (...args) => git('git', ['-C', f.worktree, ...args], { windowsHide: true })
+  await run('init'); await fs.writeFile(path.join(f.worktree, 'tracked.txt'), 'fixture')
+  await run('add', 'tracked.txt'); await run('-c', 'user.name=Preview Fixture', '-c', 'user.email=preview@example.invalid', 'commit', '-m', 'fixture')
+  const peer = path.join(f.base, 'peer'); await run('worktree', 'add', '--detach', peer, 'HEAD')
+  for (const entry of await fs.readdir(f.worktree)) if (entry !== '.git') await fs.cp(path.join(f.worktree, entry), path.join(peer, entry), { recursive: true })
+  assert.equal((await run('rev-parse', '--path-format=absolute', '--git-common-dir')).stdout.trim(),
+    (await git('git', ['-C', peer, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { windowsHide: true })).stdout.trim())
+  const cold = await f.prepare(); await f.materialize(); await cold.finish(true)
+  const selection = { ...f.selection, worktreeId: 'peer', profileId: 'code-awareness-peer' }
+  const cache = await PreviewBuildCache.prepare(f.cacheRoot, peer, path.join(f.base, 'peer-runtime'), { ...f.profile, profileId: selection.profileId }, selection, 'verified-installation', f.forbidden)
+  assert.equal(cache.receipt.restoredBytes, 0); assert.notEqual(cache.receipt.key, cold.receipt.key)
+})
+
+test('bounds retained entries and removes corrupt siblings without discarding a valid publication', async () => {
+  const f = await fixture()
+  const corrupt = path.join(f.cacheRoot, '0'.repeat(64), '1'.repeat(64))
+  await fs.mkdir(corrupt, { recursive: true }); await fs.writeFile(path.join(corrupt, 'entry.json'), 'invalid')
+  for (let index = 0; index < 10; index++) {
+    const directory = path.join(f.base, 'retention-' + index); await fs.mkdir(directory)
+    const cache = await PreviewBuildCache.prepare(f.cacheRoot, f.worktree, directory, f.profile, { ...f.selection, generation: 'generation-' + index }, 'verified-installation', f.forbidden)
+    await f.materialize(directory); await cache.finish(true)
+    assert.ok(cache.receipt.retainedBytes > 0, JSON.stringify(cache.receipt))
+  }
+  await assert.rejects(fs.access(corrupt))
+  const partitions = await fs.readdir(f.cacheRoot); assert.ok(partitions.length <= 8)
+  let entries = 0
+  for (const partition of partitions) entries += (await fs.readdir(path.join(f.cacheRoot, partition))).length
+  assert.equal(entries, 8)
 })
 test('rejects drift at consumption, aborts without publication and refuses linked cache roots', async () => {
   const f = await fixture(), original = await f.prepare(); await f.materialize(); await original.finish(true)

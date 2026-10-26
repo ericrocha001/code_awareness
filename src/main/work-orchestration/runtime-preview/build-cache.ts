@@ -48,9 +48,25 @@ export class PreviewBuildCache {
       'node_modules/vite/package.json', 'node_modules/electron-vite/package.json', 'node_modules/esbuild/package.json',
       'node_modules/@vitejs/plugin-react/package.json', 'node_modules/vite/dist/node/index.js', 'node_modules/electron-vite/dist/index.mjs']
     const entries = []
+    const compilerFiles: string[] = []
+    const compilerInputs = async (folder: string): Promise<void> => {
+      await this.safe(folder)
+      for (const entry of await fs.readdir(folder, { withFileTypes: true })) {
+        const path = join(folder, entry.name)
+        if (entry.isSymbolicLink()) throw new Error('BUILD_CACHE_LINK')
+        if (entry.isDirectory()) await compilerInputs(path)
+        else if (/\.(?:[cm]?js|json|exe|node)$/.test(entry.name)) compilerFiles.push(relative(this.worktree, path))
+        if (compilerFiles.length > 512) throw new Error('BUILD_CACHE_LIMIT')
+      }
+    }
+    for (const folder of ['vite/dist', 'electron-vite/dist', '@vitejs/plugin-react/dist', 'esbuild/lib']) await compilerInputs(join(this.worktree, 'node_modules', folder))
+    files.push(...compilerFiles.sort())
+    let total = 0
     for (const file of files) {
       const path = resolve(this.worktree, file); inside(this.worktree, path)
-      entries.push([file, bytesFingerprint(await this.bytes(path))])
+      const bytes = await this.bytes(path); total += bytes.length
+      if (total > limit) throw new Error('BUILD_CACHE_LIMIT')
+      entries.push([file, bytesFingerprint(bytes)])
     }
     return previewFingerprint([this.selection.repositoryId, this.selection.worktreeId, this.selection.generation, this.selection.fingerprint, this.profile.revision, this.worktree, this.basis,
       this.profile.dependencies, this.profile.runtimeVersion, this.profile.adapter!.nativeModules, entries])

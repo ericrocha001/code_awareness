@@ -29,7 +29,7 @@ function vitePreviewPlugin() {
       viteRoot = resolved.root
       if (resolved.server.port !== config.port || !resolved.server.strictPort || resolved.server.host !== '127.0.0.1' || (resolved.server.hmr && resolved.server.hmr.port && resolved.server.hmr.port !== config.port)) throw new Error('ENDPOINT_CONFIGURATION_INCOMPATIBLE')
       const options = resolved.optimizeDeps?.esbuildOptions ?? {}
-      const nativeOptimizer = Object.keys(options).every(key => key === 'preserveSymlinks' && options[key] === false)
+      const nativeOptimizer = Object.keys(options).every(key => (key === 'preserveSymlinks' && options[key] === false) || (key === 'jsx' && options[key] === 'automatic'))
       fs.writeFileSync(path.join(config.directory, 'dependency-cache-policy.json'), JSON.stringify({ schemaVersion: 1, nativeOptimizer }), { mode: 0o600 })
     },
     transform(code, id) {

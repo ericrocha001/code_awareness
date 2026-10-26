@@ -110,6 +110,11 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   if (faults) assert.throws(() => resolveHelper(helperConfig), /PREVIEW_HELPER_BUILD_INVALID/)
   const helper = faults ? { executable: build.owner, fingerprint: build.fingerprint, sdkDirectory: path.join(root, 'scripts/runtime-preview') } : resolveHelper(helperConfig)
   const store = new (get('work-orchestration/runtime-preview/session-store').PreviewSessionStore)(path.join(directory, 'sessions'))
+  const releaseResources = store.releaseResources.bind(store)
+  store.releaseResources = id => {
+    try { return releaseResources(id) }
+    catch (error) { save('resource-release-error', { success: false, sessionId: id, code: error.code ?? error.message, resource: error.path ? path.relative(store.runtime(id), error.path) : null }); throw error }
+  }
   const retained = new Map(), diagnosticWatchers = new Map()
   const retainDiagnostics = () => {
     if (!branchApp) return
