@@ -1,4 +1,4 @@
-export type AcademySkillStatus = 'ACTIVE' | 'ARCHIVED'
+export type AcademySkillStatus = 'ACTIVE' | 'DISABLED'
 export type AcademySkillScope = 'GLOBAL' | 'PROJECT'
 export type AcademyVersionOrigin = 'IMPORT' | 'FILESYSTEM' | 'UI' | 'MCP' | 'LOCAL_CLI'
 export type AcademyConflictStatus = 'OPEN' | 'RESOLVED'
@@ -56,6 +56,7 @@ export interface AcademySkillSummary {
   name: string
   description: string
   status: AcademySkillStatus
+  stateRevision: number
   scope: AcademySkillScope
   currentVersion: number
   projectIds: string[]

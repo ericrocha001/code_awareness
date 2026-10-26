@@ -11,6 +11,7 @@ node scripts/local-agent/local.cjs continuum publish --repository <repositoryId>
 node scripts/local-agent/local.cjs continuum update --repository <repositoryId> --id <artifactId> --revision <revision> --file handoff.md
 node scripts/local-agent/local.cjs academy list --status ACTIVE
 node scripts/local-agent/local.cjs academy get --id <skillId>
+node scripts/local-agent/local.cjs academy set_academy_skill_enabled --id <skillId> --enabled false --state-revision <observedStateRevision>
 node scripts/local-agent/local.cjs academy history --id <skillId> --metadata-only true
 node scripts/local-agent/local.cjs academy history --id <skillId> --version <version>
 node scripts/local-agent/local.cjs academy create --scope GLOBAL --file package.json
@@ -29,7 +30,9 @@ Em `PROJECT`, `--projects` deve conter IDs existentes de destinos Academy, consu
 
 Uma escrita Academy confirma persistência imediatamente (`state: 'PERSISTED'`) no SQLite. `distribution.status` no recibo imediato indica `PENDING` (quando há destinos atribuídos) ou `NOT_APPLICABLE` (quando não há destinos). Não esperar distribuição síncrona; utilize `academy delivery_status --id <skillId> [--version <versão>]` para consultar a qualquer momento o estado compacto de entrega e convergência (`PENDING`, `CONVERGED`, `DEGRADED`, `ERROR`, `NOT_APPLICABLE`) sem varredura em disco ou download de pacotes. Persistência não equivale a consumidores recarregados.
 
-`VERSION_CONFLICT` exige reler a versão e reavaliar. Create recusa nome ativo duplicado. Erros de scope/projetos, token, protocolo ou operação encerram sem sucesso falso. Archive/restore, conflitos, Git e releases não fazem parte deste canal. Depois de perder a resposta de uma escrita, consulte ID ou nome e versão/hash antes de reenviar; não existe retry automático.
+`VERSION_CONFLICT` exige reler a versão e reavaliar. Create recusa nome canônico duplicado, inclusive desativado. Erros de scope/projetos, token, protocolo ou operação encerram sem sucesso falso. Conflitos, Git e releases não fazem parte deste canal. Depois de perder a resposta de uma escrita, consulte ID ou nome e versão/hash antes de reenviar; não existe retry automático.
+
+`academy list` lista ACTIVE e DISABLED com `stateRevision`; filtros aceitam ambos e ARCHIVED como alias legado de DISABLED. A operação `set_academy_skill_enabled` recebe ID, booleano e revisão de estado esperada. `STATE_REVISION_CONFLICT` exige reler e reavaliar, sem retry cego. Retorna o estado canônico persistido e agenda reconciliação separada, sem publicar plugin. Transições incrementam somente `stateRevision`; edição desativada incrementa somente a versão de conteúdo e continua fora da distribuição. Os aliases temporários `archive` e `restore` recebem `--id` e `--version`, desativando/ativando; protegem somente a versão do conteúdo. Prefira CAS de ativação. Desativar preserva ID, nome reservado, histórico, escopo e associações.
 
 O protocolo `code-awareness-local/v1` exige domínio, ação e args explícitos, com schemas fechados e operações registradas. Há um request por conexão, limite de 8 MiB de request/16 MiB de response, deadline absoluto de 15 segundos e no máximo 16 conexões. Não há truncamento silencioso nem fallback offline. Processos do mesmo usuário com acesso ao perfil integram o contexto autorizado.
 
@@ -37,7 +40,7 @@ O protocolo `code-awareness-local/v1` exige domínio, ação e args explícitos,
 
 `academy history --id <skillId> --metadata-only true` descobre versões em ordem decrescente sem ler ou retornar seus packages. A metadata contém `skillId`, `version`, `origin`, `createdAt` e `packageHash`. Use `--version <inteiro positivo seguro>` para obter uma única `AcademySkillVersion`, com package literal completo e hash canônico. Nenhum conteúdo é truncado; os limites atuais do transporte continuam aplicáveis.
 
-Os seletores são mutuamente exclusivos, inclusive `--metadata-only false` junto de `--version`. Versões zero, fracionárias, inseguras e strings não numéricas são recusadas. Skill ausente produz `SKILL_NOT_FOUND`; versão ausente de uma Skill existente produz `VERSION_NOT_FOUND`. Skills arquivadas continuam consultáveis. Sem seletores (ou com `--metadata-only false` isolado), retorna-se intencionalmente o array integral legado.
+Os seletores são mutuamente exclusivos, inclusive `--metadata-only false` junto de `--version`. Versões zero, fracionárias, inseguras e strings não numéricas são recusadas. Skill ausente produz `SKILL_NOT_FOUND`; versão ausente de uma Skill existente produz `VERSION_NOT_FOUND`. Skills desativadas continuam consultáveis. Sem seletores (ou com `--metadata-only false` isolado), retorna-se intencionalmente o array integral legado.
 
 O MCP oferece os mesmos modos na operação existente `get_academy_skill_history`: `{skillId, metadataOnly:true}`, `{skillId, version:n}` ou `{skillId}`. MCP e Local Agent Channel delegam ao serviço canônico; nenhuma consulta grava versões, reconcilia distribuição ou executa scripts.
 

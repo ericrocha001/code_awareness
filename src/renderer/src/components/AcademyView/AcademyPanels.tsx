@@ -1,6 +1,5 @@
 import React from 'react'
 import {
-  Archive,
   BookOpen,
   Box,
   Check,
@@ -12,13 +11,11 @@ import {
   FolderGit2,
   GitBranch,
   History,
-  MoreHorizontal,
   Package,
   PanelRightOpen,
   Pencil,
   Plus,
   RefreshCw,
-  RotateCcw,
   Search,
   Settings2,
   ShieldCheck,
@@ -64,10 +61,10 @@ const RailCard: React.FC<{ icon: React.ReactNode; title: string; count?: string;
 
 interface AcademyHeaderProps {
   query: string
-  status: 'ALL' | 'ACTIVE' | 'ARCHIVED'
+  status: 'ALL' | 'ACTIVE' | 'DISABLED'
   conflictCount: number
   onQueryChange: (value: string) => void
-  onStatusChange: (value: 'ALL' | 'ACTIVE' | 'ARCHIVED') => void
+  onStatusChange: (value: 'ALL' | 'ACTIVE' | 'DISABLED') => void
   onCreate: () => void
   onOpenCatalog: () => void
   onOpenOperations: () => void
@@ -90,9 +87,9 @@ export const AcademyHeader: React.FC<AcademyHeaderProps> = ({ query, status, con
         <input aria-label="Buscar Skills" placeholder="Buscar skills..." value={query} onChange={(event) => onQueryChange(event.target.value)} />
       </label>
       <select aria-label="Filtrar por status" value={status} onChange={(event) => onStatusChange(event.target.value as AcademyHeaderProps['status'])}>
-        <option value="ALL">Todos os status</option>
+        <option value="ALL">Todas</option>
         <option value="ACTIVE">Ativas</option>
-        <option value="ARCHIVED">Arquivadas</option>
+        <option value="DISABLED">Desativadas</option>
       </select>
       <button className="academy-primary-button" onClick={onCreate}><Plus size={17} />Nova Skill</button>
       <button className="academy-mobile-control academy-icon-button" aria-label="Abrir operações" onClick={onOpenOperations}>
@@ -109,9 +106,11 @@ interface SkillCatalogProps {
   open: boolean
   onClose: () => void
   onSelect: (id: string) => void
+  activationPending: boolean
+  onSetEnabled: (skill: AcademySkillSummary) => void
 }
 
-export const SkillCatalog: React.FC<SkillCatalogProps> = ({ skills, selectedId, open, onClose, onSelect }) => (
+export const SkillCatalog: React.FC<SkillCatalogProps> = ({ skills, selectedId, open, onClose, onSelect, activationPending, onSetEnabled }) => (
   <aside className={`academy-catalog ${open ? 'is-open' : ''}`} aria-label="Catálogo de Skills">
     <div className="academy-pane-header">
       <div><h2>Skills</h2><span className="academy-count">{skills.length} {skills.length === 1 ? 'skill' : 'skills'}</span></div>
@@ -119,7 +118,7 @@ export const SkillCatalog: React.FC<SkillCatalogProps> = ({ skills, selectedId, 
     </div>
     <ul className="academy-skill-list">
       {skills.map((skill) => (
-        <li key={skill.id}>
+        <li key={skill.id} className="academy-skill-row">
           <button className={`academy-skill-item ${selectedId === skill.id ? 'selected' : ''}`} onClick={() => onSelect(skill.id)}>
             <span className="academy-skill-file" aria-hidden="true"><FileCode2 size={20} /></span>
             <span className="academy-skill-copy">
@@ -132,6 +131,7 @@ export const SkillCatalog: React.FC<SkillCatalogProps> = ({ skills, selectedId, 
               <span className="academy-skill-version">v{skill.currentVersion}</span>
             </span>
           </button>
+          <button className="academy-activation-switch" role="switch" aria-label={`Ativação de ${skill.name}`} aria-checked={skill.status === 'ACTIVE'} disabled={activationPending} onClick={() => onSetEnabled(skill)}><span /></button>
         </li>
       ))}
     </ul>
@@ -156,10 +156,11 @@ interface SkillWorkspaceProps {
   onEdit: () => void
   onSave: () => void
   onCancel: () => void
-  onToggleArchive: () => void
+  activationPending: boolean
+  onSetEnabled: () => void
 }
 
-export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEditing, activeTab, skillMd, scope, projectIds, destinations, history, distribution, onTabChange, onSkillMdChange, onScopeChange, onProjectIdsChange, onEdit, onSave, onCancel, onToggleArchive }) => {
+export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEditing, activeTab, skillMd, scope, projectIds, destinations, history, distribution, onTabChange, onSkillMdChange, onScopeChange, onProjectIdsChange, onEdit, onSave, onCancel, activationPending, onSetEnabled }) => {
   if (!selected && !isEditing) {
     return <main className="academy-skill-workspace academy-workspace-empty">
       <span className="academy-empty-icon"><FileCode2 size={30} /></span>
@@ -177,7 +178,7 @@ export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEdit
       <div className="academy-skill-heading">
         <div className="academy-skill-title-line">
           <h2>{title}</h2>
-          <StatusBadge tone={selected?.status === 'ARCHIVED' ? 'neutral' : 'success'}>{selected?.status ?? 'DRAFT'}</StatusBadge>
+          <StatusBadge tone={selected?.status === 'DISABLED' ? 'neutral' : 'success'}>{selected?.status ?? 'DRAFT'}</StatusBadge>
           <StatusBadge tone="info">{scope}</StatusBadge>
         </div>
         <p>{description}</p>
@@ -187,10 +188,7 @@ export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEdit
           <button className="academy-secondary-button" onClick={onCancel}>Cancelar</button>
           <button className="academy-primary-button" onClick={onSave}><Check size={16} />Salvar</button>
         </> : <button className="academy-secondary-button" onClick={onEdit}><Pencil size={16} />Editar</button>}
-        {selected && <details className="academy-action-menu">
-          <summary aria-label="Mais ações"><MoreHorizontal size={19} /></summary>
-          <button onClick={onToggleArchive}>{selected.status === 'ACTIVE' ? <Archive size={15} /> : <RotateCcw size={15} />}{selected.status === 'ACTIVE' ? 'Arquivar' : 'Restaurar'}</button>
-        </details>}
+        {selected && <button className="academy-secondary-button" role="switch" aria-label="Ativação da Skill selecionada" aria-checked={selected.status === 'ACTIVE'} disabled={activationPending || isEditing} onClick={onSetEnabled}>{activationPending ? 'Salvando…' : selected.status === 'ACTIVE' ? 'Ativada' : 'Desativada'}</button>}
       </div>
     </header>
 

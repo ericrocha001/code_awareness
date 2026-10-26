@@ -16,14 +16,16 @@ export class AcademyStore {
     this.db = new Database(databasePath)
     this.db.pragma('foreign_keys = ON')
     this.db.pragma('journal_mode = WAL')
+    try { this.migrateActivation() } catch (error) { this.db.close(); throw error }
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS academy_skills (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN ('ACTIVE','ARCHIVED')),
+        status TEXT NOT NULL CHECK(status IN ('ACTIVE','DISABLED')),
         scope TEXT NOT NULL CHECK(scope IN ('GLOBAL','PROJECT')),
-        current_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        current_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        state_revision INTEGER NOT NULL DEFAULT 1 CHECK(state_revision >= 1)
       );
-      CREATE UNIQUE INDEX IF NOT EXISTS academy_active_name ON academy_skills(lower(name)) WHERE status = 'ACTIVE';
+      CREATE UNIQUE INDEX IF NOT EXISTS academy_skill_name ON academy_skills(lower(name));
       CREATE TABLE IF NOT EXISTS academy_versions (
         skill_id TEXT NOT NULL REFERENCES academy_skills(id) ON DELETE CASCADE,
         version INTEGER NOT NULL, skill_md TEXT NOT NULL, artifacts_json TEXT NOT NULL,
@@ -135,6 +137,36 @@ export class AcademyStore {
     })()
   }
 
+  private migrateActivation(): void {
+    const schema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='academy_skills'").get() as Row | undefined
+    if (!schema || !schema.sql.includes("'ARCHIVED'")) return
+    this.db.pragma('foreign_keys = OFF')
+    try {
+      this.db.transaction(() => {
+        const currentSchema = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='academy_skills'").get() as Row
+        if (!currentSchema.sql.includes("'ARCHIVED'")) return
+        const collisions = this.db.prepare('SELECT id, name FROM academy_skills WHERE lower(name) IN (SELECT lower(name) FROM academy_skills GROUP BY lower(name) HAVING count(*) > 1) ORDER BY lower(name), id').all()
+        if (collisions.length) throw new AcademyError('ACADEMY_NAME_MIGRATION_CONFLICT', 'Resolve duplicate names explicitly by operator before retrying migration; no records were changed.', { skills: collisions })
+        const indexes = this.db.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='academy_skills' AND sql IS NOT NULL AND name <> 'academy_active_name'").all() as Row[]
+        this.db.exec(`
+          CREATE TABLE academy_skills_activation (
+            id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('ACTIVE','DISABLED')),
+            scope TEXT NOT NULL CHECK(scope IN ('GLOBAL','PROJECT')),
+            current_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            state_revision INTEGER NOT NULL DEFAULT 1 CHECK(state_revision >= 1)
+          );
+          INSERT INTO academy_skills_activation SELECT id,name,description,CASE status WHEN 'ARCHIVED' THEN 'DISABLED' ELSE status END,scope,current_version,created_at,updated_at,1 FROM academy_skills;
+          DROP TABLE academy_skills;
+          ALTER TABLE academy_skills_activation RENAME TO academy_skills;
+          CREATE UNIQUE INDEX academy_skill_name ON academy_skills(lower(name));
+        `)
+        for (const index of indexes) this.db.exec(index.sql)
+        if ((this.db.pragma('foreign_key_check') as Row[]).length) throw new AcademyError('ACADEMY_ACTIVATION_MIGRATION_INTEGRITY')
+      }).immediate()
+    } finally { this.db.pragma('foreign_keys = ON') }
+  }
+
   get isClosed(): boolean { return !this.db.open }
 
   close(): void {
@@ -151,12 +183,12 @@ export class AcademyStore {
     const hash = hashAcademyPackage(pkg)
     try {
       this.db.transaction(() => {
-        this.db.prepare('INSERT INTO academy_skills VALUES (?, ?, ?, ?, ?, 1, ?, ?)').run(id, metadata.name, metadata.description, 'ACTIVE', input.scope, now, now)
+        this.db.prepare('INSERT INTO academy_skills(id,name,description,status,scope,current_version,created_at,updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)').run(id, metadata.name, metadata.description, 'ACTIVE', input.scope, now, now)
         this.insertVersion(id, 1, pkg, hash, input.origin, now)
         this.replaceProjects(id, input.projectIds ?? [])
       })()
     } catch (error: any) {
-      if (String(error?.message).includes('academy_active_name')) throw new AcademyError('DUPLICATE_SKILL_NAME', `Active skill already exists: ${metadata.name}`)
+      if (String(error?.message).includes('academy_skill_name')) throw new AcademyError('DUPLICATE_SKILL_NAME', `Canonical skill already exists: ${metadata.name}`)
       throw error
     }
     return this.get(id)
@@ -170,14 +202,13 @@ export class AcademyStore {
       this.db.transaction(() => {
         const row = this.skillRow(input.skillId)
         if (row.current_version !== input.expectedVersion) throw new AcademyError('VERSION_CONFLICT', 'Skill changed since it was read', { expectedVersion: input.expectedVersion, currentVersion: row.current_version })
-        if (row.status !== 'ACTIVE') throw new AcademyError('SKILL_ARCHIVED')
         const version = row.current_version + 1
         this.db.prepare('UPDATE academy_skills SET name=?, description=?, scope=?, current_version=?, updated_at=? WHERE id=?').run(metadata.name, metadata.description, input.scope ?? row.scope, version, now, input.skillId)
         this.insertVersion(input.skillId, version, pkg, hashAcademyPackage(pkg), input.origin, now)
         if (input.projectIds) this.replaceProjects(input.skillId, input.projectIds)
       })()
     } catch (error: any) {
-      if (String(error?.message).includes('academy_active_name')) throw new AcademyError('DUPLICATE_SKILL_NAME', `Active skill already exists: ${metadata.name}`)
+      if (String(error?.message).includes('academy_skill_name')) throw new AcademyError('DUPLICATE_SKILL_NAME', `Canonical skill already exists: ${metadata.name}`)
       throw error
     }
     return this.get(input.skillId)
@@ -191,7 +222,7 @@ export class AcademyStore {
   }
 
   findByName(name: string): AcademySkillDetail | null {
-    const row = this.db.prepare("SELECT id FROM academy_skills WHERE lower(name)=lower(?) ORDER BY status='ACTIVE' DESC LIMIT 1").get(name) as Row | undefined
+    const row = this.db.prepare('SELECT id FROM academy_skills WHERE lower(name)=lower(?)').get(name) as Row | undefined
     return row ? this.get(row.id) : null
   }
 
@@ -225,11 +256,11 @@ export class AcademyStore {
   }
 
   archive(id: string, expectedVersion: number): AcademySkillDetail {
-    return this.setStatus(id, expectedVersion, 'ARCHIVED')
+    return this.setLegacyEnabled(id, expectedVersion, false)
   }
 
   restore(id: string, expectedVersion: number): AcademySkillDetail {
-    return this.setStatus(id, expectedVersion, 'ACTIVE')
+    return this.setLegacyEnabled(id, expectedVersion, true)
   }
 
   upsertDestination(path: string, name: string, enabled = true): AcademyDestination {
@@ -638,18 +669,23 @@ export class AcademyStore {
     return destinationFromRow(row)
   }
 
-  private setStatus(id: string, expectedVersion: number, status: AcademySkillStatus): AcademySkillDetail {
-    try {
-      this.db.transaction(() => {
-        const row = this.skillRow(id)
-        if (row.current_version !== expectedVersion) throw new AcademyError('VERSION_CONFLICT', 'Skill changed since it was read', { expectedVersion, currentVersion: row.current_version })
-        this.db.prepare('UPDATE academy_skills SET status=?, updated_at=? WHERE id=?').run(status, new Date().toISOString(), id)
-      })()
-    } catch (error: any) {
-      if (String(error?.message).includes('academy_active_name')) throw new AcademyError('DUPLICATE_SKILL_NAME')
-      throw error
-    }
-    return this.get(id)
+  setEnabled(id: string, enabled: boolean, expectedStateRevision: number): AcademySkillDetail {
+    if (typeof id !== 'string' || !id.trim() || typeof enabled !== 'boolean' || !Number.isSafeInteger(expectedStateRevision) || expectedStateRevision < 1) throw new AcademyError('INVALID_ARGUMENT')
+    return this.db.transaction(() => {
+      const row = this.skillRow(id)
+      if (row.state_revision !== expectedStateRevision) throw new AcademyError('STATE_REVISION_CONFLICT', 'Skill activation changed since it was read', { expectedStateRevision, stateRevision: row.state_revision })
+      const status = enabled ? 'ACTIVE' : 'DISABLED'
+      if (row.status !== status) this.db.prepare('UPDATE academy_skills SET status=?, state_revision=state_revision+1, updated_at=? WHERE id=?').run(status, new Date().toISOString(), id)
+      return this.get(id)
+    }).immediate()
+  }
+
+  private setLegacyEnabled(id: string, expectedVersion: number, enabled: boolean): AcademySkillDetail {
+    return this.db.transaction(() => {
+      const row = this.skillRow(id)
+      if (row.current_version !== expectedVersion) throw new AcademyError('VERSION_CONFLICT', 'Skill changed since it was read', { expectedVersion, currentVersion: row.current_version })
+      return this.setEnabled(id, enabled, row.state_revision)
+    }).immediate()
   }
 
   private insertVersion(skillId: string, version: number, pkg: AcademyPackage, hash: string, origin: AcademyVersionOrigin, createdAt: string): void {
@@ -679,7 +715,7 @@ export class AcademyStore {
 
   private summary(row: Row): AcademySkillSummary {
     const projects = this.db.prepare('SELECT destination_id FROM academy_skill_projects WHERE skill_id=? ORDER BY destination_id').all(row.id) as Row[]
-    return { id: row.id, name: row.name, description: row.description, status: row.status, scope: row.scope, currentVersion: row.current_version, projectIds: projects.map((entry) => entry.destination_id), createdAt: row.created_at, updatedAt: row.updated_at }
+    return { id: row.id, name: row.name, description: row.description, status: row.status, stateRevision: row.state_revision, scope: row.scope, currentVersion: row.current_version, projectIds: projects.map((entry) => entry.destination_id), createdAt: row.created_at, updatedAt: row.updated_at }
   }
 }
 

@@ -99,7 +99,7 @@ export class AcademyService {
 
 
   snapshot(): AcademySnapshot { return { skills: this.store.list(), destinations: this.store.listDestinations(), conflicts: this.store.conflictSummaries() } }
-  list(status?: 'ACTIVE' | 'ARCHIVED') { return this.store.list(status) }
+  list(status?: 'ACTIVE' | 'DISABLED' | 'ARCHIVED') { return this.store.list(status === 'ARCHIVED' ? 'DISABLED' : status) }
   get(id: string) { return this.store.get(id) }
   history(id: string): AcademySkillVersion[]
   history(id: string, options: { metadataOnly: true }): AcademySkillVersionMetadata[]
@@ -219,6 +219,14 @@ export class AcademyService {
     this.emitCanonicalChange()
     this.scheduleReconciliationForSkill(value.id)
     if (mode === 'RECEIPT') return this.immediateReceipt(value)
+    return value
+  }
+
+  async setEnabled(id: string, enabled: boolean, expectedStateRevision: number) {
+    this.assertNotClosed()
+    const value = this.store.setEnabled(id, enabled, expectedStateRevision)
+    this.emitCanonicalChange()
+    this.scheduleReconciliationForSkill(value.id)
     return value
   }
 
@@ -448,7 +456,7 @@ export class AcademyService {
 
     const items: AcademySkillDeliveryDestinationStatus[] = []
 
-    if (skill.status === 'ARCHIVED') {
+    if (skill.status === 'DISABLED') {
       for (const destination of destinations) {
         const isReconciling = this.reconcilingDestinations.has(destination.id) || this.dirtyDestinations.has(destination.id)
         const hasProjection = this.store.getProjection(skill.id, destination.id) !== null
