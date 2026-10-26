@@ -129,6 +129,7 @@ export class PreviewStackAdapter {
       const members = (await owner.processes()).processes
       if (!members.some(p => p.pid === electron.pid) || (electron.rendererPid && !members.some(p => p.pid === electron.rendererPid))) throw new Error('NESTED_JOB_INCOMPATIBLE')
       if (electron.window?.visible && electron.window.rendererInitialized && electron.window.presentedNs) this.presentation ??= electron.window.presentedNs
+      if (electron.window && !this.presentation) throw new Error('WINDOW_NOT_PRESENTED')
       processEvidence = { at, members: members.map(p => ({ ...p, role: p.pid === electron.rendererPid ? 'Renderer' : electron.processes.find(m => m.pid === p.pid)?.type ?? 'Session bootstrap' })) }
     }
     coverage.push({ stage: 'ENDPOINT', component: 'PROCESS', status: 'VERIFIED', fingerprint: previewFingerprint(listener), evidenceRef: 'windows-tcp/job-membership', at, reasonCode: 'SESSION_ENDPOINT_OWNER_VERIFIED' })

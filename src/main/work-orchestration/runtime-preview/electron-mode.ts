@@ -66,12 +66,13 @@ export async function initializeElectronPreview(app: App) {
     try {
       const transforms = JSON.parse(readFileSync(file, 'utf8')) as Array<{ path: string; sourceDigest: string; transformDigest: string }>
       if (transforms.length > 12 || !transforms.some(t => t.path === report.path && t.sourceDigest === report.sourceDigest && t.transformDigest === report.transformDigest)) return
-      rendererModules.set(report.path, report); rendererPid = event.sender.getOSProcessId(); save()
+      rendererModules.set(report.path, report); rendererPid = event.sender.getOSProcessId(); save(); setImmediate(save)
     } catch { }
   })
   app.on('browser-window-created', (_event, window) => {
     createdNs ??= process.hrtime.bigint().toString()
     window.on('show', save)
+    window.webContents.on('did-stop-loading', save)
     window.webContents.on('did-finish-load', () => { loadedNs ??= process.hrtime.bigint().toString(); rendererPid = window.webContents.getOSProcessId(); save() })
     window.webContents.on('render-process-gone', (_event, details) => { rendererFailure = details.reason; rendererPid = null; rendererModules.clear(); save() })
     window.webContents.on('preload-error', () => { preload = []; rendererFailure = 'PRELOAD_FAILURE'; save() })

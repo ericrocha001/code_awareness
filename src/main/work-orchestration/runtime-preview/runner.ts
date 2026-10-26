@@ -16,12 +16,14 @@ export interface PreparedPreview {
   guard: () => Promise<void>
   observeSource?: () => Promise<NonNullable<PreviewPreflight['snapshot']>>
 }
-export interface PreviewLaunchAuthority { prepare(selection: PreviewSelection, timing?: PreviewStartClock): Promise<PreparedPreview> }
+type LaunchContext = Awaited<ReturnType<PreviewRepositories['open']>>
+export interface PreviewLaunchAuthority { prepare(selection: PreviewSelection, timing?: PreviewStartClock, context?: LaunchContext): Promise<PreparedPreview> }
 export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
   constructor(private readonly repositories: PreviewRepositories, private readonly profiles: PreviewProfileStore,
     private readonly preflight: PreviewPreflightService) {}
-  async prepare(selection: PreviewSelection, timing?: PreviewStartClock): Promise<PreparedPreview> {
-    const context = await this.repositories.open(selection.repositoryId, selection.worktreeId)
+  async prepare(selection: PreviewSelection, timing?: PreviewStartClock, knownContext?: LaunchContext): Promise<PreparedPreview> {
+    const context = knownContext ?? await this.repositories.open(selection.repositoryId, selection.worktreeId)
+    context.guard()
     const check = async () => { context.guard(); const run = () => this.preflight.check(context.git, selection, timing); const result = await (timing ? timing.measure('preflight', run) : run()); context.guard(); return result }
     const result = await check()
     const identity = await context.git.getCoordinationIdentity(selection.worktreeId)
@@ -101,11 +103,11 @@ export class RuntimePreviewRunner {
     if (!record.termination || record.termination.supervisorExit) return record
     return this.change(record, { termination: { ...record.termination, supervisorExit: { observedAt: new Date().toISOString() } } })
   }
-  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void>; timing?: PreviewStartClock }): Promise<PreviewSessionRecord> {
+  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void>; timing?: PreviewStartClock; launchContext?: LaunchContext }): Promise<PreviewSessionRecord> {
 
     const selection = sessionSchema.shape.selection.safeParse(input.selection)
     if (!selection.success) return Promise.reject(selection.error)
-    input = { operationId: input.operationId, selection: selection.data, guard: input.guard, timing: input.timing }
+    input = { operationId: input.operationId, selection: selection.data, guard: input.guard, timing: input.timing, launchContext: input.launchContext }
     const timing = input.timing ?? new PreviewStartClock()
     return this.command(async () => {
       await input.guard?.()
@@ -116,7 +118,7 @@ export class RuntimePreviewRunner {
         return this.inspectInternal(previous.sessionId)
       }
       if (this.store.active()) throw new Error('PREVIEW_SESSION_BUSY')
-      const prepared = await timing.measure('authority', () => this.authority.prepare(input.selection, timing))
+      const prepared = await timing.measure('authority', () => this.authority.prepare(input.selection, timing, input.launchContext))
       const originalGuard = prepared.guard
       prepared.guard = () => timing.measure('guard', originalGuard)
       const { profile, preflight } = prepared

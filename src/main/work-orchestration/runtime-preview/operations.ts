@@ -66,8 +66,9 @@ export class RuntimePreviewOperations {
     if (!profile || previewFingerprint(profile) !== target.fingerprint) throw new Error('PROFILE_CHANGED')
     return profile
   }
-  private async check(target: PreviewSelection, timing?: PreviewStartClock) {
-    const context = await this.repositories.open(target.repositoryId, target.worktreeId)
+  private async check(target: PreviewSelection, timing?: PreviewStartClock, knownContext?: Awaited<ReturnType<PreviewRepositories['open']>>) {
+    const context = knownContext ?? await this.repositories.open(target.repositoryId, target.worktreeId)
+    context.guard()
     const check = () => this.preflight.check(context.git, target, timing)
     const value = await (timing ? timing.measure('preflight', check) : check()); context.guard()
     return { kind: 'PREFLIGHT' as const, preflight: value, startAllowed: value.status === 'SUPPORTED' || diagnosticBootstrapAllowed(value, await this.profile(target)) }
@@ -183,7 +184,7 @@ export class RuntimePreviewOperations {
       return blocked(code, messages[code] ?? 'Não foi possível formar um perfil seguro para este checkout. Confira a compatibilidade V5 e as dependências desta Worktree nos detalhes.')
     }
     const target = { repositoryId: request.repositoryId, worktreeId: tree.worktreeId, generation: tree.generation, profileId: profile.profileId, fingerprint: previewFingerprint(profile) }
-    const before = await this.check(target, timing)
+    const before = await this.check(target, timing, context)
     if (before.preflight.diagnostics.some(d => !['PROFILE_APPROVAL_REQUIRED', 'ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: before.preflight })
     await verify()
     if (!await this.profiles.approved(profile)) {
@@ -191,9 +192,9 @@ export class RuntimePreviewOperations {
       catch (error) { if (error instanceof Error && error.message === 'PROFILE_APPROVAL_REQUIRED') return blocked('PROFILE_APPROVAL_REQUIRED', 'Execução cancelada. Nenhum aplicativo foi iniciado.'); throw error }
     }
     await verify()
-    const checked = await this.check(target, timing)
+    const checked = await this.check(target, timing, context)
     if (!checked.startAllowed) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: checked.preflight })
-    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing })
+    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context })
     return { success: true, data: { kind: 'SESSION', session: await this.view(record, true), pending: false } }
   }
   private async view(record: PreviewSessionRecord, current: boolean, known?: PreviewQualification): Promise<PreviewSessionView> {
