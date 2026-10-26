@@ -211,10 +211,19 @@ export class RuntimePreviewRunner {
           await prepared.guard()
         }
         await input.guard?.()
-        if (cache) await timing.measure('cache', () => cache!.finish(true))
         timing.ready()
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE', startTiming: timing.snapshot(), ...(cache ? { buildCache: cache.receipt } : {}) })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
+        if (cache) {
+          const retained = cache
+          // STOP joins this existing serialization before deleting the private session directory.
+          void this.serial(async () => {
+            try {
+              await timing.measure('cache', () => retained.finish(true))
+              this.change(this.store.read(sessionId), { buildCache: retained.receipt, startTiming: timing.snapshot() })
+            } catch { await retained.finish(false) }
+          })
+        }
         return record
       } catch (error) {
         await cache?.finish(false)

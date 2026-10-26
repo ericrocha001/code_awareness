@@ -287,6 +287,41 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
       }
       if (agentIntent && command === 'stop-agent') await mcp('stop_runtime_preview', { sessionId })
       if (fastStart && command === 'startup-evidence') await mcp('read_runtime_preview_evidence', { sessionId, section: 'RUNTIME', limit: 1 })
+      if (fastStart && command === 'ready-stop') {
+        const deadline = Date.now() + 240000
+        let record
+        while (Date.now() < deadline) {
+          record = store.list().find(value => value.operationId === branchIntent.operationId)
+          if (record?.state === 'FAILED') throw new Error(record.failure)
+          if (record?.state === 'RUNNING' && record.readiness === 'READY' && record.attestation.loadedCode === 'VERIFIED') break
+          await new Promise(resolve => setTimeout(resolve, 50))
+        }
+        assert.equal(record?.readiness, 'READY'); sessionId = record.sessionId
+        const status = await mcp('get_runtime_preview_status', { sessionId }); assert.equal(status.data.ready, true)
+        const config = JSON.parse(fs.readFileSync(path.join(store.runtime(sessionId), 'configuration.json')))
+        const forbidden = [config.token, sessionId, store.runtime(sessionId), `http://127.0.0.1:${config.port}`, 'artifact-4e4b69c9-05a5-4015-89e6-11199c7d1649', 'SQLite format 3\0']
+        save('ready-before-retention', { success: true, sessionId, cachePending: record.buildCache?.retainedBytes === 0, technicalWindowMs: record.startTiming.technicalWindowMs, technicalReadyMs: record.startTiming.technicalReadyMs })
+        assert.equal((await mcp('stop_runtime_preview', { sessionId })).success, true)
+        let stopped
+        while (Date.now() < deadline) {
+          stopped = await mcp('get_runtime_preview_status', { sessionId })
+          if (stopped.data.phase === 'STOPPED') break
+          if (stopped.data.phase === 'UNKNOWN') await runner.inspect(sessionId)
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
+        assert.equal(stopped.data.resourcesReleased, true); assert.equal(stopped.data.activeProcesses, 0); assert.equal(stopped.data.handlesClosed, true)
+        assert.equal(fs.existsSync(store.runtime(sessionId)), false)
+        const cacheRoot = path.join(store.root, 'build-cache'); let files = 0, bytes = 0
+        const scan = folder => {
+          for (const entry of fs.readdirSync(folder, { withFileTypes: true })) {
+            const file = path.join(folder, entry.name)
+            if (entry.isDirectory()) scan(file)
+            else { const content = fs.readFileSync(file); files++; bytes += content.length; for (const value of forbidden) assert.equal(content.includes(Buffer.from(value)), false) }
+          }
+        }
+        scan(cacheRoot)
+        save('retention-stop-barrier', { success: true, sessionId, cache: store.read(sessionId).buildCache, files, bytes, secretsAbsent: true, privateResourcesReleased: true })
+      }
       if (fastStart && command === 'hmr-check') {
         const file = path.join(root, 'src/renderer/src/App.tsx'), original = fs.readFileSync(file)
         const observe = async expected => {

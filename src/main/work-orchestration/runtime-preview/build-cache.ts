@@ -18,6 +18,14 @@ const inside = (root: string, file: string) => {
   if (!path || path === '..' || path.startsWith('..' + sep) || isAbsolute(path)) throw new Error('BUILD_CACHE_PATH_INVALID')
 }
 const same = (a: string, b: string) => process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b
+async function boundedRead<T, R>(values: T[], read: (value: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = []
+  for (let offset = 0; offset < values.length; offset += 8) {
+    const batch = await Promise.allSettled(values.slice(offset, offset + 8).map(read))
+    for (const result of batch) { if (result.status === 'rejected') throw result.reason; results.push(result.value) }
+  }
+  return results
+}
 
 export class PreviewBuildCache {
   readonly receipt: z.infer<typeof buildCacheReceipt> = { status: 'DISABLED', key: null, restoredBytes: 0, retainedBytes: 0, reasonCode: null, mainPreload: 'RECOMPILED' }
@@ -29,12 +37,13 @@ export class PreviewBuildCache {
     private readonly profile: PreviewProfile, private readonly selection: PreviewSelection, private readonly basis: string,
     private readonly forbidden: string[], private readonly signal?: AbortSignal) {}
   private async safe(file: string) {
-    if (!same(await fs.realpath(file), resolve(file)) || (await fs.lstat(file)).isSymbolicLink()) throw new Error('BUILD_CACHE_LINK')
+    const [physical, stat] = await Promise.all([fs.realpath(file), fs.lstat(file)])
+    if (!same(physical, resolve(file)) || stat.isSymbolicLink()) throw new Error('BUILD_CACHE_LINK')
+    return stat
   }
   private async bytes(file: string) {
     this.signal?.throwIfAborted()
-    await this.safe(file)
-    const stat = await fs.lstat(file)
+    const stat = await this.safe(file)
     if (!stat.isFile() || stat.size > limit) throw new Error('BUILD_CACHE_LIMIT')
     return fs.readFile(file)
   }
@@ -62,12 +71,12 @@ export class PreviewBuildCache {
     for (const folder of ['vite/dist', 'electron-vite/dist', '@vitejs/plugin-react/dist', 'esbuild/lib']) await compilerInputs(join(this.worktree, 'node_modules', folder))
     files.push(...compilerFiles.sort())
     let total = 0
-    for (const file of files) {
+    entries.push(...await boundedRead(files, async file => {
       const path = resolve(this.worktree, file); inside(this.worktree, path)
       const bytes = await this.bytes(path); total += bytes.length
       if (total > limit) throw new Error('BUILD_CACHE_LIMIT')
-      entries.push([file, bytesFingerprint(bytes)])
-    }
+      return [file, bytesFingerprint(bytes)]
+    }))
     return previewFingerprint([this.selection.repositoryId, this.selection.worktreeId, this.selection.generation, this.selection.fingerprint, this.profile.revision, this.worktree, this.basis,
       this.profile.dependencies, this.profile.runtimeVersion, this.profile.adapter!.nativeModules, entries])
   }
@@ -95,7 +104,7 @@ export class PreviewBuildCache {
       const manifest = manifestSchema.parse(JSON.parse(raw.toString()))
       if (manifest.key !== key) throw new Error('BUILD_CACHE_CORRUPT')
       let total = 0
-      for (const input of manifest.inputs) if ((await cache.input(input.path)).hash !== input.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
+      await cache.verifyInputs(manifest.inputs)
       const destination = join(directory, 'vite-cache', 'deps')
       const content: Array<[string, Buffer]> = []
       for (const file of manifest.files) {
@@ -131,7 +140,12 @@ export class PreviewBuildCache {
   async guard() {
     if (!this.entry || !this.receipt.key) return
     if (await this.key() !== this.receipt.key) throw new Error('BUILD_CACHE_INPUT_CHANGED')
-    for (const input of this.manifest?.inputs ?? []) if ((await this.input(input.path)).hash !== input.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
+    await this.verifyInputs(this.manifest?.inputs ?? [])
+  }
+  private async verifyInputs(inputs: Manifest['inputs']) {
+    await boundedRead(inputs, async input => {
+      if ((await this.input(input.path)).hash !== input.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
+    })
   }
   async finish(success: boolean) {
     if (!this.entry || !this.receipt.key) return
@@ -164,6 +178,7 @@ export class PreviewBuildCache {
       const loadPackageMaps = async () => {
         if (mapsLoaded) return
         mapsLoaded = true
+        const maps: string[] = []
         const walk = async (folder: string): Promise<void> => {
           await this.safe(folder)
           for (const entry of await fs.readdir(folder, { withFileTypes: true })) {
@@ -172,15 +187,20 @@ export class PreviewBuildCache {
             if (entry.isDirectory()) { if (entry.name !== 'node_modules') await walk(file); continue }
             if (!/\.[cm]?js\.map$/.test(entry.name)) continue
             if (++mapCount > 4096) throw new Error('BUILD_CACHE_LIMIT')
+            maps.push(file)
+          }
+        }
+        for (const folder of packageRoots) await walk(folder)
+        await boundedRead(maps, async file => {
             const raw = await this.bytes(file); mapBytes += raw.length
             if (mapBytes > limit) throw new Error('BUILD_CACHE_LIMIT')
             const map = JSON.parse(raw.toString())
-            if (!Array.isArray(map.sources) || !Array.isArray(map.sourcesContent) || map.sources.length !== map.sourcesContent.length) continue
-            const mapInput = await this.input(file)
-            if (bytesFingerprint(raw) !== mapInput.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
+            if (!Array.isArray(map.sources) || !Array.isArray(map.sourcesContent) || map.sources.length !== map.sourcesContent.length) return
+            inside(join(this.worktree, 'node_modules'), file)
+            const mapInput = { path: file, hash: bytesFingerprint(raw) }
             let javascript: { path: string; hash: string }
             try { javascript = await this.input(file.slice(0, -4)) }
-            catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error }
+            catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
             const backing = [mapInput, javascript]
             for (let index = 0; index < map.sources.length; index++) {
               if (typeof map.sources[index] !== 'string' || typeof map.sourcesContent[index] !== 'string') continue
@@ -189,9 +209,7 @@ export class PreviewBuildCache {
               candidates.push({ content: map.sourcesContent[index], files: backing }); sourceMaps.set(source, candidates)
               if (sourceMaps.size > 16384) throw new Error('BUILD_CACHE_LIMIT')
             }
-          }
-        }
-        for (const folder of packageRoots) await walk(folder)
+        })
       }
       const stamps: Array<[string, string]> = []
       for (const name of names.sort()) {
@@ -208,11 +226,18 @@ export class PreviewBuildCache {
           for (let index = 0; index < map.sources.length; index++) {
             const file = resolve(directory, map.sourceRoot ?? '', map.sources[index])
             let verified = false
+            const candidates = sourceMaps.get(file)?.filter(candidate => candidate.content === map.sourcesContent[index])
+            if (candidates?.length) {
+              for (const candidate of candidates) for (const input of candidate.files) inputs.set(input.path, input.hash)
+              verified = true
+            }
             try {
-              inside(join(this.worktree, 'node_modules'), file)
-              const source = await this.bytes(file), input = await this.input(file)
-              if (source.toString('utf8') !== map.sourcesContent[index] || bytesFingerprint(source) !== input.hash) throw new Error('BUILD_CACHE_SOURCE_UNVERIFIABLE')
-              inputs.set(input.path, input.hash); verified = true
+              if (!verified) {
+                inside(join(this.worktree, 'node_modules'), file)
+                const source = await this.bytes(file)
+                if (source.toString('utf8') !== map.sourcesContent[index]) throw new Error('BUILD_CACHE_SOURCE_UNVERIFIABLE')
+                inputs.set(file, bytesFingerprint(source)); verified = true
+              }
             } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
             if (!verified) {
               await loadPackageMaps()
@@ -227,10 +252,10 @@ export class PreviewBuildCache {
       }
       if (await this.stamp(metadataFile) !== metadataStamp) throw new Error('BUILD_CACHE_CHANGED')
       for (const [path, stamp] of stamps) if (await this.stamp(path) !== stamp) throw new Error('BUILD_CACHE_CHANGED')
-      const manifest = manifestSchema.parse({ key: this.receipt.key, files: output.map(([name, bytes]) => ({ name, hash: bytesFingerprint(bytes), bytes: bytes.length })), inputs: [...inputs].map(([path, hash]) => ({ path, hash })) })
+      const manifest = manifestSchema.parse({ key: this.receipt.key, files: output.map(([name, bytes]) => ({ name, hash: bytesFingerprint(bytes), bytes: bytes.length })), inputs: [...inputs].sort(([a], [b]) => a.localeCompare(b)).map(([path, hash]) => ({ path, hash })) })
       const manifestBytes = Buffer.from(JSON.stringify(manifest))
       if (manifestBytes.length > 4 * 1048576 || total + manifestBytes.length > limit) throw new Error('BUILD_CACHE_LIMIT')
-      for (const input of manifest.inputs) if ((await this.input(input.path)).hash !== input.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
+      await this.verifyInputs(manifest.inputs)
       await this.guard()
       temporary = this.entry + '-' + randomUUID() + '.tmp'
       await fs.mkdir(join(temporary, 'data'), { recursive: true, mode: 0o700 })

@@ -13,6 +13,7 @@ import { RepositoryCatalogStore } from '../../repository-catalog/repository-cata
 import { RepositoryContinuumSession } from '../../continuum/project-continuum-session'
 import { RepositoryPreviewContextProvisioner, previewCorpusPath, previewCatalogPath } from './context-data'
 import { bytesFingerprint, type PreviewProfile } from '../preview-profile'
+import { PreviewStartClock } from './start-timing'
 
 const cleanup: Array<() => void> = []
 afterEach(() => { cleanup.reverse().forEach(fn => fn()); cleanup.length = 0 })
@@ -30,6 +31,20 @@ function setup(policy: 'EMPTY' | 'REPOSITORY_SNAPSHOT' = 'REPOSITORY_SNAPSHOT') 
   return { root, directory, worktree, host, store, service, provisioner, input, file }
 }
 describe('private preview corpus provisioning with real SQLite', () => {
+  it.each(['before', 'backup'])('cancels %s preparation without exposing a completed corpus or retaining SQLite handles', async when => {
+    const f = setup(), controller = new AbortController(), timing = new PreviewStartClock()
+    f.service.publish(markdown('Canonical remains intact'))
+    const before = f.service.get(f.service.list().artifacts[0].artifactId)
+    const measure = timing.measure.bind(timing)
+    timing.measure = async (stage, work) => {
+      if (stage === 'context_backup') controller.abort(new Error('PREPARATION_CANCELLED'))
+      return measure(stage, work)
+    }
+    if (when === 'before') controller.abort(new Error('PREPARATION_CANCELLED'))
+    await expect(f.provisioner.prepare({ ...f.input, timing, signal: controller.signal })).rejects.toThrow('PREPARATION_CANCELLED')
+    expect(f.service.get(before!.artifactId)).toEqual(before)
+    rmSync(f.directory, { recursive: true }); expect(existsSync(f.directory)).toBe(false)
+  })
   it('backs up committed WAL, revisions and actual media; retains logical identity and isolates writes', async () => {
     const f = setup()
     f.service.mutateTags({ repositoryId: 'logical-repository', intent: 'create', tag: { slug: 'canonical', name: 'Canonical' } })
