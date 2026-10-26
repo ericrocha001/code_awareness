@@ -94,6 +94,18 @@ test('requires fresh native optimizer evidence and refuses custom optimizer outp
   assert.equal(cache.receipt.reasonCode, 'BUILD_CACHE_CUSTOM_OPTIMIZER'); assert.equal(cache.receipt.retainedBytes, 0)
 })
 
+test('proves virtual original sources against distributed package maps and their JavaScript bytes', async () => {
+  const f = await fixture(), cache = await f.prepare(); await f.materialize()
+  const original = 'export const original: string = "public package source"', file = path.join(f.worktree, 'node_modules/example/index.js.map')
+  await fs.writeFile(file, JSON.stringify({ version: 3, sources: ['src/original.ts'], sourcesContent: [original] }))
+  const virtual = path.join(f.worktree, 'node_modules/example/src/original.ts'), deps = path.join(f.directory, 'vite-cache/deps')
+  await fs.writeFile(path.join(deps, 'example.js.map'), JSON.stringify({ version: 3, sources: [path.relative(deps, virtual)], sourcesContent: [original] }))
+  await cache.finish(true); assert.ok(cache.receipt.retainedBytes > 0, JSON.stringify(cache.receipt))
+  const warm = await f.prepare(path.join(f.base, 'next')); assert.ok(warm.receipt.restoredBytes > 0)
+  await fs.writeFile(path.join(f.worktree, 'node_modules/example/index.js'), 'changed while preserving package map')
+  await assert.rejects(warm.guard(), /BUILD_CACHE_INPUT_CHANGED/)
+})
+
 test('isolates two physical Git Worktrees of the same repository', async () => {
   const f = await fixture(), git = require('node:util').promisify(require('node:child_process').execFile)
   const run = (...args) => git('git', ['-C', f.worktree, ...args], { windowsHide: true })

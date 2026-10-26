@@ -1,5 +1,5 @@
 import * as fs from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { bytesFingerprint, previewFingerprint, type PreviewProfile } from '../preview-profile'
@@ -11,7 +11,7 @@ export const buildCacheReceipt = z.object({ status: z.enum(['DISABLED', 'MISS', 
   restoredBytes: z.number().int().nonnegative().max(limit), retainedBytes: z.number().int().nonnegative().max(limit),
   reasonCode: z.string().max(80).nullable(), mainPreload: z.literal('RECOMPILED') }).strict()
 const manifestSchema = z.object({ key: digest, files: z.array(z.object({ name: z.string().regex(/^[\w.-]+$/).refine(name => name !== '.' && name !== '..'), hash: digest, bytes: z.number().int().min(0).max(limit) }).strict()).max(1024),
-  inputs: z.array(z.object({ path: z.string().max(2048), hash: digest }).strict()).max(4096) }).strict()
+  inputs: z.array(z.object({ path: z.string().max(2048), hash: digest }).strict()).max(8192) }).strict()
 type Manifest = z.infer<typeof manifestSchema>
 const inside = (root: string, file: string) => {
   const path = relative(root, resolve(file))
@@ -147,14 +147,52 @@ export class PreviewBuildCache {
       const reused = this.restoredMetadata === bytesFingerprint(raw) && this.restoredStamp === await this.stamp(metadataFile)
       if (!metadata.optimized || !metadata.chunks || typeof metadata.browserHash !== 'string') throw new Error('BUILD_CACHE_METADATA_INVALID')
       const names = await fs.readdir(directory), inputs = new Map<string, string>(), output: Array<[string, Buffer]> = []
+      const sourceMaps = new Map<string, Array<{ content: string; files: Array<{ path: string; hash: string }> }>>()
+      const packageRoots = new Set<string>()
       if (names.length > 1024) throw new Error('BUILD_CACHE_LIMIT')
       for (const item of Object.values(metadata.optimized) as Array<{ src: string; file: string }>) {
         const source = await this.input(resolve(directory, item.src)); inputs.set(source.path, source.hash); item.src = source.path
+        const parts = relative(join(this.worktree, 'node_modules'), source.path).split(sep)
+        const nested = parts.lastIndexOf('node_modules') + 1
+        packageRoots.add(join(this.worktree, 'node_modules', ...parts.slice(0, nested + (parts[nested].startsWith('@') ? 2 : 1))))
       }
       for (const item of [...Object.values(metadata.optimized), ...Object.values(metadata.chunks)] as Array<{ file: string }>) {
         if (!/^\.?\/?[\w.-]+\.js$/.test(item.file)) throw new Error('BUILD_CACHE_METADATA_INVALID')
       }
       let total = 0
+      let mapsLoaded = false, mapCount = 0, mapBytes = 0
+      const loadPackageMaps = async () => {
+        if (mapsLoaded) return
+        mapsLoaded = true
+        const walk = async (folder: string): Promise<void> => {
+          await this.safe(folder)
+          for (const entry of await fs.readdir(folder, { withFileTypes: true })) {
+            const file = join(folder, entry.name)
+            if (entry.isSymbolicLink()) throw new Error('BUILD_CACHE_LINK')
+            if (entry.isDirectory()) { if (entry.name !== 'node_modules') await walk(file); continue }
+            if (!/\.[cm]?js\.map$/.test(entry.name)) continue
+            if (++mapCount > 4096) throw new Error('BUILD_CACHE_LIMIT')
+            const raw = await this.bytes(file); mapBytes += raw.length
+            if (mapBytes > limit) throw new Error('BUILD_CACHE_LIMIT')
+            const map = JSON.parse(raw.toString())
+            if (!Array.isArray(map.sources) || !Array.isArray(map.sourcesContent) || map.sources.length !== map.sourcesContent.length) continue
+            const mapInput = await this.input(file)
+            if (bytesFingerprint(raw) !== mapInput.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
+            let javascript: { path: string; hash: string }
+            try { javascript = await this.input(file.slice(0, -4)) }
+            catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue; throw error }
+            const backing = [mapInput, javascript]
+            for (let index = 0; index < map.sources.length; index++) {
+              if (typeof map.sources[index] !== 'string' || typeof map.sourcesContent[index] !== 'string') continue
+              const source = resolve(dirname(file), map.sourceRoot ?? '', map.sources[index])
+              const candidates = sourceMaps.get(source) ?? []
+              candidates.push({ content: map.sourcesContent[index], files: backing }); sourceMaps.set(source, candidates)
+              if (sourceMaps.size > 16384) throw new Error('BUILD_CACHE_LIMIT')
+            }
+          }
+        }
+        for (const folder of packageRoots) await walk(folder)
+      }
       const stamps: Array<[string, string]> = []
       for (const name of names.sort()) {
         if (name !== '_metadata.json' && name !== 'package.json' && !/^[\w.-]+\.js(?:\.map)?$/.test(name)) throw new Error('BUILD_CACHE_UNSAFE_OUTPUT')
@@ -169,12 +207,20 @@ export class PreviewBuildCache {
           if (!Array.isArray(map.sources) || !Array.isArray(map.sourcesContent) || map.sources.length !== map.sourcesContent.length) throw new Error('BUILD_CACHE_SOURCE_UNVERIFIABLE')
           for (let index = 0; index < map.sources.length; index++) {
             const file = resolve(directory, map.sourceRoot ?? '', map.sources[index])
-            inside(join(this.worktree, 'node_modules'), file)
-            const source = await this.bytes(file)
-            const input = await this.input(file)
-            if (source.toString('utf8') !== map.sourcesContent[index] || bytesFingerprint(source) !== input.hash) throw new Error('BUILD_CACHE_SOURCE_UNVERIFIABLE')
-            inputs.set(input.path, input.hash)
-            if (inputs.size > 4096) throw new Error('BUILD_CACHE_LIMIT')
+            let verified = false
+            try {
+              inside(join(this.worktree, 'node_modules'), file)
+              const source = await this.bytes(file), input = await this.input(file)
+              if (source.toString('utf8') !== map.sourcesContent[index] || bytesFingerprint(source) !== input.hash) throw new Error('BUILD_CACHE_SOURCE_UNVERIFIABLE')
+              inputs.set(input.path, input.hash); verified = true
+            } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
+            if (!verified) {
+              await loadPackageMaps()
+              const backing = sourceMaps.get(file)?.filter(candidate => candidate.content === map.sourcesContent[index])
+              if (!backing?.length) throw new Error('BUILD_CACHE_SOURCE_UNVERIFIABLE')
+              for (const candidate of backing) for (const input of candidate.files) inputs.set(input.path, input.hash)
+            }
+            if (inputs.size > 8192) throw new Error('BUILD_CACHE_LIMIT')
           }
         }
         output.push([name, bytes])
@@ -182,15 +228,17 @@ export class PreviewBuildCache {
       if (await this.stamp(metadataFile) !== metadataStamp) throw new Error('BUILD_CACHE_CHANGED')
       for (const [path, stamp] of stamps) if (await this.stamp(path) !== stamp) throw new Error('BUILD_CACHE_CHANGED')
       const manifest = manifestSchema.parse({ key: this.receipt.key, files: output.map(([name, bytes]) => ({ name, hash: bytesFingerprint(bytes), bytes: bytes.length })), inputs: [...inputs].map(([path, hash]) => ({ path, hash })) })
+      const manifestBytes = Buffer.from(JSON.stringify(manifest))
+      if (manifestBytes.length > 4 * 1048576 || total + manifestBytes.length > limit) throw new Error('BUILD_CACHE_LIMIT')
       for (const input of manifest.inputs) if ((await this.input(input.path)).hash !== input.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
       await this.guard()
       temporary = this.entry + '-' + randomUUID() + '.tmp'
       await fs.mkdir(join(temporary, 'data'), { recursive: true, mode: 0o700 })
       for (const [name, bytes] of output) await fs.writeFile(join(temporary, 'data', name), bytes, { flag: 'wx', mode: 0o600 })
-      await fs.writeFile(join(temporary, 'entry.json'), JSON.stringify(manifest), { flag: 'wx', mode: 0o600 })
+      await fs.writeFile(join(temporary, 'entry.json'), manifestBytes, { flag: 'wx', mode: 0o600 })
       await this.remove(this.entry); await fs.rename(temporary, this.entry); temporary = undefined
       this.receipt.status = reused ? 'HIT' : this.receipt.restoredBytes ? 'REBUILT' : 'MISS'
-      this.receipt.retainedBytes = total
+      this.receipt.retainedBytes = total + manifestBytes.length
       await this.prune()
     } catch (error) {
       this.reject(error instanceof Error && /^BUILD_CACHE_[A-Z_]+$/.test(error.message) ? error.message : 'BUILD_CACHE_UNAVAILABLE')
@@ -210,7 +258,7 @@ export class PreviewBuildCache {
           await this.safe(path)
           const bytes = await this.bytes(join(path, 'entry.json'))
           const manifest = manifestSchema.parse(JSON.parse(bytes.toString()))
-          entries.push({ path, at: (await fs.stat(path)).mtimeMs, bytes: manifest.files.reduce((sum, file) => sum + file.bytes, 0) })
+          entries.push({ path, at: (await fs.stat(path)).mtimeMs, bytes: bytes.length + manifest.files.reduce((sum, file) => sum + file.bytes, 0) })
         } catch { await this.remove(path).catch(() => {}) }
       }
     }
