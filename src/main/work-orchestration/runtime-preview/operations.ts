@@ -14,6 +14,7 @@ import type { RepositoryContinuumSession } from '../../continuum/project-continu
 import type { CodeAwarenessProfileResolver } from './code-awareness-profile'
 import { previewStatus } from './status'
 import type { PreviewIntentReceipt } from './session-store'
+import { PreviewStartClock } from './start-timing'
 
 export const branchIntentSchema = z.object({ branch: z.string().min(1).max(512).regex(/^[^\0\r\n]+$/), operationId: z.string().uuid(),
   repositoryId: z.string().min(1).max(128).optional(), expectedHead: z.string().regex(/^[a-f0-9]{40}$/).optional(), worktreeId: z.string().min(1).max(128).optional() }).strict()
@@ -51,9 +52,10 @@ export class RuntimePreviewOperations {
     private readonly store: PreviewSessionStore, private readonly runner: RuntimePreviewRunner,
     private readonly confirm: (profile: PreviewProfile) => Promise<boolean>, private readonly ledger?: Pick<ValidationLedger, 'getProofWithFreshness'>,
     private readonly continuum?: Pick<RepositoryContinuumSession, 'getActiveService' | 'getActiveSession'>,
-    private readonly branchProfiles?: Pick<CodeAwarenessProfileResolver, 'resolve'>) {
-    this.preflight = new PreviewPreflightService(profiles)
+    private readonly branchProfiles?: Pick<CodeAwarenessProfileResolver, 'resolve'>, preflight?: PreviewPreflightService) {
+    this.preflight = preflight ?? new PreviewPreflightService(profiles)
   }
+  get preflightService() { return this.preflight }
   private record(sessionId: string) {
     const record = this.store.read(sessionId)
     this.repositories.resolve(record.selection.repositoryId).guard()
@@ -64,9 +66,10 @@ export class RuntimePreviewOperations {
     if (!profile || previewFingerprint(profile) !== target.fingerprint) throw new Error('PROFILE_CHANGED')
     return profile
   }
-  private async check(target: PreviewSelection) {
+  private async check(target: PreviewSelection, timing?: PreviewStartClock) {
     const context = await this.repositories.open(target.repositoryId, target.worktreeId)
-    const value = await this.preflight.check(context.git, target); context.guard()
+    const check = () => this.preflight.check(context.git, target, timing)
+    const value = await (timing ? timing.measure('preflight', check) : check()); context.guard()
     return { kind: 'PREFLIGHT' as const, preflight: value, startAllowed: value.status === 'SUPPORTED' || diagnosticBootstrapAllowed(value, await this.profile(target)) }
   }
   async getStatus(input: unknown): Promise<RuntimePreviewResult> {
@@ -90,6 +93,7 @@ export class RuntimePreviewOperations {
     try {
       guard()
       const intent = parsed.data
+      const timing = new PreviewStartClock()
       const repositoryId = intent.repositoryId ?? this.continuum?.getActiveSession()?.repositoryId
       if (!repositoryId) throw new Error('REPOSITORY_REQUIRED')
       const branch = intent.branch.startsWith('refs/') ? intent.branch : 'refs/heads/' + intent.branch
@@ -108,7 +112,7 @@ export class RuntimePreviewOperations {
         let result: RuntimePreviewResult
         try {
           const context = await this.repositories.open(repositoryId)
-          const inventory = await context.git.getBranchInventory()
+          const inventory = await timing.measure('discovery', () => context.git.getBranchInventory())
           context.guard(); guard()
           const target = inventory.branches.find(b => b.ref === branch && b.repositoryId === repositoryId)
           if (!target) throw new Error('BRANCH_NOT_FOUND')
@@ -120,7 +124,7 @@ export class RuntimePreviewOperations {
           receipt.worktreeId = tree?.worktreeId ?? (candidates.length === 1 ? candidates[0].worktreeId : null)
           if (this.pending?.operationId === intent.operationId) this.pending.intent = receipt
           result = await this.runBranch({ action: 'RUN_BRANCH_APP', repositoryId, ref: target.ref, revision: target.revision, operationId: intent.operationId,
-            ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard)
+            ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard, timing)
         } catch (error) { result = failure(error) }
         const session = result.success && result.data.kind === 'SESSION' ? result.data.session : null
         const blocked = result.success && result.data.kind === 'BRANCH_APP'
@@ -132,10 +136,10 @@ export class RuntimePreviewOperations {
       return this.getStatus({ operationId: intent.operationId })
     } catch (error) { return failure(error) }
   }
-  private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void): Promise<RuntimePreviewResult> {
+  private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void, timing = new PreviewStartClock()): Promise<RuntimePreviewResult> {
     const blocked = (reasonCode: string, message: string, details = {}): RuntimePreviewResult => ({ success: true, data: { kind: 'BRANCH_APP', reasonCode, message, ...details } })
     if (!this.branchProfiles) return blocked('APP_HOST_UNSUPPORTED', 'Esta instalação não oferece um perfil seguro para rodar o Code Awareness.')
-    const context = await this.repositories.open(request.repositoryId), inventory = await context.git.getBranchInventory()
+    const context = await this.repositories.open(request.repositoryId), inventory = await timing.measure('discovery', () => context.git.getBranchInventory())
     const observedBranch = inventory.branches.find(b => b.ref === request.ref && b.repositoryId === request.repositoryId)
     const branch = observedBranch ? structuredClone(observedBranch) : undefined
     if (!branch || branch.revision !== request.revision || branch.generation === 'UNKNOWN') throw new Error('BRANCH_CHANGED')
@@ -161,7 +165,7 @@ export class RuntimePreviewOperations {
       return blocked('PREVIEW_SESSION_ACTIVE', 'Já existe um aplicativo de preview ativo. Encerre essa sessão explicitamente antes de rodar outra branch.', { activeSession: await this.view(active, false) })
     }
     let profile: PreviewProfile
-    try { profile = await this.branchProfiles.resolve(request.repositoryId, tree.worktreeId, tree.path) }
+    try { profile = await timing.measure('profile', () => this.branchProfiles!.resolve(request.repositoryId, tree.worktreeId, tree.path)) }
     catch (error) {
       const result = failure(error)
       const code = !result.success ? result.code : 'APP_PROFILE_UNAVAILABLE'
@@ -179,17 +183,17 @@ export class RuntimePreviewOperations {
       return blocked(code, messages[code] ?? 'Não foi possível formar um perfil seguro para este checkout. Confira a compatibilidade V5 e as dependências desta Worktree nos detalhes.')
     }
     const target = { repositoryId: request.repositoryId, worktreeId: tree.worktreeId, generation: tree.generation, profileId: profile.profileId, fingerprint: previewFingerprint(profile) }
-    const before = await this.check(target)
+    const before = await this.check(target, timing)
     if (before.preflight.diagnostics.some(d => !['PROFILE_APPROVAL_REQUIRED', 'ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: before.preflight })
     await verify()
     if (!await this.profiles.approved(profile)) {
-      try { await this.profiles.approve(profile, this.confirm, () => { guard(); context.guard() }) }
+      try { await this.profiles.approve(profile, value => timing.measure('approval', () => this.confirm(value)), () => { guard(); context.guard() }) }
       catch (error) { if (error instanceof Error && error.message === 'PROFILE_APPROVAL_REQUIRED') return blocked('PROFILE_APPROVAL_REQUIRED', 'Execução cancelada. Nenhum aplicativo foi iniciado.'); throw error }
     }
     await verify()
-    const checked = await this.check(target)
+    const checked = await this.check(target, timing)
     if (!checked.startAllowed) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: checked.preflight })
-    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify })
+    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing })
     return { success: true, data: { kind: 'SESSION', session: await this.view(record, true), pending: false } }
   }
   private async view(record: PreviewSessionRecord, current: boolean, known?: PreviewQualification): Promise<PreviewSessionView> {
@@ -325,7 +329,7 @@ export class RuntimePreviewOperations {
       if (request.action === 'STOP') return this.mutate('stop:' + record.sessionId, record.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.stop(record.sessionId), true), pending: false } }))
       if (request.action === 'EVIDENCE') {
         const evidence = this.store.read(record.sessionId, request.revision)
-        const entries = request.section === 'COVERAGE' ? evidence.coverage : request.section === 'SOURCE' ? [{ selection: evidence.selection, source: evidence.sourceObservation?.snapshot ?? evidence.sourceSnapshot, at: evidence.at }] : [{ process: processView(evidence), compatibility: evidence.runtimeEvidence ?? null, termination: evidence.termination ?? null, stopIntent: evidence.stopIntent ?? null, ...(evidence.context ? { data: evidence.context.data, context: { repositoryId: evidence.context.selection.repositoryId, worktreeId: evidence.context.selection.worktreeId, generation: evidence.context.selection.generation, mode: evidence.context.mode } } : {}) }, ...evidence.resourceInventory.map(r => ({ name: r.name, kind: r.kind, state: r.state }))]
+        const entries = request.section === 'COVERAGE' ? evidence.coverage : request.section === 'SOURCE' ? [{ selection: evidence.selection, source: evidence.sourceObservation?.snapshot ?? evidence.sourceSnapshot, at: evidence.at }] : [{ process: processView(evidence), compatibility: evidence.runtimeEvidence ?? null, termination: evidence.termination ?? null, stopIntent: evidence.stopIntent ?? null, ...(evidence.startTiming ? { startTiming: evidence.startTiming } : {}), ...(evidence.context ? { data: evidence.context.data, context: { repositoryId: evidence.context.selection.repositoryId, worktreeId: evidence.context.selection.worktreeId, generation: evidence.context.selection.generation, mode: evidence.context.mode } } : {}) }, ...evidence.resourceInventory.map(r => ({ name: r.name, kind: r.kind, state: r.state }))]
         const offset = request.offset ?? 0, page = entries.slice(offset, offset + (request.limit ?? 8))
         return { success: true, data: { kind: 'EVIDENCE', sessionId: record.sessionId, revision: evidence.revision, section: request.section, entries: page, nextOffset: offset + page.length < entries.length ? offset + page.length : null } }
       }

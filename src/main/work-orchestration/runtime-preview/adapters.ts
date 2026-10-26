@@ -9,11 +9,13 @@ import type { PreviewPreflight } from '../../../shared/types/runtime-preview-typ
 import type { NativeOwner } from './native-owner'
 import type { PreviewSessionRecord } from './session-store'
 import { previewDataReceipt, type PreviewContextManifest } from './context-contract'
+import type { PreviewStartClock } from './start-timing'
 
 export function diagnosticBootstrapAllowed(result: PreviewPreflight, profile: PreviewProfile) {
   return !!profile.adapter && result.status === 'UNKNOWN' && result.diagnostics.length > 0 && result.diagnostics.every(d => ['ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))
 }
 const digest = z.string().regex(/^[a-f0-9]{64}$/)
+const monotonicTime = z.string().regex(/^\d{1,24}$/).nullable()
 export function verifyEndpointFree(port: number): Promise<void> {
   return new Promise((accept, reject) => {
     const socket = createServer(); socket.once('error', () => reject(new Error('ENDPOINT_COLLISION')))
@@ -27,6 +29,7 @@ const webEvidence = z.object({ schemaVersion: z.literal(1), sessionId: z.string(
     builds: z.array(z.object({ component: z.enum(['ELECTRON_MAIN', 'ELECTRON_PRELOAD']), artifactDigest: digest, sources: z.record(z.string(), digest) }).strict()).max(16),
     rendererPid: z.number().int().nullable(), rendererFailure: z.string().nullable(), sandboxObserved: z.boolean().nullable(),
     rendererModules: z.array(z.object({ path: z.string(), sourceDigest: digest, transformDigest: digest }).strict()).max(12),
+    window: z.object({ visible: z.boolean(), rendererInitialized: z.boolean(), createdNs: monotonicTime, loadedNs: monotonicTime, presentedNs: monotonicTime }).strict().optional(),
     context: z.object({ mode: z.literal('PREVIEW'), repositoryId: z.string(), worktreeId: z.string(), generation: z.string(), profileRevision: z.number().int(),
       activeCheckout: z.string(), identity: z.literal('IDENTITY_BOUND'), data: previewDataReceipt }).strict().optional(),
     resourcesIsolated: z.literal(true), channelDisabled: z.literal(true), protocolDisabled: z.literal(true), processes: z.array(z.object({ pid: z.number().int(), type: z.string() }).strict()).max(128)
@@ -35,6 +38,15 @@ const webEvidence = z.object({ schemaVersion: z.literal(1), sessionId: z.string(
 export class PreviewStackAdapter {
   private readonly token = randomBytes(32).toString('hex')
   private endpoint?: { pid: number; created: string }
+  private presentation?: string
+  get presentedAt() { return this.presentation }
+  async measureBootstrap(timing: PreviewStartClock) {
+    let raw: Buffer
+    try { raw = await readFile(join(this.directory, 'bootstrap-timing.json')) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
+    if (raw.length > 4096) throw new Error('BOOTSTRAP_TIMING_LIMIT')
+    const events = z.array(z.object({ stage: z.enum(['abi', 'vite']), startNs: monotonicTime.unwrap(), endNs: monotonicTime.unwrap() }).strict()).max(4).parse(JSON.parse(raw.toString()))
+    for (const event of events) timing.external(event.stage, event.startNs, event.endNs, event.stage === 'abi' ? 'abi' : 'startup')
+  }
   private constructor(readonly profile: PreviewProfile, readonly worktree: string, readonly directory: string, readonly sessionId: string, private readonly context?: PreviewContextManifest) {}
   static async prepare(profile: PreviewProfile, worktree: string, directory: string, sessionId: string, sdk: string, context?: PreviewContextManifest) {
     const adapter = profile.adapter!
@@ -116,6 +128,7 @@ export class PreviewStackAdapter {
       }
       const members = (await owner.processes()).processes
       if (!members.some(p => p.pid === electron.pid) || (electron.rendererPid && !members.some(p => p.pid === electron.rendererPid))) throw new Error('NESTED_JOB_INCOMPATIBLE')
+      if (electron.window?.visible && electron.window.rendererInitialized && electron.window.presentedNs) this.presentation ??= electron.window.presentedNs
       processEvidence = { at, members: members.map(p => ({ ...p, role: p.pid === electron.rendererPid ? 'Renderer' : electron.processes.find(m => m.pid === p.pid)?.type ?? 'Session bootstrap' })) }
     }
     coverage.push({ stage: 'ENDPOINT', component: 'PROCESS', status: 'VERIFIED', fingerprint: previewFingerprint(listener), evidenceRef: 'windows-tcp/job-membership', at, reasonCode: 'SESSION_ENDPOINT_OWNER_VERIFIED' })

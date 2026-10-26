@@ -6,10 +6,11 @@ const assert = require('node:assert/strict')
 const { randomUUID, createHash } = require('node:crypto')
 const { execFileSync, spawn } = require('node:child_process')
 const branchAppUI = process.argv.includes('--branch-app-ui')
-const agentIntent = process.argv.includes('--agent-intent')
+const fastStart = process.argv.includes('--fast-start')
+const agentIntent = process.argv.includes('--agent-intent') || fastStart
 const branchApp = process.argv.includes('--branch-app') || branchAppUI || agentIntent
 const contextual = process.argv.includes('--context') || branchApp, snapshot = process.argv.includes('--snapshot') || branchApp
-const root = process.cwd(), output = path.join(root, agentIntent ? '.code-awareness/runtime-preview-agent-intent/acceptance' : branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
+const root = process.cwd(), output = path.join(root, fastStart ? '.code-awareness/runtime-preview-fast-start/acceptance' : agentIntent ? '.code-awareness/runtime-preview-agent-intent/acceptance' : branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
 fs.mkdirSync(output, { recursive: true })
 if (branchApp) process.on('uncaughtException', error => {
   fs.writeFileSync(path.join(output, 'harness-uncaught.txt'), String(error.stack))
@@ -135,7 +136,8 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     bootstrapFault = undefined
     return manifest
   } }
-  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, new PreviewPreflightService(profileStore)), helper, runnerProvisioner)
+  const preflight = new PreviewPreflightService(profileStore)
+  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, preflight), helper, runnerProvisioner)
   const start = runner.start.bind(runner)
   runner.start = async input => { try { return await start(input) } catch (error) { fs.writeFileSync(path.join(output, 'launch-diagnostic.txt'), String(error.stack)); console.error('LAUNCH_DIAGNOSTIC', error.message); throw error } }
   const ledger = new (get('validation-ledger/validation-ledger').ValidationLedger)(path.join(directory, 'ledger.db'))
@@ -152,7 +154,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     finally { authorizationWindow.hide() }
   }
   const branchProfiles = branchApp ? new (get('work-orchestration/runtime-preview/code-awareness-profile').CodeAwarenessProfileResolver)(profileStore, { root, executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules }) : undefined
-  const service = new (get('work-orchestration/runtime-preview/operations').RuntimePreviewOperations)(repositories, profileStore, store, runner, confirmation, ledger, continuum, branchProfiles)
+  const service = new (get('work-orchestration/runtime-preview/operations').RuntimePreviewOperations)(repositories, profileStore, store, runner, confirmation, ledger, continuum, branchProfiles, preflight)
   let active = { revision: 1, project: { id: webRepository.id, path: base, name: 'U4 controlled Web' } }
   const activeGit = (await repositories.open(webRepository.id)).git
   const { BranchOrchestrationController, registerBranchOrchestrationHandlers } = get('ipc/branch-orchestration-handler')
@@ -231,6 +233,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
       const selection = selections[currentKind]; assert.ok(selection)
       if (agentIntent && ['run-agent', 'replay-agent', 'refuse-agent'].includes(command)) {
         if (command !== 'replay-agent') {
+          sessionId = undefined
           const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
           const tree = inventory.worktrees.find(w => path.resolve(w.path).toLowerCase() === root.toLowerCase())
           assert.ok(tree && tree.branch && tree.head)
@@ -238,7 +241,19 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         }
         assert.ok(branchIntent)
         save('agent-intention', { success: true, ...branchIntent })
-        await mcp('run_branch_app', branchIntent)
+        const started = performance.now(), cpu = process.cpuUsage()
+        let previous = started, mainMaxDelayMs = 0
+        const pulse = setInterval(() => { const now = performance.now(); mainMaxDelayMs = Math.max(mainMaxDelayMs, now - previous - 20); previous = now }, 20)
+        try {
+          await mcp('run_branch_app', branchIntent)
+          const complete = service.pendingResult()
+          if (fastStart && complete) void complete.finally(() => {
+            clearInterval(pulse); const used = process.cpuUsage(cpu)
+            save('host-startup-observation', { success: true, operationId: branchIntent.operationId, elapsedMs: performance.now() - started,
+              mainMaxDelayMs, hostProcessCpuMs: (used.user + used.system) / 1000 })
+          })
+          else clearInterval(pulse)
+        } catch (error) { clearInterval(pulse); throw error }
       }
       if (agentIntent && command === 'agent-status') {
         const result = await mcp('get_runtime_preview_status', sessionId ? { sessionId } : { operationId: branchIntent.operationId })
@@ -249,6 +264,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         save('agent-status', result)
       }
       if (agentIntent && command === 'stop-agent') await mcp('stop_runtime_preview', { sessionId })
+      if (fastStart && command === 'startup-evidence') await mcp('read_runtime_preview_evidence', { sessionId, section: 'RUNTIME', limit: 1 })
       if (branchAppUI && command === 'ui-open') {
         uiWindow = new BrowserWindow({ title: 'Work Orchestration — aceitação isolada', show: true, width: 1440, height: 900, webPreferences: { sandbox: true, contextIsolation: true, nodeIntegration: false, backgroundThrottling: false } })
         await uiWindow.loadURL(`http://127.0.0.1:${ui.httpServer.address().port}`)

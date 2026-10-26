@@ -9,6 +9,9 @@ import { normalizeRepositoryPath, type RepositoryCatalogService } from '../../re
 import { bytesFingerprint, previewFingerprint, type PreviewProfile } from '../preview-profile'
 import { previewContextManifest, type PreviewContextManifest, type PreviewDataReceipt } from './context-contract'
 import type { PreviewSelection, PreviewPreflight } from '../../../shared/types/runtime-preview-types'
+import type { PreviewStartClock } from './start-timing'
+import { startStage } from './start-timing'
+import type { z } from 'zod'
 
 export const previewCorpusPath = (userData: string, repositoryId: string) => join(userData, 'continuum', 'repositories', Buffer.from(repositoryId).toString('base64url'), 'continuum.db')
 export const previewCatalogPath = (userData: string) => join(userData, 'repositories', 'catalog.db')
@@ -56,7 +59,7 @@ function inspectCorpus(db: Database.Database, repositoryId: string, policy: NonN
 }
 
 export interface PreviewContextProvisioner {
-  prepare(input: { profile: PreviewProfile; selection: PreviewSelection; sessionId: string; directory: string; worktree: string; source: NonNullable<PreviewPreflight['snapshot']> }): Promise<PreviewContextManifest>
+  prepare(input: { profile: PreviewProfile; selection: PreviewSelection; sessionId: string; directory: string; worktree: string; source: NonNullable<PreviewPreflight['snapshot']>; timing?: PreviewStartClock; signal?: AbortSignal }): Promise<PreviewContextManifest>
 }
 
 export class RepositoryPreviewContextProvisioner implements PreviewContextProvisioner {
@@ -85,6 +88,8 @@ export class RepositoryPreviewContextProvisioner implements PreviewContextProvis
   }
 
   async prepare(input: Parameters<PreviewContextProvisioner['prepare']>[0]): Promise<PreviewContextManifest> {
+    const measure = <T>(stage: z.infer<typeof startStage>, work: () => T) => input.timing ? input.timing.measureSync(stage, work) : work()
+    input.signal?.throwIfAborted()
     const { profile, selection, directory, sessionId, source } = input, policy = profile.bootstrap!
     if (!policy || profile.adapter?.kind !== 'ELECTRON' || profile.repositoryId !== selection.repositoryId) throw new Error('PREVIEW_CONTEXT_PROFILE_INVALID')
     const repository = this.catalog.resolveAvailable(selection.repositoryId)
@@ -96,33 +101,37 @@ export class RepositoryPreviewContextProvisioner implements PreviewContextProvis
     try { privateCatalog.provisionPreviewIdentity(repository.id, { name: repository.name, path: worktree, normalizedPath: normalizeRepositoryPath(worktree), status: 'ACTIVE', availability: 'AVAILABLE', gitState: 'GIT' }) }
     finally { privateCatalog.close() }
     mkdirSync(dirname(destination), { recursive: true })
-    const expected = expectedCorpusSchema(directory, repository.id)
+    const expected = measure('context_validation', () => expectedCorpusSchema(directory, repository.id))
     if (policy.dataPolicy === 'EMPTY') { const store = new ArtifactStore(destination, repository.id); store.close() }
     else {
       const file = this.source(repository.id)
       if (resolve(file).toLowerCase() === resolve(destination).toLowerCase() || lstatSync(file).isSymbolicLink()) throw new Error('PREVIEW_DATA_SOURCE_INVALID')
       const db = openReadOnly(file)
       try {
-        validateCorpus(db, repository.id, policy, expected)
-        await db.backup(destination, { progress: ({ totalPages }) => {
+        measure('context_validation', () => validateCorpus(db, repository.id, policy, expected))
+        const backup = () => db.backup(destination, { progress: ({ totalPages }) => {
+          input.signal?.throwIfAborted()
           if (totalPages * Number(db.pragma('page_size', { simple: true })) > policy.maxBytes) throw new Error('PREVIEW_DATA_LIMIT_EXCEEDED')
           return 128
         } })
+        await (input.timing ? input.timing.measure('context_backup', backup) : backup())
       } finally { db.close() }
       const copy = new Database(destination)
       try {
-        validateCorpus(copy, repository.id, policy, expected)
-        copy.exec('DELETE FROM artifact_structure_key; DELETE FROM artifact_structure; DELETE FROM repository_locators; DELETE FROM transport_imports; DELETE FROM legacy_migrations; VACUUM;')
+        input.signal?.throwIfAborted()
+        measure('context_validation', () => validateCorpus(copy, repository.id, policy, expected))
+        measure('context_sanitize', () => copy.exec('DELETE FROM artifact_structure_key; DELETE FROM artifact_structure; DELETE FROM repository_locators; DELETE FROM transport_imports; DELETE FROM legacy_migrations;'))
+        measure('context_vacuum', () => copy.exec('VACUUM;'))
         copy.pragma('wal_checkpoint(TRUNCATE)')
       } finally { copy.close() }
     }
     const db = openReadOnly(destination)
     let counts: ReturnType<typeof validateCorpus>
-    try { counts = validateCorpus(db, repository.id, policy, expected) } finally { db.close() }
+    try { counts = measure('context_validation', () => validateCorpus(db, repository.id, policy, expected)) } finally { db.close() }
     const data: PreviewDataReceipt = { policy: policy.dataPolicy, repositoryId: repository.id, origin: policy.dataPolicy === 'EMPTY' ? 'EMPTY' : 'HOST_REPOSITORY_CONTINUUM',
-      at: new Date().toISOString(), schema: expected, digest: bytesFingerprint(readFileSync(destination)), ...counts }
+      at: new Date().toISOString(), schema: expected, digest: measure('context_digest', () => bytesFingerprint(readFileSync(destination))), ...counts }
     if (statSync(destination).size > policy.maxBytes) throw new Error('PREVIEW_DATA_LIMIT_EXCEEDED')
     return previewContextManifest.parse({ version: 1, mode: 'PREVIEW', sessionId, selection, profileRevision: profile.revision, worktree, source, policy, data,
-      catalogDigest: bytesFingerprint(readFileSync(catalogFile)) })
+      catalogDigest: measure('context_digest', () => bytesFingerprint(readFileSync(catalogFile))) })
   }
 }

@@ -41,10 +41,14 @@ export async function initializeElectronPreview(app: App) {
   context = await validatePreviewContext(config.context, { sessionId: config.sessionId, profile: config.profile, approvedProfile: config.approvedProfile, directory, worktree })
   let preload: Build[] = [], rendererPid: number | null = null, rendererFailure: string | null = null, sandboxObserved: boolean | null = null
   const rendererModules = new Map<string, { path: string; sourceDigest: string; transformDigest: string }>()
+  let createdNs: string | null = null, loadedNs: string | null = null, presentedNs: string | null = null
   const save = () => {
+    const visible = app.isReady() && BrowserWindow.getAllWindows().some(window => window.isVisible() && window.webContents.getOSProcessId() === rendererPid && !window.webContents.isLoadingMainFrame())
+    if (visible && rendererModules.size && sandboxObserved && !rendererFailure) presentedNs ??= process.hrtime.bigint().toString()
     writeFileSync(join(directory, 'electron-evidence.json'), JSON.stringify({ sessionId: config.sessionId, pid: process.pid,
       runtime: process.versions.electron, abi: process.versions.modules, builds: [...(globalThis.__RUNTIME_PREVIEW_BUILDS__ ?? []), ...preload],
       rendererPid, rendererFailure, sandboxObserved, rendererModules: [...rendererModules.values()], resourcesIsolated, channelDisabled: true, protocolDisabled: true,
+      window: { visible, rendererInitialized: rendererModules.size > 0, createdNs, loadedNs, presentedNs },
       ...(boundContext ? { context: boundContext } : {}),
       processes: app.isReady() ? app.getAppMetrics().map(p => ({ pid: p.pid, type: p.type })) : []
     }))
@@ -66,7 +70,9 @@ export async function initializeElectronPreview(app: App) {
     } catch { }
   })
   app.on('browser-window-created', (_event, window) => {
-    window.webContents.on('did-finish-load', () => { rendererPid = window.webContents.getOSProcessId(); save() })
+    createdNs ??= process.hrtime.bigint().toString()
+    window.on('show', save)
+    window.webContents.on('did-finish-load', () => { loadedNs ??= process.hrtime.bigint().toString(); rendererPid = window.webContents.getOSProcessId(); save() })
     window.webContents.on('render-process-gone', (_event, details) => { rendererFailure = details.reason; rendererPid = null; rendererModules.clear(); save() })
     window.webContents.on('preload-error', () => { preload = []; rendererFailure = 'PRELOAD_FAILURE'; save() })
   })

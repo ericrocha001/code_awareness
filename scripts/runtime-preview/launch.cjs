@@ -6,6 +6,11 @@ const { configuration, hash } = require('./cooperation.cjs')
 const config = configuration()
 if (!config) throw new Error('PREVIEW_CONFIGURATION_REQUIRED')
 const output = path.join(config.directory, 'compatibility.json')
+const timings = []
+function finish(stage, startNs) {
+  timings.push({ stage, startNs, endNs: process.hrtime.bigint().toString() })
+  fs.writeFileSync(path.join(config.directory, 'bootstrap-timing.json'), JSON.stringify(timings))
+}
 function diagnostic(stream, name) {
   let bytes = 0
   stream.write = (chunk, encoding, callback) => {
@@ -25,6 +30,7 @@ function inside(file) {
   return physical
 }
 async function main() {
+  const abiStart = process.hrtime.bigint().toString()
   if (config.kind === 'ELECTRON') {
     const executable = inside(config.runtimeExecutable)
     if (hash(fs.readFileSync(executable)) !== config.runtimeExecutableHash) throw new Error('RUNTIME_EXECUTABLE_CHANGED')
@@ -38,6 +44,7 @@ async function main() {
   }
   const runtime = JSON.parse(fs.readFileSync(output, 'utf8'))
   if (runtime.runtime !== config.runtimeVersion || runtime.abi !== config.abi || runtime.platform !== 'win32' || runtime.arch !== 'x64') throw new Error('RUNTIME_COMPATIBILITY_MISMATCH')
+  finish('abi', abiStart)
   const deadline = Date.now() + 30000
   while (!fs.existsSync(path.join(config.directory, 'permit'))) {
     if (Date.now() > deadline) throw new Error('LAUNCH_PERMIT_TIMEOUT')
@@ -52,8 +59,10 @@ async function main() {
     await server.listen()
     process.on('SIGTERM', async () => { await server.close(); process.exit(0) })
   } else {
+    const viteStart = process.hrtime.bigint().toString()
     const { createServer } = await import(pathToFileURL(require.resolve('electron-vite', { paths: [config.worktree] })).href)
     await createServer({ configFile: inside(config.configFile), envFile: false }, {})
+    finish('vite', viteStart)
   }
 }
 main().catch(error => {

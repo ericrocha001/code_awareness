@@ -5,6 +5,7 @@ import type { PreviewPreflight, PreviewSelection, MissingSecurityRequirement } f
 import { PreviewProfileStore } from './preview-profile-store'
 import { bytesFingerprint, previewFingerprint } from './preview-profile'
 import { PreviewNpmDependencies } from './preview-npm-dependencies'
+import type { PreviewStartClock } from './runtime-preview/start-timing'
 
 export async function previewPath(root: string, path: string): Promise<string> {
   const physicalRoot = await realpath(root), physical = await realpath(resolve(root, path))
@@ -19,10 +20,10 @@ export class PreviewPreflightService {
     return Promise.all((await this.profiles.profiles(repositoryId)).map(async p => ({ profileId: p.profileId, revision: p.revision,
       runtime: p.runtime, fingerprint: previewFingerprint(p), approved: await this.profiles.approved(p) })))
   }
-  async check(git: Pick<GitOperationsService, 'getCoordinationIdentity' | 'getCoordinationSnapshot'>, selection: PreviewSelection): Promise<PreviewPreflight> {
+  async check(git: Pick<GitOperationsService, 'getCoordinationIdentity' | 'getCoordinationSnapshot'>, selection: PreviewSelection, timing?: PreviewStartClock): Promise<PreviewPreflight> {
     const profile = (await this.profiles.profiles(selection.repositoryId)).find(p => p.profileId === selection.profileId)
     if (!profile || previewFingerprint(profile) !== selection.fingerprint) throw new Error('PROFILE_CHANGED')
-    const identity = await git.getCoordinationIdentity(selection.worktreeId)
+    const identity = await (timing ? timing.measure('git', () => git.getCoordinationIdentity(selection.worktreeId)) : git.getCoordinationIdentity(selection.worktreeId))
     if (identity.repositoryId !== selection.repositoryId) throw new Error('REPOSITORY_MISMATCH')
     if (identity.record.generation !== selection.generation) throw new Error('WORKTREE_STALE')
     const initial = await git.getCoordinationSnapshot(selection.worktreeId)
@@ -64,7 +65,8 @@ export class PreviewPreflightService {
       const manifestBytes = await readFile(await previewPath(root, profile.dependencies.manifest))
       const lockBytes = await readFile(await previewPath(root, profile.dependencies.lockfile))
       if (bytesFingerprint(manifestBytes) !== profile.dependencies.manifestHash || bytesFingerprint(lockBytes) !== profile.dependencies.lockfileHash) problem('DEPENDENCY_INPUT_CHANGED', 'Manifest/scripts ou lockfile diferem do perfil aprovado.')
-      const dependencies = await this.dependencies.inspect(root, profile, selection.generation, manifestBytes, lockBytes)
+      const inspect = () => this.dependencies.inspect(root, profile, selection.generation, manifestBytes, lockBytes)
+      const dependencies = await (timing ? timing.measure('dependencies', inspect) : inspect())
       result.dependencyBasis = dependencies.basis
       for (const diagnostic of dependencies.diagnostics) problem(diagnostic.reasonCode, diagnostic.message, diagnostic.status)
       try {

@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { nativeObservation, rootExitSchema } from './native-owner'
 import { previewContextManifest } from './context-contract'
+import { startTimingSchema } from './start-timing'
 
 const selectionSchema = z.object({ repositoryId: z.string(), worktreeId: z.string(), generation: z.string(), profileId: z.string(), fingerprint: z.string() }).strict()
 export const terminationSchema = z.object({
@@ -22,6 +23,7 @@ export const sessionSchema = z.object({
   stopIntent: z.object({ requestedAt: z.string().max(64) }).strict().optional(),
   termination: terminationSchema.optional(),
   context: previewContextManifest.optional(),
+  startTiming: startTimingSchema.optional(),
   sourceSnapshot: z.object({ head: z.string().nullable(), branch: z.string().nullable(), indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict().nullable(),
   sourceObservation: z.object({ at: z.string(), fingerprint: z.string(), snapshot: z.object({ head: z.string().nullable(), branch: z.string().nullable(), indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict() }).strict().optional(),
   state: z.enum(['PREPARING', 'RUNNING', 'STOPPING', 'STOPPED', 'FAILED', 'CLEANUP_INCOMPLETE', 'OWNERSHIP_UNVERIFIED']),

@@ -180,6 +180,23 @@ it('does not cache positive runtime compatibility when uninspected package bytes
   expect(second.status).toBe('UNKNOWN')
   expect(second.diagnostics.some(d => d.reasonCode === 'RUNTIME_COMPATIBILITY_UNVERIFIED')).toBe(true)
 })
+it('bounds concurrent dependency IO and preserves deterministic evidence across scheduling', async () => {
+  const packages: Record<string, { version: string }> = {}
+  for (let index = 0; index < 19; index++) {
+    const path = `node_modules/package-${index}`; packages[path] = { version: '1.0.0' }
+    await mkdir(join(tree, path), { recursive: true }); await writeFile(join(tree, path, 'package.json'), '{"version":"1.0.0"}')
+  }
+  let active = 0, peak = 0
+  const files = { ...fileSystem, lstat: async (...args: Parameters<typeof fileSystem.lstat>) => {
+    active++; peak = Math.max(peak, active)
+    try { await new Promise<void>(resolve => setImmediate(resolve)); return await (fileSystem.lstat as any)(...args) } finally { active-- }
+  } }
+  const inspector = new PreviewNpmDependencies(files as any), manifest = Buffer.from('{}'), lock = Buffer.from(JSON.stringify({ lockfileVersion: 3, packages }))
+  const first = await inspector.inspect(tree, profile, 'g', manifest, lock)
+  expect(first.diagnostics).toEqual([]); expect(peak).toBeGreaterThan(1); expect(peak).toBeLessThanOrEqual(8)
+  expect((await inspector.inspect(tree, profile, 'g', manifest, lock)).basis).toBe(first.basis)
+  expect(active).toBe(0)
+})
 it('returns UNKNOWN for missing materialization evidence instead of declaring installed dependencies absent', async () => {
   await store.approve(profile, async () => true)
   await rm(join(tree, 'installed.json'))

@@ -76,7 +76,9 @@ export class PreviewNpmDependencies {
     const required = new Set(Object.keys({ ...manifest.dependencies, ...manifest.devDependencies }).filter(name => !Object.hasOwn(manifest.optionalDependencies ?? {}, name)).map(name => `node_modules/${name}`))
     const evidence: unknown[] = []
     for (const path of required) if (!plan.packages.has(path)) diagnostics.push({ reasonCode: 'DEPENDENCY_MISMATCH', message: `Dependência obrigatória sem entrada no lockfile: ${path}`, status: 'INCOMPATIBLE' })
-    for (const [path, entry] of plan.installed) {
+    for (let offset = 0; offset < plan.installed.length; offset += 8) {
+      const checked = await Promise.allSettled(plan.installed.slice(offset, offset + 8).map(async ([path, entry]) => {
+      const diagnostics: DependencyDiagnostic[] = [], evidence: unknown[] = []
       const logical = localPath(root, path)
       let workspace: { target: string; declared: boolean | null } | undefined
       if (entry.link) {
@@ -90,12 +92,12 @@ export class PreviewNpmDependencies {
         if (!missing(error)) throw error
         if (entry.optional && !required.has(path)) {
           try { await this.files.lstat(logical) } catch (absent) {
-            if (missing(absent)) { evidence.push([path, 'OPTIONAL_ABSENT']); continue }
+            if (missing(absent)) { evidence.push([path, 'OPTIONAL_ABSENT']); return { diagnostics, evidence } }
             throw absent
           }
           throw new Error('DEPENDENCY_LINK_BROKEN')
         }
-        diagnostics.push({ reasonCode: 'DEPENDENCIES_MISSING', message: `Dependência obrigatória ausente: ${path}`, status: 'MISSING' }); evidence.push([path, 'MISSING']); continue
+        diagnostics.push({ reasonCode: 'DEPENDENCIES_MISSING', message: `Dependência obrigatória ausente: ${path}`, status: 'MISSING' }); evidence.push([path, 'MISSING']); return { diagnostics, evidence }
       }
       contained(root, physical)
       let expected = entry
@@ -109,13 +111,20 @@ export class PreviewNpmDependencies {
       try { installed = await this.installedManifest(physical) }
       catch (error) {
         if (!missing(error)) throw error
-        diagnostics.push({ reasonCode: 'DEPENDENCY_MISMATCH', message: `Pacote materializado sem manifest: ${path}`, status: 'INCOMPATIBLE' }); continue
+        diagnostics.push({ reasonCode: 'DEPENDENCY_MISMATCH', message: `Pacote materializado sem manifest: ${path}`, status: 'INCOMPATIBLE' }); return { diagnostics, evidence }
       }
       if (expected.version && installed.manifest.version !== expected.version) diagnostics.push({ reasonCode: 'DEPENDENCY_MISMATCH', message: 'DEPENDENCY_VERSION_MISMATCH', status: 'INCOMPATIBLE' })
       if (!entry.link && !expected.version) diagnostics.push({ reasonCode: 'DEPENDENCY_VERSION_UNVERIFIABLE', message: `Versão esperada não verificável: ${path}`, status: 'UNKNOWN' })
       if (entry.link && installed.manifest.name !== path.split(/(?:^|\/)node_modules\//).pop()) throw new Error('DEPENDENCY_WORKSPACE_NAME_MISMATCH')
       if (expected.hasInstallScript && !diagnostics.some(d => d.reasonCode === 'ABI_UNVERIFIED')) diagnostics.push({ reasonCode: 'ABI_UNVERIFIED', message: 'Instalação nativa/scripts exige prova específica de materialização e ABI.', status: 'UNKNOWN' })
       evidence.push([path, physical, installed.stamp])
+      return { diagnostics, evidence }
+      }))
+      for (const result of checked) {
+        if (result.status === 'rejected') throw result.reason
+        evidence.push(...result.value.evidence)
+        diagnostics.push(...result.value.diagnostics.filter(d => d.reasonCode !== 'ABI_UNVERIFIED' || !diagnostics.some(existing => existing.reasonCode === 'ABI_UNVERIFIED')))
+      }
     }
     return { basis: previewFingerprint([context, evidence]), diagnostics }
   }

@@ -19,7 +19,7 @@ export class BranchOrchestrationController {
   private readonly previewPreflight: PreviewPreflightService | undefined
   constructor(private readonly projects: Pick<ActiveProjectService, 'getState'>, private readonly confirmRelease: (preview: WorktreeRemovalPreview) => Promise<boolean>, private readonly continuum?: RepositoryContinuumSession,
     private readonly previewStore?: PreviewProfileStore, private readonly confirmProfile?: (profile: PreviewProfile) => Promise<boolean>, private readonly previewRepositories?: PreviewRepositories, private readonly runtimePreview?: RuntimePreviewOperations) {
-    this.previewPreflight = previewStore ? new PreviewPreflightService(previewStore) : undefined
+    this.previewPreflight = runtimePreview?.preflightService ?? (previewStore ? new PreviewPreflightService(previewStore) : undefined)
   }
   bind(git: GitOperationsService, github: Pick<GitHubIntegrationService, 'branchPullRequests' | 'pullRequestCommits' | 'assessBranchDiscard'>, path: string) {
     const state = this.projects.getState()

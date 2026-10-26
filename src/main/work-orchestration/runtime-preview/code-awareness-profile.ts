@@ -46,7 +46,8 @@ export class CodeAwarenessProfileResolver {
     for (const file of [...components.map(file => 'src/main/' + file), 'src/main/preload.ts', 'src/renderer/src/App.tsx']) await checkoutPath(worktree, file, 'APP_COOPERATION_MISSING')
     const runtimeExecutable = 'node_modules/electron/dist/electron.exe'
     const runtimeBytes = await readFile(await checkoutPath(worktree, runtimeExecutable, 'APP_RUNTIME_UNAVAILABLE')).catch(() => { throw new Error('APP_RUNTIME_UNAVAILABLE') })
-    if (bytesFingerprint(runtimeBytes) !== bytesFingerprint(await readFile(this.environment.executable))) throw new Error('APP_RUNTIME_INCOMPATIBLE')
+    const runtimeFingerprint = bytesFingerprint(runtimeBytes)
+    if (runtimeFingerprint !== bytesFingerprint(await readFile(this.environment.executable))) throw new Error('APP_RUNTIME_INCOMPATIBLE')
     const locate = async (name: string) => {
       const found = await execute('where.exe', [name], { windowsHide: true, timeout: 10000, maxBuffer: 16384 })
       return realpath(found.stdout.trim().split(/\r?\n/)[0])
@@ -68,7 +69,7 @@ export class CodeAwarenessProfileResolver {
           abi: this.environment.abi, materialization: '.code-awareness/runtime-preview/materialization.json' },
         cooperation: { manifest: 'scripts/runtime-preview/cooperation.cjs', fingerprint: inputs[1].fingerprint },
         bootstrap: { kind: 'CODE_AWARENESS', dataPolicy: 'REPOSITORY_SNAPSHOT', maxBytes: 67108864, maxArtifacts: 10000 },
-        adapter: { version: 1, kind: 'ELECTRON', port, configFile: 'electron.vite.config.ts', runtimeExecutable, runtimeExecutableHash: bytesFingerprint(runtimeBytes), nativeModules: modules,
+        adapter: { version: 1, kind: 'ELECTRON', port, configFile: 'electron.vite.config.ts', runtimeExecutable, runtimeExecutableHash: runtimeFingerprint, nativeModules: modules,
           artifacts: [...components.map(file => ({ component: 'ELECTRON_MAIN', path: 'src/main/' + file })), { component: 'ELECTRON_PRELOAD', path: 'src/main/preload.ts' }, { component: 'ELECTRON_RENDERER', path: 'src/renderer/src/App.tsx' }] },
         security: { mode: 'profile_only', requirements: [] }, network: { destinations: ['http://127.0.0.1:' + port], openNetworkConsent: false, credentials: 'TARGET_OWN_TEST_PROFILE' },
         probes: { readiness: { kind: 'HTTP', address: 'http://127.0.0.1:' + port + '/', timeoutMs: 120000 }, liveness: 'READINESS', attestation: 'COOPERATIVE_LOADED_ARTIFACT' },

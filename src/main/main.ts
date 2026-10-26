@@ -448,9 +448,10 @@ app.whenReady().then(async () => {
     try {
       const helper = resolvePreviewHelper({ packaged: app.isPackaged, resources: process.resourcesPath, root: app.getAppPath(), developmentBuild: process.env.CODE_AWARENESS_PREVIEW_NATIVE_BUILD })
       const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
-      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner)
+      const preflight = new PreviewPreflightService(previewProfiles)
+      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, preflight), helper, contextProvisioner)
       const branchProfiles = new CodeAwarenessProfileResolver(previewProfiles, { root: app.getAppPath(), executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules })
-      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles)
+      runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles, preflight)
     } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
   }
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
