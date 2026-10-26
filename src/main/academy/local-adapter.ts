@@ -32,9 +32,31 @@ export class AcademyLocalAdapter implements LocalChannelAdapter {
       verify_change_impact: operation(input => input, input => service.verifyChangeImpact(input)),
       list: operation(input => {
         const value = object(input, ['status'])
-        if (value.status !== undefined && value.status !== 'ACTIVE' && value.status !== 'ARCHIVED') invalid()
-        return value.status as 'ACTIVE' | 'ARCHIVED' | undefined
+        if (value.status !== undefined && value.status !== 'ACTIVE' && value.status !== 'DISABLED' && value.status !== 'ARCHIVED') invalid()
+        return value.status as 'ACTIVE' | 'DISABLED' | 'ARCHIVED' | undefined
       }, status => service.list(status)),
+      set_academy_skill_enabled: operation(input => {
+        const value = object(input, ['skillId', 'enabled', 'expectedStateRevision'])
+        if (typeof value.enabled !== 'boolean') invalid()
+        return { skillId: text(value.skillId), enabled: value.enabled, expectedStateRevision: integer(value.expectedStateRevision) }
+      }, (request, context) => {
+        if (!context.connected()) throw new Error('IPC_CLOSED')
+        return service.setEnabled(request.skillId, request.enabled, request.expectedStateRevision)
+      }),
+      archive: operation(input => {
+        const value = object(input, ['skillId', 'expectedVersion'])
+        return { skillId: text(value.skillId), expectedVersion: integer(value.expectedVersion) }
+      }, (request, context) => {
+        if (!context.connected()) throw new Error('IPC_CLOSED')
+        return service.archive(request.skillId, request.expectedVersion)
+      }),
+      restore: operation(input => {
+        const value = object(input, ['skillId', 'expectedVersion'])
+        return { skillId: text(value.skillId), expectedVersion: integer(value.expectedVersion) }
+      }, (request, context) => {
+        if (!context.connected()) throw new Error('IPC_CLOSED')
+        return service.restore(request.skillId, request.expectedVersion)
+      }),
       get: operation(input => text(object(input, ['skillId']).skillId), skillId => ({ ...service.get(skillId), distribution: service.distribution.states(skillId).map(state => ({ destinationId: state.destinationId, target: state.target, status: state.status, canonicalVersion: state.canonicalVersion, distributedVersion: state.distributedVersion, distributedHash: state.distributedHash, errorCode: state.errorCode })) })),
       create: operation((input): AcademyCreateInput => {
         const value = object(input, ['package', 'scope', 'projectIds']), target = scope(value.scope)

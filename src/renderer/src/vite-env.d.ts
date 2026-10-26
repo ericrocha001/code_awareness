@@ -78,6 +78,7 @@ declare global {
       createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>) => Promise<AcademySkillDetail>
       updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>) => Promise<AcademySkillDetail>
       archiveAcademySkill: (id: string, expectedVersion: number) => Promise<AcademySkillDetail>
+      setAcademySkillEnabled: (id: string, enabled: boolean, expectedStateRevision: number) => Promise<AcademySkillDetail>
       restoreAcademySkill: (id: string, expectedVersion: number) => Promise<AcademySkillDetail>
       setAcademyDestinationEnabled: (id: string, enabled: boolean) => Promise<unknown>
       importAcademyDestination: (id: string) => Promise<AcademyImportItem[]>

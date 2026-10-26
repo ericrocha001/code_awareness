@@ -81,7 +81,10 @@ export class AcademyDistributionService {
 
   states(skillId?: string): AcademyDistributionState[] {
     if (this.store.isClosed) return []
-    return this.store.listDistributionStates(skillId)
+    const statuses = new Map(this.store.list().map(skill => [skill.id, skill.status]))
+    return this.store.listDistributionStates(skillId).map(state => {
+      return state.status === 'CURRENT' && statuses.get(state.skillId) === 'DISABLED' ? { ...state, status: 'PENDING' } : state
+    })
   }
 
   health(): AcademyDistributionHealth {
@@ -94,7 +97,7 @@ export class AcademyDistributionService {
         }))
       }
     }
-    const states = this.store.listDistributionStates()
+    const states = this.states()
     return { targets: TARGETS.map((target) => {
       const values = states.filter((state) => state.target === target)
       const count = (status: AcademyDistributionState['status']) => values.filter((state) => state.status === status).length
@@ -124,7 +127,7 @@ export class AcademyDistributionService {
       return { status: 'PENDING', distributedVersion: result.distributedVersion, distributedHash: result.distributedHash, errorCode: null, errorMessage: null, exposureName: result.exposureName, linkMechanism: result.linkMechanism }
     }
     const latest = this.store.get(skill.id)
-    if (latest.currentVersion !== skill.currentVersion || latest.current.packageHash !== skill.current.packageHash) {
+    if (latest.stateRevision !== skill.stateRevision || latest.currentVersion !== skill.currentVersion || latest.current.packageHash !== skill.current.packageHash) {
       return { status: 'PENDING', distributedVersion: result.distributedVersion, distributedHash: result.distributedHash, errorCode: null, errorMessage: null, exposureName: result.exposureName, linkMechanism: result.linkMechanism }
     }
     this.persist(skill, destinationId, target, result)

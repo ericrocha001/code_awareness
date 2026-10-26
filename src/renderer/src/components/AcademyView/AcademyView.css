@@ -124,6 +124,14 @@
 .academy-count { padding: 3px 8px; color: var(--text-secondary); border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--bg-tertiary); font-size: 10px; white-space: nowrap; }
 .academy-skill-list { min-height: 0; margin: 0; padding: 7px; overflow-y: auto; list-style: none; }
 .academy-skill-list li { margin: 0; }
+.academy-skill-row { position: relative; }
+.academy-skill-row .academy-skill-item { padding-right: 45px; }
+.academy-activation-switch { position: absolute; right: 8px; top: 29px; width: 30px; height: 18px; padding: 2px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--bg-tertiary); }
+.academy-activation-switch span { display: block; width: 12px; height: 12px; border-radius: 50%; background: var(--text-secondary); }
+.academy-activation-switch[aria-checked="true"] { background: var(--accent); }
+.academy-activation-switch[aria-checked="true"] span { transform: translateX(12px); background: var(--text-primary); }
+.academy-activation-switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.academy-activation-switch:disabled { opacity: 0.5; cursor: wait; }
 .academy-skill-item { width: 100%; min-height: 82px; padding: 11px 9px; display: flex; align-items: flex-start; gap: 10px; text-align: left; color: var(--text-primary); border: 1px solid transparent; border-bottom-color: var(--border-subtle); border-radius: 9px; background: transparent; }
 .academy-skill-item:hover { background: var(--hover-bg); }
 .academy-skill-item.selected { border-color: var(--accent); background: linear-gradient(120deg, color-mix(in srgb, var(--accent) 18%, transparent), color-mix(in srgb, var(--accent) 8%, transparent)); box-shadow: inset 3px 0 var(--accent), 0 0 18px rgba(120, 82, 238, 0.13); }

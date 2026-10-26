@@ -42,6 +42,35 @@ describe('Academy local adapter over canonical service', () => {
     expect(service.snapshot()).toEqual(before); expect(service.history(skill.id)).toEqual(history)
   })
 
+  it('shares reversible CAS, disabled discovery, editing and legacy aliases with MCP', async () => {
+    const { service, operations } = setup()
+    const skill = service.store.create({ package: pkg('disabled'), scope: 'GLOBAL', origin: 'UI' })
+    const args = { skillId: skill.id, enabled: false, expectedStateRevision: 1 }
+    expect(await operations.set_academy_skill_enabled.execute(args, context)).toMatchObject({ status: 'DISABLED', stateRevision: 2, currentVersion: 1 })
+    const stale = await executeAcademyTool(service, 'set_academy_skill_enabled', { ...args, enabled: true })
+    expect(JSON.parse(stale.content[0].text).error).toBe('STATE_REVISION_CONFLICT')
+    await expect(operations.set_academy_skill_enabled.execute(args, context)).rejects.toMatchObject({ code: 'STATE_REVISION_CONFLICT' })
+    const list = await executeAcademyTool(service, 'list_academy_skills', {})
+    expect(JSON.parse(list.content[0].text)).toEqual(operations.list.execute({}, context))
+    expect(operations.list.execute({ status: 'ARCHIVED' }, context)).toEqual(service.list('DISABLED'))
+    const update = await executeAcademyTool(service, 'update_academy_skill', { skillId: skill.id, expectedVersion: 1, package: pkg('disabled', 'edited while disabled') })
+    expect(update.isError).toBeUndefined()
+    expect(service.get(skill.id)).toMatchObject({ status: 'DISABLED', stateRevision: 2, currentVersion: 2 })
+    expect(() => service.analyzeChangeImpact({ skillId: skill.id, expectedVersion: 2, package: pkg('disabled', 'candidate') })).not.toThrow()
+    expect(service.history(skill.id, { version: 1 })).toEqual(skill.current)
+    expect((await executeAcademyTool(service, 'get_academy_skill', { skillId: skill.id })).isError).toBeUndefined()
+    expect((await executeAcademyTool(service, 'set_academy_skill_enabled', { ...args, enabled: true, expectedStateRevision: 2 })).isError).toBeUndefined()
+    expect((await executeAcademyTool(service, 'archive_academy_skill', { skillId: skill.id, expectedVersion: 2 })).isError).toBeUndefined()
+    expect(await operations.restore.execute({ skillId: skill.id, expectedVersion: 2 }, context)).toMatchObject({ status: 'ACTIVE' })
+    expect(await operations.archive.execute({ skillId: skill.id, expectedVersion: 2 }, context)).toMatchObject({ status: 'DISABLED' })
+    expect((await executeAcademyTool(service, 'restore_academy_skill', { skillId: skill.id, expectedVersion: 2 })).isError).toBeUndefined()
+    for (const invalid of [{ ...args, enabled: 'false' }, { ...args, expectedStateRevision: 0 }, { ...args, hidden: true }]) {
+      expect(() => operations.set_academy_skill_enabled.execute(invalid, context)).toThrow()
+      expect((await executeAcademyTool(service, 'set_academy_skill_enabled', invalid)).isError).toBe(true)
+    }
+    expect(() => operations.set_academy_skill_enabled.execute({ ...args, expectedStateRevision: 7 }, { connected: () => false })).toThrow('IPC_CLOSED')
+  })
+
   it('persists GLOBAL/PROJECT packages with LOCAL_CLI origin, managed distribution and version preconditions', async () => {
     const { service, operations } = setup()
     const root = directory(), second = directory()

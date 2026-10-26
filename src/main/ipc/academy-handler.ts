@@ -10,6 +10,7 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:create', (_event, input: Omit<AcademyCreateInput, 'origin'>) => service.create({ ...input, origin: 'UI' }))
   ipcMain.handle('academy:update', (_event, input: Omit<AcademyUpdateInput, 'origin'>) => service.update({ ...input, origin: 'UI' }))
   ipcMain.handle('academy:archive', (_event, id: string, expectedVersion: number) => service.archive(id, expectedVersion))
+  ipcMain.handle('academy:set-enabled', (_event, id: string, enabled: boolean, expectedStateRevision: number) => service.setEnabled(id, enabled, expectedStateRevision))
   ipcMain.handle('academy:restore', (_event, id: string, expectedVersion: number) => service.restore(id, expectedVersion))
   ipcMain.handle('academy:destination-enabled', (_event, id: string, enabled: boolean) => service.setDestinationEnabled(id, enabled))
   ipcMain.handle('academy:import-destination', async (_event, id: string) => {

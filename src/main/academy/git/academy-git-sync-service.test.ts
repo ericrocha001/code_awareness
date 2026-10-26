@@ -65,6 +65,32 @@ async function fixture() {
 }
 
 describe('isolated Academy GitHub reconciliation', () => {
+  it('withdraws disabled skills only after remote convergence and preserves development checkout and history', async () => {
+    const f = await fixture()
+    const humanHead = await f.git.resolveCommit(f.human, 'HEAD')
+    const original = readFileSync(join(f.human, 'skills/alpha/SKILL.md'), 'utf8')
+    f.store.setEnabled(f.skill.id, false, 1)
+    const push = vi.spyOn(f.transport, 'push').mockRejectedValueOnce(new Error('offline'))
+    const pending = await f.sync.syncNow()
+    expect(pending.syncState).not.toBe('SYNCED')
+    expect(f.store.get(f.skill.id).status).toBe('DISABLED')
+    push.mockRestore()
+    const result = await f.sync.syncNow()
+    expect(result.syncState, result.lastError ?? '').toBe('SYNCED')
+    const publication = result.publication!
+    expect(await f.git.readRemoteHead(publication.checkoutPath, 'origin', 'refs/heads/main')).toBe(publication.remoteHead)
+    expect(await f.git.readCommitFile(publication.checkoutPath, publication.remoteHead!, 'skills/alpha/SKILL.md', 10000)).toBeNull()
+    expect(await f.git.resolveCommit(f.human, 'HEAD')).toBe(humanHead)
+    expect(readFileSync(join(f.human, 'skills/alpha/SKILL.md'), 'utf8')).toBe(original)
+    f.update('disabled latest')
+    await f.sync.syncNow()
+    f.store.setEnabled(f.skill.id, true, 2)
+    const restored = await f.sync.syncNow()
+    expect(restored.syncState, restored.lastError ?? '').toBe('SYNCED')
+    expect((await f.git.readCommitFile(publication.checkoutPath, restored.publication!.remoteHead!, 'skills/alpha/SKILL.md', 10000))?.toString()).toContain('disabled latest')
+    expect(f.store.history(f.skill.id)).toHaveLength(2)
+  }, 60000)
+
   it.each(['checkout', 'projection'])('rejects an unsafe Skill junction in the %s without commit, push or canonical mutation', async (area) => {
     const f = await fixture()
     f.update('security regression')

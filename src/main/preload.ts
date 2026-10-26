@@ -102,6 +102,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:create', input),
   updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:update', input),
   archiveAcademySkill: (id: string, expectedVersion: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:archive', id, expectedVersion),
+  setAcademySkillEnabled: (id: string, enabled: boolean, expectedStateRevision: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:set-enabled', id, enabled, expectedStateRevision),
   restoreAcademySkill: (id: string, expectedVersion: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:restore', id, expectedVersion),
   setAcademyDestinationEnabled: (id: string, enabled: boolean) => ipcRenderer.invoke('academy:destination-enabled', id, enabled),
   importAcademyDestination: (id: string): Promise<AcademyImportItem[]> => ipcRenderer.invoke('academy:import-destination', id),

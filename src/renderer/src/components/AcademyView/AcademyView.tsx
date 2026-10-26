@@ -40,7 +40,8 @@ export const AcademyView: React.FC = () => {
   const [selected, setSelected] = useState<AcademySkillDetail | null>(null)
   const [history, setHistory] = useState<AcademySkillVersion[]>([])
   const [query, setQuery] = useState('')
-  const [status, setStatus] = useState<'ALL' | 'ACTIVE' | 'ARCHIVED'>('ALL')
+  const [status, setStatus] = useState<'ALL' | 'ACTIVE' | 'DISABLED'>('ALL')
+  const [activationPending, setActivationPending] = useState<string | null>(null)
   const [scope, setScope] = useState<AcademySkillScope>('GLOBAL')
   const [projectIds, setProjectIds] = useState<string[]>([])
   const [skillMd, setSkillMd] = useState(emptyPackage.skillMd)
@@ -159,7 +160,9 @@ export const AcademyView: React.FC = () => {
         : await window.codeAwareness.createAcademySkill({ package: { skillMd, artifacts }, scope, projectIds })
       setIsEditing(false)
       const delivery = await window.codeAwareness.getAcademyDeliveryStatus(detail.id, detail.currentVersion).catch(() => null)
-      const deliveryText = delivery?.status === 'NOT_APPLICABLE'
+      const deliveryText = detail.status === 'DISABLED'
+        ? 'Skill desativada; reconciliação local separada'
+        : delivery?.status === 'NOT_APPLICABLE'
         ? 'sem destinos aplicáveis'
         : delivery?.status === 'CONVERGED'
         ? 'distribuída'
@@ -169,15 +172,17 @@ export const AcademyView: React.FC = () => {
     } catch (error) { reportError(error) }
   }
 
-  const toggleArchive = async () => {
-    if (!selected) return
+  const setEnabled = async (skill: AcademySkillDetail | AcademySnapshot['skills'][number]) => {
+    if (activationPending) return
+    setActivationPending(skill.id)
     try {
-      const detail = selected.status === 'ACTIVE'
-        ? await window.codeAwareness.archiveAcademySkill(selected.id, selected.currentVersion)
-        : await window.codeAwareness.restoreAcademySkill(selected.id, selected.currentVersion)
-      showMessage(detail.status === 'ACTIVE' ? 'Skill restaurada.' : 'Skill arquivada.')
-      await refresh(detail.id)
-    } catch (error) { reportError(error) }
+      const detail = await window.codeAwareness.setAcademySkillEnabled(skill.id, skill.status !== 'ACTIVE', skill.stateRevision)
+      showMessage(`Skill ${detail.status === 'ACTIVE' ? 'ativada' : 'desativada'}. Reconciliação local agendada; publicação do plugin é separada.`)
+      await refresh(selected?.id)
+    } catch (error) {
+      await refresh(selected?.id).catch(() => {})
+      reportError(error)
+    } finally { setActivationPending(null) }
   }
 
   const openArtifact = (path: string) => {
@@ -289,8 +294,8 @@ export const AcademyView: React.FC = () => {
   return <section className="academy-view">
     <AcademyHeader query={query} status={status} conflictCount={snapshot.conflicts.length} onQueryChange={setQuery} onStatusChange={setStatus} onCreate={createNew} onOpenCatalog={() => setCatalogOpen(true)} onOpenOperations={() => setOperationsOpen(true)} />
     <div className="academy-layout">
-      <SkillCatalog skills={visible} selectedId={selected?.id ?? null} open={catalogOpen} onClose={() => setCatalogOpen(false)} onSelect={(id) => void choose(id)} />
-      <SkillWorkspace selected={selected} isEditing={isEditing} activeTab={activeTab} skillMd={skillMd} scope={scope} projectIds={projectIds} destinations={snapshot.destinations} history={history} distribution={skillDistribution} onTabChange={setActiveTab} onSkillMdChange={setSkillMd} onScopeChange={setScope} onProjectIdsChange={setProjectIds} onEdit={() => setIsEditing(true)} onSave={() => void save()} onCancel={cancelEditing} onToggleArchive={() => void toggleArchive()} />
+      <SkillCatalog skills={visible} selectedId={selected?.id ?? null} open={catalogOpen} onClose={() => setCatalogOpen(false)} onSelect={(id) => void choose(id)} activationPending={activationPending !== null || isEditing} onSetEnabled={(skill) => void setEnabled(skill)} />
+      <SkillWorkspace selected={selected} isEditing={isEditing} activeTab={activeTab} skillMd={skillMd} scope={scope} projectIds={projectIds} destinations={snapshot.destinations} history={history} distribution={skillDistribution} onTabChange={setActiveTab} onSkillMdChange={setSkillMd} onScopeChange={setScope} onProjectIdsChange={setProjectIds} onEdit={() => setIsEditing(true)} onSave={() => void save()} onCancel={cancelEditing} activationPending={activationPending !== null} onSetEnabled={() => selected && void setEnabled(selected)} />
       <OperationsRail
         open={operationsOpen} destinations={snapshot.destinations} artifacts={artifacts} conflicts={snapshot.conflicts} distribution={distribution} packageDistribution={packageDistribution} openAiPublication={openAiPublication} gitStatus={gitStatus} eligibleRepos={eligibleRepos} selectedRepoId={selectedRepoId} onSelectedRepoChange={setSelectedRepoId} onClose={() => setOperationsOpen(false)} onOpenDestinations={() => setDestinationsOpen(true)} onOpenArtifact={openArtifact} onAddArtifact={() => { setArtifactDraft({ mode: 'create', originalPath: null, path: '', content: '' }); setIsEditing(true) }}
         onReconcile={() => void (async () => { try { await window.codeAwareness.reconcileAcademyDistribution(); showMessage('Distribuição reconciliada.'); await refresh(selected?.id) } catch (error) { reportError(error) } })()}

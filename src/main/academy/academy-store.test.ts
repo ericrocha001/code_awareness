@@ -95,24 +95,89 @@ describe('AcademyStore', () => {
     expect(updated.currentVersion).toBe(2)
     expect(store.history(created.id).map((item) => [item.version, item.origin])).toEqual([[2, 'MCP'], [1, 'UI']])
     expect(store.history(created.id)[1].package).toEqual(pkg())
+    store.setEnabled(created.id, false, 1)
     store.close()
     const reopened = new AcademyStore(dbPath)
+    expect(reopened.get(created.id)).toMatchObject({ status: 'DISABLED', stateRevision: 2 })
     expect(reopened.get(created.id).current.package.skillMd).toContain('# V2')
     expect(reopened.get(created.id).current.package.artifacts['references/guide.md']).toBe('Olá β')
     reopened.close()
   })
 
-  it('enforces active names, optimistic concurrency and archive/restore', () => {
+  it('reserves disabled names and preserves independent package and activation revisions', () => {
     const store = open()
     const first = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
     expect(() => store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })).toThrowError(/already exists/)
     expect(() => store.update({ skillId: first.id, expectedVersion: 0, package: pkg(), origin: 'UI' })).toThrowError(/changed since/)
-    expect(store.archive(first.id, 1).status).toBe('ARCHIVED')
-    const replacement = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
-    expect(() => store.restore(first.id, 1)).toThrow()
-    store.archive(replacement.id, 1)
-    expect(store.restore(first.id, 1).status).toBe('ACTIVE')
+    expect(store.setEnabled(first.id, false, 1)).toMatchObject({ status: 'DISABLED', stateRevision: 2, currentVersion: 1, current: first.current })
+    expect(() => store.create({ package: pkg('alpha'), scope: 'GLOBAL', origin: 'UI' })).toThrowError(/already exists/)
+    expect(store.findByName('ALPHA')?.id).toBe(first.id)
+    expect(() => store.setEnabled(first.id, true, 1)).toThrowError(/activation changed/)
+    const edited = store.update({ skillId: first.id, expectedVersion: 1, package: pkg('alpha', '# V2'), origin: 'UI' })
+    expect(edited).toMatchObject({ id: first.id, status: 'DISABLED', stateRevision: 2, currentVersion: 2, scope: first.scope, projectIds: first.projectIds })
+    expect(store.history(first.id)[1]).toEqual(first.current)
+    expect(store.setEnabled(first.id, true, 2)).toMatchObject({ status: 'ACTIVE', stateRevision: 3, currentVersion: 2, current: edited.current })
+    expect(store.setEnabled(first.id, true, 3).stateRevision).toBe(3)
+    expect(store.archive(first.id, 2).status).toBe('DISABLED')
+    expect(store.restore(first.id, 2).status).toBe('ACTIVE')
     store.close()
+  })
+
+  it('rejects stale activation across two SQLite connections without overwriting content edits', () => {
+    const store = open(), peer = new AcademyStore(store.databasePath)
+    try {
+      const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      const read = peer.get(skill.id)
+      store.setEnabled(skill.id, false, skill.stateRevision)
+      peer.update({ skillId: skill.id, expectedVersion: read.currentVersion, package: pkg('alpha', 'peer edit'), origin: 'MCP' })
+      expect(() => peer.setEnabled(skill.id, true, read.stateRevision)).toThrowError(/activation changed/)
+      expect(store.get(skill.id)).toMatchObject({ status: 'DISABLED', stateRevision: 2, currentVersion: 2 })
+    } finally { peer.close(); store.close() }
+  })
+
+  it.each([false, true])('migrates legacy activation atomically, collision=%s', (collision) => {
+    const store = open(), path = store.databasePath
+    const destination = store.upsertDestination('C:/migration', 'migration')
+    const skill = store.create({ package: pkg(), scope: 'PROJECT', projectIds: [destination.id], origin: 'UI' })
+    store.setProjection(skill.id, destination.id, 1, skill.current.packageHash, skill.name)
+    const conflict = store.createConflict(skill.id, 'IMPORT', 1, pkg('alpha', 'diverged'), 'divergent', destination.id, null)
+    const before = store.history(skill.id)
+    store.close()
+    const legacy = new Database(path)
+    legacy.pragma('foreign_keys = OFF')
+    legacy.exec(`
+      CREATE TABLE legacy_skills (id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('ACTIVE','ARCHIVED')), scope TEXT NOT NULL CHECK(scope IN ('GLOBAL','PROJECT')),
+        current_version INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      INSERT INTO legacy_skills SELECT id,name,description,'ARCHIVED',scope,current_version,created_at,updated_at FROM academy_skills;
+      DROP TABLE academy_skills; ALTER TABLE legacy_skills RENAME TO academy_skills;
+      CREATE UNIQUE INDEX academy_active_name ON academy_skills(lower(name)) WHERE status='ACTIVE';
+    `)
+    if (collision) legacy.prepare("INSERT INTO academy_skills SELECT 'other',upper(name),description,'ACTIVE',scope,current_version,created_at,updated_at FROM academy_skills").run()
+    const rows = legacy.prepare('SELECT * FROM academy_skills ORDER BY id').all()
+    const schema = legacy.prepare('SELECT name,sql FROM sqlite_master ORDER BY name').all()
+    legacy.close()
+    if (collision) {
+      expect(() => new AcademyStore(path)).toThrowError(expect.objectContaining({ code: 'ACADEMY_NAME_MIGRATION_CONFLICT', details: { skills: expect.arrayContaining([expect.objectContaining({ id: skill.id }), expect.objectContaining({ id: 'other' })]) } }))
+      const unchanged = new Database(path)
+      expect(unchanged.prepare('SELECT * FROM academy_skills ORDER BY id').all()).toEqual(rows)
+      expect(unchanged.prepare('SELECT name,sql FROM sqlite_master ORDER BY name').all()).toEqual(schema)
+      expect(unchanged.prepare('SELECT package_hash FROM academy_versions WHERE skill_id=?').get(skill.id)).toEqual({ package_hash: skill.current.packageHash })
+      unchanged.close()
+      return
+    }
+    for (let restart = 0; restart < 2; restart++) {
+      const migrated = new AcademyStore(path)
+      expect(migrated.get(skill.id)).toMatchObject({ id: skill.id, name: skill.name, status: 'DISABLED', stateRevision: 1, currentVersion: 1, scope: 'PROJECT', projectIds: [destination.id] })
+      expect(migrated.history(skill.id)).toEqual(before)
+      expect(migrated.getProjection(skill.id, destination.id)?.packageHash).toBe(skill.current.packageHash)
+      expect(migrated.listConflicts()[0].id).toBe(conflict.id)
+      migrated.close()
+    }
+    const checked = new Database(path)
+    expect(checked.pragma('foreign_key_check')).toEqual([])
+    expect(checked.pragma('integrity_check')).toEqual([{ integrity_check: 'ok' }])
+    checked.close()
   })
 
   it('rolls back create atomically when project association is invalid', () => {

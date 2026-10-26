@@ -6,7 +6,7 @@ import { AcademyView } from './AcademyView'
 
 const detail = {
   id: 'skill-1', name: 'alpha', description: 'Alpha skill', status: 'ACTIVE' as const, scope: 'GLOBAL' as const,
-  currentVersion: 1, projectIds: [], createdAt: '2026-09-23T00:00:00.000Z', updatedAt: '2026-09-23T00:00:00.000Z',
+  currentVersion: 1, stateRevision: 1, projectIds: [], createdAt: '2026-09-23T00:00:00.000Z', updatedAt: '2026-09-23T00:00:00.000Z',
   current: { skillId: 'skill-1', version: 1, package: { skillMd: '---\nname: alpha\ndescription: Alpha skill\n---\n# Alpha', artifacts: { 'README.md': '# Usage' } }, packageHash: 'hash', origin: 'IMPORT' as const, createdAt: '2026-09-23T00:00:00.000Z' }
 }
 const destination = { id: 'repo', path: 'C:/repo', name: 'repo', enabled: true, reconciliationStatus: 'SYNCED' as const, lastError: null, updatedAt: detail.updatedAt }
@@ -21,7 +21,8 @@ beforeEach(() => {
     getAcademySnapshot: vi.fn(async () => ({ skills: [detail], destinations: [destination], conflicts: [] })),
     getAcademySkill: vi.fn(async () => detail), getAcademyHistory: vi.fn(async () => [detail.current]),
     createAcademySkill: vi.fn(async () => detail), updateAcademySkill: vi.fn(async () => ({ ...detail, currentVersion: 2, current: { ...detail.current, version: 2 } })),
-    archiveAcademySkill: vi.fn(async () => ({ ...detail, status: 'ARCHIVED' })), restoreAcademySkill: vi.fn(async () => detail),
+    setAcademySkillEnabled: vi.fn(async () => ({ ...detail, status: 'DISABLED', stateRevision: 2 })),
+    archiveAcademySkill: vi.fn(async () => ({ ...detail, status: 'DISABLED' })), restoreAcademySkill: vi.fn(async () => detail),
     setAcademyDestinationEnabled: vi.fn(), importAcademyDestination: vi.fn(async () => []), resolveAcademyConflict: vi.fn(async () => detail),
     getAcademyDeliveryStatus: vi.fn(async () => ({ skillId: detail.id, version: detail.currentVersion, packageHash: detail.current.packageHash, status: 'CONVERGED', destinations: [] })),
     getAcademyDistributionHealth: vi.fn(async () => ({ targets: [{ target: 'FILESYSTEM_NATIVE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }, { target: 'CLAUDE_CODE', convergence: 'CONVERGED', current: 1, pending: 0, drifted: 0, missing: 0, error: 0, lastReconciledAt: detail.updatedAt }, { target: 'ANTIGRAVITY', convergence: 'DEGRADED', current: 0, pending: 0, drifted: 0, missing: 0, error: 1, lastReconciledAt: detail.updatedAt }] })),
@@ -73,6 +74,47 @@ const selectAlpha = async () => {
   fireEvent.click(await screen.findByRole('button', { name: /alpha/i }))
   await screen.findByRole('button', { name: 'Editar' })
 }
+
+it('toggles from the catalog without opening the editor and preserves selection, filters and disabled history', async () => {
+  let current: any = { ...detail }
+  vi.mocked(window.codeAwareness.getAcademySnapshot).mockImplementation(async () => ({ skills: [current], destinations: [destination], conflicts: [] }))
+  vi.mocked(window.codeAwareness.getAcademySkill).mockImplementation(async () => current)
+  vi.mocked(window.codeAwareness.setAcademySkillEnabled).mockImplementation(async (id, enabled, revision) => {
+    expect(id).toBe(detail.id); expect(revision).toBe(current.stateRevision)
+    current = { ...current, status: enabled ? 'ACTIVE' : 'DISABLED', stateRevision: revision + 1 }
+    return current
+  })
+  render(<AcademyView />)
+  fireEvent.click(await screen.findByRole('switch', { name: 'Ativação de alpha' }))
+  await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).getAttribute('aria-checked')).toBe('false'))
+  expect(screen.queryByLabelText('Editar SKILL.md')).toBeNull()
+  expect(screen.queryByRole('switch', { name: 'Ativação da Skill selecionada' })).toBeNull()
+  fireEvent.change(screen.getByLabelText('Filtrar por status'), { target: { value: 'ACTIVE' } })
+  expect(screen.queryByRole('switch', { name: 'Ativação de alpha' })).toBeNull()
+  fireEvent.change(screen.getByLabelText('Filtrar por status'), { target: { value: 'DISABLED' } })
+  await selectAlpha()
+  expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).getAttribute('aria-checked')).toBe('false')
+  fireEvent.click(screen.getByRole('button', { name: 'Histórico' }))
+  expect(await screen.findByText('Import')).toBeTruthy()
+  fireEvent.click(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }))
+  await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).getAttribute('aria-checked')).toBe('true'))
+  expect(window.codeAwareness.setAcademySkillEnabled).toHaveBeenLastCalledWith(detail.id, true, 2)
+  expect(screen.getByRole('heading', { name: 'alpha' })).toBeTruthy()
+})
+
+it('keeps switches pending and refreshes the persisted state after a CAS conflict', async () => {
+  let reject!: (error: Error) => void
+  vi.mocked(window.codeAwareness.setAcademySkillEnabled).mockImplementation(() => new Promise((_resolve, rejectPromise) => { reject = rejectPromise }))
+  render(<AcademyView />)
+  await selectAlpha()
+  fireEvent.click(screen.getByRole('switch', { name: 'Ativação de alpha' }))
+  expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).hasAttribute('disabled')).toBe(true)
+  reject(new Error('STATE_REVISION_CONFLICT'))
+  await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).hasAttribute('disabled')).toBe(false))
+  expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).getAttribute('aria-checked')).toBe('true')
+  expect(screen.getByRole('status').textContent).toContain('STATE_REVISION_CONFLICT')
+  expect(window.codeAwareness.getAcademySkill).toHaveBeenCalledTimes(2)
+})
 
 it('lists, opens in VIEW and updates a canonical skill with expectedVersion', async () => {
   render(<AcademyView />)
