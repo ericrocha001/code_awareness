@@ -30,6 +30,11 @@ describe('branch inventory with real Git', () => {
     const tree = inventory.worktrees.find(value => value.path === path)!
     const expected = { worktreeId: tree.worktreeId, generation: tree.generation, path, ref: branch.ref, branchGeneration: branch.generation, head: branch.head }
     await expect(service.verifyRuntimePreviewTarget(expected)).resolves.toBeUndefined()
+    writeFile(path, '.gitignore', 'generated/\n')
+    writeFile(path, 'generated/index.db', 'derived')
+    const ignored = await service.classifyRuntimePreviewChanges(tree.worktreeId, ['generated/index.db', '.gitignore'])
+    expect([...ignored]).toEqual(['generated/index.db'])
+    await expect(service.classifyRuntimePreviewChanges(tree.worktreeId, ['../outside'])).rejects.toThrow('PREVIEW_CHANGE_COVERAGE_UNVERIFIABLE')
     await expect(service.verifyRuntimePreviewTarget({ ...expected, generation: 'replaced' })).rejects.toThrow('WORKTREE_STALE')
     await expect(service.verifyRuntimePreviewTarget({ ...expected, path: root })).rejects.toThrow('WORKTREE_STALE')
     await gitExec(path, ['update-ref', '-d', branch.ref]); await gitExec(path, ['update-ref', branch.ref, branch.head])

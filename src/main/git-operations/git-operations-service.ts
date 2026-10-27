@@ -600,6 +600,11 @@ export class GitOperationsService {
     if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     return { repositoryId: this.worktreeRepositoryId!, record: await this.worktrees!.revalidateSelection(worktreeId) }
   }
+  async classifyRuntimePreviewChanges(worktreeId: string, paths: string[]) {
+    if (paths.length > 256 || paths.some(path => !path || path.includes('\0') || path.split('/').includes('..'))) fail('PREVIEW_CHANGE_COVERAGE_UNVERIFIABLE')
+    const selected = await this.getCoordinationIdentity(worktreeId)
+    return this.git.checkIgnoreBatch(selected.record.path, paths, { strict: true })
+  }
 
   async verifyRuntimePreviewTarget(expected: { worktreeId: string; generation: string; path: string; ref: string; branchGeneration: string; head: string }) {
     if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
