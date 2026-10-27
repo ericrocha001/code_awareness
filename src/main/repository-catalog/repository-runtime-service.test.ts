@@ -19,6 +19,15 @@ function setup() {
 }
 
 describe('catalog-bound active context', () => {
+  it('keeps identity bound while cooperative background activity waits and resumes only the current selection', async () => {
+    const { projects, codeMap } = setup(), gate = deferred()
+    const runtime = new RepositoryRuntimeService({ resolveAvailable: id => record(id) }, codeMap, projects, () => gate.promise)
+    const first = await runtime.activate('A')
+    expect(first.context?.identity).toBe('IDENTITY_BOUND')
+    expect(codeMap.openRepository).not.toHaveBeenCalled()
+    await runtime.activate('B'); gate.resolve(); await flush()
+    expect(codeMap.openRepository).toHaveBeenCalledExactlyOnceWith('/B')
+  })
   it('restores the logical repository before CodeMap readiness and skips duplicate restoration', async () => {
     const { projects, runtime, codeMap } = setup()
     const restored = await runtime.restoreLastActive('A')

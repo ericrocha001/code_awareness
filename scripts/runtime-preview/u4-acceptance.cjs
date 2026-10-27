@@ -273,6 +273,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
       }
       if (fastStart && command === 'standby-show') {
         const before = store.read(sessionId), operationId = randomUUID(), approvalsBefore = approvals
+        if (before.standby?.state !== 'QUIESCENT') { save('standby-show-miss', { success: false, reason: before.standby?.reason ?? before.state }); continue }
         const start = performance.now(); await mcp('run_branch_app', { repositoryId: before.selection.repositoryId, branch: before.sourceSnapshot.branch, expectedHead: before.sourceSnapshot.head, operationId })
         const result = await service.pendingResult(); save('standby-shown', result)
         if (result?.success && result.data.kind === 'SESSION' && result.data.session) sessionId = result.data.session.sessionId

@@ -17,7 +17,8 @@ export class RepositoryRuntimeService {
   constructor(
     private readonly catalog: Pick<RepositoryCatalogService, 'resolveAvailable'>,
     private readonly codeMap: CodeMapRepositoryRuntime,
-    private readonly activeProjects: ActiveProjectRuntime
+    private readonly activeProjects: ActiveProjectRuntime,
+    private readonly waitForActivity?: () => Promise<void>
   ) {}
 
   async restoreLastActive(repositoryId?: string): Promise<ActiveProjectState> {
@@ -41,6 +42,7 @@ export class RepositoryRuntimeService {
     const current = () => revision === this.activationRevision && this.activeProjects.getState().revision === state.revision
     this.activeProjects.updateCapability(state.revision, 'codeMap', { state: 'INITIALIZING' })
     void Promise.resolve().then(async () => {
+      if (this.waitForActivity) await this.waitForActivity()
       if (!current()) return
       await this.codeMap.openRepository(checkoutPath)
       if (!current()) return

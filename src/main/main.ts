@@ -96,7 +96,7 @@ import { orchestrationContinuumReader } from './ipc/orchestration-continuum-read
 import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
 import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
 import { PreviewRepositories } from './work-orchestration/preview-repositories'
-import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap, previewStartsHidden } from './work-orchestration/runtime-preview/electron-mode'
+import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap, previewStartsHidden, whenPreviewActive } from './work-orchestration/runtime-preview/electron-mode'
 import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtime-preview/context-data'
 import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
 import { CodeAwarenessProfileResolver } from './work-orchestration/runtime-preview/code-awareness-profile'
@@ -467,7 +467,7 @@ app.whenReady().then(async () => {
   powerMonitor.on('resume', () => workOrchestration.pause(false))
   app.on('before-quit', () => workOrchestration.deactivate())
   app.on('before-quit', () => { void gitManagement.deactivate() })
-  const repositoryRuntime = new RepositoryRuntimeService(repositoryCatalog, codeMapService, activeProjects)
+  const repositoryRuntime = new RepositoryRuntimeService(repositoryCatalog, codeMapService, activeProjects, previewStartsHidden() ? whenPreviewActive : undefined)
   activeProjects.onBeforeChange(async () => {
     await gitManagement.deactivate()
     workOrchestration.deactivate()

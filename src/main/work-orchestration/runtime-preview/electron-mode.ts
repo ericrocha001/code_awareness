@@ -8,6 +8,12 @@ export const isRuntimePreview = () => ['PREVIEW_SESSION_ID', 'PREVIEW_SESSION_CO
 let context: PreviewContextManifest | undefined
 let boundContext: { mode: 'PREVIEW'; repositoryId: string; worktreeId: string; generation: string; profileRevision: number; activeCheckout: string; identity: 'IDENTITY_BOUND'; data: PreviewContextManifest['data'] } | undefined
 let saveEvidence: (() => void) | undefined
+let active = false
+const activityWaiters = new Set<() => void>()
+export function whenPreviewActive(): Promise<void> {
+  if (!previewStartsHidden() || active) return Promise.resolve()
+  return new Promise(resolve => activityWaiters.add(resolve))
+}
 export const previewBootstrapContext = () => context ? structuredClone(context) : undefined
 export function previewStartsHidden() {
   if (!isRuntimePreview()) return false
@@ -68,7 +74,10 @@ export async function initializeElectronPreview(app: App) {
     quiescent = value.quiescent
     if (!quiescent && window.isVisible() && window.isFocused() && value.functional === true && boundContext && rendererModules.size && !rendererFailure) {
       functionalNs = process.hrtime.bigint().toString(); focusedNs = functionalNs
+      active = true
+      setImmediate(() => { for (const resume of activityWaiters) resume(); activityWaiters.clear() })
     }
+    if (quiescent) active = false
     save()
   })
   const activity = (window: BrowserWindow, quiet: boolean) => window.webContents.send('runtime-preview:activity', { quiescent: quiet, controlId })
