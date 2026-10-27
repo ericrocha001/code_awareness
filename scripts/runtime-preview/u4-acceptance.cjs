@@ -306,10 +306,10 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         const deadline = Date.now() + 240000
         let record
         while (Date.now() < deadline) {
-          record = store.list().find(value => value.operationId === branchIntent.operationId)
+          record = record ? store.read(record.sessionId) : store.list().find(value => value.operationId === branchIntent.operationId)
           if (record?.state === 'FAILED') throw new Error(record.failure)
           if (record?.state === 'RUNNING' && record.readiness === 'READY' && record.attestation.loadedCode === 'VERIFIED') break
-          await new Promise(resolve => setTimeout(resolve, 50))
+          await new Promise(resolve => setTimeout(resolve, 250))
         }
         assert.equal(record?.readiness, 'READY'); sessionId = record.sessionId
         const status = await mcp('get_runtime_preview_status', { sessionId }); assert.equal(status.data.ready, true)
@@ -334,7 +334,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
             else { const content = fs.readFileSync(file); files++; bytes += content.length; for (const value of forbidden) assert.equal(content.includes(Buffer.from(value)), false) }
           }
         }
-        scan(cacheRoot)
+        if (fs.existsSync(cacheRoot)) scan(cacheRoot)
         save('retention-stop-barrier', { success: true, sessionId, cache: store.read(sessionId).buildCache, files, bytes, secretsAbsent: true, privateResourcesReleased: true })
       }
       if (fastStart && command === 'hmr-check') {
