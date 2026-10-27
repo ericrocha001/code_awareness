@@ -616,7 +616,18 @@ export class GitOperationsService {
   async watchRuntimePreviewTarget(expected: Parameters<GitOperationsService['verifyRuntimePreviewTarget']>[0], invalidate: () => void) {
     await this.verifyRuntimePreviewTarget(expected)
     const common = realpathSync(await this.git.getCommonDirectory(expected.path)), admin = realpathSync(await this.git.getWorktreeDirectory(expected.path))
-    const index = join(admin, 'index'), indexFingerprint = ownershipDigest(readFileSync(index).toString('base64'))
+    const files = [join(admin, 'index'), join(admin, 'HEAD'), join(admin, 'commondir'), join(admin, 'gitdir'),
+      join(expected.path, '.gitignore'), join(common, expected.ref), join(common, 'logs', expected.ref),
+      join(common, 'packed-refs'), join(common, 'config'), join(common, 'info/exclude')]
+    const fingerprint = (file: string) => {
+      try { const stat = lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('PREPARED_GIT_METADATA_UNVERIFIABLE'); return ownershipDigest(readFileSync(file).toString('base64')) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+    }
+    const before = files.map(fingerprint)
+    const assertCurrent = () => {
+      this.worktrees!.assertObservedSelection(expected.worktreeId, expected.generation, expected.path)
+      if (existsSync(join(common, expected.ref + '.lock')) || files.some((file, index) => fingerprint(file) !== before[index])) throw new Error('PREPARED_GIT_METADATA_CHANGED')
+    }
     const watchers: ReturnType<typeof watch>[] = []
     try {
       const observe = (directory: string, relevant: (path: string) => boolean) => {
@@ -629,8 +640,9 @@ export class GitOperationsService {
       observe(common, path => ['packed-refs', 'config', 'info/exclude', expected.ref, 'logs/' + expected.ref].includes(path))
       observe(admin, path => ['HEAD', 'index', 'commondir', 'gitdir', 'locked', 'HEAD.lock', 'index.lock'].includes(path))
       await this.verifyRuntimePreviewTarget(expected)
+      assertCurrent()
       return {
-        assertCurrent: () => { if (lstatSync(index).isSymbolicLink() || ownershipDigest(readFileSync(index).toString('base64')) !== indexFingerprint) throw new Error('PREPARED_INDEX_CHANGED') },
+        assertCurrent,
         close: () => { for (const watcher of watchers) watcher.close() }
       }
     } catch (error) { for (const watcher of watchers) watcher.close(); throw error }

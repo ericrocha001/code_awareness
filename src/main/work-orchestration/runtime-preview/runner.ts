@@ -226,13 +226,12 @@ export class RuntimePreviewRunner {
             const slot = this.slots.get(sessionId)
             const observe = slot?.sourceCovered ? async () => {
               slot.assertIdentity?.(); slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
-              await input.guard?.()
               slot.assertIdentity?.(); slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
             } : undefined
             if (prepared.presentationGuard) await prepared.presentationGuard(observe, mark)
             else await prepared.guard()
             if (!observe) await input.guard?.()
-          }, profile, async () => { await prepared.retentionGuard?.(); await input.guard?.() }, prepared.classifyChanges, input.watchIdentity, corpus)
+          }, profile, async () => { await prepared.retentionGuard?.(); const slot = this.slots.get(sessionId); if (slot?.sourceCovered) slot.assertIdentity?.(); else await input.guard?.() }, prepared.classifyChanges, input.watchIdentity, corpus)
         } }
         const [context] = await prepareTogether(async signal => {
           if (!profile.bootstrap) return undefined

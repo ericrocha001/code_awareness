@@ -223,7 +223,7 @@ export class RuntimePreviewOperations {
     const checked = before.startAllowed && !approvedNow ? before : await this.check(target, timing, context)
     if (!checked.startAllowed) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: checked.preflight })
     const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context, preflightEvidence: checked.preflight,
-      ...(standbyPolicy ? { standbyPolicy, watchIdentity: (invalidate: () => void) => context.git.watchRuntimePreviewTarget({ worktreeId: tree.worktreeId, generation: tree.generation, path: tree.path, ref: branch.ref, branchGeneration: branch.generation, head: branch.head }, invalidate) } : {}) })
+      ...(standbyPolicy ? { standbyPolicy, watchIdentity: async (invalidate: () => void) => { const observation = await context.git.watchRuntimePreviewTarget({ worktreeId: tree.worktreeId, generation: tree.generation, path: tree.path, ref: branch.ref, branchGeneration: branch.generation, head: branch.head }, invalidate); return { close: observation.close, assertCurrent: () => { guard(); context.guard(); observation.assertCurrent() } } } } : {}) })
     return { success: true, data: { kind: 'SESSION', session: await this.view(record, true), pending: false } }
   }
   private async view(record: PreviewSessionRecord, current: boolean, known?: PreviewQualification): Promise<PreviewSessionView> {
@@ -348,6 +348,10 @@ export class RuntimePreviewOperations {
         this.repositories.resolve(request.repositoryId).guard()
         await this.profiles.revoke(request.repositoryId, guard)
         const active = this.store.list().find(value => value.selection.repositoryId === request.repositoryId && value.resources !== 'RELEASED')
+        if (active && this.pending && active.state === 'PREPARING') {
+          this.runner.cancelPreparation(active.sessionId)
+          return { success: true, data: { kind: 'SESSION', session: null, operationId: active.operationId, pending: true } }
+        }
         if (active) return this.mutate('stop:' + active.sessionId, active.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.evict(active.sessionId, 'REPOSITORY_TRUST_REVOKED'), true), pending: false } }))
         return { success: true, data: { kind: 'PROFILES', profiles: await this.preflight.list(request.repositoryId) } }
       }

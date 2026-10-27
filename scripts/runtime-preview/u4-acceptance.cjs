@@ -20,7 +20,7 @@ const fastStart = process.argv.includes('--fast-start')
 const agentIntent = process.argv.includes('--agent-intent') || fastStart
 const branchApp = process.argv.includes('--branch-app') || branchAppUI || agentIntent
 const contextual = process.argv.includes('--context') || branchApp, snapshot = process.argv.includes('--snapshot') || branchApp
-const root = process.cwd(), output = path.join(root, fastStart ? '.code-awareness/runtime-preview-fast-start/acceptance' : agentIntent ? '.code-awareness/runtime-preview-agent-intent/acceptance' : branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
+const root = process.cwd(), outputArgument = process.argv.indexOf('--evidence-directory'), output = outputArgument >= 0 ? path.resolve(process.argv[outputArgument + 1]) : path.join(root, fastStart ? '.code-awareness/runtime-preview-fast-start/acceptance' : agentIntent ? '.code-awareness/runtime-preview-agent-intent/acceptance' : branchApp ? '.code-awareness/run-branch-app/acceptance' : contextual ? '.code-awareness/active-context-b/acceptance' + (snapshot ? '-snapshot' : '-empty') : '.code-awareness/u4')
 fs.mkdirSync(output, { recursive: true })
 if (branchApp) process.on('uncaughtException', error => {
   fs.writeFileSync(path.join(output, 'harness-uncaught.txt'), String(error.stack))

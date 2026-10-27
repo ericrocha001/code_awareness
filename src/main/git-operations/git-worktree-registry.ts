@@ -120,6 +120,19 @@ export class GitWorktreeRegistry {
     return record
   }
 
+  assertObservedSelection(worktreeId: string, generation: string, path: string) {
+    if (!this.identity.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
+    const prior = this.observed.get(worktreeId)
+    if (!prior || prior.record.generation !== generation || prior.record.path !== path) fail('WORKTREE_STALE')
+    const physical = realpathSync(path)
+    const directories = this.validatedDirectories(physical, path, prior.common)
+    if (!directories || physical !== prior.physical || directories.admin !== prior.admin) fail('WORKTREE_IDENTITY_MISMATCH')
+    const admin = statSync(prior.admin, { bigint: true }), root = statSync(physical, { bigint: true })
+    if (digest([prior.admin, String(admin.dev), String(admin.ino), String(admin.birthtimeNs), physical, String(root.ino), String(root.birthtimeNs)]) !== generation) fail('WORKTREE_STALE')
+    if (['locked', 'index.lock', 'HEAD.lock'].some(name => existsSync(join(prior.admin, name))) ||
+      ['packed-refs.lock', 'config.lock'].some(name => existsSync(join(prior.common, name)))) fail('GIT_OPERATION_IN_PROGRESS')
+  }
+
   async revalidateSelection(worktreeId: string): Promise<WorktreeRecord> {
     const prior = this.observed.get(worktreeId)
     if (!prior) fail('WORKTREE_NOT_DISCOVERED')

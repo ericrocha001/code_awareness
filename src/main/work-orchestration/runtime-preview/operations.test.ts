@@ -107,6 +107,15 @@ describe('Runtime Preview bounded operations (contract fixtures)', () => {
     expect(await service.pendingResult()).toEqual({ success: false, code: 'WORKTREE_STALE' })
     expect(confirm).not.toHaveBeenCalled()
   })
+  it('revokes trust and cancels WARMING immediately while its operation is pending', async () => {
+    const active = { ...record, state: 'PREPARING' }, cancelPreparation = vi.fn(), revoke = vi.fn(async () => {})
+    const service = new RuntimePreviewOperations({ resolve: () => ({ guard() {} }) } as any, { revoke } as any,
+      { list: () => [active] } as any, { cancelPreparation } as any, async () => true)
+    ;(service as any).pending = { operationId: active.operationId }
+    expect(await service.handle({ action: 'REVOKE_TRUST', repositoryId: selection.repositoryId })).toMatchObject({ success: true, data: { pending: true, operationId: active.operationId } })
+    expect(revoke).toHaveBeenCalledOnce()
+    expect(cancelPreparation).toHaveBeenCalledWith(active.sessionId)
+  })
   it('exposes fifteen fixed tools and returns structured errors, without action injection', async () => {
     const { service } = setup()
     expect(RUNTIME_PREVIEW_TOOLS).toHaveLength(15)

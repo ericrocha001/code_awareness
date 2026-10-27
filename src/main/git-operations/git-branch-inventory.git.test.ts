@@ -41,12 +41,18 @@ describe('branch inventory with real Git', () => {
     const dispose = await service.watchRuntimePreviewTarget(expected, () => { invalidated = true })
     try {
       expect(() => dispose.assertCurrent()).not.toThrow()
+      writeFile(path, '.gitignore', 'changed/\n')
+      expect(() => dispose.assertCurrent()).toThrow('PREPARED_GIT_METADATA_CHANGED')
+      writeFile(path, '.gitignore', 'generated/\n.code-awareness/\n')
+      expect(() => dispose.assertCurrent()).not.toThrow()
       writeFile(path, '.code-awareness/tracked.txt', 'tracked')
       await gitExec(path, ['add', '--force', '.code-awareness/tracked.txt'])
-      expect(() => dispose.assertCurrent()).toThrow('PREPARED_INDEX_CHANGED')
+      expect(() => dispose.assertCurrent()).toThrow('PREPARED_GIT_METADATA_CHANGED')
       await gitExec(path, ['reset', '--', '.code-awareness/tracked.txt'])
+      invalidated = false
       await gitExec(path, ['update-ref', '-d', branch.ref]); await gitExec(path, ['update-ref', branch.ref, branch.head])
       await vi.waitFor(() => expect(invalidated).toBe(true))
+      expect(() => dispose.assertCurrent()).toThrow('PREPARED_GIT_METADATA_CHANGED')
     } finally { dispose.close() }
     await expect(service.verifyRuntimePreviewTarget(expected)).rejects.toThrow('BRANCH_CHANGED')
     const updated = (await service.getBranchInventory()).branches.find(value => value.ref === branch.ref)!
