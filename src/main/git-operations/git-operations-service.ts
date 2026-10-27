@@ -616,7 +616,7 @@ export class GitOperationsService {
   async watchRuntimePreviewTarget(expected: Parameters<GitOperationsService['verifyRuntimePreviewTarget']>[0], invalidate: () => void) {
     await this.verifyRuntimePreviewTarget(expected)
     const common = realpathSync(await this.git.getCommonDirectory(expected.path)), admin = realpathSync(await this.git.getWorktreeDirectory(expected.path))
-    const files = [join(admin, 'index'), join(admin, 'HEAD'), join(admin, 'commondir'), join(admin, 'gitdir'),
+    const files = [join(admin, 'index'), join(admin, 'HEAD'), join(admin, 'commondir'), join(admin, 'gitdir'), join(admin, 'config.worktree'),
       join(expected.path, '.gitignore'), join(common, expected.ref), join(common, 'logs', expected.ref),
       join(common, 'packed-refs'), join(common, 'config'), join(common, 'info/exclude')]
     const fingerprint = (file: string) => {
@@ -630,15 +630,20 @@ export class GitOperationsService {
     }
     const watchers: ReturnType<typeof watch>[] = []
     try {
-      const observe = (directory: string, relevant: (path: string) => boolean) => {
-        const watcher = watch(directory, { recursive: true, persistent: false }, (_event, file) => {
+      const groups = new Map<string, Set<string>>()
+      for (const file of [...files.filter(file => file !== join(expected.path, '.gitignore')), join(admin, 'locked'), join(admin, 'HEAD.lock'), join(admin, 'index.lock'), join(common, expected.ref + '.lock')]) {
+        let directory = dirname(file)
+        while (!existsSync(directory) && dirname(directory) !== directory) directory = dirname(directory)
+        const paths = groups.get(directory) ?? new Set<string>()
+        paths.add(relative(directory, file).replaceAll('\\', '/')); groups.set(directory, paths)
+      }
+      for (const [directory, paths] of groups) {
+        const watcher = watch(directory, { recursive: [...paths].some(path => path.includes('/')), persistent: false }, (_event, file) => {
           const path = file?.toString().replaceAll('\\', '/')
-          if (!path || relevant(path)) invalidate()
+          if (!path || paths.has(path)) invalidate()
         })
         watcher.on('error', invalidate); watchers.push(watcher)
       }
-      observe(common, path => ['packed-refs', 'config', 'info/exclude', expected.ref, 'logs/' + expected.ref].includes(path))
-      observe(admin, path => ['HEAD', 'index', 'commondir', 'gitdir', 'locked', 'HEAD.lock', 'index.lock'].includes(path))
       await this.verifyRuntimePreviewTarget(expected)
       assertCurrent()
       return {
