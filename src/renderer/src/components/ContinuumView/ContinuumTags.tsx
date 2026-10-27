@@ -45,9 +45,9 @@ export function ArtifactTagEditor({ repositoryId, artifact, tags, onChanged }: {
   </div>
 }
 
-export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, onChanged, onClose, onTokenTotals }: {
+export function ContinuumTagManager({ repositoryId, tags, onFilter, onChanged, onClose, onTokenTotals }: {
   onTokenTotals?(totals: ContinuumTagTokens[]): void
-  repositoryId: string; tags: ContinuumTag[]; onFilter(slug: string): void; onBundle?(slug: string): void; onChanged(): void; onClose(): void
+  repositoryId: string; tags: ContinuumTag[]; onFilter(slug: string): void; onChanged(): void; onClose(): void
 }) {
   const [name, setName] = useState(''), [description, setDescription] = useState(''), [editing, setEditing] = useState<string | null>(null)
   const [pending, setPending] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
@@ -93,7 +93,7 @@ export function ContinuumTagManager({ repositoryId, tags, onFilter, onBundle, on
       <button disabled={pending} onClick={() => bundle(tag.slug, 'copy')} aria-label={`Copiar contexto ${tag.name}`}>Copiar contexto</button>
       <details className="continuum-tag-options"><summary aria-label={`Opções ${tag.name}`} title="Opções"><MoreHorizontal size={16} /></summary><div>
         <button disabled={pending} onClick={() => bundle(tag.slug, 'markdown')}>Salvar Markdown</button><button disabled={pending} onClick={() => bundle(tag.slug, 'zip')}>Salvar ZIP</button>
-        {onBundle && <button onClick={() => onBundle(tag.slug)}>Revisar pacote…</button>}
+        
         <button disabled={pending} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); setEditing(tag.slug); setName(tag.name); setDescription(tag.description) }}>Editar tag</button>
         <button aria-label={`Excluir tag ${tag.slug}`} title={tag.count ? 'Remova as associações antes de excluir' : 'Excluir tag vazia'} disabled={pending || tag.count > 0} onClick={() => mutate({ repositoryId, intent: 'delete', slug: tag.slug })}>Excluir tag vazia</button>
       </div></details>
