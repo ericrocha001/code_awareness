@@ -3,7 +3,19 @@ import type { GitAtlasScope, GitAtlasWindow } from '../../shared/types/git-atlas
 import type { AtlasCatalogManifest, AtlasCollectionRound, AtlasCatalogDiagnostic } from '../../shared/types/git-atlas-catalog-types'
 
 export type AtlasCommit = Omit<GitHistoryNode, 'decorations'>
+export interface AtlasHistoryOrder {
+  key: string
+  offset: number
+  shas: string[]
+  complete: boolean
+}
+export interface AtlasOrderPage {
+  shas: string[]
+  materialized: number
+  complete: boolean
+}
 export interface AtlasHistorySlice {
+  order?: AtlasHistoryOrder
   revision: string
   worktreeGeneration: string
   scope?: GitAtlasScope
@@ -27,6 +39,7 @@ export interface AtlasPersistence {
   getCommit(sha: string): AtlasCommit | undefined
   getDisplayCommit(sha: string): AtlasCommit | undefined
   getSlice(key: string): AtlasHistorySlice | undefined
+  getOrder?(key: string, offset: number, limit: number, since: string | null, until: string | null): AtlasOrderPage | undefined
   findSlice(revision: string, since: string | null, until: string): AtlasHistorySlice | undefined
   save(key: string, slice: AtlasHistorySlice, commits: readonly AtlasCommit[], observation?: AtlasCatalogManifest): boolean
   beginRound(manifest: AtlasCatalogManifest): AtlasCollectionRound | undefined

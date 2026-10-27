@@ -72,11 +72,13 @@ export class GitAtlasReader {
   }
 
   invalidate(dispose = false) {
+    if (this.disposed) return
     this.stopCollection()
     this.deliveredSnapshot = ''
     this.generation++; this.pages.clear(); this.pending.clear(); this.anchors.clear()
     if (dispose) {
       this.drainOnClose()
+      if (this.writes.size) console.warn('[GitAtlas] Shutdown with unconfirmed writes', { pending: this.writes.size, reason: this.persistenceReason })
       this.disposed = true; this.commits.clear(); this.slices.clear(); this.persistenceToken++; this.persistence?.close(); this.persistence = undefined
     }
   }
@@ -257,14 +259,20 @@ export class GitAtlasReader {
     return page
   }
 
-  private async readCommits(shas: string[]): Promise<Map<string, AtlasCommit>> {
-    const identity = this.structuralIdentity
+  private cachedCommits(shas: string[]): Map<string, AtlasCommit> {
     const found = new Map<string, AtlasCommit>()
     for (const sha of shas) {
       const cached = this.commits.getReadonly<AtlasCommit>(sha) ?? this.persistence?.getDisplayCommit(sha)
       if (cached) { found.set(sha, cached); if (!Object.isFrozen(cached)) this.commits.set(sha, cached) }
     }
+    return found
+  }
+
+  private async readCommits(shas: string[]): Promise<Map<string, AtlasCommit>> {
+    const identity = this.structuralIdentity
+    const found = this.cachedCommits(shas)
     const missing = shas.filter(sha => !found.has(sha))
+    if (!missing.length) return found
     const raw = await this.git.getAtlasCommitMetadata(this.root, missing)
     if (identity !== this.structuralIdentity) this.fail('GIT_STATE_CHANGED')
     for (const line of raw.trimEnd().split('\n').filter(Boolean)) {
@@ -283,6 +291,7 @@ export class GitAtlasReader {
     if (![7, 15, 30, 60, 90, 'ALL'].includes(request.window) || !Number.isInteger(limit) || limit < 1 || limit > 100) this.fail('INVALID_ARGUMENT')
     const before = await this.observe(request.contextKey, request.scope)
     if (request.refresh && !this.persistence && this.persistenceCommon) this.preparePersistence(this.persistenceCommon, true)
+    const alreadyReady = !!this.persistence
     await this.storageReady()
     if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')
     const session = JSON.stringify([request.contextKey, request.scope, request.window])
@@ -319,7 +328,8 @@ export class GitAtlasReader {
     const tips = [...new Set([...before.refs.map(ref => ref.sha), ...before.detachedHeads.map(ref => ref.sha), ...before.tags.map(tag => tag.sha)])].sort()
     if (tips.join(' ').length > 24000) this.fail('ATLAS_REFERENCE_LIMIT')
     if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')
-    let slice = !request.refresh ? this.slices.getReadonly<AtlasHistorySlice>(sliceKey) ?? this.persistence?.getSlice(sliceKey) : undefined
+    const storedSlice = !request.refresh ? this.persistence?.getSlice(sliceKey) : undefined
+    let slice = !request.refresh ? this.slices.getReadonly<AtlasHistorySlice>(sliceKey) ?? storedSlice : undefined
     if (slice && (slice.revision !== before.historyRevision || slice.worktreeGeneration !== before.worktreeGeneration || slice.window !== request.window || slice.offset !== offset || slice.limit !== limit || request.window !== 'ALL' && slice.anchorAt !== anchorAt || slice.since !== since || slice.upperBound !== upperBound || JSON.stringify(slice.tips) !== JSON.stringify(tips) || JSON.stringify(slice.scope) !== JSON.stringify(request.scope))) slice = undefined
     if (!slice && !request.refresh && offset === 0) {
       const compatible = (candidate: AtlasHistorySlice) => candidate.revision === before.historyRevision && candidate.worktreeGeneration === before.worktreeGeneration && !candidate.hasMore && candidate.offset === 0 && candidate.shas.length <= limit &&
@@ -336,13 +346,15 @@ export class GitAtlasReader {
       }
     }
     if (!slice) {
-      const rows = await this.git.getAtlasHistoryOrder(this.root, tips, offset, limit + 1, since, upperBound ?? undefined)
+      const rows = await this.historyOrder(request, before, tips, offset, limit + 1, since, upperBound)
       const shas = rows.slice(0, limit)
       if (checkoutCommit && !shas.includes(checkoutCommit.sha)) shas.push(checkoutCommit.sha)
       slice = { revision: before.historyRevision, worktreeGeneration: before.worktreeGeneration, scope: request.scope, tips, window: request.window, offset, limit, shas, hasMore: rows.length > limit, since, upperBound, anchorAt, anchorKind, queriedAt }
     }
-    const objects = await this.readCommits(slice.shas)
-    const after = await this.observe(request.contextKey, request.scope)
+    const known = this.cachedCommits(slice.shas)
+    const durable = alreadyReady && storedSlice && slice === storedSlice && known.size === slice.shas.length
+    const objects = known.size === slice.shas.length ? known : await this.readCommits(slice.shas)
+    const after = durable ? before : await this.observe(request.contextKey, request.scope)
     if (generation !== this.generation || after.snapshot !== before.snapshot) this.fail('GIT_STATE_CHANGED')
     const nodes = slice.shas.filter(sha => !request.scope || request.window === 'ALL' || Date.parse(objects.get(sha)!.timestamp) <= Date.parse(anchorAt)).map(sha => {
       const immutable = objects.get(sha)!
@@ -359,11 +371,42 @@ export class GitAtlasReader {
     const result: GitAtlasPage = { ...presentation, ...(request.scope ? { scope: request.scope, referenceCoverage: request.scope.kind === 'CHECKOUT' ? 'SELECTED' as const : 'ALL_REFS' as const, anchorAt, anchorKind } : {}), queriedAt, since, nodes, boundary, pendingParents: boundary, nextCursor, coverage: nextCursor ? 'PARTIAL' : 'COMPLETE_WINDOW' }
     if (generation === this.generation) {
       this.pages.set(cacheKey, result); this.slices.set(sliceKey, slice)
-      await this.persist(sliceKey,slice,[...objects.values()],{scopeKey:JSON.stringify(request.scope??'LEGACY'),revision:before.historyRevision,topology:before.topologyRevision,worktreeGeneration:before.worktreeGeneration,tips,refs:before.refs,tags:before.tags,observedAt:new Date().toISOString(),available:request.scope?.kind==='CHECKOUT'||before.detachedCoverage==='COMPLETE'})
+      if (!durable) await this.persist(sliceKey,slice,[...objects.values()],{scopeKey:JSON.stringify(request.scope??'LEGACY'),revision:before.historyRevision,topology:before.topologyRevision,worktreeGeneration:before.worktreeGeneration,tips,refs:before.refs,tags:before.tags,observedAt:new Date().toISOString(),available:request.scope?.kind==='CHECKOUT'||before.detachedCoverage==='COMPLETE'})
     }
     if (this.disposed) this.fail('REPOSITORY_CONTEXT_CHANGED')
     if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')
     return result
+  }
+
+  private async historyOrder(request: GitAtlasQuery, before: Awaited<ReturnType<GitAtlasReader['observe']>>, tips: string[], offset: number, limit: number, since: string | null, until: string | null): Promise<string[]> {
+    const store = this.persistence
+    if (!store?.getOrder || store.diagnostic().state !== 'READY') return this.git.getAtlasHistoryOrder(this.root, tips, offset, limit, since, until ?? undefined)
+    const key = createHash('sha256').update(JSON.stringify(['GIT_DATE_ORDER_V1', before.topologyRevision, tips])).digest('hex')
+    const generation = this.generation
+    while (!this.disposed && generation === this.generation) {
+      const page = store.getOrder(key, offset, limit, since, until)
+      if (page && (page.shas.length === limit || page.complete)) return page.shas
+      if (store.diagnostic().state !== 'READY') break
+      const position = page?.materialized ?? 0
+      const shas = await this.coalesce(`order:${key}:${position}`, async () => {
+        const rows = await this.git.getAtlasHistoryOrder(this.root, tips, position, 101, null)
+        const commits = await this.readCommits(rows)
+        const after = await this.observe(request.contextKey, request.scope)
+        if (this.disposed || generation !== this.generation || after.snapshot !== before.snapshot) this.fail('GIT_STATE_CHANGED')
+        const observedAt = new Date().toISOString()
+        const slice: AtlasHistorySlice = { revision: key, worktreeGeneration: before.worktreeGeneration, tips, window: 'ALL', offset: position, limit: 100, shas: rows, hasMore: rows.length === 101, since: null, upperBound: null, anchorAt: observedAt, anchorKind: 'PRESENT', queriedAt: observedAt,
+          order: { key, offset: position, shas: rows, complete: rows.length < 101 } }
+        await this.persist(`order:${key}:${position}`, slice, [...commits.values()], { scopeKey: 'GIT_DATE_ORDER_V1', revision: before.historyRevision, topology: before.topologyRevision, worktreeGeneration: before.worktreeGeneration, tips, refs: before.refs, tags: before.tags, observedAt, available: before.detachedCoverage === 'COMPLETE' })
+        return rows
+      })
+      const saved = store.getOrder(key, offset, limit, since, until)
+      if (!saved || saved.materialized <= position && !saved.complete) break
+      if (shas.length < 101 && saved.complete) return saved.shas
+      await new Promise<void>(resolve => setImmediate(resolve))
+    }
+    if (this.disposed) this.fail('REPOSITORY_CONTEXT_CHANGED')
+    if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')
+    return this.git.getAtlasHistoryOrder(this.root, tips, offset, limit, since, until ?? undefined)
   }
 
   async compare(request: { snapshot: string; left: string; right: string; contextKey?: string; scope?: GitAtlasScope }): Promise<GitAtlasComparison> {

@@ -2,7 +2,7 @@ import Database from 'better-sqlite3'
 import { createHash } from 'node:crypto'
 import { existsSync, lstatSync, mkdirSync, realpathSync, unlinkSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import type { AtlasCommit, AtlasHistorySlice, AtlasPersistence } from './git-atlas-cache'
+import type { AtlasCommit, AtlasHistorySlice, AtlasPersistence, AtlasOrderPage } from './git-atlas-cache'
 import type { AtlasCatalogManifest, AtlasCollectionRound, AtlasCatalogDiagnostic } from '../../shared/types/git-atlas-catalog-types'
 
 const formatVersion = 1
@@ -74,7 +74,7 @@ export class GitAtlasSqliteCache implements AtlasPersistence {
       db.pragma('journal_size_limit = 4194304')
       db.pragma('max_page_count = 2147483646')
       const version = db.pragma('user_version', { simple: true })
-      if (![0, 1, 2].includes(Number(version))) throw new Error('ATLAS_CATALOG_SCHEMA_INCOMPATIBLE')
+      if (![0, 1, 2, 3].includes(Number(version))) throw new Error('ATLAS_CATALOG_SCHEMA_INCOMPATIBLE')
       db.transaction(() => {
       db.exec(`
         CREATE TABLE IF NOT EXISTS cache_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -99,11 +99,13 @@ export class GitAtlasSqliteCache implements AtlasPersistence {
         CREATE INDEX IF NOT EXISTS atlas_frontier_round ON atlas_frontier(round_id,id);
         CREATE TABLE IF NOT EXISTS atlas_round_visit(round_id TEXT NOT NULL,sha TEXT NOT NULL,PRIMARY KEY(round_id,sha));
         CREATE INDEX IF NOT EXISTS atlas_visit_sha ON atlas_round_visit(sha,round_id);
-        PRAGMA user_version = 2;
+        CREATE TABLE IF NOT EXISTS atlas_history_order(key TEXT PRIMARY KEY,materialized INTEGER NOT NULL,complete INTEGER NOT NULL,last_access INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS atlas_history_position(order_key TEXT NOT NULL,position INTEGER NOT NULL,sha TEXT NOT NULL,PRIMARY KEY(order_key,position));
+        PRAGMA user_version = 3;
       `)
       this.statement('INSERT OR REPLACE INTO cache_meta(key,value) VALUES (?,?)').run('identity',selected.identity)
       if(Number(version)===1) this.statement('INSERT OR IGNORE INTO cache_meta(key,value) VALUES (?,?)').run('legacy_identity',selected.legacyIdentity)
-      this.statement('INSERT OR REPLACE INTO cache_meta(key,value) VALUES (?,?)').run('limits',JSON.stringify({schemaVersion:2,durableFacts:'NO_AUTOMATIC_EVICTION',sliceBytes:8*1024*1024,slices:256}))
+      this.statement('INSERT OR REPLACE INTO cache_meta(key,value) VALUES (?,?)').run('limits',JSON.stringify({schemaVersion:3,durableFacts:'NO_AUTOMATIC_EVICTION',sliceBytes:8*1024*1024,slices:256,orders:64}))
       })()
       this.health = { state: 'READY', reason: null }
     } catch (error) { this.failure(error) }
@@ -208,6 +210,36 @@ export class GitAtlasSqliteCache implements AtlasPersistence {
     for(const ref of [...manifest.refs,...manifest.tags.map(tag=>({ref:`refs/tags/${tag.name}`,sha:tag.sha,kind:'TAG'}))]) this.statement('INSERT OR IGNORE INTO atlas_ref_observation(scope_key,revision,observer_generation,ref,sha,kind,observed_at,source) VALUES (?,?,?,?,?,?,?,?)').run(manifest.scopeKey,manifest.revision,manifest.worktreeGeneration,ref.ref,ref.sha,ref.kind,manifest.observedAt,'GIT_LOCAL')
   }
 
+  getOrder(key: string, offset: number, limit: number, since: string | null, until: string | null): AtlasOrderPage | undefined {
+    if (!this.db) return undefined
+    try {
+      if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(limit) || limit < 1 || limit > 101) throw new Error('ATLAS_BATCH_LIMIT')
+      const order = this.statement('SELECT materialized,complete FROM atlas_history_order WHERE key=?').get(key) as { materialized: number; complete: number } | undefined
+      if (!order) return undefined
+      const rows = this.statement(`SELECT p.sha FROM atlas_history_position p JOIN git_commit c ON c.sha=p.sha
+        WHERE p.order_key=? AND (? IS NULL OR julianday(c.committed_at)>=julianday(?)) AND (? IS NULL OR julianday(c.committed_at)<=julianday(?))
+        ORDER BY p.position LIMIT ? OFFSET ?`).all(key, since, since, until, until, limit, offset) as Array<{ sha: string }>
+      this.statement('UPDATE atlas_history_order SET last_access=? WHERE key=?').run(Date.now(), key)
+      return { shas: rows.map(row => row.sha), materialized: order.materialized, complete: !!order.complete }
+    } catch (error) { this.failure(error); return undefined }
+  }
+
+  private putOrder(order: NonNullable<AtlasHistorySlice['order']>) {
+    if (!Number.isSafeInteger(order.offset) || order.offset < 0 || order.shas.length > 101 || order.shas.some(sha => !shaPattern.test(sha))) throw new Error('ATLAS_BATCH_LIMIT')
+    const previous = this.statement('SELECT materialized,complete FROM atlas_history_order WHERE key=?').get(order.key) as { materialized: number; complete: number } | undefined
+    if (order.offset > (previous?.materialized ?? 0)) throw new Error('ATLAS_ORDER_GAP')
+    order.shas.forEach((sha, index) => {
+      const position = order.offset + index
+      const current = this.statement('SELECT sha FROM atlas_history_position WHERE order_key=? AND position=?').get(order.key, position) as { sha: string } | undefined
+      if (current && current.sha !== sha) throw new Error('ATLAS_ORDER_CONFLICT')
+      if (!this.statement('SELECT 1 FROM git_commit WHERE sha=?').get(sha)) throw new Error('ATLAS_METADATA_INCOMPLETE')
+      this.statement('INSERT OR IGNORE INTO atlas_history_position(order_key,position,sha) VALUES (?,?,?)').run(order.key, position, sha)
+    })
+    const end = order.offset + order.shas.length
+    if (order.complete && end < (previous?.materialized ?? 0) || previous?.complete && end > previous.materialized) throw new Error('ATLAS_ORDER_CONFLICT')
+    this.statement('INSERT OR REPLACE INTO atlas_history_order(key,materialized,complete,last_access) VALUES (?,?,?,?)').run(order.key, Math.max(previous?.materialized ?? 0, end), Number(order.complete || !!previous?.complete), Date.now())
+  }
+
   save(key: string, slice: AtlasHistorySlice, commits: readonly AtlasCommit[], observation?: AtlasCatalogManifest): boolean {
     if (!this.db) return false
     try {
@@ -216,6 +248,7 @@ export class GitAtlasSqliteCache implements AtlasPersistence {
       this.db.transaction(() => {
         const now = Date.now()
         for(const commit of commits) this.putCommit(commit,observation??{revision:slice.revision,worktreeGeneration:slice.worktreeGeneration,observedAt:slice.queriedAt})
+        if (slice.order) this.putOrder(slice.order)
         if(observation) this.observe(observation)
         if(bytes<=32*1024) this.statement('INSERT OR REPLACE INTO history_slice(key, body, checksum, bytes, last_access, revision, since_ms, upper_ms, page_offset, complete) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(key, body, digest(key + body), bytes, now, slice.revision, slice.since === null ? null : Date.parse(slice.since), slice.upperBound === null ? null : Date.parse(slice.upperBound), slice.offset, Number(!slice.hasMore))
       })()
@@ -316,6 +349,13 @@ export class GitAtlasSqliteCache implements AtlasPersistence {
       this.maintenance = undefined
       if (!this.db) return
       try {
+        const orders = this.statement('SELECT key FROM atlas_history_order ORDER BY last_access DESC LIMIT -1 OFFSET 64').all() as Array<{ key: string }>
+        if (orders.length) this.db.transaction(() => {
+          for (const { key } of orders) {
+            this.statement('DELETE FROM atlas_history_position WHERE order_key=?').run(key)
+            this.statement('DELETE FROM atlas_history_order WHERE key=?').run(key)
+          }
+        })()
         const stats = this.statement('SELECT COUNT(*) AS slices,COALESCE(SUM(bytes),0) AS bytes FROM history_slice').get() as {slices:number;bytes:number}
         if(stats.slices<=256 && stats.bytes<=8*1024*1024) return
         this.statement('DELETE FROM history_slice WHERE key IN (SELECT key FROM history_slice ORDER BY last_access LIMIT 32)').run()

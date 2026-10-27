@@ -44,42 +44,54 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const [overviewLoading, setOverviewLoading] = useState(false)
   const paging = useRef<string | null>(null)
   const loadedPage = useRef<GitAtlasPage | null>(null)
+  const pendingLoad = useRef<{ key: string; promise: Promise<boolean | undefined> } | null>(null)
   const [notice, setNotice] = useState('')
   const returnFocus = useRef<HTMLElement | null>(null)
   const inspectorFocus = useRef<HTMLElement>(null)
   const context = useMemo(() => ({ projectId: state.project?.id ?? '', revision: state.revision }), [state.project?.id, state.revision])
-  const load = useCallback(async (cursor?: string, refresh = false) => {
-    if (!state.project) return
-    if (cursor && paging.current === cursor) return
-    paging.current = cursor ?? null
-    const request = ++generation.current
-    setLoading(true); setError('')
-    try {
-      const result = await window.codeAwareness.getGitAtlasCore({ context, window: 'ALL', scope, limit: 100, cursor, ...(refresh ? { refresh: true } : {}) })
-      if (generation.current !== request) return
-      if (!result.success) { if (cursor && result.code === 'GIT_STATE_CHANGED') { setHistory(null); setCore(null); setEnrichment(null); setNotice('O histórico mudou. A revisão atual está sendo carregada.'); paging.current = null; void load(); return } setError(result.code); return }
-      setNotice('')
-      const page = result.data.git
-      if (cursor && (!loadedPage.current || loadedPage.current.snapshot !== page.snapshot || loadedPage.current.queriedAt !== page.queriedAt || loadedPage.current.anchorAt !== page.anchorAt)) { setError('GIT_STATE_CHANGED'); return }
-      loadedPage.current = page
-      if (!cursor) { setCore(result.data); setEnrichment(null); setSelectedPr(null) }
-      setHistory(previous => {
-        if (!cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt) return previous
-        const expanding = !cursor && previous?.scope?.kind === 'CHECKOUT' && page.scope?.kind === 'ALL_REFS' && previous.head === page.head &&
-          previous.worktreeGeneration === page.worktreeGeneration && previous.topologyRevision === page.topologyRevision &&
-          previous.refs.every(ref => page.refs.some(current => current.ref === ref.ref && current.sha === ref.sha))
-        if (expanding || cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt && previous.anchorAt === page.anchorAt) {
-          const nodes = [...new Map([...(previous?.nodes ?? []), ...page.nodes].map(node => [node.sha, node])).values()]
-            .map(node => ({ ...node, decorations: page.refs.filter(ref => ref.sha === node.sha) }))
-          const present = new Set(nodes.map(node => node.sha))
-          const boundary = [...new Set(nodes.flatMap(node => node.parents).filter(sha => !present.has(sha)))]
-          return { ...page, nodes, boundary, pendingParents: boundary }
+  const load = useCallback((cursor?: string, refresh = false): Promise<boolean | undefined> => {
+    if (!state.project) return Promise.resolve(undefined)
+    const key = JSON.stringify([context, scope, cursor, refresh])
+    if (pendingLoad.current?.key === key) return pendingLoad.current.promise
+    const run = async () => {
+      if (cursor && paging.current === cursor) return
+      paging.current = cursor ?? null
+      const request = ++generation.current
+      setLoading(true); setError('')
+      try {
+        const result = await window.codeAwareness.getGitAtlasCore({ context, window: 'ALL', scope, limit: 100, cursor, ...(refresh ? { refresh: true } : {}) })
+        if (generation.current !== request) return
+        if (!result.success) { if (cursor && result.code === 'GIT_STATE_CHANGED') { setHistory(null); setCore(null); setEnrichment(null); setNotice('O histórico mudou. A revisão atual está sendo carregada.'); paging.current = null; void load(); return } setError(result.code); return }
+        setNotice('')
+        const page = result.data.git
+        if (cursor && (!loadedPage.current || loadedPage.current.snapshot !== page.snapshot || loadedPage.current.queriedAt !== page.queriedAt || loadedPage.current.anchorAt !== page.anchorAt)) { setError('GIT_STATE_CHANGED'); return }
+        const changed = loadedPage.current?.snapshot !== page.snapshot
+        loadedPage.current = page
+        if (!cursor) {
+          setCore(previous => previous?.gitSnapshot === result.data.gitSnapshot ? previous : result.data)
+          if (changed) { setEnrichment(null); setSelectedPr(null) }
         }
-        return page
-      })
-      return true
-    } catch { if (generation.current === request) setError('Falha ao carregar histórico. Atualize para tentar novamente.') }
-    finally { if (generation.current === request) { setLoading(false); paging.current = null } }
+        setHistory(previous => {
+          if (!cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt) return previous
+          const expanding = !cursor && previous?.scope?.kind === 'CHECKOUT' && page.scope?.kind === 'ALL_REFS' && previous.head === page.head &&
+            previous.worktreeGeneration === page.worktreeGeneration && previous.topologyRevision === page.topologyRevision &&
+            previous.refs.every(ref => page.refs.some(current => current.ref === ref.ref && current.sha === ref.sha))
+          if (expanding || cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt && previous.anchorAt === page.anchorAt) {
+            const nodes = [...new Map([...(previous?.nodes ?? []), ...page.nodes].map(node => [node.sha, node])).values()]
+              .map(node => ({ ...node, decorations: page.refs.filter(ref => ref.sha === node.sha) }))
+            const present = new Set(nodes.map(node => node.sha))
+            const boundary = [...new Set(nodes.flatMap(node => node.parents).filter(sha => !present.has(sha)))]
+            return { ...page, nodes, boundary, pendingParents: boundary }
+          }
+          return page
+        })
+        return true
+      } catch { if (generation.current === request) setError('Falha ao carregar histórico. Atualize para tentar novamente.') }
+      finally { if (generation.current === request) { setLoading(false); paging.current = null } }
+    }
+    const promise = run().finally(() => { if (pendingLoad.current?.promise === promise) pendingLoad.current = null })
+    pendingLoad.current = { key, promise }
+    return promise
   }, [context, state.project?.id, scope])
   useEffect(() => {
     setCatalog(null); catalogRef.current = null
@@ -101,7 +113,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   useEffect(() => {
     loadedPage.current = null
     void load()
-    return () => { generation.current++; paging.current = null }
+    return () => { generation.current++; paging.current = null; pendingLoad.current = null }
   }, [load])
   useEffect(() => {
     if (!core) return
@@ -157,7 +169,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
       } else setPrState('UNAVAILABLE')
     }).catch(() => { if (current) setPrState('UNAVAILABLE') })
     return () => { current = false }
-  }, [core, context, prRequested])
+  }, [core?.gitSnapshot, context, prRequested])
   const actionsActive = drawer && !selection && selectedPr === null
   useEffect(() => {
     if (!actionsActive || !core) return
