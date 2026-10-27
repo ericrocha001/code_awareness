@@ -163,7 +163,18 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   } }
   const preflight = new PreviewPreflightService(profileStore)
   const cacheOptions = { buildCache: process.argv.includes('--cache-enabled') }
-  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, preflight), helper, runnerProvisioner, cacheOptions)
+  const authority = new CatalogPreviewLaunchAuthority(repositories, profileStore, preflight)
+  const prepareAuthority = authority.prepare.bind(authority)
+  authority.prepare = async (...args) => {
+    const prepared = await prepareAuthority(...args), classify = prepared.classifyChanges
+    if (classify) prepared.classifyChanges = async paths => {
+      const ignored = await classify(paths), rejected = paths.filter(value => !ignored.has(value))
+      if (rejected.length) save('source-change-diagnostic', { success: false, paths: rejected.slice(0, 32), count: rejected.length })
+      return ignored
+    }
+    return prepared
+  }
+  const runner = new RuntimePreviewRunner(store, authority, helper, runnerProvisioner, cacheOptions)
   const start = runner.start.bind(runner)
   let standbyLimit = 'normal'
   runner.start = async input => {
