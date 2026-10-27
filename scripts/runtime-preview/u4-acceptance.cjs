@@ -153,7 +153,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const provisionerModule = get('work-orchestration/runtime-preview/context-data')
   const provisioner = new provisionerModule.RepositoryPreviewContextProvisioner(catalog, path.join(contextual && snapshot ? process.env.U4_CANONICAL_USER_DATA : directory, 'continuum'))
   let bootstrapFault
-  const runnerProvisioner = { watchInvalidation: (profile, invalidate) => provisioner.watchInvalidation(profile, invalidate), prepare: async input => {
+  const runnerProvisioner = { observeChanges: (profile, invalidate) => provisioner.observeChanges(profile, invalidate), prepare: async input => {
     const manifest = await provisioner.prepare(input)
     if (bootstrapFault === 'generation') manifest.selection.generation = 'invalid-generation'
     if (bootstrapFault === 'digest') manifest.data.digest = 'f'.repeat(64)

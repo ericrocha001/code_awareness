@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync } from 'node:fs'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, existsSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -31,6 +31,23 @@ function setup(policy: 'EMPTY' | 'REPOSITORY_SNAPSHOT' = 'REPOSITORY_SNAPSHOT') 
   return { root, directory, worktree, host, store, service, provisioner, input, file }
 }
 describe('private preview corpus provisioning with real SQLite', () => {
+  it('ignores WAL-index coordination and proves committed writes through one read-only connection', async () => {
+    const f = setup(), invalidations = vi.fn()
+    f.service.publish(markdown('Before observation'))
+    const observation = f.provisioner.observeChanges(f.input.profile, invalidations)
+    cleanup.push(observation.close)
+    const before = bytesFingerprint(readFileSync(f.file))
+    utimesSync(f.file + '-shm', new Date(), new Date())
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(invalidations).not.toHaveBeenCalled()
+    expect(() => observation.assertCurrent()).not.toThrow()
+    expect(bytesFingerprint(readFileSync(f.file))).toBe(before)
+    f.service.publish(markdown('After observation'))
+    expect(() => observation.assertCurrent()).toThrow('PREPARED_CORPUS_CHANGED')
+    expect(invalidations).toHaveBeenCalled()
+    observation.close(); observation.close()
+    expect(() => observation.assertCurrent()).toThrow('PREVIEW_CORPUS_OBSERVER_CLOSED')
+  })
   it.each(['before', 'backup'])('cancels %s preparation without exposing a completed corpus or retaining SQLite handles', async when => {
     const f = setup(), controller = new AbortController(), timing = new PreviewStartClock()
     f.service.publish(markdown('Canonical remains intact'))

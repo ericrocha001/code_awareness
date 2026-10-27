@@ -60,6 +60,15 @@ describe('branch application intent — domain fixtures, no simulated Windows ev
     expect(await f.service.pendingResult()).toMatchObject({ success: false, code: 'PREPARED_TARGET_MISMATCH' })
     expect(present).not.toHaveBeenCalled(); expect(f.runner.start).not.toHaveBeenCalled()
   })
+  it('keeps the UI session response contract when presenting a prepared slot', async () => {
+    const f = setup(true)
+    const prepared = { ...f.record, standby: { state: 'QUIESCENT' as const, policy: { idleMs: 60000, maxPrivateBytes: 2 ** 30, maxWorkingSetBytes: 2 ** 30, maxCpuPercent: 5, minAvailableBytes: 0, sampleMs: 2000 }, expiresAt: new Date(Date.now() + 60000).toISOString() } }
+    f.store.reserve(prepared)
+    Object.assign(f.runner, { present: vi.fn(async () => prepared) })
+    expect(await f.service.handle(f.request)).toMatchObject({ success: true, data: { kind: 'SESSION', operationId: f.request.operationId, pending: true } })
+    expect(await f.service.pendingResult()).toMatchObject({ success: true, data: { kind: 'SESSION', session: { sessionId: f.record.sessionId } } })
+    expect(f.repositories.open).not.toHaveBeenCalled(); expect(f.runner.start).not.toHaveBeenCalled()
+  })
   it('resolves exact branch, authorizes and preflights internally before one launch', async () => {
     const f = setup(); expect(await f.run()).toMatchObject({ success: true, data: { kind: 'SESSION', session: { state: 'RUNNING' } } })
     expect(f.resolver.resolve).toHaveBeenCalledWith('repo', 'tree', 'checkout', expect.anything()); expect(f.check).toHaveBeenCalledTimes(2)

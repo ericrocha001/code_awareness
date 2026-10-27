@@ -329,7 +329,10 @@ export class RuntimePreviewOperations {
       guard()
       if (request.action === 'RUN_BRANCH_APP') {
         const slot = this.store.list().find(value => value.selection.repositoryId === request.repositoryId && value.standby?.state === 'QUIESCENT' && value.state === 'RUNNING')
-        if (slot) return this.runBranchApp({ repositoryId: request.repositoryId, branch: request.ref, operationId: request.operationId, ...(request.worktree ? { worktreeId: request.worktree.worktreeId } : {}) }, guard)
+        if (slot) {
+          const result = await this.runBranchApp({ repositoryId: request.repositoryId, branch: request.ref, operationId: request.operationId, ...(request.worktree ? { worktreeId: request.worktree.worktreeId } : {}) }, guard)
+          return result.success && result.data.kind === 'STATUS' ? { success: true, data: { kind: 'SESSION', session: null, operationId: request.operationId, pending: true } } : result
+        }
         return this.mutate('run-branch:' + request.operationId + ':' + previewFingerprint(request), request.operationId, () => this.runBranch(request, guard))
       }
       if (request.action === 'PREPARE_BRANCH_APP') return this.runBranchApp(request.intent, guard, true)

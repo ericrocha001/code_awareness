@@ -58,18 +58,38 @@ function inspectCorpus(db: Database.Database, repositoryId: string, policy: NonN
   return { bytes, artifacts, media }
 }
 
+export interface PreviewCorpusObservation { assertCurrent(): void; close(): void }
 export interface PreviewContextProvisioner {
-  watchInvalidation?(profile: PreviewProfile, invalidate: () => void): () => void
+  observeChanges?(profile: PreviewProfile, invalidate: () => void): PreviewCorpusObservation
   prepare(input: { profile: PreviewProfile; selection: PreviewSelection; sessionId: string; directory: string; worktree: string; source: NonNullable<PreviewPreflight['snapshot']>; timing?: PreviewStartClock; signal?: AbortSignal }): Promise<PreviewContextManifest>
 }
 
 export class RepositoryPreviewContextProvisioner implements PreviewContextProvisioner {
   constructor(private readonly catalog: Pick<RepositoryCatalogService, 'resolveAvailable'>, private readonly continuumBase: string) {}
-  watchInvalidation(profile: PreviewProfile, invalidate: () => void) {
+  observeChanges(profile: PreviewProfile, invalidate: () => void): PreviewCorpusObservation {
+    if (profile.bootstrap?.dataPolicy !== 'REPOSITORY_SNAPSHOT') return { assertCurrent() {}, close() {} }
     const file = this.source(profile.repositoryId)
-    const watcher = watch(dirname(file), { persistent: false }, (_event, name) => { if (String(name).startsWith('continuum.db')) invalidate() })
-    watcher.on('error', invalidate)
-    return () => watcher.close()
+    const identity = statSync(file, { bigint: true }), db = openReadOnly(file)
+    let closed = false, fileChanged = false
+    let watcher: ReturnType<typeof watch> | undefined
+    try {
+    const version = db.pragma('data_version', { simple: true })
+    // The WAL-index coordinates readers; it does not contain committed corpus data.
+    watcher = watch(dirname(file), { persistent: false }, (_event, name) => {
+      if (!closed && (!name || ['continuum.db', 'continuum.db-wal', 'continuum.db-journal'].includes(String(name)))) { fileChanged = true; invalidate() }
+    })
+    watcher.on('error', () => { fileChanged = true; invalidate() })
+    return {
+      assertCurrent: () => {
+        try {
+          if (closed) throw new Error('PREVIEW_CORPUS_OBSERVER_CLOSED')
+          const current = statSync(this.source(profile.repositoryId), { bigint: true })
+          if (fileChanged || current.dev !== identity.dev || current.ino !== identity.ino || db.pragma('data_version', { simple: true }) !== version) throw new Error('PREPARED_CORPUS_CHANGED')
+        } catch (error) { invalidate(); throw error }
+      },
+      close: () => { if (!closed) { closed = true; watcher?.close(); db.close() } }
+    }
+    } catch (error) { watcher?.close(); db.close(); throw error }
   }
 
   private source(repositoryId: string) {

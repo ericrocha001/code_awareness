@@ -9,7 +9,7 @@ import type { PreviewRepositories } from '../preview-repositories'
 import { NativeOwner, nativeObservation, type NativeObservation } from './native-owner'
 import { PreviewSessionStore, sessionSchema, type PreviewSessionRecord } from './session-store'
 import { PreviewStackAdapter, diagnosticBootstrapAllowed, verifyEndpointFree } from './adapters'
-import type { PreviewContextProvisioner } from './context-data'
+import type { PreviewContextProvisioner, PreviewCorpusObservation } from './context-data'
 import { PreviewStartClock } from './start-timing'
 import type { PreviewBuildCache } from './build-cache'
 import { prepareTogether } from './preparation'
@@ -103,7 +103,7 @@ export class RuntimePreviewRunner {
   private readonly stopRequests = new Set<string>()
   private readonly slots = new Map<string, { guard: () => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher;
     metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void;
-    checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string }>()
+    checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; assertContext?: () => void }>()
   constructor(private readonly store: PreviewSessionStore, private readonly authority: PreviewLaunchAuthority,
     private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner,
     private readonly options: { buildCache?: boolean } = {}) {}
@@ -209,22 +209,25 @@ export class RuntimePreviewRunner {
       let adapter: PreviewStackAdapter | undefined
       let cache: PreviewBuildCache | undefined
       let createRequested = false
-      let disposePreparingContext: (() => void) | undefined, contextChanged = false
+      let corpus: PreviewCorpusObservation | undefined, contextChanged = false
       try {
-        if (input.standbyPolicy) disposePreparingContext = this.contextProvisioner?.watchInvalidation?.(profile, () => { contextChanged = true })
+        if (input.standbyPolicy) {
+          corpus = this.contextProvisioner?.observeChanges?.(profile, () => { contextChanged = true })
+          if (profile.bootstrap?.dataPolicy === 'REPOSITORY_SNAPSHOT' && !corpus) throw new Error('PREVIEW_CORPUS_OBSERVER_REQUIRED')
+        }
         const armObservation = async () => { if (input.standbyPolicy) {
           await this.monitorSlot(sessionId, prepared.worktree, async () => {
             cancellation.signal.throwIfAborted()
             const slot = this.slots.get(sessionId)
             const observe = slot?.sourceCovered ? async () => {
-              await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
+              slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
               await input.guard?.()
-              await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
+              slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
             } : undefined
             if (prepared.presentationGuard) await prepared.presentationGuard(observe)
             else await prepared.guard()
             if (!observe) await input.guard?.()
-          }, profile, async () => { await prepared.retentionGuard?.(); await input.guard?.() }, prepared.classifyChanges, input.watchIdentity)
+          }, profile, async () => { await prepared.retentionGuard?.(); await input.guard?.() }, prepared.classifyChanges, input.watchIdentity, corpus)
         } }
         const [context] = await prepareTogether(async signal => {
           if (!profile.bootstrap) return undefined
@@ -277,10 +280,10 @@ export class RuntimePreviewRunner {
           const slot = this.slots.get(sessionId)!
           await slot.checkChanges?.()
           if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
+          corpus?.assertCurrent()
           if (contextChanged) throw new Error('PREPARED_CORPUS_CHANGED')
           slot.sourceCovered = !!input.watchIdentity
         }
-        disposePreparingContext?.(); disposePreparingContext = undefined
         timing.ready()
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE', startTiming: timing.snapshot(), ...(cache ? { buildCache: cache.receipt } : {}) })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
@@ -304,7 +307,7 @@ export class RuntimePreviewRunner {
         }
         return record
       } catch (error) {
-        disposePreparingContext?.()
+        corpus?.close()
         this.clearSlot(sessionId)
         await cache?.finish(false)
         try { await native?.stop(0, profile.shutdown.forceMs, false) } catch { }
@@ -371,10 +374,10 @@ export class RuntimePreviewRunner {
     if (slot?.timer) clearTimeout(slot.timer)
     slot?.watcher.close(); slot?.disposeContext?.(); slot?.disposeIdentity?.(); this.slots.delete(sessionId)
   }
-  private async monitorSlot(sessionId: string, worktree: string, guard: () => Promise<void>, profile: PreviewProfile, retentionGuard?: () => Promise<void>, classifyChanges?: PreparedPreview['classifyChanges'], watchIdentity?: (invalidate: () => void) => Promise<() => void>) {
+  private async monitorSlot(sessionId: string, worktree: string, guard: () => Promise<void>, profile: PreviewProfile, retentionGuard?: () => Promise<void>, classifyChanges?: PreparedPreview['classifyChanges'], watchIdentity?: (invalidate: () => void) => Promise<() => void>, corpus?: PreviewCorpusObservation) {
     const changes = new Set<string>()
     const slot: { guard: () => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher; metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void;
-      checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string } = {
+      checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; assertContext?: () => void } = {
       guard, invalid: false, watcher: watch(worktree, { recursive: true, persistent: false }, (_event, file) => {
         const path = file?.toString().replaceAll('\\', '/')
         if (!path || changes.size >= 256) { slot.invalid = true; slot.invalidReason = path ? 'PREPARED_EVENT_COVERAGE_LIMIT' : 'PREPARED_SOURCE_OBSERVER_LOST'; return }
@@ -389,7 +392,8 @@ export class RuntimePreviewRunner {
       if (!ignored || paths.some(path => !ignored.has(path))) { slot.invalid = true; slot.invalidReason = 'PREPARED_SOURCE_EVENT' }
     }
     slot.watcher.on('error', () => { slot.invalid = true; slot.invalidReason = 'PREPARED_SOURCE_OBSERVER_LOST' })
-    slot.disposeContext = this.contextProvisioner?.watchInvalidation?.(profile, () => { slot.invalid = true; slot.invalidReason = 'PREPARED_CORPUS_CHANGED' })
+    slot.disposeContext = () => corpus?.close()
+    slot.assertContext = () => corpus?.assertCurrent()
     this.slots.set(sessionId, slot)
     slot.disposeIdentity = await watchIdentity?.(() => { slot.invalid = true; slot.invalidReason = 'PREPARED_GIT_EVENT' })
     const sample = async () => {
@@ -399,7 +403,7 @@ export class RuntimePreviewRunner {
         const record = this.store.read(sessionId), standby = record.standby!
         if (standby.state !== 'QUIESCENT') return
         try {
-          await slot.checkChanges?.()
+          slot.assertContext?.(); await slot.checkChanges?.()
           if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_FILESYSTEM_CHANGED')
           await (slot.retentionGuard ?? guard)()
           const owner = this.owners.get(sessionId), adapter = this.adapters.get(sessionId)
@@ -413,7 +417,7 @@ export class RuntimePreviewRunner {
         } catch (error) { reason = error instanceof Error ? error.message : 'STANDBY_UNVERIFIABLE' }
       }).catch(() => { reason = 'STANDBY_UNVERIFIABLE' })
       if (reason && this.slots.get(sessionId) === slot) { await this.evict(sessionId, reason); return }
-      if (this.slots.get(sessionId) === slot) { slot.timer = setTimeout(() => void sample(), this.store.read(sessionId).standby!.policy.sampleMs); slot.timer.unref() }
+      if (this.slots.get(sessionId) === slot && this.store.read(sessionId).standby?.state === 'QUIESCENT') { slot.timer = setTimeout(() => void sample(), this.store.read(sessionId).standby!.policy.sampleMs); slot.timer.unref() }
     }
     slot.resume = () => { if (slot.timer) clearTimeout(slot.timer); slot.timer = setTimeout(() => void sample(), 1); slot.timer.unref() }
     slot.resume()
@@ -457,6 +461,8 @@ export class RuntimePreviewRunner {
         const shown = await adapter.control('SHOW', this.cancellations.get(sessionId)?.signal)
         const observed = await adapter.observe(owner)
         if (observed.readiness !== 'READY' || observed.attestation.loadedCode !== 'VERIFIED') throw new Error('PRESENTATION_NOT_ATTESTED')
+        slot.assertContext?.(); await slot.checkChanges?.()
+        if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
         record = this.change(record, { ...observed, standby: { ...standby, state: 'RUNNING', metrics, presentation: { receivedNs, guardedNs,
           showNs: shown.showNs!, functionalNs: shown.functionalNs!, focusedNs: shown.focusedNs!, durationMs: Number(BigInt(shown.focusedNs!) - BigInt(receivedNs)) / 1e6 } } })
         if (slot.timer) clearTimeout(slot.timer)
