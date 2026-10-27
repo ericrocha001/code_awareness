@@ -49,6 +49,35 @@ export class ArtifactStore {
   private readonly tagIndex: ArtifactTags
   private readonly tokenCache: ArtifactTokenCache
   tags() { return this.tagIndex.list() }
+  resolveBuilderGroup(filter: ListArtifactsFilter) {
+    return this.db.transaction(() => {
+      const members: ArtifactDiscoveryRecord[] = []
+      let cursor: string | undefined
+      let bytes = 0
+      do {
+        const page = this.list({ ...filter, cursor, limit: 100, includeRawMarkdownTokenCount: false })
+        bytes += Buffer.byteLength(JSON.stringify(page.artifacts), 'utf8')
+        if (bytes > 2 * 1024 * 1024) throw new Error('BUNDLE_LIMIT: metadata excede 2 MiB; nenhum membro foi truncado')
+        members.push(...page.artifacts)
+        cursor = page.nextCursor
+      } while (cursor)
+      return members
+    })()
+  }
+  builderEntries(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) {
+    if (!Array.isArray(selected) || !selected.length || Buffer.byteLength(JSON.stringify(selected), 'utf8') > 2 * 1024 * 1024) throw new Error('INVALID_SELECTION')
+    const entries: Array<{ artifactId: string; revision: number; contentHash: string }> = []
+    const ids = new Set<string>()
+    for (let offset = 0; offset < selected.length; offset += 100) {
+      const batch = selected.slice(offset, offset + 100)
+      for (const item of batch) {
+        if (!item || ids.has(item.artifactId)) throw new Error('INVALID_SELECTION')
+        ids.add(item.artifactId)
+      }
+      entries.push(...this.selectionEntries(batch))
+    }
+    return entries
+  }
   resolveSelection(filter: ListArtifactsFilter) {
     return this.db.transaction(() => {
       const page = this.list({ ...filter, cursor: undefined, limit: 100, includeRawMarkdownTokenCount: false })

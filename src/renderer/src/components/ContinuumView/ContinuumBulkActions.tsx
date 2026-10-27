@@ -1,13 +1,14 @@
 import React, { useEffect, useRef, useState } from 'react'
 import type { ContinuumItem, ContinuumSelectedArtifact } from '../../../../shared/types/continuum-ui-types'
 import type { ContinuumTag } from '../../../../shared/types/continuum-tag-types'
-import type { ContinuumBundleExport } from '../../../../shared/types/continuum-bundle-types'
 
-export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, onChanged, onBusy, disabled = false }: {
+
+export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, onChanged, onBusy, onBundle, disabled = false }: {
   disabled?: boolean
   repositoryId: string
   selected: ContinuumItem[]
   tags: ContinuumTag[]
+  onBundle?(): void
   onClear(): void
   onChanged(): void
   onBusy(value: boolean): void
@@ -16,7 +17,6 @@ export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, on
   const [query, setQuery] = useState('')
   const [pending, setPending] = useState(false)
   const [error, setError] = useState('')
-  const [message, setMessage] = useState('')
 
   const identity = JSON.stringify([repositoryId, selected.map(item => [item.artifactId, item.revision])])
   const context = useRef(identity), busy = useRef(false)
@@ -24,7 +24,6 @@ export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, on
   useEffect(() => () => { context.current = '' }, [])
   useEffect(() => {
     setError('')
-    setMessage('')
   }, [identity])
 
   const sources: ContinuumSelectedArtifact[] = selected.map(item => ({
@@ -36,7 +35,7 @@ export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, on
     if (busy.current || disabled || !query.trim()) return
     const started = identity, name = query.trim()
     const tag = tags.find(tag => tag.slug === name || tag.name.toLocaleLowerCase() === name.toLocaleLowerCase())
-    busy.current = true; setPending(true); onBusy(true); setError(''); setMessage('')
+    busy.current = true; setPending(true); onBusy(true); setError('')
     try {
       const result = await window.codeAwareness.mutateContinuumTags(tag
         ? { repositoryId, intent: 'assign', slug: tag.slug, assigned: true, selected: sources, confirmed: true }
@@ -47,33 +46,6 @@ export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, on
     finally { busy.current = false; onBusy(false); if (context.current === started) setPending(false) }
   }
 
-  const exportDirect = async (intent: ContinuumBundleExport['intent']) => {
-    if (busy.current || disabled || !selected.length) return
-    const started = identity
-    busy.current = true; setPending(true); onBusy(true); setError(''); setMessage('')
-    try {
-      const result = await window.codeAwareness.quickContinuumBundle({
-        repositoryId,
-        selected: sources,
-        intent
-      })
-      if (context.current !== started || result.repositoryId !== repositoryId) return
-      const actionLabel = result.outcome === 'copied'
-        ? 'Copiado para a área de transferência'
-        : result.outcome === 'saved'
-          ? 'Salvo em Downloads'
-          : 'Operação cancelada'
-      const visualWarning = result.hasVisuals && intent !== 'zip'
-        ? ' O texto não inclui pixels; baixe o ZIP completo.'
-        : ''
-      setMessage(`${actionLabel} · ${result.count} Artifacts · ~${result.tokenCount} tokens (${result.tokenizerEncoding}).${visualWarning}`)
-    } catch (reason) {
-      if (context.current === started) setError(String(reason))
-    } finally {
-      busy.current = false; onBusy(false); if (context.current === started) setPending(false)
-    }
-  }
-
   return (
     <div className="continuum-bulk-actions" aria-label="Ações em massa" aria-busy={pending}>
       <span title="Soma do Markdown integral, incluindo YAML, estimada em cl100k_base; sem tokens visuais. O pacote montado inclui overhead próprio.">
@@ -81,9 +53,7 @@ export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, on
       </span>
       <div>
         <button disabled={pending || disabled} onClick={() => setEditing(value => !value)}>Adicionar tag</button>
-        <button disabled={pending || disabled} onClick={() => void exportDirect('copy')}>Copiar contexto</button>
-        <button disabled={pending || disabled} onClick={() => void exportDirect('markdown')}>Baixar Markdown</button>
-        <button disabled={pending || disabled} onClick={() => void exportDirect('zip')}>Baixar ZIP</button>
+        <button disabled={pending || disabled} onClick={onBundle}>Montar pacote</button>
         <button disabled={pending || disabled} onClick={onClear}>Limpar seleção</button>
       </div>
       {editing && (
@@ -93,7 +63,6 @@ export function ContinuumBulkActions({ repositoryId, selected, tags, onClear, on
           <button type="submit" disabled={pending || disabled || !query.trim()}>Confirmar tag em {selected.length} Artifacts</button>
         </form>
       )}
-      {message && <p role="status">{message}</p>}
       {error && <p role="alert">{error}</p>}
     </div>
   )

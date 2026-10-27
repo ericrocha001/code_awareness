@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { Check, MoreHorizontal, Tag, X } from 'lucide-react'
 import type { ContinuumDetail, ContinuumTagTokens } from '../../../../shared/types/continuum-ui-types'
 import { TAG_DESCRIPTION_MAX_LENGTH, type ContinuumTag, type ContinuumTagMutation } from '../../../../shared/types/continuum-tag-types'
-import type { ContinuumBundleQuick } from '../../../../shared/types/continuum-bundle-types'
+
 
 export function ArtifactTagEditor({ repositoryId, artifact, tags, onChanged }: { repositoryId: string; artifact: ContinuumDetail; tags: ContinuumTag[]; onChanged(): void }) {
   const [open, setOpen] = useState(false), [query, setQuery] = useState(''), [pending, setPending] = useState(false), [error, setError] = useState('')
@@ -45,7 +45,8 @@ export function ArtifactTagEditor({ repositoryId, artifact, tags, onChanged }: {
   </div>
 }
 
-export function ContinuumTagManager({ repositoryId, tags, onFilter, onChanged, onClose, onTokenTotals }: {
+export function ContinuumTagManager({ repositoryId, tags, onFilter, onChanged, onClose, onTokenTotals, onBundle }: {
+  onBundle?(slug: string): void
   onTokenTotals?(totals: ContinuumTagTokens[]): void
   repositoryId: string; tags: ContinuumTag[]; onFilter(slug: string): void; onChanged(): void; onClose(): void
 }) {
@@ -81,18 +82,12 @@ export function ContinuumTagManager({ repositoryId, tags, onFilter, onChanged, o
     if (context.current !== repositoryId || result.repositoryId !== repositoryId) return
     onChanged(); setName(''); setDescription(''); setEditing(null); setMessage('Tag salva.')
   })
-  const bundle = (slug: string, intent: ContinuumBundleQuick['intent']) => run(async () => {
-    const receipt = await window.codeAwareness.quickContinuumBundle({ repositoryId, slug, intent })
-    if (context.current !== repositoryId || receipt.repositoryId !== repositoryId) return
-    setMessage(`${receipt.outcome === 'copied' ? 'Copiado' : receipt.outcome === 'saved' ? 'Salvo' : 'Cancelado'} · ${receipt.count} Artifacts · ~${receipt.tokenCount} tokens (${receipt.tokenizerEncoding}).${receipt.hasVisuals && intent !== 'zip' ? ' O texto não inclui pixels; salve o ZIP completo.' : ''}`)
-  })
   return <dialog ref={modal} className="continuum-tag-manager" aria-label="Tags e pacotes" onCancel={onClose}>
     <header><h2>Tags e pacotes</h2><button className="continuum-icon-button" aria-label="Fechar tags" title="Fechar tags" onClick={onClose}><X size={16} /></button></header>
     <div className="continuum-tag-list">{tags.map(tag => <div key={tag.slug}>
       <button className="continuum-tag-name" title={`${tag.description || 'Ver membros'} · Soma do Markdown integral, incluindo YAML; estimativa cl100k_base. O pacote inclui overhead próprio.`} onClick={() => onFilter(tag.slug)}><span>{tag.name}</span><small>{tag.count} Artifacts · {totals.find(total => total.slug === tag.slug) ? `≈ ${totals.find(total => total.slug === tag.slug)!.rawMarkdownTokenCount.toLocaleString()} tokens dos documentos` : tokenError ? 'Tokens indisponíveis' : 'Calculando tokens…'}</small></button>
-      <button disabled={pending} onClick={() => bundle(tag.slug, 'copy')} aria-label={`Copiar contexto ${tag.name}`}>Copiar contexto</button>
+      <button disabled={pending} onClick={() => onBundle?.(tag.slug)}>Montar pacote</button>
       <details className="continuum-tag-options"><summary aria-label={`Opções ${tag.name}`} title="Opções"><MoreHorizontal size={16} /></summary><div>
-        <button disabled={pending} onClick={() => bundle(tag.slug, 'markdown')}>Salvar Markdown</button><button disabled={pending} onClick={() => bundle(tag.slug, 'zip')}>Salvar ZIP</button>
         
         <button disabled={pending} onClick={event => { event.currentTarget.closest('details')?.removeAttribute('open'); setEditing(tag.slug); setName(tag.name); setDescription(tag.description) }}>Editar tag</button>
         <button aria-label={`Excluir tag ${tag.slug}`} title={tag.count ? 'Remova as associações antes de excluir' : 'Excluir tag vazia'} disabled={pending || tag.count > 0} onClick={() => mutate({ repositoryId, intent: 'delete', slug: tag.slug })}>Excluir tag vazia</button>
