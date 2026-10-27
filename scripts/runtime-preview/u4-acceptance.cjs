@@ -47,6 +47,7 @@ const freePort = () => new Promise(resolve => { const server = net.createServer(
 
 async function main(directory, { app, BrowserWindow, ipcMain }) {
   const bundle = path.join(output, 'bundle')
+  const banner = { js: `require = require('node:module').createRequire(${JSON.stringify(path.join(root, 'package.json'))});` }
   const entries = ['work-orchestration/runtime-preview/operations', 'work-orchestration/runtime-preview/runner', 'work-orchestration/runtime-preview/session-store', 'work-orchestration/runtime-preview/host-helper', 'work-orchestration/preview-profile-store', 'work-orchestration/preview-preflight', 'work-orchestration/preview-repositories', 'core/git-service', 'git-operations/git-operations-service', 'github/github-git-transport', 'repository-catalog/repository-catalog-service', 'repository-catalog/repository-catalog-store', 'validation-ledger/validation-ledger', 'validation-execution/validation-source', 'continuum/project-continuum-session', 'mcp/channel-mcp-adapter', 'mcp/mcp-http-server', 'ipc/branch-orchestration-handler']
   const packageJson = require(path.join(root, 'package.json'))
   const external = Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies }).filter(name => !['mdast-util-from-markdown', 'micromark-extension-gfm', 'mdast-util-gfm', 'mdast-util-to-string'].includes(name))
@@ -59,9 +60,9 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
       if (relative === 'src/main/work-orchestration/runtime-preview/adapters.ts') return { contents: fs.readFileSync(args.path, 'utf8').replace('signal: AbortSignal, enabled = true', 'signal: AbortSignal, enabled = false'), loader: 'ts', resolveDir: path.dirname(args.path) }
     })
   } }] : []
-  await require('esbuild').build({ entryPoints: entries.map(file => 'src/main/' + file + '.ts'), outdir: bundle, platform: 'node', format: 'cjs', bundle: true, external, plugins, logLevel: 'silent' })
+  await require('esbuild').build({ entryPoints: entries.map(file => 'src/main/' + file + '.ts'), outdir: bundle, platform: 'node', format: 'cjs', bundle: true, external, plugins, banner, logLevel: 'silent' })
   const get = name => require(path.join(bundle, name + '.js'))
-  require('esbuild').buildSync({ entryPoints: ['context-data', 'authorization', 'context-bootstrap', 'code-awareness-profile'].map(file => 'src/main/work-orchestration/runtime-preview/' + file + '.ts'), outdir: path.join(bundle, 'work-orchestration/runtime-preview'), platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
+  require('esbuild').buildSync({ entryPoints: ['context-data', 'authorization', 'context-bootstrap', 'code-awareness-profile'].map(file => 'src/main/work-orchestration/runtime-preview/' + file + '.ts'), outdir: path.join(bundle, 'work-orchestration/runtime-preview'), platform: 'node', format: 'cjs', bundle: true, external, banner, logLevel: 'silent' })
   const base = path.join(directory, 'base'), target = path.join(directory, 'feature')
   fs.mkdirSync(path.join(base, 'runtime'), { recursive: true }); fs.mkdirSync(path.join(base, 'app'))
   for (const file of ['launch.cjs', 'cooperation.cjs']) fs.copyFileSync(path.join(root, 'scripts/runtime-preview', file), path.join(base, 'runtime', file))
