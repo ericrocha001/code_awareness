@@ -15,6 +15,7 @@ function vitePreviewPlugin() {
   if (!config) return { name: 'runtime-preview-disabled' }
   const observed = new Map(), loaded = new Map(), inputs = new Map()
   let viteRoot = config.worktree
+  let optimizerWatcher
   const files = config.artifacts.filter(a => ['WEB', 'ELECTRON_RENDERER'].includes(a.component))
   const selected = id => files.find(a => path.resolve(config.worktree, a.path).toLowerCase() === path.resolve(id.split('?')[0]).toLowerCase())
   const capture = { name: 'runtime-preview-input-capture', enforce: 'pre', transform(code, id) {
@@ -31,6 +32,13 @@ function vitePreviewPlugin() {
       const options = resolved.optimizeDeps?.esbuildOptions ?? {}
       const nativeOptimizer = Object.keys(options).every(key => (key === 'preserveSymlinks' && options[key] === false) || (key === 'jsx' && options[key] === 'automatic'))
       fs.writeFileSync(path.join(config.directory, 'dependency-cache-policy.json'), JSON.stringify({ schemaVersion: 1, nativeOptimizer }), { mode: 0o600 })
+      const cache = path.join(config.directory, 'vite-cache'), processing = new Set()
+      fs.mkdirSync(cache, { recursive: true })
+      const saveOptimizer = () => fs.writeFileSync(path.join(config.directory, 'optimizer-observation.json'), JSON.stringify({ schemaVersion: 1, processingDirectories: processing.size }), { mode: 0o600 })
+      saveOptimizer()
+      optimizerWatcher = fs.watch(cache, { persistent: false }, (_event, name) => {
+        if (String(name).startsWith('deps_temp_') && processing.size < 16) { processing.add(String(name)); saveOptimizer() }
+      })
     },
     transform(code, id) {
       const artifact = selected(id)
@@ -50,6 +58,7 @@ function vitePreviewPlugin() {
       if (artifact) { loaded.delete(artifact.path); observed.delete(artifact.path) }
     },
     configureServer(server) {
+      server.httpServer?.once('close', () => optimizerWatcher?.close())
       server.middlewares.use((req, res, next) => {
         const url = new URL(req.url, 'http://127.0.0.1')
         const artifact = files.find(a => url.pathname === '/' + path.relative(viteRoot, path.resolve(config.worktree, a.path)).replace(/\\/g, '/'))

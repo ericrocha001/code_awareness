@@ -41,7 +41,7 @@ function setup(durable = false) {
 describe('branch application intent — domain fixtures, no simulated Windows evidence', () => {
   it('resolves exact branch, authorizes and preflights internally before one launch', async () => {
     const f = setup(); expect(await f.run()).toMatchObject({ success: true, data: { kind: 'SESSION', session: { state: 'RUNNING' } } })
-    expect(f.resolver.resolve).toHaveBeenCalledWith('repo', 'tree', 'checkout'); expect(f.check).toHaveBeenCalledTimes(2)
+    expect(f.resolver.resolve).toHaveBeenCalledWith('repo', 'tree', 'checkout', expect.anything()); expect(f.check).toHaveBeenCalledTimes(2)
     expect(f.confirm).toHaveBeenCalledTimes(1); expect(f.runner.start).toHaveBeenCalledTimes(1)
     await f.run(); expect(f.runner.start).toHaveBeenCalledTimes(1)
   })
@@ -131,7 +131,7 @@ describe('agent intent and durable compact status', () => {
     const other = { ...f.tree, worktreeId: 'other' }; f.inventory.worktrees.push(other); f.branch.worktrees.push(other)
     const selected = { ...intent(), worktreeId: 'other' }
     await f.service.runBranchApp(selected); await f.service.pendingResult()
-    expect(f.resolver.resolve).toHaveBeenCalledWith('repo', 'other', 'checkout')
+    expect(f.resolver.resolve).toHaveBeenCalledWith('repo', 'other', 'checkout', expect.anything())
     expect(f.runner.start).toHaveBeenCalledTimes(1)
   })
   it('retains uncertain interrupted operations, forbids a new start and never restores READY after restart', async () => {

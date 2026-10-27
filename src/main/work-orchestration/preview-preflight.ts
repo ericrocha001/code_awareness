@@ -68,7 +68,7 @@ export class PreviewPreflightService {
       const manifestBytes = await read(await previewPath(root, profile.dependencies.manifest))
       const lockBytes = await read(await previewPath(root, profile.dependencies.lockfile))
       if (bytesFingerprint(manifestBytes) !== profile.dependencies.manifestHash || bytesFingerprint(lockBytes) !== profile.dependencies.lockfileHash) problem('DEPENDENCY_INPUT_CHANGED', 'Manifest/scripts ou lockfile diferem do perfil aprovado.')
-      const inspect = () => this.dependencies.inspect(root, profile, selection.generation, manifestBytes, lockBytes)
+      const inspect = () => this.dependencies.inspect(root, profile, selection.generation, manifestBytes, lockBytes, timing)
       const dependencies = await (timing ? timing.measure('dependencies', inspect) : inspect())
       result.dependencyBasis = dependencies.basis
       for (const diagnostic of dependencies.diagnostics) problem(diagnostic.reasonCode, diagnostic.message, diagnostic.status)
@@ -118,7 +118,7 @@ export class PreviewPreflightService {
     await measure('materialization', async () => {
       const manifest = await read(await previewPath(evidence.root, profile.dependencies.manifest)), lock = await read(await previewPath(evidence.root, profile.dependencies.lockfile))
       if (bytesFingerprint(manifest) !== profile.dependencies.manifestHash || bytesFingerprint(lock) !== profile.dependencies.lockfileHash) throw new Error('DEPENDENCY_INPUT_CHANGED')
-      const current = await this.dependencies.inspect(evidence.root, profile, selection.generation, manifest, lock)
+      const current = await this.dependencies.inspect(evidence.root, profile, selection.generation, manifest, lock, timing)
       if (current.basis !== result.dependencyBasis) throw new Error('DEPENDENCY_INSTALLATION_CHANGED')
       let materialization: string | null = null
       try { materialization = bytesFingerprint(await read(await previewPath(evidence.root, profile.dependencies.materialization))) }

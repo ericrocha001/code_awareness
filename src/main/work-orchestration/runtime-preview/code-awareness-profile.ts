@@ -6,6 +6,7 @@ import { promisify } from 'node:util'
 import { bytesFingerprint, previewFingerprint, previewProfileSchema, type PreviewProfile } from '../preview-profile'
 import { previewPath } from '../preview-preflight'
 import type { PreviewProfileStore } from '../preview-profile-store'
+import type { PreviewStartClock } from './start-timing'
 
 const execute = promisify(execFile)
 async function checkoutPath(root: string, file: string, reason: string) {
@@ -30,24 +31,25 @@ const availablePort = () => new Promise<number>((resolve, reject) => {
 export interface CodeAwarenessEnvironment { root: string; executable: string; electronVersion: string; abi: string }
 export class CodeAwarenessProfileResolver {
   constructor(private readonly store: PreviewProfileStore, private readonly environment: CodeAwarenessEnvironment) {}
-  async resolve(repositoryId: string, worktreeId: string, worktree: string): Promise<PreviewProfile> {
+  async resolve(repositoryId: string, worktreeId: string, worktree: string, timing?: PreviewStartClock): Promise<PreviewProfile> {
+    const read = (file: string) => timing ? timing.read(file) : readFile(file)
     if (process.platform !== 'win32' || process.arch !== 'x64' || !process.env.SystemRoot) throw new Error('APP_HOST_UNSUPPORTED')
     let targetPackage: { name?: string; packageManager?: string }
-    try { targetPackage = JSON.parse(await readFile(await checkoutPath(worktree, 'package.json', 'APP_CHECKOUT_UNSUPPORTED'), 'utf8')) }
+    try { targetPackage = JSON.parse((await read(await checkoutPath(worktree, 'package.json', 'APP_CHECKOUT_UNSUPPORTED'))).toString()) }
     catch { throw new Error('APP_CHECKOUT_UNSUPPORTED') }
     if (targetPackage.name !== 'code-awareness' || targetPackage.packageManager !== 'npm@10.9.4') throw new Error('APP_CHECKOUT_UNSUPPORTED')
     const inputs: Array<{ path: string; fingerprint: string }> = []
     for (const file of launchInputs) {
-      const trusted = await readFile(join(this.environment.root, file)).catch(() => { throw new Error('APP_HOST_PROFILE_UNAVAILABLE') })
-      const target = await readFile(await checkoutPath(worktree, file, 'APP_COOPERATION_MISSING')).catch(() => { throw new Error('APP_COOPERATION_MISSING') })
+      const trusted = await read(join(this.environment.root, file)).catch(() => { throw new Error('APP_HOST_PROFILE_UNAVAILABLE') })
+      const target = await read(await checkoutPath(worktree, file, 'APP_COOPERATION_MISSING')).catch(() => { throw new Error('APP_COOPERATION_MISSING') })
       if (!trusted.equals(target)) throw new Error('APP_COOPERATION_INCOMPATIBLE')
       inputs.push({ path: file, fingerprint: bytesFingerprint(trusted) })
     }
     for (const file of [...components.map(file => 'src/main/' + file), 'src/main/preload.ts', 'src/renderer/src/App.tsx']) await checkoutPath(worktree, file, 'APP_COOPERATION_MISSING')
     const runtimeExecutable = 'node_modules/electron/dist/electron.exe'
-    const runtimeBytes = await readFile(await checkoutPath(worktree, runtimeExecutable, 'APP_RUNTIME_UNAVAILABLE')).catch(() => { throw new Error('APP_RUNTIME_UNAVAILABLE') })
+    const runtimeBytes = await read(await checkoutPath(worktree, runtimeExecutable, 'APP_RUNTIME_UNAVAILABLE')).catch(() => { throw new Error('APP_RUNTIME_UNAVAILABLE') })
     const runtimeFingerprint = bytesFingerprint(runtimeBytes)
-    if (runtimeFingerprint !== bytesFingerprint(await readFile(this.environment.executable))) throw new Error('APP_RUNTIME_INCOMPATIBLE')
+    if (runtimeFingerprint !== bytesFingerprint(await read(this.environment.executable))) throw new Error('APP_RUNTIME_INCOMPATIBLE')
     const locate = async (name: string) => {
       const found = await execute('where.exe', [name], { windowsHide: true, timeout: 10000, maxBuffer: 16384 })
       return realpath(found.stdout.trim().split(/\r?\n/)[0])
@@ -61,11 +63,11 @@ export class CodeAwarenessProfileResolver {
       const port = current?.adapter?.port ?? await availablePort()
       return previewProfileSchema.parse({ schemaVersion: 1, profileId: 'code-awareness-' + worktreeId, revision: current?.revision ?? 1, repositoryId,
         runtime: 'ELECTRON_DEV', runtimeVersion: this.environment.electronVersion,
-        command: { executable: node, executableHash: bytesFingerprint(await readFile(node)), args: ['scripts/runtime-preview/launch.cjs'], cwd: '.', inputs },
+        command: { executable: node, executableHash: bytesFingerprint(await read(node)), args: ['scripts/runtime-preview/launch.cjs'], cwd: '.', inputs },
         env: { PATH: dirname(git) + delimiter + join(process.env.SystemRoot!, 'System32') },
         resources: [{ name: 'runtime', strategy: 'SESSION_DIRECTORY' }, { name: 'http-hmr', strategy: 'SESSION_ENDPOINT' }],
         dependencies: { packageManager: 'npm', packageManagerVersion: '10.9.4', manifest: 'package.json', lockfile: 'package-lock.json',
-          manifestHash: bytesFingerprint(await readFile(await previewPath(worktree, 'package.json'))), lockfileHash: bytesFingerprint(await readFile(await previewPath(worktree, 'package-lock.json'))),
+          manifestHash: bytesFingerprint(await read(await previewPath(worktree, 'package.json'))), lockfileHash: bytesFingerprint(await read(await previewPath(worktree, 'package-lock.json'))),
           abi: this.environment.abi, materialization: '.code-awareness/runtime-preview/materialization.json' },
         cooperation: { manifest: 'scripts/runtime-preview/cooperation.cjs', fingerprint: inputs[1].fingerprint },
         bootstrap: { kind: 'CODE_AWARENESS', dataPolicy: 'REPOSITORY_SNAPSHOT', maxBytes: 67108864, maxArtifacts: 10000 },

@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import type { PreviewProfile } from './preview-profile'
 import { bytesFingerprint, previewFingerprint } from './preview-profile'
+import type { PreviewStartClock } from './runtime-preview/start-timing'
 
 type PackageEntry = { version?: string; optional?: boolean; link?: boolean; resolved?: string; hasInstallScript?: boolean }
 type PackageManifest = { name?: string; version?: string }
@@ -38,14 +39,15 @@ export class PreviewNpmDependencies {
   private readonly contexts = new Map<string, string>()
   constructor(private readonly files: Files = fs) {}
 
-  private async installedManifest(directory: string) {
+  private async installedManifest(directory: string, timing?: PreviewStartClock) {
     const path = join(directory, 'package.json')
     const before = await this.files.lstat(path, { bigint: true })
     if (!before.isFile() || before.isSymbolicLink()) throw new Error('DEPENDENCY_MANIFEST_LINK_UNSUPPORTED')
     const stamp = [before.dev, before.ino, before.size, before.mtimeNs, before.ctimeNs].join(':')
     const cached = this.manifests.get(path)
     if (cached?.stamp === stamp) return { manifest: cached.manifest, stamp }
-    const manifest = JSON.parse(await this.files.readFile(path, 'utf8')) as PackageManifest
+    const raw = await this.files.readFile(path, 'utf8'); timing?.recordRead(Buffer.byteLength(raw))
+    const manifest = JSON.parse(raw) as PackageManifest
     const after = await this.files.lstat(path, { bigint: true })
     if ([after.dev, after.ino, after.size, after.mtimeNs, after.ctimeNs].join(':') !== stamp || !after.isFile()) throw new Error('DEPENDENCY_INSTALLATION_CHANGED')
     if (this.manifests.size >= 4096) this.manifests.delete(this.manifests.keys().next().value!)
@@ -53,7 +55,7 @@ export class PreviewNpmDependencies {
     return { manifest, stamp }
   }
 
-  async inspect(rootPath: string, profile: PreviewProfile, generation: string, manifestBytes: Buffer, lockBytes: Buffer) {
+  async inspect(rootPath: string, profile: PreviewProfile, generation: string, manifestBytes: Buffer, lockBytes: Buffer, timing?: PreviewStartClock) {
     const root = await this.files.realpath(rootPath), diagnostics: DependencyDiagnostic[] = []
     const context = previewFingerprint([profile.repositoryId, generation, profile.dependencies, profile.runtime, profile.runtimeVersion, profile.command.executableHash, bytesFingerprint(manifestBytes), bytesFingerprint(lockBytes)])
     if (this.contexts.get(root) !== context) {
@@ -108,7 +110,7 @@ export class PreviewNpmDependencies {
         if (declared === null || !expected.version) diagnostics.push({ reasonCode: 'DEPENDENCY_WORKSPACE_UNVERIFIABLE', message: `Declaração ou versão do workspace não verificável: ${path}`, status: 'UNKNOWN' })
       } else if (!samePath(physical, logical)) throw new Error('DEPENDENCY_LINK_UNDECLARED')
       let installed: Awaited<ReturnType<PreviewNpmDependencies['installedManifest']>>
-      try { installed = await this.installedManifest(physical) }
+      try { installed = await this.installedManifest(physical, timing) }
       catch (error) {
         if (!missing(error)) throw error
         diagnostics.push({ reasonCode: 'DEPENDENCY_MISMATCH', message: `Pacote materializado sem manifest: ${path}`, status: 'INCOMPATIBLE' }); return { diagnostics, evidence }

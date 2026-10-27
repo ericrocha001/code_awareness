@@ -54,9 +54,12 @@ export class PreviewStartClock {
     const phase = this.begin(stage)
     return () => { if (phase) this.finish(phase) }
   }
-  async read(file: string) {
-    const bytes = await readFile(file), id = this.scope.getStore()
-    if (id !== undefined) this.phases[id].bytesRead = (this.phases[id].bytesRead ?? 0) + bytes.length
+  recordRead(bytes: number) {
+    const id = this.scope.getStore()
+    if (id !== undefined) this.phases[id].bytesRead = (this.phases[id].bytesRead ?? 0) + bytes
+  }
+  async read(file: string, signal?: AbortSignal) {
+    const bytes = await readFile(file, { signal }); this.recordRead(bytes.length)
     return bytes
   }
   presented(at: string) {

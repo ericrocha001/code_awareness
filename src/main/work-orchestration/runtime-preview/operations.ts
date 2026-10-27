@@ -172,7 +172,7 @@ export class RuntimePreviewOperations {
       return blocked('PREVIEW_SESSION_ACTIVE', 'Já existe um aplicativo de preview ativo. Encerre essa sessão explicitamente antes de rodar outra branch.', { activeSession: await this.view(active, false) })
     }
     let profile: PreviewProfile
-    try { profile = await timing.measure('profile', () => this.branchProfiles!.resolve(request.repositoryId, tree.worktreeId, tree.path)) }
+    try { profile = await timing.measure('profile', () => this.branchProfiles!.resolve(request.repositoryId, tree.worktreeId, tree.path, timing)) }
     catch (error) {
       const result = failure(error)
       const code = !result.success ? result.code : 'APP_PROFILE_UNAVAILABLE'

@@ -22,7 +22,7 @@ async function fixture() {
     dependencies: { manifest: 'package.json', lockfile: 'package-lock.json', abi: '128' }, runtimeVersion: '32', env: { PATH: 'approved' },
     adapter: { kind: 'ELECTRON', configFile: 'electron.vite.config.ts', nativeModules: ['esbuild'], artifacts: [{ component: 'ELECTRON_RENDERER', path: 'src/App.tsx' }] } }
   const forbidden = [randomUUID(), 'secret-token-' + randomUUID(), directory, 'http://127.0.0.1:54321']
-  const prepare = async (dir = directory, changes = {}) => { await fs.mkdir(dir, { recursive: true }); return PreviewBuildCache.prepare(cacheRoot, worktree, dir, profile, selection, 'verified-installation', forbidden, changes.signal) }
+  const prepare = async (dir = directory, changes = {}) => { await fs.mkdir(dir, { recursive: true }); return PreviewBuildCache.prepare(cacheRoot, worktree, dir, profile, selection, 'verified-installation', forbidden, changes.signal, changes.enabled) }
   const materialize = async (dir = directory, injected = '') => {
     await fs.mkdir(dir, { recursive: true })
     await fs.writeFile(path.join(dir, 'dependency-cache-policy.json'), JSON.stringify({ schemaVersion: 1, nativeOptimizer: true }))
@@ -53,6 +53,30 @@ test('retains only native dependency outputs and restores them in a fresh privat
   const scan = async dir => { for (const entry of await fs.readdir(dir, { withFileTypes: true })) { const file = path.join(dir, entry.name); if (entry.isDirectory()) await scan(file); else { const text = await fs.readFile(file, 'utf8'); assert.ok(!text.includes('PRIVATE_ARTIFACT_CANARY')); for (const secret of f.forbidden) assert.ok(!text.includes(secret)) } } }
   await scan(f.cacheRoot)
   await assert.rejects(fs.access(path.join(next, 'userData')))
+})
+
+test('disabled host policy performs no cache materialization or retention', async () => {
+  const f = await fixture(), cache = await f.prepare(f.directory, { enabled: false })
+  assert.equal(cache.receipt.status, 'DISABLED'); assert.equal(cache.receipt.reasonCode, 'HOST_CACHE_DISABLED')
+  await cache.guard(); await cache.finish(true)
+  await assert.rejects(fs.access(f.cacheRoot)); assert.equal(cache.receipt.retainedBytes, 0)
+})
+
+test('cancels retention and joins pending reads before removing publication output', async () => {
+  const f = await fixture(), cache = await f.prepare(); await f.materialize()
+  const controller = new AbortController(), read = fs.readFile
+  let aborted = false, active = 0
+  fs.readFile = async (...args) => {
+    active++
+    try {
+      if (!aborted) { aborted = true; controller.abort() }
+      return await read(...args)
+    } finally { active-- }
+  }
+  try { await cache.finish(true, controller.signal) } finally { fs.readFile = read }
+  assert.equal(active, 0); assert.equal(cache.receipt.reasonCode, 'BUILD_CACHE_CANCELLED'); assert.equal(cache.receipt.retainedBytes, 0)
+  const partitions = await fs.readdir(f.cacheRoot)
+  for (const partition of partitions) assert.equal((await fs.readdir(path.join(f.cacheRoot, partition))).length, 0)
 })
 test('revalidates dependency bytes without relying on HEAD, mtime or package version', async () => {
   const f = await fixture(), cold = await f.prepare(); await f.materialize(); await cold.finish(true)

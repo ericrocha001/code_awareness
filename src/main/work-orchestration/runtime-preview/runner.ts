@@ -65,8 +65,10 @@ export class RuntimePreviewRunner {
   private readonly owners = new Map<string, NativeOwner>()
   private readonly adapters = new Map<string, PreviewStackAdapter>()
   private readonly sources = new Map<string, NonNullable<PreparedPreview['observeSource']>>()
+  private readonly retentions = new Map<string, AbortController>()
   constructor(private readonly store: PreviewSessionStore, private readonly authority: PreviewLaunchAuthority,
-    private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner) {}
+    private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner,
+    private readonly options: { buildCache?: boolean } = {}) {}
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const operation = this.tail.then(fn); this.tail = operation.catch(() => {}); return operation
   }
@@ -114,6 +116,7 @@ export class RuntimePreviewRunner {
     if (!selection.success) return Promise.reject(selection.error)
     input = { operationId: input.operationId, selection: selection.data, guard: input.guard, timing: input.timing, launchContext: input.launchContext, preflightEvidence: input.preflightEvidence }
     const timing = input.timing ?? new PreviewStartClock()
+    const buildCacheEnabled = this.options.buildCache ?? false
     const queued = timing.waiting('queue')
     return this.command(async () => {
       queued()
@@ -176,7 +179,7 @@ export class RuntimePreviewRunner {
           if (!this.helper.sdkDirectory) throw new Error('TRUSTED_SDK_REQUIRED')
           adapter = await timing.measure('adapter', () => PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory!, undefined, true, signal))
           cache = await timing.measure('cache', () => adapter!.prepareCache(join(this.store.root, 'build-cache'), input.selection,
-            previewFingerprint([preflight.dependencyBasis, preflight.snapshot]), signal))
+            previewFingerprint([preflight.dependencyBasis, preflight.snapshot]), signal, buildCacheEnabled, timing))
           signal.throwIfAborted()
         })
         if (context) {
@@ -207,20 +210,24 @@ export class RuntimePreviewRunner {
           }))
           stack = await timing.measure('startup', () => adapter!.awaitReady(native!))
           await adapter.measureBootstrap(timing)
+          if (cache) cache.receipt.optimizerRuns = await adapter.optimizerRuns()
           if (adapter.presentedAt) timing.presented(adapter.presentedAt)
         }
         await verify()
         timing.ready()
         record = this.change(record, { state: 'RUNNING', process: observation, liveness: observation.activeProcesses > 0 ? 'VERIFIED' : 'UNVERIFIABLE', startTiming: timing.snapshot(), ...(cache ? { buildCache: cache.receipt } : {}) })
         if (stack) record = this.change(record, { ...stack, coverage: [...record.coverage.filter(c => ['TARGET_CHECKOUT', 'BEHAVIOR'].includes(c.stage)), ...stack.coverage] })
-        if (cache) {
+        if (cache && cache.receipt.status !== 'DISABLED') {
           const retained = cache
+          const cancellation = new AbortController(); this.retentions.set(sessionId, cancellation)
+          const signal = AbortSignal.any([cancellation.signal, AbortSignal.timeout(15000)])
           // STOP joins this existing serialization before deleting the private session directory.
           void this.serial(async () => {
             try {
-              await timing.measure('cache', () => retained.finish(true))
+              await timing.measure('cache', () => retained.finish(true, signal))
               this.change(this.store.read(sessionId), { buildCache: retained.receipt, startTiming: timing.snapshot() })
             } catch { await retained.finish(false) }
+            finally { this.retentions.delete(sessionId) }
           })
         }
         return record
@@ -250,6 +257,7 @@ export class RuntimePreviewRunner {
     })
   }
   stop(sessionId: string): Promise<PreviewSessionRecord> {
+    this.retentions.get(sessionId)?.abort()
     return this.command(async () => {
       let record = this.store.read(sessionId)
       if (record.state === 'STOPPED' || record.state === 'FAILED') return record

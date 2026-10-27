@@ -4,12 +4,13 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { bytesFingerprint, previewFingerprint, type PreviewProfile } from '../preview-profile'
 import type { PreviewSelection } from '../../../shared/types/runtime-preview-types'
+import type { PreviewStartClock } from './start-timing'
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/)
 const limit = 64 * 1048576
 export const buildCacheReceipt = z.object({ status: z.enum(['DISABLED', 'MISS', 'HIT', 'REBUILT', 'REJECTED']), key: digest.nullable(),
   restoredBytes: z.number().int().nonnegative().max(limit), retainedBytes: z.number().int().nonnegative().max(limit),
-  reasonCode: z.string().max(80).nullable(), mainPreload: z.literal('RECOMPILED') }).strict()
+  reasonCode: z.string().max(80).nullable(), mainPreload: z.literal('RECOMPILED'), optimizerRuns: z.number().int().min(0).max(16).optional() }).strict()
 const manifestSchema = z.object({ key: digest, files: z.array(z.object({ name: z.string().regex(/^[\w.-]+$/).refine(name => name !== '.' && name !== '..'), hash: digest, bytes: z.number().int().min(0).max(limit) }).strict()).max(1024),
   inputs: z.array(z.object({ path: z.string().max(2048), hash: digest }).strict()).max(8192) }).strict()
 type Manifest = z.infer<typeof manifestSchema>
@@ -33,9 +34,10 @@ export class PreviewBuildCache {
   private entry?: string
   private restoredMetadata?: string
   private restoredStamp?: string
+  private publicationSignal?: AbortSignal
   private constructor(private readonly root: string, private readonly worktree: string, private readonly directory: string,
     private readonly profile: PreviewProfile, private readonly selection: PreviewSelection, private readonly basis: string,
-    private readonly forbidden: string[], private readonly signal?: AbortSignal) {}
+    private readonly forbidden: string[], private readonly signal?: AbortSignal, private readonly timing?: PreviewStartClock) {}
   private async safe(file: string) {
     const [physical, stat] = await Promise.all([fs.realpath(file), fs.lstat(file)])
     if (!same(physical, resolve(file)) || stat.isSymbolicLink()) throw new Error('BUILD_CACHE_LINK')
@@ -43,9 +45,11 @@ export class PreviewBuildCache {
   }
   private async bytes(file: string) {
     this.signal?.throwIfAborted()
+    this.publicationSignal?.throwIfAborted()
     const stat = await this.safe(file)
     if (!stat.isFile() || stat.size > limit) throw new Error('BUILD_CACHE_LIMIT')
-    return fs.readFile(file)
+    const signal = this.publicationSignal ?? this.signal
+    return this.timing ? this.timing.read(file, signal) : fs.readFile(file, { signal })
   }
   private async input(file: string) {
     const path = resolve(file); inside(join(this.worktree, 'node_modules'), path)
@@ -86,8 +90,9 @@ export class PreviewBuildCache {
   }
   private reject(code: string) { this.receipt.status = 'REJECTED'; this.receipt.reasonCode = code }
   static async prepare(root: string, worktree: string, directory: string, profile: PreviewProfile, selection: PreviewSelection, basis: string,
-    forbidden: string[], signal?: AbortSignal) {
-    const cache = new PreviewBuildCache(resolve(root), await fs.realpath(worktree), directory, profile, selection, basis, forbidden, signal)
+    forbidden: string[], signal?: AbortSignal, enabled = true, timing?: PreviewStartClock) {
+    const cache = new PreviewBuildCache(resolve(root), await fs.realpath(worktree), directory, profile, selection, basis, forbidden, signal, timing)
+    if (!enabled) { cache.receipt.reasonCode = 'HOST_CACHE_DISABLED'; return cache }
     if (profile.profileId !== 'code-awareness-' + selection.worktreeId || profile.adapter?.kind !== 'ELECTRON' || profile.adapter.configFile !== 'electron.vite.config.ts' || Object.keys(profile.env).some(key => key !== 'PATH')) return cache
     try {
       inside(resolve(root, '..'), root)
@@ -158,9 +163,10 @@ export class PreviewBuildCache {
       if ((await this.input(input.path)).hash !== input.hash) throw new Error('BUILD_CACHE_INPUT_CHANGED')
     })
   }
-  async finish(success: boolean) {
+  async finish(success: boolean, signal?: AbortSignal) {
     if (!this.entry || !this.receipt.key) return
     if (!success) { await this.remove(this.entry).catch(() => {}); return }
+    this.publicationSignal = signal
     let temporary: string | undefined
     try {
       await this.guard()
@@ -268,16 +274,18 @@ export class PreviewBuildCache {
       if (manifestBytes.length > 4 * 1048576 || total + manifestBytes.length > limit) throw new Error('BUILD_CACHE_LIMIT')
       await this.verifyInputs(manifest.inputs)
       await this.guard()
+      signal?.throwIfAborted()
       temporary = this.entry + '-' + randomUUID() + '.tmp'
       await fs.mkdir(join(temporary, 'data'), { recursive: true, mode: 0o700 })
-      for (const [name, bytes] of output) await fs.writeFile(join(temporary, 'data', name), bytes, { flag: 'wx', mode: 0o600 })
-      await fs.writeFile(join(temporary, 'entry.json'), manifestBytes, { flag: 'wx', mode: 0o600 })
+      for (const [name, bytes] of output) { signal?.throwIfAborted(); await fs.writeFile(join(temporary, 'data', name), bytes, { flag: 'wx', mode: 0o600, signal }) }
+      await fs.writeFile(join(temporary, 'entry.json'), manifestBytes, { flag: 'wx', mode: 0o600, signal })
+      signal?.throwIfAborted()
       await this.remove(this.entry); await fs.rename(temporary, this.entry); temporary = undefined
       this.receipt.status = reused ? 'HIT' : this.receipt.restoredBytes ? 'REBUILT' : 'MISS'
       this.receipt.retainedBytes = total + manifestBytes.length
       await this.prune()
     } catch (error) {
-      this.reject(error instanceof Error && /^BUILD_CACHE_[A-Z_]+$/.test(error.message) ? error.message : 'BUILD_CACHE_UNAVAILABLE')
+      this.reject(signal?.aborted ? 'BUILD_CACHE_CANCELLED' : error instanceof Error && /^BUILD_CACHE_[A-Z_]+$/.test(error.message) ? error.message : 'BUILD_CACHE_UNAVAILABLE')
       if (temporary) await this.remove(temporary).catch(() => {})
       await this.remove(this.entry).catch(() => {})
     }

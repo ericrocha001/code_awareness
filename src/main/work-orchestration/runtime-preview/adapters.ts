@@ -96,9 +96,16 @@ export class PreviewStackAdapter {
       packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...profile.adapter!, ...(context ? { context, approvedProfile: profile } : {}) }), { flag: 'wx', mode: 0o600 })
     this.context = context; this.configured = true
   }
-  prepareCache(root: string, selection: PreviewSelection, basis: string, signal: AbortSignal) {
+  prepareCache(root: string, selection: PreviewSelection, basis: string, signal: AbortSignal, enabled = true, timing?: PreviewStartClock) {
     return PreviewBuildCache.prepare(root, this.worktree, this.directory, this.profile, selection, basis,
-      [this.token, this.sessionId, this.directory, `http://127.0.0.1:${this.profile.adapter!.port}`], signal)
+      [this.token, this.sessionId, this.directory, `http://127.0.0.1:${this.profile.adapter!.port}`], signal, enabled, timing)
+  }
+  async optimizerRuns() {
+    try {
+      const raw = await readFile(join(this.directory, 'optimizer-observation.json'))
+      if (raw.length > 1024) throw new Error('OPTIMIZER_OBSERVATION_LIMIT')
+      return z.object({ schemaVersion: z.literal(1), processingDirectories: z.number().int().min(0).max(16) }).strict().parse(JSON.parse(raw.toString())).processingDirectories
+    } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined; throw error }
   }
   environment() {
     if (!this.configured) throw new Error('PREVIEW_CONTEXT_REQUIRED')

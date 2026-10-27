@@ -50,7 +50,16 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const entries = ['work-orchestration/runtime-preview/operations', 'work-orchestration/runtime-preview/runner', 'work-orchestration/runtime-preview/session-store', 'work-orchestration/runtime-preview/host-helper', 'work-orchestration/preview-profile-store', 'work-orchestration/preview-preflight', 'work-orchestration/preview-repositories', 'core/git-service', 'git-operations/git-operations-service', 'github/github-git-transport', 'repository-catalog/repository-catalog-service', 'repository-catalog/repository-catalog-store', 'validation-ledger/validation-ledger', 'validation-execution/validation-source', 'continuum/project-continuum-session', 'mcp/channel-mcp-adapter', 'mcp/mcp-http-server', 'ipc/branch-orchestration-handler']
   const packageJson = require(path.join(root, 'package.json'))
   const external = Object.keys({ ...packageJson.dependencies, ...packageJson.devDependencies }).filter(name => !['mdast-util-from-markdown', 'micromark-extension-gfm', 'mdast-util-gfm', 'mdast-util-to-string'].includes(name))
-  require('esbuild').buildSync({ entryPoints: entries.map(file => 'src/main/' + file + '.ts'), outdir: bundle, platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
+  const baselineHost = process.argv.includes('--baseline-host'), baseline = 'b529540e4f1cc3eaa9219eca70adec8557a9c36c'
+  const oldGuards = new Set(['src/main/work-orchestration/runtime-preview/operations.ts', 'src/main/work-orchestration/runtime-preview/runner.ts', 'src/main/work-orchestration/preview-preflight.ts'])
+  const plugins = baselineHost ? [{ name: 'controlled-baseline-host', setup(build) {
+    build.onLoad({ filter: /\.ts$/ }, args => {
+      const relative = path.relative(root, args.path).replaceAll('\\', '/')
+      if (oldGuards.has(relative)) return { contents: execFileSync('git', ['show', baseline + ':' + relative], { cwd: root, encoding: 'utf8', windowsHide: true }), loader: 'ts', resolveDir: path.dirname(args.path) }
+      if (relative === 'src/main/work-orchestration/runtime-preview/adapters.ts') return { contents: fs.readFileSync(args.path, 'utf8').replace('signal: AbortSignal, enabled = true', 'signal: AbortSignal, enabled = false'), loader: 'ts', resolveDir: path.dirname(args.path) }
+    })
+  } }] : []
+  await require('esbuild').build({ entryPoints: entries.map(file => 'src/main/' + file + '.ts'), outdir: bundle, platform: 'node', format: 'cjs', bundle: true, external, plugins, logLevel: 'silent' })
   const get = name => require(path.join(bundle, name + '.js'))
   require('esbuild').buildSync({ entryPoints: ['context-data', 'authorization', 'context-bootstrap', 'code-awareness-profile'].map(file => 'src/main/work-orchestration/runtime-preview/' + file + '.ts'), outdir: path.join(bundle, 'work-orchestration/runtime-preview'), platform: 'node', format: 'cjs', bundle: true, external, logLevel: 'silent' })
   const base = path.join(directory, 'base'), target = path.join(directory, 'feature')
@@ -152,7 +161,8 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
     return manifest
   } }
   const preflight = new PreviewPreflightService(profileStore)
-  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, preflight), helper, runnerProvisioner)
+  const cacheOptions = { buildCache: process.argv.includes('--cache-enabled') }
+  const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, preflight), helper, runnerProvisioner, cacheOptions)
   const start = runner.start.bind(runner)
   runner.start = async input => { try { return await start(input) } catch (error) { fs.writeFileSync(path.join(output, 'launch-diagnostic.txt'), String(error.stack)); console.error('LAUNCH_DIAGNOSTIC', error.message); throw error } }
   const ledger = new (get('validation-ledger/validation-ledger').ValidationLedger)(path.join(directory, 'ledger.db'))
@@ -244,6 +254,11 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const commands = inputCommands()
   for await (const command of commands) {
     try {
+        if (fastStart && ['cache-on', 'cache-off'].includes(command)) {
+          assert.equal(baselineHost, false); assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state)))
+          cacheOptions.buildCache = command === 'cache-on'
+          save('cache-policy', { success: true, enabled: cacheOptions.buildCache })
+        }
       if (command.startsWith('select ')) currentKind = command.slice(7)
       const selection = selections[currentKind]; assert.ok(selection)
       if (agentIntent && ['run-agent', 'replay-agent', 'refuse-agent'].includes(command)) {
@@ -255,7 +270,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
           branchIntent = { repositoryId: electronRepository.id, branch: tree.branch, expectedHead: command === 'refuse-agent' ? '0'.repeat(40) : tree.head, operationId: randomUUID() }
         }
         assert.ok(branchIntent)
-        save('agent-intention', { success: true, ...branchIntent })
+        save('agent-intention', { success: true, ...branchIntent, guardSource: baselineHost ? baseline : 'CURRENT_CHECKPOINT', cacheEnabled: baselineHost ? false : cacheOptions.buildCache })
         const ioBefore = fastStart ? await hostIo() : null
         const started = performance.now(), cpu = process.cpuUsage(), delayWindows = []
         let previous = started, mainMaxDelayMs = 0
