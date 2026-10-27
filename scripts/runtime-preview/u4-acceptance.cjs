@@ -295,7 +295,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         await mcp('prepare_branch_app', branchIntent)
         const result = await service.pendingResult(); save('standby-prepared', result)
         const record = result?.success && result.data.kind === 'SESSION' && result.data.session ? store.read(result.data.session.sessionId) : store.list().find(value => value.operationId === branchIntent.operationId)
-        if (record) { sessionId = record.sessionId; save('standby-receipt', { success: true, sessionId, state: record.state, standby: record.standby, timing: record.startTiming, process: record.process }) }
+        if (record) { sessionId = record.sessionId; save('standby-receipt', { success: record.standby?.state === 'QUIESCENT', sessionId, state: record.state, standby: record.standby, timing: record.startTiming, process: record.process }) }
       }
       if (fastStart && command === 'standby-show') {
         const before = store.read(sessionId), operationId = randomUUID(), approvalsBefore = approvals

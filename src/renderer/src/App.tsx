@@ -192,7 +192,7 @@ export const App: React.FC = () => {
           <span>Contexto fixo. As alterações de dados ficam nesta sessão.</span>
         </div>}
         {activeTab === "git-management" && <GitManagementView key={`git-management:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} commitIntent={commitIntent} onIntentConsumed={id => setCommitIntent(previous => previous?.requestId === id ? null : previous)} />}
-        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={activeTab === "work-orchestration"} onArtifact={intent => { setArtifactIntent(intent); setActiveTab("continuum"); }} onCommit={intent => {
+        <WorkOrchestrationTab key={`work-orchestration:${activeProject?.id}:${activeProjectState.revision}`} state={activeProjectState} active={previewActive && activeTab === "work-orchestration"} onArtifact={intent => { setArtifactIntent(intent); setActiveTab("continuum"); }} onCommit={intent => {
           if (intent.projectId !== commitContext.current.project?.id || intent.revision !== commitContext.current.revision) return;
           setCommitIntent(intent); setActiveTab('git-management');
         }} />
