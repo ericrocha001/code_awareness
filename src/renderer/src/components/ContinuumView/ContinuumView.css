@@ -47,7 +47,7 @@
 .continuum-bulk-actions button, .continuum-selection-controls button { font-size: 11px; padding: 5px 7px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 6px; }
 .continuum-bulk-actions button:hover, .continuum-selection-controls button:hover { background: var(--hover-bg); }
 .continuum-bulk-actions button:disabled, .continuum-selection-controls button:disabled { opacity: .5; }
-.continuum-bulk-actions input, .continuum-bundle-composer input { min-width: 0; padding: 6px 8px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 6px; }
+.continuum-bulk-actions input { min-width: 0; padding: 6px 8px; background: var(--bg-primary); color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: 6px; }
 .continuum-item::before { content: ''; position: absolute; left: -12px; top: -12px; bottom: -14px; width: 1px; background: var(--border); }
 .continuum-node { position: absolute; left: -16px; top: 22px; width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
 .continuum-item > svg { flex-shrink: 0; color: var(--accent); margin-top: 1px; }
@@ -127,17 +127,6 @@
 .continuum-tag-confirmation { padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
 .continuum-tag-confirmation ul { max-height: 160px; overflow: auto; overflow-wrap: anywhere; }
 .continuum-tag-confirmation button { margin-right: 8px; }
-.continuum-bundle-composer { position: absolute; inset: 100px 24px 24px auto; width: min(760px, calc(100% - 48px)); z-index: 6; overflow: auto; padding: 20px; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-secondary); box-shadow: 0 12px 48px #0006; font-size: 12px; }
-.continuum-bundle-composer header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.continuum-bundle-composer h2 { font-size: 17px; overflow-wrap: anywhere; }
-.continuum-bundle-composer label { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
-.continuum-bundle-composer textarea { padding: 8px; border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--bg-primary); }
-.continuum-bundle-composer textarea { min-height: 220px; resize: vertical; font-family: var(--font-mono); font-size: 11px; }
-.continuum-bundle-composer button { border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); background: var(--bg-primary); }
-.continuum-bundle-composer ol { padding: 0; list-style: none; max-height: 240px; overflow: auto; }
-.continuum-bundle-composer li { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-subtle); }
-.continuum-bundle-composer li > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
-.continuum-bundle-composer small { display: block; color: var(--text-secondary); font: 10px var(--font-mono); }
 .continuum-icon-button:hover:enabled, .continuum-icon-button[aria-expanded=true] { background: var(--hover-bg); color: var(--accent); }
 .continuum-view, .continuum-view *, .continuum-view *::before, .continuum-view *::after { box-sizing: border-box; }
 .continuum-facet-year > button { width: 100%; }

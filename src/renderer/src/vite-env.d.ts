@@ -1,4 +1,4 @@
-import type { ContinuumBundleQuick, ContinuumBundleReceipt, ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleExport } from '../../shared/types/continuum-bundle-types'
+import type { ContinuumBundleQuick, ContinuumBundleReceipt } from '../../shared/types/continuum-bundle-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 /*
 -T ---
@@ -55,14 +55,11 @@ declare global {
       getContinuumVisualThumbnail: (repositoryId: string, artifactId: string) => Promise<ContinuumVisualSelection>
       getContinuumFacets: (repositoryPath: string) => Promise<ContinuumFacets>
       getContinuumTags: (repositoryId: string) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
-      discardContinuumBundle: (snapshotId: string) => Promise<void>
       resolveContinuumSelection: (request: ContinuumListRequest) => Promise<import('../../shared/types/continuum-ui-types').ContinuumResolvedSelection>
       getContinuumSelectionTokens: (repositoryId: string, selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) => Promise<{ repositoryId: string; artifacts: Array<{ artifactId: string; rawMarkdownTokenCount: number }> }>
       getContinuumTagTokens: (repositoryId: string, slugs: string[]) => Promise<{ repositoryId: string; totals: import('../../shared/types/continuum-ui-types').ContinuumTagTokens[] }>
       mutateContinuumTags: (request: ContinuumTagMutation) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
       quickContinuumBundle: (request: ContinuumBundleQuick) => Promise<ContinuumBundleReceipt>
-      prepareContinuumBundle: (request: ContinuumBundlePrepare) => Promise<ContinuumBundlePreview>
-      exportContinuumBundle: (request: ContinuumBundleExport) => Promise<{ outcome: 'copied' | 'saved' | 'cancelled'; snapshotId: string }>
       exportContinuumArtifact: (request: ContinuumExportRequest) => Promise<ContinuumExportReceipt>
       getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
       onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void
