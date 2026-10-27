@@ -17,12 +17,12 @@ async function fixture() {
   return { root, git, reader, read }
 }
 
-it('uses exactly two read-only commands and tracks create/rename/delete, packed refs and explicit fetch', async () => {
+it('uses one read-only command and tracks create/rename/delete, packed refs and explicit fetch', async () => {
   const { root, git, read } = await fixture()
   const commands = vi.spyOn(git as any, 'runGit')
   const before = await read()
-  expect(commands.mock.calls).toHaveLength(2)
-  expect(commands.mock.calls.map(call => (call[0] as string[])[0])).toEqual(['rev-parse', 'for-each-ref'])
+  expect(commands.mock.calls).toHaveLength(1)
+  expect(commands.mock.calls.map(call => (call[0] as string[])[0])).toEqual(['for-each-ref'])
   await gitExec(root, ['branch', 'same-a']); const first = await read()
   await gitExec(root, ['branch', 'same-b']); const second = await read()
   expect(first.referenceFingerprint).not.toBe(before.referenceFingerprint)
@@ -94,4 +94,21 @@ it('preserves unborn checkout observations and detects the first external commit
   const first = await service.getAtlasCheckoutState(true)
   expect(first.head).toMatch(/^[a-f0-9]{40,64}$/)
   expect(first.referenceFingerprint).not.toBe(empty.referenceFingerprint)
+}, 60000)
+
+it('observes detached HEAD with the same fingerprint and falls back on Git without root-ref support', async () => {
+  const { root, git } = await fixture()
+  await gitExec(root, ['switch', '--detach', 'HEAD'])
+  const light = await git.getAtlasObservation(root, true, true)
+  expect(light.branch).toBeNull()
+  expect(light.referenceFingerprint).toBe((await git.getAtlasObservation(root, false, true)).referenceFingerprint)
+  const run = (git as any).runGit.bind(git)
+  const commands = vi.spyOn(git as any, 'runGit').mockImplementation(async (args, ...rest) => {
+    if ((args as string[]).includes('--include-root-refs')) throw new Error("error: unknown option 'include-root-refs'")
+    return run(args, ...rest)
+  })
+  expect((await git.getAtlasObservation(root, true, true)).referenceFingerprint).toBe(light.referenceFingerprint)
+  commands.mockClear()
+  expect((await git.getAtlasObservation(root, true, true)).referenceFingerprint).toBe(light.referenceFingerprint)
+  expect(commands).toHaveBeenCalledTimes(2)
 }, 60000)

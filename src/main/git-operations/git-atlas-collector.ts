@@ -60,14 +60,18 @@ export class AtlasCollector {
     this.running = true
     try {
       if (busy()) return
-      if (consumer.store.diagnostic().state !== 'READY') { this.stopped.add(consumer); this.emit(consumer); return }
+      const started = performance.now()
+      if (consumer.store.diagnostic().state !== 'READY') { this.stopped.add(consumer); this.emit(consumer, 'CHECKPOINT_UNAVAILABLE'); return }
       const source = await consumer.fingerprint()
       if (!active() || busy()) return
       if (source !== consumer.manifest.sourceFingerprint) {
         consumer.manifest = await consumer.observe()
         if (!active() || busy()) return
         this.rounds.delete(consumer)
+        return
       }
+      const manifest = consumer.manifest
+      const selected = () => active() && consumer.manifest === manifest
       let round = this.rounds.get(consumer)
       if (!round) {
         round = consumer.store.beginRound(consumer.manifest)
@@ -75,33 +79,34 @@ export class AtlasCollector {
         this.rounds.set(consumer, round)
         if (round.status !== 'COMPLETE') this.emit(consumer)
       }
-      if (round.status === 'COMPLETE') {
-        const current = await consumer.observe()
-        if (!active() || busy()) return
-        consumer.manifest = current
-        if (!current.available || current.revision !== round.manifest.revision || current.sourceFingerprint !== source) { this.rounds.delete(consumer); return }
-        this.stopped.add(consumer); this.emit(consumer); return
-      }
-      const frontier = consumer.store.frontier(round.id, 32)
-      if (!frontier.length) {
-        const current = await consumer.observe()
-        if (!active() || busy()) return
-        if (current.revision !== round.manifest.revision || current.sourceFingerprint !== consumer.manifest.sourceFingerprint) {
-          consumer.manifest = current; this.rounds.delete(consumer); return
+      for (let unit = 0; unit < 8; unit++) {
+        if (!selected() || busy() || unit > 0 && performance.now() - started >= 1000) return
+        if (consumer.store.diagnostic().state !== 'READY') { this.stopped.add(consumer); this.emit(consumer, 'CHECKPOINT_UNAVAILABLE'); return }
+        const frontier = round.status === 'COMPLETE' ? [] : consumer.store.frontier(round.id, 32)
+        if (consumer.store.diagnostic().state !== 'READY') { this.stopped.add(consumer); this.emit(consumer, 'CHECKPOINT_UNAVAILABLE'); return }
+        if (!frontier.length) {
+          const current = await consumer.observe()
+          if (!selected() || busy()) return
+          if (current.revision !== manifest.revision || current.topology !== manifest.topology || current.worktreeGeneration !== manifest.worktreeGeneration || current.sourceFingerprint !== source) {
+            consumer.manifest = current; this.rounds.delete(consumer); return
+          }
+          if (!current.available || round.status !== 'COMPLETE' && !consumer.store.finishRound(round.id, current.revision, current.available)) {
+            consumer.store.markUnknown(round.id, 'SCOPE_OR_CLOSURE_UNAVAILABLE')
+          }
+          const confirmed = consumer.store.getRound(round.id)
+          if (!confirmed || consumer.store.diagnostic().state !== 'READY') { this.stopped.add(consumer); this.emit(consumer, 'CHECKPOINT_UNAVAILABLE'); return }
+          consumer.manifest = current
+          this.rounds.set(consumer, confirmed)
+          this.stopped.add(consumer); this.emit(consumer, current.available ? null : 'SOURCE_COVERAGE_UNAVAILABLE'); return
         }
-        if (!consumer.store.finishRound(round.id, current.revision, current.available)) {
-          consumer.store.markUnknown(round.id, 'SCOPE_OR_CLOSURE_UNAVAILABLE')
-        }
-        this.rounds.set(consumer, consumer.store.getRound(round.id) ?? round)
-        this.stopped.add(consumer); this.emit(consumer); return
+        const missing = frontier.filter(sha => typeof consumer.store.getCommit(sha)?.message !== 'string')
+        const commits = missing.length ? await consumer.metadata(missing) : []
+        if (!selected() || busy()) return
+        if (!consumer.store.checkpoint(round.id, commits, frontier)) { this.stopped.add(consumer); this.emit(consumer, 'CHECKPOINT_UNAVAILABLE'); return }
+        round = consumer.store.getRound(round.id) ?? round
+        this.rounds.set(consumer, round); this.emit(consumer)
+        await new Promise<void>(resolve => setImmediate(resolve))
       }
-      const missing = frontier.filter(sha => typeof consumer.store.getCommit(sha)?.message !== 'string')
-      const commits = await consumer.metadata(missing)
-      if (!active() || busy()) return
-      if (await consumer.fingerprint() !== consumer.manifest.sourceFingerprint) { this.rounds.delete(consumer); return }
-      if (!active() || busy()) return
-      if (!consumer.store.checkpoint(round.id, commits, frontier)) { this.stopped.add(consumer); this.emit(consumer, 'CHECKPOINT_UNAVAILABLE'); return }
-      this.rounds.set(consumer, consumer.store.getRound(round.id) ?? round); this.emit(consumer)
     } catch (error) {
       if (active()) {
         const reason = error instanceof Error ? error.message : 'COLLECTION_UNAVAILABLE'

@@ -757,6 +757,8 @@ export class GitService implements FileListingPort {
 
   async getAtlasObservation(root: string, lightweight = false, strict = false): Promise<GitAtlasCheckoutObservation> {
     if (lightweight) {
+      const combined = await this.atlasReferenceObservation(root, strict)
+      if (combined) return combined
       const checkout = await this.getAtlasCheckoutState(root, strict)
       if (checkout.operation) return checkout
       const references = await this.getAtlasReferences(root)
@@ -768,6 +770,36 @@ export class GitService implements FileListingPort {
     ])
     if (checkout.operation) return checkout
     return { ...checkout, referenceFingerprint: this.atlasReferenceFingerprint(checkout, references), sourceFingerprint: this.atlasSourceFingerprint(root, directories, checkout, references, worktrees, topology) }
+  }
+
+  private atlasRootRefsSupported = true
+  private async atlasReferenceObservation(root: string, strict: boolean): Promise<GitAtlasCheckoutObservation | undefined> {
+    if (!this.atlasRootRefsSupported) return undefined
+    let admin: string
+    try {
+      const dotGit = join(root, '.git')
+      if (statSync(dotGit).isDirectory()) admin = dotGit
+      else {
+        const match = /^gitdir: (.+)\r?\n?$/.exec(readFileSync(dotGit, 'utf8'))
+        if (!match) return undefined
+        admin = resolve(root, match[1].trim())
+      }
+    } catch { return undefined }
+    let raw: string
+    try {
+      raw = await this.runGit(['for-each-ref', '--include-root-refs', '--sort=refname', '--format=%(refname)%00%(objectname)%00%(symref)%00%(*objectname)%00%(upstream:short)%00%(objecttype)%00%(*objecttype)', 'HEAD', 'refs/heads/', 'refs/remotes/', 'refs/tags/'], root, { maxOutputBytes: 256000, env: this.localReadEnvironment() })
+    } catch (error) {
+      if (/unknown option[^\n]*include-root-refs|unrecognized option[^\n]*include-root-refs/i.test(String(error))) { this.atlasRootRefsSupported = false; return undefined }
+      throw error
+    }
+    const lines = raw.split('\n').filter(Boolean)
+    const head = lines.find(line => line.startsWith('HEAD\0'))?.split('\0')
+    if (!head || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(head[1])) return undefined
+    const checkout = { head: head[1], branch: head[2]?.startsWith('refs/heads/') ? head[2].slice(11) : null,
+      operation: this.operationFromDirectory(admin) ?? (strict && ['index.lock', 'HEAD.lock'].some(name => existsSync(join(admin, name))) ? 'LOCKED' : null) }
+    if (checkout.operation) return checkout
+    const references = lines.filter(line => line.startsWith('refs/')).join('\n')
+    return { ...checkout, referenceFingerprint: this.atlasReferenceFingerprint(checkout, references ? references + '\n' : '') }
   }
 
   async getAtlasSourceFingerprint(root: string): Promise<string> {
@@ -790,7 +822,11 @@ export class GitService implements FileListingPort {
   async getAtlasFullCommitMetadata(root: string, shas: string[]): Promise<Array<Omit<GitHistoryNode,'decorations'>>> {
     if(!shas.length) return []
     if(shas.length>32 || shas.some(sha=>!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
-    const raw=await this.runGit(['log','--no-walk=unsorted','--format=%H%x00%P%x00%an%x00%cI%x00%s%x00%cn%x00%aI%x00%ae%x00%ce%x00%B%x00',...shas,'--'],root,{maxOutputBytes:2*1024*1024,env:this.localReadEnvironment()})
+    // Checkpoint object parents even if shallow, graft or replacement state changes inside an epoch.
+    const raw = await this.runGit([
+      '--no-replace-objects', '-c', 'advice.graftFileDeprecated=false', 'log', '--no-walk=unsorted',
+      '--format=%H%x00%P%x00%an%x00%cI%x00%s%x00%cn%x00%aI%x00%ae%x00%ce%x00%B%x00', ...shas, '--'
+    ], root, { maxOutputBytes: 2 * 1024 * 1024, env: { ...this.localReadEnvironment(), GIT_SHALLOW_FILE: '', GIT_GRAFT_FILE: process.platform === 'win32' ? 'NUL' : '/dev/null' } })
     const fields=raw.split('\0'), commits: Array<Omit<GitHistoryNode,'decorations'>>=[]
     for(let index=0;index<fields.length && fields[index].trim();index+=10) {
       if(index+9>=fields.length) throw new Error('GIT_METADATA_INVALID')
