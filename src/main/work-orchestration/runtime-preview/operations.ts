@@ -222,7 +222,8 @@ export class RuntimePreviewOperations {
     await verify()
     const checked = before.startAllowed && !approvedNow ? before : await this.check(target, timing, context)
     if (!checked.startAllowed) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: checked.preflight })
-    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context, preflightEvidence: checked.preflight, ...(standbyPolicy ? { standbyPolicy } : {}) })
+    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context, preflightEvidence: checked.preflight,
+      ...(standbyPolicy ? { standbyPolicy, watchIdentity: (invalidate: () => void) => context.git.watchRuntimePreviewTarget({ worktreeId: tree.worktreeId, generation: tree.generation, path: tree.path, ref: branch.ref, branchGeneration: branch.generation, head: branch.head }, invalidate) } : {}) })
     return { success: true, data: { kind: 'SESSION', session: await this.view(record, true), pending: false } }
   }
   private async view(record: PreviewSessionRecord, current: boolean, known?: PreviewQualification): Promise<PreviewSessionView> {

@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { summarizeLocalChanges } from './local-change-summary'
 import type { RemoteEvidence } from '../../shared/types/git-evidence-types'
 import ignore from 'ignore'
-import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fstatSync, lstatSync, openSync, readFileSync, readSync, realpathSync, statSync, writeFileSync, watch } from 'node:fs'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { GitService, GitWorktreeReadSnapshot } from '../core/git-service'
 import type { GitRemoteTransport } from '../core/git-remote-transport'
@@ -613,6 +613,24 @@ export class GitOperationsService {
     const common = realpathSync(await this.git.getCommonDirectory(this.repoRoot))
     if (await this.git.resolveCommit(record.path, expected.ref) !== expected.head || chronology(common, expected.ref).generation !== expected.branchGeneration) fail('BRANCH_CHANGED')
     if (!this.coordinationIdentity?.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
+  }
+  async watchRuntimePreviewTarget(expected: Parameters<GitOperationsService['verifyRuntimePreviewTarget']>[0], invalidate: () => void) {
+    await this.verifyRuntimePreviewTarget(expected)
+    const common = realpathSync(await this.git.getCommonDirectory(expected.path)), admin = realpathSync(await this.git.getWorktreeDirectory(expected.path))
+    const watchers: ReturnType<typeof watch>[] = []
+    try {
+      const observe = (directory: string, relevant: (path: string) => boolean) => {
+        const watcher = watch(directory, { recursive: true, persistent: false }, (_event, file) => {
+          const path = file?.toString().replaceAll('\\', '/')
+          if (!path || relevant(path)) invalidate()
+        })
+        watcher.on('error', invalidate); watchers.push(watcher)
+      }
+      observe(common, path => ['packed-refs', 'config', 'info/exclude', expected.ref, 'logs/' + expected.ref].includes(path))
+      observe(admin, path => ['HEAD', 'index', 'commondir', 'gitdir', 'locked', 'HEAD.lock', 'index.lock'].includes(path))
+      await this.verifyRuntimePreviewTarget(expected)
+      return () => { for (const watcher of watchers) watcher.close() }
+    } catch (error) { for (const watcher of watchers) watcher.close(); throw error }
   }
 
   private correlation() {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
 import { rmSync } from 'node:fs'
 import { GitService } from '../core/git-service'
@@ -37,7 +37,12 @@ describe('branch inventory with real Git', () => {
     await expect(service.classifyRuntimePreviewChanges(tree.worktreeId, ['../outside'])).rejects.toThrow('PREVIEW_CHANGE_COVERAGE_UNVERIFIABLE')
     await expect(service.verifyRuntimePreviewTarget({ ...expected, generation: 'replaced' })).rejects.toThrow('WORKTREE_STALE')
     await expect(service.verifyRuntimePreviewTarget({ ...expected, path: root })).rejects.toThrow('WORKTREE_STALE')
-    await gitExec(path, ['update-ref', '-d', branch.ref]); await gitExec(path, ['update-ref', branch.ref, branch.head])
+    let invalidated = false
+    const dispose = await service.watchRuntimePreviewTarget(expected, () => { invalidated = true })
+    try {
+      await gitExec(path, ['update-ref', '-d', branch.ref]); await gitExec(path, ['update-ref', branch.ref, branch.head])
+      await vi.waitFor(() => expect(invalidated).toBe(true))
+    } finally { dispose() }
     await expect(service.verifyRuntimePreviewTarget(expected)).rejects.toThrow('BRANCH_CHANGED')
     const updated = (await service.getBranchInventory()).branches.find(value => value.ref === branch.ref)!
     await gitExec(path, ['commit', '--allow-empty', '-m', 'drift'])
