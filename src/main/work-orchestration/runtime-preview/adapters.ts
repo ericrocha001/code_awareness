@@ -206,7 +206,14 @@ export class PreviewStackAdapter {
       signal?.throwIfAborted()
       const raw = await readFile(join(this.directory, 'electron-evidence.json'))
       if (raw.length > 65536) throw new Error('PROBE_LIMIT')
-      const window = webEvidence.shape.electron.unwrap().parse(JSON.parse(raw.toString())).window
+      let evidence: unknown
+      try { evidence = JSON.parse(raw.toString()) }
+      catch (error) {
+        if (!(error instanceof SyntaxError)) throw error
+        await new Promise(resolve => setTimeout(resolve, 10))
+        continue
+      }
+      const window = webEvidence.shape.electron.unwrap().parse(evidence).window
       if (window?.controlId === controlId && (action === 'QUIESCE' ? window.quiescent && !window.visible : window.visible && window.focused && !window.quiescent && window.functionalNs && window.focusedNs)) {
         this.hidden = action === 'QUIESCE'
         return { receivedNs, showNs: window.showNs, functionalNs: window.functionalNs, focusedNs: window.focusedNs }

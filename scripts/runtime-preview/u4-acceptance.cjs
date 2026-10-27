@@ -290,9 +290,13 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         await service.handle({ action: 'TRUST_REPOSITORY', selection, policy }); save('standby-trust', await service.pendingResult())
       }
       if (fastStart && command === 'standby-prepare') {
-        const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
-        const tree = inventory.worktrees.find(value => path.resolve(value.path).toLowerCase() === root.toLowerCase())
-        branchIntent = { repositoryId: electronRepository.id, branch: tree.branch, expectedHead: tree.head, worktreeId: tree.worktreeId, operationId: randomUUID() }
+        const current = sessionId ? store.read(sessionId) : undefined
+        if (current?.state === 'RUNNING') branchIntent = { repositoryId: current.selection.repositoryId, branch: current.sourceSnapshot.branch, expectedHead: current.sourceSnapshot.head, worktreeId: current.selection.worktreeId, operationId: randomUUID() }
+        else {
+          const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
+          const tree = inventory.worktrees.find(value => path.resolve(value.path).toLowerCase() === root.toLowerCase())
+          branchIntent = { repositoryId: electronRepository.id, branch: tree.branch, expectedHead: tree.head, worktreeId: tree.worktreeId, operationId: randomUUID() }
+        }
         await mcp('prepare_branch_app', branchIntent)
         const result = await service.pendingResult(); save('standby-prepared', result)
         const record = result?.success && result.data.kind === 'SESSION' && result.data.session ? store.read(result.data.session.sessionId) : store.list().find(value => value.operationId === branchIntent.operationId)
@@ -305,7 +309,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         const result = await service.pendingResult(); save('standby-shown', result)
         if (result?.success && result.data.kind === 'SESSION' && result.data.session) sessionId = result.data.session.sessionId
         const after = store.read(sessionId)
-        save('standby-presentation', { success: after.standby?.state === 'RUNNING', remoteMs: performance.now() - start, presentation: after.standby?.presentation, samePid: before.process.pid === after.process.pid, sameSession: before.sessionId === after.sessionId, approvals: approvals - approvalsBefore })
+        save('standby-presentation', { success: !!result?.success && after.standby?.state === 'RUNNING' && after.standby?.presentation?.receivedNs !== before.standby?.presentation?.receivedNs, remoteMs: performance.now() - start, presentation: after.standby?.presentation, samePid: before.process.pid === after.process.pid, sameSession: before.sessionId === after.sessionId, approvals: approvals - approvalsBefore })
       }
       if (fastStart && command === 'standby-metrics') save('standby-metrics', { success: true, sessionId, metrics: runner.slotMetrics(sessionId), standby: store.read(sessionId).standby, host: hostSample() })
         if (fastStart && ['cache-on', 'cache-off'].includes(command)) {

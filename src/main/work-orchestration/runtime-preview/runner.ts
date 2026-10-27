@@ -484,7 +484,7 @@ export class RuntimePreviewRunner {
     try {
       return await this.command(async () => {
         const record = this.store.read(sessionId), slot = this.slots.get(sessionId), adapter = this.adapters.get(sessionId)
-        if (!slot || !adapter || slot.invalid || record.standby?.state !== 'RUNNING') throw new Error('PREPARED_SLOT_INVALID')
+        if (!slot || !adapter || slot.invalid || record.standby?.state !== 'RUNNING') throw new Error(slot?.invalidReason ?? 'PREPARED_SLOT_INVALID')
         await slot.checkChanges?.(); await slot.guard(); await slot.checkChanges?.()
         if (slot.invalid) throw new Error('PREPARED_SLOT_INVALID')
         await adapter.control('QUIESCE', this.cancellations.get(sessionId)?.signal)
