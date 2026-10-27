@@ -84,3 +84,19 @@ it('preserves a selected branch and clears only a deleted reference after reconc
   expect((screen.getByLabelText('Referência em foco') as HTMLSelectElement).value).toBe('')
   expect(option('external')).toBeTruthy()
 })
+
+it('finishes a remounted loading generation under StrictMode and preserves enrichment on an unchanged refresh', async () => {
+  const api = setup()
+  api.getGitAtlasPrEvidence.mockResolvedValue(ok({ phase: 'PR_ENRICHMENT', gitSnapshot: page.snapshot, repositoryId: 'repo', worktreeId: 'tree', worktreeGeneration: 'g', coverage: 'COMPLETE', pullRequests: [], events: [] }) as any)
+  render(<React.StrictMode><GitManagementView state={state} /></React.StrictMode>)
+  await tick(1500)
+  expect(document.querySelector('.gm-history')?.getAttribute('aria-busy')).toBe('false')
+  const requests = api.getGitAtlasPrEvidence.mock.calls.length
+  fireEvent.change(screen.getByLabelText('Referência em foco'), { target: { value: 'refs/heads/main' } })
+  await tick(100)
+  fireEvent.click(screen.getByLabelText('Atualizar Git'))
+  await tick(1000)
+  expect(api.getGitAtlasPrEvidence).toHaveBeenCalledTimes(requests)
+  expect((screen.getByLabelText('Referência em foco') as HTMLSelectElement).value).toBe('refs/heads/main')
+  expect(document.querySelector('.gm-history')?.getAttribute('aria-busy')).toBe('false')
+})

@@ -4,7 +4,7 @@ import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
 import type { GitAtlasCoreEvidence, GitAtlasEvidenceQuery, GitAtlasPrEvidence } from '../../shared/types/git-atlas-evidence-types'
 import type { BranchInventory } from '../../shared/types/branch-orchestration-types'
 import type { BranchPullRequests } from '../../shared/types/branch-pull-request-types'
-import type { AtlasPersistence } from './git-atlas-cache'
+import { AtlasCache, type AtlasPersistence } from './git-atlas-cache'
 import { GitBranchInventory, recordBranchCreation } from './git-branch-inventory'
 import { GitBranchDiscard } from './git-branch-discard'
 import type { BranchDiscardExecute, BranchDiscardRemoteReader } from '../../shared/types/branch-discard-types'
@@ -1128,7 +1128,7 @@ export class GitOperationsService {
     })
   }
 
-  clearAtlasCache() { this.atlasReader?.invalidate(true); this.atlasReader = undefined }
+  clearAtlasCache() { this.atlasReader?.invalidate(true); this.atlasReader = undefined; this.atlasCores.clear() }
   private atlasActivity = 0
   beginAtlasInteraction() { this.atlasActivity++; return () => { this.atlasActivity-- } }
   stopAtlasCollection() { this.atlasReader?.stopCollection() }
@@ -1150,17 +1150,34 @@ export class GitOperationsService {
     return this.git.getAtlasObservation(this.repoRoot, lightweight, true)
   }
   private atlasPullRequests?: (inventory: BranchInventory) => Promise<BranchPullRequests>
+  private readonly atlasCores = new AtlasCache(8, 2 * 1024 * 1024)
+  private readonly atlasCorePending = new Map<string, Promise<GitAtlasCoreEvidence>>()
+  private readonly atlasPrPending = new Map<string, Promise<GitAtlasPrEvidence>>()
+  private atlasCoreKey(request: GitAtlasEvidenceQuery) { return JSON.stringify([request.contextKey, request.scope, request.window, request.limit ?? 100, request.cursor ?? null]) }
 
   bindAtlasPullRequests(reader: (inventory: BranchInventory) => Promise<BranchPullRequests>) {
     this.atlasPullRequests = reader
   }
 
   async getAtlasCoreEvidence(request: GitAtlasEvidenceQuery): Promise<GitAtlasCoreEvidence> {
+    const key = JSON.stringify([this.atlasCoreKey(request), request.comparisonRef, !!request.refresh])
+    const existing = this.atlasCorePending.get(key)
+    if (existing) return structuredClone(await existing)
+    const promise = this.readAtlasCoreEvidence(request)
+    this.atlasCorePending.set(key, promise)
+    try { return structuredClone(await promise) }
+    finally { if (this.atlasCorePending.get(key) === promise) this.atlasCorePending.delete(key) }
+  }
+
+  private async readAtlasCoreEvidence(request: GitAtlasEvidenceQuery): Promise<GitAtlasCoreEvidence> {
     if (request.comparisonRef !== undefined && (typeof request.comparisonRef !== 'string' || !request.comparisonRef.length || request.comparisonRef.length > 256)) fail('INVALID_ARGUMENT')
     await this.repository()
     const identity = this.coordinationIdentity
     if (!identity || !this.worktrees || !identity.isActive()) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     const page = await this.atlas().history(request)
+    if (!identity.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
+    const cached = this.atlasCores.getReadonly<GitAtlasCoreEvidence>(this.atlasCoreKey(request))
+    if (cached?.gitSnapshot === page.snapshot && cached.checkout.comparisonRef === (request.comparisonRef ?? null)) return { ...structuredClone(cached), git: page }
     const trees = request.scope?.kind === 'CHECKOUT'
       ? { repositoryId: identity.repositoryId, worktrees: [await this.worktrees.current({ head: page.head, branch: page.branch })] }
       : await this.worktrees.discover({ reuseValidatedDirectories: true })
@@ -1186,7 +1203,7 @@ export class GitOperationsService {
     if (request.scope?.kind !== 'CHECKOUT') await this.atlas().assertSnapshot(page.snapshot, request.contextKey, request.scope)
     if (!identity.isActive() || trees.repositoryId !== identity.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
     const observedAt = new Date().toISOString()
-    return {
+    const core: GitAtlasCoreEvidence = {
       phase: 'CORE', repositoryId: identity.repositoryId, worktreeId: selected.worktreeId, worktreeGeneration: selected.generation,
       observedAt, gitSnapshot: page.snapshot, source: 'GIT_LOCAL',
       coverage: { git: page.nextCursor || page.detachedCoverage !== 'COMPLETE' ? 'PARTIAL' : 'COMPLETE', github: 'NOT_REQUESTED' },
@@ -1196,11 +1213,26 @@ export class GitOperationsService {
       events: page.nodes.filter(node => node.parents.length > 1).map(node => ({ kind: 'GIT_MERGE_COMMIT', evidenceSource: 'GIT_LOCAL', confidence: 'CONFIRMED', sha: node.sha, parents: node.parents, firstParent: node.parents[0], committedAt: node.timestamp, observedAt })),
       historicalIntegrationCoverage: 'UNKNOWN'
     }
+    this.atlasCores.set(this.atlasCoreKey(request), core)
+    return core
   }
 
   async getAtlasPrEvidence(request: GitAtlasEvidenceQuery & { snapshot: string }): Promise<GitAtlasPrEvidence> {
-    const core = await this.getAtlasCoreEvidence({ ...request, refresh: false })
-    if (core.gitSnapshot !== request.snapshot) fail('GIT_STATE_CHANGED')
+    const key = JSON.stringify([this.atlasCoreKey(request), request.snapshot])
+    const existing = this.atlasPrPending.get(key)
+    if (existing) return structuredClone(await existing)
+    const promise = this.readAtlasPrEvidence(request)
+    this.atlasPrPending.set(key, promise)
+    try { return structuredClone(await promise) }
+    finally { if (this.atlasPrPending.get(key) === promise) this.atlasPrPending.delete(key) }
+  }
+
+  private async readAtlasPrEvidence(request: GitAtlasEvidenceQuery & { snapshot: string }): Promise<GitAtlasPrEvidence> {
+    await this.repository()
+    const core = this.atlasCores.getReadonly<GitAtlasCoreEvidence>(this.atlasCoreKey(request))
+    if (!core || core.gitSnapshot !== request.snapshot) fail('GIT_STATE_CHANGED')
+    if (!this.coordinationIdentity?.isActive() || this.coordinationIdentity.repositoryId !== core.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
+    await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey, request.scope)
     const result: GitAtlasPrEvidence = {
       phase: 'PR_ENRICHMENT', repositoryId: core.repositoryId, worktreeId: core.worktreeId, worktreeGeneration: core.worktreeGeneration,
       gitSnapshot: core.gitSnapshot, observedAt: new Date().toISOString(), source: 'GITHUB_REST', providerRevision: null,
