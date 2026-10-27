@@ -605,7 +605,6 @@ export class GitOperationsService {
     const selected = await this.getCoordinationIdentity(worktreeId)
     return this.git.checkIgnoreBatch(selected.record.path, paths, { strict: true })
   }
-
   async verifyRuntimePreviewTarget(expected: { worktreeId: string; generation: string; path: string; ref: string; branchGeneration: string; head: string }) {
     if (!this.worktrees || !this.worktreeRepositoryId) fail('WORKTREE_IDENTITY_UNAVAILABLE')
     const record = await this.worktrees!.revalidateSelection(expected.worktreeId)
@@ -617,6 +616,7 @@ export class GitOperationsService {
   async watchRuntimePreviewTarget(expected: Parameters<GitOperationsService['verifyRuntimePreviewTarget']>[0], invalidate: () => void) {
     await this.verifyRuntimePreviewTarget(expected)
     const common = realpathSync(await this.git.getCommonDirectory(expected.path)), admin = realpathSync(await this.git.getWorktreeDirectory(expected.path))
+    const index = join(admin, 'index'), indexFingerprint = ownershipDigest(readFileSync(index).toString('base64'))
     const watchers: ReturnType<typeof watch>[] = []
     try {
       const observe = (directory: string, relevant: (path: string) => boolean) => {
@@ -629,7 +629,10 @@ export class GitOperationsService {
       observe(common, path => ['packed-refs', 'config', 'info/exclude', expected.ref, 'logs/' + expected.ref].includes(path))
       observe(admin, path => ['HEAD', 'index', 'commondir', 'gitdir', 'locked', 'HEAD.lock', 'index.lock'].includes(path))
       await this.verifyRuntimePreviewTarget(expected)
-      return () => { for (const watcher of watchers) watcher.close() }
+      return {
+        assertCurrent: () => { if (lstatSync(index).isSymbolicLink() || ownershipDigest(readFileSync(index).toString('base64')) !== indexFingerprint) throw new Error('PREPARED_INDEX_CHANGED') },
+        close: () => { for (const watcher of watchers) watcher.close() }
+      }
     } catch (error) { for (const watcher of watchers) watcher.close(); throw error }
   }
 

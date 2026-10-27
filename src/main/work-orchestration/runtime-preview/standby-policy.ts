@@ -27,5 +27,5 @@ export const slotMetricsSchema = z.object({ at: z.string(), processes: z.number(
 export const standbySchema = z.object({ state: z.enum(['WARMING', 'QUIESCENT', 'RUNNING', 'EVICTED']), policy: standbyPolicySchema,
   expiresAt: z.string(), preparedAt: z.string().optional(), reason: z.string().optional(), metrics: slotMetricsSchema.optional(),
   guardMode: z.enum(['CONTINUOUS_OBSERVATION', 'FULL_RECHECK']).optional(),
-  presentation: z.object({ receivedNs: z.string(), guardedNs: z.string(), showNs: z.string(), functionalNs: z.string(), focusedNs: z.string(),
+  presentation: z.object({ stagesNs: z.record(z.string()).optional(), receivedNs: z.string(), guardedNs: z.string(), showNs: z.string(), functionalNs: z.string(), focusedNs: z.string(),
     durationMs: z.number().nonnegative() }).strict().optional() }).strict()

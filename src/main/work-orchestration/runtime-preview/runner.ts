@@ -20,7 +20,7 @@ import type { StandbyPolicy } from './standby-policy'
 export interface PreparedPreview {
   profile: PreviewProfile; worktree: string; gitFingerprint: string; preflight: PreviewPreflight;
   guard: () => Promise<void>
-  presentationGuard?: (observeSource?: () => Promise<void>) => Promise<void>
+  presentationGuard?: (observeSource?: () => Promise<void>, mark?: (stage: string) => void) => Promise<void>
   retentionGuard?: () => Promise<void>
   classifyChanges?: (paths: string[]) => Promise<Set<string>>
   observeSource?: () => Promise<NonNullable<PreviewPreflight['snapshot']>>
@@ -62,20 +62,25 @@ export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
       if (!approved || previewFingerprint(approved) !== selection.fingerprint || !await this.profiles.approved(approved)) throw new Error('PROFILE_CHANGED')
       context.guard()
       return { ...snapshot.snapshot, dirty: snapshot.stagedCount + snapshot.unstagedCount + snapshot.untrackedCount > 0 }
-    }, presentationGuard: async observeSource => {
+    }, presentationGuard: async (observeSource, mark) => {
       context.guard()
       const approved = (await this.profiles.profiles(selection.repositoryId)).find(value => value.profileId === profile.profileId)
       if (!approved || previewFingerprint(approved) !== selection.fingerprint || !trust || previewFingerprint(await this.profiles.trusted(approved)) !== previewFingerprint(trust)) throw new Error('REPOSITORY_TRUST_REQUIRED')
+      mark?.('authorization')
       const files = [...profile.command.inputs, { path: profile.dependencies.manifest, fingerprint: profile.dependencies.manifestHash }, { path: profile.dependencies.lockfile, fingerprint: profile.dependencies.lockfileHash }]
       for (const file of files) if (bytesFingerprint(await readFile(await previewPath(identity.record.path, file.path))) !== file.fingerprint) throw new Error('PREPARED_INPUT_CHANGED')
+      mark?.('inputs')
       if (bytesFingerprint(await readFile(profile.command.executable)) !== profile.command.executableHash || bytesFingerprint(await readFile(await previewPath(identity.record.path, profile.adapter!.runtimeExecutable!))) !== profile.adapter!.runtimeExecutableHash) throw new Error('PREPARED_EXECUTABLE_CHANGED')
+      mark?.('executables')
       if (await materialization() !== materializationDigest) throw new Error('PREPARED_MATERIALIZATION_CHANGED')
+      mark?.('materialization')
       if (observeSource) await observeSource()
       else {
       const source = await context.git.getCoordinationSnapshot(selection.worktreeId)
       if (source.record.generation !== selection.generation || source.record.path !== identity.record.path || source.record.detached || source.record.locked || source.conflictCount || source.snapshot.operation ||
         previewFingerprint({ ...source.snapshot, dirty: source.stagedCount + source.unstagedCount + source.untrackedCount > 0 }) !== gitFingerprint) throw new Error('PREPARED_SOURCE_CHANGED')
       }
+      mark?.('source')
       context.guard()
     }, guard: async () => {
       context.guard()
@@ -101,9 +106,9 @@ export class RuntimePreviewRunner {
   private readonly retentions = new Map<string, AbortController>()
   private readonly cancellations = new Map<string, AbortController>()
   private readonly stopRequests = new Set<string>()
-  private readonly slots = new Map<string, { guard: () => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher;
+  private readonly slots = new Map<string, { guard: (mark?: (stage: string) => void) => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher;
     metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void;
-    checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; assertContext?: () => void }>()
+    checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; assertIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; assertContext?: () => void }>()
   constructor(private readonly store: PreviewSessionStore, private readonly authority: PreviewLaunchAuthority,
     private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner,
     private readonly options: { buildCache?: boolean } = {}) {}
@@ -148,7 +153,7 @@ export class RuntimePreviewRunner {
     if (!record.termination || record.termination.supervisorExit) return record
     return this.change(record, { termination: { ...record.termination, supervisorExit: { observedAt: new Date().toISOString() } } })
   }
-  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void>; timing?: PreviewStartClock; launchContext?: LaunchContext; preflightEvidence?: PreviewPreflight; standbyPolicy?: StandbyPolicy; watchIdentity?: (invalidate: () => void) => Promise<() => void> }): Promise<PreviewSessionRecord> {
+  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void>; timing?: PreviewStartClock; launchContext?: LaunchContext; preflightEvidence?: PreviewPreflight; standbyPolicy?: StandbyPolicy; watchIdentity?: (invalidate: () => void) => Promise<{ assertCurrent: () => void; close: () => void }> }): Promise<PreviewSessionRecord> {
 
     const selection = sessionSchema.shape.selection.safeParse(input.selection)
     if (!selection.success) return Promise.reject(selection.error)
@@ -216,15 +221,15 @@ export class RuntimePreviewRunner {
           if (profile.bootstrap?.dataPolicy === 'REPOSITORY_SNAPSHOT' && !corpus) throw new Error('PREVIEW_CORPUS_OBSERVER_REQUIRED')
         }
         const armObservation = async () => { if (input.standbyPolicy) {
-          await this.monitorSlot(sessionId, prepared.worktree, async () => {
+          await this.monitorSlot(sessionId, prepared.worktree, async mark => {
             cancellation.signal.throwIfAborted()
             const slot = this.slots.get(sessionId)
             const observe = slot?.sourceCovered ? async () => {
-              slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
+              slot.assertIdentity?.(); slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
               await input.guard?.()
-              slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
+              slot.assertIdentity?.(); slot.assertContext?.(); await slot.checkChanges?.(); if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
             } : undefined
-            if (prepared.presentationGuard) await prepared.presentationGuard(observe)
+            if (prepared.presentationGuard) await prepared.presentationGuard(observe, mark)
             else await prepared.guard()
             if (!observe) await input.guard?.()
           }, profile, async () => { await prepared.retentionGuard?.(); await input.guard?.() }, prepared.classifyChanges, input.watchIdentity, corpus)
@@ -374,10 +379,10 @@ export class RuntimePreviewRunner {
     if (slot?.timer) clearTimeout(slot.timer)
     slot?.watcher.close(); slot?.disposeContext?.(); slot?.disposeIdentity?.(); this.slots.delete(sessionId)
   }
-  private async monitorSlot(sessionId: string, worktree: string, guard: () => Promise<void>, profile: PreviewProfile, retentionGuard?: () => Promise<void>, classifyChanges?: PreparedPreview['classifyChanges'], watchIdentity?: (invalidate: () => void) => Promise<() => void>, corpus?: PreviewCorpusObservation) {
+  private async monitorSlot(sessionId: string, worktree: string, guard: (mark?: (stage: string) => void) => Promise<void>, profile: PreviewProfile, retentionGuard?: () => Promise<void>, classifyChanges?: PreparedPreview['classifyChanges'], watchIdentity?: (invalidate: () => void) => Promise<{ assertCurrent: () => void; close: () => void }>, corpus?: PreviewCorpusObservation) {
     const changes = new Set<string>()
-    const slot: { guard: () => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher; metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void;
-      checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; assertContext?: () => void } = {
+    const slot: { guard: (mark?: (stage: string) => void) => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher; metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void;
+      checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; classifyChanges?: PreparedPreview['classifyChanges']; disposeIdentity?: () => void; assertIdentity?: () => void; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; assertContext?: () => void } = {
       guard, invalid: false, watcher: watch(worktree, { recursive: true, persistent: false }, (_event, file) => {
         const path = file?.toString().replaceAll('\\', '/')
         if (!path || changes.size >= 256) { slot.invalid = true; slot.invalidReason = path ? 'PREPARED_EVENT_COVERAGE_LIMIT' : 'PREPARED_SOURCE_OBSERVER_LOST'; return }
@@ -395,7 +400,8 @@ export class RuntimePreviewRunner {
     slot.disposeContext = () => corpus?.close()
     slot.assertContext = () => corpus?.assertCurrent()
     this.slots.set(sessionId, slot)
-    slot.disposeIdentity = await watchIdentity?.(() => { slot.invalid = true; slot.invalidReason = 'PREPARED_GIT_EVENT' })
+    const identity = await watchIdentity?.(() => { slot.invalid = true; slot.invalidReason = 'PREPARED_GIT_EVENT' })
+    slot.disposeIdentity = identity?.close; slot.assertIdentity = identity?.assertCurrent
     const sample = async () => {
       let reason: string | undefined
       await this.serial(async () => {
@@ -403,7 +409,7 @@ export class RuntimePreviewRunner {
         const record = this.store.read(sessionId), standby = record.standby!
         if (standby.state !== 'QUIESCENT') return
         try {
-          slot.assertContext?.(); await slot.checkChanges?.()
+          slot.assertIdentity?.(); slot.assertContext?.(); await slot.checkChanges?.()
           if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_FILESYSTEM_CHANGED')
           await (slot.retentionGuard ?? guard)()
           const owner = this.owners.get(sessionId), adapter = this.adapters.get(sessionId)
@@ -447,11 +453,15 @@ export class RuntimePreviewRunner {
     const receivedNs = process.hrtime.bigint().toString()
     try {
       return await this.command(async () => {
+        const stagesNs: Record<string, string> = { entered: process.hrtime.bigint().toString() }
+        const mark = (stage: string) => { stagesNs[stage] = process.hrtime.bigint().toString() }
         let record = this.store.read(sessionId)
         const standby = record.standby, slot = this.slots.get(sessionId), owner = this.owners.get(sessionId), adapter = this.adapters.get(sessionId)
         if (!standby || standby.state !== 'QUIESCENT' || !slot || !owner || !adapter || slot.invalid || Date.now() >= Date.parse(standby.expiresAt)) throw new Error('PREPARED_SLOT_INVALID')
         await slot.checkChanges?.()
-        await slot.guard()
+        mark('changesBefore')
+        await slot.guard(mark)
+        mark('guard')
         await slot.checkChanges?.()
         if (slot.invalid || Date.now() >= Date.parse(standby.expiresAt)) throw new Error('PREPARED_SLOT_INVALID')
         const metrics = await this.sampleSlot(sessionId)
@@ -461,9 +471,9 @@ export class RuntimePreviewRunner {
         const shown = await adapter.control('SHOW', this.cancellations.get(sessionId)?.signal)
         const observed = await adapter.observe(owner)
         if (observed.readiness !== 'READY' || observed.attestation.loadedCode !== 'VERIFIED') throw new Error('PRESENTATION_NOT_ATTESTED')
-        slot.assertContext?.(); await slot.checkChanges?.()
+        slot.assertIdentity?.(); slot.assertContext?.(); await slot.checkChanges?.()
         if (slot.invalid) throw new Error(slot.invalidReason ?? 'PREPARED_SOURCE_CHANGED')
-        record = this.change(record, { ...observed, standby: { ...standby, state: 'RUNNING', metrics, presentation: { receivedNs, guardedNs,
+        record = this.change(record, { ...observed, standby: { ...standby, state: 'RUNNING', metrics, presentation: { receivedNs, guardedNs, stagesNs,
           showNs: shown.showNs!, functionalNs: shown.functionalNs!, focusedNs: shown.focusedNs!, durationMs: Number(BigInt(shown.focusedNs!) - BigInt(receivedNs)) / 1e6 } } })
         if (slot.timer) clearTimeout(slot.timer)
         slot.timer = undefined
