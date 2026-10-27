@@ -132,15 +132,17 @@ export function BranchAppAction({ branch, runtime, disabled }: { branch: BranchR
   const { session, notice, pending, uncertain } = runtime
   const own = session?.selection.repositoryId === branch.repositoryId && branch.worktrees.some(w => w.worktreeId === session.selection.worktreeId && w.generation === session.selection.generation)
   const active = own && session && unresolvedPreview(session)
+  const prepared = active && session.standby?.state === 'QUIESCENT'
   const preparing = pending?.ref === branch.ref
   const message = notice?.ref === branch.ref ? notice : null
   return <div className="bm-app-action">
     <div className="bm-app-controls">
       {branch.namespace !== 'LOCAL' && !active && <span>Requer checkout local</span>}
       {active && <span role="status">{uncertain ? 'Estado não confirmado' : session.state === 'RUNNING' && (session.observation === 'CURRENT' || runtime.verifiedSession === session.sessionId) && session.readiness === 'READY' && session.liveness === 'VERIFIED' ? 'Em execução' : session.state === 'STOPPING' ? 'Encerrando…' : 'Verificando aplicativo…'}</span>}
-      <button className="bm-run-app" disabled={disabled || !runtime.ready || !!pending || (uncertain && !active) || (branch.namespace !== 'LOCAL' && !active)} aria-label={`${active ? 'Encerrar aplicativo' : 'Rodar aplicativo'}: ${branch.name}`} onClick={() => active ? runtime.stop(session, branch.ref) : runtime.start(branch)}>
-        {active ? <Square size={14}/> : <Play size={14}/>}{preparing ? pending.stop ? 'Encerrando…' : 'Preparando…' : active ? 'Encerrar' : 'Rodar aplicativo'}
+      <button className="bm-run-app" disabled={disabled || !runtime.ready || !!pending || (uncertain && !active) || (branch.namespace !== 'LOCAL' && !active)} aria-label={`${prepared ? 'Mostrar aplicativo' : active ? 'Encerrar aplicativo' : 'Rodar aplicativo'}: ${branch.name}`} onClick={() => active && !prepared ? runtime.stop(session, branch.ref) : runtime.start(branch)}>
+        {active && !prepared ? <Square size={14}/> : <Play size={14}/>}{preparing ? pending.stop ? 'Encerrando…' : 'Preparando…' : prepared ? 'Mostrar aplicativo' : active ? 'Encerrar' : 'Rodar aplicativo'}
       </button>
+      {prepared && <button disabled={disabled || !!pending} onClick={() => runtime.stop(session, branch.ref)}>Descartar preparo</button>}
     </div>
     {message && <div className="bm-app-notice"><p role="alert">{message.message}</p>
       {message.candidates?.map(tree => <button key={tree.worktreeId} disabled={disabled || !!pending} onClick={() => runtime.start(branch, tree)}>Rodar neste checkout: {tree.path}</button>)}

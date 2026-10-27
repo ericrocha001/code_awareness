@@ -96,7 +96,7 @@ import { orchestrationContinuumReader } from './ipc/orchestration-continuum-read
 import { BranchOrchestrationController, registerBranchOrchestrationHandlers } from './ipc/branch-orchestration-handler'
 import { PreviewProfileStore } from './work-orchestration/preview-profile-store'
 import { PreviewRepositories } from './work-orchestration/preview-repositories'
-import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap } from './work-orchestration/runtime-preview/electron-mode'
+import { isRuntimePreview, previewBootstrapContext, bindPreviewContext, failPreviewBootstrap, previewStartsHidden } from './work-orchestration/runtime-preview/electron-mode'
 import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtime-preview/context-data'
 import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
 import { CodeAwarenessProfileResolver } from './work-orchestration/runtime-preview/code-awareness-profile'
@@ -248,6 +248,7 @@ function createWindow(): void {
   // Se estiver ausente, omite a opcao icon para evitar falha na criacao da janela.
   const iconPath = getWindowIconPath()
   const windowOptions: Electron.BrowserWindowConstructorOptions = {
+    show: !previewStartsHidden(),
     width: 1200,
     height: 800,
     backgroundColor: nativeTheme.shouldUseDarkColors ? '#18181B' : '#F9FAFB',
@@ -441,8 +442,8 @@ app.whenReady().then(async () => {
   const previewProfiles = new PreviewProfileStore(join(previewDirectory, 'preview-profiles'))
   const previewRepositories = new PreviewRepositories(repositoryCatalog, (path, identity) => new GitOperationsService(path, gitService, gitTransport, identity, true))
   const contextProvisioner = new RepositoryPreviewContextProvisioner(repositoryCatalog, continuumSession.getStorageBaseDir())
-  const confirmPreview = async (profile: import('./work-orchestration/preview-profile').PreviewProfile) =>
-    !!mainWindow && !mainWindow.isDestroyed() && confirmPreviewProfile(mainWindow, profile, contextProvisioner)
+  const confirmPreview = async (profile: import('./work-orchestration/preview-profile').PreviewProfile, policy?: import('./work-orchestration/runtime-preview/standby-policy').StandbyPolicy) =>
+    !!mainWindow && !mainWindow.isDestroyed() && confirmPreviewProfile(mainWindow, profile, contextProvisioner, policy)
   let runtimePreview: RuntimePreviewOperations | undefined
   if (!isRuntimePreview() && process.platform === 'win32') {
     try {

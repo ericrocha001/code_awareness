@@ -11,6 +11,7 @@ export interface PreviewQualification extends PreviewValidationLink {
   status: 'PASSED' | 'FAILED' | 'INCONCLUSIVE'; reasons: string[]; observedStatus: string; at: string; evidenceAt: string | null; scope: string[]
 }
 export interface PreviewSessionView {
+  standby?: { state: 'WARMING' | 'QUIESCENT' | 'RUNNING' | 'EVICTED'; expiresAt: string; reason?: string }
   sessionId: string; operationId: string; selection: PreviewSelection; revision: number; profileRevision: number
   state: 'PREPARING' | 'RUNNING' | 'STOPPING' | 'STOPPED' | 'FAILED' | 'CLEANUP_INCOMPLETE' | 'OWNERSHIP_UNVERIFIED'
   readiness: 'NOT_OBSERVED' | 'READY' | 'NOT_READY' | 'UNVERIFIABLE'; liveness: 'NOT_OBSERVED' | 'VERIFIED' | 'UNVERIFIABLE'
@@ -25,10 +26,11 @@ export interface PreviewSessionView {
 export interface RunBranchAppIntent {
   branch: string; operationId: string; repositoryId?: string; expectedHead?: string; worktreeId?: string
 }
+export interface RuntimePreviewStandbyPolicy { idleMs: number; maxPrivateBytes: number; maxWorkingSetBytes: number; maxCpuPercent: number; minAvailableBytes: number; sampleMs: number }
 export interface RuntimePreviewStatus {
   kind: 'STATUS'
   operationId: string | null; sessionId: string | null; revision: string
-  phase: 'PENDING' | 'PREPARING' | 'RUNNING' | 'BLOCKED' | 'FAILED' | 'STOPPING' | 'STOPPED' | 'UNKNOWN'
+  phase: 'PENDING' | 'PREPARING' | 'WARMING' | 'PREPARED' | 'RUNNING' | 'BLOCKED' | 'FAILED' | 'STOPPING' | 'STOPPED' | 'UNKNOWN'
   ready: boolean; repositoryId: string | null; branch: string | null; head: string | null; worktreeId: string | null
   reasonCode: string | null
   recommendedAction: 'WAIT' | 'REQUEST_NATIVE_APPROVAL' | 'INSPECT_ERROR' | 'ASK_HUMAN_REVIEW' | 'STOP' | 'NONE'
@@ -36,6 +38,9 @@ export interface RuntimePreviewStatus {
   observedAt: string | null
 }
 export type RuntimePreviewRequest =
+  | { action: 'TRUST_REPOSITORY'; selection: PreviewSelection; policy: RuntimePreviewStandbyPolicy }
+  | { action: 'REVOKE_TRUST'; repositoryId: string }
+  | { action: 'PREPARE_BRANCH_APP'; intent: RunBranchAppIntent }
   | { action: 'RUN_BRANCH_APP'; repositoryId: string; ref: string; revision: string; operationId: string; worktree?: { worktreeId: string; generation: string } }
   | { action: 'PROFILES' | 'WORKTREES'; repositoryId: string }
   | { action: 'PREFLIGHT' | 'AUTHORIZE'; selection: PreviewSelection }

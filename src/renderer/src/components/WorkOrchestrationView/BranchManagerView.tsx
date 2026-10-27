@@ -16,6 +16,7 @@ import './BranchManagerView.css'
 import { BranchExecutions, type ArtifactNavigation } from './BranchExecutions'
 import { RuntimePreviewSession } from './RuntimePreviewSession'
 import { BranchAppAction, useBranchAppRuntime } from './BranchAppAction'
+import { StandbyActions } from './StandbyActions'
 
 const date = (at: string | null) => at ? new Date(at).toLocaleString('pt-BR') : 'Desconhecida'
 const relationLabel = { CONFIRMED_CURRENT: 'Origem corrente confirmada', CONFIRMED_HISTORICAL: 'Vínculo histórico comprovado', CANDIDATE: 'Candidato — HEAD divergente', AMBIGUOUS: 'Associação ambígua', UNKNOWN: 'Origem não confirmada' }
@@ -147,6 +148,7 @@ export function BranchManagerView({ state, active = true, onCommit, onArtifact }
         {visible.slice(0, limit).map(record => <article key={record.key} className={`bm-card${selected === record.key ? ' selected' : ''}`} aria-label={record.name}>
           <button className="bm-branch-select" disabled={busy} aria-label={`Detalhes: ${record.name}`} aria-expanded={selected === record.key} onClick={() => choose(record)}><GitBranch size={17}/><strong title={record.ref}>{record.name}</strong><span>Detalhes</span></button>
           <BranchAppAction branch={record} runtime={runtime} disabled={!active || stale || busy || loading}/>
+          {record.namespace === 'LOCAL' && <StandbyActions branch={record} worktrees={inventory?.worktrees.filter(value => record.worktrees.some(link => link.worktreeId === value.worktreeId && link.generation === value.generation)) ?? []} query={query} disabled={!active || stale || busy || loading}/>}
         </article>)}
 
         {!visible.length && inventory && <p>Nenhuma branch neste filtro.</p>}{visible.length > limit && <button onClick={() => setLimit(n => n + 50)}>Mostrar mais branches</button>}

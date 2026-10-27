@@ -4,6 +4,7 @@ const text = { type: 'string', minLength: 1, maxLength: 128 }
 const selection = { type: 'object', properties: { repositoryId: text, worktreeId: text, generation: text, profileId: text, fingerprint: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, required: ['repositoryId', 'worktreeId', 'generation', 'profileId', 'fingerprint'], additionalProperties: false }
 const session = { sessionId: { type: 'string', format: 'uuid' } }
 const definitions = [
+  ['prepare_branch_app', 'PREPARE_BRANCH_INTENT', 'Prepare one explicitly selected branch in the single hidden V5 slot under owner-approved repository trust and finite resource policy. Does not grant trust. Expired or invalid slots require new preparation.', { branch: { type: 'string', minLength: 1, maxLength: 512 }, operationId: { type: 'string', format: 'uuid' }, repositoryId: text, expectedHead: { type: 'string', pattern: '^[a-f0-9]{40}$' }, worktreeId: text }, ['branch', 'operationId']],
   ['run_branch_app', 'RUN_BRANCH_INTENT', 'Run an exact local branch through the same host-owned workflow as the UI. Stable operationId recovers this intention; native approval and preflight remain required. No checkout creation, install or fetch.', { branch: { type: 'string', minLength: 1, maxLength: 512 }, operationId: { type: 'string', format: 'uuid' }, repositoryId: text, expectedHead: { type: 'string', pattern: '^[a-f0-9]{40}$' }, worktreeId: text }, ['branch', 'operationId']],
   ['get_runtime_preview_status', 'STATUS', 'Read exactly one operationId OR sessionId as a compact snapshot, without probes or history. READY invites human review and never means feature VALIDATED. UNKNOWN requires explicit reconciliation.', { operationId: { type: 'string', format: 'uuid' }, ...session }, []],
   ['list_runtime_preview_profiles', 'PROFILES', 'List fixed preview profiles and approval revisions for an explicit managed repository.', { repositoryId: text }, ['repositoryId']],
@@ -24,9 +25,9 @@ export const RUNTIME_PREVIEW_TOOLS: McpToolDefinition[] = definitions.map(([name
 export async function executeRuntimePreviewTool(service: RuntimePreviewOperations, name: string, args: unknown, guard: () => void): Promise<McpToolResult> {
   const definition = definitions.find(value => value[0] === name)
   if (!definition || !args || typeof args !== 'object' || Array.isArray(args) || 'action' in args) { const result = { success: false, code: 'INVALID_ARGUMENT' }; return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, isError: true } }
-  if (definition[1] === 'RUN_BRANCH_INTENT' || definition[1] === 'STATUS') {
+  if (definition[1] === 'RUN_BRANCH_INTENT' || definition[1] === 'PREPARE_BRANCH_INTENT' || definition[1] === 'STATUS') {
     guard()
-    const result = definition[1] === 'RUN_BRANCH_INTENT' ? await service.runBranchApp(args, guard) : await service.getStatus(args)
+    const result = definition[1] === 'STATUS' ? await service.getStatus(args) : await service.runBranchApp(args, guard, definition[1] === 'PREPARE_BRANCH_INTENT')
     guard()
     return { content: [], structuredContent: result, ...(result.success ? {} : { isError: true }) }
   }

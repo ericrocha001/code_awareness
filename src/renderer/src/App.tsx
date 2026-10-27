@@ -30,8 +30,10 @@ import { SettingsModal } from './components/SettingsModal/SettingsModal';
 import { resolveDeepLink } from "./utils/deep-link-resolver";
 import type { Tab } from "./config/navigation";
 import "./App.css";
+import { usePreviewActivity } from './hooks/usePreviewActivity';
 
 export const App: React.FC = () => {
+  const previewActive = usePreviewActivity();
   // Invoca o hook para aplicar data-theme no <body> imediatamente
   useTheme();
 
@@ -194,11 +196,12 @@ export const App: React.FC = () => {
           if (intent.projectId !== commitContext.current.project?.id || intent.revision !== commitContext.current.revision) return;
           setCommitIntent(intent); setActiveTab('git-management');
         }} />
-        <ChannelTab active={activeTab === "channel"} />
+        <ChannelTab active={previewActive && activeTab === "channel"} />
         {activeTab === "academy" && <AcademyView />}
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} artifactIntent={artifactIntent} />}
         {activeTab === "home" && (
           <HomeView
+            active={previewActive}
             selectionLocked={activeProjectState.context?.mode === 'PREVIEW'}
             activeProject={activeProject}
             onSelectRepository={setActiveRepository}

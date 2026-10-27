@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3'
-import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, watch } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { ArtifactStore } from '../../continuum/artifact-store'
@@ -59,11 +59,18 @@ function inspectCorpus(db: Database.Database, repositoryId: string, policy: NonN
 }
 
 export interface PreviewContextProvisioner {
+  watchInvalidation?(profile: PreviewProfile, invalidate: () => void): () => void
   prepare(input: { profile: PreviewProfile; selection: PreviewSelection; sessionId: string; directory: string; worktree: string; source: NonNullable<PreviewPreflight['snapshot']>; timing?: PreviewStartClock; signal?: AbortSignal }): Promise<PreviewContextManifest>
 }
 
 export class RepositoryPreviewContextProvisioner implements PreviewContextProvisioner {
   constructor(private readonly catalog: Pick<RepositoryCatalogService, 'resolveAvailable'>, private readonly continuumBase: string) {}
+  watchInvalidation(profile: PreviewProfile, invalidate: () => void) {
+    const file = this.source(profile.repositoryId)
+    const watcher = watch(dirname(file), { persistent: false }, (_event, name) => { if (String(name).startsWith('continuum.db')) invalidate() })
+    watcher.on('error', invalidate)
+    return () => watcher.close()
+  }
 
   private source(repositoryId: string) {
     const file = join(this.continuumBase, 'repositories', Buffer.from(repositoryId).toString('base64url'), 'continuum.db')

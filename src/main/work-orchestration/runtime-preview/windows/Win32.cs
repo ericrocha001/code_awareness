@@ -7,6 +7,13 @@ internal static class Win32
     internal const uint KillOnClose = 0x2000;
     internal const uint WaitSignaled = 0;
     internal const uint WaitTimeout = 258;
+    [StructLayout(LayoutKind.Sequential)] internal struct MemoryCounters
+    {
+        public uint cb, faults;
+        public UIntPtr peakWorkingSet, workingSet, peakPaged, paged, peakNonPaged, nonPaged, pagefile, peakPagefile, privateUsage, privateWorkingSet;
+        public ulong sharedCommit;
+    }
+    [DllImport("psapi.dll", SetLastError = true)] internal static extern bool GetProcessMemoryInfo(IntPtr process, ref MemoryCounters counters, uint size);
     [StructLayout(LayoutKind.Sequential)] internal struct StartupInfo
     {
         public int cb; public IntPtr reserved, desktop, title;

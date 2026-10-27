@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { randomUUID } from 'node:crypto'
 import type { PreviewSelection } from '../../../shared/types/runtime-preview-types'
 import type { RuntimePreviewRequest, RuntimePreviewResult, PreviewSessionView, PreviewValidationLink, PreviewQualification } from '../../../shared/types/runtime-preview-operations'
 import type { PreviewRepositories } from '../preview-repositories'
@@ -15,6 +16,7 @@ import type { CodeAwarenessProfileResolver } from './code-awareness-profile'
 import { previewStatus } from './status'
 import type { PreviewIntentReceipt } from './session-store'
 import { PreviewStartClock } from './start-timing'
+import { standbyPolicySchema, type StandbyPolicy } from './standby-policy'
 
 export const branchIntentSchema = z.object({ branch: z.string().min(1).max(512).regex(/^[^\0\r\n]+$/), operationId: z.string().uuid(),
   repositoryId: z.string().min(1).max(128).optional(), expectedHead: z.string().regex(/^[a-f0-9]{40}$/).optional(), worktreeId: z.string().min(1).max(128).optional() }).strict()
@@ -29,6 +31,9 @@ export const previewRequestSchema = z.discriminatedUnion('action', [
     worktree: z.object({ worktreeId: text, generation: text }).strict().optional() }).strict(),
   z.object({ action: z.literal('PROFILES'), repositoryId: text }).strict(),
   z.object({ action: z.literal('WORKTREES'), repositoryId: text }).strict(),
+  z.object({ action: z.literal('TRUST_REPOSITORY'), selection, policy: standbyPolicySchema }).strict(),
+  z.object({ action: z.literal('REVOKE_TRUST'), repositoryId: text }).strict(),
+  z.object({ action: z.literal('PREPARE_BRANCH_APP'), intent: branchIntentSchema }).strict(),
   ...(['PREFLIGHT', 'AUTHORIZE'] as const).map(action => z.object({ action: z.literal(action), selection }).strict()),
   z.object({ action: z.literal('START'), selection, operationId: id }).strict(),
   z.object({ action: z.literal('LIST'), repositoryId: text, worktreeId: text.optional(), cursor: id.optional(), limit: z.number().int().min(1).max(20).optional() }).strict(),
@@ -51,7 +56,7 @@ export class RuntimePreviewOperations {
   private readonly preflight: PreviewPreflightService
   constructor(private readonly repositories: PreviewRepositories, private readonly profiles: PreviewProfileStore,
     private readonly store: PreviewSessionStore, private readonly runner: RuntimePreviewRunner,
-    private readonly confirm: (profile: PreviewProfile) => Promise<boolean>, private readonly ledger?: Pick<ValidationLedger, 'getProofWithFreshness'>,
+    private readonly confirm: (profile: PreviewProfile, policy?: StandbyPolicy) => Promise<boolean>, private readonly ledger?: Pick<ValidationLedger, 'getProofWithFreshness'>,
     private readonly continuum?: Pick<RepositoryContinuumSession, 'getActiveService' | 'getActiveSession'>,
     private readonly branchProfiles?: Pick<CodeAwarenessProfileResolver, 'resolve'>, preflight?: PreviewPreflightService) {
     this.preflight = preflight ?? new PreviewPreflightService(profiles)
@@ -89,7 +94,7 @@ export class RuntimePreviewOperations {
       return failure(error)
     }
   }
-  async runBranchApp(input: unknown, guard: () => void = () => {}): Promise<RuntimePreviewResult> {
+  async runBranchApp(input: unknown, guard: () => void = () => {}, prepare = false): Promise<RuntimePreviewResult> {
     const parsed = branchIntentSchema.safeParse(input)
     if (!parsed.success) return { success: false, code: 'INVALID_ARGUMENT' }
     try {
@@ -99,7 +104,7 @@ export class RuntimePreviewOperations {
       const repositoryId = intent.repositoryId ?? this.continuum?.getActiveSession()?.repositoryId
       if (!repositoryId) throw new Error('REPOSITORY_REQUIRED')
       const branch = intent.branch.startsWith('refs/') ? intent.branch : 'refs/heads/' + intent.branch
-      const key = previewFingerprint({ ...intent, repositoryId, branch })
+      const key = previewFingerprint({ ...intent, repositoryId, branch, ...(prepare ? { prepare: true } : {}) })
       const previous = this.store.readIntent(intent.operationId)
       if (previous) {
         if (previous.key !== key) throw new Error('OPERATION_ID_CONFLICT')
@@ -113,6 +118,12 @@ export class RuntimePreviewOperations {
       this.mutate('intent:' + intent.operationId, intent.operationId, async () => {
         let result: RuntimePreviewResult
         try {
+          const slot = this.store.list().find(value => value.selection.repositoryId === repositoryId && value.standby?.state === 'QUIESCENT' && value.state === 'RUNNING')
+          if (slot && !prepare) {
+            if (slot.sourceSnapshot?.branch !== branch.slice(11) || intent.expectedHead && slot.sourceSnapshot.head !== intent.expectedHead || intent.worktreeId && slot.selection.worktreeId !== intent.worktreeId) throw new Error('PREPARED_TARGET_MISMATCH')
+            guard()
+            result = { success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.present(slot.sessionId), true), pending: false } }
+          } else {
           const context = await timing.measure('repository', () => this.repositories.open(repositoryId))
           const inventory = await timing.measure('inventory', () => context.git.getBranchInventory())
           context.guard(); guard()
@@ -126,7 +137,8 @@ export class RuntimePreviewOperations {
           receipt.worktreeId = tree?.worktreeId ?? (candidates.length === 1 ? candidates[0].worktreeId : null)
           if (this.pending?.operationId === intent.operationId) this.pending.intent = receipt
           result = await this.runBranch({ action: 'RUN_BRANCH_APP', repositoryId, ref: target.ref, revision: target.revision, operationId: intent.operationId,
-            ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard, timing, { context, inventory })
+            ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard, timing, { context, inventory }, prepare)
+          }
         } catch (error) { result = failure(error) }
         const session = result.success && result.data.kind === 'SESSION' ? result.data.session : null
         const blocked = result.success && result.data.kind === 'BRANCH_APP'
@@ -138,7 +150,7 @@ export class RuntimePreviewOperations {
       return this.getStatus({ operationId: intent.operationId })
     } catch (error) { return failure(error) }
   }
-  private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void, timing = new PreviewStartClock(), known?: LaunchResolution): Promise<RuntimePreviewResult> {
+  private async runBranch(request: Extract<RuntimePreviewRequest, { action: 'RUN_BRANCH_APP' }>, guard: () => void, timing = new PreviewStartClock(), known?: LaunchResolution, prepare = false): Promise<RuntimePreviewResult> {
     const blocked = (reasonCode: string, message: string, details = {}): RuntimePreviewResult => ({ success: true, data: { kind: 'BRANCH_APP', reasonCode, message, ...details } })
     if (!this.branchProfiles) return blocked('APP_HOST_UNSUPPORTED', 'Esta instalação não oferece um perfil seguro para rodar o Code Awareness.')
     const context = known?.context ?? await timing.measure('repository', () => this.repositories.open(request.repositoryId))
@@ -190,6 +202,8 @@ export class RuntimePreviewOperations {
       return blocked(code, messages[code] ?? 'Não foi possível formar um perfil seguro para este checkout. Confira a compatibilidade V5 e as dependências desta Worktree nos detalhes.')
     }
     const target = { repositoryId: request.repositoryId, worktreeId: tree.worktreeId, generation: tree.generation, profileId: profile.profileId, fingerprint: previewFingerprint(profile) }
+    const standbyPolicy = prepare ? await this.profiles.trusted(profile) : undefined
+    if (prepare && !standbyPolicy) return blocked('REPOSITORY_TRUST_REQUIRED', 'O proprietário precisa habilitar a confiança e definir os limites de standby antes de preparar esta Worktree.')
     const before = await this.check(target, timing, context)
     if (before.preflight.diagnostics.some(d => !['PROFILE_APPROVAL_REQUIRED', 'ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: before.preflight })
     await verify()
@@ -202,7 +216,7 @@ export class RuntimePreviewOperations {
     await verify()
     const checked = before.startAllowed && !approvedNow ? before : await this.check(target, timing, context)
     if (!checked.startAllowed) return blocked('APP_PREFLIGHT_BLOCKED', 'O checkout não passou na pré-checagem. Veja a condição concreta nos detalhes.', { preflight: checked.preflight })
-    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context, preflightEvidence: checked.preflight })
+    const record = await this.runner.start({ selection: target, operationId: request.operationId, guard: verify, timing, launchContext: context, preflightEvidence: checked.preflight, ...(standbyPolicy ? { standbyPolicy } : {}) })
     return { success: true, data: { kind: 'SESSION', session: await this.view(record, true), pending: false } }
   }
   private async view(record: PreviewSessionRecord, current: boolean, known?: PreviewQualification): Promise<PreviewSessionView> {
@@ -226,6 +240,7 @@ export class RuntimePreviewOperations {
       observation: this.pending && !current ? 'IN_PROGRESS' : record.persistence !== 'PERSISTED' || ['OWNERSHIP_UNVERIFIED', 'CLEANUP_INCOMPLETE'].includes(record.state) ? 'UNVERIFIABLE' : current && !['STOPPED', 'FAILED'].includes(record.state) ? 'CURRENT' : 'HISTORICAL',
       source: record.sourceObservation?.snapshot ?? record.sourceSnapshot, coverage, qualifications, endpoint,
       at: record.at, startedAt: record.startedAt, endedAt: record.endedAt, process: processView(record),
+      ...(record.standby ? { standby: { state: record.standby.state, expiresAt: record.standby.expiresAt, reason: record.standby.reason } } : {}),
       ...(record.termination ? { termination: { kind: record.termination.kind, reasonCode: record.termination.reasonCode, rootExit: record.termination.rootExit } } : {}) }
   }
   private inconclusive(link: PreviewValidationLink, reason: string): PreviewQualification {
@@ -305,7 +320,27 @@ export class RuntimePreviewOperations {
     const request = parsed.data as RuntimePreviewRequest
     try {
       guard()
-      if (request.action === 'RUN_BRANCH_APP') return this.mutate('run-branch:' + request.operationId + ':' + previewFingerprint(request), request.operationId, () => this.runBranch(request, guard))
+      if (request.action === 'RUN_BRANCH_APP') {
+        const slot = this.store.list().find(value => value.selection.repositoryId === request.repositoryId && value.standby?.state === 'QUIESCENT' && value.state === 'RUNNING')
+        if (slot) return this.runBranchApp({ repositoryId: request.repositoryId, branch: request.ref, operationId: request.operationId, ...(request.worktree ? { worktreeId: request.worktree.worktreeId } : {}) }, guard)
+        return this.mutate('run-branch:' + request.operationId + ':' + previewFingerprint(request), request.operationId, () => this.runBranch(request, guard))
+      }
+      if (request.action === 'PREPARE_BRANCH_APP') return this.runBranchApp(request.intent, guard, true)
+      if (request.action === 'TRUST_REPOSITORY') return this.mutate('trust:' + request.selection.repositoryId, randomUUID(), async () => {
+        const profile = await this.profile(request.selection), context = await this.repositories.open(request.selection.repositoryId, request.selection.worktreeId)
+        const identity = await context.git.getCoordinationIdentity(request.selection.worktreeId)
+        if (identity.record.generation !== request.selection.generation) throw new Error('WORKTREE_STALE')
+        await this.profiles.assertExternal(identity.record.path)
+        await this.profiles.trust(profile, request.policy, this.confirm, () => { guard(); context.guard() })
+        return { success: true, data: await this.check(request.selection) }
+      })
+      if (request.action === 'REVOKE_TRUST') {
+        this.repositories.resolve(request.repositoryId).guard()
+        await this.profiles.revoke(request.repositoryId, guard)
+        const active = this.store.list().find(value => value.selection.repositoryId === request.repositoryId && value.resources !== 'RELEASED')
+        if (active) return this.mutate('stop:' + active.sessionId, active.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.evict(active.sessionId, 'REPOSITORY_TRUST_REVOKED'), true), pending: false } }))
+        return { success: true, data: { kind: 'PROFILES', profiles: await this.preflight.list(request.repositoryId) } }
+      }
       if (request.action === 'PROFILES') { const context = this.repositories.resolve(request.repositoryId); const profiles = await this.preflight.list(request.repositoryId); context.guard(); guard(); return { success: true, data: { kind: 'PROFILES', profiles } } }
       if (request.action === 'WORKTREES') { const context = await this.repositories.open(request.repositoryId); context.guard(); guard(); return { success: true, data: { kind: 'WORKTREES', repositoryId: request.repositoryId, worktrees: context.worktrees } } }
       if (request.action === 'PREFLIGHT') return this.mutate('preflight:' + previewFingerprint(request.selection), previewFingerprint(request.selection), async () => { const data = await this.check(request.selection); guard(); return { success: true, data } })
@@ -335,7 +370,13 @@ export class RuntimePreviewOperations {
       }
       if (!('sessionId' in request)) throw new Error('INVALID_ARGUMENT')
       const record = request.action === 'STOP' ? this.store.read(request.sessionId) : this.record(request.sessionId)
-      if (request.action === 'STOP') return this.mutate('stop:' + record.sessionId, record.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.stop(record.sessionId), true), pending: false } }))
+      if (request.action === 'STOP') {
+        if (this.pending && record.state === 'PREPARING') {
+          this.runner.cancelPreparation(record.sessionId)
+          return { success: true, data: { kind: 'SESSION', session: null, operationId: record.operationId, pending: true } }
+        }
+        return this.mutate('stop:' + record.sessionId, record.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.stop(record.sessionId), true), pending: false } }))
+      }
       if (request.action === 'EVIDENCE') {
         const evidence = this.store.read(record.sessionId, request.revision)
         const entries = request.section === 'COVERAGE' ? evidence.coverage : request.section === 'SOURCE' ? [{ selection: evidence.selection, source: evidence.sourceObservation?.snapshot ?? evidence.sourceSnapshot, at: evidence.at }] : [{ process: processView(evidence), compatibility: evidence.runtimeEvidence ?? null, termination: evidence.termination ?? null, stopIntent: evidence.stopIntent ?? null, ...(evidence.startTiming ? { startTiming: evidence.startTiming } : {}), ...(evidence.buildCache ? { buildCache: evidence.buildCache } : {}), ...(evidence.context ? { data: evidence.context.data, context: { repositoryId: evidence.context.selection.repositoryId, worktreeId: evidence.context.selection.worktreeId, generation: evidence.context.selection.generation, mode: evidence.context.mode } } : {}) }, ...evidence.resourceInventory.map(r => ({ name: r.name, kind: r.kind, state: r.state }))]

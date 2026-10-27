@@ -39,6 +39,27 @@ function setup(durable = false) {
 }
 
 describe('branch application intent — domain fixtures, no simulated Windows evidence', () => {
+  it('presents the prepared session without inventory, profile resolution, consent or another start', async () => {
+    const f = setup(true)
+    const prepared = { ...f.record, standby: { state: 'QUIESCENT' as const, policy: { idleMs: 60000, maxPrivateBytes: 2 ** 30, maxWorkingSetBytes: 2 ** 30, maxCpuPercent: 5, minAvailableBytes: 0, sampleMs: 2000 }, expiresAt: new Date(Date.now() + 60000).toISOString() } }
+    f.store.reserve(prepared)
+    const present = vi.fn(async () => { const value = { ...prepared, revision: 1, standby: { ...prepared.standby, state: 'RUNNING' as const } }; f.store.append(value); return value })
+    Object.assign(f.runner, { present })
+    const intent = { repositoryId: 'repo', branch: 'topic', expectedHead: 'a'.repeat(40), operationId: randomUUID() }
+    await f.service.runBranchApp(intent); await f.service.pendingResult()
+    expect(await f.service.getStatus({ operationId: intent.operationId })).toMatchObject({ data: { operationId: intent.operationId, sessionId: f.record.sessionId, phase: 'RUNNING', ready: true } })
+    await f.service.runBranchApp(intent)
+    expect(present).toHaveBeenCalledTimes(1)
+    expect(f.repositories.open).not.toHaveBeenCalled(); expect(f.runner.start).not.toHaveBeenCalled(); expect(f.resolver.resolve).not.toHaveBeenCalled(); expect(f.confirm).not.toHaveBeenCalled()
+  })
+  it('refuses a prepared slot for another branch without showing it', async () => {
+    const f = setup(true)
+    f.store.reserve({ ...f.record, standby: { state: 'QUIESCENT', policy: { idleMs: 60000, maxPrivateBytes: 2 ** 30, maxWorkingSetBytes: 2 ** 30, maxCpuPercent: 5, minAvailableBytes: 0, sampleMs: 2000 }, expiresAt: new Date(Date.now() + 60000).toISOString() } })
+    const present = vi.fn(); Object.assign(f.runner, { present })
+    await f.service.runBranchApp({ repositoryId: 'repo', branch: 'other', operationId: randomUUID() })
+    expect(await f.service.pendingResult()).toMatchObject({ success: false, code: 'PREPARED_TARGET_MISMATCH' })
+    expect(present).not.toHaveBeenCalled(); expect(f.runner.start).not.toHaveBeenCalled()
+  })
   it('resolves exact branch, authorizes and preflights internally before one launch', async () => {
     const f = setup(); expect(await f.run()).toMatchObject({ success: true, data: { kind: 'SESSION', session: { state: 'RUNNING' } } })
     expect(f.resolver.resolve).toHaveBeenCalledWith('repo', 'tree', 'checkout', expect.anything()); expect(f.check).toHaveBeenCalledTimes(2)

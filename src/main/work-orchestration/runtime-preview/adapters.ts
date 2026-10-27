@@ -31,7 +31,9 @@ const webEvidence = z.object({ schemaVersion: z.literal(1), sessionId: z.string(
     builds: z.array(z.object({ component: z.enum(['ELECTRON_MAIN', 'ELECTRON_PRELOAD']), artifactDigest: digest, sources: z.record(z.string(), digest) }).strict()).max(16),
     rendererPid: z.number().int().nullable(), rendererFailure: z.string().nullable(), sandboxObserved: z.boolean().nullable(),
     rendererModules: z.array(z.object({ path: z.string(), sourceDigest: digest, transformDigest: digest }).strict()).max(12),
-    window: z.object({ visible: z.boolean(), rendererInitialized: z.boolean(), createdNs: monotonicTime, loadedNs: monotonicTime, presentedNs: monotonicTime }).strict().optional(),
+    window: z.object({ visible: z.boolean(), rendererInitialized: z.boolean(), createdNs: monotonicTime, loadedNs: monotonicTime, presentedNs: monotonicTime,
+      hiddenReady: z.boolean().optional(), quiescent: z.boolean().optional(), focused: z.boolean().optional(), controlId: z.string().optional(),
+      showNs: monotonicTime.optional(), functionalNs: monotonicTime.optional(), focusedNs: monotonicTime.optional() }).strict().optional(),
     context: z.object({ mode: z.literal('PREVIEW'), repositoryId: z.string(), worktreeId: z.string(), generation: z.string(), profileRevision: z.number().int(),
       activeCheckout: z.string(), identity: z.literal('IDENTITY_BOUND'), data: previewDataReceipt }).strict().optional(),
     resourcesIsolated: z.literal(true), channelDisabled: z.literal(true), protocolDisabled: z.literal(true), processes: z.array(z.object({ pid: z.number().int(), type: z.string() }).strict()).max(128)
@@ -50,6 +52,8 @@ export class PreviewStackAdapter {
     for (const event of events) timing.external(event.stage, event.startNs, event.endNs, event.stage === 'abi' ? 'abi' : 'startup')
   }
   private configured = false
+  private hidden = false
+  prepareHidden() { if (this.configured) throw new Error('PREVIEW_ALREADY_CONFIGURED'); this.hidden = true }
   private constructor(readonly profile: PreviewProfile, readonly worktree: string, readonly directory: string, readonly sessionId: string, private context?: PreviewContextManifest) {}
   static async prepare(profile: PreviewProfile, worktree: string, directory: string, sessionId: string, sdk: string, context?: PreviewContextManifest, deferContext = false, signal?: AbortSignal) {
     signal?.throwIfAborted()
@@ -92,7 +96,7 @@ export class PreviewStackAdapter {
     const { profile, sessionId, directory, worktree } = this
     if (this.configured || !!profile.bootstrap !== !!context) throw new Error('PREVIEW_CONTEXT_REQUIRED')
     await writeFile(join(directory, 'configuration.json'), JSON.stringify({ sessionId, token: this.token, worktree, directory,
-      profile: previewFingerprint(profile), runtimeVersion: profile.runtimeVersion, abi: profile.dependencies.abi,
+      profile: previewFingerprint(profile), runtimeVersion: profile.runtimeVersion, abi: profile.dependencies.abi, prepareHidden: this.hidden,
       packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...profile.adapter!, ...(context ? { context, approvedProfile: profile } : {}) }), { flag: 'wx', mode: 0o600 })
     this.context = context; this.configured = true
   }
@@ -154,7 +158,7 @@ export class PreviewStackAdapter {
       const members = (await owner.processes()).processes
       if (!members.some(p => p.pid === electron.pid) || (electron.rendererPid && !members.some(p => p.pid === electron.rendererPid))) throw new Error('NESTED_JOB_INCOMPATIBLE')
       if (electron.window?.visible && electron.window.rendererInitialized && electron.window.presentedNs) this.presentation ??= electron.window.presentedNs
-      if (electron.window && !this.presentation) throw new Error('WINDOW_NOT_PRESENTED')
+      if (electron.window && !this.presentation && !(this.hidden && electron.window.hiddenReady && electron.window.quiescent)) throw new Error('WINDOW_NOT_PRESENTED')
       processEvidence = { at, members: members.map(p => ({ ...p, role: p.pid === electron.rendererPid ? 'Renderer' : electron.processes.find(m => m.pid === p.pid)?.type ?? 'Session bootstrap' })) }
     }
     coverage.push({ stage: 'ENDPOINT', component: 'PROCESS', status: 'VERIFIED', fingerprint: previewFingerprint(listener), evidenceRef: 'windows-tcp/job-membership', at, reasonCode: 'SESSION_ENDPOINT_OWNER_VERIFIED' })
@@ -174,9 +178,10 @@ export class PreviewStackAdapter {
     if (evidence.electron?.rendererFailure) failure = 'RENDERER_CRASH'
     return { coverage, readiness: failure ? 'NOT_READY' : 'READY', attestation: { artifact: served ? 'VERIFIED' : 'UNVERIFIABLE', loadedCode: loaded ? 'VERIFIED' : 'UNVERIFIABLE' }, failure, ...(processEvidence ? { processEvidence } : {}) }
   }
-  async awaitReady(owner: NativeOwner) {
+  async awaitReady(owner: NativeOwner, signal?: AbortSignal) {
     const deadline = Date.now() + this.profile.probes.readiness.timeoutMs
     while (Date.now() < deadline) {
+      signal?.throwIfAborted()
       try {
         const failure = JSON.parse(await readFile(join(this.directory, 'bootstrap-failure.json'), 'utf8'))
         if (failure.sessionId === this.sessionId && typeof failure.code === 'string' && /^PREVIEW_[A-Z_]{1,120}$/.test(failure.code)) throw new Error(failure.code)
@@ -192,5 +197,22 @@ export class PreviewStackAdapter {
   async released(owner: NativeOwner) {
     const observation = await owner.endpoint(this.profile.adapter!.port)
     if (this.endpoint && observation.listeners.some(p => p.pid === this.endpoint!.pid && p.created === this.endpoint!.created)) throw new Error('ENDPOINT_CLEANUP_INCOMPLETE')
+  }
+  async control(action: 'SHOW' | 'QUIESCE', signal?: AbortSignal) {
+    const controlId = randomUUID(), receivedNs = process.hrtime.bigint().toString()
+    await writeFile(join(this.directory, 'preview-control.json'), JSON.stringify({ sessionId: this.sessionId, token: this.token, controlId, action }), { mode: 0o600 })
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      signal?.throwIfAborted()
+      const raw = await readFile(join(this.directory, 'electron-evidence.json'))
+      if (raw.length > 65536) throw new Error('PROBE_LIMIT')
+      const window = webEvidence.shape.electron.unwrap().parse(JSON.parse(raw.toString())).window
+      if (window?.controlId === controlId && (action === 'QUIESCE' ? window.quiescent && !window.visible : window.visible && window.focused && !window.quiescent && window.functionalNs && window.focusedNs)) {
+        this.hidden = action === 'QUIESCE'
+        return { receivedNs, showNs: window.showNs, functionalNs: window.functionalNs, focusedNs: window.focusedNs }
+      }
+      await new Promise(resolve => setTimeout(resolve, 20))
+    }
+    throw new Error('PREVIEW_CONTROL_TIMEOUT')
   }
 }

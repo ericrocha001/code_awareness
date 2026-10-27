@@ -153,7 +153,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const provisionerModule = get('work-orchestration/runtime-preview/context-data')
   const provisioner = new provisionerModule.RepositoryPreviewContextProvisioner(catalog, path.join(contextual && snapshot ? process.env.U4_CANONICAL_USER_DATA : directory, 'continuum'))
   let bootstrapFault
-  const runnerProvisioner = { prepare: async input => {
+  const runnerProvisioner = { watchInvalidation: (profile, invalidate) => provisioner.watchInvalidation(profile, invalidate), prepare: async input => {
     const manifest = await provisioner.prepare(input)
     if (bootstrapFault === 'generation') manifest.selection.generation = 'invalid-generation'
     if (bootstrapFault === 'digest') manifest.data.digest = 'f'.repeat(64)
@@ -170,12 +170,12 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   continuum.activate(base)
   let approvals = 0, approvalAllowed = true
   let authorizationWindow
-  const confirmation = async profile => {
+  const confirmation = async (profile, policy) => {
     approvals++
     if (!contextual) return approvalAllowed
     authorizationWindow.show()
     authorizationWindow.focus()
-    try { return await get('work-orchestration/runtime-preview/authorization').confirmPreviewProfile(authorizationWindow, profile, provisioner) }
+    try { return await get('work-orchestration/runtime-preview/authorization').confirmPreviewProfile(authorizationWindow, profile, provisioner, policy) }
     finally { authorizationWindow.hide() }
   }
   const branchProfiles = branchApp ? new (get('work-orchestration/runtime-preview/code-awareness-profile').CodeAwarenessProfileResolver)(profileStore, { root, executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules }) : undefined
@@ -217,7 +217,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const branchRequest = operation => ipc({ context: { projectId: webRepository.id, revision: 1 }, operation })
   const unauthorized = await fetch(mcpUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); assert.equal(unauthorized.status, 409)
   const listTools = adapter.listTools().filter(tool => tool.name.includes('runtime_preview') || tool.name === 'run_branch_app')
-  assert.equal(listTools.length, 14)
+  assert.equal(listTools.length, 15)
   save('isolated-mcp-tools', { success: true, tools: listTools.map(tool => tool.name), unauthorizedStatus: unauthorized.status })
   for (const [name, args] of [['start_runtime_preview', { selection: selections.web, operationId: randomUUID(), command: 'forbidden' }], ['stop_runtime_preview', { sessionId: 'all' }], ['probe_runtime_preview', { sessionId: randomUUID(), probes: ['SHELL'] }], ['read_runtime_preview_evidence', { sessionId: randomUUID(), section: 'RUNTIME', limit: 1000 }]]) assert.equal((await mcp(name, args)).success, false)
   save('ipc-inventory', await branchRequest({ action: 'INVENTORY' }))
@@ -254,6 +254,31 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const commands = inputCommands()
   for await (const command of commands) {
     try {
+      if (fastStart && command === 'standby-trust') {
+        const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
+        const tree = inventory.worktrees.find(value => path.resolve(value.path).toLowerCase() === root.toLowerCase())
+        const profile = await branchProfiles.resolve(electronRepository.id, tree.worktreeId, tree.path)
+        const selection = { repositoryId: electronRepository.id, worktreeId: tree.worktreeId, generation: tree.generation, profileId: profile.profileId, fingerprint: hash(JSON.stringify(profile)) }
+        const policy = { idleMs: 180000, maxPrivateBytes: 2 * 1024 ** 3, maxWorkingSetBytes: 2 * 1024 ** 3, maxCpuPercent: 5, minAvailableBytes: 512 * 1048576, sampleMs: 5000 }
+        await service.handle({ action: 'TRUST_REPOSITORY', selection, policy }); save('standby-trust', await service.pendingResult())
+      }
+      if (fastStart && command === 'standby-prepare') {
+        const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
+        const tree = inventory.worktrees.find(value => path.resolve(value.path).toLowerCase() === root.toLowerCase())
+        branchIntent = { repositoryId: electronRepository.id, branch: tree.branch, expectedHead: tree.head, worktreeId: tree.worktreeId, operationId: randomUUID() }
+        await mcp('prepare_branch_app', branchIntent)
+        const result = await service.pendingResult(); save('standby-prepared', result)
+        const record = store.list().find(value => value.operationId === branchIntent.operationId)
+        if (record) { sessionId = record.sessionId; save('standby-receipt', { success: true, sessionId, state: record.state, standby: record.standby, timing: record.startTiming, process: record.process }) }
+      }
+      if (fastStart && command === 'standby-show') {
+        const before = store.read(sessionId), operationId = randomUUID(), approvalsBefore = approvals
+        const start = performance.now(); await mcp('run_branch_app', { repositoryId: before.selection.repositoryId, branch: before.sourceSnapshot.branch, expectedHead: before.sourceSnapshot.head, operationId })
+        const result = await service.pendingResult(); save('standby-shown', result)
+        const after = store.read(sessionId)
+        save('standby-presentation', { success: after.standby?.state === 'RUNNING', remoteMs: performance.now() - start, presentation: after.standby?.presentation, samePid: before.process.pid === after.process.pid, sameSession: before.sessionId === after.sessionId, approvals: approvals - approvalsBefore })
+      }
+      if (fastStart && command === 'standby-metrics') save('standby-metrics', { success: true, sessionId, metrics: runner.slotMetrics(sessionId), standby: store.read(sessionId).standby })
         if (fastStart && ['cache-on', 'cache-off'].includes(command)) {
           assert.equal(baselineHost, false); assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state)))
           cacheOptions.buildCache = command === 'cache-on'

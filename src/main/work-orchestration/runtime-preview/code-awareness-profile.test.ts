@@ -6,6 +6,22 @@ import { CodeAwarenessProfileResolver } from './code-awareness-profile'
 import { PreviewProfileStore } from '../preview-profile-store'
 
 const directories: string[] = []
+
+it('persists only owner-approved repository trust and refuses security drift or revocation', async () => {
+  const { store, resolver, directory } = await setup()
+  const profile = await resolver.resolve('repo', 'tree', process.cwd())
+  const policy = { idleMs: 60000, maxPrivateBytes: 2 ** 30, maxWorkingSetBytes: 2 ** 30, maxCpuPercent: 5, minAvailableBytes: 0, sampleMs: 2000 }
+  await expect(store.trust(profile, policy, async () => false, () => {})).rejects.toThrow('REPOSITORY_TRUST_REQUIRED')
+  expect(await store.approved(profile)).toBe(false)
+  await store.trust(profile, policy, async () => true, () => {})
+  const reopened = new PreviewProfileStore(directory)
+  expect(await reopened.trusted(profile)).toEqual(policy)
+  expect(await reopened.approved({ ...profile, profileId: 'other-tree', revision: 2, adapter: { ...profile.adapter!, port: 52525 }, network: { ...profile.network, destinations: ['http://127.0.0.1:52525'] } })).toBe(true)
+  for (const changed of [{ ...profile, repositoryId: 'other' }, { ...profile, command: { ...profile.command, executableHash: 'f'.repeat(64) } },
+    { ...profile, bootstrap: { ...profile.bootstrap!, maxBytes: 1024 } }, { ...profile, network: { ...profile.network, openNetworkConsent: true } }]) expect(await reopened.trusted(changed)).toBeUndefined()
+  await reopened.revoke('repo', () => {})
+  expect(await store.approved(profile)).toBe(false)
+}, 60000)
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 async function setup(root = process.cwd(), executable = join(process.cwd(), 'node_modules/electron/dist/electron.exe')) {
   const directory = await mkdtemp(join(tmpdir(), 'app-profile-')); directories.push(directory)

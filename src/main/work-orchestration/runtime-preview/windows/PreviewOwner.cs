@@ -245,7 +245,7 @@ internal sealed class PreviewOwner : IDisposable
         } finally { Marshal.FreeHGlobal(table); }
         return new { port = port, listeners = matches.ToArray() };
     }
-    private object Processes()
+    private object Processes(bool metrics = false)
     {
         if (job == IntPtr.Zero) throw new Exception("OWNERSHIP_UNVERIFIED");
         int size = 8 + 128 * IntPtr.Size;
@@ -261,7 +261,14 @@ internal sealed class PreviewOwner : IDisposable
                 if (handle == IntPtr.Zero) throw new NativeFailure("PROCESS_COVERAGE_UNVERIFIABLE", Marshal.GetLastWin32Error());
                 try {
                     if (!Member(handle)) throw new Exception("PROCESS_COVERAGE_CHANGED");
-                    processes.Add(new { pid = pid, created = Win32.Creation(handle).ToString() });
+                    if (metrics) {
+                        var memory = new Win32.MemoryCounters(); memory.cb = (uint)Marshal.SizeOf(typeof(Win32.MemoryCounters));
+                        Win32.Check(Win32.GetProcessMemoryInfo(handle, ref memory, memory.cb), "PROCESS_MEMORY_UNVERIFIABLE");
+                        long created, exited, kernel, user;
+                        Win32.Check(Win32.GetProcessTimes(handle, out created, out exited, out kernel, out user), "PROCESS_CPU_UNVERIFIABLE");
+                        processes.Add(new { pid = pid, created = created.ToString(), workingSetBytes = memory.workingSet.ToUInt64(),
+                            privateWorkingSetBytes = memory.privateWorkingSet.ToUInt64(), privateBytes = memory.privateUsage.ToUInt64(), cpuMs = (kernel + user) / 10000.0 });
+                    } else processes.Add(new { pid = pid, created = Win32.Creation(handle).ToString() });
                 } finally { Win32.CloseHandle(handle); }
             }
         } finally { Marshal.FreeHGlobal(buffer); }
@@ -284,6 +291,7 @@ internal sealed class PreviewOwner : IDisposable
         if (action == "inspect") return Observe();
         if (action == "endpoint") return Endpoint(Convert.ToInt32(message["port"]));
         if (action == "processes") return Processes();
+        if (action == "metrics") return Processes(true);
         if (action == "stop") {
             bool noTerminate = false;
 #if PREVIEW_TEST

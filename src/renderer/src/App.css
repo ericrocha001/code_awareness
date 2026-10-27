@@ -1,3 +1,8 @@
+[data-preview-quiescent] *, [data-preview-quiescent] *::before, [data-preview-quiescent] *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
+
 .app-layout {
   display: flex;
   height: 100vh;

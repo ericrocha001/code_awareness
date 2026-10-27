@@ -14,13 +14,14 @@ const sameLocalPath = (left: string, right: string) =>
   left.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase() === right.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase()
 
 interface HomeViewProps {
+  active?: boolean
   activeProject: { path: string; name: string } | null
   selectionLocked?: boolean
   onSelectRepository: (repositoryId: string) => void
   onStatusMessage: (message: string, isError?: boolean) => void
 }
 
-export const HomeView: React.FC<HomeViewProps> = ({ activeProject, selectionLocked = false, onSelectRepository, onStatusMessage }) => {
+export const HomeView: React.FC<HomeViewProps> = ({ activeProject, active = true, selectionLocked = false, onSelectRepository, onStatusMessage }) => {
   const [repositories, setRepositories] = useState<RepositoryRecord[]>([])
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [repositoryToHide, setRepositoryToHide] = useState<RepositoryRecord | null>(null)
@@ -50,10 +51,10 @@ export const HomeView: React.FC<HomeViewProps> = ({ activeProject, selectionLock
   }, [])
 
   useEffect(() => {
-    if (githubStatus?.state !== 'AUTHORIZING') return
+    if (!active || githubStatus?.state !== 'AUTHORIZING') return
     const timer = window.setInterval(() => void loadGitHubStatus(true), 1000)
     return () => window.clearInterval(timer)
-  }, [githubStatus?.state])
+  }, [githubStatus?.state, active])
 
   const loadGitHubStatus = async (reloadOnConnection = false) => {
     try {

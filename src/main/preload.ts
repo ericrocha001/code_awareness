@@ -8,8 +8,19 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 declare const globalThis: typeof global & { __RUNTIME_PREVIEW_BUILDS__?: unknown[] }
 
 if (process.argv.includes('--runtime-preview')) {
+  let latestActivity: unknown
+  ipcRenderer.on('runtime-preview:activity', (_event, value: unknown) => { latestActivity = value })
   ipcRenderer.send('runtime-preview:preload-initialized', { builds: globalThis.__RUNTIME_PREVIEW_BUILDS__ ?? [], sandboxed: process.sandboxed, contextIsolated: process.contextIsolated })
-  contextBridge.exposeInMainWorld('__runtimePreview', { initialized: (report: unknown) => ipcRenderer.send('runtime-preview:renderer-initialized', report) })
+  contextBridge.exposeInMainWorld('__runtimePreview', {
+    initialized: (report: unknown) => ipcRenderer.send('runtime-preview:renderer-initialized', report),
+    onActivity: (callback: (value: unknown) => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, value: unknown) => callback(value)
+      ipcRenderer.on('runtime-preview:activity', listener)
+      if (latestActivity) callback(latestActivity)
+      return () => ipcRenderer.removeListener('runtime-preview:activity', listener)
+    },
+    activityConfirmed: (value: unknown) => ipcRenderer.send('runtime-preview:activity-confirmed', value)
+  })
 }
 import { ActionLog, AppSettings, Campaign, CampaignStatus, CheckpointData, CheckpointDetails, CheckpointDiffFile, CheckpointSummary, CodefetchResult, CompressionSettingsPayload, DiffFileStatus, OrphanFile, OutputFormat, ProjectInfo, RestoreExecuteOptions, RestoreExecuteResult, RestorePreviewResult, Tag } from '../shared/types'
 import type { DashExecutionResult } from '../shared/types/dash-types'

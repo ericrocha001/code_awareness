@@ -2,6 +2,7 @@ import { mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promis
 import { join, relative, isAbsolute, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { previewProfileSchema, previewFingerprint, type PreviewProfile } from './preview-profile'
+import { repositoryTrustScope, standbyPolicySchema, type StandbyPolicy } from './runtime-preview/standby-policy'
 
 export class PreviewProfileStore {
   private defaults: Promise<unknown> = Promise.resolve()
@@ -42,11 +43,41 @@ export class PreviewProfileStore {
     const path = relative(await realpath(worktree), await realpath(this.directory))
     if (!path || !(path === '..' || path.startsWith(`..${sep}`) || isAbsolute(path))) throw new Error('PROFILE_STORE_INSIDE_WORKTREE')
   }
-  private async approvals(): Promise<Record<string, { fingerprint: string; approvedAt: string }>> {
+  private async approvals(): Promise<Record<string, { fingerprint: string; approvedAt: string; policy?: StandbyPolicy }>> {
     try { return JSON.parse(await readFile(join(this.directory, 'approvals.json'), 'utf8')) }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {}; throw error }
   }
-  async approved(profile: PreviewProfile) { return (await this.approvals())[profile.profileId]?.fingerprint === previewFingerprint(profile) }
+  async trusted(profile: PreviewProfile) {
+    const grant = (await this.approvals())['repository:' + profile.repositoryId]
+    if (!grant?.policy) return undefined
+    try { return grant.fingerprint === repositoryTrustScope(profile) ? standbyPolicySchema.parse(grant.policy) : undefined } catch { return undefined }
+  }
+  async approved(profile: PreviewProfile) { return !!await this.trusted(profile) || (await this.approvals())[profile.profileId]?.fingerprint === previewFingerprint(profile) }
+  async trust(profile: PreviewProfile, policy: StandbyPolicy, confirm: (profile: PreviewProfile, policy: StandbyPolicy) => Promise<boolean>, guard: () => void) {
+    policy = standbyPolicySchema.parse(policy)
+    const fingerprint = repositoryTrustScope(profile)
+    if (!await confirm(profile, policy)) throw new Error('REPOSITORY_TRUST_REQUIRED')
+    guard()
+    const current = (await this.profiles(profile.repositoryId)).find(value => value.profileId === profile.profileId)
+    if (!current || repositoryTrustScope(current) !== fingerprint) throw new Error('PROFILE_CHANGED')
+    const approvals = await this.approvals()
+    approvals['repository:' + profile.repositoryId] = { fingerprint, policy, approvedAt: new Date().toISOString() }
+    await this.saveApprovals(approvals, guard)
+  }
+  async revoke(repositoryId: string, guard: () => void) {
+    const approvals = await this.approvals()
+    delete approvals['repository:' + repositoryId]
+    for (const profile of await this.profiles(repositoryId)) delete approvals[profile.profileId]
+    await this.saveApprovals(approvals, guard)
+  }
+  private async saveApprovals(approvals: Awaited<ReturnType<PreviewProfileStore['approvals']>>, guard: () => void) {
+    await mkdir(this.directory, { recursive: true })
+    const temporary = join(this.directory, `approval-${randomUUID()}.tmp`)
+    guard()
+    await writeFile(temporary, JSON.stringify(approvals), { flag: 'wx', mode: 0o600 })
+    try { guard(); await rename(temporary, join(this.directory, 'approvals.json')) }
+    finally { await rm(temporary, { force: true }) }
+  }
   async approve(profile: PreviewProfile, confirm: (profile: PreviewProfile) => Promise<boolean>, guard: () => void = () => {}) {
     const fingerprint = previewFingerprint(profile)
     if (!await confirm(profile)) throw new Error('PROFILE_APPROVAL_REQUIRED')

@@ -53,7 +53,7 @@ export class NativeOwner {
     if (this.pending) { clearTimeout(this.pending.timer); this.pending.reject(error); this.pending = undefined }
   }
   get available() { return !this.exited }
-  private request(action: 'start' | 'inspect' | 'stop' | 'reconcile' | 'endpoint' | 'processes', fields: Record<string, unknown> = {}, timeout = 10000): Promise<unknown> {
+  private request(action: 'start' | 'inspect' | 'stop' | 'reconcile' | 'endpoint' | 'processes' | 'metrics', fields: Record<string, unknown> = {}, timeout = 10000): Promise<unknown> {
     if (this.exited || this.pending) return Promise.reject(new Error(this.exited ? 'OWNER_LOST' : 'NATIVE_REQUEST_BUSY'))
     const id = ++this.sequence
     return new Promise((resolve, reject) => {
@@ -69,6 +69,10 @@ export class NativeOwner {
   }
   async processes() {
     return z.object({ processes: z.array(z.object({ pid: z.number().int().positive(), created: z.string() }).strict()).max(128) }).strict().parse(await this.request('processes'))
+  }
+  async metrics() {
+    return z.object({ processes: z.array(z.object({ pid: z.number().int().positive(), created: z.string(), workingSetBytes: z.number().nonnegative(),
+      privateWorkingSetBytes: z.number().nonnegative(), privateBytes: z.number().nonnegative(), cpuMs: z.number().nonnegative() }).strict()).max(128) }).strict().parse(await this.request('metrics'))
   }
   reconcile(sessionId: string, pid: number, created: string | null) { return this.request('reconcile', { sessionId, pid, created }) }
   async stop(graceMs: number, forceMs: number, graceful: boolean) {

@@ -3,7 +3,7 @@ import type { PreviewSessionRecord, PreviewIntentReceipt } from './session-store
 
 export function previewStatus(receipt?: PreviewIntentReceipt, record?: PreviewSessionRecord, options: { pending?: boolean; stopping?: boolean; owned?: boolean; operationId?: string; sessionId?: string } = {}): RuntimePreviewStatus {
   const status: RuntimePreviewStatus = {
-    kind: 'STATUS', operationId: record?.operationId ?? receipt?.operationId ?? options.operationId ?? null,
+    kind: 'STATUS', operationId: receipt?.operationId ?? record?.operationId ?? options.operationId ?? null,
     sessionId: record?.sessionId ?? receipt?.sessionId ?? options.sessionId ?? null,
     revision: `${receipt?.revision ?? 0}:${record?.revision ?? 0}:${options.pending ? 1 : 0}:${options.stopping ? 1 : 0}:${options.owned ? 1 : 0}:${receipt?.head ? 1 : 0}`,
     phase: receipt?.phase ?? 'UNKNOWN', ready: false,
@@ -34,11 +34,13 @@ export function previewStatus(receipt?: PreviewIntentReceipt, record?: PreviewSe
       status.phase = 'UNKNOWN'; status.reasonCode ??= 'RUNTIME_RECONCILIATION_REQUIRED'
     }
     if (options.stopping) status.phase = 'STOPPING'
+    if (!options.stopping && status.phase === 'RUNNING' && record.standby?.state === 'QUIESCENT') status.phase = 'PREPARED'
+    if (status.phase === 'PREPARING' && record.standby?.state === 'WARMING') status.phase = 'WARMING'
     status.ready = status.phase === 'RUNNING' && options.owned === true && record.readiness === 'READY' && record.liveness === 'VERIFIED' &&
       record.attestation.loadedCode === 'VERIFIED' &&
       record.coverage.some(c => c.stage === 'TARGET_CHECKOUT' && c.status === 'VERIFIED') && record.coverage.some(c => c.stage === 'ENDPOINT' && c.status === 'VERIFIED')
   }
-  status.recommendedAction = status.ready ? 'ASK_HUMAN_REVIEW' : ['PENDING', 'PREPARING', 'STOPPING'].includes(status.phase) ? 'WAIT' :
+  status.recommendedAction = status.ready ? 'ASK_HUMAN_REVIEW' : status.phase === 'PREPARED' ? 'NONE' : ['PENDING', 'PREPARING', 'WARMING', 'STOPPING'].includes(status.phase) ? 'WAIT' :
     status.phase === 'STOPPED' ? 'NONE' : status.reasonCode === 'PROFILE_APPROVAL_REQUIRED' ? 'REQUEST_NATIVE_APPROVAL' :
       status.reasonCode === 'PREVIEW_SESSION_ACTIVE' ? 'STOP' : 'INSPECT_ERROR'
   return status
