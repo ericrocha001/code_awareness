@@ -119,6 +119,11 @@ export class RuntimePreviewOperations {
         let result: RuntimePreviewResult
         try {
           const slot = this.store.list().find(value => value.selection.repositoryId === repositoryId && value.standby?.state === 'QUIESCENT' && value.state === 'RUNNING')
+          const visible = prepare ? this.store.list().find(value => value.selection.repositoryId === repositoryId && value.standby?.state === 'RUNNING' && value.state === 'RUNNING') : undefined
+          if (visible) {
+            if (visible.sourceSnapshot?.branch !== branch.slice(11) || intent.expectedHead && visible.sourceSnapshot.head !== intent.expectedHead || intent.worktreeId && visible.selection.worktreeId !== intent.worktreeId) throw new Error('PREPARED_TARGET_MISMATCH')
+            result = { success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.park(visible.sessionId), true), pending: false } }
+          } else {
           if (slot && !prepare) {
             if (slot.sourceSnapshot?.branch !== branch.slice(11) || intent.expectedHead && slot.sourceSnapshot.head !== intent.expectedHead || intent.worktreeId && slot.selection.worktreeId !== intent.worktreeId) throw new Error('PREPARED_TARGET_MISMATCH')
             guard()
@@ -138,6 +143,7 @@ export class RuntimePreviewOperations {
           if (this.pending?.operationId === intent.operationId) this.pending.intent = receipt
           result = await this.runBranch({ action: 'RUN_BRANCH_APP', repositoryId, ref: target.ref, revision: target.revision, operationId: intent.operationId,
             ...(tree ? { worktree: { worktreeId: tree.worktreeId, generation: tree.generation } } : {}) }, guard, timing, { context, inventory }, prepare)
+          }
           }
         } catch (error) { result = failure(error) }
         const session = result.success && result.data.kind === 'SESSION' ? result.data.session : null

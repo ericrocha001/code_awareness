@@ -275,6 +275,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         const before = store.read(sessionId), operationId = randomUUID(), approvalsBefore = approvals
         const start = performance.now(); await mcp('run_branch_app', { repositoryId: before.selection.repositoryId, branch: before.sourceSnapshot.branch, expectedHead: before.sourceSnapshot.head, operationId })
         const result = await service.pendingResult(); save('standby-shown', result)
+        if (result?.success && result.data.kind === 'SESSION' && result.data.session) sessionId = result.data.session.sessionId
         const after = store.read(sessionId)
         save('standby-presentation', { success: after.standby?.state === 'RUNNING', remoteMs: performance.now() - start, presentation: after.standby?.presentation, samePid: before.process.pid === after.process.pid, sameSession: before.sessionId === after.sessionId, approvals: approvals - approvalsBefore })
       }

@@ -39,6 +39,11 @@ export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
     if (identity.repositoryId !== selection.repositoryId || identity.record.generation !== selection.generation) throw new Error('WORKTREE_STALE')
     const gitFingerprint = previewFingerprint(result.snapshot)
     const trust = await this.profiles.trusted(profile)
+    const materialization = async () => {
+      try { return bytesFingerprint(await readFile(await previewPath(identity.record.path, profile.dependencies.materialization))) }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
+    }
+    const materializationDigest = await materialization()
     return { profile, worktree: identity.record.path, gitFingerprint, preflight: result, observeSource: async () => {
       context.guard()
       const current = await context.git.getCoordinationIdentity(selection.worktreeId)
@@ -56,6 +61,7 @@ export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
       const files = [...profile.command.inputs, { path: profile.dependencies.manifest, fingerprint: profile.dependencies.manifestHash }, { path: profile.dependencies.lockfile, fingerprint: profile.dependencies.lockfileHash }]
       for (const file of files) if (bytesFingerprint(await readFile(await previewPath(identity.record.path, file.path))) !== file.fingerprint) throw new Error('PREPARED_INPUT_CHANGED')
       if (bytesFingerprint(await readFile(profile.command.executable)) !== profile.command.executableHash || bytesFingerprint(await readFile(await previewPath(identity.record.path, profile.adapter!.runtimeExecutable!))) !== profile.adapter!.runtimeExecutableHash) throw new Error('PREPARED_EXECUTABLE_CHANGED')
+      if (await materialization() !== materializationDigest) throw new Error('PREPARED_MATERIALIZATION_CHANGED')
       const source = await context.git.getCoordinationSnapshot(selection.worktreeId)
       if (source.record.generation !== selection.generation || source.record.path !== identity.record.path || source.record.detached || source.record.locked || source.conflictCount || source.snapshot.operation ||
         previewFingerprint({ ...source.snapshot, dirty: source.stagedCount + source.unstagedCount + source.untrackedCount > 0 }) !== gitFingerprint) throw new Error('PREPARED_SOURCE_CHANGED')
@@ -332,7 +338,8 @@ export class RuntimePreviewRunner {
     const slot: { guard: () => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher; metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void } = {
       guard, invalid: false, watcher: watch(worktree, { recursive: true, persistent: false }, (_event, file) => {
         const path = file?.toString().replaceAll('\\', '/')
-        if (path && (path.startsWith('out/') || path.startsWith('.code-awareness/')) && path !== profile.dependencies.materialization) return
+        if (path && (path === 'out' || path.startsWith('out/'))) return
+        if (path && (path === '.code-awareness' || path.startsWith('.code-awareness/')) && path !== profile.dependencies.materialization) return
         slot.invalid = true
       }) }
     slot.watcher.on('error', () => { slot.invalid = true })
@@ -345,7 +352,7 @@ export class RuntimePreviewRunner {
         const record = this.store.read(sessionId), standby = record.standby!
         if (standby.state !== 'QUIESCENT') return
         try {
-          if (slot.invalid) throw new Error('PREPARED_SOURCE_CHANGED')
+          if (slot.invalid) throw new Error('PREPARED_FILESYSTEM_CHANGED')
           await guard()
           const current = await this.sampleSlot(sessionId)
           if (Date.now() >= Date.parse(standby.expiresAt)) reason = 'STANDBY_EXPIRED'
@@ -397,10 +404,25 @@ export class RuntimePreviewRunner {
         if (observed.readiness !== 'READY' || observed.attestation.loadedCode !== 'VERIFIED') throw new Error('PRESENTATION_NOT_ATTESTED')
         record = this.change(record, { ...observed, standby: { ...standby, state: 'RUNNING', metrics, presentation: { receivedNs, guardedNs,
           showNs: shown.showNs!, functionalNs: shown.functionalNs!, focusedNs: shown.focusedNs!, durationMs: Number(BigInt(shown.focusedNs!) - BigInt(receivedNs)) / 1e6 } } })
-        this.clearSlot(sessionId)
+        if (slot.timer) clearTimeout(slot.timer)
+        slot.timer = undefined
         return record
       })
     } catch (error) { await this.evict(sessionId, error instanceof Error ? error.message : 'PRESENTATION_FAILED'); throw error }
+  }
+  async park(sessionId: string) {
+    try {
+      return await this.command(async () => {
+        const record = this.store.read(sessionId), slot = this.slots.get(sessionId), adapter = this.adapters.get(sessionId)
+        if (!slot || !adapter || slot.invalid || record.standby?.state !== 'RUNNING') throw new Error('PREPARED_SLOT_INVALID')
+        await slot.guard()
+        await adapter.control('QUIESCE', this.cancellations.get(sessionId)?.signal)
+        const next = this.change(record, { standby: { ...record.standby, state: 'QUIESCENT', expiresAt: new Date(Date.now() + record.standby.policy.idleMs).toISOString() } })
+        this.clearSlot(sessionId)
+        this.monitorSlot(sessionId, adapter.worktree, slot.guard, adapter.profile)
+        return next
+      })
+    } catch (error) { await this.evict(sessionId, error instanceof Error ? error.message : 'QUIESCENCE_FAILED'); throw error }
   }
   list(options: { cursor?: string; limit?: number } = {}) {
     return this.serial(async () => {
