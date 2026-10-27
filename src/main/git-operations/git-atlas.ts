@@ -20,14 +20,14 @@ export class GitAtlasReader {
   private persistence?: AtlasPersistence
   private persistenceCommon = ''
   private persistenceToken = 0
-  private persistenceFailed = false
+  private persistenceReason: string | null = null
   private disposed = false
   private persistenceReady: Promise<void> = Promise.resolve()
   private deliveredSnapshot = ''
   private detachCollector?: () => void
   private catalogRequest = 0
   private manifest?: AtlasCatalogManifest
-  private flush?: NodeJS.Immediate
+  private flushing?: Promise<void>
   private readonly writes = new Map<string, { slice: AtlasHistorySlice; commits: AtlasCommit[]; observation: AtlasCatalogManifest }>()
   constructor(private readonly root: string, private readonly git: GitService, private readonly fail: (code: string) => never,
     private readonly openPersistence?: (common: string) => AtlasPersistence | Promise<AtlasPersistence>,
@@ -51,7 +51,7 @@ export class GitAtlasReader {
     this.stopCollection()
     const request = this.catalogRequest
     const manifest = await this.catalogManifest(contextKey)
-    await this.persistenceReady
+    await this.storageReady()
     if (this.disposed || request !== this.catalogRequest) this.fail('REPOSITORY_CONTEXT_CHANGED')
     const store = this.persistence
     const state: AtlasCatalogState = { manifest, coverage: 'UNKNOWN', acquired: 0, diagnostic: this.catalogDiagnostic(), reason: null }
@@ -65,58 +65,103 @@ export class GitAtlasReader {
     return state
   }
 
-  catalogDiagnostic() { return this.persistence?.diagnostic()??{state:'UNAVAILABLE' as const,reason:this.persistenceCommon?'OPENING_OR_UNAVAILABLE':'NOT_REQUESTED'} }
+  catalogDiagnostic() {
+    if (this.persistenceReason) return { state: 'SUSPENDED' as const, reason: this.persistenceReason }
+    if (this.writes.size) return { state: 'SUSPENDED' as const, reason: 'WRITES_PENDING' }
+    return this.persistence?.diagnostic() ?? { state: 'UNAVAILABLE' as const, reason: this.persistenceCommon ? 'OPENING_OR_UNAVAILABLE' : 'NOT_REQUESTED' }
+  }
 
   invalidate(dispose = false) {
     this.stopCollection()
     this.deliveredSnapshot = ''
     this.generation++; this.pages.clear(); this.pending.clear(); this.anchors.clear()
     if (dispose) {
-      if(this.flush) clearImmediate(this.flush)
-      this.flush=undefined
-      if(this.persistence) for(const [key,value] of this.writes) this.persistence.save(key,value.slice,value.commits,value.observation)
-      this.writes.clear()
+      this.drainOnClose()
       this.disposed = true; this.commits.clear(); this.slices.clear(); this.persistenceToken++; this.persistence?.close(); this.persistence = undefined
     }
   }
 
-  private preparePersistence(common: string) {
-    if (!this.openPersistence || this.disposed || this.persistenceCommon === common) return
+  private drainOnClose() {
+    const deadline = Date.now() + 250
+    this.persistence?.retry?.()
+    for (const [key, value] of this.writes) {
+      if (Date.now() >= deadline || !this.saveWrite(key, value)) break
+    }
+    if (this.writes.size) this.persistenceReason = 'SHUTDOWN_WITH_UNCONFIRMED_WRITES'
+  }
+
+  private preparePersistence(common: string, retry = false) {
+    if (!this.openPersistence || this.disposed || this.persistenceCommon === common && !retry) return
     this.stopCollection()
-    if (this.persistence) for (const [key, value] of this.writes) this.persistence.save(key, value.slice, value.commits, value.observation)
-    this.persistence?.close(); this.persistence = undefined; this.persistenceCommon = common; this.persistenceFailed = false
-    this.writes.clear()
-    if (this.flush) clearImmediate(this.flush)
-    this.flush = undefined
+    if (this.persistenceCommon !== common) {
+      this.drainOnClose()
+      if (this.writes.size) this.fail('ATLAS_PERSISTENCE_PENDING_CONTEXT_CHANGE')
+    }
+    this.persistence?.close(); this.persistence = undefined; this.persistenceCommon = common; this.persistenceReason = null
     const token = ++this.persistenceToken
     this.persistenceReady = new Promise<void>(resolve => setImmediate(() => {
       if (this.disposed || token !== this.persistenceToken) { resolve(); return }
       Promise.resolve().then(() => this.openPersistence!(common)).then(store => {
         if (this.disposed || token !== this.persistenceToken) { store.close(); return }
-        this.persistence = store; this.scheduleFlush()
-      }).catch(() => { if (token === this.persistenceToken) { this.persistenceFailed = true; this.writes.clear() } }).finally(resolve)
+        this.persistence = store; this.persistenceReason = null
+      }).catch(() => { if (token === this.persistenceToken) this.persistenceReason = 'OPEN_FAILED' }).finally(resolve)
     }))
   }
 
-  private scheduleFlush() {
-    if (!this.persistence || this.flush || this.disposed || !this.writes.size) return
-    this.flush = setImmediate(() => {
-      this.flush = undefined
-      const next = this.writes.entries().next().value
-      if (!next || !this.persistence || this.disposed) return
-      const [key, value] = next
-      this.writes.delete(key)
-      try { if(!this.persistence.save(key,value.slice,value.commits,value.observation)) this.persistenceFailed=true }
-      catch { this.persistence.close(); this.persistence = undefined; this.persistenceFailed = true; this.writes.clear() }
-      this.scheduleFlush()
-    })
+  private async storageReady() {
+    let timer: NodeJS.Timeout | undefined
+    await Promise.race([this.persistenceReady, new Promise<void>(resolve => { timer = setTimeout(resolve, 1500) })])
+    if (timer) clearTimeout(timer)
+    if (this.disposed) this.fail('REPOSITORY_CONTEXT_CHANGED')
   }
 
-  private persist(key: string, slice: AtlasHistorySlice, commits: AtlasCommit[], observation: AtlasCatalogManifest) {
-    if (!this.openPersistence || this.persistenceFailed || this.disposed) return
-    if(!this.writes.has(key) && this.writes.size>=8) { this.persistence?.suspend('PERSISTENCE_QUEUE_CAPACITY'); this.persistenceFailed=true; return }
+  private saveWrite(key: string, value: { slice: AtlasHistorySlice; commits: AtlasCommit[]; observation: AtlasCatalogManifest }): boolean {
+    try {
+      if (!this.persistence?.save(key, value.slice, value.commits, value.observation)) {
+        this.persistenceReason = this.persistence?.diagnostic().reason ?? 'WRITE_UNCONFIRMED'
+        return false
+      }
+      if (this.writes.get(key) === value) this.writes.delete(key)
+      this.persistenceReason = null
+      return true
+    } catch { this.persistenceReason = 'WRITE_FAILED'; return false }
+  }
+
+  private flushWrites(): Promise<void> {
+    if (this.flushing) return this.flushing
+    const token = this.persistenceToken
+    const run = async () => {
+      let attempts = 0
+      while (!this.disposed && token === this.persistenceToken && this.writes.size) {
+        const [key, value] = this.writes.entries().next().value!
+        this.persistence?.retry?.()
+        if (this.saveWrite(key, value)) attempts = 0
+        else if (++attempts >= 3) return
+        await new Promise<void>(resolve => attempts ? setTimeout(resolve, attempts * 100) : setImmediate(resolve))
+      }
+    }
+    const result = run().finally(() => { if (this.flushing === result) this.flushing = undefined })
+    this.flushing = result
+    return result
+  }
+
+  private async persist(key: string, slice: AtlasHistorySlice, commits: AtlasCommit[], observation: AtlasCatalogManifest) {
+    if (!this.openPersistence || this.disposed) return
+    await this.storageReady()
+    await this.flushWrites()
+    if (this.disposed) return
+    const bytes = Buffer.byteLength(JSON.stringify({ slice, commits, observation }))
+    const full = () => this.writes.size >= 8 || [...this.writes.values()].reduce((total, value) => total + Buffer.byteLength(JSON.stringify(value)), bytes) > 8 * 1024 * 1024
+    while (!this.writes.has(key) && full() && this.writes.size) {
+      await this.flushWrites()
+      if (this.persistenceReason || this.disposed) break
+    }
+    if (!this.writes.has(key) && full()) {
+      this.persistenceReason = 'WRITE_NOT_ACCEPTED_BACKPRESSURE'
+      return
+    }
     this.writes.set(key, { slice, commits, observation })
-    this.scheduleFlush()
+    await this.flushWrites()
   }
 
   private coalesce<T>(key: string, run: () => Promise<T>): Promise<T> {
@@ -237,6 +282,8 @@ export class GitAtlasReader {
     const limit = request.limit ?? 100
     if (![7, 15, 30, 60, 90, 'ALL'].includes(request.window) || !Number.isInteger(limit) || limit < 1 || limit > 100) this.fail('INVALID_ARGUMENT')
     const before = await this.observe(request.contextKey, request.scope)
+    if (request.refresh && !this.persistence && this.persistenceCommon) this.preparePersistence(this.persistenceCommon, true)
+    await this.storageReady()
     if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')
     const session = JSON.stringify([request.contextKey, request.scope, request.window])
     const current = this.anchors.get(session)
@@ -312,8 +359,10 @@ export class GitAtlasReader {
     const result: GitAtlasPage = { ...presentation, ...(request.scope ? { scope: request.scope, referenceCoverage: request.scope.kind === 'CHECKOUT' ? 'SELECTED' as const : 'ALL_REFS' as const, anchorAt, anchorKind } : {}), queriedAt, since, nodes, boundary, pendingParents: boundary, nextCursor, coverage: nextCursor ? 'PARTIAL' : 'COMPLETE_WINDOW' }
     if (generation === this.generation) {
       this.pages.set(cacheKey, result); this.slices.set(sliceKey, slice)
-      this.persist(sliceKey,slice,[...objects.values()],{scopeKey:JSON.stringify(request.scope??'LEGACY'),revision:before.historyRevision,topology:before.topologyRevision,worktreeGeneration:before.worktreeGeneration,tips,refs:before.refs,tags:before.tags,observedAt:new Date().toISOString(),available:request.scope?.kind==='CHECKOUT'||before.detachedCoverage==='COMPLETE'})
+      await this.persist(sliceKey,slice,[...objects.values()],{scopeKey:JSON.stringify(request.scope??'LEGACY'),revision:before.historyRevision,topology:before.topologyRevision,worktreeGeneration:before.worktreeGeneration,tips,refs:before.refs,tags:before.tags,observedAt:new Date().toISOString(),available:request.scope?.kind==='CHECKOUT'||before.detachedCoverage==='COMPLETE'})
     }
+    if (this.disposed) this.fail('REPOSITORY_CONTEXT_CHANGED')
+    if (generation !== this.generation) this.fail('GIT_STATE_CHANGED')
     return result
   }
 

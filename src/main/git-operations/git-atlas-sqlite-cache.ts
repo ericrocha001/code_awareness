@@ -46,9 +46,22 @@ export class GitAtlasSqliteCache implements AtlasPersistence {
     for (const file of files) if (existsSync(file)) unlinkSync(file)
   }
 
-  constructor(directory: string, repositoryId: string, commonDirectory: string) {
+  constructor(private readonly directory: string, private readonly repositoryId: string, private readonly commonDirectory: string) {
+    this.catalogIdentity = paths(directory, repositoryId, commonDirectory).id
+    this.open()
+  }
+
+  retry(): boolean {
+    if (this.health.state === 'READY' && this.db) return true
+    if (!['SQLITE_BUSY', 'SQLITE_LOCKED', 'SQLITE_FULL', 'SQLITE_CANTOPEN'].includes(this.health.reason ?? '')) return false
+    this.close()
+    this.open()
+    return this.health.state === 'READY'
+  }
+
+  private open() {
+    const { directory, repositoryId, commonDirectory } = this
     const selected = paths(directory, repositoryId, commonDirectory)
-    this.catalogIdentity = selected.id
     try {
       if (existsSync(selected.stable) && existsSync(selected.legacy)) throw new Error('ATLAS_CATALOG_AMBIGUOUS_FILES')
       mkdirSync(directory, { recursive: true })
@@ -92,6 +105,7 @@ export class GitAtlasSqliteCache implements AtlasPersistence {
       if(Number(version)===1) this.statement('INSERT OR IGNORE INTO cache_meta(key,value) VALUES (?,?)').run('legacy_identity',selected.legacyIdentity)
       this.statement('INSERT OR REPLACE INTO cache_meta(key,value) VALUES (?,?)').run('limits',JSON.stringify({schemaVersion:2,durableFacts:'NO_AUTOMATIC_EVICTION',sliceBytes:8*1024*1024,slices:256}))
       })()
+      this.health = { state: 'READY', reason: null }
     } catch (error) { this.failure(error) }
   }
 

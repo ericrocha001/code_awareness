@@ -1,4 +1,5 @@
 const nativeTestFiles = Object.freeze([
+  'src/main/git-operations/git-atlas-persistence.e2e.test.ts',
   'src/main/continuum/continuum-agent.test.ts',
   'src/main/continuum/context-bundle.test.ts',
   'src/main/continuum/artifact-tags.test.ts',

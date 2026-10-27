@@ -23,6 +23,7 @@ export interface AtlasPersistence {
   readonly catalogIdentity: string
   diagnostic(): AtlasCatalogDiagnostic
   suspend(reason: string): void
+  retry?(): boolean
   getCommit(sha: string): AtlasCommit | undefined
   getDisplayCommit(sha: string): AtlasCommit | undefined
   getSlice(key: string): AtlasHistorySlice | undefined
