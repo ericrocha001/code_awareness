@@ -822,7 +822,11 @@ export class GitService implements FileListingPort {
   async getAtlasFullCommitMetadata(root: string, shas: string[]): Promise<Array<Omit<GitHistoryNode,'decorations'>>> {
     if(!shas.length) return []
     if(shas.length>32 || shas.some(sha=>!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha))) throw new Error('INVALID_ARGUMENT')
-    const raw=await this.runGit(['log','--no-walk=unsorted','--format=%H%x00%P%x00%an%x00%cI%x00%s%x00%cn%x00%aI%x00%ae%x00%ce%x00%B%x00',...shas,'--'],root,{maxOutputBytes:2*1024*1024,env:this.localReadEnvironment()})
+    // Checkpoint object parents even if shallow, graft or replacement state changes inside an epoch.
+    const raw = await this.runGit([
+      '--no-replace-objects', '-c', 'advice.graftFileDeprecated=false', 'log', '--no-walk=unsorted',
+      '--format=%H%x00%P%x00%an%x00%cI%x00%s%x00%cn%x00%aI%x00%ae%x00%ce%x00%B%x00', ...shas, '--'
+    ], root, { maxOutputBytes: 2 * 1024 * 1024, env: { ...this.localReadEnvironment(), GIT_SHALLOW_FILE: '', GIT_GRAFT_FILE: process.platform === 'win32' ? 'NUL' : '/dev/null' } })
     const fields=raw.split('\0'), commits: Array<Omit<GitHistoryNode,'decorations'>>=[]
     for(let index=0;index<fields.length && fields[index].trim();index+=10) {
       if(index+9>=fields.length) throw new Error('GIT_METADATA_INVALID')
