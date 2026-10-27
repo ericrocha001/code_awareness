@@ -216,7 +216,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   }
   const branchRequest = operation => ipc({ context: { projectId: webRepository.id, revision: 1 }, operation })
   const unauthorized = await fetch(mcpUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' }); assert.equal(unauthorized.status, 409)
-  const listTools = adapter.listTools().filter(tool => tool.name.includes('runtime_preview') || tool.name === 'run_branch_app')
+  const listTools = adapter.listTools().filter(tool => tool.name.includes('runtime_preview') || ['run_branch_app', 'prepare_branch_app'].includes(tool.name))
   assert.equal(listTools.length, 15)
   save('isolated-mcp-tools', { success: true, tools: listTools.map(tool => tool.name), unauthorizedStatus: unauthorized.status })
   for (const [name, args] of [['start_runtime_preview', { selection: selections.web, operationId: randomUUID(), command: 'forbidden' }], ['stop_runtime_preview', { sessionId: 'all' }], ['probe_runtime_preview', { sessionId: randomUUID(), probes: ['SHELL'] }], ['read_runtime_preview_evidence', { sessionId: randomUUID(), section: 'RUNTIME', limit: 1000 }]]) assert.equal((await mcp(name, args)).success, false)
