@@ -164,7 +164,14 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   const cacheOptions = { buildCache: process.argv.includes('--cache-enabled') }
   const runner = new RuntimePreviewRunner(store, new CatalogPreviewLaunchAuthority(repositories, profileStore, preflight), helper, runnerProvisioner, cacheOptions)
   const start = runner.start.bind(runner)
-  runner.start = async input => { try { return await start(input) } catch (error) { fs.writeFileSync(path.join(output, 'launch-diagnostic.txt'), String(error.stack)); console.error('LAUNCH_DIAGNOSTIC', error.message); throw error } }
+  let standbyLimit = 'normal'
+  runner.start = async input => {
+    if (input.standbyPolicy && standbyLimit !== 'normal') {
+      input = { ...input, standbyPolicy: { ...input.standbyPolicy,
+        ...(standbyLimit === 'ttl' ? { idleMs: 2000 } : standbyLimit === 'memory' ? { maxPrivateBytes: 1048576 } : { minAvailableBytes: 64 * 1024 ** 3 }) } }
+    }
+    try { return await start(input) } catch (error) { fs.writeFileSync(path.join(output, 'launch-diagnostic.txt'), String(error.stack)); console.error('LAUNCH_DIAGNOSTIC', error.message); throw error }
+  }
   const ledger = new (get('validation-ledger/validation-ledger').ValidationLedger)(path.join(directory, 'ledger.db'))
   const continuum = new (get('continuum/project-continuum-session').RepositoryContinuumSession)(path.join(directory, 'continuum'), { findByPath: folder => folder === base ? webRepository : null })
   continuum.activate(base)
@@ -252,8 +259,27 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   })
   async function* inputCommands() { while (true) { if (!commandQueue.length) await new Promise(resolve => { wake = resolve }); while (commandQueue.length) yield commandQueue.shift() } }
   const commands = inputCommands()
+  const hostSample = () => ({ at: new Date().toISOString(), processCpuMs: process.cpuUsage(), processes: app.getAppMetrics().map(value => ({ pid: value.pid, created: value.creationTime, type: value.type, cpu: value.cpu, memory: value.memory })) })
+  if (fastStart) save('standby-host-baseline', { success: true, sample: hostSample() })
   for await (const command of commands) {
     try {
+      if (fastStart && ['standby-normal', 'standby-ttl', 'standby-memory', 'standby-pressure'].includes(command)) {
+        assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state)))
+        standbyLimit = command.slice(8); save('standby-test-limit', { success: true, mode: standbyLimit, strictlyConservative: true })
+      }
+      if (fastStart && command === 'standby-wait-eviction') {
+        const deadline = Date.now() + 60000, started = performance.now()
+        let record
+        while (Date.now() < deadline) {
+          record = store.read(sessionId)
+          if (record.state === 'STOPPED' && record.resources === 'RELEASED') break
+          if (['CLEANUP_INCOMPLETE', 'OWNERSHIP_UNVERIFIED'].includes(record.state)) await runner.inspect(sessionId)
+          await new Promise(resolve => setTimeout(resolve, 500))
+        }
+        assert.equal(record.state, 'STOPPED'); assert.equal(record.resources, 'RELEASED'); assert.equal(record.process.activeProcesses, 0)
+        assert.equal(record.process.knownHandlesClosed, true); assert.equal(fs.existsSync(store.runtime(sessionId)), false)
+        save('standby-eviction', { success: true, sessionId, elapsedMs: performance.now() - started, standby: record.standby, process: record.process, host: hostSample() })
+      }
       if (fastStart && command === 'standby-trust') {
         const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
         const tree = inventory.worktrees.find(value => path.resolve(value.path).toLowerCase() === root.toLowerCase())
@@ -268,7 +294,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         branchIntent = { repositoryId: electronRepository.id, branch: tree.branch, expectedHead: tree.head, worktreeId: tree.worktreeId, operationId: randomUUID() }
         await mcp('prepare_branch_app', branchIntent)
         const result = await service.pendingResult(); save('standby-prepared', result)
-        const record = store.list().find(value => value.operationId === branchIntent.operationId)
+        const record = result?.success && result.data.kind === 'SESSION' && result.data.session ? store.read(result.data.session.sessionId) : store.list().find(value => value.operationId === branchIntent.operationId)
         if (record) { sessionId = record.sessionId; save('standby-receipt', { success: true, sessionId, state: record.state, standby: record.standby, timing: record.startTiming, process: record.process }) }
       }
       if (fastStart && command === 'standby-show') {
@@ -280,7 +306,7 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
         const after = store.read(sessionId)
         save('standby-presentation', { success: after.standby?.state === 'RUNNING', remoteMs: performance.now() - start, presentation: after.standby?.presentation, samePid: before.process.pid === after.process.pid, sameSession: before.sessionId === after.sessionId, approvals: approvals - approvalsBefore })
       }
-      if (fastStart && command === 'standby-metrics') save('standby-metrics', { success: true, sessionId, metrics: runner.slotMetrics(sessionId), standby: store.read(sessionId).standby })
+      if (fastStart && command === 'standby-metrics') save('standby-metrics', { success: true, sessionId, metrics: runner.slotMetrics(sessionId), standby: store.read(sessionId).standby, host: hostSample() })
         if (fastStart && ['cache-on', 'cache-off'].includes(command)) {
           assert.equal(baselineHost, false); assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state)))
           cacheOptions.buildCache = command === 'cache-on'
