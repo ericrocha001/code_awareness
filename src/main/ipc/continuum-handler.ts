@@ -43,6 +43,8 @@ function publicationMarkdown(fileName: unknown, rawMarkdown: string): string {
 }
 
 function validateListRequest(request: ContinuumListRequest) {
+  if (request.sortBy !== undefined && request.sortBy !== 'createdAt' && request.sortBy !== 'updatedAt') throw new Error('INVALID_ARGUMENT: invalid sortBy')
+  if (request.includeTags !== undefined && typeof request.includeTags !== 'boolean') throw new Error('INVALID_ARGUMENT: includeTags must be boolean')
   if (request.query !== undefined && typeof request.query !== 'string') throw new Error('INVALID_ARGUMENT: query must be text')
   if (request.cursor !== undefined && typeof request.cursor !== 'string') throw new Error('INVALID_ARGUMENT: cursor must be text')
   if (request.metadata !== undefined && (!request.metadata || typeof request.metadata !== 'object' || Array.isArray(request.metadata) ||
@@ -178,7 +180,7 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     const service = active(request.repositoryId)
     if (!service) return { repositoryId: null, artifacts: [] }
     validateListRequest(request)
-    const result = service.list({ ...(request.tag !== undefined ? { tag: request.tag } : {}), ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.periods !== undefined ? { periods: request.periods } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30, includeRawMarkdownTokenCount: true })
+    const result = service.list({ ...(request.sortBy !== undefined ? { sortBy: request.sortBy } : {}), ...(request.includeTags !== undefined ? { includeTags: request.includeTags } : {}), ...(request.tag !== undefined ? { tag: request.tag } : {}), ...(request.query !== undefined ? { query: request.query } : {}), ...(request.metadata !== undefined ? { metadata: request.metadata } : {}), ...(request.periods !== undefined ? { periods: request.periods } : {}), ...(request.cursor !== undefined ? { cursor: request.cursor } : {}), limit: 30, includeRawMarkdownTokenCount: true })
     if (active(request.repositoryId) !== service) throw new Error('REPOSITORY_CONTEXT_CHANGED')
     return { repositoryId: request.repositoryId, ...result }
   })

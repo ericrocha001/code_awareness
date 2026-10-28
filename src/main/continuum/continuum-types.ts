@@ -25,6 +25,8 @@ export interface Artifact {
   provenance: Record<string, MetadataValue>
 }
 export interface ArtifactDiscoveryRecord {
+  createdAt?: string
+  tags?: string[]
   revision?: number
   artifactId: string
   name: string
@@ -41,6 +43,8 @@ export interface RawMarkdownTokenUsageEnvelope {
   tokenizerEncoding: string
 }
 export interface ListArtifactsFilter {
+  sortBy?: 'createdAt' | 'updatedAt'
+  includeTags?: boolean
   tag?: string
   query?: string
   kind?: string

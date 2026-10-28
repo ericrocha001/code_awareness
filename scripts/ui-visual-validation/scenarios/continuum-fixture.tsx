@@ -11,7 +11,8 @@ let activePages = 0
 async function list(request: ContinuumListRequest) {
   const short = pagination && request.query === 'short'
   const filtered = short ? items.slice(0, 3) : items.filter((item, index) => (!request.periods?.occurred?.month || (request.periods.occurred.month === 10 ? index < 12 : index >= 12)) && item.name.toLowerCase().includes((request.query || '').toLowerCase()))
-  if (!pagination) return { repositoryId: request.repositoryId, artifacts: filtered }
+  const projected = filtered.map(item => ({ ...item, ...(request.sortBy === 'createdAt' ? { createdAt: '2026-10-01T18:00:00Z' } : {}), ...(request.includeTags ? { tags: item.artifactId === 'fixture-0' ? ['fixture', 'canonical', 'fallback', 'remaining'] : [] } : {}) }))
+  if (!pagination) return { repositoryId: request.repositoryId, artifacts: projected }
   const record = { cursor: request.cursor, query: request.query, size: 0 }
   pageRequests.push(record); document.body.dataset.pageRequests = JSON.stringify(pageRequests)
   if (request.cursor) {
@@ -22,7 +23,7 @@ async function list(request: ContinuumListRequest) {
     if (request.cursor && document.body.dataset.holdNextPage === 'true') await new Promise<void>(resolve => document.addEventListener('release-page', () => resolve(), { once: true }))
     if (request.cursor && document.body.dataset.failNextPage === 'true') { delete document.body.dataset.failNextPage; throw new Error('Falha sintética recuperável') }
     const offset = Number(request.cursor ?? 0), size = short ? 1 : 30
-    const artifacts = filtered.slice(offset, offset + size)
+    const artifacts = projected.slice(offset, offset + size)
     record.size = artifacts.length; document.body.dataset.pageRequests = JSON.stringify(pageRequests)
     return { repositoryId: request.repositoryId, artifacts, ...(offset + size < filtered.length ? { nextCursor: String(offset + size) } : {}) }
   } finally { if (request.cursor) activePages-- }

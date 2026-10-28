@@ -42,7 +42,7 @@ interface ArtifactRow {
 interface DiscoveryRow {
   revision: number
   artifact_id: string; name: string; description: string | null; kind: string; status: string | null
-  updated_at: string; relation_count: number; content_hash: string
+  created_at?: string; updated_at: string; relation_count: number; content_hash: string
 }
 
 export class ArtifactStore {
@@ -199,6 +199,7 @@ export class ArtifactStore {
         content_hash TEXT NOT NULL, provenance_json TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS artifacts_order ON artifacts(updated_at DESC, artifact_id DESC);
+      CREATE INDEX IF NOT EXISTS artifacts_creation_order ON artifacts(created_at DESC, artifact_id DESC);
       CREATE INDEX IF NOT EXISTS artifacts_kind ON artifacts(kind, updated_at DESC, artifact_id DESC);
       CREATE INDEX IF NOT EXISTS artifacts_status ON artifacts(status, updated_at DESC, artifact_id DESC);
       CREATE VIRTUAL TABLE IF NOT EXISTS artifact_search USING fts5(name, description, content='artifacts', content_rowid='rowid', tokenize='trigram');
@@ -394,6 +395,10 @@ export class ArtifactStore {
   }
 
   list(filter: ListArtifactsFilter = {}): ArtifactPage {
+    if (filter.sortBy !== undefined && filter.sortBy !== 'createdAt' && filter.sortBy !== 'updatedAt') throw new Error('INVALID_ARGUMENT: invalid sortBy')
+    if (filter.includeTags !== undefined && typeof filter.includeTags !== 'boolean') throw new Error('INVALID_ARGUMENT: includeTags must be boolean')
+    const timestampKey = filter.sortBy === 'createdAt' ? 'createdAt' : 'updatedAt'
+    const timestampColumn = timestampKey === 'createdAt' ? 'created_at' : 'updated_at'
     validatePeriods(filter.periods, filter.metadata)
     const limit = filter.limit ?? 20
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new Error('INVALID_ARGUMENT: limit must be 1-100')
@@ -435,23 +440,36 @@ export class ArtifactStore {
       }
       clauses.push(`a.artifact_id IN (${parts.join(' UNION ')})`)
     } else if (filter.direction || filter.relationKind) throw new Error('INVALID_ARGUMENT: relation filters require relatedToArtifactId')
-    const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, includeRawMarkdownTokenCount, ...selection } = filter
+    const { cursor: omittedCursor, limit: omittedLimit, metadataKeys: omittedKeys, includeRawMarkdownTokenCount, sortBy, includeTags, ...legacySelection } = filter
+    const selection = sortBy === 'createdAt' ? { ...legacySelection, sortBy } : legacySelection
     const signature = computeContentHash(this.repositoryId + ':' + canonicalJson(normalizeMetadataValue(selection)))
     if (filter.cursor) {
-      let cursor: { updatedAt: string; artifactId: string; signature: string }
+      let cursor: { createdAt?: string; updatedAt?: string; artifactId: string; signature: string }
       try { cursor = JSON.parse(Buffer.from(filter.cursor, 'base64url').toString('utf8')) } catch { throw new Error('INVALID_ARGUMENT: invalid cursor') }
-      if (!cursor || cursor.signature !== signature || typeof cursor.updatedAt !== 'string' || typeof cursor.artifactId !== 'string') throw new Error('INVALID_ARGUMENT: cursor does not match repository or filters')
-      clauses.push('(a.updated_at < ? OR (a.updated_at = ? AND a.artifact_id < ?))'); params.push(cursor.updatedAt, cursor.updatedAt, cursor.artifactId)
+      if (!cursor || cursor.signature !== signature || typeof cursor[timestampKey] !== 'string' || typeof cursor.artifactId !== 'string') throw new Error('INVALID_ARGUMENT: cursor does not match repository or filters')
+      clauses.push(`(a.${timestampColumn} < ? OR (a.${timestampColumn} = ? AND a.artifact_id < ?))`); params.push(cursor[timestampKey]!, cursor[timestampKey]!, cursor.artifactId)
     }
     const rows = this.db.prepare(`SELECT a.artifact_id, a.revision, a.content_hash, a.name, a.description, a.kind, a.status, a.updated_at,
+      ${timestampKey === 'createdAt' ? 'a.created_at,' : ''}
       (SELECT count(*) FROM artifact_relations r WHERE r.source_id = a.artifact_id OR r.target_id = a.artifact_id) AS relation_count
       FROM artifacts a ${clauses.length ? 'WHERE ' + clauses.join(' AND ') : ''}
-      ORDER BY a.updated_at DESC, a.artifact_id DESC LIMIT ?`).all(...params, limit + 1) as DiscoveryRow[]
+      ORDER BY a.${timestampColumn} DESC, a.artifact_id DESC LIMIT ?`).all(...params, limit + 1) as DiscoveryRow[]
     const more = rows.length > limit
     const selected = rows.slice(0, limit)
+    const tagsByArtifact = new Map<string, string[]>()
+    if (includeTags && selected.length) {
+      const memberships = this.db.prepare(`SELECT artifact_id, slug FROM artifact_tags WHERE artifact_id IN (${selected.map(() => '?').join(',')}) ORDER BY artifact_id, slug`)
+        .all(...selected.map(row => row.artifact_id)) as { artifact_id: string; slug: string }[]
+      for (const { artifact_id, slug } of memberships) {
+        const tags = tagsByArtifact.get(artifact_id) ?? []
+        tags.push(slug); tagsByArtifact.set(artifact_id, tags)
+      }
+    }
     const artifacts: ArtifactDiscoveryRecord[] = selected.map(row => {
       const record: ArtifactDiscoveryRecord = { revision: row.revision, artifactId: row.artifact_id, name: row.name, kind: row.kind,
         updatedAt: row.updated_at, relationCount: row.relation_count,
+        ...(timestampKey === 'createdAt' ? { createdAt: row.created_at } : {}),
+        ...(includeTags ? { tags: tagsByArtifact.get(row.artifact_id) ?? [] } : {}),
         ...(row.description !== null ? { description: row.description } : {}), ...(row.status !== null ? { status: row.status } : {}) }
       if (filter.metadataKeys?.length) {
         record.metadata = Object.create(null) as Record<string, MetadataValue>
@@ -461,6 +479,7 @@ export class ArtifactStore {
       return record
     })
     const last = selected[selected.length - 1]
+    const nextCursor = more ? Buffer.from(JSON.stringify({ [timestampKey]: last[timestampColumn], artifactId: last.artifact_id, signature })).toString('base64url') : undefined
     if (includeRawMarkdownTokenCount === true && selected.length > 0) {
       const entries = selected.map(row => ({ artifactId: row.artifact_id, revision: row.revision, contentHash: row.content_hash }))
       const counts = this.measureTokenCountBatch(entries)
@@ -469,9 +488,9 @@ export class ArtifactStore {
         const result = counts.get(record.artifactId)
         if (result !== undefined) record.rawMarkdownTokenCount = result.rawMarkdownTokenCount
       }
-      return { artifacts, ...(more ? { nextCursor: Buffer.from(JSON.stringify({ updatedAt: last.updated_at, artifactId: last.artifact_id, signature })).toString('base64url') } : {}), ...(tokenizer ? { tokenizerId: tokenizer.tokenizerId, tokenizerEncoding: tokenizer.tokenizerEncoding } : {}) }
+      return { artifacts, ...(nextCursor ? { nextCursor } : {}), ...(tokenizer ? { tokenizerId: tokenizer.tokenizerId, tokenizerEncoding: tokenizer.tokenizerEncoding } : {}) }
     }
-    return { artifacts, ...(more ? { nextCursor: Buffer.from(JSON.stringify({ updatedAt: last.updated_at, artifactId: last.artifact_id, signature })).toString('base64url') } : {}) }
+    return { artifacts, ...(nextCursor ? { nextCursor } : {}) }
   }
 
   importArtifact(source: string, input: CreateArtifactInput): Artifact {

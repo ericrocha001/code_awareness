@@ -88,6 +88,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   const root = useRef<HTMLDivElement>(null)
   const [bulkBusy, setBulkBusy] = useState(false)
   const [tags, setTags] = useState<ContinuumTag[]>([])
+  const tagNames = useMemo(() => new Map(tags.map(tag => [tag.slug, tag.name])), [tags])
   const [tag, setTag] = useState<string | undefined>()
   const [tagManager, setTagManager] = useState(false)
   const [builder, setBuilder] = useState<{ initial?: BundleComponentSource } | null>(null)
@@ -96,6 +97,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
 
   const [markdownDraft, setMarkdownDraft] = useState<{ repositoryId: string; fileName: string; rawMarkdown: string } | null>(null)
   const [view, setView] = useState<'timeline' | 'graph'>('timeline')
+  const [sortBy, setSortBy] = useState<'createdAt' | 'updatedAt'>('createdAt')
   const [repositoryId, setRepositoryId] = useState<string | null>(null)
   const [facets, setFacets] = useState<ContinuumFacet[]>([])
   const [items, setItems] = useState<ContinuumItem[]>([])
@@ -124,7 +126,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
   const [inspectorOpen, setInspectorOpen] = useState(false)
   const listGeneration = useRef(0)
   const listReadyGeneration = useRef<number | null>(null)
-  const paginationKey = `${bulkContext}:${view}`
+  const paginationKey = `${bulkContext}:${view}:${sortBy}`
   const pagination = useRef({ key: paginationKey, inFlight: false, cursors: new Set<string>() })
   if (pagination.current.key !== paginationKey) pagination.current = { key: paginationKey, inFlight: false, cursors: new Set<string>() }
   const [pageState, setPageState] = useState<{ scope: object; pending: boolean; error: string } | null>(null)
@@ -280,7 +282,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     setItems([]); setCursor(undefined)
     if (!repositoryId) return
     setLoading(true)
-    window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}) }).then(result => {
+    window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, sortBy, includeTags: true, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}) }).then(result => {
       if (cancelled || currentPath.current !== path || generation !== listGeneration.current) return
       listReadyGeneration.current = result.repositoryId === repositoryId ? generation : null
       setItems(result.repositoryId === repositoryId ? result.artifacts : [])
@@ -288,7 +290,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     }).catch(reason => { if (!cancelled) setError(String(reason)) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true; listReadyGeneration.current = null; listGeneration.current++ }
-  }, [repositoryId, query, metadata, periods, tag, refresh])
+  }, [repositoryId, query, metadata, periods, tag, refresh, sortBy])
 
   useEffect(() => {
     let cancelled = false
@@ -320,7 +322,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     scope.inFlight = true; scope.cursors.add(cursor)
     setPageState({ scope, pending: true, error: '' })
     try {
-      const result = await window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}), cursor })
+      const result = await window.codeAwareness.listContinuumArtifacts({ repositoryId, query, metadata, sortBy, includeTags: true, ...(tag ? { tag } : {}), ...(Object.keys(periods).length ? { periods } : {}), cursor })
       if (scope !== pagination.current || generation !== listGeneration.current) return
       if (result.repositoryId !== repositoryId) throw new Error('O contexto do repositório mudou; atualize a Timeline.')
       const ids = new Set(items.map(item => item.artifactId))
@@ -409,6 +411,12 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
               buttons[mode === 'timeline' ? 1 : 0].focus()
             }}>{mode === 'timeline' ? 'Timeline' : 'Graph'}</button>)}
           </div></div>
+          {view === 'timeline' && <div className="continuum-timeline-order"><label>Ordenar por
+            <select value={sortBy} disabled={bulkPending} onChange={event => {
+              setSortBy(event.target.value as 'createdAt' | 'updatedAt')
+              if (timelineScroll.current) timelineScroll.current.scrollTop = 0
+            }}><option value="createdAt">Data de criação</option><option value="updatedAt">Data de atualização</option></select>
+          </label></div>}
           {view === 'graph' && repositoryId && boundPath.current === path && <React.Suspense fallback={<p role="status">Carregando Graph…</p>}><ContinuumGraph key={`${path}:${repositoryId}`} repositoryId={repositoryId} query={query} tag={tag} metadata={metadata} periods={periods} refresh={refresh} selectedId={selectedId} onSelect={id => { setSelectedId(id); setInspectorOpen(true) }} /></React.Suspense>}
           {view === 'timeline' && repositoryId && <>
             <div className="continuum-selection-controls"><button disabled={bulkPending || loading} onClick={() => bulk.replace([...new Map([...bulk.selected, ...items].map(item => [item.artifactId, item])).values()])}>Selecionar carregados</button><button disabled={bulkPending || loading} onClick={() => void bulk.all()}>Selecionar todos os resultados do filtro</button></div>
@@ -419,15 +427,20 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
           <div className="continuum-pane-scroll" hidden={view !== 'timeline'} aria-busy={loading} ref={timelineScroll}>
             {loading && <p role="status" className="continuum-hint">Carregando artifacts…</p>}
             {items.map((item, index) => <React.Fragment key={`${repositoryId}:${item.artifactId}`}>
-              {(index === 0 || new Date(items[index - 1].updatedAt).toDateString() !== new Date(item.updatedAt).toDateString()) &&
-                <div className="continuum-date">{new Date(item.updatedAt).toLocaleDateString(undefined, { dateStyle: 'long' })}</div>}
+              {(index === 0 || new Date(items[index - 1][sortBy] ?? '').toDateString() !== new Date(item[sortBy] ?? '').toDateString()) &&
+                <div className="continuum-date">{item[sortBy] ? new Date(item[sortBy]!).toLocaleDateString(undefined, { dateStyle: 'long' }) : 'Data indisponível'}</div>}
               <div className="continuum-selectable-row"><input type="checkbox" aria-label={`Selecionar ${item.name}`} disabled={bulkPending} checked={bulk.selected.some(source => source.artifactId === item.artifactId)} onChange={() => bulk.toggle(item)} />
               <button data-artifact-id={item.artifactId} className={`continuum-item${selectedId === item.artifactId ? ' selected' : ''}`} aria-pressed={selectedId === item.artifactId}
                 onClick={() => { setSelectedId(item.artifactId); setInspectorOpen(true) }}>
                 <span className="continuum-node" />{item.kind === 'VISUAL_REFERENCE' && repositoryId
                   ? <VisualThumbnail repositoryId={repositoryId} artifactId={item.artifactId} root={timelineScroll} enqueue={enqueueThumbnail} /> : <FileText size={19} />}
                 <span className="continuum-item-content"><strong>{item.name}</strong><span className="continuum-badge">{item.kind === 'VISUAL_REFERENCE' ? <><ImageIcon size={13} aria-hidden="true" /> Referência visual</> : item.kind}</span>
-                  {item.description && <span className="continuum-description">{item.description}</span>}<time dateTime={item.updatedAt}>{timestamp(item.updatedAt)}</time>
+                  {item.description && <span className="continuum-description">{item.description}</span>}
+                  {!!item.tags?.length && <span className="continuum-item-tags">
+                    {item.tags.slice(0, 3).map(slug => <span className="continuum-item-tag" key={slug}>{tagNames.get(slug) ?? slug}</span>)}
+                    {item.tags.length > 3 && <span className="continuum-item-tag" title={item.tags.slice(3).map(slug => tagNames.get(slug) ?? slug).join(', ')} aria-label={`Outras tags: ${item.tags.slice(3).map(slug => tagNames.get(slug) ?? slug).join(', ')}`}>+{item.tags.length - 3}</span>}
+                  </span>}
+                  <time dateTime={item[sortBy]}>{sortBy === 'createdAt' ? 'Criado' : 'Atualizado'} · {item[sortBy] ? timestamp(item[sortBy]!) : 'Data indisponível'}</time>
                   <small title="Estimativa cl100k_base do Markdown literal integral, incluindo YAML. Referências visuais contam apenas texto, sem pixels.">{item.rawMarkdownTokenCount === undefined ? 'Tokens indisponíveis' : `≈ ${item.rawMarkdownTokenCount.toLocaleString()} tokens${item.kind === 'VISUAL_REFERENCE' ? ' de texto' : ''}`}</small></span>
               </button></div>
             </React.Fragment>)}
