@@ -1,3 +1,4 @@
+import type { PreviewObservationState, PreviewObservationSink } from '../../../shared/types/runtime-preview-types'
 import Database from 'better-sqlite3'
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, watch } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
@@ -58,37 +59,48 @@ function inspectCorpus(db: Database.Database, repositoryId: string, policy: NonN
   return { bytes, artifacts, media }
 }
 
-export interface PreviewCorpusObservation { assertCurrent(): void; close(): void }
+export interface PreviewCorpusObservation { readonly epoch: number; readonly state: PreviewObservationState; assertCurrent(): void | Promise<void>; close(): void }
 export interface PreviewContextProvisioner {
-  observeChanges?(profile: PreviewProfile, invalidate: () => void): PreviewCorpusObservation
+  observeChanges?(profile: PreviewProfile, invalidate: PreviewObservationSink): PreviewCorpusObservation
   prepare(input: { profile: PreviewProfile; selection: PreviewSelection; sessionId: string; directory: string; worktree: string; source: NonNullable<PreviewPreflight['snapshot']>; timing?: PreviewStartClock; signal?: AbortSignal }): Promise<PreviewContextManifest>
 }
 
 export class RepositoryPreviewContextProvisioner implements PreviewContextProvisioner {
-  constructor(private readonly catalog: Pick<RepositoryCatalogService, 'resolveAvailable'>, private readonly continuumBase: string) {}
-  observeChanges(profile: PreviewProfile, invalidate: () => void): PreviewCorpusObservation {
-    if (profile.bootstrap?.dataPolicy !== 'REPOSITORY_SNAPSHOT') return { assertCurrent() {}, close() {} }
-    const file = this.source(profile.repositoryId)
-    const identity = statSync(file, { bigint: true }), db = openReadOnly(file)
-    let closed = false, fileChanged = false
+  constructor(private readonly catalog: Pick<RepositoryCatalogService, 'resolveAvailable'>, private readonly continuumBase: string, private readonly openSource: (file: string) => Pick<Database.Database, 'pragma' | 'close'> = openReadOnly) {}
+  observeChanges(profile: PreviewProfile, invalidate: PreviewObservationSink): PreviewCorpusObservation {
+    if (profile.bootstrap?.dataPolicy !== 'REPOSITORY_SNAPSHOT') return { epoch: 0, state: 'CURRENT', assertCurrent() {}, close() {} }
+    const file = this.source(profile.repositoryId), identity = statSync(file, { bigint: true }), db = this.openSource(file)
+    let closed = false, lost = false, epoch = 0, burst = 0, state: PreviewObservationState = 'CURRENT'
     let watcher: ReturnType<typeof watch> | undefined
-    try {
-    const version = db.pragma('data_version', { simple: true })
-    // The WAL-index coordinates readers; it does not contain committed corpus data.
-    watcher = watch(dirname(file), { persistent: false }, (_event, name) => {
-      if (!closed && (!name || ['continuum.db', 'continuum.db-wal', 'continuum.db-journal'].includes(String(name)))) { fileChanged = true; invalidate() }
-    })
-    watcher.on('error', () => { fileChanged = true; invalidate() })
-    return {
-      assertCurrent: () => {
-        try {
-          if (closed) throw new Error('PREVIEW_CORPUS_OBSERVER_CLOSED')
-          const current = statSync(this.source(profile.repositoryId), { bigint: true })
-          if (fileChanged || current.dev !== identity.dev || current.ino !== identity.ino || db.pragma('data_version', { simple: true }) !== version) throw new Error('PREPARED_CORPUS_CHANGED')
-        } catch (error) { invalidate(); throw error }
-      },
-      close: () => { if (!closed) { closed = true; watcher?.close(); db.close() } }
+    const report = (decision: 'NO_CHANGE' | 'CHANGED' | 'COVERAGE_LOST', reason: string) => {
+      state = decision === 'NO_CHANGE' ? 'CURRENT' : decision === 'CHANGED' ? 'INVALID' : 'UNVERIFIABLE'
+      if (decision === 'NO_CHANGE') burst = 0
+      invalidate({ origin: 'CORPUS', event: 'verify', path: 'continuum.db', epoch, decision, reason })
+      if (decision !== 'NO_CHANGE') throw new Error(reason)
     }
+    try {
+      const version = db.pragma('data_version', { simple: true })
+      watcher = watch(dirname(file), { persistent: false }, (event, name) => {
+        if (closed) return
+        if (!name) { lost = true; state = 'UNVERIFIABLE' }
+        else if (!['continuum.db', 'continuum.db-wal', 'continuum.db-journal'].includes(String(name))) return
+        else state = 'SUSPECT'
+        if (++burst > 1024) { lost = true; state = 'UNVERIFIABLE' }
+        invalidate({ origin: 'CORPUS', event, path: name ? String(name) : 'UNKNOWN', epoch: ++epoch })
+      })
+      watcher.on('error', () => { if (!closed) { lost = true; state = 'UNVERIFIABLE'; invalidate({ origin: 'CORPUS', event: 'error', path: 'UNKNOWN', epoch: ++epoch }) } })
+      watcher.on('close', () => { if (!closed) { lost = true; state = 'UNVERIFIABLE'; invalidate({ origin: 'CORPUS', event: 'close', path: 'UNKNOWN', epoch: ++epoch }) } })
+      return { get epoch() { return epoch }, get state() { return state }, assertCurrent: () => {
+        if (state === 'INVALID') throw new Error('PREPARED_CORPUS_CHANGED')
+        if (closed || lost) return report('COVERAGE_LOST', 'PREVIEW_CORPUS_OBSERVER_LOST')
+        let current: import('node:fs').BigIntStats, currentVersion: unknown
+        try { current = statSync(this.source(profile.repositoryId), { bigint: true }) }
+        catch { return report('COVERAGE_LOST', 'PREVIEW_CORPUS_UNVERIFIABLE') }
+        if (current.dev !== identity.dev || current.ino !== identity.ino) return report('CHANGED', 'PREPARED_CORPUS_IDENTITY_CHANGED')
+        try { currentVersion = db.pragma('data_version', { simple: true }) } catch { return report('COVERAGE_LOST', 'PREVIEW_CORPUS_UNVERIFIABLE') }
+        if (currentVersion !== version) return report('CHANGED', 'PREPARED_CORPUS_CHANGED')
+        if (state === 'SUSPECT') report('NO_CHANGE', 'SQLITE_VERSION_AND_IDENTITY_CURRENT')
+      }, close: () => { if (!closed) { closed = true; watcher?.close(); db.close() } } }
     } catch (error) { watcher?.close(); db.close(); throw error }
   }
 

@@ -16,3 +16,10 @@ export interface PreviewPreflight {
   readiness: 'NOT_OBSERVED'
   process: 'NOT_IMPLEMENTED'
 }
+
+export type PreviewObservationState = 'CURRENT' | 'SUSPECT' | 'INVALID' | 'UNVERIFIABLE'
+export interface PreviewObservationEvent {
+  origin: 'GIT' | 'SOURCE' | 'CORPUS'; event: string; path: string; epoch: number
+  decision?: 'NO_CHANGE' | 'CHANGED' | 'COVERAGE_LOST'; reason?: string
+}
+export type PreviewObservationSink = (event: PreviewObservationEvent) => void

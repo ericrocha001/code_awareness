@@ -669,6 +669,15 @@ export class GitService implements FileListingPort {
       readOnly ? { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0' } } : undefined)
   }
 
+  async getRuntimePreviewIndexRevision(root: string): Promise<string> {
+    const [entries, flags] = await Promise.all([
+      this.runGit(['ls-files', '--stage', '-z'], root, { env: this.localReadEnvironment() }),
+      this.runGit(['ls-files', '-v', '-z'], root, { env: this.localReadEnvironment() })
+    ])
+    if (flags.split('\0').filter(Boolean).some(entry => /^[a-zS]/.test(entry))) throw new Error('WORKTREE_HIDDEN_INDEX_FLAGS')
+    return createHash('sha256').update(entries).digest('hex')
+  }
+
   async getIndexRevision(dirPath: string): Promise<string> {
     return createHash('sha256').update(await this.runGit(['ls-files', '--stage', '-z'], dirPath)).digest('hex')
   }

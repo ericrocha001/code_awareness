@@ -275,6 +275,58 @@ async function main(directory, { app, BrowserWindow, ipcMain }) {
   if (fastStart) save('standby-host-baseline', { success: true, sample: hostSample() })
   for await (const command of commands) {
     try {
+      if (fastStart && command === 'unit-d-cycle') {
+        let failure, cycleSession
+        const approvalsBefore = approvals
+        try {
+          const context = await repositories.open(electronRepository.id), inventory = await context.git.getBranchInventory()
+          const tree = inventory.worktrees.find(value => path.resolve(value.path).toLowerCase() === root.toLowerCase())
+          assert.ok(tree, 'UNIT_D_CHECKOUT_UNAVAILABLE')
+          branchIntent = { repositoryId: electronRepository.id, branch: tree.branch, expectedHead: tree.head, worktreeId: tree.worktreeId, operationId: randomUUID() }
+          await mcp('prepare_branch_app', branchIntent)
+          const prepared = await service.pendingResult(); save('unit-d-prepare', prepared)
+          const before = store.list().find(value => value.operationId === branchIntent.operationId)
+          if (before) { cycleSession = before.sessionId; sessionId = before.sessionId }
+          if (!before || before.standby?.state !== 'QUIESCENT') throw Error(before?.failure ?? (prepared?.success === false ? prepared.code : 'UNIT_D_NOT_PREPARED'))
+          const slot = runner.slots.get(sessionId), epoch = slot.observations().epoch
+          const admin = await git.getWorktreeDirectory(root), index = path.join(admin, 'index'), fingerprint = hash(fs.readFileSync(index))
+          fs.utimesSync(index, new Date(), new Date())
+          const deadline = Date.now() + 5000
+          while (slot.observations().epoch <= epoch && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10))
+          assert.ok(slot.observations().epoch > epoch, 'UNIT_D_GIT_NOTIFICATION_NOT_OBSERVED')
+          assert.equal(hash(fs.readFileSync(index)), fingerprint, 'UNIT_D_INDEX_CONTENT_CHANGED')
+          const started = performance.now()
+          await mcp('run_branch_app', { ...branchIntent, operationId: randomUUID() })
+          const shown = await service.pendingResult(); save('unit-d-show', shown)
+          const after = store.read(sessionId)
+          if (!shown?.success || after.standby?.state !== 'RUNNING') throw Error(shown?.code ?? after.standby?.reason ?? 'UNIT_D_SHOW_FAILED')
+          assert.equal(after.sessionId, before.sessionId); assert.equal(after.process.pid, before.process.pid); assert.equal(after.process.created, before.process.created)
+          assert.equal(approvals, approvalsBefore, 'UNIT_D_UNEXPECTED_APPROVAL')
+          assert.equal(after.standby.observations.state, 'CURRENT')
+          assert.ok(after.standby.observations.events.some(event => event.origin === 'GIT' && event.epoch > epoch && event.decision === 'NO_CHANGE'), 'UNIT_D_MATERIALITY_NOT_PROVED')
+          save('unit-d-presentation', { success: true, sessionId, pid: after.process.pid, samePid: true, sameSession: true, approvals: approvals - approvalsBefore,
+            prepareMs: before.startTiming?.technicalMs, remoteMs: performance.now() - started, presentation: after.standby.presentation, observations: after.standby.observations })
+          await mcp('prepare_branch_app', { ...branchIntent, operationId: randomUUID() })
+          const parked = await service.pendingResult(); save('unit-d-quiesce', parked)
+          const quiescent = store.read(sessionId)
+          if (!parked?.success || quiescent.standby?.state !== 'QUIESCENT') throw Error(parked?.code ?? quiescent.standby?.reason ?? 'UNIT_D_QUIESCE_FAILED')
+          assert.equal(quiescent.standby.observations.state, 'CURRENT')
+        } catch (error) { failure = error.message; save('unit-d-failure', { success: false, reasonCode: failure }) }
+        finally {
+          if (cycleSession) {
+            let terminal = store.read(cycleSession)
+            if (terminal.resources !== 'RELEASED') {
+              await mcp('stop_runtime_preview', { sessionId: cycleSession }); await service.pendingResult(); terminal = store.read(cycleSession)
+              if (terminal.resources !== 'RELEASED') terminal = await runner.inspect(cycleSession)
+            }
+            const released = terminal.resources === 'RELEASED' && terminal.process?.activeProcesses === 0 && terminal.process?.knownHandlesClosed && !fs.existsSync(store.runtime(cycleSession))
+            save('unit-d-cleanup', { success: !!released, sessionId: cycleSession, state: terminal.state, resources: terminal.resources, process: terminal.process, runtimeRemoved: !fs.existsSync(store.runtime(cycleSession)), observations: terminal.standby?.observations })
+            if (!released) failure = 'UNIT_D_CLEANUP_NOT_PROVED'
+            if (!failure && terminal.state !== 'STOPPED') failure = 'UNIT_D_STOP_NOT_PROVED'
+          }
+        }
+        save('unit-d-cycle', { success: !failure, reasonCode: failure ?? null, sessionId: cycleSession ?? null, coldLaunches: cycleSession ? 1 : 0 })
+      }
       if (fastStart && ['standby-normal', 'standby-ttl', 'standby-memory', 'standby-pressure'].includes(command)) {
         assert.ok(store.list().every(record => ['STOPPED', 'FAILED'].includes(record.state)))
         standbyLimit = command.slice(8); save('standby-test-limit', { success: true, mode: standbyLimit, strictlyConservative: true })

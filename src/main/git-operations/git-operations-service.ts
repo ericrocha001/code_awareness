@@ -1,3 +1,4 @@
+import type { PreviewObservationSink, PreviewObservationState } from '../../shared/types/runtime-preview-types'
 import { readWorktreeProvenance } from './git-worktree-provenance'
 import { GitAtlasReader } from './git-atlas'
 import type { GitAtlasQuery } from '../../shared/types/git-atlas-types'
@@ -613,7 +614,7 @@ export class GitOperationsService {
     if (await this.git.resolveCommit(record.path, expected.ref) !== expected.head || chronology(common, expected.ref).generation !== expected.branchGeneration) fail('BRANCH_CHANGED')
     if (!this.coordinationIdentity?.isActive()) fail('WORKTREE_REPOSITORY_CHANGED')
   }
-  async watchRuntimePreviewTarget(expected: Parameters<GitOperationsService['verifyRuntimePreviewTarget']>[0], invalidate: () => void) {
+  async watchRuntimePreviewTarget(expected: Parameters<GitOperationsService['verifyRuntimePreviewTarget']>[0], invalidate: PreviewObservationSink) {
     await this.verifyRuntimePreviewTarget(expected)
     const common = realpathSync(await this.git.getCommonDirectory(expected.path)), admin = realpathSync(await this.git.getWorktreeDirectory(expected.path))
     const files = [join(admin, 'index'), join(admin, 'HEAD'), join(admin, 'commondir'), join(admin, 'gitdir'), join(admin, 'config.worktree'),
@@ -623,10 +624,32 @@ export class GitOperationsService {
       try { const stat = lstatSync(file); if (!stat.isFile() || stat.isSymbolicLink()) throw new Error('PREPARED_GIT_METADATA_UNVERIFIABLE'); return ownershipDigest(readFileSync(file).toString('base64')) }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error }
     }
-    const before = files.map(fingerprint)
-    const assertCurrent = () => {
-      this.worktrees!.assertObservedSelection(expected.worktreeId, expected.generation, expected.path)
-      if (existsSync(join(common, expected.ref + '.lock')) || files.some((file, index) => fingerprint(file) !== before[index])) throw new Error('PREPARED_GIT_METADATA_CHANGED')
+    let before = files.map(fingerprint), epoch = 0, state: PreviewObservationState = 'CURRENT', lost = false, closed = false
+    const indexRevision = await this.git.getRuntimePreviewIndexRevision(expected.path)
+    const report = (decision: 'NO_CHANGE' | 'CHANGED' | 'COVERAGE_LOST', reason: string) => {
+      state = decision === 'NO_CHANGE' ? 'CURRENT' : decision === 'CHANGED' ? 'INVALID' : 'UNVERIFIABLE'
+      invalidate({ origin: 'GIT', event: 'verify', path: 'UNKNOWN', epoch, decision, reason })
+      if (decision !== 'NO_CHANGE') throw new Error(reason)
+    }
+    const assertCurrent = async () => {
+      if (state === 'INVALID') throw new Error('PREPARED_GIT_METADATA_CHANGED')
+      if (closed || lost) return report('COVERAGE_LOST', 'PREPARED_GIT_OBSERVER_LOST')
+      const observedEpoch = epoch
+      let current: Array<string | null>
+      try { this.worktrees!.assertObservedSelection(expected.worktreeId, expected.generation, expected.path); current = files.map(fingerprint) }
+      catch (error) { return report('COVERAGE_LOST', error instanceof Error && error.message === 'GIT_OPERATION_IN_PROGRESS' ? 'PREPARED_GIT_OPERATION_IN_PROGRESS' : 'PREPARED_GIT_IDENTITY_UNVERIFIABLE') }
+      if (existsSync(join(common, expected.ref + '.lock'))) return report('COVERAGE_LOST', 'PREPARED_GIT_OPERATION_IN_PROGRESS')
+      if (current.some((value, index) => index > 0 && value !== before[index]) || chronology(common, expected.ref).generation !== expected.branchGeneration) return report('CHANGED', 'PREPARED_GIT_METADATA_CHANGED')
+      if (current[0] !== before[0]) {
+        let revision: string
+        try { revision = await this.git.getRuntimePreviewIndexRevision(expected.path) }
+        catch (error) { return report('COVERAGE_LOST', error instanceof Error && error.message === 'WORKTREE_HIDDEN_INDEX_FLAGS' ? 'PREPARED_INDEX_HIDDEN_FLAGS' : 'PREPARED_INDEX_UNVERIFIABLE') }
+        if (observedEpoch !== epoch || current[0] !== fingerprint(files[0])) { state = 'SUSPECT'; return }
+        if (revision !== indexRevision) return report('CHANGED', 'PREPARED_INDEX_ENTRIES_CHANGED')
+      }
+      if (observedEpoch !== epoch) { state = 'SUSPECT'; return }
+      before = current
+      if (state === 'SUSPECT') report('NO_CHANGE', 'GIT_IDENTITY_AND_INDEX_CURRENT')
     }
     const watchers: ReturnType<typeof watch>[] = []
     try {
@@ -640,15 +663,19 @@ export class GitOperationsService {
       for (const [directory, paths] of groups) {
         const watcher = watch(directory, { recursive: [...paths].some(path => path.includes('/')), persistent: false }, (_event, file) => {
           const path = file?.toString().replaceAll('\\', '/')
-          if (!path || paths.has(path)) invalidate()
+          if (!path || paths.has(path)) {
+            if (!path) { lost = true; state = 'UNVERIFIABLE' } else state = 'SUSPECT'
+            invalidate({ origin: 'GIT', event: _event, path: path && !path.includes('..') ? 'git/' + path : 'UNKNOWN', epoch: ++epoch })
+          }
         })
-        watcher.on('error', invalidate); watchers.push(watcher)
+        watcher.on('error', () => { lost = true; state = 'UNVERIFIABLE'; invalidate({ origin: 'GIT', event: 'error', path: 'UNKNOWN', epoch: ++epoch }) })
+        watcher.on('close', () => { if (!closed) { lost = true; state = 'UNVERIFIABLE'; invalidate({ origin: 'GIT', event: 'close', path: 'UNKNOWN', epoch: ++epoch }) } }); watchers.push(watcher)
       }
       await this.verifyRuntimePreviewTarget(expected)
-      assertCurrent()
+      await assertCurrent()
       return {
-        assertCurrent,
-        close: () => { for (const watcher of watchers) watcher.close() }
+        get epoch() { return epoch }, get state() { return state }, assertCurrent,
+        close: () => { closed = true; for (const watcher of watchers) watcher.close() }
       }
     } catch (error) { for (const watcher of watchers) watcher.close(); throw error }
   }
