@@ -1,0 +1,65 @@
+const fs = require('node:fs')
+const path = require('node:path')
+const { createHash } = require('node:crypto')
+const { buildSync } = require('esbuild')
+const { clipboard } = require('electron')
+exports.preload = path.join(__dirname, 'bundle-builder-preload.cjs')
+exports.run = async ctx => {
+  if (!process.env.BUNDLE_CORPUS_FILE) throw new Error('BUNDLE_CORPUS_FILE required: read-only Continuum snapshots')
+  const corpus = JSON.parse(fs.readFileSync(process.env.BUNDLE_CORPUS_FILE, 'utf8'))
+  if (corpus.length !== 4) throw new Error('Expected the four investigation documents')
+  const sha = value => createHash('sha256').update(value).digest('hex')
+  for (const item of corpus) if (sha(item.rawMarkdown) !== item.contentHash) throw new Error('CORPUS_HASH_MISMATCH')
+  buildSync({ entryPoints: [path.join(__dirname, 'bundle-builder-backend.ts')], bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'better-sqlite3', 'sharp', 'archiver', 'js-tiktoken'], outfile: path.join(ctx.evidenceDir, 'backend.cjs') })
+  const backend = require(path.join(ctx.evidenceDir, 'backend.cjs')).start(path.join(ctx.temporary, 'continuum.db'), corpus)
+  try {
+    buildSync({ entryPoints: [path.join(__dirname, 'bundle-builder-fixture.tsx')], bundle: true, platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, outfile: path.join(ctx.temporary, 'fixture.js'), loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' } })
+    const page = path.join(ctx.temporary, 'index.html')
+    fs.writeFileSync(page, '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}body{background:var(--bg-primary);color:var(--text-primary)}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>')
+    await ctx.load(page); await ctx.viewport(1672, 941)
+    await ctx.waitFor(() => document.querySelectorAll('.continuum-builder-catalog > div button').length === 4)
+    await ctx.capture('builder-empty-dark')
+    for (let index = 0; index < 4; index++) {
+      await ctx.click(`.continuum-builder-catalog > div:nth-child(${index + 1}) button`)
+      await ctx.waitFor(count => document.querySelectorAll('.continuum-builder-members li').length === count, index + 1)
+    }
+    await ctx.click('[aria-label="Compressão PAKT"]')
+    ctx.window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' })
+    ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' })
+    ctx.window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' })
+    ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' })
+    await ctx.waitFor(() => document.querySelector('[aria-label="Compressão PAKT"]').value === 'strong')
+    await ctx.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === 'Gerar prévia').click())
+    await ctx.waitFor(() => !!document.querySelector('[aria-label="Prévia do pacote"]'))
+    await ctx.capture('builder-reference-wide-dark')
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
+    await ctx.capture('builder-reference-wide-light')
+    for (const theme of ['light', 'dark']) {
+      await ctx.evaluate(value => { document.body.dataset.theme = value }, theme)
+      ctx.check(`${theme}: readable typography and full-size dropdown fields`, await ctx.evaluate(() => {
+        const selectors = ['.continuum-builder-stage p', '.continuum-builder-source', '.continuum-builder-source small', '.continuum-builder-member', '.continuum-builder-metrics small', '.continuum-builder-select select']
+        const readable = selectors.every(selector => [...document.querySelectorAll(selector)].every(node => parseFloat(getComputedStyle(node).fontSize) >= 14))
+        return readable && [...document.querySelectorAll('.continuum-builder-select select')].every(node => node.getBoundingClientRect().height >= 44 && node.getBoundingClientRect().width >= 200)
+      }))
+    }
+    await ctx.evaluate(() => document.querySelector('.continuum-builder-compression-result').scrollIntoView({ block: 'center' }))
+    await ctx.click('.continuum-builder-compression-result summary')
+    await ctx.waitFor(() => document.querySelector('.continuum-builder-compression-result details').open)
+    await ctx.capture('builder-real-corpus-diagnostic')
+    await ctx.overflow()
+    await ctx.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === 'Copiar contexto').click())
+    await ctx.waitFor(() => document.querySelector('footer').textContent.includes('Contexto copiado'))
+    const result = backend.service.list({ limit: 20 }).artifacts
+    ctx.check('Source bytes remain literal in isolated real-corpus Store', result.length === 4 && result.every(item => corpus.some(source => source.contentHash === backend.service.get(item.artifactId).contentHash)))
+    const reports = require(path.join(ctx.evidenceDir, 'backend.cjs')).readHistory(path.join(ctx.temporary, 'continuum.db-profile', 'context-bundle-results'))
+    const report = reports[0].compression
+    ctx.check('Explicit Strong completes with an explanatory non-operational outcome', report.profile === 'strong' && ['no-eligible-blocks', 'no-block-gain', 'roundtrip-rejected', 'overhead-no-gain', 'applied'].includes(report.outcome))
+    ctx.check('Preview and copied output match', clipboard.readText() === await ctx.evaluate(() => document.querySelector('[aria-label="Prévia do pacote"]').textContent))
+    await ctx.viewport(1000, 760)
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light'; document.querySelector('.continuum-builder-export').scrollIntoView({ block: 'start' }) })
+    await ctx.overflow()
+    ctx.check('Medium viewport keeps export controls reachable without horizontal pane overflow', await ctx.evaluate(() => [...document.querySelectorAll('.continuum-builder-workspace > section')].every(section => section.scrollWidth <= section.clientWidth + 1)))
+    await ctx.capture('builder-real-corpus-medium-light')
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'corpus-proof.json'), JSON.stringify({ sources: corpus.map(item => ({ artifactId: item.artifactId, revision: item.revision, contentHash: item.contentHash })), profile: 'strong', report, isolation: 'Exact rawMarkdown snapshots in temporary Store at revision 1, relation indexes omitted; not the original user session' }, null, 2))
+  } finally { backend.close() }
+}

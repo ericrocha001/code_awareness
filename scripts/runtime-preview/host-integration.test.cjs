@@ -7,7 +7,7 @@ test('optional preview compiler failure does not prevent the existing host super
   const source = fs.readFileSync(path.resolve('scripts/dev-supervisor.cjs'), 'utf8')
   vm.runInNewContext(source, {
     __dirname: path.resolve('scripts'),
-    process: { platform: 'win32', env: { CODE_AWARENESS_PREVIEW_NATIVE_BUILD: 'stale-inherited-build' }, on() {} },
+    process: { platform: 'win32', env: { npm_lifecycle_event: 'dev', npm_config_ignore_scripts: 'false', CODE_AWARENESS_PREVIEW_NATIVE_BUILD: 'stale-inherited-build' }, on() {} },
     console: { warn: value => { warning = value } },
     require(name) {
       if (name === 'node:path') return path

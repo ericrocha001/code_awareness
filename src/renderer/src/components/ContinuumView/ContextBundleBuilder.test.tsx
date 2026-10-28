@@ -46,3 +46,21 @@ it('discards a late component after closing and sends explicit cancellation', as
   expect(close).toHaveBeenCalledTimes(1)
   expect(window.codeAwareness.continuumBuilder).toHaveBeenCalledWith({ repositoryId: 'A', action: 'cancel' })
 })
+it('explains zero savings and invalidates the diagnostic when the compression profile changes', async () => {
+  const api = vi.mocked(window.codeAwareness.continuumBuilder), original = api.getMockImplementation()!
+  api.mockImplementation(async request => request.action === 'preview'
+    ? { ...await original(request) as any, compression: { profile: 'strong', applied: false, outcome: 'no-eligible-blocks', originalTokens: 30, outputTokens: 30, savedTokens: 0, savedPercent: 0, transformedBlocks: 0, detectedBlocks: 0, rejectedBlocks: 0, unchangedBlocks: 0, reason: 'Nenhum bloco estruturado elegível detectado.' } }
+    : original(request))
+  render(<ContextBundleBuilder repositoryId="A" facets={[]} tags={[]} onClose={vi.fn()} />)
+  fireEvent.click(await screen.findByRole('button', { name: /Source DOCUMENT/ }))
+  await screen.findByText('1 Artifacts únicos')
+  fireEvent.change(screen.getByLabelText('Compressão PAKT'), { target: { value: 'strong' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Gerar prévia' }))
+  await screen.findByText('Sem redução neste pacote')
+  fireEvent.click(screen.getByText('Diagnóstico da compressão'))
+  expect(screen.getByText(/0 blocos detectados/).textContent).toContain('0 transformados')
+  expect(api).toHaveBeenCalledWith(expect.objectContaining({ action: 'preview', profile: 'strong' }))
+  fireEvent.change(screen.getByLabelText('Compressão PAKT'), { target: { value: 'off' } })
+  expect(screen.queryByText('Sem redução neste pacote')).toBeNull()
+  expect(screen.queryByLabelText('Prévia do pacote')).toBeNull()
+})

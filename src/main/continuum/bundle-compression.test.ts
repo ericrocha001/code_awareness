@@ -13,6 +13,8 @@ it.each(['light', 'balanced', 'strong'] as BundleCompressionProfile[])('round-tr
   try {
     const result = compressBundleOutput(original, profile)
     expect(result.report.applied).toBe(true)
+    expect(result.report.outcome).toBe('applied')
+    expect(result.report.detectedBlocks).toBeGreaterThanOrEqual(result.report.transformedBlocks)
     expect(result.report.savedTokens).toBeGreaterThan(0)
     const transformed = result.markdown.slice(result.markdown.indexOf('# Context Bundle'))
     expect(Buffer.from(decompressMixed(transformed))).toEqual(Buffer.from(original))
@@ -22,6 +24,15 @@ it.each(['light', 'balanced', 'strong'] as BundleCompressionProfile[])('round-tr
     expect(fetch).not.toHaveBeenCalled()
     expect(compressBundleOutput(original, profile)).toEqual(result)
   } finally { fetch.mockRestore() }
+})
+it('distinguishes disabled compression, prose with no eligible blocks and rejected non-byte-stable structures', () => {
+  const disabled = compressBundleOutput(wrap(structured), 'off').report
+  expect(disabled).toMatchObject({ outcome: 'disabled', detectedBlocks: 0, transformedBlocks: 0 })
+  const prose = compressBundleOutput(wrap('# Feature Map\n\nNão remover contratos.\n\n| Contrato | Estado |\n| --- | --- |\n| abc | ACTIVE |'), 'strong')
+  expect(prose.report).toMatchObject({ outcome: 'no-eligible-blocks', detectedBlocks: 0, transformedBlocks: 0, savedTokens: 0 })
+  const minified = compressBundleOutput(wrap('```json\n' + JSON.stringify(rows) + '\n```'), 'strong')
+  expect(minified.report).toMatchObject({ outcome: 'roundtrip-rejected', detectedBlocks: 1, rejectedBlocks: 1, transformedBlocks: 0, savedTokens: 0 })
+  expect(minified.markdown).toBe(wrap('```json\n' + JSON.stringify(rows) + '\n```'))
 })
 it('keeps exact originals for disabled, noneligible, no gain, malformed and non-byte-stable inputs', () => {
   for (const body of ['Prosa curta. Não alterar. ç 🚀', '```json\n{bad JSON}\n```', '```json\n'+JSON.stringify(rows)+'\n```', '```yaml\na: 1\nb: 2\n```']) {
