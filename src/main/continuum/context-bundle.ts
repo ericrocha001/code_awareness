@@ -5,6 +5,8 @@ import type { ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleSou
 import type { Artifact } from './continuum-types'
 import type { ContinuumService } from './continuum-service'
 import { countCanonicalTokens, getCanonicalTokenizer } from '../core/tokenizer'
+import { compressBundleOutput } from './bundle-compression'
+import type { BundleCompressionProfile, BundleCompressionReport } from '../../shared/types/continuum-builder-types'
 
 export const BUNDLE_MAX_ARTIFACTS = 50
 export const SELECTION_MAX_ARTIFACTS = 100
@@ -12,21 +14,24 @@ export const BUNDLE_MAX_MARKDOWN = 8 * 1024 * 1024
 export const BUNDLE_MAX_TOTAL = 64 * 1024 * 1024
 const tooLarge = () => new Error('BUNDLE_LIMIT: refine a seleção ou divida a coleção; nenhum conteúdo foi truncado')
 export class ContextBundle {
+  composition?: import('../../shared/types/continuum-builder-types').BundleComposition
+  compression?: BundleCompressionReport
   readonly preview: ContinuumBundlePreview
   private readonly sources: Artifact[]
   private readonly tagIdentity: string
   private readonly source: ContinuumBundleSource
-  private constructor(private readonly service: ContinuumService, request: ContinuumBundlePrepare) {
+  private constructor(private readonly service: ContinuumService, request: ContinuumBundlePrepare, private readonly builder = false) {
     if (!request || typeof request !== 'object' || Object.keys(request).some(key => !['repositoryId', 'slug', 'source', 'order'].includes(key)) || (request.source !== undefined && request.slug !== undefined)) throw new Error('INVALID_BUNDLE_REQUEST')
     service.assertRepository(request.repositoryId)
     this.source = structuredClone(request.source ?? { kind: 'tag', slug: request.slug! })
     if (!this.source || !['tag', 'selection'].includes(this.source.kind)) throw new Error('INVALID_BUNDLE_SOURCE')
     const explicit = this.source.kind === 'selection'
-    const limit = explicit ? SELECTION_MAX_ARTIFACTS : BUNDLE_MAX_ARTIFACTS
+    const limit = builder ? Infinity : explicit ? SELECTION_MAX_ARTIFACTS : BUNDLE_MAX_ARTIFACTS
     const slug = this.source.kind === 'tag' ? this.source.slug : ''
-    if (explicit) {
+    if (this.source.kind === 'selection') {
       if (Object.keys(this.source).some(key => !['kind', 'selected'].includes(key))) throw new Error('INVALID_BUNDLE_SOURCE')
-      service.assertSelection(this.source.kind === 'selection' ? this.source.selected : [])
+      if (builder) service.assertBuilderSelection(this.source.selected)
+      else service.assertSelection(this.source.selected)
     } else {
       if (Object.keys(this.source).some(key => !['kind', 'slug'].includes(key))) throw new Error('INVALID_BUNDLE_SOURCE')
       validateTagSlug(slug)
@@ -72,6 +77,22 @@ export class ContextBundle {
     this.assertFresh()
   }
   static prepare(service: ContinuumService, request: ContinuumBundlePrepare): ContextBundle { return new ContextBundle(service, request) }
+  static prepareBuilder(service: ContinuumService, repositoryId: string, selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[], order: string[]): ContextBundle {
+    const result = new ContextBundle(service, { repositoryId, source: { kind: 'selection', selected }, order }, true)
+    if (!result.preview.members.length) throw new Error('BUNDLE_EMPTY')
+    if (!result.preview.compositionAvailable) throw tooLarge()
+    return result
+  }
+  compressOutput(profile: BundleCompressionProfile): void {
+    if (!this.builder || this.compression) throw new Error('INVALID_COMPRESSION_CONTEXT')
+    this.assertFresh()
+    const output = compressBundleOutput(this.preview.markdown, profile)
+    this.assertFresh()
+    this.preview.markdown = output.markdown
+    this.preview.markdownBytes = Buffer.byteLength(output.markdown, 'utf8')
+    this.preview.tokenCount = output.report.outputTokens
+    this.compression = output.report
+  }
   async zip(): Promise<Buffer> {
     this.assertFresh()
     const media: { path: string; data: Buffer }[] = []
@@ -96,14 +117,17 @@ export class ContextBundle {
         original = { path, bytes: data.length, sha256: this.sources[index].contentHash }
         media.push({ path, data })
       }
-      return { artifactId: member.artifactId, revision: member.revision, kind: member.kind, sourceSHA256: this.sources[index].contentHash, ...(original ? { markdown: original } : {}), ...(visual ? { media: visual } : {}) }
+      return { artifactId: member.artifactId, name: member.name, revision: member.revision, kind: member.kind, sourceSHA256: this.sources[index].contentHash, ...(original ? { markdown: original } : {}), ...(visual ? { media: visual } : {}) }
     })
     const markdown = Buffer.from(this.preview.markdown, 'utf8')
     const makeManifest = (context: boolean) => Buffer.from(JSON.stringify({ version: 1, repositoryId: this.preview.repositoryId, ...(explicit ? { source: 'selection' } : { tag: this.preview.slug }), snapshotId: this.preview.snapshotId, generatedAt: this.preview.generatedAt,
-      ...(context ? { context: { path: 'context.md', bytes: markdown.length, sha256: createHash('sha256').update(markdown).digest('hex') } } : {}), artifacts }, null, 2), 'utf8')
+      ...(context ? { context: { path: 'context.md', bytes: markdown.length, sha256: createHash('sha256').update(markdown).digest('hex') } } : {}), ...(this.compression ? { compression: this.compression } : {}), ...(this.composition ? { composition: this.composition } : {}), artifacts }, null, 2), 'utf8')
     let includeContext = this.preview.compositionAvailable !== false
     let manifest = makeManifest(includeContext)
-    if (explicit && includeContext && totalBytes + markdown.length + manifest.length + (media.length + 2) * 1024 > BUNDLE_MAX_TOTAL) { includeContext = false; manifest = makeManifest(false) }
+    if (explicit && includeContext && totalBytes + markdown.length + manifest.length + (media.length + 2) * 1024 > BUNDLE_MAX_TOTAL) {
+      if (this.builder) throw tooLarge()
+      includeContext = false; manifest = makeManifest(false)
+    }
     if (explicit && includeContext) totalBytes += markdown.length
     totalBytes += manifest.length
     if (totalBytes > BUNDLE_MAX_TOTAL) throw tooLarge()
@@ -131,7 +155,8 @@ export class ContextBundle {
     this.service.assertActive()
     if (this.source.kind === 'selection') {
       this.service.assertRepository(this.preview.repositoryId)
-      this.service.assertSelection(this.source.selected)
+      if (this.builder) this.service.assertBuilderSelection(this.source.selected)
+      else this.service.assertSelection(this.source.selected)
     } else {
       const tag = this.service.tags().find(tag => tag.slug === this.preview.slug)
       if (!tag || JSON.stringify([tag.slug, tag.name, tag.description]) !== this.tagIdentity) throw new Error('BUNDLE_SNAPSHOT_STALE: regenere o pacote')

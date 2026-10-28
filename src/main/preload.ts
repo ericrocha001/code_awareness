@@ -1,4 +1,5 @@
 import type { ContinuumBundleQuick, ContinuumBundleReceipt } from '../shared/types/continuum-bundle-types'
+import type { BuilderRequest, BuilderPreview, BuilderReceipt, BundleComponent, BundleResult, BundleComposition } from '../shared/types/continuum-builder-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../shared/types/continuum-tag-types'
 /*
 -T ---
@@ -86,6 +87,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getContinuumTagTokens: (repositoryId: string, slugs: string[]): Promise<{ repositoryId: string; totals: import('../shared/types/continuum-ui-types').ContinuumTagTokens[] }> => ipcRenderer.invoke('continuum:tag-tokens', repositoryId, slugs),
   mutateContinuumTags: (request: ContinuumTagMutation): Promise<{ repositoryId: string; tags: ContinuumTag[] }> => ipcRenderer.invoke('continuum:mutate-tags', request),
   quickContinuumBundle: (request: ContinuumBundleQuick): Promise<ContinuumBundleReceipt> => ipcRenderer.invoke('continuum:quick-bundle', request),
+  continuumBuilder: (request: BuilderRequest): Promise<BuilderPreview | BuilderReceipt | BundleComponent | BundleResult[] | BundleComposition> => ipcRenderer.invoke('continuum:builder', request),
   exportContinuumArtifact: (request: ContinuumExportRequest): Promise<ContinuumExportReceipt> => ipcRenderer.invoke('continuum:export', request),
   getContinuumArtifact: (repositoryId: string, artifactId: string): Promise<ContinuumSelection> => ipcRenderer.invoke('continuum:get', repositoryId, artifactId),
   onContinuumChanged: (callback: (change: ContinuumChange) => void): (() => void) => {

@@ -1,4 +1,5 @@
 import type { ContinuumBundleQuick, ContinuumBundleReceipt } from '../../shared/types/continuum-bundle-types'
+import type { BuilderRequest, BuilderPreview, BuilderReceipt, BundleComponent, BundleResult, BundleComposition } from '../../shared/types/continuum-builder-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 /*
 -T ---
@@ -60,6 +61,7 @@ declare global {
       getContinuumTagTokens: (repositoryId: string, slugs: string[]) => Promise<{ repositoryId: string; totals: import('../../shared/types/continuum-ui-types').ContinuumTagTokens[] }>
       mutateContinuumTags: (request: ContinuumTagMutation) => Promise<{ repositoryId: string; tags: ContinuumTag[] }>
       quickContinuumBundle: (request: ContinuumBundleQuick) => Promise<ContinuumBundleReceipt>
+      continuumBuilder: (request: BuilderRequest) => Promise<BuilderPreview | BuilderReceipt | BundleComponent | BundleResult[] | BundleComposition>
       exportContinuumArtifact: (request: ContinuumExportRequest) => Promise<ContinuumExportReceipt>
       getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
       onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void

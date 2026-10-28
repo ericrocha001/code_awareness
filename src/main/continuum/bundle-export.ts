@@ -9,7 +9,7 @@ export function exportAgentContextBundle(bundle: ContextBundle, intent: Continuu
   return exportContextBundle(bundle, intent, assertContext, BrowserWindow?.getFocusedWindow?.() ?? null)
 }
 
-export async function exportContextBundle(bundle: ContextBundle, intent: ContinuumBundleExport['intent'], assertContext: () => void, parent: BrowserWindow | null) {
+export async function exportContextBundle(bundle: ContextBundle, intent: ContinuumBundleExport['intent'], assertContext: () => void, parent: BrowserWindow | null, exported?: (data: Buffer) => void) {
   assertContext()
   if (!bundle.preview.members.length) throw new Error('BUNDLE_EMPTY')
   if (intent !== 'zip' && bundle.preview.compositionAvailable === false) throw new Error('BUNDLE_LIMIT: composição excede 8 MiB; refine a seleção ou salve ZIP com originais')
@@ -17,6 +17,7 @@ export async function exportContextBundle(bundle: ContextBundle, intent: Continu
   if (intent === 'copy') {
     if (!clipboard?.writeText) throw new Error('INTERACTIVE_SESSION_REQUIRED: native clipboard unavailable')
     clipboard.writeText(bundle.preview.markdown)
+    exported?.(Buffer.from(bundle.preview.markdown, 'utf8'))
     return { outcome: 'copied' as const, snapshotId }
   }
   if (!parent || parent.isDestroyed() || !parent.isVisible()) throw new Error('INTERACTIVE_SESSION_REQUIRED: use Tags e pacotes na janela do aplicativo')
@@ -30,9 +31,29 @@ export async function exportContextBundle(bundle: ContextBundle, intent: Continu
   const temporary = join(dirname(result.filePath), `.continuum-bundle-${randomUUID()}.tmp`)
   try {
     writeFileSync(temporary, data, { flag: 'wx', mode: 0o600 })
+    assertContext()
     renameSync(temporary, result.filePath)
   } finally { rmSync(temporary, { force: true }) }
+  exported?.(data)
   return { outcome: 'saved' as const, snapshotId }
+}
+
+export async function exportHistoricalBundle(result: import('../../shared/types/continuum-builder-types').BundleResult, data: Buffer, assertContext: () => void, parent: BrowserWindow | null) {
+  assertContext()
+  if (result.format === 'copy') {
+    clipboard.writeText(data.toString('utf8'))
+    return { outcome: 'copied' as const }
+  }
+  if (!parent || parent.isDestroyed() || !parent.isVisible()) throw new Error('INTERACTIVE_SESSION_REQUIRED')
+  const extension = result.format === 'zip' ? 'zip' : 'md'
+  const target = await dialog.showSaveDialog(parent, { title: `Reutilizar pacote histórico de ${result.generatedAt}`, defaultPath: join(app.getPath('downloads'), `historico-${result.id}.${extension}`), filters: [{ name: extension, extensions: [extension] }], properties: ['showOverwriteConfirmation', 'dontAddToRecent'] })
+  assertContext()
+  if (target.canceled) return { outcome: 'cancelled' as const }
+  if (!target.filePath || extname(target.filePath).toLowerCase() !== '.' + extension) throw new Error('INVALID_EXPORT_EXTENSION')
+  const temporary = join(dirname(target.filePath), `.continuum-bundle-${randomUUID()}.tmp`)
+  try { writeFileSync(temporary, data, { flag: 'wx', mode: 0o600 }); assertContext(); renameSync(temporary, target.filePath) }
+  finally { rmSync(temporary, { force: true }) }
+  return { outcome: 'saved' as const }
 }
 
 export async function exportQuickContextBundle(bundle: ContextBundle, intent: ContinuumBundleExport['intent'], assertContext: () => void) {

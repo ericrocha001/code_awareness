@@ -44,19 +44,42 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   tags() { this.assertActive(); this.reconcile?.(); this.assertActive(); return this.store.tags() }
   assertRepository(repositoryId: string) { this.assertActive(); if (repositoryId !== this.store.repositoryId) throw new Error('REPOSITORY_CONTEXT_CHANGED') }
   assertSelection(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) { this.assertActive(); this.store.selectionEntries(selected) }
+  assertBuilderSelection(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) { this.assertActive(); this.store.builderEntries(selected) }
+  async resolveBuilderComponent(repositoryId: string, source: import('../../shared/types/continuum-builder-types').BundleComponentSource, refresh = false) {
+    this.assertRepository(repositoryId)
+    this.reconcile?.()
+    if (!source || !['artifact', 'query'].includes(source.kind) || Buffer.byteLength(JSON.stringify(source), 'utf8') > 2 * 1024 * 1024) throw new Error('INVALID_BUNDLE_COMPONENT')
+    if (source.kind === 'query' && (!source.filter || typeof source.filter !== 'object' || Array.isArray(source.filter) || Object.keys(source.filter).some(key => !['tag', 'query', 'metadata', 'periods'].includes(key)))) throw new Error('INVALID_BUNDLE_QUERY')
+    if (source.kind === 'artifact' && (!Array.isArray(source.selected) || !source.selected.length)) throw new Error('INVALID_SELECTION')
+    const members = source.kind === 'query' ? this.store.resolveBuilderGroup(source.filter)
+      : source.selected.map(item => {
+        if (!refresh) this.store.selectionEntries([item])
+        const current = this.store.get(item.artifactId)
+        if (!current) throw new Error('ARTIFACT_NOT_FOUND: ' + item.artifactId)
+        return { artifactId: current.artifactId, revision: current.revision, name: current.metadata.name, kind: current.metadata.kind, status: current.metadata.status, updatedAt: current.updatedAt, relationCount: current.metadata.relations?.length ?? 0 }
+      })
+    if (!members.length) {
+      if (refresh) return { id: randomUUID(), source: structuredClone(source), members: [] }
+      throw new Error('BUNDLE_EMPTY')
+    }
+    const selected = members.map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision! }))
+    const counts = new Map((await this.selectionTokens(selected, true)).map(item => [item.artifactId, item.rawMarkdownTokenCount]))
+    this.assertRepository(repositoryId)
+    return { id: randomUUID(), source: source.kind === 'artifact' ? { kind: 'artifact' as const, selected } : structuredClone(source), members: members.map(item => ({ ...item, rawMarkdownTokenCount: counts.get(item.artifactId) })) }
+  }
   resolveSelection(filter: ListArtifactsFilter) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     return this.store.resolveSelection(filter)
   }
-  async selectionTokens(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[]) {
+  async selectionTokens(selected: import('../../shared/types/continuum-ui-types').ContinuumSelectedArtifact[], builder = false) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
-    const entries = this.store.selectionEntries(selected)
+    const entries = builder ? this.store.builderEntries(selected) : this.store.selectionEntries(selected)
     const artifacts: Array<{ artifactId: string; rawMarkdownTokenCount: number }> = []
     for (let offset = 0; offset < entries.length; offset += 30) {
       await new Promise<void>(resolve => setImmediate(resolve)); this.assertActive()
       for (const [artifactId, result] of this.store.measureTokenCountBatch(entries.slice(offset, offset + 30))) artifacts.push({ artifactId, rawMarkdownTokenCount: result.rawMarkdownTokenCount })
     }
-    this.assertActive(); this.store.selectionEntries(selected)
+    this.assertActive(); if (builder) this.store.builderEntries(selected); else this.store.selectionEntries(selected)
     return artifacts
   }
   async tagTokenTotals(slugs: string[]): Promise<ContinuumTagTokens[]> {
