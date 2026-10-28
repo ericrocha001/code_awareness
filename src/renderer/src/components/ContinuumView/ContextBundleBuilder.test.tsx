@@ -46,21 +46,23 @@ it('discards a late component after closing and sends explicit cancellation', as
   expect(close).toHaveBeenCalledTimes(1)
   expect(window.codeAwareness.continuumBuilder).toHaveBeenCalledWith({ repositoryId: 'A', action: 'cancel' })
 })
-it('explains zero savings and invalidates the diagnostic when the compression profile changes', async () => {
+it('keeps generation literal, removes compression controls and labels only applied legacy history', async () => {
   const api = vi.mocked(window.codeAwareness.continuumBuilder), original = api.getMockImplementation()!
-  api.mockImplementation(async request => request.action === 'preview'
-    ? { ...await original(request) as any, compression: { profile: 'strong', applied: false, outcome: 'no-eligible-blocks', originalTokens: 30, outputTokens: 30, savedTokens: 0, savedPercent: 0, transformedBlocks: 0, detectedBlocks: 0, rejectedBlocks: 0, unchangedBlocks: 0, reason: 'Nenhum bloco estruturado elegível detectado.' } }
+  api.mockImplementation(async request => request.action === 'recent'
+    ? [{ id: 'legacy', name: 'Legado', format: 'copy', generatedAt: '2026-01-01', count: 1, bytes: 20, tokenCount: 10, compression: { applied: true, profile: 'strong' } }, { id: 'plain', name: 'Integral', format: 'copy', generatedAt: '2026-01-02', count: 1, bytes: 20, tokenCount: 10, compression: { applied: false, profile: 'off' } }]
     : original(request))
   render(<ContextBundleBuilder repositoryId="A" facets={[]} tags={[]} onClose={vi.fn()} />)
+  expect(screen.queryByLabelText('Compressão PAKT')).toBeNull()
   fireEvent.click(await screen.findByRole('button', { name: /Source DOCUMENT/ }))
   await screen.findByText('1 Artifacts únicos')
-  fireEvent.change(screen.getByLabelText('Compressão PAKT'), { target: { value: 'strong' } })
   fireEvent.click(screen.getByRole('button', { name: 'Gerar prévia' }))
-  await screen.findByText('Sem redução neste pacote')
-  fireEvent.click(screen.getByText('Diagnóstico da compressão'))
-  expect(screen.getByText(/0 blocos detectados/).textContent).toContain('0 transformados')
-  expect(api).toHaveBeenCalledWith(expect.objectContaining({ action: 'preview', profile: 'strong' }))
-  fireEvent.change(screen.getByLabelText('Compressão PAKT'), { target: { value: 'off' } })
-  expect(screen.queryByText('Sem redução neste pacote')).toBeNull()
-  expect(screen.queryByLabelText('Prévia do pacote')).toBeNull()
+  await screen.findByLabelText('Prévia do pacote')
+  const previewRequest = api.mock.calls.find(([request]) => request.action === 'preview')![0]
+  expect(previewRequest).not.toHaveProperty('profile')
+  fireEvent.change(screen.getByLabelText('Formato do pacote'), { target: { value: 'markdown' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar pacote' }))
+  await waitFor(() => expect(api).toHaveBeenCalledWith(expect.objectContaining({ action: 'export', intent: 'markdown' })))
+  fireEvent.click(screen.getByRole('button', { name: 'Recentes (15)' }))
+  expect(await screen.findAllByText('Pacote histórico com compressão legada')).toHaveLength(1)
+  expect(screen.queryByText('strong')).toBeNull()
 })

@@ -23,8 +23,8 @@ if (process.versions.electron && process.type === 'browser' && process.env.CODE_
       window.webContents.once('did-finish-load', () => {
         if (finished) return
         finished = true
-        const loaded = Object.keys(require.cache).some(file => file.replace(/\\/g, '/').includes('/@sriinnu/pakt/'))
-        fs.writeFileSync(path.join(root, 'electron.json'), JSON.stringify({ pid: process.pid, electron: process.versions.electron, paktLoaded: loaded, userData: app.getPath('userData'), url: window.webContents.getURL() }))
+        const loaded = Object.keys(require.cache).some(file => file.replace(/\\/g, '/').includes('/archiver/'))
+        fs.writeFileSync(path.join(root, 'electron.json'), JSON.stringify({ pid: process.pid, electron: process.versions.electron, archiverLoaded: loaded, userData: app.getPath('userData'), url: window.webContents.getURL() }))
         clearTimeout(deadline)
         setTimeout(() => app.exit(loaded ? 0 : 1), 250)
       })

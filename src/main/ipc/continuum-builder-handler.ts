@@ -63,24 +63,21 @@ export function registerContinuumBuilderHandlers(session: RepositoryContinuumSes
         assertContext(); return component
       }
       if (request.action !== 'preview' && request.action !== 'export') throw new Error('INVALID_BUNDLE_ACTION')
+      if (Object.prototype.hasOwnProperty.call(request, 'profile')) throw new Error('UNSUPPORTED_BUNDLE_PROFILE: compressão removida deste contrato')
       const composition = request.composition
       if (!composition || composition.repositoryId !== request.repositoryId || !Array.isArray(composition.components) || !Array.isArray(composition.excluded) || !Array.isArray(composition.order) || Buffer.byteLength(JSON.stringify(composition)) > 4 * 1024 * 1024) throw new Error('INVALID_BUNDLE_COMPOSITION')
       const members = consolidateBundle(composition)
-      const profile = request.profile ?? 'off'
-      if (!['off', 'light', 'balanced', 'strong'].includes(profile)) throw new Error('INVALID_COMPRESSION_PROFILE')
-      const fingerprint = createHash('sha256').update(JSON.stringify([composition, profile, request.intent ?? 'copy'])).digest('hex')
+      const fingerprint = createHash('sha256').update(JSON.stringify([composition, request.intent ?? 'copy'])).digest('hex')
       const cached = previews.get(sender)
       const bundle = cached?.fingerprint === fingerprint ? cached.bundle : ContextBundle.prepareBuilder(service, request.repositoryId, members.map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision! })), composition.order.filter(id => members.some(member => member.artifactId === id)))
       bundle.composition = structuredClone(composition)
-      await new Promise<void>(resolve => setImmediate(resolve)); assertContext()
-      if (!bundle.compression) bundle.compressOutput(profile)
       await new Promise<void>(resolve => setImmediate(resolve)); assertContext()
       bundle.assertFresh(); assertContext()
       previews.set(sender, { fingerprint, bundle })
       if (request.action === 'preview') {
         const counts = await service.selectionTokens(members.map(item => ({ artifactId: item.artifactId, expectedRevision: item.revision! })), true)
         assertContext(); bundle.assertFresh()
-        return { repositoryId: request.repositoryId, fingerprint, count: members.length, documentTokens: counts.reduce((sum, item) => sum + item.rawMarkdownTokenCount, 0), tokenCount: bundle.preview.tokenCount, tokenizerEncoding: bundle.preview.tokenizerEncoding, markdownBytes: bundle.preview.markdownBytes, hasVisuals: bundle.preview.hasVisuals, markdown: bundle.preview.markdown, compression: bundle.compression }
+        return { repositoryId: request.repositoryId, fingerprint, count: members.length, documentTokens: counts.reduce((sum, item) => sum + item.rawMarkdownTokenCount, 0), tokenCount: bundle.preview.tokenCount, tokenizerEncoding: bundle.preview.tokenizerEncoding, markdownBytes: bundle.preview.markdownBytes, hasVisuals: bundle.preview.hasVisuals, markdown: bundle.preview.markdown }
       }
       if (!['copy', 'markdown', 'zip'].includes(request.intent)) throw new Error('INVALID_BUNDLE_EXPORT')
       if (request.name !== undefined && (typeof request.name !== 'string' || request.name.length > 120)) throw new Error('INVALID_BUNDLE_NAME')
@@ -89,9 +86,9 @@ export function registerContinuumBuilderHandlers(session: RepositoryContinuumSes
       if (!output || result.outcome === 'cancelled') return { repositoryId: request.repositoryId, outcome: result.outcome }
       let retention: { retained: boolean; retentionMessage: string }
       try {
-        retention = history(store => store.retain({ repositoryId: request.repositoryId, generatedAt: bundle.preview.generatedAt, name: request.name?.trim() || undefined, format: request.intent, count: members.length, tokenCount: bundle.preview.tokenCount, tokenizerEncoding: bundle.preview.tokenizerEncoding, hasVisuals: bundle.preview.hasVisuals, composition: structuredClone(composition), compression: bundle.compression }, output!))
+        retention = history(store => store.retain({ repositoryId: request.repositoryId, generatedAt: bundle.preview.generatedAt, name: request.name?.trim() || undefined, format: request.intent, count: members.length, tokenCount: bundle.preview.tokenCount, tokenizerEncoding: bundle.preview.tokenizerEncoding, hasVisuals: bundle.preview.hasVisuals, composition: structuredClone(composition) }, output!))
       } catch (error) { retention = { retained: false, retentionMessage: `Exportação concluída; histórico não retido: ${String(error)}` } }
-      return { repositoryId: request.repositoryId, outcome: result.outcome, compression: bundle.compression, ...retention }
+      return { repositoryId: request.repositoryId, outcome: result.outcome, ...retention }
     } finally { if (jobs.get(sender) === job) jobs.delete(sender) }
   })
 }

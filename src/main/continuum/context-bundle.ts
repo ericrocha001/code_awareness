@@ -5,8 +5,6 @@ import type { ContinuumBundlePrepare, ContinuumBundlePreview, ContinuumBundleSou
 import type { Artifact } from './continuum-types'
 import type { ContinuumService } from './continuum-service'
 import { countCanonicalTokens, getCanonicalTokenizer } from '../core/tokenizer'
-import { compressBundleOutput } from './bundle-compression'
-import type { BundleCompressionProfile, BundleCompressionReport } from '../../shared/types/continuum-builder-types'
 
 export const BUNDLE_MAX_ARTIFACTS = 50
 export const SELECTION_MAX_ARTIFACTS = 100
@@ -15,7 +13,6 @@ export const BUNDLE_MAX_TOTAL = 64 * 1024 * 1024
 const tooLarge = () => new Error('BUNDLE_LIMIT: refine a seleção ou divida a coleção; nenhum conteúdo foi truncado')
 export class ContextBundle {
   composition?: import('../../shared/types/continuum-builder-types').BundleComposition
-  compression?: BundleCompressionReport
   readonly preview: ContinuumBundlePreview
   private readonly sources: Artifact[]
   private readonly tagIdentity: string
@@ -83,16 +80,6 @@ export class ContextBundle {
     if (!result.preview.compositionAvailable) throw tooLarge()
     return result
   }
-  compressOutput(profile: BundleCompressionProfile): void {
-    if (!this.builder || this.compression) throw new Error('INVALID_COMPRESSION_CONTEXT')
-    this.assertFresh()
-    const output = compressBundleOutput(this.preview.markdown, profile)
-    this.assertFresh()
-    this.preview.markdown = output.markdown
-    this.preview.markdownBytes = Buffer.byteLength(output.markdown, 'utf8')
-    this.preview.tokenCount = output.report.outputTokens
-    this.compression = output.report
-  }
   async zip(): Promise<Buffer> {
     this.assertFresh()
     const media: { path: string; data: Buffer }[] = []
@@ -121,7 +108,7 @@ export class ContextBundle {
     })
     const markdown = Buffer.from(this.preview.markdown, 'utf8')
     const makeManifest = (context: boolean) => Buffer.from(JSON.stringify({ version: 1, repositoryId: this.preview.repositoryId, ...(explicit ? { source: 'selection' } : { tag: this.preview.slug }), snapshotId: this.preview.snapshotId, generatedAt: this.preview.generatedAt,
-      ...(context ? { context: { path: 'context.md', bytes: markdown.length, sha256: createHash('sha256').update(markdown).digest('hex') } } : {}), ...(this.compression ? { compression: this.compression } : {}), ...(this.composition ? { composition: this.composition } : {}), artifacts }, null, 2), 'utf8')
+      ...(context ? { context: { path: 'context.md', bytes: markdown.length, sha256: createHash('sha256').update(markdown).digest('hex') } } : {}), ...(this.composition ? { composition: this.composition } : {}), artifacts }, null, 2), 'utf8')
     let includeContext = this.preview.compositionAvailable !== false
     let manifest = makeManifest(includeContext)
     if (explicit && includeContext && totalBytes + markdown.length + manifest.length + (media.length + 2) * 1024 > BUNDLE_MAX_TOTAL) {

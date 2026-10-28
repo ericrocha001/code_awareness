@@ -2,7 +2,7 @@ import Database from 'better-sqlite3'
 import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import type { BundleResult } from '../../shared/types/continuum-builder-types'
+import type { BundleResult, HistoricalBundleResult } from '../../shared/types/continuum-builder-types'
 
 export class BundleResultHistory {
   private readonly db: Database.Database
@@ -16,13 +16,13 @@ export class BundleResultHistory {
       CREATE TABLE IF NOT EXISTS results (id TEXT PRIMARY KEY, repository_id TEXT NOT NULL, sha256 TEXT NOT NULL REFERENCES payloads(sha256), metadata_json TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS results_repository ON results(repository_id);`)
   }
-  list(repositoryId: string): BundleResult[] {
+  list(repositoryId: string): HistoricalBundleResult[] {
     return (this.db.prepare('SELECT metadata_json FROM results WHERE repository_id = ? ORDER BY rowid DESC').all(repositoryId) as Array<{ metadata_json: string }>).map(row => JSON.parse(row.metadata_json))
   }
   get(repositoryId: string, id: string) {
     const row = this.db.prepare('SELECT metadata_json FROM results WHERE repository_id = ? AND id = ?').get(repositoryId, id) as { metadata_json: string } | undefined
     if (!row) throw new Error('BUNDLE_RESULT_NOT_FOUND')
-    const result = JSON.parse(row.metadata_json) as BundleResult
+    const result = JSON.parse(row.metadata_json) as HistoricalBundleResult
     let data: Buffer
     try { data = readFileSync(join(this.payloadDir, result.sha256)) } catch { throw new Error('BUNDLE_HISTORY_FILE_UNAVAILABLE') }
     if (data.length !== result.bytes || createHash('sha256').update(data).digest('hex') !== result.sha256) throw new Error('BUNDLE_HISTORY_INTEGRITY_ERROR')

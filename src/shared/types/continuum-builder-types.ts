@@ -4,27 +4,22 @@ export type BundleQuery = Omit<ContinuumListRequest, 'repositoryId' | 'cursor'>
 export type BundleComponentSource = { kind: 'artifact'; selected: ContinuumSelectedArtifact[] } | { kind: 'query'; filter: BundleQuery }
 export interface BundleComponent { id: string; source: BundleComponentSource; members: ContinuumItem[] }
 export interface BundleComposition { repositoryId: string; components: BundleComponent[]; excluded: string[]; order: string[] }
-export type BundleCompressionProfile = 'off' | 'light' | 'balanced' | 'strong'
-export type BundleCompressionOutcome = 'disabled' | 'no-eligible-blocks' | 'no-block-gain' | 'roundtrip-rejected' | 'overhead-no-gain' | 'timeout' | 'byte-limit' | 'invalid-block' | 'pakt-error' | 'applied'
-export interface BundleCompressionReport {
-  profile: BundleCompressionProfile; applied: boolean; originalTokens: number; outputTokens: number; savedTokens: number; savedPercent: number; transformedBlocks: number; reason: string
-  outcome?: BundleCompressionOutcome; detectedBlocks?: number; rejectedBlocks?: number; unchangedBlocks?: number
-}
-export interface BuilderPreview { repositoryId: string; fingerprint: string; count: number; documentTokens: number; tokenCount: number; tokenizerEncoding: string; markdownBytes: number; hasVisuals: boolean; markdown: string; compression?: BundleCompressionReport }
+export interface BuilderPreview { repositoryId: string; fingerprint: string; count: number; documentTokens: number; tokenCount: number; tokenizerEncoding: string; markdownBytes: number; hasVisuals: boolean; markdown: string }
 export interface BundleResult {
   id: string; repositoryId: string; generatedAt: string; name?: string; format: 'copy' | 'markdown' | 'zip'; sha256: string; bytes: number
-  count: number; tokenCount: number; tokenizerEncoding: string; hasVisuals: boolean; composition: BundleComposition; compression?: BundleCompressionReport
+  count: number; tokenCount: number; tokenizerEncoding: string; hasVisuals: boolean; composition: BundleComposition
 }
+export interface HistoricalBundleResult extends BundleResult { readonly compression?: Readonly<{ applied: boolean; [key: string]: unknown }> }
 export type BuilderRequest = { repositoryId: string } & (
   | { action: 'resolve'; source: BundleComponentSource; refresh?: boolean }
-  | { action: 'preview'; composition: BundleComposition; profile?: BundleCompressionProfile; intent?: 'copy' | 'markdown' | 'zip' }
-  | { action: 'export'; composition: BundleComposition; profile?: BundleCompressionProfile; intent: 'copy' | 'markdown' | 'zip'; name?: string }
+  | { action: 'preview'; composition: BundleComposition; intent?: 'copy' | 'markdown' | 'zip' }
+  | { action: 'export'; composition: BundleComposition; intent: 'copy' | 'markdown' | 'zip'; name?: string }
   | { action: 'recent' }
   | { action: 'reuse'; id: string }
   | { action: 'restore'; id: string; mode: 'members' | 'recipe' }
   | { action: 'cancel' }
 )
-export interface BuilderReceipt { repositoryId: string; outcome: 'copied' | 'saved' | 'cancelled'; retained?: boolean; retentionMessage?: string; historicalAt?: string; compression?: BundleCompressionReport }
+export interface BuilderReceipt { repositoryId: string; outcome: 'copied' | 'saved' | 'cancelled'; retained?: boolean; retentionMessage?: string; historicalAt?: string }
 
 export function consolidateBundle(composition: BundleComposition): ContinuumItem[] {
   const unique = new Map<string, ContinuumItem>()
