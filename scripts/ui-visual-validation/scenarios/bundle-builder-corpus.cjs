@@ -23,9 +23,25 @@ exports.run = async ctx => {
       await ctx.click(`.continuum-builder-catalog > div:nth-child(${index + 1}) button`)
       await ctx.waitFor(count => document.querySelectorAll('.continuum-builder-members li').length === count, index + 1)
     }
-    await ctx.evaluate(() => { const select = document.querySelector('[aria-label="Compressão PAKT"]'); select.value = 'strong'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    await ctx.click('[aria-label="Compressão PAKT"]')
+    ctx.window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'End' })
+    ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'End' })
+    ctx.window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Return' })
+    ctx.window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Return' })
+    await ctx.waitFor(() => document.querySelector('[aria-label="Compressão PAKT"]').value === 'strong')
     await ctx.evaluate(() => [...document.querySelectorAll('button')].find(button => button.textContent === 'Gerar prévia').click())
     await ctx.waitFor(() => !!document.querySelector('[aria-label="Prévia do pacote"]'))
+    await ctx.capture('builder-reference-wide-dark')
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
+    await ctx.capture('builder-reference-wide-light')
+    for (const theme of ['light', 'dark']) {
+      await ctx.evaluate(value => { document.body.dataset.theme = value }, theme)
+      ctx.check(`${theme}: readable typography and full-size dropdown fields`, await ctx.evaluate(() => {
+        const selectors = ['.continuum-builder-stage p', '.continuum-builder-source', '.continuum-builder-source small', '.continuum-builder-member', '.continuum-builder-metrics small', '.continuum-builder-select select']
+        const readable = selectors.every(selector => [...document.querySelectorAll(selector)].every(node => parseFloat(getComputedStyle(node).fontSize) >= 14))
+        return readable && [...document.querySelectorAll('.continuum-builder-select select')].every(node => node.getBoundingClientRect().height >= 44 && node.getBoundingClientRect().width >= 200)
+      }))
+    }
     await ctx.evaluate(() => document.querySelector('.continuum-builder-compression-result').scrollIntoView({ block: 'center' }))
     await ctx.click('.continuum-builder-compression-result summary')
     await ctx.waitFor(() => document.querySelector('.continuum-builder-compression-result details').open)
