@@ -10,7 +10,8 @@ exports.run = async ctx => {
   ctx.window.webContents.on('console-message', (_event, _level, message) => console.log(message))
   ctx.window.webContents.on('preload-error', (_event, _file, error) => console.error(error))
   buildSync({ entryPoints: [path.join(__dirname, 'bundle-builder-backend.ts')], bundle: true, platform: 'node', format: 'cjs', external: ['electron', 'better-sqlite3', 'sharp', 'archiver', 'js-tiktoken'], outfile: path.join(ctx.evidenceDir, 'backend.cjs') })
-  const backend = require(path.join(ctx.evidenceDir, 'backend.cjs')).start(path.join(ctx.temporary, 'continuum.db'))
+  const backendModule = require(path.join(ctx.evidenceDir, 'backend.cjs'))
+  const backend = backendModule.start(path.join(ctx.temporary, 'continuum.db'))
   const nativeSave = dialog.showSaveDialog
   let saveFixture = 'context.md'
   let saveFinished
@@ -22,7 +23,7 @@ exports.run = async ctx => {
     buildSync({ entryPoints: [path.join(__dirname, 'bundle-builder-fixture.tsx')], bundle: true, platform: 'browser', jsx: 'automatic', define: { 'process.env.NODE_ENV': '"production"' }, outfile: path.join(ctx.temporary, 'fixture.js'), loader: { '.woff': 'dataurl', '.woff2': 'dataurl', '.ttf': 'dataurl' } })
     const page = path.join(ctx.temporary, 'index.html')
     fs.writeFileSync(page, '<!doctype html><html><head><meta charset="utf-8"><link rel="stylesheet" href="fixture.css"><style>html,body,#root{height:100%;margin:0}body{background:var(--bg-primary);color:var(--text-primary)}</style></head><body><div id="root"></div><script src="fixture.js"></script></body></html>')
-    await ctx.load(page); await ctx.viewport(1440, 960)
+    await ctx.load(page); await ctx.viewport(1672, 941)
     try { await ctx.waitFor(() => document.querySelectorAll('.continuum-builder-catalog > div button').length === 30) }
     catch (error) { console.log(await ctx.evaluate(() => ({ text: document.body.innerText, api: Object.keys(window.codeAwareness ?? {}) }))); throw error }
     await ctx.click('[aria-label="Fontes"] button:nth-child(3)')
@@ -35,10 +36,6 @@ exports.run = async ctx => {
     await ctx.waitFor(() => !!document.querySelector('.continuum-facet-options input'))
     await ctx.evaluate(() => document.querySelector('.continuum-facet-options input').click())
     await ctx.click('.continuum-facet-groups summary')
-    await ctx.capture('builder-properties-dropdown-dark')
-    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
-    await ctx.capture('builder-properties-dropdown-light')
-    await ctx.evaluate(() => { document.body.dataset.theme = 'dark' })
     await ctx.click('.continuum-facet-values button')
     await ctx.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent === 'Adicionar grupo por propriedades').click())
     await ctx.waitFor(() => document.querySelectorAll('.continuum-builder-members li').length === 67)
@@ -55,22 +52,19 @@ exports.run = async ctx => {
     await ctx.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent === 'Copiar contexto').click())
     await ctx.waitFor(() => document.querySelector('footer')?.textContent.includes('copiado'))
     ctx.check('Actual clipboard contains canonical context and literal Unicode sources', clipboard.readText().includes('Não alterar o hash abc123') && clipboard.readText().includes('Fontes documentais'))
-    await ctx.evaluate(() => { const select = document.querySelector('[aria-label="Compressão PAKT"]'); select.value = 'strong'; select.dispatchEvent(new Event('change', { bubbles: true })) })
-    await ctx.waitFor(() => !document.querySelector('[aria-label="Prévia do pacote"]'))
-    await ctx.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent === 'Gerar prévia').click())
-    await ctx.waitFor(() => document.querySelector('[aria-label="Prévia do pacote"]')?.textContent.includes('Conteúdo transformado'))
-    ctx.check('User-triggered PAKT preview retains source boundaries and reversible notation', await ctx.evaluate(() => { const text = document.querySelector('[aria-label="Prévia do pacote"]').textContent; return text.includes('<!-- BEGIN ') && text.includes('<!-- PAKT:') && text.includes('abc123') }))
-    await ctx.capture('builder-pakt-preview')
-    await ctx.evaluate(() => [...document.querySelectorAll('button')].find(item => item.textContent === 'Copiar contexto').click())
-    await ctx.waitFor(() => document.querySelector('footer').textContent.includes('Resultado retido'))
-    const compressed = clipboard.readText()
+    ctx.check('New Builder has no compression controls or diagnostics', await ctx.evaluate(() => !document.querySelector('[aria-label="Compressão PAKT"]') && !document.querySelector('.continuum-builder-compression-result')))
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
+    await ctx.capture('builder-literal-light')
+    await ctx.evaluate(() => { document.body.dataset.theme = 'dark' })
+    const records = backendModule.readHistory(path.join(ctx.temporary, 'continuum.db-profile', 'context-bundle-results'))
+    const legacy = backendModule.seedLegacy(path.join(ctx.temporary, 'continuum.db'), records[0].composition)
     await ctx.evaluate(() => document.querySelector('[aria-label="Pacotes"] button:nth-child(2)').click())
     await ctx.waitFor(() => document.querySelectorAll('.continuum-builder-recent article').length === 2)
     clipboard.clear()
     await ctx.click('.continuum-builder-recent article:first-of-type > button')
     await ctx.waitFor(() => document.querySelector('footer').textContent.includes('Sem verificação de vigência'))
-    ctx.check('Recent result reuses byte-identical actual clipboard', clipboard.readText() === compressed)
-    await ctx.capture('builder-recent-results')
+    ctx.check('Legacy result keeps exact historical bytes without PAKT', clipboard.readText() === legacy.text)
+    ctx.check('Only actual applied history is labelled legacy', await ctx.evaluate(() => [...document.querySelectorAll('.continuum-builder-recent small')].filter(item => item.textContent === 'Pacote histórico com compressão legada').length === 1))
     await ctx.click('.continuum-builder-recent article:first-of-type summary')
     await ctx.click('.continuum-builder-recent article:first-of-type details button:first-of-type')
     await ctx.waitFor(() => document.querySelectorAll('.continuum-builder-members li').length === 66)
@@ -81,7 +75,7 @@ exports.run = async ctx => {
     await dialogCompleted
     await ctx.waitFor(() => document.querySelector('footer').textContent.includes('Pacote salvo'))
     const saved = fs.readFileSync(ctx.nativeDialogs.fixture('context.md'))
-    ctx.check('Native Save creates complete Markdown', saved.includes(Buffer.from('Conteúdo transformado')) && saved.includes(Buffer.from('<!-- END ')))
+    ctx.check('Native Save creates complete Markdown', saved.includes(Buffer.from('Não alterar o hash abc123')) && !saved.includes(Buffer.from('Conteúdo transformado')) && saved.includes(Buffer.from('<!-- END ')))
     saveFixture = 'context.zip'
     dialogCompleted = new Promise(resolve => { saveFinished = resolve })
     await ctx.evaluate(() => { const select = document.querySelector('[aria-label="Formato do pacote"]'); select.value = 'zip'; select.dispatchEvent(new Event('change', { bubbles: true })) })
@@ -89,7 +83,7 @@ exports.run = async ctx => {
     await dialogCompleted
     await ctx.waitFor(() => document.querySelector('footer').textContent.includes('Pacote salvo'))
     const zip = fs.readFileSync(ctx.nativeDialogs.fixture('context.zip'))
-    ctx.check('Native ZIP contains manifest, transformed context and literal originals', zip.includes(Buffer.from('manifest.json')) && zip.includes(Buffer.from('context.md')) && zip.includes(Buffer.from('artifacts/')))
+    ctx.check('Native ZIP contains manifest, literal context and originals', zip.includes(Buffer.from('manifest.json')) && zip.includes(Buffer.from('context.md')) && zip.includes(Buffer.from('artifacts/')))
     const output = path.join(ctx.temporary, 'reopened.json'), env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
     const reopened = spawnSync(process.execPath, [path.join(__dirname, 'bundle-history-reader.cjs'), path.join(ctx.evidenceDir, 'backend.cjs'), path.join(ctx.temporary, 'continuum.db-profile', 'context-bundle-results'), path.join(ctx.temporary, 'new-electron-profile'), output], { env, windowsHide: true, timeout: 15000, encoding: 'utf8' })
     if (reopened.status !== 0) throw new Error('Fresh Electron history read failed: ' + reopened.stderr)

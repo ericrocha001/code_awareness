@@ -1,10 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { X, Package, ArrowUp, ArrowDown, FileText, Tags, ListFilter, Clock3, Search, Check, ChevronDown, RotateCw, Eye, Copy, Download, FileArchive, Layers3, Coins } from 'lucide-react'
-import { consolidateBundle, type BundleComponent, type BundleComponentSource, type BundleComposition, type BuilderPreview, type BuilderReceipt, type BundleCompressionProfile, type BundleResult } from '../../../../shared/types/continuum-builder-types'
+import { consolidateBundle, type BundleComponent, type BundleComponentSource, type BundleComposition, type BuilderPreview, type BuilderReceipt, type HistoricalBundleResult } from '../../../../shared/types/continuum-builder-types'
 import type { ContinuumFacet, ContinuumItem, ContinuumScalar, ContinuumPeriod } from '../../../../shared/types/continuum-ui-types'
 import type { ContinuumTag } from '../../../../shared/types/continuum-tag-types'
 import { ContextFilters } from './ContextFilters'
-import { BundleCompressionStatus } from './BundleCompressionStatus'
 import './ContextBundleBuilder.css'
 
 export function ContextBundleBuilder({ repositoryId, facets, tags, initial, onClose }: {
@@ -12,7 +11,7 @@ export function ContextBundleBuilder({ repositoryId, facets, tags, initial, onCl
 }) {
   const modal = useRef<HTMLDialogElement>(null), alive = useRef(true), busy = useRef(false), generation = useRef(0)
   const [composition, setComposition] = useState<BundleComposition>({ repositoryId, components: [], excluded: [], order: [] })
-  const [tab, setTab] = useState<'build' | 'recent'>('build'), [recent, setRecent] = useState<BundleResult[]>([]), [name, setName] = useState('')
+  const [tab, setTab] = useState<'build' | 'recent'>('build'), [recent, setRecent] = useState<HistoricalBundleResult[]>([]), [name, setName] = useState('')
   const [entry, setEntry] = useState<'artifacts' | 'properties' | 'tags'>('artifacts')
   const [query, setQuery] = useState(''), [memberQuery, setMemberQuery] = useState('')
   const catalogQuery = useRef(query)
@@ -20,7 +19,6 @@ export function ContextBundleBuilder({ repositoryId, facets, tags, initial, onCl
   const [items, setItems] = useState<ContinuumItem[]>([]), [cursor, setCursor] = useState<string>(), [loading, setLoading] = useState(false)
   const [metadata, setMetadata] = useState<Record<string, ContinuumScalar>>({}), [periods, setPeriods] = useState<Record<string, ContinuumPeriod>>({})
   const [pending, setPending] = useState(false), [error, setError] = useState(''), [message, setMessage] = useState('')
-  const [profile, setProfile] = useState<BundleCompressionProfile>('off')
   const [preview, setPreview] = useState<BuilderPreview | null>(null), [intent, setIntent] = useState<'copy' | 'markdown' | 'zip'>('copy')
   const [delta, setDelta] = useState<{ old: BundleComponent; next: BundleComponent } | null>(null)
   const [detail, setDetail] = useState<string>('')
@@ -72,13 +70,13 @@ export function ContextBundleBuilder({ repositoryId, facets, tags, initial, onCl
     if (current() && result.repositoryId === repositoryId && result.artifact) setDetail(`${result.artifact.artifactId} · revisão ${result.artifact.revision}\n${JSON.stringify(result.artifact.metadata, null, 2)}\n\n${result.artifact.body}`)
   })
   const execute = (action: 'preview' | 'export') => run(async current => {
-    const result = await window.codeAwareness.continuumBuilder(action === 'preview' ? { repositoryId, action, composition, profile, intent } : { repositoryId, action, composition, profile, intent, name })
+    const result = await window.codeAwareness.continuumBuilder(action === 'preview' ? { repositoryId, action, composition, intent } : { repositoryId, action, composition, intent, name })
     if (!current()) return
     if (action === 'preview') setPreview(result as BuilderPreview)
-    else { const receipt = result as BuilderReceipt; setMessage((receipt.outcome === 'copied' ? 'Contexto copiado.' : receipt.outcome === 'saved' ? 'Pacote salvo.' : 'Salvamento cancelado.') + (receipt.compression && receipt.compression.profile !== 'off' ? ' ' + receipt.compression.reason + ' · economia ' + receipt.compression.savedTokens + ' tokens (' + receipt.compression.savedPercent.toFixed(1) + '%).' : '') + (receipt.retentionMessage ? ' ' + receipt.retentionMessage : '')) }
+    else { const receipt = result as BuilderReceipt; setMessage((receipt.outcome === 'copied' ? 'Contexto copiado.' : receipt.outcome === 'saved' ? 'Pacote salvo.' : 'Salvamento cancelado.') + (receipt.retentionMessage ? ' ' + receipt.retentionMessage : '')) }
   })
   const showRecent = () => run(async current => {
-    const results = await window.codeAwareness.continuumBuilder({ repositoryId, action: 'recent' }) as BundleResult[]
+    const results = await window.codeAwareness.continuumBuilder({ repositoryId, action: 'recent' }) as HistoricalBundleResult[]
     if (current()) { setRecent(results); setTab('recent') }
   })
   const reuse = (id: string) => run(async current => {
@@ -94,7 +92,7 @@ export function ContextBundleBuilder({ repositoryId, facets, tags, initial, onCl
   return <dialog ref={modal} className="continuum-builder" aria-label="Context Bundle Builder" onCancel={event => { event.preventDefault(); cancel() }}>
     <header><div className="continuum-builder-title"><span className="continuum-builder-icon"><Package size={26} /></span><div><h2>Context Bundle Builder</h2><p>Monte, revise e exporte contexto do Continuum.</p></div></div><button aria-label="Fechar construtor" onClick={cancel}><X size={18} /></button></header>
     <nav aria-label="Pacotes"><button aria-current={tab === 'build' ? 'page' : undefined} onClick={() => setTab('build')}><Package size={19} />Montar pacote</button><button disabled={pending} aria-current={tab === 'recent' ? 'page' : undefined} onClick={() => void showRecent()}><Clock3 size={19} />Recentes (15)</button></nav>
-    {tab === 'recent' && <section className="continuum-builder-recent" aria-label="Resultados históricos"><p>Resultados históricos do repositório. Reutilizar preserva os bytes originais, sem verificar vigência. Atualizar prepara uma nova composição para revisão.</p>{!recent.length && <p>Nenhum resultado retido.</p>}{recent.map(result => <article key={result.id}><div><strong>{result.name || new Date(result.generatedAt).toLocaleString()}</strong><small>{result.generatedAt} · {result.count} Artifacts · ≈ {result.tokenCount} tokens · {result.format} · {result.compression?.profile ?? 'off'} · {result.bytes.toLocaleString()} bytes</small></div><button disabled={pending} onClick={() => void reuse(result.id)}>Reutilizar</button><details><summary>Atualizar</summary><button disabled={pending} onClick={() => void restore(result.id, 'members')}>Mesmos membros, revisões atuais</button><button disabled={pending} onClick={() => void restore(result.id, 'recipe')}>Reexecutar tags e propriedades</button></details></article>)}</section>}
+    {tab === 'recent' && <section className="continuum-builder-recent" aria-label="Resultados históricos"><p>Resultados históricos do repositório. Reutilizar preserva os bytes originais, sem verificar vigência. Atualizar prepara uma nova composição para revisão.</p>{!recent.length && <p>Nenhum resultado retido.</p>}{recent.map(result => <article key={result.id}><div><strong>{result.name || new Date(result.generatedAt).toLocaleString()}</strong><small>{result.generatedAt} · {result.count} Artifacts · ≈ {result.tokenCount} tokens · {result.format} · {result.bytes.toLocaleString()} bytes</small>{result.compression?.applied === true && <small>Pacote histórico com compressão legada</small>}</div><button disabled={pending} onClick={() => void reuse(result.id)}>Reutilizar</button><details><summary>Atualizar</summary><button disabled={pending} onClick={() => void restore(result.id, 'members')}>Mesmos membros, revisões atuais</button><button disabled={pending} onClick={() => void restore(result.id, 'recipe')}>Reexecutar tags e propriedades</button></details></article>)}</section>}
     {tab === 'build' && <div className="continuum-builder-workspace" aria-busy={pending}>
       <section className="continuum-builder-inputs" aria-label="Adicionar fontes">
         <div className="continuum-builder-stage"><span>1</span><div><h3>Adicionar fontes</h3><p>Selecione Artifacts, propriedades ou tags.</p></div></div>
@@ -118,10 +116,9 @@ export function ContextBundleBuilder({ repositoryId, facets, tags, initial, onCl
         <div className="continuum-builder-stage"><span>3</span><div><h3>Resumo e exportação</h3><p>Configure a saída e confira a prévia.</p></div></div>
         <dl className="continuum-builder-totals"><div><dt><Layers3 size={18} /> Artifacts incluídos</dt><dd>{members.length}</dd></div><div><dt><Coins size={18} /> Tokens dos documentos</dt><dd>≈ {documentTokens.toLocaleString()}</dd></div></dl>
 
-        <div className="continuum-builder-compression-settings"><label><span className="continuum-builder-compression-label"><Layers3 size={20} /> Compressão PAKT</span><span className="continuum-builder-select"><select aria-label="Compressão PAKT" value={profile} disabled={pending} onChange={event => { generation.current++; setProfile(event.target.value as BundleCompressionProfile); setPreview(null) }}><option value="off">Desativada</option><option value="light">Leve · L1</option><option value="balanced">Equilibrada · L1–L2</option><option value="strong">Forte · L1–L3</option></select><ChevronDown size={20} /></span></label></div>
 
-        {!preview && <div className="continuum-builder-preview-empty"><Package size={22} /><strong>Confira antes de exportar</strong><p>Gere a prévia para ver o contexto completo e a economia do perfil selecionado.</p></div>}
-        {preview && <>{preview.compression && <BundleCompressionStatus report={preview.compression} />}<section className="continuum-builder-preview"><h4><Eye size={19} /> Prévia do contexto</h4><pre aria-label="Prévia do pacote">{preview.markdown}</pre><details><summary>Detalhes da saída <ChevronDown size={19} /></summary><p className="continuum-builder-hint">≈ {(preview.compression?.originalTokens ?? preview.tokenCount).toLocaleString()} tokens montados · overhead ≈ {(preview.compression?.originalTokens ?? preview.tokenCount) - preview.documentTokens} · saída {preview.markdownBytes.toLocaleString()} bytes</p></details></section></>}
+        {!preview && <div className="continuum-builder-preview-empty"><Package size={22} /><strong>Confira antes de exportar</strong><p>Gere a prévia para conferir o contexto integral que será exportado.</p></div>}
+        {preview && <section className="continuum-builder-preview"><h4><Eye size={19} /> Prévia do contexto</h4><pre aria-label="Prévia do pacote">{preview.markdown}</pre><details><summary>Detalhes da saída <ChevronDown size={19} /></summary><p className="continuum-builder-hint">≈ {preview.tokenCount.toLocaleString()} tokens montados · overhead ≈ {preview.tokenCount - preview.documentTokens} · saída {preview.markdownBytes.toLocaleString()} bytes</p></details></section>}
       </section>
     </div>}
     <footer><div className="continuum-builder-output" hidden={tab !== 'build'}><label className="continuum-builder-format">Formato de saída<span className="continuum-builder-select"><FileText size={20} /><select aria-label="Formato do pacote" value={intent} disabled={pending} onChange={event => { generation.current++; setIntent(event.target.value as typeof intent); setPreview(null) }}><option value="copy">Copiar contexto</option><option value="markdown">Markdown (.md)</option><option value="zip">ZIP com mídias</option></select><ChevronDown size={20} /></span></label><button disabled={pending || !members.length || !!conflict} onClick={() => void execute('preview')}><Eye size={19} />Gerar prévia</button><button className="continuum-builder-primary" disabled={pending || !members.length || !!conflict} onClick={() => void execute('export')}>{intent === 'copy' ? <Copy size={19} /> : intent === 'zip' ? <FileArchive size={19} /> : <Download size={19} />}{intent === 'copy' ? 'Copiar contexto' : 'Salvar pacote'}</button></div>
