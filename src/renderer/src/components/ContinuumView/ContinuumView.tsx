@@ -358,7 +358,7 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
     <header className="continuum-header">
       <div className="continuum-feature-icon"><Infinity size={36} /></div>
       <div className="continuum-feature-title"><h1>CONTINUUM</h1><p>{activeProject?.name ?? 'Contexto durável do repositório'}</p></div>
-      <button className="continuum-publish" disabled={!repositoryId} onClick={() => setTagManager(true)}><Tags size={16} /> Tags e pacotes</button>
+      <button className="continuum-publish" disabled={!repositoryId} onClick={() => setTagManager(true)}><Tags size={16} /> Gerenciador de Tags</button>
       <button className="continuum-publish" disabled={!repositoryId} onClick={() => setBuilder({})}>Montar pacote</button>
       <SearchBox value={query} onChange={setQuery} placeholder="Buscar no Continuum…" ariaLabel="Buscar no Continuum" />
       <button className="continuum-publish" disabled={!path || !repositoryId || publishing} onClick={chooseMarkdown}>{publishing ? 'Publicando…' : 'Publicar Markdown'}</button>
