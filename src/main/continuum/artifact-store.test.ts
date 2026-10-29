@@ -11,6 +11,56 @@ function input(artifactId = 'A', overrides: Partial<CreateArtifactInput> = {}): 
     rawMarkdown: '# Decision\r\n\r\nUnicode ç 日本語 🚀 `code` ${literal}\r\n', createdAt: '2026-10-01T00:00:00.000Z', ...overrides }
 }
 describe('Repository Artifact Store', () => {
+  it('keeps creation order after tagging, projects page memberships and preserves legacy update cursors', () => {
+    const { store } = setup()
+    for (const [id, day] of [['A', '01'], ['B', '02'], ['C', '03'], ['D', '03']]) {
+      const date = `2026-10-${day}T00:00:00.000Z`
+      store.create(input(id, { createdAt: date, updatedAt: date, metadata: { name: id, description: id, kind: 'DECISION' },
+        rawMarkdown: `---\nname: ${id}\ndescription: ${id}\nkind: DECISION\n---\nBody` }))
+    }
+    const before = store.get('A')!
+    store.saveTag({ slug: 'canonical', name: 'Canonical' }, true)
+    const [tagged] = store.assignTag('canonical', [{ artifactId: 'A', expectedRevision: 1 }], true)
+    expect(tagged.createdAt).toBe(before.createdAt)
+    expect(tagged.updatedAt > before.updatedAt).toBe(true)
+    expect(tagged.revision).toBe(2)
+    const get = vi.spyOn(store, 'get')
+    const prepare = vi.spyOn((store as unknown as { db: import('better-sqlite3').Database }).db, 'prepare')
+    const first = store.list({ sortBy: 'createdAt', includeTags: true, limit: 1 })
+    expect(first.artifacts.map(item => item.artifactId)).toEqual(['D'])
+    expect(first.artifacts[0]).toMatchObject({ createdAt: '2026-10-03T00:00:00.000Z', tags: [] })
+    expect(prepare.mock.calls.filter(([sql]) => sql.includes('FROM artifact_tags'))).toHaveLength(1)
+    expect(prepare.mock.calls.some(([sql]) => /raw_markdown|metadata_json/.test(sql))).toBe(false)
+    expect(get).not.toHaveBeenCalled()
+    const ids = ['D']
+    let cursor = first.nextCursor
+    while (cursor) {
+      const page = store.list({ sortBy: 'createdAt', includeTags: true, cursor, limit: 1 })
+      ids.push(...page.artifacts.map(item => item.artifactId)); cursor = page.nextCursor
+      if (!cursor) expect(page.artifacts[0].tags).toEqual(['canonical'])
+    }
+    expect(ids).toEqual(['D', 'C', 'B', 'A'])
+    prepare.mockClear()
+    const legacy = store.list({ limit: 1 })
+    expect(legacy.artifacts[0].artifactId).toBe('A')
+    expect(legacy.artifacts[0]).not.toHaveProperty('tags')
+    expect(legacy.artifacts[0]).not.toHaveProperty('createdAt')
+    expect(prepare.mock.calls.some(([sql]) => sql.includes('FROM artifact_tags'))).toBe(false)
+    const oldCursor = Buffer.from(JSON.stringify({ updatedAt: tagged.updatedAt, artifactId: 'A', signature: computeContentHash('catalog-A:{}') })).toString('base64url')
+    expect(legacy.nextCursor).toBe(oldCursor)
+    expect(store.list({ sortBy: 'updatedAt', cursor: oldCursor, limit: 1 }).artifacts[0].artifactId).toBe('D')
+    expect(() => store.list({ cursor: first.nextCursor })).toThrow(/cursor/)
+    expect(() => store.list({ sortBy: 'createdAt', cursor: oldCursor })).toThrow(/cursor/)
+    expect(() => store.list({ sortBy: 'invalid' as 'createdAt' })).toThrow(/sortBy/)
+    expect(() => store.list({ includeTags: 'true' as unknown as boolean })).toThrow(/includeTags/)
+    get.mockRestore(); prepare.mockRestore()
+    const measured = store.list({ sortBy: 'createdAt', includeRawMarkdownTokenCount: true })
+    const tokenize = vi.spyOn(tokenizer, 'countCanonicalTokens')
+    const withTags = store.list({ sortBy: 'createdAt', includeTags: true, includeRawMarkdownTokenCount: true })
+    expect(withTags.artifacts.map(item => item.rawMarkdownTokenCount)).toEqual(measured.artifacts.map(item => item.rawMarkdownTokenCount))
+    expect(tokenize).not.toHaveBeenCalled()
+    tokenize.mockRestore()
+  })
   it('discovers open scalar facets from indexes, preserves value types/counts and removes last occurrences after update', () => {
     const { store } = setup()
     const original = store.create(input('A', { metadata: { name: 'A', description: 'A', kind: 'CUSTOM', futureKey: 'blue', count: 4, enabled: false, nullKey: null, arrayKey: ['a'], objectKey: { x: 1 } } }))

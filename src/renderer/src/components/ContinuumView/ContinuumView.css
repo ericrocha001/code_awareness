@@ -58,6 +58,12 @@
 .continuum-badge { display: block; max-width: 100%; overflow-wrap: anywhere; padding: 3px 7px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--text-secondary); font-size: 9px; }
 .continuum-description { font-size: 12px; line-height: 1.5; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .continuum-item time { color: var(--text-secondary); font-size: 10px; }
+.continuum-timeline-order { padding: 8px 14px; border-bottom: 1px solid var(--border-subtle); }
+.continuum-timeline-order label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--text-secondary); font-size: 11px; }
+.continuum-timeline-order select { min-width: 0; max-width: 100%; padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-primary); color: var(--text-primary); font: inherit; }
+.continuum-timeline-order select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.continuum-item-tags { display: flex; flex-wrap: wrap; gap: 4px; max-width: 100%; }
+.continuum-item-tag { max-width: 100%; padding: 3px 7px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--bg-secondary); color: var(--text-secondary); font-size: 10px; line-height: 1.4; overflow-wrap: anywhere; }
 .continuum-detail-heading { display: flex; align-items: flex-start; gap: 10px; }
 .continuum-detail-heading svg { color: var(--accent); flex-shrink: 0; }
 .continuum-detail-heading h3 { margin: 0; font-size: 17px; line-height: 1.4; overflow-wrap: anywhere; }
