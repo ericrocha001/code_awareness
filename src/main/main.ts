@@ -550,6 +550,10 @@ app.whenReady().then(async () => {
       navigation,
       continuum,
       visualContinuum: continuum,
+      ...(continuum && gitRepositoryId ? { executionClosure: { repositoryId: gitRepositoryId, assertActive: () => {
+        if (activeProjects?.getState().project?.id !== project.id || activeProjects.getState().revision !== gitProjectRevision) throw new Error('PROJECT_CONTEXT_CHANGED')
+        continuum.assertRepository(gitRepositoryId)
+      } } } : {}),
       validationExecution: activeValidationExecution,
       ...(runtimePreview ? { runtimePreview: { service: runtimePreview, isCurrent: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision } } : {}),
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),

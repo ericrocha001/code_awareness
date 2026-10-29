@@ -1,4 +1,5 @@
 import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, supportsContinuumAgent } from '../continuum/continuum-agent'
+import { ASSESS_EXECUTION_CLOSURE_TOOL, executeAssessExecutionClosure, type ClosureContext } from './execution-closure'
 import { createHash, randomUUID } from 'node:crypto'
 import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
 import { GITHUB_PR_TOOLS, executeGitHubPrTool } from '../github/github-pr-mcp'
@@ -82,6 +83,7 @@ export class ChannelMcpAdapter {
   private readonly validationLedger: ValidationLedger | undefined
   private readonly artifactReader: IArtifactReader | undefined
   private readonly continuum?: IContinuumService
+  private readonly executionClosure?: ClosureContext
   private readonly visualContinuum?: IVisualContinuumService
   private readonly validationExecution: ValidationExecution | undefined
   private readonly diagnosticSourceAccess: DiagnosticSourceAccess | undefined
@@ -132,6 +134,7 @@ export class ChannelMcpAdapter {
       this.runtimeIdentity = (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ?? this.systemHealth?.getRuntimeIdentityProvider()
       this.validationLedger = runtimeIdentityOrLedger as ValidationLedger | undefined
       this.continuum = context.continuum
+      this.executionClosure = context.executionClosure
       this.visualContinuum = context.visualContinuum
       this.artifactReader = context.continuum ?? context.artifactReader
       this.validationExecution = context.validationExecution
@@ -192,6 +195,7 @@ export class ChannelMcpAdapter {
       )
     }
     if (this.continuum) tools.push(PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL)
+    if (this.executionClosure && this.artifactReader) tools.push(ASSESS_EXECUTION_CLOSURE_TOOL)
     if (supportsContinuumAgent(this.continuum)) tools.push(...CONTINUUM_AGENT_TOOLS)
     if (this.continuum && 'inspectStructure' in this.continuum && 'readSection' in this.continuum) tools.push(INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL)
     if (this.visualContinuum) tools.push(PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL)
@@ -267,7 +271,7 @@ export class ChannelMcpAdapter {
     if (GIT_OPERATIONS_TOOLS.some(tool => tool.name === name) || GITHUB_PR_TOOLS.some(tool => tool.name === name) || name === INSPECT_PULL_REQUEST_MERGEABILITY_TOOL.name) return 'Git Operations'
     if (ACADEMY_MCP_TOOLS.some(tool => tool.name === name)) return 'Academy'
     if (VALIDATION_EXECUTION_TOOLS.some(tool => tool.name === name) || [LIST_VALIDATION_PROOFS_TOOL, GET_VALIDATION_PROOF_TOOL, RECORD_VALIDATION_PROOF_TOOL].some(tool => tool.name === name)) return 'Validation'
-    if ([...CONTINUUM_AGENT_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
+    if ([ASSESS_EXECUTION_CLOSURE_TOOL, ...CONTINUUM_AGENT_TOOLS, LIST_ARTIFACTS_TOOL, GET_ARTIFACT_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL, READ_ARTIFACT_SECTION_TOOL].some(tool => tool.name === name)) return 'Continuum'
     if (DIAGNOSTIC_SOURCE_TOOLS.some(tool => tool.name === name)) return 'Diagnostic Source Access'
     if (name === RUNTIME_IDENTITY_MCP_TOOL.name || name === REQUEST_RUNTIME_RESTART_TOOL.name) return 'Runtime Identity/Restart'
     if (name === SYSTEM_HEALTH_MCP_TOOL.name) return 'System Health'
@@ -275,6 +279,11 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {
+      if (!this.executionClosure || !this.artifactReader) return { isError: true, content: [{ type: 'text', text: 'CLOSURE_UNAVAILABLE' }] }
+      return executeAssessExecutionClosure({ ...this.executionClosure, reader: this.artifactReader, ledger: this.validationLedger,
+        ...(this.githubContext?.githubIntegration ? { github: (prNumber: number) => this.githubContext!.githubIntegration!.getPullRequest(this.githubContext!.repoRoot, prNumber) } : {}) }, args)
+    }
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return this.runtimePreview ? executeRuntimePreviewTool(this.runtimePreview.service, name, args, () => { if (!this.runtimePreview?.isCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : { content: [{ type: 'text', text: JSON.stringify({ success: false, code: 'PREVIEW_UNAVAILABLE' }) }], isError: true }
     if (GITHUB_PR_TOOLS.some(tool => tool.name === name) && this.githubContext?.githubIntegration) {
       return executeGitHubPrTool(this.githubContext.githubIntegration, this.githubContext.repoRoot, name, args, {
