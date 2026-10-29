@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { previewFingerprint, type PreviewProfile } from '../preview-profile'
 
+const observationEventSchema = z.object({ origin: z.enum(['GIT', 'SOURCE', 'CORPUS']), event: z.string().max(64), path: z.string().max(240), epoch: z.number().int().nonnegative(), decision: z.enum(['NO_CHANGE', 'CHANGED', 'COVERAGE_LOST']).optional(), reason: z.string().max(128).optional(), condition: z.string().max(64).optional(), protection: z.string().max(64).optional(), redaction: z.enum(['PATH_UNAVAILABLE', 'UNSAFE_OR_SENSITIVE_PATH']).optional() }).strict()
 export const standbyPolicySchema = z.object({
   idleMs: z.number().int().min(1000).max(1800000),
   maxPrivateBytes: z.number().int().min(1048576).max(64 * 1024 ** 3),
@@ -26,7 +27,7 @@ export const slotMetricsSchema = z.object({ at: z.string(), processes: z.number(
   peakPrivateBytes: z.number().nonnegative(), peakWorkingSetBytes: z.number().nonnegative(), availableBytes: z.number().nonnegative() }).strict()
 export const standbySchema = z.object({ state: z.enum(['WARMING', 'QUIESCENT', 'RUNNING', 'EVICTED']), policy: standbyPolicySchema,
   expiresAt: z.string(), preparedAt: z.string().optional(), reason: z.string().optional(), metrics: slotMetricsSchema.optional(),
-  observations: z.object({ state: z.enum(['CURRENT', 'SUSPECT', 'INVALID', 'UNVERIFIABLE']), epoch: z.number().int().nonnegative(), events: z.array(z.object({ origin: z.enum(['GIT', 'SOURCE', 'CORPUS']), event: z.string().max(64), path: z.string().max(240), epoch: z.number().int().nonnegative(), decision: z.enum(['NO_CHANGE', 'CHANGED', 'COVERAGE_LOST']).optional(), reason: z.string().max(128).optional() }).strict()).max(24) }).strict().optional(),
+  observations: z.object({ state: z.enum(['CURRENT', 'SUSPECT', 'INVALID', 'UNVERIFIABLE']), epoch: z.number().int().nonnegative(), events: z.array(observationEventSchema).max(24), rejection: observationEventSchema.optional() }).strict().optional(),
   guardMode: z.enum(['CONTINUOUS_OBSERVATION', 'FULL_RECHECK']).optional(),
   presentation: z.object({ stagesNs: z.record(z.string()).optional(), receivedNs: z.string(), guardedNs: z.string(), showNs: z.string(), functionalNs: z.string(), focusedNs: z.string(),
     durationMs: z.number().nonnegative() }).strict().optional() }).strict()

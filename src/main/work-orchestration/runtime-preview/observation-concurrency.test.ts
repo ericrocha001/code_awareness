@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { standbySchema } from './standby-policy'
 import { randomUUID } from 'node:crypto'
-import { RuntimePreviewRunner } from './runner'
+import { RuntimePreviewRunner, PreviewSourceVerificationFailure } from './runner'
 
 const observed = vi.hoisted(() => ({ callbacks: [] as Array<(event: string, file?: string) => void>, watchers: [] as any[] }))
 vi.mock('node:fs', async original => {
@@ -15,7 +16,7 @@ afterEach(() => { vi.clearAllTimers(); vi.useRealTimers(); vi.restoreAllMocks() 
 async function fixture(visible = false) {
   const id = randomUUID(), policy = { idleMs: 60000, maxPrivateBytes: 2147483648, maxWorkingSetBytes: 2147483648, maxCpuPercent: 5, minAvailableBytes: 0, sampleMs: 5000 }
   let record: any = { sessionId: id, operationId: randomUUID(), selection: {}, revision: 0, at: new Date().toISOString(), resourceInventory: [],
-    state: 'RUNNING', resources: 'RESERVED', readiness: 'READY', attestation: { artifact: 'VERIFIED', loadedCode: 'VERIFIED' },
+    process: { pid: 4242, created: 'fixture-process-identity' }, state: 'RUNNING', resources: 'RESERVED', readiness: 'READY', attestation: { artifact: 'VERIFIED', loadedCode: 'VERIFIED' },
     standby: { state: visible ? 'RUNNING' : 'QUIESCENT', policy, expiresAt: new Date(Date.now() + 60000).toISOString() } }
   const store = { read: vi.fn(() => record), append: vi.fn((next: any) => { record = next }) }
   const runner = new RuntimePreviewRunner(store as any, {} as any, {} as any)
@@ -39,9 +40,23 @@ describe('observer coordination before SHOW and QUIESCENT, without Electron', ()
   it('preserves the same slot after an inoffensive event and writes bounded evidence only in the receipt', async () => {
     const f = await fixture(); f.event('derived/output.js')
     const result = await f.runner.present(f.id)
-    expect(result.sessionId).toBe(f.id); expect(result.standby?.state).toBe('RUNNING')
+    expect(result.sessionId).toBe(f.id); expect(result.process).toEqual({ pid: 4242, created: 'fixture-process-identity' }); expect(result.standby?.state).toBe('RUNNING')
     expect(result.standby?.observations).toMatchObject({ state: 'CURRENT', events: expect.arrayContaining([expect.objectContaining({ origin: 'SOURCE', decision: 'NO_CHANGE' })]) })
     expect(f.adapter.control).toHaveBeenCalledOnce(); expect(f.evict).not.toHaveBeenCalled()
+  })
+  it.each(['ignored/untracked.js', '.env.secret', 'C:/private/token'])('retains the decisive source rejection independently of recent events: %s', async decisive => {
+    const f = await fixture(); f.event(decisive.startsWith('C:') ? 'derived/trigger' : decisive)
+    for (let i = 0; i < 90; i++) f.event('derived/event-' + i)
+    f.verify.mockRejectedValue(new PreviewSourceVerificationFailure('PREPARED_IGNORED_SOURCE_UNVERIFIABLE', decisive, 'IGNORED_OUTSIDE_DERIVED_NAMESPACE', 'UNKNOWN_IGNORED'))
+    await expect(f.runner.present(f.id)).rejects.toThrow('PREPARED_IGNORED_SOURCE_UNVERIFIABLE')
+    const evidence = standbySchema.parse(f.store.read().standby).observations!, decision = evidence.events.at(-1)!
+    expect(evidence.epoch).toBe(91); expect(evidence.events).toHaveLength(24)
+    expect(decision).toMatchObject({ origin: 'SOURCE', decision: 'COVERAGE_LOST', condition: 'IGNORED_OUTSIDE_DERIVED_NAMESPACE', protection: 'UNKNOWN_IGNORED', path: decisive === 'ignored/untracked.js' ? decisive : 'UNKNOWN' })
+    if (decisive !== 'ignored/untracked.js') { expect(decision.redaction).toBe('UNSAFE_OR_SENSITIVE_PATH'); expect(JSON.stringify(evidence)).not.toContain(decisive) }
+    expect(f.adapter.control).not.toHaveBeenCalled()
+    for (let i = 0; i < 90; i++) f.event('derived/later-' + i)
+    const later = f.slot.observations()
+    expect(later.state).toBe('UNVERIFIABLE'); expect(later.rejection).toEqual(decision)
   })
   it('rechecks an epoch that changes while source materiality is being verified', async () => {
     const f = await fixture(); f.event('derived/first.js')

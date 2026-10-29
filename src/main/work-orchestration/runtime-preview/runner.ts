@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
-import { readFile, realpath } from 'node:fs/promises'
-import { join } from 'node:path'
+import { readFile, realpath, lstat } from 'node:fs/promises'
+import { join, relative, isAbsolute } from 'node:path'
 import type { PreviewObservationEvent, PreviewObservationSink, PreviewObservationState, PreviewSelection, PreviewPreflight } from '../../../shared/types/runtime-preview-types'
 import { bytesFingerprint, previewFingerprint, type PreviewProfile } from '../preview-profile'
 import type { PreviewProfileStore } from '../preview-profile-store'
@@ -25,6 +25,9 @@ export interface PreparedPreview {
   classifyChanges?: (paths: string[]) => Promise<Set<string>>
   verifySourceChanges?: (paths: string[]) => Promise<void>
   observeSource?: () => Promise<NonNullable<PreviewPreflight['snapshot']>>
+}
+export class PreviewSourceVerificationFailure extends Error {
+  constructor(reason: string, readonly path: string, readonly condition: string, readonly protection: string) { super(reason) }
 }
 type LaunchContext = Awaited<ReturnType<PreviewRepositories['open']>>
 export interface PreviewLaunchAuthority { prepare(selection: PreviewSelection, timing?: PreviewStartClock, context?: LaunchContext, evidence?: PreviewPreflight): Promise<PreparedPreview> }
@@ -52,24 +55,44 @@ export class CatalogPreviewLaunchAuthority implements PreviewLaunchAuthority {
         const protectedFiles = new Map([...profile.command.inputs.map(file => [file.path, file.fingerprint] as const),
           [profile.dependencies.manifest, profile.dependencies.manifestHash] as const, [profile.dependencies.lockfile, profile.dependencies.lockfileHash] as const,
           [profile.dependencies.materialization, materializationDigest] as const])
+        const executable = profile.command.executable && relative(identity.record.path, profile.command.executable).replaceAll('\\', '/')
+        const loaded = [...(profile.adapter?.artifacts.map(file => file.path) ?? []), ...(profile.adapter?.runtimeExecutable ? [profile.adapter.runtimeExecutable] : []),
+          ...(executable && !isAbsolute(executable) && !executable.startsWith('../') ? [executable] : [])]
+        const fail = (reason: string, path: string, condition: string, protection: string): never => { throw new PreviewSourceVerificationFailure(reason, path, condition, protection) }
         const remaining: string[] = []
         for (const path of paths) {
-          if (protectedFiles.has(path)) {
-            let digest: string | null
-            try { digest = bytesFingerprint(await readFile(await previewPath(identity.record.path, path))) }
-            catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') digest = null; else throw new Error('PREPARED_SOURCE_UNVERIFIABLE') }
-            if (digest !== protectedFiles.get(path)) throw new Error('PREPARED_INPUT_BYTES_CHANGED')
-          } else if (path === 'node_modules' || path.startsWith('node_modules/')) throw new Error('PREPARED_DEPENDENCY_UNVERIFIABLE')
-          else if (path !== '.git') remaining.push(path)
+          const affected = [...protectedFiles].filter(([file]) => file === path || file.startsWith(path + '/'))
+          for (const [file, expected] of affected) {
+            let digest: string | null = null
+            try { digest = bytesFingerprint(await readFile(await previewPath(identity.record.path, file))) }
+            catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') digest = null; else fail('PREPARED_SOURCE_UNVERIFIABLE', path, 'INPUT_READ_FAILED', 'PROFILE_INPUT') }
+            if (digest !== expected) fail('PREPARED_INPUT_BYTES_CHANGED', path, 'INPUT_DIGEST_CHANGED', 'PROFILE_INPUT')
+          }
+          if (path === 'node_modules' || path.startsWith('node_modules/')) fail('PREPARED_DEPENDENCY_UNVERIFIABLE', path, 'DEPENDENCY_EVENT', 'DEPENDENCY')
+          if (!protectedFiles.has(path) && path !== '.git') remaining.push(path)
         }
         if (!remaining.length) return
-        const ignored = await context.git.classifyRuntimePreviewChanges(selection.worktreeId, remaining)
-        if (remaining.some(path => ignored.has(path) && !/^(?:\.code-awareness|out|code_awareness)\//.test(path))) throw new Error('PREPARED_IGNORED_SOURCE_UNVERIFIABLE')
-        if (remaining.some(path => ignored.has(path) && profile.adapter?.artifacts.some(file => file.path === path))) throw new Error('PREPARED_LOADED_SOURCE_UNVERIFIABLE')
-        if (remaining.every(path => ignored.has(path))) return
+        const affectedLoaded = loaded.filter(file => !protectedFiles.has(file) && remaining.some(path => file === path || file.startsWith(path + '/')))
+        const ignored = await context.git.classifyRuntimePreviewChanges(selection.worktreeId, [...new Set([...remaining, ...affectedLoaded])])
+        let directoryEvent = false
+        for (const path of remaining) {
+          if (affectedLoaded.some(file => (file === path || file.startsWith(path + '/')) && (ignored.has(path) || ignored.has(file)))) fail('PREPARED_LOADED_SOURCE_UNVERIFIABLE', path, 'LOADED_CONTENT_NOT_REATTESTED', 'LOADED_CODE')
+          if (!ignored.has(path)) continue
+          const root = /^(?:\.code-awareness|out|code_awareness)(?:$|\/)/.exec(path)?.[0].replace(/\/$/, '')
+          if (!root) fail('PREPARED_IGNORED_SOURCE_UNVERIFIABLE', path, 'IGNORED_OUTSIDE_DERIVED_NAMESPACE', 'UNKNOWN_IGNORED')
+          try {
+            const directory = await lstat(join(identity.record.path, root!))
+            if (!directory.isDirectory() || directory.isSymbolicLink()) fail('PREPARED_IGNORED_SOURCE_UNVERIFIABLE', path, 'DERIVED_ROOT_NOT_DIRECTORY', 'UNKNOWN_IGNORED')
+            if ((await lstat(await previewPath(identity.record.path, path))).isDirectory()) directoryEvent = true
+          } catch (error) {
+            if (error instanceof PreviewSourceVerificationFailure) throw error
+            fail('PREPARED_IGNORED_SOURCE_UNVERIFIABLE', path, 'DERIVED_PATH_UNVERIFIABLE', 'UNKNOWN_IGNORED')
+          }
+        }
+        if (!directoryEvent && remaining.every(path => ignored.has(path))) return
         const source = await context.git.getCoordinationSnapshot(selection.worktreeId)
         if (source.record.generation !== selection.generation || source.record.path !== identity.record.path || source.record.detached || source.record.locked || source.conflictCount || source.snapshot.operation ||
-          previewFingerprint({ ...source.snapshot, dirty: source.stagedCount + source.unstagedCount + source.untrackedCount > 0 }) !== gitFingerprint) throw new Error('PREPARED_SOURCE_BYTES_CHANGED')
+          previewFingerprint({ ...source.snapshot, dirty: source.stagedCount + source.unstagedCount + source.untrackedCount > 0 }) !== gitFingerprint) fail('PREPARED_SOURCE_BYTES_CHANGED', remaining.length === 1 ? remaining[0] : 'UNKNOWN', 'SOURCE_SNAPSHOT_MISMATCH', 'TRACKED_SOURCE')
       },
       classifyChanges: paths => context.git.classifyRuntimePreviewChanges(selection.worktreeId, paths),
       retentionGuard: async () => {
@@ -132,7 +155,7 @@ export class RuntimePreviewRunner {
   private readonly stopRequests = new Set<string>()
   private readonly slots = new Map<string, { guard: (mark?: (stage: string) => void) => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher;
     metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void;
-    checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; disposeIdentity?: () => void; suspect?: PreviewObservationSink; observations?: () => { state: PreviewObservationState; epoch: number; events: PreviewObservationEvent[] }; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; }>()
+    checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; disposeIdentity?: () => void; suspect?: PreviewObservationSink; observations?: () => { state: PreviewObservationState; epoch: number; events: PreviewObservationEvent[]; rejection?: PreviewObservationEvent }; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; }>()
   constructor(private readonly store: PreviewSessionStore, private readonly authority: PreviewLaunchAuthority,
     private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner,
     private readonly options: { buildCache?: boolean } = {}) {}
@@ -408,13 +431,16 @@ export class RuntimePreviewRunner {
   private async monitorSlot(sessionId: string, worktree: string, guard: (mark?: (stage: string) => void) => Promise<void>, profile: PreviewProfile, retentionGuard?: () => Promise<void>, classifyChanges?: PreparedPreview['classifyChanges'], watchIdentity?: (invalidate: PreviewObservationSink) => Promise<PreviewCorpusObservation>, corpus?: PreviewCorpusObservation, verifySource?: PreparedPreview['verifySourceChanges'], events: PreviewObservationEvent[] = []) {
     const changes = new Set<string>()
     let epoch = 0, burst = 0, lost = false, state: PreviewObservationState = 'CURRENT'
+    let rejection: PreviewObservationEvent | undefined
     const receive: PreviewObservationSink = event => {
-      if (!event.decision) { epoch++; burst++; state = 'SUSPECT'; if (burst > 1024) lost = true }
+      if (!event.decision) { epoch++; burst++; if (state === 'CURRENT' || state === 'SUSPECT') state = 'SUSPECT'; if (burst > 1024) lost = true }
       const path = event.path && event.path.length <= 240 && !/^[A-Za-z]:|^[/\\]|[\x00-\x1f]/.test(event.path) && !event.path.replaceAll('\\', '/').split('/').some(part => part === '..' || /^(?:\.env.*|credentials?|tokens?)$/i.test(part)) ? event.path.replaceAll('\\', '/') : 'UNKNOWN'
-      events.push({ ...event, path, epoch }); if (events.length > 24) events.shift()
+      const safe: PreviewObservationEvent = { ...event, path, epoch, ...(path === 'UNKNOWN' ? { redaction: !event.path || event.path === 'UNKNOWN' ? 'PATH_UNAVAILABLE' : 'UNSAFE_OR_SENSITIVE_PATH' } : {}) }
+      if (!rejection && (event.decision === 'CHANGED' || event.decision === 'COVERAGE_LOST')) rejection = safe
+      events.push(safe); if (events.length > 24) events.shift()
     }
     const slot: { guard: (mark?: (stage: string) => void) => Promise<void>; timer?: NodeJS.Timeout; watcher: FSWatcher; metrics?: NonNullable<NonNullable<PreviewSessionRecord['standby']>['metrics']>; previous?: { at: number; cpu: number }; invalid: boolean; disposeContext?: () => void;
-      checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; disposeIdentity?: () => void; suspect?: PreviewObservationSink; observations?: () => { state: PreviewObservationState; epoch: number; events: PreviewObservationEvent[] }; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; } = {
+      checkChanges?: () => Promise<void>; retentionGuard?: () => Promise<void>; disposeIdentity?: () => void; suspect?: PreviewObservationSink; observations?: () => { state: PreviewObservationState; epoch: number; events: PreviewObservationEvent[]; rejection?: PreviewObservationEvent }; sourceCovered?: boolean; resume?: () => void; invalidReason?: string; } = {
       guard, invalid: false, watcher: watch(worktree, { recursive: true, persistent: false }, (_event, file) => {
         const path = file?.toString().replaceAll('\\', '/')
         if (!path || /^[A-Za-z]:|^[/\\]|[\x00-\x1f]/.test(path) || path.split('/').includes('..') || changes.size >= 256) lost = true
@@ -423,7 +449,7 @@ export class RuntimePreviewRunner {
       }) }
     slot.retentionGuard = retentionGuard
     slot.suspect = receive
-    slot.observations = () => ({ state, epoch, events: [...events] })
+    slot.observations = () => ({ state, epoch, events: [...events], ...(rejection ? { rejection } : {}) })
     slot.watcher.on('error', () => { lost = true; receive({ origin: 'SOURCE', event: 'error', path: 'UNKNOWN', epoch }) })
     slot.watcher.on('close', () => { if (this.slots.get(sessionId) === slot) { lost = true; receive({ origin: 'SOURCE', event: 'close', path: 'UNKNOWN', epoch }) } })
     slot.disposeContext = () => corpus?.close()
@@ -456,7 +482,7 @@ export class RuntimePreviewRunner {
         const reason = error instanceof Error ? error.message : 'PREPARED_OBSERVATION_UNVERIFIABLE'
         slot.invalid = true; slot.invalidReason = reason
         state = /CHANGED/.test(reason) || identity?.state === 'INVALID' || corpus?.state === 'INVALID' ? 'INVALID' : 'UNVERIFIABLE'
-        receive({ origin, event: 'verify', path: 'UNKNOWN', epoch, decision: state === 'INVALID' ? 'CHANGED' : 'COVERAGE_LOST', reason })
+        receive({ origin, event: 'verify', path: error instanceof PreviewSourceVerificationFailure ? error.path : 'UNKNOWN', epoch, decision: state === 'INVALID' ? 'CHANGED' : 'COVERAGE_LOST', reason, ...(error instanceof PreviewSourceVerificationFailure ? { condition: error.condition, protection: error.protection } : {}) })
         const current = this.store.read(sessionId)
         if (current.standby) this.change(current, { standby: { ...current.standby, observations: slot.observations!() } })
         throw error

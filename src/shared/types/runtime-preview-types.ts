@@ -21,5 +21,6 @@ export type PreviewObservationState = 'CURRENT' | 'SUSPECT' | 'INVALID' | 'UNVER
 export interface PreviewObservationEvent {
   origin: 'GIT' | 'SOURCE' | 'CORPUS'; event: string; path: string; epoch: number
   decision?: 'NO_CHANGE' | 'CHANGED' | 'COVERAGE_LOST'; reason?: string
+  condition?: string; protection?: string; redaction?: 'PATH_UNAVAILABLE' | 'UNSAFE_OR_SENSITIVE_PATH'
 }
 export type PreviewObservationSink = (event: PreviewObservationEvent) => void

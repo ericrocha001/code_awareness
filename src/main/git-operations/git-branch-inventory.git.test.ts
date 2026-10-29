@@ -2,7 +2,7 @@ import { CatalogPreviewLaunchAuthority } from '../work-orchestration/runtime-pre
 import { bytesFingerprint, previewFingerprint } from '../work-orchestration/preview-profile'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { join } from 'node:path'
-import { rmSync, readFileSync, writeFileSync, watch } from 'node:fs'
+import { rmSync, readFileSync, writeFileSync, watch, symlinkSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { GitService } from '../core/git-service'
 import { cleanupTempRepo, commit, createTempGitRepo, gitExec, stageAll, writeFile } from '../core/git-test-helpers'
@@ -81,9 +81,11 @@ describe('branch inventory with real Git', () => {
   }, 60000)
   it('verifies source materiality, protecting loaded ignored files and dependencies', async () => {
     await setup()
-    writeFile(root, '.gitignore', '.code-awareness/\nignored/\nnode_modules/\n')
+    writeFile(root, '.gitignore', '.code-awareness\nout\ncode_awareness\n.code-awareness-other/\nignored/\nnode_modules/\n')
     writeFile(root, 'ignored/loaded.js', 'loaded')
     writeFile(root, 'feature.ts', 'original source')
+    writeFile(root, '.code-awareness/tracked.ts', 'tracked source')
+    await gitExec(root, ['add', '-f', '.code-awareness/tracked.ts'])
     await stageAll(root); await commit(root, 'preview policy')
     const service = new GitOperationsService(root, git, new GitHubGitTransport(null, git), { repositoryId: 'fixture', isActive: () => true })
     const inventory = await service.getBranchInventory(), tree = inventory.worktrees.find(value => value.path === root)!
@@ -100,7 +102,51 @@ describe('branch inventory with real Git', () => {
     const prepared = await authority.prepare(selection)
     writeFile(root, '.code-awareness/output.js', 'generated')
     await expect(prepared.verifySourceChanges!(['derived/output.js'])).resolves.toBeUndefined()
+    for (const directory of ['.code-awareness', 'out', 'code_awareness']) {
+      writeFile(root, directory + '/generated.txt', 'derived output')
+      await expect(prepared.verifySourceChanges!([directory])).resolves.toBeUndefined()
+      await expect(prepared.verifySourceChanges!([directory + '/generated.txt'])).resolves.toBeUndefined()
+    }
     await expect(prepared.verifySourceChanges!(['a'])).resolves.toBeUndefined()
+    await expect(prepared.verifySourceChanges!(['feature.ts'])).resolves.toBeUndefined()
+    await expect(prepared.verifySourceChanges!(['.code-awareness/missing.txt'])).rejects.toMatchObject({ path: '.code-awareness/missing.txt', condition: 'DERIVED_PATH_UNVERIFIABLE', protection: 'UNKNOWN_IGNORED' })
+    writeFile(root, '.code-awareness-other/generated.txt', 'not a derived namespace')
+    await expect(prepared.verifySourceChanges!(['.code-awareness-other'])).rejects.toMatchObject({ path: '.code-awareness-other', condition: 'IGNORED_OUTSIDE_DERIVED_NAMESPACE' })
+    for (const directory of ['.code-awareness', 'out', 'code_awareness']) {
+      rmSync(join(root, directory), { recursive: true })
+      writeFile(root, directory, 'an ignored file is not a derived directory')
+      await expect(prepared.verifySourceChanges!([directory])).rejects.toMatchObject({ path: directory, condition: directory === '.code-awareness' ? 'SOURCE_SNAPSHOT_MISMATCH' : 'DERIVED_ROOT_NOT_DIRECTORY' })
+      rmSync(join(root, directory))
+      await expect(prepared.verifySourceChanges!([directory])).rejects.toMatchObject({ path: directory, condition: directory === '.code-awareness' ? 'SOURCE_SNAPSHOT_MISMATCH' : 'DERIVED_PATH_UNVERIFIABLE' })
+      if (directory === 'out') {
+        symlinkSync(join(root, 'ignored'), join(root, directory), 'junction')
+        await expect(prepared.verifySourceChanges!([directory])).rejects.toMatchObject({ condition: 'DERIVED_ROOT_NOT_DIRECTORY' })
+        rmSync(join(root, directory))
+      }
+      writeFile(root, directory + '/loaded.js', 'loaded executable')
+      if (directory === '.code-awareness') writeFile(root, '.code-awareness/tracked.ts', 'tracked source')
+      profile.adapter.artifacts.push({ component: 'ELECTRON_MAIN', path: directory + '/loaded.js' })
+      await expect(prepared.verifySourceChanges!([directory])).rejects.toMatchObject({ path: directory, protection: 'LOADED_CODE' })
+      await expect(prepared.verifySourceChanges!([directory + '/loaded.js'])).rejects.toMatchObject({ path: directory + '/loaded.js', condition: 'LOADED_CONTENT_NOT_REATTESTED' })
+      profile.adapter.artifacts.pop()
+      if (directory === 'out') {
+        ;(profile.adapter as any).runtimeExecutable = 'out/loaded.js'
+        await expect(prepared.verifySourceChanges!(['out'])).rejects.toMatchObject({ protection: 'LOADED_CODE' })
+        await expect(prepared.verifySourceChanges!(['out/loaded.js'])).rejects.toMatchObject({ protection: 'LOADED_CODE' })
+        delete (profile.adapter as any).runtimeExecutable
+      }
+      writeFile(root, directory + '/input.js', 'pinned')
+      profile.command.inputs.push({ path: directory + '/input.js', fingerprint: bytesFingerprint('pinned') })
+      await expect(prepared.verifySourceChanges!([directory])).resolves.toBeUndefined()
+      writeFile(root, directory + '/input.js', 'changed')
+      await expect(prepared.verifySourceChanges!([directory])).rejects.toMatchObject({ path: directory, condition: 'INPUT_DIGEST_CHANGED', protection: 'PROFILE_INPUT' })
+      profile.command.inputs.pop()
+    }
+    await expect(prepared.verifySourceChanges!(['node_modules'])).rejects.toMatchObject({ path: 'node_modules', protection: 'DEPENDENCY' })
+    writeFile(root, '.code-awareness/tracked.ts', 'changed tracked source')
+    await expect(prepared.verifySourceChanges!(['.code-awareness'])).rejects.toMatchObject({ path: '.code-awareness', condition: 'SOURCE_SNAPSHOT_MISMATCH', protection: 'TRACKED_SOURCE' })
+    writeFile(root, '.code-awareness/tracked.ts', 'tracked source')
+    profile.adapter.artifacts.push({ component: 'ELECTRON_MAIN', path: 'feature.ts' })
     await expect(prepared.verifySourceChanges!(['feature.ts'])).resolves.toBeUndefined()
     writeFile(root, 'feature.ts', 'changed source')
     await expect(prepared.verifySourceChanges!(['feature.ts'])).rejects.toThrow('PREPARED_SOURCE_BYTES_CHANGED')
@@ -109,7 +155,7 @@ describe('branch inventory with real Git', () => {
     writeFile(root, 'ignored/loaded.js', 'changed ignored source')
     await expect(prepared.verifySourceChanges!(['ignored/loaded.js'])).rejects.toThrow('PREPARED_INPUT_BYTES_CHANGED')
     writeFile(root, 'ignored/untracked.js', 'unknown loaded code')
-    await expect(prepared.verifySourceChanges!(['ignored/untracked.js'])).rejects.toThrow('PREPARED_IGNORED_SOURCE_UNVERIFIABLE')
+    await expect(prepared.verifySourceChanges!(['ignored/untracked.js'])).rejects.toMatchObject({ message: 'PREPARED_IGNORED_SOURCE_UNVERIFIABLE', path: 'ignored/untracked.js', condition: 'IGNORED_OUTSIDE_DERIVED_NAMESPACE', protection: 'UNKNOWN_IGNORED' })
     writeFile(root, 'node_modules/dependency/index.js', 'unproved')
     await expect(prepared.verifySourceChanges!(['node_modules/dependency/index.js'])).rejects.toThrow('PREPARED_DEPENDENCY_UNVERIFIABLE')
   }, 60000)
