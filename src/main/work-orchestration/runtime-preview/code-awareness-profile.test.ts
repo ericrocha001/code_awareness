@@ -15,7 +15,7 @@ async function setup(root = process.cwd(), executable = join(process.cwd(), 'nod
 it('resolves the installed Windows environment into one reusable host profile without manual configuration', async () => {
   const { store, resolver, directory } = await setup()
   const profile = await resolver.resolve('repo', 'tree', process.cwd())
-  expect(profile.bootstrap?.dataPolicy).toBe('REPOSITORY_SNAPSHOT')
+  expect(profile.bootstrap?.dataPolicy).toBe('ARTIFACT_FIRST')
   expect(profile.adapter?.artifacts).toHaveLength(12)
   await store.approve(profile, async () => true)
   const bytes = await readFile(join(directory, 'profiles.json'), 'utf8')

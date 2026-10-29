@@ -72,7 +72,7 @@ export class RepositoryPreviewContextProvisioner implements PreviewContextProvis
     const policy = profile.bootstrap
     if (!policy) return null
     const repository = this.catalog.resolveAvailable(profile.repositoryId)
-    if (policy.dataPolicy === 'EMPTY') return { repositoryId: repository.id, estimatedBytes: 0, artifacts: 0, ...policy }
+    if (policy.dataPolicy !== 'REPOSITORY_SNAPSHOT') return { repositoryId: repository.id, estimatedBytes: 0, artifacts: 0, ...policy }
     const source = this.source(repository.id)
     if (!existsSync(source) || lstatSync(source).isSymbolicLink()) throw new Error('PREVIEW_DATA_SOURCE_UNAVAILABLE')
     const db = openReadOnly(source)
@@ -95,6 +95,11 @@ export class RepositoryPreviewContextProvisioner implements PreviewContextProvis
     const privateCatalog = new RepositoryCatalogStore(catalogFile)
     try { privateCatalog.provisionPreviewIdentity(repository.id, { name: repository.name, path: worktree, normalizedPath: normalizeRepositoryPath(worktree), status: 'ACTIVE', availability: 'AVAILABLE', gitState: 'GIT' }) }
     finally { privateCatalog.close() }
+    if (policy.dataPolicy === 'ARTIFACT_FIRST') return previewContextManifest.parse({
+      version: 1, mode: 'PREVIEW', sessionId, selection, profileRevision: profile.revision, worktree, source, policy,
+      data: { policy: 'ARTIFACT_FIRST', repositoryId: repository.id, origin: 'HOST_CANONICAL_REFERENCE', at: new Date().toISOString(),
+        schema: null, digest: null, bytes: 0, artifacts: 0, media: 0 }, catalogDigest: bytesFingerprint(readFileSync(catalogFile))
+    })
     mkdirSync(dirname(destination), { recursive: true })
     const expected = expectedCorpusSchema(directory, repository.id)
     if (policy.dataPolicy === 'EMPTY') { const store = new ArtifactStore(destination, repository.id); store.close() }

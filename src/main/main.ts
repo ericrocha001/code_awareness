@@ -429,7 +429,7 @@ app.whenReady().then(async () => {
   activeProjects = new ActiveProjectService(codeMapService, path => repositoryCatalog?.findByPath(path) ?? null,
     previewContext ? { mode: 'PREVIEW', sessionId: previewContext.sessionId,
       target: { ...previewContext.selection, path: previewContext.worktree }, dataPolicy: previewContext.data.policy,
-      dataOrigin: { at: previewContext.data.at, digest: previewContext.data.digest, artifacts: previewContext.data.artifacts, media: previewContext.data.media } } : { mode: 'HOST' })
+      ...(previewContext.data.digest ? { dataOrigin: { at: previewContext.data.at, digest: previewContext.data.digest, artifacts: previewContext.data.artifacts, media: previewContext.data.media } } : {}) } : { mode: 'HOST' })
   const gitManagement = new GitManagementController(activeProjects)
   registerGitManagementHandlers(gitManagement)
   const workOrchestration = new WorkOrchestrationController(activeProjects, change => {
@@ -494,7 +494,7 @@ app.whenReady().then(async () => {
     let continuum = undefined
     activeProjects!.updateCapability(revision, 'continuum', { state: 'INITIALIZING' })
     try {
-      const report = continuumSession.activate(project.path)
+      const report = context?.dataPolicy === 'ARTIFACT_FIRST' ? undefined : continuumSession.activate(project.path)
       if (report && report.discovered > 0) {
         console.log(`[Continuum] Ingestion: discovered=${report.discovered} ingested=${report.ingested} rejected=${report.rejected} retryable=${report.retryableFailures}`)
       }
@@ -645,8 +645,13 @@ app.whenReady().then(async () => {
   if (previewContext) {
     try {
       const state = await repositoryRuntime.activate(previewContext.selection.repositoryId)
-      if (state.context?.identity !== 'IDENTITY_BOUND' || state.context.repositoryId !== previewContext.selection.repositoryId || state.context.capabilities.continuum.state !== 'READY') throw new Error('PREVIEW_CONTEXT_ACTIVATION_FAILED')
-      bindPreviewContext(state.context.repositoryId, state.project!.path)
+      if (state.context?.identity !== 'IDENTITY_BOUND' || state.context.repositoryId !== previewContext.selection.repositoryId ||
+        (previewContext.data.policy !== 'ARTIFACT_FIRST' && state.context.capabilities.continuum.state !== 'READY')) throw new Error('PREVIEW_CONTEXT_ACTIVATION_FAILED')
+      await bindPreviewContext(state.context.repositoryId, state.project!.path, () => {
+        const current = activeProjects?.getState().context
+        return current?.identity === 'IDENTITY_BOUND' && current.repositoryId === previewContext.selection.repositoryId &&
+          current.worktree?.worktreeId === previewContext.selection.worktreeId && current.worktree.generation === previewContext.selection.generation ? current.capabilities : undefined
+      })
     } catch (error) { failPreviewBootstrap(app, error) }
   } else if (!isRuntimePreview()) await repositoryRuntime.restoreLastActive(settingsService.loadSettings().lastActiveRepositoryId)
   createWindow()

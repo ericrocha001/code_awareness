@@ -28,14 +28,15 @@ export async function validatePreviewContext(raw: unknown, input: { sessionId: s
     throw new Error('PREVIEW_GIT_IDENTITY_UNAVAILABLE')
   }
   const userData = join(input.directory, 'userData'), catalogFile = previewCatalogPath(userData), corpus = previewCorpusPath(userData, selection.repositoryId)
-  for (const file of [catalogFile, corpus]) if (realpathSync(file).toLowerCase() !== file.toLowerCase()) throw new Error('PREVIEW_DATA_PATH_ESCAPED')
-  if (bytesFingerprint(readFileSync(catalogFile)) !== context.catalogDigest || bytesFingerprint(readFileSync(corpus)) !== data.digest) throw new Error('PREVIEW_DATA_DIGEST_MISMATCH')
+  for (const file of data.policy === 'ARTIFACT_FIRST' ? [catalogFile] : [catalogFile, corpus]) if (realpathSync(file).toLowerCase() !== file.toLowerCase()) throw new Error('PREVIEW_DATA_PATH_ESCAPED')
+  if (bytesFingerprint(readFileSync(catalogFile)) !== context.catalogDigest || (data.policy !== 'ARTIFACT_FIRST' && bytesFingerprint(readFileSync(corpus)) !== data.digest)) throw new Error('PREVIEW_DATA_DIGEST_MISMATCH')
   const catalog = new Database(catalogFile, { readonly: true, fileMustExist: true })
   try {
     const rows = catalog.prepare('SELECT id,checkout_path,normalized_checkout_path,status,availability,git_state FROM repository_catalog_records').all() as Array<Record<string, string>>
     if (rows.length !== 1 || rows[0].id !== selection.repositoryId || realpathSync(rows[0].checkout_path).toLowerCase() !== input.worktree.toLowerCase() || rows[0].normalized_checkout_path !== normalizeRepositoryPath(input.worktree) || rows[0].status !== 'ACTIVE' || rows[0].availability !== 'AVAILABLE' || rows[0].git_state !== 'GIT') throw new Error('PREVIEW_CATALOG_IDENTITY_MISMATCH')
     if (catalog.pragma('quick_check', { simple: true }) !== 'ok' || (catalog.prepare('SELECT count(*) AS n FROM repository_catalog_github_links').get() as { n: number }).n) throw new Error('PREVIEW_CATALOG_INVALID')
   } finally { catalog.close() }
+  if (data.policy === 'ARTIFACT_FIRST') { await verifyGit(); return context }
   const db = new Database(corpus, { readonly: true, fileMustExist: true })
   try {
     const expected = expectedCorpusSchema(input.directory, selection.repositoryId)

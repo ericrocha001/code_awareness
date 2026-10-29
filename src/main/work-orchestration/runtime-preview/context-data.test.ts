@@ -30,6 +30,17 @@ function setup(policy: 'EMPTY' | 'REPOSITORY_SNAPSHOT' = 'REPOSITORY_SNAPSHOT') 
   return { root, directory, worktree, host, store, service, provisioner, input, file }
 }
 describe('private preview corpus provisioning with real SQLite', () => {
+  it('ARTIFACT_FIRST provisions only checkout identity with no readable Host corpus or private Continuum', async () => {
+    const f = setup('EMPTY')
+    f.input.profile.bootstrap!.dataPolicy = 'ARTIFACT_FIRST'
+    const provisioner = new RepositoryPreviewContextProvisioner({ resolveAvailable: () => ({ id: 'logical-repository', name: 'Selected' }) as never }, join(f.root, 'absent-host'))
+    expect(provisioner.quote(f.input.profile)).toMatchObject({ estimatedBytes: 0, artifacts: 0 })
+    const manifest = await provisioner.prepare(f.input)
+    expect(manifest.data).toMatchObject({ policy: 'ARTIFACT_FIRST', origin: 'HOST_CANONICAL_REFERENCE', schema: null, digest: null, bytes: 0 })
+    expect(existsSync(previewCatalogPath(join(f.directory, 'userData')))).toBe(true)
+    expect(existsSync(join(f.directory, 'userData', 'continuum'))).toBe(false)
+    expect(existsSync(join(f.root, 'absent-host'))).toBe(false)
+  })
   it('backs up committed WAL, revisions and actual media; retains logical identity and isolates writes', async () => {
     const f = setup()
     f.service.mutateTags({ repositoryId: 'logical-repository', intent: 'create', tag: { slug: 'canonical', name: 'Canonical' } })

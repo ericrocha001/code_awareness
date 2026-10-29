@@ -10,7 +10,7 @@ interface OpenProjects {
 type ProjectListener = (state: ActiveProjectState) => void | Promise<void>
 export type ActiveInstance = { mode: 'HOST' } | { mode: 'PREVIEW'; sessionId: string;
   target?: { repositoryId: string; path: string; worktreeId: string; generation: string };
-  dataPolicy?: 'EMPTY' | 'REPOSITORY_SNAPSHOT'; dataOrigin?: ActiveContext['dataOrigin'] }
+  dataPolicy?: 'EMPTY' | 'REPOSITORY_SNAPSHOT' | 'ARTIFACT_FIRST'; dataOrigin?: ActiveContext['dataOrigin'] }
 const normalized = (path: string) => path.replace(/\\/g, '/').replace(/\/$/, '')
 const emptyContext = (): ActiveContext => ({ revision: 0, mode: 'HOST', identity: 'UNBOUND', repositoryId: null, activeCheckout: null,
   legacyCodeMapProjectId: null, sessionId: null, dataPolicy: 'HOST_CANONICAL',

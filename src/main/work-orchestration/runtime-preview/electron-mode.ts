@@ -3,17 +3,24 @@ import { readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, relative, isAbsolute } from 'node:path'
 import { validatePreviewContext } from './context-bootstrap'
 import type { PreviewContextManifest } from './context-contract'
+import { startPreviewChannel } from './channel-server'
 
 export const isRuntimePreview = () => ['PREVIEW_SESSION_ID', 'PREVIEW_SESSION_CONFIG', 'PREVIEW_SESSION_DIRECTORY'].some(key => process.env[key] !== undefined)
 let context: PreviewContextManifest | undefined
 let boundContext: { mode: 'PREVIEW'; repositoryId: string; worktreeId: string; generation: string; profileRevision: number; activeCheckout: string; identity: 'IDENTITY_BOUND'; data: PreviewContextManifest['data'] } | undefined
 let saveEvidence: (() => void) | undefined
+let channelConfiguration: { token: string; directory: string } | undefined
+let revokeChannel: (() => Promise<void>) | undefined
 export const previewBootstrapContext = () => context ? structuredClone(context) : undefined
-export function bindPreviewContext(repositoryId: string, checkout: string) {
+export async function bindPreviewContext(repositoryId: string, checkout: string, readiness: () => Record<string, { state: string; reasonCode?: string }> | undefined) {
   if (!context || repositoryId !== context.selection.repositoryId || realpathSync(checkout).toLowerCase() !== context.worktree.toLowerCase()) throw new Error('PREVIEW_CONTEXT_BINDING_MISMATCH')
   boundContext = { mode: 'PREVIEW', repositoryId, worktreeId: context.selection.worktreeId, generation: context.selection.generation,
     profileRevision: context.profileRevision, activeCheckout: context.worktree, identity: 'IDENTITY_BOUND', data: context.data }
   saveEvidence?.()
+  if (context.data.policy === 'ARTIFACT_FIRST') {
+    if (!channelConfiguration || revokeChannel) throw Error('PREVIEW_CHANNEL_CONFIGURATION_INVALID')
+    revokeChannel = await startPreviewChannel(context, channelConfiguration.token, channelConfiguration.directory, readiness)
+  }
 }
 type Build = { component: string; artifactDigest: string; sources: Record<string, string> }
 declare global { var __RUNTIME_PREVIEW_BUILDS__: Build[] | undefined }
@@ -39,6 +46,8 @@ export async function initializeElectronPreview(app: App) {
   })
   if (!resourcesIsolated) throw new Error('PREVIEW_RESOURCE_ESCAPED')
   context = await validatePreviewContext(config.context, { sessionId: config.sessionId, profile: config.profile, approvedProfile: config.approvedProfile, directory, worktree })
+  if (context.data.policy === 'ARTIFACT_FIRST') channelConfiguration = { token: config.channelToken, directory }
+  app.on('before-quit', () => { void revokeChannel?.() })
   let preload: Build[] = [], rendererPid: number | null = null, rendererFailure: string | null = null, sandboxObserved: boolean | null = null
   const rendererModules = new Map<string, { path: string; sourceDigest: string; transformDigest: string }>()
   const save = () => {

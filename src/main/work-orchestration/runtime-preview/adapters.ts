@@ -9,6 +9,8 @@ import type { PreviewPreflight } from '../../../shared/types/runtime-preview-typ
 import type { NativeOwner } from './native-owner'
 import type { PreviewSessionRecord } from './session-store'
 import { previewDataReceipt, type PreviewContextManifest } from './context-contract'
+import { invokePreviewChannel } from './channel-client'
+import type { PreviewChannelScope } from './channel-contract'
 
 export function diagnosticBootstrapAllowed(result: PreviewPreflight, profile: PreviewProfile) {
   return !!profile.adapter && result.status === 'UNKNOWN' && result.diagnostics.length > 0 && result.diagnostics.every(d => ['ABI_UNVERIFIED', 'RUNTIME_COMPATIBILITY_UNVERIFIED', 'DEPENDENCY_MATERIALIZATION_UNVERIFIABLE'].includes(d.reasonCode))
@@ -34,7 +36,9 @@ const webEvidence = z.object({ schemaVersion: z.literal(1), sessionId: z.string(
 }).strict()
 export class PreviewStackAdapter {
   private readonly token = randomBytes(32).toString('hex')
+  private readonly channelToken = randomBytes(32).toString('hex')
   private endpoint?: { pid: number; created: string }
+  private electronMain?: { pid: number; runtime: string; abi: string }
   private constructor(readonly profile: PreviewProfile, readonly worktree: string, readonly directory: string, readonly sessionId: string, private readonly context?: PreviewContextManifest) {}
   static async prepare(profile: PreviewProfile, worktree: string, directory: string, sessionId: string, sdk: string, context?: PreviewContextManifest) {
     const adapter = profile.adapter!
@@ -70,10 +74,16 @@ export class PreviewStackAdapter {
     const instance = new PreviewStackAdapter(profile, await realpath(worktree), directory, sessionId, context)
     await writeFile(join(directory, 'configuration.json'), JSON.stringify({ sessionId, token: instance.token, worktree: instance.worktree, directory,
       profile: previewFingerprint(profile), runtimeVersion: profile.runtimeVersion, abi: profile.dependencies.abi,
-      packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...adapter, ...(context ? { context, approvedProfile: profile } : {}) }), { flag: 'wx', mode: 0o600 })
+      packageRoot: dirname(await previewPath(worktree, profile.dependencies.manifest)), ...adapter, ...(context ? { context, approvedProfile: profile,
+        ...(context.data.policy === 'ARTIFACT_FIRST' ? { channelToken: instance.channelToken } : {}) } : {}) }), { flag: 'wx', mode: 0o600 })
     return instance
   }
   environment() { return { PREVIEW_SESSION_CONFIG: join(this.directory, 'configuration.json') } }
+  invokeChannel(owner: NativeOwner, scope: PreviewChannelScope, operation: string, input: Record<string, unknown>) {
+    if (!this.context || this.context.data.policy !== 'ARTIFACT_FIRST') throw Error('CAPABILITY_UNAVAILABLE')
+    if (!this.electronMain) throw Error('PREVIEW_UNAVAILABLE')
+    return invokePreviewChannel(this.context, this.directory, this.channelToken, owner, scope, operation, input, this.electronMain)
+  }
   async permit(owner: NativeOwner, persist: (evidence: { runtime: string; abi: string; platform: 'win32'; arch: 'x64'; modules: string[] }) => Promise<void>) {
     const deadline = Date.now() + 15000
     let evidence: unknown
@@ -89,6 +99,7 @@ export class PreviewStackAdapter {
     await writeFile(join(this.directory, 'permit'), 'approved-diagnostic-completed', { flag: 'wx' })
   }
   async observe(owner: NativeOwner): Promise<Pick<PreviewSessionRecord, 'coverage' | 'readiness' | 'attestation' | 'failure'> & { processEvidence?: PreviewSessionRecord['processEvidence'] }> {
+    this.electronMain = undefined
     const port = this.profile.adapter!.port, proof = await owner.endpoint(port)
     if (!proof.listeners.length) throw new Error('ENDPOINT_NOT_OBSERVED')
     if (proof.listeners.length !== 1 || !proof.listeners[0].member || !proof.listeners[0].loopback) throw new Error('WRONG_ENDPOINT_OWNER')
@@ -116,6 +127,7 @@ export class PreviewStackAdapter {
       }
       const members = (await owner.processes()).processes
       if (!members.some(p => p.pid === electron.pid) || (electron.rendererPid && !members.some(p => p.pid === electron.rendererPid))) throw new Error('NESTED_JOB_INCOMPATIBLE')
+      this.electronMain = { pid: electron.pid, runtime: electron.runtime, abi: electron.abi }
       processEvidence = { at, members: members.map(p => ({ ...p, role: p.pid === electron.rendererPid ? 'Renderer' : electron.processes.find(m => m.pid === p.pid)?.type ?? 'Session bootstrap' })) }
     }
     coverage.push({ stage: 'ENDPOINT', component: 'PROCESS', status: 'VERIFIED', fingerprint: previewFingerprint(listener), evidenceRef: 'windows-tcp/job-membership', at, reasonCode: 'SESSION_ENDPOINT_OWNER_VERIFIED' })

@@ -14,6 +14,11 @@ import type { RepositoryContinuumSession } from '../../continuum/project-continu
 import type { CodeAwarenessProfileResolver } from './code-awareness-profile'
 import { previewStatus } from './status'
 import type { PreviewIntentReceipt } from './session-store'
+import { previewChannelScope, previewChannelError } from './channel-contract'
+
+const channelSelector = z.object({ scope: previewChannelScope, operation: z.string().min(1).max(64), input: z.record(z.unknown()).default({}) }).strict()
+const knowledgeList = z.object({ query: z.string().max(512).optional(), kind: z.string().max(128).optional(), limit: z.number().int().min(1).max(20).default(10), cursor: z.string().max(2048).optional() }).strict()
+const knowledgeGet = z.object({ artifactId: z.string().min(1).max(512) }).strict()
 
 export const branchIntentSchema = z.object({ branch: z.string().min(1).max(512).regex(/^[^\0\r\n]+$/), operationId: z.string().uuid(),
   repositoryId: z.string().min(1).max(128).optional(), expectedHead: z.string().regex(/^[a-f0-9]{40}$/).optional(), worktreeId: z.string().min(1).max(128).optional() }).strict()
@@ -63,6 +68,33 @@ export class RuntimePreviewOperations {
     const profile = (await this.profiles.profiles(target.repositoryId)).find(p => p.profileId === target.profileId)
     if (!profile || previewFingerprint(profile) !== target.fingerprint) throw new Error('PROFILE_CHANGED')
     return profile
+  }
+  async invokeChannel(input: unknown, guard: () => void = () => {}) {
+    const parsed = channelSelector.safeParse(input)
+    if (!parsed.success) return { success: false as const, code: 'SCOPE_REJECTED' }
+    try {
+      const { scope, operation, input: args } = parsed.data
+      const context = this.repositories.resolve(scope.repositoryId)
+      const current = () => { guard(); context.guard() }
+      const reply = await this.runner.invokeChannel(scope, operation.startsWith('continuum.') ? 'runtime.liveness' : operation,
+        operation.startsWith('continuum.') ? {} : args, current)
+      if (!reply.result.success) return reply.result
+      if (!operation.startsWith('continuum.')) return { success: true as const, data: { kind: 'CHANNEL', target: 'PREVIEW', ...reply } }
+      if (!['continuum.list', 'continuum.get'].includes(operation)) return { success: false as const, code: 'CAPABILITY_UNAVAILABLE' }
+      current()
+      const service = this.continuum?.getActiveService(), active = this.continuum?.getActiveSession()
+      if (!service || active?.repositoryId !== scope.repositoryId) return { success: false as const, code: 'PREVIEW_UNAVAILABLE' }
+      const list = operation === 'continuum.list' ? knowledgeList.safeParse(args) : null
+      const get = operation === 'continuum.get' ? knowledgeGet.safeParse(args) : null
+      if (list && !list.success || get && !get.success) return { success: false as const, code: 'SCOPE_REJECTED' }
+      const data = list?.success ? service.list(list.data) : get?.success ? service.get(get.data.artifactId) : null
+      current()
+      if (this.continuum?.getActiveSession()?.repositoryId !== scope.repositoryId || this.continuum.getActiveService() !== service) throw Error('SESSION_STALE')
+      return { success: true as const, data: { kind: 'CHANNEL', target: 'HOST_CANONICAL', repositoryId: scope.repositoryId, sessionId: scope.sessionId, result: data } }
+    } catch (error) {
+      const parsedCode = previewChannelError.safeParse(error instanceof Error ? error.message : '')
+      return { success: false as const, code: parsedCode.success ? parsedCode.data : 'PREVIEW_UNAVAILABLE' }
+    }
   }
   private async check(target: PreviewSelection) {
     const context = await this.repositories.open(target.repositoryId, target.worktreeId)

@@ -107,9 +107,9 @@ describe('Runtime Preview bounded operations (contract fixtures)', () => {
     expect(await service.pendingResult()).toEqual({ success: false, code: 'WORKTREE_STALE' })
     expect(confirm).not.toHaveBeenCalled()
   })
-  it('exposes fourteen fixed tools and returns structured errors, without action injection', async () => {
+  it('exposes sixteen fixed tools and returns structured errors, without action injection', async () => {
     const { service } = setup()
-    expect(RUNTIME_PREVIEW_TOOLS).toHaveLength(14)
+    expect(RUNTIME_PREVIEW_TOOLS).toHaveLength(16)
     expect(RUNTIME_PREVIEW_TOOLS.every(tool => tool.inputSchema.additionalProperties === false)).toBe(true)
     const invalid = await executeRuntimePreviewTool(service, 'stop_runtime_preview', { sessionId, action: 'START' }, () => {})
     expect(invalid.isError).toBe(true)

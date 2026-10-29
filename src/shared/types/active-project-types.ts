@@ -22,7 +22,7 @@ export interface ActiveContext {
   activeCheckout: { path: string; basis: 'REPOSITORY_CATALOG' | 'LEGACY_CODEMAP' } | null
   legacyCodeMapProjectId: string | null
   sessionId: string | null
-  dataPolicy: 'HOST_CANONICAL' | 'EMPTY' | 'REPOSITORY_SNAPSHOT'
+  dataPolicy: 'HOST_CANONICAL' | 'EMPTY' | 'REPOSITORY_SNAPSHOT' | 'ARTIFACT_FIRST'
   worktree?: { worktreeId: string; generation: string }
   dataOrigin?: { at: string; digest: string; artifacts: number; media: number }
   capabilities: Record<ActiveContextCapability, CapabilityReadiness>

@@ -9,6 +9,7 @@ import { NativeOwner, nativeObservation, type NativeObservation } from './native
 import { PreviewSessionStore, sessionSchema, type PreviewSessionRecord } from './session-store'
 import { PreviewStackAdapter, diagnosticBootstrapAllowed, verifyEndpointFree } from './adapters'
 import type { PreviewContextProvisioner } from './context-data'
+import { previewChannelScope, type PreviewChannelScope } from './channel-contract'
 
 export interface PreparedPreview {
   profile: PreviewProfile; worktree: string; gitFingerprint: string; preflight: PreviewPreflight;
@@ -258,6 +259,24 @@ export class RuntimePreviewRunner {
   }
   inspect(sessionId: string) { return this.command(() => this.inspectInternal(sessionId)) }
   owns(sessionId: string) { return this.owners.get(sessionId)?.available === true }
+  private async channelTarget(scope: PreviewChannelScope) {
+    const record = await this.inspectInternal(scope.sessionId)
+    if (record.selection.repositoryId !== scope.repositoryId || record.selection.worktreeId !== scope.worktreeId || record.selection.generation !== scope.generation) throw Error('SCOPE_REJECTED')
+    const owner = this.owners.get(scope.sessionId), adapter = this.adapters.get(scope.sessionId)
+    if (record.state !== 'RUNNING' || record.readiness !== 'READY' || record.attestation.loadedCode !== 'VERIFIED' || !owner?.available || !adapter ||
+      record.coverage.some(c => c.stage === 'TARGET_CHECKOUT' && c.status !== 'VERIFIED')) throw Error('SESSION_STALE')
+    return { owner, adapter }
+  }
+  invokeChannel(scope: PreviewChannelScope, operation: string, input: Record<string, unknown>, guard: () => void = () => {}) {
+    return this.serial(async () => {
+      previewChannelScope.parse(scope)
+      guard()
+      const { owner, adapter } = await this.channelTarget(scope)
+      const result = await adapter.invokeChannel(owner, scope, operation, input)
+      guard()
+      return result
+    })
+  }
   linkValidation(sessionId: string, link: import('../../../shared/types/runtime-preview-operations').PreviewValidationLink, expectedRevision: number, guard: () => Promise<void>) {
     return this.command(async () => {
       const record = this.store.read(sessionId)
