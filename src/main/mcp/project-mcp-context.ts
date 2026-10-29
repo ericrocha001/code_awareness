@@ -10,6 +10,7 @@ import type { RepositoryFileEditing } from '../repository-file-ingress/repositor
 import type { IVisualContinuumService } from '../continuum/continuum-types'
 
 export interface McpProjectContext {
+  executionClosure?: import('./execution-closure').ClosureContext
   projectId: string
   repoRoot: string
   navigation: ProjectContextNavigation

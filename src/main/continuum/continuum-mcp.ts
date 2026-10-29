@@ -35,7 +35,7 @@ export function executeArtifactNavigation(service: IArtifactStructureReader, nam
   try { return ok(name === 'inspect_artifact_structure' ? service.inspectStructure(navigationQuery(args, false)) : service.readSection(navigationQuery(args, true))) }
   catch (error) { return failure(error) }
 }
-export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown with YAML frontmatter name, description and open kind to the active repository Continuum. Returns a compact receipt without content. Another repository requires switching the active context.', { rawMarkdown: string }, ['rawMarkdown'])
+export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown with YAML frontmatter name, description and open kind to the active repository Continuum. Returns a compact receipt without content. After an implementation Handoff is persisted, use assess_execution_closure for its explicit planArtifactId when available; diagnosis never revokes persistence. Another repository requires switching the active context.', { rawMarkdown: string }, ['rawMarkdown'])
 export const UPDATE_ARTIFACT_TOOL = tool('update_artifact', 'Replace an Artifact within the active repository atomically while preserving artifactId and history. Requires expectedRevision from get_artifact; revision conflict requires rereading. Replaces Markdown, metadata and relations together.', { artifactId: string, expectedRevision: { type: 'integer', minimum: 1 }, rawMarkdown: string }, ['artifactId', 'expectedRevision', 'rawMarkdown'])
 
 function ok(value: unknown): McpToolResult<McpTextContent> { return { content: [{ type: 'text', text: JSON.stringify(value) }] } }
