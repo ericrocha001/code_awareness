@@ -53,7 +53,17 @@ export type PullRequestFailureCode = 'INVALID_ARGUMENT' | 'HEAD_DRIFT' | 'WORKTR
   'REVIEWS_NOT_READY' | 'OPERATION_NOT_FOUND' | 'OPERATION_CONFLICT' | 'PERMISSION_REQUIRED'
 
 export class PullRequestError extends Error {
-  constructor(readonly code: PullRequestFailureCode) { super(code) }
+  constructor(readonly code: PullRequestFailureCode, readonly stackEvidence?: PullRequestStackEvidence) { super(code) }
+}
+
+export interface PullRequestStackEvidence {
+  state: 'NONE' | 'PRESENT' | 'UNKNOWN'
+  source: 'GITHUB_REST_STACK_FILTER'
+  repository: string
+  prNumber: number
+  observedAt: string
+  complete: boolean
+  reason?: string
 }
 
 export interface PullRequestReview {

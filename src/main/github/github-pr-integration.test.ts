@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -20,6 +20,7 @@ function fixture() {
   const current = pr()
   const api = {
     getPullRequest: vi.fn(async () => current),
+    getPullRequestStackEvidence: vi.fn(async () => ({ state: 'UNKNOWN', source: 'GITHUB_REST_STACK_FILTER', repository: context.repository, prNumber: 42, complete: false, observedAt: new Date().toISOString(), reason: 'PROVIDER_RESPONSE_INCONCLUSIVE' } as any)),
     getPullRequestEndpointPermissions: vi.fn(async () => ({ read: true, close: true, merge: true, checks: true, statuses: true })),
     getBranchSha: vi.fn(async (_repo: string, ref: string) => ref === 'main' ? base : head),
     getPullRequestPolicy: vi.fn(async () => evaluatePullRequestPolicy([], null, { allow_merge_commit: true })),
@@ -37,6 +38,89 @@ function fixture() {
 }
 
 describe('durable controlled PR integration', () => {
+  it('composes omitted inline REST data with the official empty filter and a durable approved merge receipt', async () => {
+    const f = fixture()
+    const fetcher = vi.fn(async (url: any, init: any) => {
+      const path = new URL(String(url)).pathname
+      if (path.endsWith('/stacks')) {
+        expect(new URL(String(url)).searchParams.get('pull_request')).toBe('42')
+        return new Response('[]')
+      }
+      if (path.endsWith('/merge-async')) {
+        expect(init.method).toBe('PUT')
+        expect(JSON.parse(init.body)).toEqual({ sha: head, bypass_rules: false, merge_action: 'default', merge_method: 'merge' })
+        return new Response(JSON.stringify(pending()), { status: 202 })
+      }
+      if (path.endsWith('/pulls/42')) return new Response(JSON.stringify({ number: 42, html_url: f.current.url, title: 'Proof', state: 'open', draft: false, merged_at: null,
+        head: { ...f.current.head, repo: { full_name: context.repository } }, base: { ...f.current.base, repo: { full_name: context.repository } } }))
+      throw new Error('Unexpected endpoint')
+    })
+    const actual = new GitHubApiClient(async () => 'secret', fetcher)
+    f.api.getPullRequest.mockImplementation(() => actual.getPullRequest(context.repository, 42))
+    f.api.getPullRequestStackEvidence.mockImplementation(() => actual.getPullRequestStackEvidence(context.repository, f.current))
+    f.api.requestPullRequestMerge.mockImplementation((repo, number, sha, queue, beforeSend) => actual.requestPullRequestMerge(repo, number, sha, queue, beforeSend))
+    f.approveMutation.mockImplementation(async () => { expect(fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith('/stacks'))).toHaveLength(1); return true })
+    expect(await f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)).toMatchObject({ status: 'PENDING', uuid })
+    expect(fetcher.mock.calls.filter(([url]) => new URL(String(url)).pathname.endsWith('/stacks'))).toHaveLength(3)
+    expect(fetcher.mock.calls.filter(([, init]) => init.method === 'PUT')).toHaveLength(1)
+    expect(f.approveMutation).toHaveBeenCalledTimes(1)
+  })
+  it('resolves an omitted inline stack before approval and again immediately before PUT', async () => {
+    const f = fixture(); f.current.stack = 'UNKNOWN'
+    f.api.getPullRequestStackEvidence.mockResolvedValue({ state: 'NONE' } as any)
+    expect(await f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)).toMatchObject({ status: 'PENDING', uuid })
+    expect(f.api.getPullRequestStackEvidence).toHaveBeenCalledTimes(3)
+    expect(f.approveMutation).toHaveBeenCalledTimes(1)
+    await f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)
+    expect(f.api.getPullRequestStackEvidence).toHaveBeenCalledTimes(3)
+    expect(f.api.requestPullRequestMerge).toHaveBeenCalledTimes(1)
+  })
+  it.each(['PRESENT', 'UNKNOWN'])('refuses supplementary %s evidence without approval or receipt', async state => {
+    const f = fixture(); f.current.stack = 'UNKNOWN'
+    f.api.getPullRequestStackEvidence.mockResolvedValue({ state } as any)
+    await expect(f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)).rejects.toMatchObject({ code: state === 'PRESENT' ? 'STACKED_PR_UNSUPPORTED' : 'STACK_UNKNOWN' })
+    expect(f.approveMutation).not.toHaveBeenCalled(); expect(f.api.requestPullRequestMerge).not.toHaveBeenCalled()
+    expect(readdirSync(f.dependencies.receiptDirectory)).toEqual([])
+  })
+  it.each(['403', '404', '422', 'timeout', 'malformed', 'partial'])('blocks the real supplementary %s source before approval and receipt', async failure => {
+    const f = fixture(); f.current.stack = 'UNKNOWN'
+    const actual = new GitHubApiClient(async () => 'secret', vi.fn(async () => {
+      if (failure === 'timeout') throw new DOMException('timeout', 'TimeoutError')
+      if (failure === 'malformed') return new Response('invalid json')
+      if (failure === 'partial') return new Response('[]', { headers: { link: '<https://api.github.com/repos/owner/repo/stacks?page=2>; rel="next"' } })
+      return new Response('{}', { status: Number(failure) })
+    }))
+    f.api.getPullRequestStackEvidence.mockImplementation(() => actual.getPullRequestStackEvidence(context.repository, f.current))
+    await expect(f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)).rejects.toMatchObject({ code: 'STACK_UNKNOWN', stackEvidence: { state: 'UNKNOWN', source: 'GITHUB_REST_STACK_FILTER', complete: false } })
+    expect(f.approveMutation).not.toHaveBeenCalled(); expect(f.api.requestPullRequestMerge).not.toHaveBeenCalled()
+    expect(readdirSync(f.dependencies.receiptDirectory)).toEqual([])
+  })
+  it.each(['NONE', 'PRESENT'])('does not supplement trusted inline %s', async state => {
+    const f = fixture(); f.current.stack = state as any
+    try { await f.build().mutate('MERGE_PULL_REQUEST', input, f.execution) } catch (error) { expect(error).toMatchObject({ code: 'STACKED_PR_UNSUPPORTED' }) }
+    expect(f.api.getPullRequestStackEvidence).not.toHaveBeenCalled()
+  })
+  it('rejects a stack appearing during native approval before preparing any receipt', async () => {
+    const f = fixture(); f.current.stack = 'UNKNOWN'
+    f.api.getPullRequestStackEvidence.mockResolvedValue({ state: 'NONE' } as any)
+    f.approveMutation.mockImplementation(async () => { f.api.getPullRequestStackEvidence.mockResolvedValue({ state: 'PRESENT' } as any); return true })
+    await expect(f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)).rejects.toMatchObject({ code: 'STACKED_PR_UNSUPPORTED' })
+    expect(f.api.requestPullRequestMerge).not.toHaveBeenCalled(); expect(readdirSync(f.dependencies.receiptDirectory)).toEqual([])
+  })
+  it.each(['stack', 'head', 'base', 'expiry'])('refuses %s drift at the final pre-send barrier', async change => {
+    const f = fixture(); f.current.stack = 'UNKNOWN'
+    f.api.getPullRequestStackEvidence.mockResolvedValue({ state: 'NONE' } as any)
+    const sent = vi.fn()
+    f.api.requestPullRequestMerge.mockImplementation(async (_repo, _number, _head, _queue, beforeSend) => {
+      if (change === 'stack') f.api.getPullRequestStackEvidence.mockResolvedValue({ state: 'PRESENT' } as any)
+      if (change === 'head') f.current.head.sha = 'd'.repeat(40)
+      if (change === 'base') f.current.base.sha = 'd'.repeat(40)
+      if (change === 'expiry') { vi.useFakeTimers(); vi.setSystemTime(Date.now() + 130_000) }
+      await beforeSend(); sent(); return { httpStatus: 202, value: pending() }
+    })
+    expect(await f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)).toMatchObject({ status: 'OUTCOME_UNKNOWN' })
+    expect(sent).not.toHaveBeenCalled()
+  })
   it('refuses denial and missing mutation approval independently from CREATE approval', async () => {
     const f = fixture(); f.approveMutation.mockResolvedValue(false)
     await expect(f.build().mutate('MERGE_PULL_REQUEST', input, f.execution)).rejects.toMatchObject({ code: 'AUTHORIZATION_DENIED' })
@@ -187,6 +271,53 @@ describe('current evidence and cumulative policies', () => {
 describe('async REST wire contract', () => {
   const dto = () => ({ number: 42, html_url: pr().url, title: 'Proof', state: 'open', draft: false, head: { ref: 'cline/feature', sha: head, repo: { full_name: context.repository } }, base: { ref: 'main', sha: base, repo: { full_name: context.repository } }, merged_at: null, mergeable: null, stack: null })
   const json = (value: unknown, status = 200, headers?: Record<string, string>) => new Response(JSON.stringify(value), { status, headers })
+  const stack = (number = 42) => ({ id: 7, number: 9, url: 'https://api.github.com/repos/owner/repo/stacks/9', pull_requests: [{ number, head: { ref: 'cline/feature', sha: head } }] })
+  it.each([
+    { inline: null, expected: 'NONE' }, { inline: stack(), expected: 'PRESENT' },
+    { inline: undefined, expected: 'UNKNOWN' }, { inline: {}, expected: 'UNKNOWN' },
+    { inline: stack(99), expected: 'UNKNOWN' }, { inline: [], expected: 'UNKNOWN' }
+  ])('normalizes strict inline stack $expected without supplementary calls', async ({ inline, expected }) => {
+    const fetcher = vi.fn(async () => json({ ...dto(), stack: inline }))
+    const result = await new GitHubApiClient(async () => 'secret', fetcher).getPullRequest(context.repository, 42)
+    expect(result.stack).toBe(expected); expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+  it.each([
+    { body: [], expected: 'NONE' }, { body: [stack()], expected: 'PRESENT' },
+    { body: [stack(99)], expected: 'UNKNOWN' }, { body: {}, expected: 'UNKNOWN' },
+    { body: [stack(), stack()], expected: 'UNKNOWN' }, { body: [{ ...stack(), url: 'https://api.github.com/repos/other/repo/stacks/9' }], expected: 'UNKNOWN' },
+    { body: [{ ...stack(), pull_requests: [{ number: 42, head: { ref: 'cline/feature', sha: base } }] }], expected: 'UNKNOWN' },
+    { body: [{ ...stack(), pull_requests: [{ number: 42 }] }], expected: 'UNKNOWN' },
+    { body: [{ ...stack(), pull_requests: [...stack().pull_requests, ...stack().pull_requests] }], expected: 'UNKNOWN' }
+  ])('reads only the officially filtered stack and returns $expected', async ({ body, expected }) => {
+    const fetcher = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toBe('https://api.github.com/repos/owner/repo/stacks?pull_request=42&per_page=100&page=1')
+      expect(init.headers['X-GitHub-Api-Version']).toBe('2026-03-10'); expect(init.method ?? 'GET').toBe('GET')
+      expect(init.headers.Authorization).toBe('Bearer secret')
+      return json(body)
+    })
+    const result = await new GitHubApiClient(async () => 'secret', fetcher).getPullRequestStackEvidence(context.repository, pr())
+    expect(result).toMatchObject({ state: expected, source: 'GITHUB_REST_STACK_FILTER', prNumber: 42, repository: context.repository, complete: expected !== 'UNKNOWN' })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+  it.each([403, 404, 422, 500])('fails closed for stack HTTP %s', async status => {
+    const api = new GitHubApiClient(async () => 'secret', vi.fn(async () => json({}, status)))
+    expect(await api.getPullRequestStackEvidence(context.repository, pr())).toMatchObject({ state: 'UNKNOWN', complete: false })
+  })
+  it.each(['next', 'prev', 'malformed'])('does not authorize partial or uncertain pagination %s', async relation => {
+    const fetcher = vi.fn(async () => json([], 200, { link: relation === 'malformed' ? 'invalid' : `<https://api.github.com/repos/owner/repo/stacks?page=2>; rel="${relation}"` }))
+    expect(await new GitHubApiClient(async () => 'secret', fetcher).getPullRequestStackEvidence(context.repository, pr())).toMatchObject({ state: 'UNKNOWN', complete: false })
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+  it.each(['timeout', 'malformed', 'network'])('fails closed for a %s source', async cause => {
+    const fetcher = vi.fn(async () => { if (cause === 'malformed') return new Response('invalid json'); throw new DOMException('unavailable', cause === 'timeout' ? 'TimeoutError' : 'NetworkError') })
+    expect(await new GitHubApiClient(async () => 'secret', fetcher).getPullRequestStackEvidence(context.repository, pr())).toMatchObject({ state: 'UNKNOWN', complete: false })
+  })
+  it('rejects cross-repository and invalid-number selectors before HTTP', async () => {
+    const fetcher = vi.fn()
+    const api = new GitHubApiClient(async () => 'secret', fetcher)
+    for (const current of [{ ...pr(), number: 0 }, { ...pr(), base: { ...pr().base, repository: 'other/repo' } }]) expect(await api.getPullRequestStackEvidence(context.repository, current)).toMatchObject({ state: 'UNKNOWN', complete: false })
+    expect(fetcher).not.toHaveBeenCalled()
+  })
   it('reads raw reviews without bodies and bounds untrusted pagination', async () => {
     const fetcher = vi.fn(async (url: any) => String(url).includes('/reviews?') ? json([{ id: 1, user: { login: 'reviewer' }, state: 'APPROVED', commit_id: head, submitted_at: '2026-10-17T12:00:00Z', body: 'private review' }], 200, { link: '<https://evil.example/token>; rel="next"' }) : json(dto()))
     const result = await new GitHubApiClient(async () => 'secret', fetcher as any).getPullRequestReviews(context.repository, 42)

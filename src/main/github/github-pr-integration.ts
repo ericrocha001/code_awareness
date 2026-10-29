@@ -114,7 +114,11 @@ export class GitHubPrIntegration {
     if (operation === 'CLOSE_PULL_REQUEST') return { pr, queue: false }
     if (pr.draft) throw new PullRequestError('DRAFT_PR')
     if (pr.mergeability === 'NOT_MERGEABLE') throw new PullRequestError('POLICY_BLOCKED')
-    if (pr.stack !== 'NONE') throw new PullRequestError(pr.stack === 'PRESENT' ? 'STACKED_PR_UNSUPPORTED' : 'STACK_UNKNOWN')
+    if (pr.stack === 'PRESENT') throw new PullRequestError('STACKED_PR_UNSUPPORTED')
+    if (pr.stack !== 'NONE') {
+      const evidence = await this.api.getPullRequestStackEvidence(context.repository, pr)
+      if (evidence.state !== 'NONE') throw new PullRequestError(evidence.state === 'PRESENT' ? 'STACKED_PR_UNSUPPORTED' : 'STACK_UNKNOWN', evidence)
+    }
     const policy = await this.api.getPullRequestPolicy(context.repository, pr.base.ref)
     if (policy.coverage !== 'COMPLETE') throw new PullRequestError('POLICY_UNKNOWN')
     if (!policy.mergeCommitAllowed || (policy.queue && policy.queueMethod !== 'merge')) throw new PullRequestError('METHOD_NOT_ALLOWED')
