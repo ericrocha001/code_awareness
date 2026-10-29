@@ -53,6 +53,6 @@ export async function executeGitHubPrTool(service: GitHubIntegrationService, rep
     return { content: [{ type: 'text', text: JSON.stringify(result) }] }
   } catch (error) {
     const code = error instanceof PullRequestError ? error.code : toGitHubIntegrationError(error).code
-    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(typeof (args as any)?.operationId === 'string' ? { operationId: (args as any).operationId } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { retryability: 'SAME_OPERATION_ID_RECONCILE_ONLY', automaticPostAllowed: false } : {}) }) }] }
+    return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(error instanceof PullRequestError && error.stackEvidence ? { stackEvidence: error.stackEvidence } : {}), ...(typeof (args as any)?.operationId === 'string' ? { operationId: (args as any).operationId } : {}), ...(code === 'OUTCOME_UNKNOWN' ? { retryability: 'SAME_OPERATION_ID_RECONCILE_ONLY', automaticPostAllowed: false } : {}) }) }] }
   }
 }

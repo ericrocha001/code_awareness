@@ -188,6 +188,22 @@ export class GitHubApiClient {
     return result
   }
 
+  async getPullRequestStackEvidence(fullName: string, pr: PullRequestSummary): Promise<import('../../shared/types/github-pr-types').PullRequestStackEvidence> {
+    const observed = { source: 'GITHUB_REST_STACK_FILTER' as const, repository: fullName, prNumber: pr.number }
+    const unknown = (reason: string) => ({ ...observed, state: 'UNKNOWN' as const, complete: false, observedAt: new Date().toISOString(), reason })
+    if (!Number.isSafeInteger(pr.number) || pr.number <= 0 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(fullName) ||
+      pr.head.repository.toLowerCase() !== fullName.toLowerCase() || pr.base.repository.toLowerCase() !== fullName.toLowerCase() || !/^[a-f0-9]{40}$/.test(pr.head.sha)) return unknown('PR_IDENTITY_CONFLICT')
+    try {
+      const { value, response } = await this.requestWithResponse<unknown>(`/repos/${encodeRepositoryFullName(fullName)}/stacks?pull_request=${pr.number}&per_page=100&page=1`, { signal: AbortSignal.timeout(10_000) })
+      if (response.status !== 200 || !Array.isArray(value) || value.length > 1 || response.headers.get('link')) return unknown('STACK_COVERAGE_INCONCLUSIVE')
+      if (!value.length) return { ...observed, state: 'NONE', complete: true, observedAt: new Date().toISOString() }
+      if (!stackContainsPullRequest(value[0], fullName, pr.number, pr.head)) return unknown('STACK_IDENTITY_INCONCLUSIVE')
+      return { ...observed, state: 'PRESENT', complete: true, observedAt: new Date().toISOString() }
+    } catch (error) {
+      return unknown(error instanceof GitHubIntegrationError ? error.code : 'STACK_SOURCE_UNAVAILABLE')
+    }
+  }
+
   async getPullRequestReviews(fullName: string, number: number) {
     const pr = await this.getPullRequest(fullName, number)
     const page = await this.boundedPrEvidence(`/repos/${encodeRepositoryFullName(fullName)}/pulls/${number}/reviews`)
@@ -345,9 +361,18 @@ function toPullRequest(value: any, fullName: string): PullRequestSummary {
   return { number: value.number, url: value.html_url, title: value.title, state: value.state, draft: value.draft,
     lifecycle: value.merged_at ? 'MERGED' : value.state === 'open' ? 'OPEN' : 'CLOSED',
     mergeCommitSha: /^[a-f0-9]{40}$/.test(value.merge_commit_sha ?? '') ? value.merge_commit_sha : null,
-    stack: value.stack === null ? 'NONE' : value.stack && typeof value.stack === 'object' ? 'PRESENT' : 'UNKNOWN',
+    stack: value.stack === null ? 'NONE' : stackContainsPullRequest(value.stack, fullName, value.number, value.head) ? 'PRESENT' : 'UNKNOWN',
     head: { ref: value.head.ref, sha: value.head.sha, repository: value.head.repo.full_name }, base: { ref: value.base.ref, sha: value.base.sha, repository: value.base.repo.full_name },
     mergedAt: value.merged_at, mergeability: value.mergeable === true ? 'MERGEABLE' : value.mergeable === false ? 'NOT_MERGEABLE' : 'UNKNOWN', observedAt: new Date().toISOString() }
+}
+
+function stackContainsPullRequest(value: any, fullName: string, number: number, head: { ref: string; sha: string }): boolean {
+  if (!value || !Number.isSafeInteger(value.id) || value.id <= 0 || !Number.isSafeInteger(value.number) || value.number <= 0 ||
+    typeof value.url !== 'string' || value.url.toLowerCase() !== `https://api.github.com/repos/${fullName}/stacks/${value.number}`.toLowerCase() ||
+    !Array.isArray(value.pull_requests) || !value.pull_requests.length || value.pull_requests.length > 100 ||
+    value.pull_requests.some((pr: any) => !Number.isSafeInteger(pr?.number) || pr.number <= 0 || typeof pr.head?.ref !== 'string' || !/^[a-f0-9]{40}$/.test(pr.head.sha)) ||
+    new Set(value.pull_requests.map((pr: any) => pr.number)).size !== value.pull_requests.length) return false
+  return value.pull_requests.some((pr: any) => pr.number === number && pr.head.sha === head.sha && pr.head.ref === head.ref)
 }
 
 function parsePullRequest(value: any): PullRequestRecord {
