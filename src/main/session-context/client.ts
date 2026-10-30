@@ -2,30 +2,66 @@ import { Worker } from 'node:worker_threads'
 import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
+import { parseSessionRefresh } from './mcp'
+import type { SessionTarget, SessionTargetResolver, SessionTargetSelection } from './target'
 
 const failure = (code: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code }) }] })
 export class SessionContextClient implements SessionContextPort {
   private worker?: Worker
   private readonly cancellation = new Int32Array(new SharedArrayBuffer(4))
   private serial = 0
-  private pending = new Map<number, { resolve: (result: McpToolResult) => void; timer: NodeJS.Timeout }>()
+  private pending = new Map<number, { resolve: (result: McpToolResult) => void; timer: NodeJS.Timeout; validate?: () => Promise<void> }>()
   private refresh?: { key: string; task: Promise<McpToolResult> }
   constructor(private readonly storageBase: string, private readonly repositoryId: string, private readonly root: string, private readonly isCurrent: () => boolean,
-    private readonly workerPath = join(__dirname, 'session-context-worker.js')) {}
+    private readonly workerPath = join(__dirname, 'session-context-worker.js'), private readonly resolveTarget?: SessionTargetResolver) {}
   call(name: SessionToolName, args: unknown): Promise<McpToolResult> {
     if (!this.isCurrent() || Atomics.load(this.cancellation, 0)) return Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
     if (Buffer.byteLength(JSON.stringify(args ?? {})) > 8192) return Promise.resolve(failure('INVALID_ARGUMENT'))
     const key = JSON.stringify(args ?? {})
     if (name === 'refresh_agent_sessions' && this.refresh) return this.refresh.key === key ? this.refresh.task : Promise.resolve(failure('BACKPRESSURE'))
+    if (name === 'refresh_agent_sessions') {
+      const task = this.prepareRefresh(args)
+      this.refresh = { key, task }
+      void task.finally(() => { this.refresh = undefined })
+      return task
+    }
+    return this.dispatch(name, args)
+  }
+  private async prepareRefresh(args: unknown): Promise<McpToolResult> {
+    try {
+      const q = parseSessionRefresh(args)
+      if (!q.worktreeId) return this.dispatch('refresh_agent_sessions', q)
+      if (!this.resolveTarget) return failure('WORKTREE_IDENTITY_UNAVAILABLE')
+      const selection = { worktreeId: q.worktreeId, generation: q.generation! }
+      const target = await this.resolveTarget(selection)
+      return this.dispatch('refresh_agent_sessions', q, { ...target, selection })
+    } catch (error) {
+      return failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'INVALID_ARGUMENT')
+    }
+  }
+  private dispatch(name: SessionToolName, args: unknown, target?: SessionTarget & { selection: SessionTargetSelection }): Promise<McpToolResult> {
+    if (!this.isCurrent() || Atomics.load(this.cancellation, 0)) return Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     if (!this.worker) {
       try {
         this.worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: this.cancellation.buffer }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
-        this.worker.on('message', ({ id, result }: { id: number; result: McpToolResult }) => {
+        const worker = this.worker
+        this.worker.on('message', async (message: { id: number; result?: McpToolResult; validate?: number }) => {
+          const { id, result } = message
           const request = this.pending.get(id)
+          if (message.validate !== undefined) {
+            let code: string | undefined
+            try {
+              if (!request?.validate || !this.isCurrent() || Atomics.load(this.cancellation, 0)) throw new Error('PROJECT_CONTEXT_CHANGED')
+              await request.validate()
+              if (!this.isCurrent() || Atomics.load(this.cancellation, 0)) throw new Error('PROJECT_CONTEXT_CHANGED')
+            } catch (error) { code = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'WORKTREE_STALE' }
+            worker.postMessage({ validation: message.validate, code })
+            return
+          }
           if (!request) return
           this.pending.delete(id); clearTimeout(request.timer)
-          request.resolve(this.isCurrent() && !Atomics.load(this.cancellation, 0) ? result : failure('PROJECT_CONTEXT_CHANGED'))
+          request.resolve(this.isCurrent() && !Atomics.load(this.cancellation, 0) ? result! : failure('PROJECT_CONTEXT_CHANGED'))
         })
         this.worker.on('error', () => this.dispose('SESSION_CONTEXT_UNAVAILABLE'))
         this.worker.on('exit', () => this.dispose('SESSION_CONTEXT_UNAVAILABLE'))
@@ -34,13 +70,9 @@ export class SessionContextClient implements SessionContextPort {
     const id = ++this.serial
     const task = new Promise<McpToolResult>(resolve => {
       const timer = setTimeout(() => this.dispose('SESSION_CONTEXT_TIMEOUT'), 14_000)
-      this.pending.set(id, { resolve, timer })
-      this.worker!.postMessage({ id, name, args })
+      this.pending.set(id, { resolve, timer, validate: target?.validate })
+      this.worker!.postMessage({ id, name, args, ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
     })
-    if (name === 'refresh_agent_sessions') {
-      this.refresh = { key, task }
-      void task.finally(() => { this.refresh = undefined })
-    }
     return task
   }
   dispose(code = 'PROJECT_CONTEXT_CHANGED'): void {

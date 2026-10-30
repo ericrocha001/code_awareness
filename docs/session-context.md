@@ -24,7 +24,7 @@ Ao lado do SQLite, o operador cria `session-context.provider.json`, fora do Git,
 
 O caminho precisa ser absoluto; o arquivo executável é fixado por hash e versão. A atualização do Entire exige nova conferência pelo operador. O preflight confirma os comandos `session list --json` e `session info <id> --json|--transcript` na ajuda da versão local antes de consumir dados. O adaptador aceita os formatos JSONL Codex rollout e exec; schemas desconhecidos permanecem PARTIAL/UNAVAILABLE. Não configura nem instala o provider para satisfazer o preflight. Remover ou desativar o opt-in impede novas importações; o histórico já armazenado continua consultável.
 
-Na P0, só são importadas sessões cuja origem observada corresponde à Worktree ativa. Sessões de outra Worktree devem ser atualizadas quando ela estiver ativa; seu banco continua compartilhado pelo repositoryId. Não se deduz autoria por nome de branch, pasta ou HEAD. Não há busca global de sessões.
+Para atualizar uma Worktree irmã sem mudar o projeto ativo, descubra-a pelo Git Operations e forneça `worktreeId` e `generation` juntos a `refresh_agent_sessions`, com `sessionId` opcional. O registry do repositório ativo resolve e revalida o alvo; paths e branches não são aceitos. Sem alvo, permanece o checkout ativo. Worktrees estrangeiras, missing/prunable, detached ou de geração antiga são recusadas. O Entire usa o cwd e a configuração local segura do alvo, mantendo o mesmo SQLite do repositoryId. A identidade é conferida antes da consulta, antes do commit SQLite e após a importação; resultados obsoletos são recusados. Não se deduz autoria por nome de branch, pasta ou HEAD. Não há busca global de sessões.
 
 ## Limites e cobertura
 

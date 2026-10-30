@@ -42,6 +42,7 @@ import { WorktreeStructureNavigation } from './core/context/worktree-structure-n
 import { registerActiveProjectHandlers } from './ipc/active-project-handler'
 import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { SessionContextClient } from './session-context/client'
+import { sessionTargetResolver } from './session-context/target'
 import { registerApplicationShutdown } from './application-shutdown'
 import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
 import { NgrokTransport } from './mcp/connection/ngrok-transport'
@@ -512,8 +513,6 @@ app.whenReady().then(async () => {
 
     const gitRepositoryId = repositoryCatalog?.findByPath(project.path)?.id
     const gitProjectRevision = activeProjects?.getState().revision
-    if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path,
-      () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId)
     activeValidationExecution = new ValidationExecution(project.path, validationLedger, runtimeIdentityProvider, undefined, undefined, gitRepositoryId ?? null)
     activeWorktreeValidation = gitRepositoryId ? new GitWorktreeValidation(project.path, gitService, {
       repositoryId: gitRepositoryId,
@@ -533,6 +532,9 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     gitOperations.bindAtlasPullRequests(inventory => githubIntegration.branchPullRequests(project.path, inventory))
+    const sessionIsCurrent = () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId
+    if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path, sessionIsCurrent, undefined,
+      gitOperations.worktrees ? sessionTargetResolver(gitOperations.worktrees, () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : undefined)
     if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
       const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache.js')
       return GitAtlasSqliteCache.acquire(join(app.getPath('userData'), 'cache', 'git-atlas'), gitRepositoryId, common)

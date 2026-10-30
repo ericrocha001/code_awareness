@@ -87,14 +87,16 @@ export class SessionStore {
       return data.offset
     } catch { throw new Error('CURSOR_STALE') }
   }
-  ingest(input: SessionInput, events: EventInput[]): { sessionId: string; revision: number; eventCount: number; coverage: string; replay: boolean } {
+  ingest(input: SessionInput, events: EventInput[], assertCurrent: () => void = () => {}): { sessionId: string; revision: number; eventCount: number; coverage: string; replay: boolean } {
     if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(input.providerSessionId) || input.agent !== 'codex' || events.length > LIMITS.events) throw new Error('INVALID_IMPORT')
     if (!['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'].includes(input.state) || (input.state === 'ENDED' && (!input.endedAt || !Number.isFinite(Date.parse(input.endedAt))))) throw new Error('INVALID_IMPORT')
     return this.db.transaction(() => {
+      assertCurrent()
       const old = this.byProvider(input.providerSessionId)
       if (old?.sourceDigest === input.sourceDigest && old.coverage === input.coverage && old.state === input.state && old.endedAt === (input.endedAt ?? null)) {
         this.db.prepare('UPDATE sessions SET lastObserved = ? WHERE id = ?').run(new Date().toISOString(), old.id)
         this.db.prepare('UPDATE identity SET revision = revision + 1').run()
+        assertCurrent()
         return { sessionId: old.id, revision: old.revision, eventCount: old.eventCount, coverage: old.coverage, replay: true }
       }
       if (!old && this.count() >= LIMITS.sessions) {
@@ -144,6 +146,7 @@ export class SessionStore {
       const coverage = partial || !!this.db.prepare("SELECT 1 FROM events WHERE sessionId = ? AND omission = 'LIMIT_REACHED' LIMIT 1").get(id) ? 'PARTIAL' : 'COMPLETE'
       this.db.prepare('UPDATE sessions SET eventCount=?, payloadBytes=?, coverage=? WHERE id=?').run(totals.count, totals.bytes, coverage, id)
       this.db.prepare('UPDATE identity SET revision = revision + 1').run()
+      assertCurrent()
       return { sessionId: id, revision, eventCount: totals.count, coverage, replay: false }
     }).immediate()
   }
