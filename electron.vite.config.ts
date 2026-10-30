@@ -12,7 +12,7 @@ const { buildIdentity } = requirePreview('./scripts/runtime-preview/build-identi
 
 export default defineConfig({
   main: {
-    build: { rollupOptions: { input: { main: resolve('src/main/bootstrap.ts') }, output: { chunkFileNames: '[name]-[hash].js' } } },
+    build: { rollupOptions: { input: { main: resolve('src/main/bootstrap.ts'), 'session-context-worker': resolve('src/main/session-context/worker.ts') }, output: { chunkFileNames: '[name]-[hash].js' } } },
     define: {
       __CODE_AWARENESS_RELAY_ENDPOINT__: JSON.stringify(process.env.CODE_AWARENESS_RELAY_ENDPOINT?.trim() ?? '')
     },

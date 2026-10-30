@@ -41,6 +41,7 @@ import { bindProjectNavigation } from './core/context/project-context-navigation
 import { WorktreeStructureNavigation } from './core/context/worktree-structure-navigation'
 import { registerActiveProjectHandlers } from './ipc/active-project-handler'
 import { McpLifecycle } from './mcp/mcp-lifecycle'
+import { SessionContextClient } from './session-context/client'
 import { registerApplicationShutdown } from './application-shutdown'
 import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
 import { NgrokTransport } from './mcp/connection/ngrok-transport'
@@ -158,6 +159,7 @@ const runtimeRestart = new RuntimeRestartController(
   () => app.quit()
 )
 let activeValidationExecution: ValidationExecution | null = null
+let activeSessionContext: SessionContextClient | undefined
 let activeWorktreeValidation: GitWorktreeValidation | null = null
 let diagnosticInstallationId: string | null = null
 let repositoryCatalog: RepositoryCatalogService | null = null
@@ -481,6 +483,8 @@ app.whenReady().then(async () => {
   activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
     boundProjectRevision = revision
+    activeSessionContext?.dispose()
+    activeSessionContext = undefined
     if (!project) {
       void mcpLifecycle.deactivate()
       continuumSession.deactivate()
@@ -508,6 +512,8 @@ app.whenReady().then(async () => {
 
     const gitRepositoryId = repositoryCatalog?.findByPath(project.path)?.id
     const gitProjectRevision = activeProjects?.getState().revision
+    if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path,
+      () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId)
     activeValidationExecution = new ValidationExecution(project.path, validationLedger, runtimeIdentityProvider, undefined, undefined, gitRepositoryId ?? null)
     activeWorktreeValidation = gitRepositoryId ? new GitWorktreeValidation(project.path, gitService, {
       repositoryId: gitRepositoryId,
@@ -548,6 +554,7 @@ app.whenReady().then(async () => {
       projectId: project.id,
       repoRoot: project.path,
       navigation,
+      sessionContext: activeSessionContext,
       continuum,
       visualContinuum: continuum,
       ...(continuum && gitRepositoryId ? { executionClosure: { repositoryId: gitRepositoryId, assertActive: () => {
@@ -723,6 +730,7 @@ registerApplicationShutdown(app, async () => {
   }
   try {
     localAgentChannel.dispose()
+    activeSessionContext?.dispose()
     continuumSession.dispose()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Continuum Session:', error)

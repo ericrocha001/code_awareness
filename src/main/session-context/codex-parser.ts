@@ -14,6 +14,7 @@ export class CodexParser {
   private position = 0
   private hash = createHash('sha256')
   private retainedBytes = 0
+  private readonly toolsByCall = new Map<string, string>()
   readonly events: EventInput[] = []
   partial = false
   bytes = 0
@@ -69,8 +70,10 @@ export class CodexParser {
       } else if (['function_call', 'custom_tool_call', 'local_shell_call'].includes(kind ?? '')) {
         type = 'TOOL_CALL'; tool = string(p.name) ?? (kind === 'local_shell_call' ? 'shell' : undefined)
         body = string(p.arguments) ?? string(p.input) ?? (p.action ? JSON.stringify(p.action) : undefined)
+        const call = string(p.call_id)
+        if (call && call.length <= 200 && tool && tool.length <= 80) this.toolsByCall.set(call, tool)
       } else if (['function_call_output', 'custom_tool_call_output', 'local_shell_call_output'].includes(kind ?? '')) {
-        type = 'TOOL_RESULT'; body = string(p.output)
+        type = 'TOOL_RESULT'; body = string(p.output); tool = this.toolsByCall.get(String(p.call_id))
       } else { this.partial = true; return }
     } else if (row.type === 'event_msg') {
       if (kind === 'agent_reasoning' || kind === 'token_count' || kind === 'task_started' || kind === 'task_complete') return

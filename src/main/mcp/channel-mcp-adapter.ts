@@ -54,6 +54,7 @@ import { IMPORT_REPOSITORY_FILE_TOOL, executeImportRepositoryFile } from '../rep
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 import { REPOSITORY_FILE_EDITING_TOOLS, executeRepositoryFileEditing } from '../repository-file-ingress/repository-file-editing-mcp'
 import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orchestration/runtime-preview/mcp'
+import { SESSION_CONTEXT_TOOLS, type SessionToolName } from '../session-context/mcp'
 
 const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file'])
 const literalReadOutputSchema = {
@@ -94,6 +95,7 @@ export class ChannelMcpAdapter {
   private readonly repositoryFileIngress?: RepositoryFileIngress
   private readonly repositoryFileEditing?: RepositoryFileEditing
   private readonly runtimePreview?: McpProjectContext['runtimePreview']
+  private readonly sessionContext?: McpProjectContext['sessionContext']
 
   constructor(
     context: McpProjectContext,
@@ -145,6 +147,7 @@ export class ChannelMcpAdapter {
       this.repositoryFileIngress = context.repositoryFileIngress
       this.repositoryFileEditing = context.repositoryFileEditing
       this.runtimePreview = context.runtimePreview
+      this.sessionContext = context.sessionContext
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
     } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
@@ -201,6 +204,7 @@ export class ChannelMcpAdapter {
     if (this.visualContinuum) tools.push(PUBLISH_VISUAL_ARTIFACT_TOOL, GET_VISUAL_ARTIFACT_TOOL)
     if (this.validationExecution) tools.push(...VALIDATION_EXECUTION_TOOLS)
     if (this.runtimePreview) tools.push(...RUNTIME_PREVIEW_TOOLS)
+    if (this.sessionContext) tools.push(...SESSION_CONTEXT_TOOLS)
     if (this.diagnosticSourceAccess) tools.push(...DIAGNOSTIC_SOURCE_TOOLS)
     if (this.runtimeRestart) tools.push(REQUEST_RUNTIME_RESTART_TOOL)
     if (this.gitOperations) tools.push(...GIT_OPERATIONS_TOOLS)
@@ -264,6 +268,7 @@ export class ChannelMcpAdapter {
   }
 
   private capabilityForTool(name: string): string | undefined {
+    if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return 'Session Context'
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return 'Work Orchestration'
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
     if (name === IMPORT_REPOSITORY_FILE_TOOL.name) return 'Repository File Ingress'
@@ -279,6 +284,7 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return this.sessionContext ? this.sessionContext.call(name as SessionToolName, args) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
     if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {
       if (!this.executionClosure || !this.artifactReader) return { isError: true, content: [{ type: 'text', text: 'CLOSURE_UNAVAILABLE' }] }
       return executeAssessExecutionClosure({ ...this.executionClosure, reader: this.artifactReader, ledger: this.validationLedger,

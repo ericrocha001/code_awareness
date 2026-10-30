@@ -11,12 +11,16 @@ import type { SessionInput } from './types'
 interface ProviderConfig { enabled: true; repositoryId: string; executable: string; sha256: string; version: string }
 interface ProviderSession { session_id: string; agent: string; status: string; worktree_path: string; started_at?: string; ended_at?: string }
 export interface CommandOutput { code: number; text: string; limited: boolean }
-export type CommandRunner = (executable: string, args: string[], cwd: string, limit: number, consume?: (chunk: Buffer) => boolean) => Promise<CommandOutput>
-export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume) => new Promise((resolve, reject) => {
+export type CommandRunner = (executable: string, args: string[], cwd: string, limit: number, consume?: (chunk: Buffer) => boolean, timeoutMs?: number, signal?: AbortSignal) => Promise<CommandOutput>
+export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume, timeoutMs = 10_000, signal) => new Promise((resolve, reject) => {
+  if (signal?.aborted) { reject(new Error('PROJECT_CONTEXT_CHANGED')); return }
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GIT_|ENTIRE_)/i.test(key)))
   const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, NO_COLOR: '1', CI: '1', ENTIRE_LOG_LEVEL: 'error' } })
+    env: { ...env, NO_COLOR: '1', CI: '1', ENTIRE_LOG_LEVEL: 'error' } })
   let text = '', bytes = 0, limited = false, stderrBytes = 0
-  const timer = setTimeout(() => { limited = true; child.kill() }, 10_000)
+  const cancel = () => { limited = true; child.kill() }
+  signal?.addEventListener('abort', cancel, { once: true })
+  const timer = setTimeout(cancel, Math.max(1, Math.min(10_000, timeoutMs)))
   child.stdout.on('data', (chunk: Buffer) => {
     if (limited) return
     bytes += chunk.length
@@ -24,8 +28,8 @@ export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume
     if (!consume) text += chunk.toString('utf8')
   })
   child.stderr.on('data', (chunk: Buffer) => { stderrBytes += chunk.length; if (stderrBytes > 64 * 1024) { limited = true; child.kill() } })
-  child.once('error', () => { clearTimeout(timer); reject(new Error('PROVIDER_UNAVAILABLE')) })
-  child.once('close', code => { clearTimeout(timer); resolve({ code: code ?? -1, text, limited }) })
+  child.once('error', () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); reject(new Error('PROVIDER_UNAVAILABLE')) })
+  child.once('close', code => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve({ code: code ?? -1, text, limited }) })
 })
 async function smallJson(path: string): Promise<Record<string, unknown>> {
   const stat = await lstat(path)
@@ -41,7 +45,14 @@ const date = (value?: string) => value && Number.isFinite(Date.parse(value)) ? n
 
 export class EntireProvider {
   private pending?: { key: string; task: Promise<object> }
+  private deadline = 0
   constructor(private readonly store: SessionStore, private readonly root: string, private readonly assertActive: () => void, private readonly run: CommandRunner = runReadOnly) {}
+  private command(exe: string, args: string[], cwd: string, limit: number, consume?: (chunk: Buffer) => boolean): Promise<CommandOutput> {
+    this.assertActive()
+    const remaining = this.deadline - Date.now()
+    if (remaining <= 0) throw new Error('IMPORT_LIMIT_REACHED')
+    return this.run(exe, args, cwd, limit, consume, remaining)
+  }
   refresh(sessionId?: string): Promise<object> {
     this.assertActive()
     const key = sessionId ?? 'discovery'
@@ -57,30 +68,37 @@ export class EntireProvider {
     if (config.enabled !== true || config.repositoryId !== this.store.repositoryId) throw new Error('CAPTURE_NOT_ENABLED')
     if (!isAbsolute(config.executable) || !/^entire(?:\.exe)?$/i.test(basename(config.executable)) || !/^[a-f0-9]{64}$/.test(config.sha256) || !/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?$/.test(config.version)) throw new Error('PROVIDER_CONFIG_UNSAFE')
     const executable = await realpath(config.executable)
+    const executableStat = await lstat(executable)
+    if (!executableStat.isFile() || executableStat.size > 256 * 1024 * 1024) throw new Error('PROVIDER_CONFIG_UNSAFE')
     const hash = createHash('sha256')
     for await (const chunk of createReadStream(executable)) hash.update(chunk)
     if (hash.digest('hex') !== config.sha256) throw new Error('PROVIDER_VERSION_MISMATCH')
     const localPath = join(this.root, '.entire', 'settings.local.json')
     let local: Record<string, unknown>
-    try { local = await smallJson(localPath) } catch { throw new Error('PROVIDER_CONFIG_UNSAFE') }
+    try {
+      const directory = await lstat(join(this.root, '.entire'))
+      if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error()
+      local = await smallJson(localPath)
+    } catch { throw new Error('PROVIDER_CONFIG_UNSAFE') }
     if ((local.strategy_options as Record<string, unknown> | undefined)?.push_sessions !== false || local.enabled === false) throw new Error('PROVIDER_CONFIG_UNSAFE')
-    const tracked = await this.run('git', ['ls-files', '--error-unmatch', '--', '.entire/settings.local.json'], this.root, 4096)
+    const tracked = await this.command('git', ['-c', 'core.fsmonitor=false', 'ls-files', '--error-unmatch', '--', '.entire/settings.local.json'], this.root, 4096)
     if (tracked.code !== 1 || tracked.limited) throw new Error('PROVIDER_CONFIG_UNSAFE')
-    const version = await this.run(executable, ['version'], this.root, 4096)
+    const version = await this.command(executable, ['version'], this.root, 4096)
     if (version.code !== 0 || version.limited || !version.text.includes(config.version)) throw new Error('PROVIDER_VERSION_MISMATCH')
     for (const [args, flags] of [[['session', 'list', '--help'], ['--json']], [['session', 'info', '--help'], ['--json', '--transcript']]] as const) {
-      const help = await this.run(executable, [...args], this.root, 32 * 1024)
+      const help = await this.command(executable, [...args], this.root, 32 * 1024)
       if (help.code !== 0 || help.limited || !flags.every(flag => help.text.includes(flag))) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
     }
     this.assertActive()
     return { ...config, executable }
   }
   private async perform(sessionId?: string): Promise<object> {
+    this.deadline = Date.now() + 12_000
     try {
-      const config = await this.preflight()
       const known = sessionId ? this.store.session(sessionId) : undefined
+      const config = await this.preflight()
       const args = known ? ['session', 'info', known.providerSessionId, '--json'] : ['session', 'list', '--json']
-      const output = await this.run(config.executable, args, this.root, 1024 * 1024)
+      const output = await this.command(config.executable, args, this.root, 1024 * 1024)
       this.assertActive()
       if (output.limited || output.code !== 0) throw new Error(output.limited ? 'IMPORT_LIMIT_REACHED' : 'PROVIDER_UNAVAILABLE')
       let values: unknown[]
@@ -100,7 +118,7 @@ export class EntireProvider {
           coverage: 'UNAVAILABLE', sourceDigest: digest(JSON.stringify({ id: value.session_id, status: value.status, ended: value.ended_at })), sourceBytes: 0 }
         if (known) {
           const parser = new CodexParser()
-          const transcript = await this.run(config.executable, ['session', 'info', value.session_id, '--transcript'], this.root, 32 * 1024 * 1024, chunk => parser.push(chunk))
+          const transcript = await this.command(config.executable, ['session', 'info', value.session_id, '--transcript'], this.root, 32 * 1024 * 1024, chunk => parser.push(chunk))
           this.assertActive()
           if (transcript.code !== 0 && !transcript.limited) throw new Error('PROVIDER_UNAVAILABLE')
           const parsed = parser.finish()
