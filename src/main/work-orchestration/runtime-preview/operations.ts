@@ -1,3 +1,5 @@
+import { buildPreparationRequest } from '../preview-build/preparation'
+import { snapshotSelector } from './snapshot'
 import { z } from 'zod'
 import type { PreviewSelection } from '../../../shared/types/runtime-preview-types'
 import type { RuntimePreviewRequest, RuntimePreviewResult, PreviewSessionView, PreviewValidationLink, PreviewQualification } from '../../../shared/types/runtime-preview-operations'
@@ -29,12 +31,13 @@ export const statusSelectorSchema = z.union([
 const text = z.string().min(1).max(128).regex(/^[^\0\r\n]+$/), id = z.string().uuid()
 const selection = z.object({ repositoryId: text, worktreeId: text, generation: text, profileId: text, fingerprint: z.string().regex(/^[a-f0-9]{64}$/) }).strict()
 export const previewRequestSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('PREPARE'), request: buildPreparationRequest }).strict(),
   z.object({ action: z.literal('RUN_BRANCH_APP'), repositoryId: text, ref: z.string().min(1).max(512).regex(/^[^\0\r\n]+$/), revision: text, operationId: id,
     worktree: z.object({ worktreeId: text, generation: text }).strict().optional() }).strict(),
   z.object({ action: z.literal('PROFILES'), repositoryId: text }).strict(),
   z.object({ action: z.literal('WORKTREES'), repositoryId: text }).strict(),
   ...(['PREFLIGHT', 'AUTHORIZE'] as const).map(action => z.object({ action: z.literal(action), selection }).strict()),
-  z.object({ action: z.literal('START'), selection, operationId: id }).strict(),
+  z.object({ action: z.literal('START'), selection, operationId: id, snapshot: snapshotSelector.optional() }).strict(),
   z.object({ action: z.literal('LIST'), repositoryId: text, worktreeId: text.optional(), cursor: id.optional(), limit: z.number().int().min(1).max(20).optional() }).strict(),
   ...(['INSPECT', 'STOP', 'BINDINGS'] as const).map(action => z.object({ action: z.literal(action), sessionId: id }).strict()),
   z.object({ action: z.literal('PROBE'), sessionId: id, probes: z.array(z.enum(['READINESS', 'ATTESTATION'])).length(2).refine(values => new Set(values).size === values.length) }).strict(),
@@ -237,10 +240,10 @@ export class RuntimePreviewOperations {
       if (entry) Object.assign(entry, { status: 'VERIFIED', evidenceRef: behavior.proofId, at: behavior.at, reasonCode: 'VALIDATION_LEDGER_BEHAVIOR_OBSERVED' })
     }
     let endpoint: string | null = null
-    if (current && record.state === 'RUNNING' && record.readiness === 'READY' && record.coverage.some(c => c.stage === 'ENDPOINT' && c.status === 'VERIFIED')) {
+    if (!record.build && current && record.state === 'RUNNING' && record.readiness === 'READY' && record.coverage.some(c => c.stage === 'ENDPOINT' && c.status === 'VERIFIED')) {
       try { const profile = await this.profile(record.selection); const address = new URL(profile.probes.readiness.address); if (address.hostname === '127.0.0.1' && address.protocol === 'http:' && !address.username && !address.password) endpoint = address.origin } catch { }
     }
-    return { sessionId: record.sessionId, operationId: record.operationId, selection: record.selection, revision: record.revision, profileRevision: record.profileRevision,
+    return { ...(record.spawnedAt ? { spawnedAt: record.spawnedAt } : {}), ...(record.functionalAt ? { functionalAt: record.functionalAt } : {}), ...(record.build ? { build: record.build } : {}), sessionId: record.sessionId, operationId: record.operationId, selection: record.selection, revision: record.revision, profileRevision: record.profileRevision,
       state: record.state, readiness: record.readiness, liveness: record.liveness, resources: record.resources, failure: record.failure,
       observation: this.pending && !current ? 'IN_PROGRESS' : record.persistence !== 'PERSISTED' || ['OWNERSHIP_UNVERIFIED', 'CLEANUP_INCOMPLETE'].includes(record.state) ? 'UNVERIFIABLE' : current && !['STOPPED', 'FAILED'].includes(record.state) ? 'CURRENT' : 'HISTORICAL',
       source: record.sourceObservation?.snapshot ?? record.sourceSnapshot, coverage, qualifications, endpoint,
@@ -324,6 +327,15 @@ export class RuntimePreviewOperations {
     const request = parsed.data as RuntimePreviewRequest
     try {
       guard()
+      if (request.action === 'PREPARE') {
+        const key = previewFingerprint(request.request)
+        return this.mutate('prepare:' + key, key, async () => {
+          const result = await this.runner.prepareBuild(request.request, guard)
+          if (!result.success) return { success: false, code: result.code }
+          const { bundleDirectory: _directory, ...build } = result
+          return { success: true, data: { kind: 'BUILD', selection: request.request.selection, build } }
+        })
+      }
       if (request.action === 'RUN_BRANCH_APP') return this.mutate('run-branch:' + request.operationId + ':' + previewFingerprint(request), request.operationId, () => this.runBranch(request, guard))
       if (request.action === 'PROFILES') { const context = this.repositories.resolve(request.repositoryId); const profiles = await this.preflight.list(request.repositoryId); context.guard(); guard(); return { success: true, data: { kind: 'PROFILES', profiles } } }
       if (request.action === 'WORKTREES') { const context = await this.repositories.open(request.repositoryId); context.guard(); guard(); return { success: true, data: { kind: 'WORKTREES', repositoryId: request.repositoryId, worktrees: context.worktrees } } }
@@ -342,7 +354,7 @@ export class RuntimePreviewOperations {
       }
       if (request.action === 'START') {
         this.repositories.resolve(request.selection.repositoryId).guard()
-        return this.mutate('start:' + request.operationId + ':' + previewFingerprint(request.selection), request.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.start({ ...request, guard }), true), pending: false } }))
+        return this.mutate('start:' + request.operationId + ':' + previewFingerprint([request.selection, request.snapshot]), request.operationId, async () => ({ success: true, data: { kind: 'SESSION', session: await this.view(await this.runner.start({ ...request, guard }), true), pending: false } }))
       }
       if (request.action === 'LIST') {
         this.repositories.resolve(request.repositoryId).guard()

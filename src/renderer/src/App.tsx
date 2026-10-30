@@ -41,6 +41,11 @@ export const App: React.FC = () => {
   const navigation = useNavigationVisibility();
   const [commitIntent, setCommitIntent] = useState<CommitNavigationIntent | null>(null);
   const [activeProjectState, setActiveProjectState] = useState<ActiveProjectState>({ revision: -1, project: null });
+  useEffect(() => {
+    if (activeProjectState.context?.mode === 'PREVIEW' && activeProjectState.context.identity === 'IDENTITY_BOUND') {
+      (window as unknown as { __runtimePreview?: { functional?: () => void } }).__runtimePreview?.functional?.();
+    }
+  }, [activeProjectState]);
   const { project: activeProject } = activeProjectState;
   const commitContext = useRef(activeProjectState);
   commitContext.current = activeProjectState;

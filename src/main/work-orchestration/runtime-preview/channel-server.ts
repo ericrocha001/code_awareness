@@ -14,8 +14,9 @@ export async function startPreviewChannel(context: PreviewContextManifest, token
   readiness: () => Record<string, { state: string; reasonCode?: string }> | undefined) {
   if (!/^[a-f0-9]{64}$/.test(token)) throw new Error('PREVIEW_CHANNEL_CONFIGURATION_INVALID')
   const identity = { sessionId: context.sessionId, ...Object.fromEntries(['repositoryId', 'worktreeId', 'generation'].map(key => [key, context.selection[key as keyof typeof context.selection]])),
+    ...(context.snapshot ? { build: { captureId: context.snapshot.captureId, buildId: context.snapshot.buildId, runtimeId: context.snapshot.runtimeId } } : {}),
     instanceId: randomUUID(), pid: process.pid, runtime: process.versions.electron ?? process.versions.node, abi: process.versions.modules, source: context.source }
-  const root = await realpath(context.worktree), file = join(directory, 'channel.json')
+  const root = await realpath(context.snapshot?.sourceDirectory ?? context.worktree), file = join(directory, 'channel.json')
   let active = true
   const sockets = new Set<import('node:net').Socket>()
   const server: Server = createServer(async (req, res) => {

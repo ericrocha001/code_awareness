@@ -1,9 +1,11 @@
+import { pathToFileURL } from 'node:url'
 import { BrowserWindow, ipcMain, type App } from 'electron'
 import { readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
 import { join, resolve, relative, isAbsolute } from 'node:path'
 import { validatePreviewContext } from './context-bootstrap'
 import type { PreviewContextManifest } from './context-contract'
 import { startPreviewChannel } from './channel-server'
+import { hash, verify } from '../preview-build/files'
 
 export const isRuntimePreview = () => ['PREVIEW_SESSION_ID', 'PREVIEW_SESSION_CONFIG', 'PREVIEW_SESSION_DIRECTORY'].some(key => process.env[key] !== undefined)
 let context: PreviewContextManifest | undefined
@@ -45,9 +47,38 @@ export async function initializeElectronPreview(app: App) {
     return !!scope && !scope.startsWith('..') && !isAbsolute(scope)
   })
   if (!resourcesIsolated) throw new Error('PREVIEW_RESOURCE_ESCAPED')
-  context = await validatePreviewContext(config.context, { sessionId: config.sessionId, profile: config.profile, approvedProfile: config.approvedProfile, directory, worktree })
+  context = await validatePreviewContext(config.context, { sessionId: config.sessionId, profile: config.profile, approvedProfile: config.approvedProfile, directory, worktree, snapshot: config.mode === 'SNAPSHOT' ? config.snapshot : undefined })
   if (context.data.policy === 'ARTIFACT_FIRST') channelConfiguration = { token: config.channelToken, directory }
   app.on('before-quit', () => { void revokeChannel?.() })
+  if (config.mode === 'SNAPSHOT') {
+    const snapshot = config.snapshot
+    if (!context.snapshot || snapshot.buildId !== context.snapshot.buildId || snapshot.captureId !== context.snapshot.captureId || snapshot.runtimeId !== context.snapshot.runtimeId || resolve(app.getAppPath()) !== resolve(snapshot.bundle, 'app')) throw Error('PREVIEW_BUILD_IDENTITY_MISMATCH')
+    await verify(snapshot.bundle, snapshot.manifest.files)
+    const file = join(directory, 'snapshot-evidence.json')
+    const evidence = { sessionId: config.sessionId, pid: process.pid, runtime: process.versions.electron, abi: process.versions.modules,
+      buildId: snapshot.buildId, captureId: snapshot.captureId, runtimeId: snapshot.runtimeId,
+      mainDigest: hash(readFileSync(join(app.getAppPath(), 'out/main/main.js'))),
+      preloadDigest: hash(readFileSync(join(app.getAppPath(), 'out/preload/preload.js'))),
+      rendererDigest: hash(readFileSync(join(app.getAppPath(), 'out/renderer/index.html'))),
+      rendererPid: null as number | null, sandboxObserved: null as boolean | null, functionalAt: null as string | null, rendererFailure: null as string | null, contextBound: false }
+    saveEvidence = () => { evidence.contextBound = !!boundContext; writeFileSync(file, JSON.stringify(evidence)) }
+    saveEvidence()
+    ipcMain.on('runtime-preview:preload-initialized', (event, payload) => {
+      if (!BrowserWindow.fromWebContents(event.sender) || event.senderFrame !== event.sender.mainFrame) return
+      evidence.sandboxObserved = payload?.sandboxed === true && payload?.contextIsolated === true
+      evidence.functionalAt = null; saveEvidence?.()
+    })
+    ipcMain.on('runtime-preview:functional', event => {
+      const window = BrowserWindow.fromWebContents(event.sender)
+      if (!window || event.senderFrame !== event.sender.mainFrame || event.sender.getURL() !== pathToFileURL(join(app.getAppPath(), 'out/renderer/index.html')).href || !boundContext) return
+      evidence.rendererPid = event.sender.getOSProcessId(); evidence.functionalAt = new Date().toISOString(); evidence.rendererFailure = null; saveEvidence?.()
+    })
+    app.on('browser-window-created', (_event, window) => {
+      window.webContents.on('render-process-gone', (_event, details) => { evidence.rendererFailure = details.reason; evidence.functionalAt = null; saveEvidence?.() })
+      window.webContents.on('preload-error', () => { evidence.rendererFailure = 'PRELOAD_FAILURE'; evidence.functionalAt = null; saveEvidence?.() })
+    })
+    return
+  }
   let preload: Build[] = [], rendererPid: number | null = null, rendererFailure: string | null = null, sandboxObserved: boolean | null = null
   const rendererModules = new Map<string, { path: string; sourceDigest: string; transformDigest: string }>()
   const save = () => {

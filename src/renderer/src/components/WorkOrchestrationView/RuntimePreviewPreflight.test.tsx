@@ -11,7 +11,8 @@ it('has no idle reads, disables launch until preflight and sends only verified s
     .mockResolvedValueOnce({ kind: 'PREVIEW_RUNTIME', result: { success: true, data: { kind: 'PREFLIGHT', startAllowed: false, preflight: { selection, status: 'INCOMPATIBLE', diagnostics: [{ reasonCode: 'SECURITY_ISOLATION_UNAVAILABLE', message: 'Missing protection', missingRequirements: [{ capability: 'NETWORK_EGRESS_RESTRICTION', guarantee: 'loopback enforced', availableMechanism: { name: 'No firewall', basis: 'No enforcement' }, resolutions: [{ description: 'Independent review' }] }] }] } } } })
   render(<RuntimePreviewPreflight repositoryId="repo" worktrees={worktrees} query={query} disabled={false}/> )
   expect(query).not.toHaveBeenCalled()
-  expect((screen.getByRole('button', { name: 'Iniciar preview' }) as HTMLButtonElement).disabled).toBe(true)
+  fireEvent.change(screen.getByLabelText('Modo'), { target: { value: 'LIVE' } });
+  expect((screen.getByRole('button', { name: 'Iniciar Live' }) as HTMLButtonElement).disabled).toBe(true)
   fireEvent.click(screen.getByText('Consultar perfis'))
   fireEvent.click(await screen.findByText('Verificar compatibilidade'))
   expect(await screen.findByText('SECURITY_ISOLATION_UNAVAILABLE')).toBeTruthy()
@@ -57,5 +58,6 @@ it('consults a completed asynchronous preflight only for the exact selected iden
   fireEvent.click(await screen.findByText('Consultar pré-checagem'))
   await screen.findByText(/SUPPORTED/)
   expect(query.mock.calls.at(-1)?.[0]).toEqual({ action: 'PREVIEW_RUNTIME', request: { action: 'LIST', repositoryId: 'repo', worktreeId: 'tree', limit: 1 } })
-  expect((screen.getByText('Iniciar preview') as HTMLButtonElement).disabled).toBe(false)
+  fireEvent.change(screen.getByLabelText('Modo'), { target: { value: 'LIVE' } });
+  expect((screen.getByText('Iniciar Live') as HTMLButtonElement).disabled).toBe(false)
 })

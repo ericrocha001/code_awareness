@@ -5,7 +5,8 @@ export const previewChannelScope = z.object({ sessionId: z.string().uuid(), repo
 export const previewChannelRequest = z.object({ version: z.literal(1), requestId: z.string().uuid(), scope: previewChannelScope,
   operation: z.string().min(1).max(64), input: z.record(z.unknown()) }).strict()
 export const previewChannelError = z.enum(['PREVIEW_UNAVAILABLE', 'SESSION_STALE', 'CAPABILITY_UNAVAILABLE', 'SCOPE_REJECTED'])
-export const previewRuntimeIdentity = z.object({ ...previewChannelScope.shape, instanceId: z.string().uuid(), pid: z.number().int().positive(),
+export const previewRuntimeIdentity = z.object({ ...previewChannelScope.shape, build: z.object({ captureId: z.string().regex(/^[a-f0-9]{64}$/), buildId: z.string().regex(/^[a-f0-9]{64}$/), runtimeId: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+    instanceId: z.string().uuid(), pid: z.number().int().positive(),
   runtime: id, abi: id, source: z.object({ head: z.string().nullable(), branch: z.string().nullable(),
     indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict() }).strict()
 export const previewCapabilities = [

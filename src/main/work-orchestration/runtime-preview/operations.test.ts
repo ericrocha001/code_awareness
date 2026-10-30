@@ -30,6 +30,23 @@ describe('Runtime Preview bounded operations (contract fixtures)', () => {
     const service = new RuntimePreviewOperations(repositories as any, {} as any, store as any, runner as any, async () => false)
     return { service, runner, store, repositories, guard }
   }
+  it('retains asynchronous PREPARE completion for passive consultation without private paths', async () => {
+    const { service, runner } = setup()
+    let complete!: (value: unknown) => void
+    const prepare = vi.fn(() => new Promise(resolve => { complete = resolve }))
+    Object.assign(runner, { prepareBuild: prepare })
+    const request = { action: 'PREPARE', request: { selection, allowDirty: true } }
+    expect(await service.handle(request)).toMatchObject({ success: true, data: { kind: 'SESSION', pending: true } })
+    await new Promise(resolve => setImmediate(resolve))
+    expect(await service.handle({ action: 'LIST', repositoryId: 'repo' })).toMatchObject({ success: true, data: { kind: 'SESSIONS', pendingOperationId: expect.any(String) } })
+    complete({ success: true, captureId: 'c'.repeat(64), buildId: 'b'.repeat(64), runtimeId: 'd'.repeat(64), reused: true, bundleDirectory: 'PRIVATE_BUNDLE_PATH', compatibility: {} })
+    await new Promise(resolve => setImmediate(resolve))
+    const completed = await service.handle({ action: 'LIST', repositoryId: 'repo' })
+    expect(completed).toMatchObject({ success: true, data: { kind: 'SESSIONS', pendingOperationId: null, lastOperation: { result: { success: true, data: { kind: 'BUILD', selection, build: { reused: true } } } } } })
+    expect(JSON.stringify(completed)).not.toContain('PRIVATE_BUNDLE_PATH')
+    expect(runner.inspect).not.toHaveBeenCalled()
+    expect(runner.start).not.toHaveBeenCalled()
+  })
   it('never reads operational history by probing or exposing private resource references', async () => {
     const { service, runner } = setup()
     const result = await service.handle({ action: 'LIST', repositoryId: 'repo' })
@@ -107,9 +124,9 @@ describe('Runtime Preview bounded operations (contract fixtures)', () => {
     expect(await service.pendingResult()).toEqual({ success: false, code: 'WORKTREE_STALE' })
     expect(confirm).not.toHaveBeenCalled()
   })
-  it('exposes sixteen fixed tools and returns structured errors, without action injection', async () => {
+  it('exposes seventeen fixed tools and returns structured errors, without action injection', async () => {
     const { service } = setup()
-    expect(RUNTIME_PREVIEW_TOOLS).toHaveLength(16)
+    expect(RUNTIME_PREVIEW_TOOLS).toHaveLength(17)
     expect(RUNTIME_PREVIEW_TOOLS.every(tool => tool.inputSchema.additionalProperties === false)).toBe(true)
     const invalid = await executeRuntimePreviewTool(service, 'stop_runtime_preview', { sessionId, action: 'START' }, () => {})
     expect(invalid.isError).toBe(true)

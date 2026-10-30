@@ -22,7 +22,8 @@ export const previewContextManifest = z.object({
   selection: z.object({ repositoryId: id, worktreeId: id, generation: id, profileId: id, fingerprint: digest }).strict(),
   profileRevision: z.number().int().positive(), worktree: z.string().min(1).max(4096),
   source: z.object({ head: z.string().nullable(), branch: z.string().nullable(), indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict(),
-  policy: previewDataPolicy, data: previewDataReceipt, catalogDigest: digest
+  policy: previewDataPolicy, data: previewDataReceipt, catalogDigest: digest,
+  snapshot: z.object({ captureId: digest, buildId: digest, runtimeId: digest, sourceDirectory: id }).strict().optional()
 }).strict()
 export type PreviewContextManifest = z.infer<typeof previewContextManifest>
 export type PreviewDataReceipt = z.infer<typeof previewDataReceipt>

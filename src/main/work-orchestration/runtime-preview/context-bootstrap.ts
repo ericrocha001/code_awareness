@@ -1,3 +1,6 @@
+import type { PreparedSnapshot } from './snapshot'
+import { PreviewCaptureStore } from '../preview-build/capture'
+import { digest } from '../preview-build/files'
 import { readFileSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import Database from 'better-sqlite3'
@@ -8,7 +11,7 @@ import { bytesFingerprint, previewProfileSchema, previewFingerprint } from '../p
 import { previewContextManifest } from './context-contract'
 import { expectedCorpusSchema, previewCatalogPath, previewCorpusPath, validateCorpus } from './context-data'
 
-export async function validatePreviewContext(raw: unknown, input: { sessionId: string; profile: string; approvedProfile: unknown; directory: string; worktree: string }) {
+export async function validatePreviewContext(raw: unknown, input: { sessionId: string; profile: string; approvedProfile: unknown; directory: string; worktree: string; snapshot?: PreparedSnapshot }) {
   const parsed = previewContextManifest.safeParse(raw)
   if (!parsed.success) throw new Error('PREVIEW_CONTEXT_MANIFEST_INVALID')
   const context = parsed.data, { selection, source, data } = context
@@ -19,6 +22,14 @@ export async function validatePreviewContext(raw: unknown, input: { sessionId: s
     context.policy.dataPolicy !== data.policy || data.repositoryId !== selection.repositoryId || (data.policy === 'EMPTY') !== (data.origin === 'EMPTY')) throw new Error('PREVIEW_CONTEXT_IDENTITY_MISMATCH')
   const git = new GitService(), registry = new GitWorktreeRegistry(input.worktree, git, { repositoryId: selection.repositoryId, isActive: () => true })
   const verifyGit = async () => {
+    if (input.snapshot) {
+      const s = input.snapshot
+      if (!context.snapshot || context.data.policy !== 'ARTIFACT_FIRST' || context.snapshot.buildId !== s.buildId || context.snapshot.captureId !== s.captureId || context.snapshot.runtimeId !== s.runtimeId || context.snapshot.sourceDirectory !== s.sourceDirectory) throw Error('PREVIEW_BUILD_IDENTITY_MISMATCH')
+      const capture = await new PreviewCaptureStore(join(s.sourceDirectory, '../..')).get(s.captureId)
+      if (digest(previewContextManifest.shape.source.parse(capture.source)) !== digest(context.source) || digest(previewContextManifest.shape.selection.parse(capture.selection)) !== digest(context.selection)) throw Error('PREVIEW_CAPTURE_IDENTITY_MISMATCH')
+      return
+    }
+    if (context.snapshot) throw Error('PREVIEW_BUILD_REQUIRED')
     const snapshot = await git.captureWorktreeReadSnapshot(input.worktree), identity = await registry.current(snapshot)
     if (identity.worktreeId !== selection.worktreeId || identity.generation !== selection.generation || realpathSync(identity.path).toLowerCase() !== input.worktree.toLowerCase() || identity.locked || identity.detached || identity.prunable || identity.missing) throw new Error('PREVIEW_WORKTREE_IDENTITY_MISMATCH')
     if (snapshot.head !== source.head || snapshot.branch !== source.branch || snapshot.indexRevision !== source.indexRevision || snapshot.worktreeRevision !== source.worktreeRevision || snapshot.operation) throw new Error('PREVIEW_SOURCE_CHANGED_BEFORE_BOOT')

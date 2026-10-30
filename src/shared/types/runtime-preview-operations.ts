@@ -11,6 +11,8 @@ export interface PreviewQualification extends PreviewValidationLink {
   status: 'PASSED' | 'FAILED' | 'INCONCLUSIVE'; reasons: string[]; observedStatus: string; at: string; evidenceAt: string | null; scope: string[]
 }
 export interface PreviewSessionView {
+  spawnedAt?: string; functionalAt?: string
+  build?: { captureId: string; buildId: string; runtimeId: string }
   sessionId: string; operationId: string; selection: PreviewSelection; revision: number; profileRevision: number
   state: 'PREPARING' | 'RUNNING' | 'STOPPING' | 'STOPPED' | 'FAILED' | 'CLEANUP_INCOMPLETE' | 'OWNERSHIP_UNVERIFIED'
   readiness: 'NOT_OBSERVED' | 'READY' | 'NOT_READY' | 'UNVERIFIABLE'; liveness: 'NOT_OBSERVED' | 'VERIFIED' | 'UNVERIFIABLE'
@@ -36,16 +38,18 @@ export interface RuntimePreviewStatus {
   observedAt: string | null
 }
 export type RuntimePreviewRequest =
+  | { action: 'PREPARE'; request: import('./preview-build-types').PreviewBuildRequest }
   | { action: 'RUN_BRANCH_APP'; repositoryId: string; ref: string; revision: string; operationId: string; worktree?: { worktreeId: string; generation: string } }
   | { action: 'PROFILES' | 'WORKTREES'; repositoryId: string }
   | { action: 'PREFLIGHT' | 'AUTHORIZE'; selection: PreviewSelection }
-  | { action: 'START'; selection: PreviewSelection; operationId: string }
+  | { action: 'START'; selection: PreviewSelection; operationId: string; snapshot?: { captureId: string; buildId: string } }
   | { action: 'LIST'; repositoryId: string; worktreeId?: string; cursor?: string; limit?: number }
   | { action: 'INSPECT' | 'STOP' | 'BINDINGS'; sessionId: string }
   | { action: 'PROBE'; sessionId: string; probes: Array<'READINESS' | 'ATTESTATION'> }
   | { action: 'EVIDENCE'; sessionId: string; revision?: number; section: 'COVERAGE' | 'SOURCE' | 'RUNTIME'; offset?: number; limit?: number }
   | { action: 'QUALIFY'; sessionId: string; bindingId: string; criterionId: string; proofId: string }
 export type RuntimePreviewData =
+  | { kind: 'BUILD'; selection: PreviewSelection; build: Omit<Extract<import('./preview-build-types').PreviewBuildResult, { success: true }>, 'bundleDirectory'> }
   | RuntimePreviewStatus
   | { kind: 'BRANCH_APP'; reasonCode: string; message: string; candidates?: BranchWorktree[]; preflight?: PreviewPreflight; activeSession?: PreviewSessionView }
   | { kind: 'PROFILES'; profiles: PreviewProfileSummary[] }

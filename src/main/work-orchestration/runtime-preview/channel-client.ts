@@ -32,6 +32,6 @@ export async function invokePreviewChannel(context: PreviewContextManifest, dire
   const identity = reply.identity
   if (reply.requestId !== request.requestId || identity.pid !== peer.pid || identity.runtime !== main.runtime || identity.abi !== main.abi || identity.sessionId !== context.sessionId ||
     identity.repositoryId !== context.selection.repositoryId || identity.worktreeId !== context.selection.worktreeId || identity.generation !== context.selection.generation ||
-    previewFingerprint(identity.source) !== previewFingerprint(context.source)) throw Error('SCOPE_REJECTED')
+    previewFingerprint(identity.source) !== previewFingerprint(context.source) || previewFingerprint(identity.build ?? null) !== previewFingerprint(context.snapshot ? { captureId: context.snapshot.captureId, buildId: context.snapshot.buildId, runtimeId: context.snapshot.runtimeId } : null)) throw Error('SCOPE_REJECTED')
   return reply
 }

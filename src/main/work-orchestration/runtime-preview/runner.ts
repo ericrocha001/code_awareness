@@ -1,3 +1,4 @@
+import { SnapshotAdapter, type SnapshotLaunch, type SnapshotSelector, type PreparedSnapshot } from './snapshot'
 import { randomUUID } from 'node:crypto'
 import { readFile, realpath } from 'node:fs/promises'
 import type { PreviewSelection, PreviewPreflight } from '../../../shared/types/runtime-preview-types'
@@ -14,6 +15,7 @@ import { previewChannelScope, type PreviewChannelScope } from './channel-contrac
 export interface PreparedPreview {
   profile: PreviewProfile; worktree: string; gitFingerprint: string; preflight: PreviewPreflight;
   guard: () => Promise<void>
+  snapshot?: PreparedSnapshot
   observeSource?: () => Promise<NonNullable<PreviewPreflight['snapshot']>>
 }
 export interface PreviewLaunchAuthority { prepare(selection: PreviewSelection): Promise<PreparedPreview> }
@@ -56,10 +58,10 @@ class SessionPersistenceFailure extends Error {
 export class RuntimePreviewRunner {
   private tail: Promise<unknown> = Promise.resolve()
   private readonly owners = new Map<string, NativeOwner>()
-  private readonly adapters = new Map<string, PreviewStackAdapter>()
+  private readonly adapters = new Map<string, PreviewStackAdapter | SnapshotAdapter>()
   private readonly sources = new Map<string, NonNullable<PreparedPreview['observeSource']>>()
   constructor(private readonly store: PreviewSessionStore, private readonly authority: PreviewLaunchAuthority,
-    private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner) {}
+    private readonly helper: { executable: string; fingerprint: string; sdkDirectory?: string }, private readonly contextProvisioner?: PreviewContextProvisioner, private readonly snapshots?: SnapshotLaunch) {}
   private serial<T>(fn: () => Promise<T>): Promise<T> {
     const operation = this.tail.then(fn); this.tail = operation.catch(() => {}); return operation
   }
@@ -101,21 +103,22 @@ export class RuntimePreviewRunner {
     if (!record.termination || record.termination.supervisorExit) return record
     return this.change(record, { termination: { ...record.termination, supervisorExit: { observedAt: new Date().toISOString() } } })
   }
-  start(input: { operationId: string; selection: PreviewSelection; guard?: () => void | Promise<void> }): Promise<PreviewSessionRecord> {
+  start(input: { operationId: string; selection: PreviewSelection; snapshot?: SnapshotSelector; guard?: () => void | Promise<void> }): Promise<PreviewSessionRecord> {
 
     const selection = sessionSchema.shape.selection.safeParse(input.selection)
     if (!selection.success) return Promise.reject(selection.error)
-    input = { operationId: input.operationId, selection: selection.data, guard: input.guard }
+    input = { operationId: input.operationId, selection: selection.data, snapshot: input.snapshot, guard: input.guard }
     return this.command(async () => {
       await input.guard?.()
       if (!sessionSchema.shape.operationId.safeParse(input.operationId).success) throw new Error('INVALID_OPERATION_ID')
       const previous = this.store.list().find(r => r.operationId === input.operationId)
       if (previous) {
-        if (selectionKey(previous.selection) !== selectionKey(input.selection)) throw new Error('OPERATION_ID_CONFLICT')
+        if (selectionKey(previous.selection) !== selectionKey(input.selection) || previous.build?.buildId !== input.snapshot?.buildId || previous.build?.captureId !== input.snapshot?.captureId) throw new Error('OPERATION_ID_CONFLICT')
         return this.inspectInternal(previous.sessionId)
       }
       if (this.store.active()) throw new Error('PREVIEW_SESSION_BUSY')
-      const prepared = await this.authority.prepare(input.selection)
+      if (input.snapshot && !this.snapshots) throw Error('PREPARE_REQUIRED')
+      const prepared: PreparedPreview = input.snapshot ? await this.snapshots!.prepare(input.selection, input.snapshot) : await this.authority.prepare(input.selection)
       const { profile, preflight } = prepared
       if (preflight.status !== 'SUPPORTED' && !diagnosticBootstrapAllowed(preflight, profile)) throw new Error('PREFLIGHT_' + preflight.status)
       if (selectionKey(preflight.selection) !== selectionKey(input.selection) || previewFingerprint(profile) !== input.selection.fingerprint || preflight.profileRevision !== profile.revision || profile.repositoryId !== input.selection.repositoryId) throw new Error('LAUNCH_IDENTITY_MISMATCH')
@@ -124,10 +127,10 @@ export class RuntimePreviewRunner {
       if (profile.resources.some(r => r.strategy === 'SESSION_ENDPOINT') && !profile.adapter) throw new Error('RESOURCE_ADAPTER_REQUIRED')
       if (Object.keys(profile.env).some(k => reserved.test(k))) throw new Error('RESERVED_ENVIRONMENT')
       this.store.assertExternal(prepared.worktree)
-      const executable = await realpath(profile.command.executable)
-      if (bytesFingerprint(await readFile(executable)) !== profile.command.executableHash) throw new Error('EXECUTABLE_CHANGED')
+      const executable = await realpath(prepared.snapshot?.executable ?? profile.command.executable)
+      if (bytesFingerprint(await readFile(executable)) !== (prepared.snapshot?.executableHash ?? profile.command.executableHash)) throw new Error('EXECUTABLE_CHANGED')
       const cwd = await previewPath(prepared.worktree, profile.command.cwd)
-      for (const input of profile.command.inputs) if (bytesFingerprint(await readFile(await previewPath(prepared.worktree, input.path))) !== input.fingerprint) throw new Error('COMMAND_INPUT_CHANGED')
+      for (const input of prepared.snapshot ? [] : profile.command.inputs) if (bytesFingerprint(await readFile(await previewPath(prepared.worktree, input.path))) !== input.fingerprint) throw new Error('COMMAND_INPUT_CHANGED')
       await prepared.guard()
       const sessionId = randomUUID()
       const at = new Date().toISOString()
@@ -149,20 +152,29 @@ export class RuntimePreviewRunner {
         shutdown: { graceMs: profile.shutdown.graceMs, forceMs: profile.shutdown.forceMs, graceful: profile.shutdown.graceful === 'SESSION_EVENT' } }
       this.store.reserve(record)
       let native: NativeOwner | undefined
-      let adapter: PreviewStackAdapter | undefined
+      let adapter: PreviewStackAdapter | SnapshotAdapter | undefined
       let createRequested = false
       try {
+        if (prepared.snapshot) {
+          await this.snapshots!.builds.bundles.retain(prepared.snapshot.buildId, sessionId)
+          const { captureId, buildId, runtimeId } = prepared.snapshot
+          record = this.change(record, { build: { captureId, buildId, runtimeId } })
+        }
         if (profile.bootstrap) {
           if (!this.contextProvisioner || !preflight.snapshot) throw new Error('PREVIEW_CONTEXT_PROVISIONER_REQUIRED')
           const context = await this.contextProvisioner.prepare({ profile, selection: input.selection, sessionId,
             directory: this.store.runtime(sessionId), worktree: prepared.worktree, source: preflight.snapshot })
           await prepared.guard()
           await input.guard?.()
+          if (prepared.snapshot) {
+            const { captureId, buildId, runtimeId, sourceDirectory } = prepared.snapshot
+            context.snapshot = { captureId, buildId, runtimeId, sourceDirectory }
+          }
           record = this.change(record, { context })
         }
         if (profile.adapter) {
           if (!this.helper.sdkDirectory) throw new Error('TRUSTED_SDK_REQUIRED')
-          adapter = await PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory, record.context)
+          adapter = prepared.snapshot ? await new SnapshotAdapter(prepared.snapshot, record.context!, this.store.runtime(sessionId)).prepare() : await PreviewStackAdapter.prepare(profile, prepared.worktree, this.store.runtime(sessionId), sessionId, this.helper.sdkDirectory, record.context)
           this.adapters.set(sessionId, adapter)
           if (prepared.observeSource) this.sources.set(sessionId, prepared.observeSource)
         }
@@ -172,12 +184,13 @@ export class RuntimePreviewRunner {
         const runtime = this.store.runtime(sessionId)
         createRequested = true
         const observation = await native.start({ sessionId, operationId: input.operationId, directory: this.store.directory(sessionId),
-          slotKey: bytesFingerprint(this.store.root.toLowerCase()), executable, executableHash: profile.command.executableHash, cwd, args: profile.command.args, spawn: 'JOB_LIST_AT_CREATE',
+          slotKey: bytesFingerprint(this.store.root.toLowerCase()), executable, executableHash: prepared.snapshot?.executableHash ?? profile.command.executableHash, cwd, args: prepared.snapshot ? [prepared.snapshot.bundle + '/app'] : profile.command.args, spawn: 'JOB_LIST_AT_CREATE',
           graceful: profile.shutdown.graceful ?? 'NONE', graceMs: profile.shutdown.graceMs, forceMs: profile.shutdown.forceMs, hostPid: process.pid,
           env: { ...profile.env, SystemRoot: process.env.SystemRoot!, TEMP: runtime, TMP: runtime, APPDATA: runtime, LOCALAPPDATA: runtime, USERPROFILE: runtime, HOME: runtime,
             PREVIEW_SESSION_ID: sessionId, PREVIEW_SESSION_DIRECTORY: runtime, ...adapter?.environment() } })
         if (!observation.assignedAtCreation || !observation.ownerOutsideJob || !observation.pid || !observation.created) throw new Error('OWNERSHIP_UNVERIFIED')
         await prepared.guard()
+        if (prepared.snapshot) record = this.change(record, { spawnedAt: new Date().toISOString() })
         let stack: Awaited<ReturnType<PreviewStackAdapter['observe']>> | undefined
         if (adapter) {
           await adapter.permit(native, async actual => {
@@ -186,6 +199,10 @@ export class RuntimePreviewRunner {
             record = this.change(record, { process: observation, runtimeEvidence: { ...actual, preflight: preflight.status === 'SUPPORTED' ? 'SUPPORTED' : 'UNKNOWN', at: new Date().toISOString(), scope: 'DECLARED_INSTALL_SCRIPTS' } })
           })
           stack = await adapter.awaitReady(native)
+          if (adapter instanceof SnapshotAdapter) {
+            const reference = adapter.endpointReference()
+            record = this.change(record, { snapshotEndpoint: true, resourceInventory: record.resourceInventory.map(resource => resource.kind === 'SESSION_ENDPOINT' ? { ...resource, reference } : resource) })
+          }
           await prepared.guard()
         }
         await input.guard?.()
@@ -208,12 +225,24 @@ export class RuntimePreviewRunner {
           if (native) record = this.supervisorExited(record)
           try { this.store.releaseResources(sessionId) }
           catch { return this.change(this.store.read(sessionId), { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', process: observation.success ? observation.data : null, failure: 'RESOURCE_RELEASE_UNVERIFIED', readiness: 'UNVERIFIABLE', liveness: 'NOT_OBSERVED' }) }
+          try { await this.releaseBuild(record) }
+          catch { return this.change(this.store.read(sessionId), { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'BUILD_REFERENCE_RELEASE_UNVERIFIED' }) }
           record = this.change(this.store.read(sessionId), { state: 'FAILED', resources: 'RELEASED', process: observation.success ? observation.data : null, failure: reason })
           this.store.release(sessionId)
         } else record = this.change(this.store.read(sessionId), { state: 'OWNERSHIP_UNVERIFIED', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', liveness: 'UNVERIFIABLE', failure: 'LAUNCH_UNACKNOWLEDGED' })
         return record
       }
     })
+  }
+  private async releaseBuild(record: PreviewSessionRecord) {
+    if (record.build) {
+      if (!this.snapshots) throw Error('BUILD_REFERENCE_RELEASE_UNAVAILABLE')
+      await this.snapshots.builds.bundles.release(record.build.buildId, record.sessionId)
+    }
+  }
+  prepareBuild(input: unknown, guard: () => void) {
+    if (!this.snapshots) return Promise.resolve({ success: false as const, code: 'PREPARE_REQUIRED' })
+    return this.snapshots.builds.prepare(input, guard)
   }
   stop(sessionId: string): Promise<PreviewSessionRecord> {
     return this.command(async () => {
@@ -235,6 +264,7 @@ export class RuntimePreviewRunner {
         await owner.shutdown()
         record = this.supervisorExited(record)
         this.store.releaseResources(sessionId)
+        await this.releaseBuild(record)
         record = this.change(record, { ...this.terminal(record), process: observation, resources: 'RELEASED', liveness: 'NOT_OBSERVED' })
         this.store.release(sessionId); this.owners.delete(sessionId)
         this.adapters.delete(sessionId)
@@ -303,6 +333,7 @@ export class RuntimePreviewRunner {
           await owner.shutdown()
           record = this.supervisorExited(record)
           this.store.releaseResources(sessionId)
+          await this.releaseBuild(record)
           record = this.change(record, { ...this.terminal(record), process: final, resources: 'RELEASED', liveness: 'NOT_OBSERVED', readiness: 'NOT_READY' })
           this.store.release(sessionId); this.owners.delete(sessionId)
           this.adapters.delete(sessionId); this.sources.delete(sessionId)
@@ -357,7 +388,7 @@ export class RuntimePreviewRunner {
       record = this.termination(record, record.stopIntent ? 'STOP_REQUESTED' : observation.data.assignedAtCreation ? 'UNEXPECTED_EXIT' : 'STARTUP_FAILURE',
         record.stopIntent ? 'OPERATOR_STOP' : observation.data.assignedAtCreation ? 'UNEXPECTED_PROCESS_EXIT' : 'LAUNCH_FAILED', observation.data, 'EXITED')
       record = this.supervisorExited(record)
-      for (const resource of record.resourceInventory.filter(r => r.kind === 'SESSION_ENDPOINT')) {
+      for (const resource of record.resourceInventory.filter(r => r.kind === 'SESSION_ENDPOINT' && (!record.build || record.snapshotEndpoint))) {
         const match = /^127\.0\.0\.1:(\d+)$/.exec(resource.reference)
         const port = Number(match?.[1])
         try {
@@ -369,6 +400,8 @@ export class RuntimePreviewRunner {
       }
       try { this.store.releaseResources(sessionId) }
       catch { return this.change(record, { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', process: observation.data, failure: 'RESOURCE_RELEASE_UNVERIFIED', readiness: 'UNVERIFIABLE', liveness: 'NOT_OBSERVED' }) }
+      try { await this.releaseBuild(record) }
+      catch { return this.change(record, { state: 'CLEANUP_INCOMPLETE', reconciliation: 'REQUIRED', resources: 'UNVERIFIABLE', failure: 'BUILD_REFERENCE_RELEASE_UNVERIFIED' }) }
       record = this.change(record, { ...this.terminal(record), resources: 'RELEASED', process: observation.data, reconciliation: 'OBSERVED', liveness: 'NOT_OBSERVED', readiness: 'NOT_READY' })
       if (this.store.active() === sessionId) this.store.release(sessionId)
       this.adapters.delete(sessionId); this.sources.delete(sessionId)

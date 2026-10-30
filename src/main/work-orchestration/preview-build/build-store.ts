@@ -101,7 +101,7 @@ export class PreviewBuildStore {
   async release(buildId: string, referenceId: string) {
     if (!/^[a-zA-Z0-9-]{1,128}$/.test(referenceId)) throw Error('BUILD_REFERENCE_INVALID')
     const unlock = await this.lock()
-    try { await unlink(join(this.root, 'references', this.id(buildId), referenceId + '.json')) } finally { await unlock() }
+    try { await unlink(join(this.root, 'references', this.id(buildId), referenceId + '.json')).catch(error => { if (!absent(error)) throw error }) } finally { await unlock() }
   }
   async prune(limit = 3) {
     if (!Number.isInteger(limit) || limit < 0 || limit > 100) throw Error('BUILD_RETENTION_INVALID')

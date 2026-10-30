@@ -18,10 +18,13 @@ export const sessionSchema = z.object({
   schemaVersion: z.literal(1), sessionId: z.string().uuid(), operationId: z.string().uuid(), selection: selectionSchema,
   persistence: z.enum(['PERSISTED', 'UNVERIFIABLE']),
   profileRevision: z.number().int().positive(), gitFingerprint: z.string(), revision: z.number().int().nonnegative(), at: z.string(),
+  snapshotEndpoint: z.boolean().optional(),
+  spawnedAt: z.string().optional(), functionalAt: z.string().optional(),
   startedAt: z.string(), endedAt: z.string().nullable(),
   stopIntent: z.object({ requestedAt: z.string().max(64) }).strict().optional(),
   termination: terminationSchema.optional(),
   context: previewContextManifest.optional(),
+  build: z.object({ captureId: z.string().regex(/^[a-f0-9]{64}$/), buildId: z.string().regex(/^[a-f0-9]{64}$/), runtimeId: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
   sourceSnapshot: z.object({ head: z.string().nullable(), branch: z.string().nullable(), indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict().nullable(),
   sourceObservation: z.object({ at: z.string(), fingerprint: z.string(), snapshot: z.object({ head: z.string().nullable(), branch: z.string().nullable(), indexRevision: z.string(), worktreeRevision: z.string(), dirty: z.boolean(), operation: z.string().nullable().optional() }).strict() }).strict().optional(),
   state: z.enum(['PREPARING', 'RUNNING', 'STOPPING', 'STOPPED', 'FAILED', 'CLEANUP_INCOMPLETE', 'OWNERSHIP_UNVERIFIED']),
@@ -137,6 +140,7 @@ export class PreviewSessionStore {
       if (lstatSync(path).size > 32768) throw new Error('SESSION_RECORD_LIMIT')
       const value = sessionSchema.parse(JSON.parse(readFileSync(path, 'utf8')))
       if (value.sessionId !== id || value.revision !== index || (latest && (value.operationId !== latest.operationId || value.profileRevision !== latest.profileRevision || value.gitFingerprint !== latest.gitFingerprint || JSON.stringify(value.selection) !== JSON.stringify(latest.selection)))) throw new Error('SESSION_RECORD_UNVERIFIABLE')
+      if (latest?.build && JSON.stringify(latest.build) !== JSON.stringify(value.build)) throw new Error('SESSION_BUILD_CHANGED')
       if (latest?.context && JSON.stringify(latest.context) !== JSON.stringify(value.context)) throw new Error('SESSION_CONTEXT_CHANGED')
       if (latest?.stopIntent && JSON.stringify(latest.stopIntent) !== JSON.stringify(value.stopIntent)) throw new Error('SESSION_STOP_INTENT_CHANGED')
       if (latest?.termination && latest.termination.kind !== 'UNKNOWN') {

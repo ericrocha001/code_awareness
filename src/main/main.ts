@@ -101,6 +101,7 @@ import { RepositoryPreviewContextProvisioner } from './work-orchestration/runtim
 import { confirmPreviewProfile } from './work-orchestration/runtime-preview/authorization'
 import { CodeAwarenessProfileResolver } from './work-orchestration/runtime-preview/code-awareness-profile'
 import { resolvePreviewHelper } from './work-orchestration/runtime-preview/host-helper'
+import { SnapshotLaunch } from './work-orchestration/runtime-preview/snapshot'
 import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orchestration/runtime-preview/runner'
 import { PreviewSessionStore } from './work-orchestration/runtime-preview/session-store'
 import { RuntimePreviewOperations } from './work-orchestration/runtime-preview/operations'
@@ -235,7 +236,7 @@ const getAssetPath = (filename: string): string => {
   }
   // BUGFIX: No build de producao, __dirname resolve para dentro do asar.
   // Usar process.resourcesPath ou app.getAppPath() garante resolucao correta.
-  const basePath = process.resourcesPath ?? app.getAppPath()
+  const basePath = previewBootstrapContext()?.snapshot ? join(app.getAppPath(), '../resources') : process.resourcesPath ?? app.getAppPath()
   return join(basePath, 'assets', filename)
 }
 
@@ -282,6 +283,8 @@ function createWindow(): void {
     console.log(`[Renderer] [${level}] ${message} (${sourceId}:${line})`)
   })
   mainWindow.webContents.on('did-finish-load', () => {
+    const snapshot = previewBootstrapContext()?.snapshot
+    if (snapshot) mainWindow?.setTitle('Code Awareness · Snapshot ' + snapshot.buildId.slice(0, 12))
     console.log('[Main] Janela do aplicativo carregada e visivel.')
   })
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -445,18 +448,18 @@ app.whenReady().then(async () => {
   const contextProvisioner = new RepositoryPreviewContextProvisioner(repositoryCatalog, continuumSession.getStorageBaseDir())
   const confirmPreview = async (profile: import('./work-orchestration/preview-profile').PreviewProfile) =>
     !!mainWindow && !mainWindow.isDestroyed() && confirmPreviewProfile(mainWindow, profile, contextProvisioner)
+  const buildPreparation = !isRuntimePreview() && process.platform === 'win32' ? new PreviewBuildPreparation(join(previewDirectory, 'build-store'), previewRepositories, previewProfiles,
+    (capture, recipe) => !!mainWindow && !mainWindow.isDestroyed() ? confirmPreviewBuild(mainWindow, capture, recipe) : Promise.resolve(false)) : undefined
   let runtimePreview: RuntimePreviewOperations | undefined
   if (!isRuntimePreview() && process.platform === 'win32') {
     try {
       const helper = resolvePreviewHelper({ packaged: app.isPackaged, resources: process.resourcesPath, root: app.getAppPath(), developmentBuild: process.env.CODE_AWARENESS_PREVIEW_NATIVE_BUILD })
       const sessions = new PreviewSessionStore(join(previewDirectory, 'preview-sessions'))
-      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner)
+      const runner = new RuntimePreviewRunner(sessions, new CatalogPreviewLaunchAuthority(previewRepositories, previewProfiles, new PreviewPreflightService(previewProfiles)), helper, contextProvisioner, buildPreparation ? new SnapshotLaunch(buildPreparation, previewRepositories, previewProfiles) : undefined)
       const branchProfiles = new CodeAwarenessProfileResolver(previewProfiles, { root: app.getAppPath(), executable: process.execPath, electronVersion: process.versions.electron, abi: process.versions.modules })
       runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles)
     } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
   }
-  const buildPreparation = !isRuntimePreview() && process.platform === 'win32' ? new PreviewBuildPreparation(join(previewDirectory, 'build-store'), previewRepositories, previewProfiles,
-    (capture, recipe) => !!mainWindow && !mainWindow.isDestroyed() ? confirmPreviewBuild(mainWindow, capture, recipe) : Promise.resolve(false)) : undefined
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
     const response = await dialog.showMessageBox({ type: 'warning', title: 'Liberar e remover Worktree',
       message: 'Confirme que a IDE e os agentes desta Worktree foram encerrados e liberaram o diretório.',
