@@ -41,21 +41,19 @@ function setup(value = synchronization) {
   return api
 }
 
-it('opens the existing confirmation from the checkout signal and never probes for node selection or wheel gestures', async () => {
+it('executes an eligible pull once without opening Inspector and never probes for node selection or wheel gestures', async () => {
   const api = setup()
   render(<GitManagementView state={project} />)
-  const pull = await screen.findByRole('button', { name: 'Atualizar — Pull FF-only…' }, { timeout: 5000 })
+  const pull = await screen.findByRole('button', { name: 'Atualizar — Pull FF-only' }, { timeout: 5000 })
   await waitFor(() => expect(pull.hasAttribute('disabled')).toBe(false))
   const reads = api.getGitCheckoutSynchronization.mock.calls.length
   fireEvent.click(screen.getByRole('button', { name: /Known commit/ }))
+  fireEvent.click(screen.getByRole('button', { name: 'Fechar detalhes' }))
   fireEvent.wheel(screen.getByLabelText('Mapa Git por eventos; role para explorar'), { deltaX: 40 })
   expect(api.getGitCheckoutSynchronization).toHaveBeenCalledTimes(reads)
   fireEvent.click(pull)
-  const dialog = await screen.findByRole('dialog', { name: 'Confirmar operação Git' })
-  expect(within(dialog).getByText('Atualizar branch')).toBeTruthy()
-  expect(within(dialog).getByText(/Atualizar topic a partir de origin\/topic.*sem criar merge/)).toBeTruthy()
-  expect(api.mutateGitManagement).not.toHaveBeenCalled()
-  fireEvent.click(within(dialog).getByText('Confirmar operação'))
+  expect(screen.queryByRole('dialog', { name: 'Confirmar operação Git' })).toBeNull()
+  expect(document.querySelector('.gm-inspector')?.classList.contains('is-open')).toBe(false)
   await waitFor(() => expect(api.mutateGitManagement).toHaveBeenCalledTimes(1))
   expect(api.mutateGitManagement.mock.calls[0][0]).toMatchObject({ context, snapshot: state, operation: { action: 'PULL_FF_ONLY', contextual: true }, operationId: expect.any(String) })
   await waitFor(() => expect(api.getGitCheckoutSynchronization).toHaveBeenCalledTimes(reads + 1))
@@ -65,7 +63,9 @@ it.each(['COMPARE', 'REVIEW_PUBLICATION'] as const)('routes %s through the exist
   const evidence = { ...synchronization.evidence, relationship: action === 'COMPARE' ? 'DIVERGED' : 'AHEAD', remoteCounts: { ahead: 2, behind: action === 'COMPARE' ? 3 : 0 } } as GitCheckoutSynchronization['evidence']
   const api = setup({ ...synchronization, action, evidence })
   render(<GitManagementView state={project} />)
-  fireEvent.click(await screen.findByRole('button', { name: action === 'COMPARE' ? 'Inspecionar divergência' : 'Revisar publicação' }))
+  const button = await screen.findByRole('button', { name: action === 'COMPARE' ? 'Inspecionar divergência' : 'Revisar publicação' })
+  await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false))
+  fireEvent.click(button)
   await waitFor(() => expect(api.compareGitAtlas).toHaveBeenCalledWith(expect.objectContaining({ left: remote, right: sha })))
   expect(api.mutateGitManagement).not.toHaveBeenCalled()
   expect(within(document.querySelector('.gm-checkout-sync') as HTMLElement).queryByText(/Publicar.*push/i)).toBeNull()
@@ -75,15 +75,29 @@ it('recovers a lost contextual response with the same operationId and evidence t
   const api = setup()
   api.mutateGitManagement.mockRejectedValueOnce(new Error('lost response'))
   render(<GitManagementView state={project} />)
-  const pull = await screen.findByRole('button', { name: 'Atualizar — Pull FF-only…' })
+  const pull = await screen.findByRole('button', { name: 'Atualizar — Pull FF-only' })
   await waitFor(() => expect(pull.hasAttribute('disabled')).toBe(false))
   fireEvent.click(pull)
-  fireEvent.click(await screen.findByRole('button', { name: 'Confirmar operação' }))
-  const recover = await screen.findByRole('button', { name: 'Recuperar mesma operação' })
+  const feedback = await screen.findByLabelText('Resultado da sincronização Git')
+  const recover = await within(feedback).findByRole('button', { name: 'Recuperar mesma operação' })
   await waitFor(() => expect(recover.hasAttribute('disabled')).toBe(false))
   fireEvent.click(recover)
   await waitFor(() => expect(api.mutateGitManagement).toHaveBeenCalledTimes(2))
   expect(api.mutateGitManagement.mock.calls[1][0]).toEqual(api.mutateGitManagement.mock.calls[0][0])
+})
+
+it.each(['FETCH', 'PUSH'] as const)('executes eligible %s in one gesture, retaining destination and the single executor', async action => {
+  const value = { ...synchronization, action, state: { ...state, ahead: action === 'PUSH' ? 3 : 0 }, evidence: { ...synchronization.evidence, relationship: action === 'PUSH' ? 'AHEAD' : 'UNKNOWN', tracking: action === 'PUSH' ? 'TRACKING_CURRENT' : 'TRACKING_STALE', remoteCounts: action === 'PUSH' ? { ahead: 3, behind: 0 } : null } } as GitCheckoutSynchronization
+  const api = setup(value)
+  render(<GitManagementView state={project} />)
+  const button = await screen.findByRole('button', { name: action === 'PUSH' ? 'Publicar — Push' : 'Buscar atualizações — Fetch' })
+  await waitFor(() => expect(button.hasAttribute('disabled')).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: 'Fechar detalhes' }))
+  fireEvent.click(button); fireEvent.click(button)
+  await waitFor(() => expect(api.mutateGitManagement).toHaveBeenCalledTimes(1))
+  expect(api.mutateGitManagement.mock.calls[0][0]).toMatchObject({ operation: { action, contextual: true }, snapshot: value.state })
+  expect(screen.queryByRole('dialog')).toBeNull()
+  expect(document.querySelector('.gm-inspector')?.classList.contains('is-open')).toBe(false)
 })
 
 it('displays unknown remote counts and a useful reason without borrowing local tracking counts', () => {
@@ -91,7 +105,7 @@ it('displays unknown remote counts and a useful reason without borrowing local t
   render(<CheckoutSynchronization value={value} loading={false} error="" blocked={false} verify={() => {}} act={() => {}} />)
   expect(screen.getByRole('status').textContent).toContain('contagem ainda não verificada')
   expect(screen.queryByText(/1 commits atrás/)).toBeNull()
-  expect(screen.getByRole('button', { name: 'Buscar atualizações — Fetch…' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Buscar atualizações — Fetch' })).toBeTruthy()
 })
 
 it('coalesces verification and discards a late response after switching project or checkout snapshot', async () => {

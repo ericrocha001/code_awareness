@@ -77,6 +77,18 @@ export class GitHubIntegrationService {
     return this.api!.getBranchProtection(origin.fullName, branch)
   }
 
+  async managementPublicationPolicy(repoPath: string, branch: string) {
+    const connection = this.connectionRevision, origin = await this.pullRequestOrigin(repoPath)
+    const [repository, protectedBranch, access] = await Promise.all([
+      this.api!.getPullRequestRepository(origin.fullName), this.api!.getBranchProtection(origin.fullName, branch),
+      this.api!.getPullRequestEndpointPermissions(origin.fullName)
+    ])
+    const after = await this.pullRequestOrigin(repoPath)
+    if (connection !== this.connectionRevision || origin.repositoryId !== after.repositoryId || origin.fullName !== after.fullName || origin.providerRepositoryId && origin.providerRepositoryId !== repository.id) throw new Error('REMOTE_CONTEXT_CHANGED')
+    return { defaultBranch: repository.defaultBranch, protected: protectedBranch,
+      canPush: access.evidence.repositoryScope === 'INCLUDED' && access.evidence.installation === 'OBSERVED' && access.evidence.grants?.contents === 'write' && access.evidence.userPermissions?.push === true }
+  }
+
   async pullRequestCommits(repoPath: string, number: number, head: string, page = 1): Promise<PullRequestCommitsPage> {
     const origin = await this.pullRequestOrigin(repoPath)
     const before = await this.api!.getPullRequestCatalogRecord(origin.fullName, number)

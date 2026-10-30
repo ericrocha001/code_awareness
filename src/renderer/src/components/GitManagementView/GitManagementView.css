@@ -323,3 +323,4 @@
 .gm-checkout-sync { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; }
 .gm-checkout-sync small { color: var(--text-secondary); }
 .gm-checkout-sync button { white-space: nowrap; }
+.gm-remote-events-list { display: flex; flex-direction: column; align-items: flex-start; max-height: 180px; overflow: auto; }

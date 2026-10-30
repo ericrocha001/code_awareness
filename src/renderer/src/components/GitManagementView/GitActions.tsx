@@ -5,7 +5,8 @@ import type {
   GitManagementContext,
   GitMutationRequest,
   GitOverview,
-  GitManagementState
+  GitManagementState,
+  GitCheckoutSynchronization
 } from '../../../../shared/types/git-management-types'
 
 const errorText: Record<string, string> = {
@@ -26,8 +27,10 @@ const errorText: Record<string, string> = {
     'O projeto ativo mudou. Reabra este repositório para reconciliar a operação.'
 }
 export interface GitActionsHandle {
-  confirm: (operation: GitBasicAction, snapshot: GitManagementState) => void
+  execute: (operation: GitBasicAction, snapshot: GitManagementState) => void
+  recover: () => void
 }
+export interface GitActionsFeedback { busy: boolean; pending: boolean; status: string }
 export const GitActions = forwardRef<GitActionsHandle, {
   context: GitManagementContext
   overview: GitOverview
@@ -36,6 +39,8 @@ export const GitActions = forwardRef<GitActionsHandle, {
   blocked: boolean
   onMutationStart?: () => void
   onLockedChange?: (locked: boolean) => void
+  onFeedbackChange?: (feedback: GitActionsFeedback) => void
+  synchronization?: GitCheckoutSynchronization | null
 }>(function GitActions({
   context,
   overview,
@@ -43,7 +48,9 @@ export const GitActions = forwardRef<GitActionsHandle, {
   refresh,
   blocked,
   onMutationStart,
-  onLockedChange
+  onLockedChange,
+  onFeedbackChange,
+  synchronization
 }, ref) {
   const [paths, setPaths] = useState<string[]>([])
   const [message, setMessage] = useState('')
@@ -60,7 +67,7 @@ export const GitActions = forwardRef<GitActionsHandle, {
       const value = sessionStorage.getItem(
         `git-management:pending:${context.projectId}`
       )
-      return value ? { ...JSON.parse(value), context } : null
+      return value ? JSON.parse(value) : null
     } catch {
       return null
     }
@@ -80,6 +87,7 @@ export const GitActions = forwardRef<GitActionsHandle, {
     !!overview.state.operation ||
     overview.state.conflictCount > 0
   useEffect(() => { onLockedChange?.(locked) }, [locked, onLockedChange])
+  useEffect(() => { onFeedbackChange?.({ busy, pending: !!pending, status }) }, [busy, pending, status, onFeedbackChange])
   useEffect(() => {
     if (confirmation && confirmationSnapshot.current) confirmationDialog.current?.scrollIntoView?.({ block: 'nearest' })
   }, [confirmation])
@@ -87,11 +95,6 @@ export const GitActions = forwardRef<GitActionsHandle, {
     setPaths([])
     if (!confirmationSnapshot.current) setConfirmation(null)
   }, [overview])
-  useImperativeHandle(ref, () => ({ confirm(operation, snapshot) {
-    if (locked) return
-    confirmationSnapshot.current = snapshot
-    updateConfirmation(operation)
-  } }), [locked])
   useEffect(() => {
     mounted.current = true
     return () => {
@@ -110,6 +113,10 @@ export const GitActions = forwardRef<GitActionsHandle, {
     recover?: GitMutationRequest
   ) => {
     if (activeRequest.current) return
+    if (recover && (recover.context.projectId !== context.projectId || recover.context.revision !== context.revision)) {
+      setStatus(errorText.PROJECT_CONTEXT_CHANGED)
+      return
+    }
     activeRequest.current = true
     const request = recover ?? {
       context,
@@ -173,6 +180,19 @@ export const GitActions = forwardRef<GitActionsHandle, {
       if (mounted.current) setBusy(false)
     }
   }
+  useImperativeHandle(ref, () => ({
+    execute(operation, snapshot) {
+      if (locked || activeRequest.current) return
+      confirmationSnapshot.current = snapshot
+      void execute(operation)
+    },
+    recover() { if (pending && !busy) void execute(pending.operation, pending) }
+  }))
+  const direct = (action: 'PULL_FF_ONLY' | 'PUSH') => {
+    if (synchronization?.action !== action || locked) return
+    confirmationSnapshot.current = synchronization.state
+    void execute({ action, contextual: true })
+  }
   const selectedPaths = (action: 'STAGE' | 'UNSTAGE') =>
     available
       .filter(
@@ -185,10 +205,6 @@ export const GitActions = forwardRef<GitActionsHandle, {
       .flatMap((change) =>
         change.previousPath ? [change.path, change.previousPath] : [change.path]
       )
-  const contextualConfirmation = confirmation && 'contextual' in confirmation && confirmation.contextual
-  const confirmationTitle = contextualConfirmation
-    ? confirmation.action === 'FETCH' ? 'Buscar atualizações' : confirmation.action === 'PULL_FF_ONLY' ? 'Atualizar branch' : 'Publicar commits'
-    : confirmation?.action
   return (
     <section className="gm-actions" aria-label="Operações Git">
       <h3>Preparar → Registrar → Publicar</h3>
@@ -322,26 +338,26 @@ export const GitActions = forwardRef<GitActionsHandle, {
         <div className="gm-action-row">
           <button
             disabled={locked}
-            onClick={() => setConfirmation({ action: 'FETCH' })}
+            onClick={() => void execute({ action: 'FETCH' })}
           >
-            Fetch…
+            Fetch
           </button>
           <button
-            disabled={locked || !overview.state.branch || overview.state.dirty}
+            disabled={locked || synchronization?.action !== 'PULL_FF_ONLY'}
             title={
               overview.state.dirty
                 ? 'Pull exige uma worktree limpa'
                 : 'Atualizar por fast-forward'
             }
-            onClick={() => setConfirmation({ action: 'PULL_FF_ONLY' })}
+            onClick={() => direct('PULL_FF_ONLY')}
           >
-            Pull FF-only…
+            Pull FF-only
           </button>
           <button
             disabled={locked || !overview.state.branch || !overview.state.head}
-            onClick={() => setConfirmation({ action: 'PUSH' })}
+            onClick={() => synchronization?.action === 'PUSH' ? direct('PUSH') : setConfirmation({ action: 'PUSH' })}
           >
-            Publicar · push…
+            {synchronization?.action === 'PUSH' ? 'Publicar · Push' : 'Revisar publicação…'}
           </button>
         </div>
       </details>
@@ -352,13 +368,9 @@ export const GitActions = forwardRef<GitActionsHandle, {
           role="dialog"
           aria-label="Confirmar operação Git"
         >
-          <h3>{contextualConfirmation ? confirmationTitle : `Confirmar ${confirmationTitle}`}</h3>
+          <h3>Confirmar {confirmation.action}</h3>
           <p>
-            {contextualConfirmation
-              ? confirmation.action === 'FETCH'
-                ? `Buscar referências e commits de origin. A branch ${confirmationSnapshot.current?.branch ?? overview.state.branch} e seus arquivos permanecem na mesma versão.`
-                : `Atualizar ${confirmationSnapshot.current?.branch} a partir de ${confirmationSnapshot.current?.upstream} somente por avanço direto (Pull FF-only), sem criar merge. Se o histórico divergir ou o estado Git mudar, a operação será recusada.`
-              : confirmation.action === 'COMMIT'
+            {confirmation.action === 'COMMIT'
               ? `Registrar somente os ${staged.length} arquivos listados na prévia. Não prepara nem publica outras alterações.`
               : confirmation.action === 'CREATE'
                 ? `Criar ${confirmation.branch} no HEAD inspecionado. A branch atual permanece ativa.`

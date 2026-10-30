@@ -20,7 +20,7 @@ exports.run = async ctx => {
       const read = backend.controller.read.bind(backend.controller)
       backend.controller.read = async (...args) => {
         const started = Date.now(), result = await read(...args)
-        observations.push({ started, finished: Date.now(), action: String(args[1]), result: result.success ? { action: result.data?.action, automaticFetch: result.data?.automaticFetch, snapshot: result.data?.gitSnapshot } : result })
+        observations.push({ started, finished: Date.now(), action: String(args[1]), result: result.success ? { action: result.data?.action, automaticFetch: result.data?.automaticFetch, snapshot: result.data?.gitSnapshot, nodes: result.data?.phase === 'CORE' ? result.data.git.nodes.map(node => node.sha) : undefined } : result })
         fs.writeFileSync(path.join(ctx.evidenceDir, 'live-remote-observations.json'), JSON.stringify(observations))
         fs.writeFileSync(path.join(ctx.evidenceDir, 'live-remote-commands.json'), JSON.stringify(commands))
         return result
@@ -47,14 +47,24 @@ exports.run = async ctx => {
       git(writer, ['add', 'external.txt']); git(writer, ['commit', '-m', 'External contribution'])
       git(writer, ['switch', 'main']); git(writer, ['merge', '--no-ff', 'external/topic', '-m', 'External merge']); git(writer, ['push', 'origin', 'main'])
       await wait(() => document.querySelector('.gm-checkout-sync')?.textContent.includes('2 commits atrás'))
-      await wait(() => !![...document.querySelectorAll('.gm-atlas-node')].find(node => node.getAttribute('aria-label')?.includes('External merge')))
+      await wait(() => document.querySelector('.gm-header p')?.textContent.includes('13 commits no trecho carregado'))
       await wait(() => document.querySelector('.gm-checkout-sync')?.textContent.includes('2 commits atrás'))
+      const mergedHead = git(writer, ['rev-parse', 'HEAD'])
+      ctx.check('delivered Core contains the actual external merge despite viewport virtualization', observations.some(observation => observation.result.nodes?.includes(mergedHead)))
       ctx.check('one conditional fetch with checkout untouched', fetches() === 1 && git(repository, ['rev-parse', 'HEAD']) === head)
       ctx.check('fetched tracking converges to external merge', git(repository, ['rev-parse', 'origin/main']) === git(writer, ['rev-parse', 'HEAD']))
       ctx.check('checkout marker remains visible', await ctx.evaluate(() => !!document.querySelector('.gm-checkout-marker')))
       await ctx.capture('live-external-merge')
       await ctx.evaluate(() => document.querySelector('.gm-atlas-scroll').dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaX: 60 })))
       ctx.check('scroll does not cause another fetch', fetches() === 1)
+      if (ctx.integratedDirectActions) {
+        await wait(() => { const button = document.querySelector('.gm-checkout-sync button'); return button && !button.disabled && button.textContent.includes('Pull FF-only') })
+        await ctx.click('.gm-checkout-sync button')
+        ctx.check('integrated direct pull opens no confirmation or Inspector', await ctx.evaluate(() => !document.querySelector('.gm-confirm') && !document.querySelector('.gm-inspector.is-open')))
+        await wait(() => document.querySelector('.gm-checkout-sync')?.textContent.includes('Atualizada com origin/main'))
+        ctx.check('automatic reconciliation and direct pull compose on the real checkout', git(repository, ['rev-parse', 'HEAD']) === git(writer, ['rev-parse', 'HEAD']) && fetches() === 1 && commands.filter(args => args[0] === 'pull').length === 1)
+        await ctx.capture('integrated-direct-pull')
+      }
       fs.writeFileSync(path.join(ctx.evidenceDir, 'live-remote-commands.json'), JSON.stringify(commands))
       fs.writeFileSync(path.join(ctx.evidenceDir, 'live-remote-observations.json'), JSON.stringify(observations))
     }

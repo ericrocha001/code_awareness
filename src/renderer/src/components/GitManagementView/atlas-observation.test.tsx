@@ -58,10 +58,22 @@ it('revisits PR evidence independently of unchanged Git and shows a later remote
   expect(document.querySelectorAll('.gm-atlas-node')).toHaveLength(1)
 })
 
+it('keeps a larger remote catalog in a bounded disclosure while surfacing its latest event', async () => {
+  const api = setup()
+  const events = Array.from({ length: 40 }, (_, index) => ({ kind: 'PR_CREATED', prNumber: index + 1, at: new Date(Date.UTC(2026, 10, index + 1)).toISOString(), observedAt: '2026-12-11T12:00:00Z' }))
+  api.getGitAtlasPrEvidence.mockResolvedValue(ok({ phase: 'PR_ENRICHMENT', gitSnapshot: page.snapshot, repositoryId: 'repo', worktreeId: 'tree', worktreeGeneration: 'g', coverage: 'COMPLETE', pullRequests: [], events }) as any)
+  render(<GitManagementView state={state} />); await tick(1500)
+  const activity = screen.getByLabelText('Eventos remotos fora do histórico local')
+  expect(activity.querySelector(':scope > button')?.textContent).toContain('PR #40')
+  expect(activity.querySelector('details')?.open).toBe(false)
+  expect(activity.querySelector('summary')?.textContent).toContain('Mais 39 eventos')
+  expect(document.querySelectorAll('.gm-atlas-node')).toHaveLength(1)
+})
+
 it('reconciles fetched tracking once while preserving the live behind observation and checkout marker', async () => {
   const api = setup(), remote = 'b'.repeat(40)
   const local = { ...branch('main'), upstream: 'origin/main' }
-  const tracking = { ...branch('origin/main'), ref: 'refs/remotes/origin/main', kind: 'REMOTE', upstream: null }
+  const tracking = { ...branch('origin/main'), ref: 'refs/remotes/origin/main', kind: 'REMOTE' as const, upstream: null }
   const initial = { ...page, refs: [local, tracking] } as GitAtlasPage
   const delivered = (git: GitAtlasPage) => ({ ...core(git), checkout: { ...core(git).checkout, upstream: 'origin/main' } })
   api.getGitAtlasCore.mockResolvedValue(ok(delivered(initial)))

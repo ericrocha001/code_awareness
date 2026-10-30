@@ -9,7 +9,7 @@ export function checkoutSynchronizationRevision(page: GitAtlasPage | null) {
   return JSON.stringify([page.head, page.branch, upstream, trackingHead])
 }
 
-export function useCheckoutSynchronization(context: GitManagementContext, snapshot: string | undefined) {
+export function useCheckoutSynchronization(context: GitManagementContext, snapshot: string | undefined, blocked = false) {
   const key = JSON.stringify([context, snapshot])
   const currentKey = useRef(key)
   currentKey.current = key
@@ -23,7 +23,7 @@ export function useCheckoutSynchronization(context: GitManagementContext, snapsh
     setObservation({ key, value: null, loading: false, error: '' })
   }, [key])
   const verify = useCallback((): Promise<void> => {
-    if (!snapshot || !context.projectId) return Promise.resolve()
+    if (!snapshot || !context.projectId || blocked) return Promise.resolve()
     if (inFlight.current?.key === key) return inFlight.current.promise
     const request = ++generation.current
     setObservation(previous => ({ key, value: previous.key === key ? previous.value : null, loading: true, error: '' }))
@@ -37,7 +37,7 @@ export function useCheckoutSynchronization(context: GitManagementContext, snapsh
       .finally(() => { if (inFlight.current?.promise === promise) inFlight.current = null })
     inFlight.current = { key, promise }
     return promise
-  }, [context, key, snapshot])
+  }, [context, key, snapshot, blocked])
   useEffect(() => {
     let current = true, timer: ReturnType<typeof setTimeout> | undefined
     let quietUntil = 0, dragging = false
@@ -61,8 +61,10 @@ export function useCheckoutSynchronization(context: GitManagementContext, snapsh
     const interact = () => { quietUntil = Date.now() + 600 }
     const down = () => { dragging = true; interact() }
     const up = () => { dragging = false; interact() }
+    const blur = () => { dragging = false; interact() }
     focus()
     window.addEventListener('focus', focus)
+    window.addEventListener('blur', blur)
     document.addEventListener('visibilitychange', visibility)
     window.addEventListener('wheel', interact, { passive: true })
     window.addEventListener('keydown', interact)
@@ -71,7 +73,7 @@ export function useCheckoutSynchronization(context: GitManagementContext, snapsh
     window.addEventListener('pointercancel', up)
     return () => {
       current = false; clearTimeout(timer); generation.current++; inFlight.current = null
-      window.removeEventListener('focus', focus); document.removeEventListener('visibilitychange', visibility)
+      window.removeEventListener('focus', focus); window.removeEventListener('blur', blur); document.removeEventListener('visibilitychange', visibility)
       window.removeEventListener('wheel', interact); window.removeEventListener('keydown', interact)
       window.removeEventListener('pointerdown', down); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up)
     }

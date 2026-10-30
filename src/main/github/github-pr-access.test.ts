@@ -12,14 +12,16 @@ function fixture() {
     registration: { slug: GITHUB_OFFICIAL_APP.appSlug, permissions: { ...allGrants } },
     failure: null as { path: string; status: number; headers?: Record<string, string> } | null,
     malformed: false,
-    incomplete: false
+    incomplete: false,
+    protectedBranch: false
   }
   const fetcher = vi.fn(async (url: any, init: any) => {
     expect(init.headers.Authorization).toBe('Bearer user-token-secret')
     const path = new URL(String(url)).pathname
     if (state.failure?.path === path) return new Response(JSON.stringify({ message: 'secret-provider-message' }), { status: state.failure.status, headers: state.failure.headers })
     let value: unknown
-    if (path === '/repos/owner/repo') value = repo
+    if (path === '/repos/owner/repo') value = { ...repo, default_branch: 'main' }
+    else if (path === '/repos/owner/repo/branches/topic') value = { name: 'topic', protected: state.protectedBranch }
     else if (path === '/user/installations') value = state.malformed ? {} : { installations: state.installations }
     else if (path === '/user/installations/1/repositories') value = { repositories: state.repositories }
     else if (path === `/apps/${GITHUB_OFFICIAL_APP.appSlug}`) value = state.registration
@@ -36,6 +38,17 @@ function fixture() {
 }
 
 describe('GitHub App scoped grant evidence', () => {
+  it('requires installation contents write, actual user push scope and current branch protection for direct publication', async () => {
+    const f = fixture(), service = f.service()
+    expect(await service.managementPublicationPolicy('/repo', 'topic')).toEqual({ defaultBranch: 'main', protected: false, canPush: true })
+    f.state.repositories[0].permissions.push = false
+    expect(await service.managementPublicationPolicy('/repo', 'topic')).toMatchObject({ canPush: false })
+    f.state.repositories[0].permissions.push = true
+    f.state.installations[0].permissions.contents = 'read'
+    expect(await service.managementPublicationPolicy('/repo', 'topic')).toMatchObject({ canPush: false })
+    f.state.protectedBranch = true
+    expect(await service.managementPublicationPolicy('/repo', 'topic')).toMatchObject({ protected: true })
+  })
   it('reports an App authorized but not observably installed without inventing the cause', async () => {
     const f = fixture(); f.state.installations = []
     expect(await f.service().getPullRequestAccess('/active')).toMatchObject({ state: 'INSTALLATION_REQUIRED', operations: { read: false, create: false, merge: false }, evidence: { installation: 'NOT_OBSERVED' }, diagnostics: [{ cause: 'APP_INSTALLATION_NOT_ACCESSIBLE', nextAction: 'VERIFY_APP_INSTALLATION_AND_ACCOUNT_ACCESS' }] })

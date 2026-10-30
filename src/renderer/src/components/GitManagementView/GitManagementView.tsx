@@ -7,7 +7,7 @@ import type { GitAtlasComparison, GitAtlasPage, GitAtlasScope } from '../../../.
 import type { GitAtlasCoreEvidence, GitAtlasPrEvidence } from '../../../../shared/types/git-atlas-evidence-types'
 import type { AtlasCatalogState } from '../../../../shared/types/git-atlas-catalog-types'
 import { GitInspector, type GitSelection } from './GitInspector'
-import { GitActions, type GitActionsHandle } from './GitActions'
+import { GitActions, type GitActionsFeedback, type GitActionsHandle } from './GitActions'
 import { CheckoutSynchronization } from './CheckoutSynchronization'
 import { useCheckoutSynchronization } from './useCheckoutSynchronization'
 import { GitAtlasCanvas } from './GitAtlasCanvas'
@@ -51,11 +51,11 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const returnFocus = useRef<HTMLElement | null>(null)
   const inspectorFocus = useRef<HTMLElement>(null)
   const context = useMemo(() => ({ projectId: state.project?.id ?? '', revision: state.revision }), [state.project?.id, state.revision])
+  const [actionFeedback, setActionFeedback] = useState<GitActionsFeedback>({ busy: false, pending: false, status: '' })
   const synchronization = useCheckoutSynchronization(context, core ? JSON.stringify([
     core.repositoryId, core.worktreeId, core.worktreeGeneration, core.checkout.head, core.checkout.ref, core.checkout.upstream
-  ]) : undefined)
+  ]) : undefined, actionFeedback.busy || actionFeedback.pending)
   const actions = useRef<GitActionsHandle>(null)
-  const actionsDetails = useRef<HTMLDetailsElement>(null)
   const [actionsLocked, setActionsLocked] = useState(true)
   const load = useCallback((cursor?: string, refresh = false): Promise<boolean | undefined> => {
     if (!state.project) return Promise.resolve(undefined)
@@ -100,6 +100,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   }, [context, state.project?.id, scope])
   useEffect(() => {
     setCatalog(null); catalogRef.current = null
+    setActionsLocked(true); setActionFeedback({ busy: false, pending: false, status: '' })
     setHistory(null); setCore(null); setEnrichment(null); setPrRequested(true); setSelectedPr(null); setPrState('NOT_REQUESTED'); setOverview(null); setNotice(''); setSelection(null); setBase(''); setFocus(''); setComparison(null); setDrawer(true)
     setScope(previous => previous.kind === 'ALL_REFS' && previous.anchor === 'AUTO' && !previous.baseRef && !previous.focusRef ? previous : { kind: 'ALL_REFS', anchor: 'AUTO' }); setOperation(null)
   }, [context])
@@ -200,13 +201,13 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   }, [core?.gitSnapshot, context, prRequested, remoteRevision])
   const actionsActive = drawer && !selection && selectedPr === null
   useEffect(() => {
-    if (!actionsActive || !core) return
+    if (!core) return
     let second = 0
     const first = requestAnimationFrame(() => { second = requestAnimationFrame(() => { void readOverview() }) })
     const focusWindow = () => void readOverview()
     window.addEventListener('focus', focusWindow)
     return () => { cancelAnimationFrame(first); cancelAnimationFrame(second); overviewGeneration.current++; window.removeEventListener('focus', focusWindow) }
-  }, [readOverview, actionsActive, !!core])
+  }, [readOverview, !!core])
   useEffect(() => {
     if (!history) return
     setBase(previous => history.refs.some(ref => ref.ref === previous) ? previous : history.primaryRef ?? '')
@@ -273,15 +274,12 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
       setSelection({ kind: 'COMMIT', sha: value.state.head })
       return
     }
-    if (value.action !== 'FETCH' && value.action !== 'PULL_FF_ONLY') return
-    openChanges()
-    if (actionsDetails.current) actionsDetails.current.open = true
-    actions.current?.confirm({ action: value.action, contextual: true }, value.state)
+    if (value.action !== 'FETCH' && value.action !== 'PULL_FF_ONLY' && value.action !== 'PUSH') return
+    actions.current?.execute({ action: value.action, contextual: true }, value.state)
   }
   const syncState = synchronization.value?.state
   const syncMatchesCheckout = !!syncState && syncState.head === core?.checkout.head &&
     (syncState.branch ? `refs/heads/${syncState.branch}` : null) === core?.checkout.ref && syncState.upstream === core?.checkout.upstream
-  const syncMutation = synchronization.value?.action === 'FETCH' || synchronization.value?.action === 'PULL_FF_ONLY'
   const refs = history?.refs.filter(ref => ref.kind !== 'HEAD') ?? []
   const selected = selection?.kind === 'COMMIT' ? selection.sha : selection?.ref.sha
   const mergeContexts = useMemo(() => classifyAtlasMerges(history, base), [history, base])
@@ -289,7 +287,9 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const remoteEvents = useMemo(() => {
     const nodes = history?.nodes ?? [], present = new Set(nodes.map(node => node.sha))
     const latest = nodes.reduce((time, node) => Math.max(time, Date.parse(node.timestamp)), -Infinity)
-    return enrichment?.events.filter(event => event.kind === 'PR_MERGED' && !present.has(event.mergeCommitSha ?? '') || event.kind === 'PR_CREATED' && Date.parse(event.at) > latest) ?? []
+    return enrichment?.events.filter((event): event is Exclude<GitAtlasPrEvidence['events'][number], { kind: 'GIT_MERGE_COMMIT' }> =>
+      event.kind === 'PR_MERGED' && !present.has(event.mergeCommitSha ?? '') || event.kind === 'PR_CREATED' && Date.parse(event.at) > latest)
+      .sort((a, b) => Date.parse(b.at) - Date.parse(a.at)) ?? []
   }, [history?.nodes, enrichment])
   const catalogComplete = catalog?.coverage === 'COMPLETE' && catalog.diagnostic.state === 'READY' && !catalog.reason
   const catalogUnavailable = catalog && (catalog.diagnostic.state !== 'READY' || !!catalog.reason)
@@ -311,10 +311,11 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     </div>
     <div className="gm-context-strip" aria-label="Contexto do repositório">
       {core ? <AtlasCheckout core={core} context={context} base={base} inspect={select} /> : <span className="gm-context-placeholder">Lendo checkout local…</span>}
-      {core && <CheckoutSynchronization value={syncMatchesCheckout ? synchronization.value : null} loading={synchronization.loading} error={synchronization.error || (synchronization.value && !syncMatchesCheckout ? 'O checkout mudou; verifique novamente.' : '')} blocked={!!operation || synchronization.loading || syncMutation && (!overview || actionsLocked || overviewLoading || !!overviewError)} verify={() => void synchronization.verify()} act={synchronize} />}
+      {core && <CheckoutSynchronization value={syncMatchesCheckout ? synchronization.value : null} loading={synchronization.loading} error={synchronization.error || (synchronization.value && !syncMatchesCheckout ? 'O checkout mudou; verifique novamente.' : '')} blocked={!!operation || synchronization.loading || !overview || actionsLocked || overviewLoading || !!overviewError} verify={() => void synchronization.verify()} act={synchronize} fetchRemote={() => { const snapshot = syncMatchesCheckout ? syncState : overview?.state; if (snapshot) actions.current?.execute({ action: 'FETCH' }, snapshot) }} />}
       <div className="gm-context-item"><Database size={20} aria-hidden="true" /><div><strong>Histórico local</strong><span>{history ? `${history.nodes.length} commits no trecho carregado` : 'Aguardando histórico'}</span></div></div>
       {catalog && <div className={`gm-context-item gm-catalog-state ${catalogUnavailable ? 'is-unavailable' : catalogComplete ? 'is-complete' : ''}`} role="status"><span className="gm-status-dot" aria-hidden="true" /><div><strong>{catalogUnavailable ? 'Coleta indisponível' : catalogComplete ? 'Catálogo indexado' : 'Catálogo parcial'}</strong><span title={catalog.manifest ? `Revisão local ${catalog.manifest.revision}` : undefined}>{catalogUnavailable ? 'Timeline local preservada' : catalogComplete ? 'Tips e revisão local verificados' : 'Histórico disponível progressivamente'}</span></div></div>}
     </div>
+    {(actionFeedback.status || actionFeedback.pending) && <div className="gm-atlas-note gm-operation-feedback" aria-label="Resultado da sincronização Git"><span role="status">{actionFeedback.status}</span>{actionFeedback.pending && <button disabled={actionFeedback.busy || !!operation || overviewLoading} onClick={() => actions.current?.recover()}>Recuperar mesma operação</button>}</div>}
     {notice && <div className="gm-atlas-note" role="status">{notice}</div>}
     {operation && <div className="gm-atlas-note" role="status">Operação Git em andamento: {operation}. Abra Alterações para consultar as ações disponíveis.</div>}
     {error && <div className="gm-error" role="alert">{error === 'NOT_GIT_REPOSITORY' ? 'Este projeto não é um repositório Git.' : error === 'GIT_STATE_CHANGED' ? 'Histórico desatualizado. Atualize para carregar um novo snapshot.' : error}</div>}
@@ -337,7 +338,8 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
         {history?.referenceCoverage === 'SELECTED' ? <p className="gm-atlas-note" role="status">Contexto do checkout e da base; outras referências e worktrees ainda não consultadas.</p> : history?.detachedCoverage === 'PARTIAL' && <p className="gm-atlas-note" role="status">Alguns HEADs de worktrees não puderam ser verificados.</p>}
         {!!remoteEvents.length && <div className="gm-atlas-note" aria-label="Eventos remotos fora do histórico local">
           <strong>Atividade confirmada no GitHub</strong>
-          {remoteEvents.map(event => event.kind !== 'GIT_MERGE_COMMIT' && <button key={`${event.kind}:${event.prNumber}`} onClick={() => choosePr(event.prNumber)}>PR #{event.prNumber} · {event.kind === 'PR_MERGED' ? 'integrado remotamente; commit fora do trecho local' : 'criado remotamente'} · {new Date(event.at).toLocaleString()}</button>)}
+          <button onClick={() => choosePr(remoteEvents[0].prNumber)}>PR #{remoteEvents[0].prNumber} · {remoteEvents[0].kind === 'PR_MERGED' ? 'integrado remotamente; commit fora do trecho local' : 'criado remotamente'} · {new Date(remoteEvents[0].at).toLocaleString()}</button>
+          {remoteEvents.length > 1 && <details><summary>Mais {remoteEvents.length - 1} eventos confirmados fora do trecho</summary><div className="gm-remote-events-list">{remoteEvents.slice(1).map(event => <button key={`${event.kind}:${event.prNumber}`} onClick={() => choosePr(event.prNumber)}>PR #{event.prNumber} · {event.kind === 'PR_MERGED' ? 'integrado remotamente' : 'criado remotamente'} · {new Date(event.at).toLocaleString()}</button>)}</div></details>}
         </div>}
         {history && !history.nextCursor && !loading && <p className="gm-atlas-note">Fim do histórico do escopo consultado.</p>}
         <GitAtlasCanvas key={`${context.projectId}:${context.revision}`} page={history} core={core} enrichment={enrichment} choosePr={choosePr} base={base} focus={focus} mode={mode} comparison={comparison} selected={selected} select={select} loading={loading} requestMore={history?.nextCursor && !error ? () => void load(history.nextCursor!) : undefined} focusTrajectory={(ref, sha) => { returnFocus.current = document.activeElement as HTMLElement; setSelectedPr(null); setDrawer(true); setFocus(ref); setMode('Foco'); const branch = history?.refs.find(item => item.ref === ref); setSelection(branch ? { kind: 'BRANCH', ref: branch } : { kind: 'COMMIT', sha }) }} />
@@ -351,7 +353,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
           {(selection || selectedPr !== null) && <AtlasPullRequests evidence={enrichment} selection={selection} selectedPr={selectedPr} choose={choosePr} />}
           {actionsActive && !overview && overviewLoading && <p role="status">Consultando alterações locais…</p>}
           {!actionsActive && <button className="gm-back-to-changes" onClick={openChanges}><FileText size={15} />Alterações locais</button>}
-          {overview && <details ref={actionsDetails} className="gm-local-actions" hidden={!actionsActive}><summary>Preparar, registrar e sincronizar</summary><GitActions key={`${context.projectId}:${context.revision}`} ref={actions} context={context} overview={overview} history={history} refresh={refresh} blocked={overviewLoading || !!overviewError || !!operation} onMutationStart={synchronization.invalidate} onLockedChange={setActionsLocked} /></details>}
+          {overview && <details className="gm-local-actions" hidden={!actionsActive}><summary>Preparar, registrar e sincronizar</summary><GitActions key={`${context.projectId}:${context.revision}`} ref={actions} context={context} overview={overview} history={history} refresh={refresh} blocked={overviewLoading || !!overviewError || !!operation || synchronization.value?.automaticFetch === 'PENDING'} onMutationStart={synchronization.invalidate} onLockedChange={setActionsLocked} onFeedbackChange={setActionFeedback} synchronization={syncMatchesCheckout ? synchronization.value : null} /></details>}
           <details className="gm-sha-lookup"><summary>Inspecionar por SHA</summary><form onSubmit={event => { event.preventDefault(); if (/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())) select(shaInput.trim()) }}><input aria-label="SHA completo" value={shaInput} onChange={event => setShaInput(event.target.value)} placeholder="SHA completo do commit" /><button disabled={!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(shaInput.trim())}>Inspecionar</button></form></details>
         </div>
       </aside>

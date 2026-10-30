@@ -20,7 +20,7 @@ it('verifies every thirty healthy seconds, suspends hidden and defers interactio
   await tick(30000); expect(read).toHaveBeenCalledTimes(2)
   act(() => window.dispatchEvent(new Event('pointerdown')))
   await tick(30000); expect(read).toHaveBeenCalledTimes(2)
-  act(() => window.dispatchEvent(new Event('pointerup')))
+  act(() => window.dispatchEvent(new Event('blur')))
   await tick(1000); expect(read).toHaveBeenCalledTimes(3)
   vi.spyOn(document, 'hidden', 'get').mockReturnValue(true)
   act(() => document.dispatchEvent(new Event('visibilitychange')))
@@ -36,4 +36,13 @@ it('backs off unavailable observations and ignores hidden responses', async () =
   await tick(0); await tick(30000); expect(read).toHaveBeenCalledTimes(1)
   await tick(30000); expect(read).toHaveBeenCalledTimes(2)
   view.unmount(); await tick(240000); expect(read).toHaveBeenCalledTimes(2)
+})
+
+it('does not start automatic work while an explicit operation is busy or has an unknown outcome', async () => {
+  const view = renderHook(({ blocked }) => useCheckoutSynchronization(context, 'snapshot', blocked), { initialProps: { blocked: false } })
+  await tick(0); expect(read).toHaveBeenCalledTimes(1)
+  view.rerender({ blocked: true }); await tick(90000)
+  expect(read).toHaveBeenCalledTimes(1)
+  view.rerender({ blocked: false }); await tick(0)
+  expect(read).toHaveBeenCalledTimes(2)
 })

@@ -177,6 +177,7 @@ export class GitOperationsService {
   }
   async executeManagementMutation(request: GitMutationRequest, assertCurrent: () => void): Promise<GitOperationalResult> {
     const { operation, snapshot, operationId } = request
+    if (this.automaticFetchRequest && this.automaticFetchRequest.operationId !== operationId) return { value: { code: 'GIT_OPERATION_IN_PROGRESS' }, isError: true }
     let name: string, args: Record<string, unknown>
     if (operation.action === 'STAGE' || operation.action === 'UNSTAGE') {
       name = 'stage_git_changes'; args = { mode: operation.action, paths: operation.paths, expectedIndexRevision: snapshot.indexRevision, expectedWorktreeRevision: snapshot.worktreeRevision }
@@ -1145,6 +1146,8 @@ export class GitOperationsService {
   private remotePending?: Promise<GitCheckoutSynchronization>
   private automaticFetchRequest?: GitMutationRequest
   private automaticFetch = () => false
+  private publicationPolicy?: (branch: string) => Promise<{ defaultBranch: string; protected: boolean; canPush: boolean }>
+  bindManagementPublicationPolicy(reader: NonNullable<GitOperationsService['publicationPolicy']>) { this.publicationPolicy = reader }
   bindAtlasRemotePolicy(enabled: () => boolean) { this.automaticFetch = enabled }
   async observeCheckoutSynchronization(context: GitMutationRequest['context'], assertCurrent: () => void): Promise<GitCheckoutSynchronization> {
     if (this.remotePending) return this.remotePending
@@ -1406,7 +1409,17 @@ export class GitOperationsService {
     if (evidence.relationship === 'IN_SYNC') return result(null)
     if (evidence.tracking === 'TRACKING_STALE' || evidence.relationship === 'UNKNOWN' || !evidence.remoteCounts)
       return evidence.remote === 'origin' ? result('FETCH') : result(null, `Fetch contextual disponível somente para origin; upstream em ${evidence.remote}.`)
-    if (evidence.relationship === 'AHEAD') return result('REVIEW_PUBLICATION', 'Push direto depende de política e autorização comprovadas; revise os commits e use o fluxo autorizado de publicação.')
+    if (evidence.relationship === 'AHEAD') {
+      if (this.publicationPolicy && evidence.remote === 'origin' && evidence.ref === `refs/heads/${state.branch}` && !['main', 'master'].includes(state.branch!)) {
+        try {
+          const primary = await this.git.getAtlasSelectedBase(this.repoRoot)
+          const policy = await this.publicationPolicy(state.branch!)
+          if (!sameCheckoutSnapshot(state, await this.getState())) fail('GIT_STATE_CHANGED')
+          if (primary !== `refs/heads/${state.branch}` && primary !== `refs/remotes/${evidence.remote}/${state.branch}` && policy.canPush === true && policy.protected === false && policy.defaultBranch && policy.defaultBranch !== state.branch) return result('PUSH')
+        } catch (error) { if (error instanceof GitOperationsError && error.code === 'GIT_STATE_CHANGED') throw error }
+      }
+      return result('REVIEW_PUBLICATION', 'Push direto depende de política e autorização comprovadas; revise os commits e use o fluxo autorizado de publicação.')
+    }
     if (evidence.relationship === 'DIVERGED') return result('COMPARE')
     if (evidence.remote !== 'origin') return result(null, `O executor atual usa origin; upstream ${evidence.remote}/${evidence.ref.replace('refs/heads/', '')} não suportado pelo atalho.`)
     if (evidence.ref !== `refs/heads/${state.branch}`) return result(null, 'O upstream difere de origin/<branch ativa>; Pull contextual indisponível para este destino.')

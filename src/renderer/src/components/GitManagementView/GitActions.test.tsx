@@ -135,3 +135,19 @@ it('retains the same operationId after a lost response, including a remount', as
   expect(mutate.mock.calls[1][0]).toEqual(request)
   await screen.findByText(/Resultado ainda não confirmado/)
 })
+
+it('does not rebind an old pending intent to a new project revision', async () => {
+  const mutate = vi.fn().mockRejectedValue(new Error('lost'))
+  window.codeAwareness = { mutateGitManagement: mutate } as any
+  const props = { context, overview, history: null, refresh: async () => {}, blocked: false }
+  const view = render(<GitActions {...props} />)
+  fireEvent.click(screen.getByLabelText('new.txt')); fireEvent.click(screen.getByText('Preparar selecionados'))
+  await screen.findByText(/A resposta foi perdida/)
+  const original = JSON.parse(sessionStorage.getItem(`git-management:pending:${context.projectId}`)!)
+  view.unmount()
+  render(<GitActions {...props} context={{ ...context, revision: 2 }} />)
+  fireEvent.click(screen.getByText('Recuperar mesma operação'))
+  await screen.findByText(/O projeto ativo mudou/)
+  expect(mutate).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(sessionStorage.getItem(`git-management:pending:${context.projectId}`)!)).toEqual(original)
+})

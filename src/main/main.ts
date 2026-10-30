@@ -532,6 +532,7 @@ app.whenReady().then(async () => {
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
     gitOperations.bindAtlasRemotePolicy(() => settingsService.loadSettings().gitManagement?.automaticFetch !== false)
+    gitOperations.bindManagementPublicationPolicy(branch => githubIntegration.managementPublicationPolicy(project.path, branch))
     gitOperations.bindAtlasPullRequests((inventory, force) => githubIntegration.branchPullRequests(project.path, inventory, force))
     const sessionIsCurrent = () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId
     if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path, sessionIsCurrent, undefined,
