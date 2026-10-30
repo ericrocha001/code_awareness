@@ -95,6 +95,18 @@ describe('Entire read-only Codex ingestion', () => {
     expect(await f.provider.refresh()).toMatchObject({ coverage: 'UNAVAILABLE', code: 'PROVIDER_UNAVAILABLE' })
     expect(f.store.count()).toBe(0)
   })
+  it('accepts both Codex and codex agent casing and rejects non-codex agents', async () => {
+    const f = await setup()
+    f.metadata.agent = 'Codex'
+    expect(await f.provider.refresh()).toMatchObject({ imported: 1, skipped: 0, transcriptImported: false })
+    const id = f.store.byProvider('session-1')!.id
+    expect(f.store.session(id).agent).toBe('codex')
+
+    const f2 = await setup()
+    f2.metadata.agent = 'claude'
+    expect(await f2.provider.refresh()).toMatchObject({ imported: 0, skipped: 1, coverage: 'PARTIAL' })
+    expect(f2.store.count()).toBe(0)
+  })
   it('bounds malformed/huge input and subprocess output, supports exec JSONL and coalesces refresh', async () => {
     const publicParser = new CodexParser()
     const publicBytes = readFileSync(join(process.cwd(), 'src/main/session-context/fixtures/codex-exec.jsonl'))
