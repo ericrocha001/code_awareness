@@ -24,6 +24,7 @@ export interface AppSettings {
   hiddenNavigationItems?: string[]
   ngrokDomain?: string
   remoteAccessEnabled?: boolean
+  cliExecutionEnabled?: boolean
   transportKind?: 'relay' | 'ngrok'
   rootFolders: string[]
   individualProjects: string[]
