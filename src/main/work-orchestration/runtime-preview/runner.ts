@@ -1,3 +1,4 @@
+import { readBootstrapFailure, type BootstrapFailurePhase } from './bootstrap-failure'
 import { SnapshotAdapter, type SnapshotLaunch, type SnapshotSelector, type PreparedSnapshot } from './snapshot'
 import { randomUUID } from 'node:crypto'
 import { readFile, realpath } from 'node:fs/promises'
@@ -87,10 +88,10 @@ export class RuntimePreviewRunner {
     return new NativeOwner(this.helper.executable)
   }
   private termination(record: PreviewSessionRecord, kind: NonNullable<PreviewSessionRecord['termination']>['kind'], reasonCode: string,
-    observation: NativeObservation | null, status: 'RESPONDING' | 'EXITED' | 'UNKNOWN') {
+    observation: NativeObservation | null, status: 'RESPONDING' | 'EXITED' | 'UNKNOWN', failurePhase?: BootstrapFailurePhase) {
     if (record.termination && record.termination.kind !== 'UNKNOWN') return record
     const journal = this.store.nativeJournal(record.sessionId).at(-1)
-    return this.change(record, { termination: { kind, reasonCode, observedAt: new Date().toISOString(),
+    return this.change(record, { termination: { kind, reasonCode, ...(failurePhase ? { failurePhase } : {}), observedAt: new Date().toISOString(),
       rootExit: observation?.rootExit ?? { status: 'UNKNOWN', code: null, reasonCode: 'EXIT_STATUS_NOT_RECORDED', observedAt: null },
       supervisor: { status, phase: typeof journal?.phase === 'string' ? journal.phase : null,
         pid: typeof journal?.ownerPid === 'number' ? journal.ownerPid : null, created: typeof journal?.ownerCreated === 'string' ? journal.ownerCreated : null }, process: observation } })
@@ -219,8 +220,9 @@ export class RuntimePreviewRunner {
         // A missing create acknowledgement is not proof that CreateProcess never ran.
         const proof = this.store.nativeJournal(sessionId).at(-1)
         const observation = nativeObservation.safeParse(proof?.evidence)
-        const reason = error instanceof Error && /^[A-Z_0-9:]{1,160}$/.test(error.message) ? error.message : 'LAUNCH_FAILED'
-        record = this.termination(this.store.read(sessionId), 'STARTUP_FAILURE', reason, observation.success ? observation.data : null, native && ownerExited ? 'EXITED' : 'UNKNOWN')
+        const diagnostic = observation.success && observation.data.assignedAtCreation ? await readBootstrapFailure(this.store.runtime(sessionId), sessionId) : undefined
+        const reason = diagnostic?.code ?? (error instanceof Error && /^[A-Z_0-9:]{1,160}$/.test(error.message) ? error.message : 'LAUNCH_FAILED')
+        record = this.termination(this.store.read(sessionId), 'STARTUP_FAILURE', reason, observation.success ? observation.data : null, native && ownerExited ? 'EXITED' : 'UNKNOWN', diagnostic?.phase)
         if (ownerExited && ((!createRequested) || (proof?.phase === 'DRAINED' && observation.success && terminalProof(observation.data)))) {
           if (native) record = this.supervisorExited(record)
           try { this.store.releaseResources(sessionId) }

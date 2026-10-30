@@ -1,3 +1,4 @@
+import { readBootstrapFailure } from './bootstrap-failure'
 import { readFile, writeFile, realpath } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { join, dirname, resolve } from 'node:path'
@@ -150,10 +151,8 @@ export class PreviewStackAdapter {
   async awaitReady(owner: NativeOwner) {
     const deadline = Date.now() + this.profile.probes.readiness.timeoutMs
     while (Date.now() < deadline) {
-      try {
-        const failure = JSON.parse(await readFile(join(this.directory, 'bootstrap-failure.json'), 'utf8'))
-        if (failure.sessionId === this.sessionId && typeof failure.code === 'string' && /^PREVIEW_[A-Z_]{1,120}$/.test(failure.code)) throw new Error(failure.code)
-      } catch (error) { if (error instanceof Error && /^PREVIEW_[A-Z_]+$/.test(error.message)) throw error }
+      const failure = await readBootstrapFailure(this.directory, this.sessionId)
+      if (failure) throw Error(failure.code)
       const state = await owner.inspect(); if (state.rootSignaled) throw new Error('BOOTSTRAP_FAILURE')
       try { return await this.observe(owner) } catch (error) {
         if (error instanceof Error && ['WRONG_ENDPOINT_OWNER', 'WRONG_CHECKOUT'].includes(error.message)) throw error

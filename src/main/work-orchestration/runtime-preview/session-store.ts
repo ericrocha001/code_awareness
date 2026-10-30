@@ -3,11 +3,13 @@ import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { nativeObservation, rootExitSchema } from './native-owner'
+import { bootstrapFailurePhase } from './bootstrap-failure'
 import { previewContextManifest } from './context-contract'
 
 const selectionSchema = z.object({ repositoryId: z.string(), worktreeId: z.string(), generation: z.string(), profileId: z.string(), fingerprint: z.string() }).strict()
 export const terminationSchema = z.object({
   kind: z.enum(['STOP_REQUESTED', 'UNEXPECTED_EXIT', 'STARTUP_FAILURE', 'UNKNOWN']),
+  failurePhase: bootstrapFailurePhase.optional(),
   reasonCode: z.string().min(1).max(160), observedAt: z.string().max(64), rootExit: rootExitSchema,
   supervisor: z.object({ status: z.enum(['RESPONDING', 'EXITED', 'UNKNOWN']), phase: z.string().max(80).nullable(),
     pid: z.number().int().positive().nullable(), created: z.string().max(64).nullable() }).strict(),

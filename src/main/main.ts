@@ -659,7 +659,7 @@ app.whenReady().then(async () => {
         return current?.identity === 'IDENTITY_BOUND' && current.repositoryId === previewContext.selection.repositoryId &&
           current.worktree?.worktreeId === previewContext.selection.worktreeId && current.worktree.generation === previewContext.selection.generation ? current.capabilities : undefined
       })
-    } catch (error) { failPreviewBootstrap(app, error) }
+    } catch (error) { failPreviewBootstrap(app, error, 'CONTEXT_ACTIVATION') }
   } else if (!isRuntimePreview()) await repositoryRuntime.restoreLastActive(settingsService.loadSettings().lastActiveRepositoryId)
   createWindow()
 

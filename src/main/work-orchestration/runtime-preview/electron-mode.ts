@@ -1,3 +1,4 @@
+import type { BootstrapFailurePhase } from './bootstrap-failure'
 import { pathToFileURL } from 'node:url'
 import { BrowserWindow, ipcMain, type App } from 'electron'
 import { readFileSync, writeFileSync, mkdirSync, realpathSync } from 'node:fs'
@@ -113,13 +114,13 @@ export async function initializeElectronPreview(app: App) {
   void app.whenReady().then(save)
 }
 
-export function failPreviewBootstrap(app: App, error: unknown): never {
+export function failPreviewBootstrap(app: App, error: unknown, phase: BootstrapFailurePhase = 'ELECTRON_BOOTSTRAP'): never {
   const code = error instanceof Error && /^PREVIEW_[A-Z_]{1,120}$/.test(error.message) ? error.message : 'PREVIEW_BOOTSTRAP_FAILED'
   try {
     const file = process.env.PREVIEW_SESSION_CONFIG, directory = realpathSync(process.env.PREVIEW_SESSION_DIRECTORY!)
     const config = JSON.parse(readFileSync(file!, 'utf8'))
     if (realpathSync(config.directory) === directory && config.sessionId === process.env.PREVIEW_SESSION_ID && resolve(file!) === join(directory, 'configuration.json')) {
-      writeFileSync(join(directory, 'bootstrap-failure.json'), JSON.stringify({ sessionId: config.sessionId, code }), { flag: 'wx', mode: 0o600 })
+      writeFileSync(join(directory, 'bootstrap-failure.json'), JSON.stringify({ sessionId: config.sessionId, code, phase }), { flag: 'wx', mode: 0o600 })
     }
   } catch { }
   console.error(code)

@@ -1,3 +1,4 @@
+import { readBootstrapFailure } from './bootstrap-failure'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
@@ -92,10 +93,8 @@ export class SnapshotAdapter {
   async awaitReady(owner: NativeOwner) {
     const deadline = Date.now() + 120000
     while (Date.now() < deadline) {
-      try {
-        const failure = JSON.parse(await readFile(join(this.directory, 'bootstrap-failure.json'), 'utf8'))
-        if (failure.sessionId === this.context.sessionId && typeof failure.code === 'string' && /^PREVIEW_[A-Z_]{1,120}$/.test(failure.code)) throw Error(failure.code)
-      } catch (error) { if (error instanceof Error && /^PREVIEW_[A-Z_]+$/.test(error.message)) throw error }
+      const failure = await readBootstrapFailure(this.directory, this.context.sessionId)
+      if (failure) throw Error(failure.code)
       if ((await owner.inspect()).rootSignaled) throw Error('BOOTSTRAP_FAILURE')
       try { return await this.observe(owner) } catch (error) { if (error instanceof Error && ['WRONG_CHECKOUT', 'BUILD_INTEGRITY_FAILED'].includes(error.message)) throw error }
       await new Promise(resolve => setTimeout(resolve, 100))
