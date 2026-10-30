@@ -29,7 +29,12 @@ import { assertNoWorktreeGrant, GitWorktreeOwnership, ownershipDigest, withWorkt
 import { GitWorktreeLifecycle } from './git-worktree-lifecycle'
 import { GitWorktreeIntegration, type WorktreeIntegrationPreview } from './git-worktree-integration'
 import type { CapturedText, WorktreeStructureCapture, WorktreeStructureRequest } from './git-worktree-capture'
-import type { GitDecoration, GitHistoryPage, GitCommitDetail, GitCommitFile, GitPatch, GitOperationalResult, GitMutationRequest } from '../../shared/types/git-management-types'
+import type { GitDecoration, GitHistoryPage, GitCommitDetail, GitCommitFile, GitPatch, GitOperationalResult, GitMutationRequest, GitCheckoutSynchronization, GitManagementState } from '../../shared/types/git-management-types'
+
+function sameCheckoutSnapshot(left: GitManagementState, right: GitManagementState) {
+  return left.head === right.head && left.branch === right.branch && left.upstream === right.upstream &&
+    left.indexRevision === right.indexRevision && left.worktreeRevision === right.worktreeRevision && left.operation === right.operation
+}
 
 export class GitOperationsError extends Error {
   constructor(readonly code: string, readonly details?: { revisionKind?: 'FILE_BYTES_SHA256'; totalLines?: number; validRange?: { startLine: number; endLine: number } | null; maxLines?: number }) { super(code) }
@@ -181,11 +186,18 @@ export class GitOperationsService {
       name = 'manage_git_branch'; args = { action: operation.action, branch: operation.branch, ...(operation.action === 'CREATE' ? { expectedHead: snapshot.head } : {}) }
     } else {
       name = 'sync_git_remote'; args = { action: operation.action, ...(operation.action === 'FETCH' ? {} : { expectedHead: snapshot.head }) }
+      if ('contextual' in operation && operation.contextual) Object.assign(args, { contextual: true, upstream: snapshot.upstream, remoteEvidence: snapshot.remoteEvidence })
     }
     const guard = async () => {
       assertCurrent()
       const current = await this.getState()
-      if (current.head !== snapshot.head || current.branch !== snapshot.branch || current.indexRevision !== snapshot.indexRevision || current.worktreeRevision !== snapshot.worktreeRevision || current.operation !== snapshot.operation) fail('GIT_STATE_CHANGED')
+      if (!sameCheckoutSnapshot(current, snapshot)) fail('GIT_STATE_CHANGED')
+      if ('contextual' in operation && operation.contextual) {
+        const synchronization = await this.getCheckoutSynchronization()
+        const observed = snapshot.remoteEvidence, fresh = synchronization.evidence
+        if (!sameCheckoutSnapshot(synchronization.state, snapshot) || synchronization.action !== operation.action || observed?.status !== 'VERIFIED' || fresh.status !== 'VERIFIED' ||
+          observed.localHead !== fresh.localHead || observed.remoteHead !== fresh.remoteHead || observed.remote !== fresh.remote || observed.ref !== fresh.ref) fail('GIT_STATE_CHANGED')
+      }
       assertCurrent()
     }
     try {
@@ -1332,6 +1344,33 @@ export class GitOperationsService {
     const after = await this.getState()
     if (state.head !== after.head || state.branch !== after.branch || state.indexRevision !== after.indexRevision || state.worktreeRevision !== after.worktreeRevision) fail('GIT_STATE_CHANGED')
     return { state, changes }
+  }
+
+  async getCheckoutSynchronization(): Promise<GitCheckoutSynchronization> {
+    const state = await this.getState('VERIFY')
+    const after = await this.getState()
+    if (!sameCheckoutSnapshot(state, after)) fail('GIT_STATE_CHANGED')
+    const evidence = state.remoteEvidence
+    let blockedReason: string | null = null
+    if (!state.head) blockedReason = 'Repositório sem commits.'
+    else if (!state.branch) blockedReason = 'HEAD detached: nenhuma branch em checkout.'
+    else if (state.operation || state.conflictCount) blockedReason = 'Resolva a operação Git ou os conflitos antes de sincronizar.'
+    else if (this.readOnlyWorktree) blockedReason = 'O controle Git desta worktree pertence a outro executor.'
+    else {
+      try { assertNoWorktreeGrant(realpathSync(await this.git.getCommonDirectory(this.repoRoot)), this.repoRoot) }
+      catch { blockedReason = 'O controle Git desta worktree pertence a outro executor.' }
+    }
+    const result = (action: GitCheckoutSynchronization['action'], reason = blockedReason): GitCheckoutSynchronization => ({ state, evidence, action, blockedReason: reason })
+    if (blockedReason || evidence.status !== 'VERIFIED') return result(null)
+    if (evidence.relationship === 'IN_SYNC') return result(null)
+    if (evidence.tracking === 'TRACKING_STALE' || evidence.relationship === 'UNKNOWN' || !evidence.remoteCounts)
+      return evidence.remote === 'origin' ? result('FETCH') : result(null, `Fetch contextual disponível somente para origin; upstream em ${evidence.remote}.`)
+    if (evidence.relationship === 'AHEAD') return result('REVIEW_PUBLICATION', 'Push direto depende de política e autorização comprovadas; revise os commits e use o fluxo autorizado de publicação.')
+    if (evidence.relationship === 'DIVERGED') return result('COMPARE')
+    if (evidence.remote !== 'origin') return result(null, `O executor atual usa origin; upstream ${evidence.remote}/${evidence.ref.replace('refs/heads/', '')} não suportado pelo atalho.`)
+    if (evidence.ref !== `refs/heads/${state.branch}`) return result(null, 'O upstream difere de origin/<branch ativa>; Pull contextual indisponível para este destino.')
+    if (evidence.relationship === 'BEHIND') return state.dirty ? result(null, 'Pull exige uma worktree limpa; há alterações locais.') : result('PULL_FF_ONLY')
+    return result(null)
   }
 
   async getCommitDetail(request: { sha: string; cursor?: string }): Promise<GitCommitDetail> {

@@ -44,6 +44,7 @@ declare global {
       compareGitAtlas: (request: GitAtlasCompareRequest) => Promise<GitManagementResult<GitAtlasComparison>>
       getGitCommitCorrelation: (request: GitCommitCorrelationRequest) => Promise<GitManagementResult<GitCommitCorrelationPage>>
       getGitManagementOverview: (context: GitManagementContext) => Promise<GitManagementResult<GitOverview>>
+      getGitCheckoutSynchronization: (context: GitManagementContext) => Promise<GitManagementResult<import('../../shared/types/git-management-types').GitCheckoutSynchronization>>
       getGitManagementCommit: (request: GitCommitRequest) => Promise<GitManagementResult<GitCommitDetail>>
       getGitManagementPatch: (request: GitPatchRequest) => Promise<GitManagementResult<GitPatch>>
       mutateGitManagement: (request: GitMutationRequest) => Promise<GitManagementResult<GitOperationalResult>>

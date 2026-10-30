@@ -37,6 +37,7 @@ function setup() {
     getGitAtlasPrEvidence: vi.fn().mockResolvedValue({ success: false, code: 'UNAVAILABLE' }),
     compareGitAtlas: vi.fn().mockResolvedValue({ success: false, code: 'UNAVAILABLE' }),
     getGitManagementOverview: vi.fn().mockResolvedValue(ok({ state: { head: sha, branch: 'main', operation: null }, changes: [] })),
+    getGitCheckoutSynchronization: vi.fn().mockResolvedValue({ success: false, code: 'UNAVAILABLE' }),
     getGitManagementCommit: vi.fn().mockResolvedValue(ok({ commit: { ...page.nodes[0], message: 'Known commit' }, base: null, comparison: 'EMPTY_TREE', files: [], nextCursor: null })),
     getGitCommitCorrelation: vi.fn().mockResolvedValue({ success: false, code: 'UNAVAILABLE' })
   }

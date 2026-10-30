@@ -3,7 +3,8 @@ const path = require('node:path')
 const { execFileSync } = require('node:child_process')
 const { buildSync } = require('esbuild')
 exports.run = async (ctx) => {
-  const build = ctx.atlasObservationProof?.build ?? buildSync
+  const proof = ctx.atlasSynchronizationProof ?? ctx.atlasObservationProof
+  const build = proof?.build ?? buildSync
   const waitForGit = async (condition) => {
     const deadline = Date.now() + 30000
     while (Date.now() < deadline) {
@@ -74,7 +75,7 @@ exports.run = async (ctx) => {
   git('update-ref', 'refs/remotes/origin/main', git('rev-parse', 'HEAD~1'))
   }
   if (ctx.gridProof) require('./git-atlas-grid.cjs').seed(root)
-  if (ctx.atlasObservationProof) ctx.atlasObservationProof.seed(root)
+  if (proof) proof.seed(root)
   fs.writeFileSync(path.join(root, 'file.txt'), 'prepared version\n')
   git('add', 'file.txt')
   fs.writeFileSync(path.join(root, 'file.txt'), 'later worktree version\n')
@@ -102,9 +103,9 @@ exports.run = async (ctx) => {
     secondRoot,
     nonGitRoot,
     ctx.projectRoot,
-    ctx.atlasObservationProof ? path.join(ctx.temporary, 'atlas-cache') : undefined
+    proof ? path.join(ctx.temporary, 'atlas-cache') : undefined
   )
-  if (ctx.atlasObservationProof) ctx.atlasObservationProof.prepare(backend)
+  if (proof) proof.prepare(backend)
   await build({
     entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')],
     bundle: true,
@@ -143,7 +144,7 @@ exports.run = async (ctx) => {
   )
   await ctx.load(page)
   await waitForGit(() => document.querySelectorAll('.gm-commit').length > 0 && document.querySelector('.gm-history').getAttribute('aria-busy') === 'false')
-  if (ctx.atlasObservationProof) return ctx.atlasObservationProof.verify(ctx, { root, git, backend })
+  if (proof) return proof.verify(ctx, { root, git, backend })
   await ctx.evaluate(() => {
     document.querySelector('.global-sidebar-logo-img').src = 'logo.svg'
   })
