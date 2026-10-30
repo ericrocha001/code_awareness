@@ -2,6 +2,7 @@ import { createServer, type Server } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { MCP_REQUEST_BUDGET_MS } from './operational-guidance'
 import type { ChannelMcpAdapter } from './channel-mcp-adapter'
+import { SESSION_RESPONSE_BUDGETS, type SessionToolName } from '../session-context/mcp'
 import type { ChannelTraceEvent, ChannelTraceSink } from '../../shared/types/channel-types'
 
 const supportedProtocolVersions = new Set(['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'])
@@ -142,11 +143,19 @@ export function createMcpHttpServer(
       } else if (method === 'tools/list') {
         rpcResult = { tools: adapter.listTools() }
       } else if (method === 'tools/call' && typeof params?.name === 'string') {
+        if (Object.hasOwn(SESSION_RESPONSE_BUDGETS, params.name) && Buffer.byteLength(JSON.stringify(id)) > 256) {
+          responseSize = writeJson(response, 400, error(null, -32600, 'INVALID_REQUEST_ID'))
+          return
+        }
         emit('codescope-request-started', 'started')
         emit('codescope-handler-started', 'started')
         const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs })
         const { postResponse, ...publicResult } = toolResult
         rpcResult = publicResult
+        const sessionBudget = SESSION_RESPONSE_BUDGETS[params.name as SessionToolName]
+        if (sessionBudget && Buffer.byteLength(JSON.stringify(result(id, rpcResult))) > sessionBudget) {
+          rpcResult = { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'RESPONSE_LIMIT_REACHED' }) }] }
+        }
         emit('codescope-response-produced', 'success')
         emit('codescope-handler-completed', 'success')
         if (postResponse) {

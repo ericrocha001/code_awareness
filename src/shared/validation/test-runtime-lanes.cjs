@@ -1,4 +1,8 @@
 const nativeTestFiles = Object.freeze([
+  'src/main/session-context/store.test.ts',
+  'src/main/session-context/entire-provider.test.ts',
+  'src/main/session-context/mcp.test.ts',
+  'src/main/session-context/target.test.ts',
   'src/main/continuum/bundle-builder.test.ts',
   'src/main/continuum/bundle-result-history.test.ts',
   'src/main/ipc/continuum-builder-handler.test.ts',
