@@ -21,6 +21,46 @@ async function fixture() {
 }
 async function advance(root: string, file: string) { writeFile(root, file, file); await stageAll(root); await commit(root, file) }
 
+it('observes an external advancement once, fetches only changed tracking and never moves checkout', async () => {
+  const f = await fixture(), context = { projectId: 'p', revision: 1 }
+  f.service.bindAtlasRemotePolicy(() => true)
+  const fetch = vi.spyOn(f.transport, 'fetch'), head = (await f.service.getState()).head
+  await f.service.observeCheckoutSynchronization(context, () => {})
+  expect(fetch).not.toHaveBeenCalled()
+  await advance(f.writer, 'external.txt'); await gitExec(f.writer, ['push', 'origin', 'topic'])
+  const results = await Promise.all([f.service.observeCheckoutSynchronization(context, () => {}), f.service.observeCheckoutSynchronization(context, () => {})])
+  expect(results[0]).toEqual(results[1])
+  expect(results[0]).toMatchObject({ automaticFetch: 'FETCHED', action: 'PULL_FF_ONLY', evidence: { tracking: 'TRACKING_CURRENT', relationship: 'BEHIND' } })
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect((await f.service.getState()).head).toBe(head)
+  await f.service.observeCheckoutSynchronization(context, () => {})
+  expect(fetch).toHaveBeenCalledTimes(1)
+}, 60000)
+
+it('keeps partial truth with automatic fetch disabled, failed or without ownership and rejects a superseded observer', async () => {
+  const f = await fixture(), context = { projectId: 'p', revision: 1 }
+  await advance(f.writer, 'external.txt'); await gitExec(f.writer, ['push', 'origin', 'topic'])
+  const fetch = vi.spyOn(f.transport, 'fetch')
+  expect(await f.service.observeCheckoutSynchronization(context, () => {})).toMatchObject({ action: 'FETCH', evidence: { tracking: 'TRACKING_STALE', remoteCounts: null } })
+  expect(fetch).not.toHaveBeenCalled()
+  f.service.bindAtlasRemotePolicy(() => true)
+  const mutation = vi.spyOn(f.service, 'executeManagementMutation')
+  fetch.mockRejectedValueOnce(new Error('unreachable'))
+  expect(await f.service.observeCheckoutSynchronization(context, () => {})).toMatchObject({ action: null, automaticFetch: 'PENDING' })
+  expect(await f.service.observeCheckoutSynchronization(context, () => {})).toMatchObject({ action: null, automaticFetch: 'PENDING' })
+  expect(mutation.mock.calls[1][0].operationId).toBe(mutation.mock.calls[0][0].operationId)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  fetch.mockClear()
+  const readonly = new GitOperationsService(f.local, f.git, f.transport, undefined, true)
+  readonly.bindAtlasRemotePolicy(() => true)
+  expect(await readonly.observeCheckoutSynchronization(context, () => {})).toMatchObject({ action: null, blockedReason: expect.stringContaining('executor') })
+  expect(fetch).not.toHaveBeenCalled()
+  const read = f.transport.readRemoteHead.bind(f.transport)
+  vi.spyOn(f.transport, 'readRemoteHead').mockImplementationOnce(async (...args) => { const result = await read(...args); f.service.clearAtlasCache(); return result })
+  await expect(f.service.observeCheckoutSynchronization(context, () => {})).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
+  expect(fetch).not.toHaveBeenCalled()
+}, 60000)
+
 it('distinguishes live unknown, fetched behind, dirty blocking and receipted fast-forward without a second executor', async () => {
   const f = await fixture()
   expect(await f.service.getCheckoutSynchronization()).toMatchObject({ evidence: { relationship: 'IN_SYNC' }, action: null })

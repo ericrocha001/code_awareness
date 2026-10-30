@@ -1,7 +1,8 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Settings, X } from 'lucide-react'
 import { NAV_ITEMS, type NavId } from '../../config/navigation'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
+import { updateSettings } from '../../utils/update-settings'
 import './SettingsModal.css'
 
 interface SettingsModalProps {
@@ -16,6 +17,23 @@ interface SettingsModalProps {
 
 export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRestore, onClose }: SettingsModalProps) {
   const dialog = useRef<HTMLDialogElement>(null)
+  const [automaticFetch, setAutomaticFetch] = useState<boolean | null>(null)
+  const [gitSaving, setGitSaving] = useState(false)
+  const [gitError, setGitError] = useState('')
+  useEffect(() => {
+    let current = true
+    window.codeAwareness.loadSettings().then(settings => { if (current) setAutomaticFetch(settings.gitManagement?.automaticFetch !== false) })
+      .catch(() => { if (current) setGitError('Não foi possível ler a configuração Git.') })
+    return () => { current = false }
+  }, [])
+  const changeAutomaticFetch = async (enabled: boolean) => {
+    setGitSaving(true); setGitError('')
+    try {
+      await updateSettings(settings => ({ ...settings, gitManagement: { ...settings.gitManagement, automaticFetch: enabled } }))
+      setAutomaticFetch(enabled)
+    } catch { setGitError('Não foi possível salvar a configuração Git.') }
+    finally { setGitSaving(false) }
+  }
   useEffect(() => {
     const previousFocus = document.activeElement as HTMLElement | null
     dialog.current?.showModal()
@@ -45,6 +63,11 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
         </div>
       })}
     </div>
+    <div className="settings-intro"><h3>Git Management</h3><p>Buscar objetos e referências quando uma mudança no upstream for confirmada. O checkout só avança por ação sua.</p></div>
+    <div className="settings-list"><div className="settings-row">
+      <span className="settings-row-label">Fetch automático condicionado ao remoto</span>
+      <ToggleSwitch aria-label="Fetch automático condicionado ao remoto" checked={automaticFetch === true} disabled={automaticFetch === null || gitSaving} onChange={value => void changeAutomaticFetch(value)} />
+    </div>{gitError && <p role="alert">{gitError}</p>}</div>
     <footer className="settings-footer">
       <p>Home e Configurações ficam sempre disponíveis.</p>
       {error && <p role="alert" className="settings-error">{error}</p>}

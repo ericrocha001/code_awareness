@@ -15,7 +15,8 @@ export async function setup(
   secondRoot: string,
   nonGitRoot: string,
   sourceRoot: string,
-  catalogDirectory?: string
+  catalogDirectory?: string,
+  automaticFetch = false
 ) {
   const runtime = new RuntimeIdentityProvider({
     rootDir: sourceRoot,
@@ -47,6 +48,7 @@ export async function setup(
           )
         : null
     if (service && state.project && catalogDirectory) {
+      service.bindAtlasRemotePolicy(() => automaticFetch)
       const repositoryId = state.project.id
       service.bindAtlasPersistence(common => GitAtlasSqliteCache.acquire(catalogDirectory, repositoryId, common))
     }

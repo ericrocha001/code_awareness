@@ -531,7 +531,8 @@ app.whenReady().then(async () => {
         })
         return response.response === 1 && activeProjects?.getState().revision === gitProjectRevision
       }, false, activeWorktreeValidation ?? undefined)
-    gitOperations.bindAtlasPullRequests(inventory => githubIntegration.branchPullRequests(project.path, inventory))
+    gitOperations.bindAtlasRemotePolicy(() => settingsService.loadSettings().gitManagement?.automaticFetch !== false)
+    gitOperations.bindAtlasPullRequests((inventory, force) => githubIntegration.branchPullRequests(project.path, inventory, force))
     const sessionIsCurrent = () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId
     if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path, sessionIsCurrent, undefined,
       gitOperations.worktrees ? sessionTargetResolver(gitOperations.worktrees, () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : undefined)

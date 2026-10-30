@@ -9,7 +9,7 @@ import type { AtlasCatalogState } from '../../../../shared/types/git-atlas-catal
 import { GitInspector, type GitSelection } from './GitInspector'
 import { GitActions, type GitActionsHandle } from './GitActions'
 import { CheckoutSynchronization } from './CheckoutSynchronization'
-import { checkoutSynchronizationRevision, useCheckoutSynchronization } from './useCheckoutSynchronization'
+import { useCheckoutSynchronization } from './useCheckoutSynchronization'
 import { GitAtlasCanvas } from './GitAtlasCanvas'
 import { AtlasCheckout, AtlasPullRequests } from './AtlasContext'
 import { AtlasSearch } from './AtlasSearch'
@@ -29,7 +29,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const [prRequested, setPrRequested] = useState(true)
   const [selection, setSelection] = useState<GitSelection>(null)
   const [overview, setOverview] = useState<GitOverview | null>(null)
-  const [scope, setScope] = useState<GitAtlasScope>({ kind: 'CHECKOUT', anchor: 'AUTO' })
+  const [scope, setScope] = useState<GitAtlasScope>({ kind: 'ALL_REFS', anchor: 'AUTO' })
   const [operation, setOperation] = useState<string | null>(null)
   const [mode, setMode] = useState('Panorama')
   const [base, setBase] = useState('')
@@ -52,7 +52,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const inspectorFocus = useRef<HTMLElement>(null)
   const context = useMemo(() => ({ projectId: state.project?.id ?? '', revision: state.revision }), [state.project?.id, state.revision])
   const synchronization = useCheckoutSynchronization(context, core ? JSON.stringify([
-    core.repositoryId, core.worktreeId, core.worktreeGeneration, checkoutSynchronizationRevision(core.git)
+    core.repositoryId, core.worktreeId, core.worktreeGeneration, core.checkout.head, core.checkout.ref, core.checkout.upstream
   ]) : undefined)
   const actions = useRef<GitActionsHandle>(null)
   const actionsDetails = useRef<HTMLDetailsElement>(null)
@@ -81,10 +81,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
         }
         setHistory(previous => {
           if (!cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt) return previous
-          const expanding = !cursor && previous?.scope?.kind === 'CHECKOUT' && page.scope?.kind === 'ALL_REFS' && previous.head === page.head &&
-            previous.worktreeGeneration === page.worktreeGeneration && previous.topologyRevision === page.topologyRevision &&
-            previous.refs.every(ref => page.refs.some(current => current.ref === ref.ref && current.sha === ref.sha))
-          if (expanding || cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt && previous.anchorAt === page.anchorAt) {
+          if (cursor && previous?.snapshot === page.snapshot && previous.queriedAt === page.queriedAt && previous.anchorAt === page.anchorAt) {
             const nodes = [...new Map([...(previous?.nodes ?? []), ...page.nodes].map(node => [node.sha, node])).values()]
               .map(node => ({ ...node, decorations: page.refs.filter(ref => ref.sha === node.sha) }))
             const present = new Set(nodes.map(node => node.sha))
@@ -104,7 +101,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   useEffect(() => {
     setCatalog(null); catalogRef.current = null
     setHistory(null); setCore(null); setEnrichment(null); setPrRequested(true); setSelectedPr(null); setPrState('NOT_REQUESTED'); setOverview(null); setNotice(''); setSelection(null); setBase(''); setFocus(''); setComparison(null); setDrawer(true)
-    setScope(previous => previous.kind === 'CHECKOUT' && previous.anchor === 'AUTO' && !previous.baseRef && !previous.focusRef ? previous : { kind: 'CHECKOUT', anchor: 'AUTO' }); setOperation(null)
+    setScope(previous => previous.kind === 'ALL_REFS' && previous.anchor === 'AUTO' && !previous.baseRef && !previous.focusRef ? previous : { kind: 'ALL_REFS', anchor: 'AUTO' }); setOperation(null)
   }, [context])
   const readOverview = useCallback(async () => {
     if (!context.projectId) { setOverview(null); setOverviewLoading(false); setOverviewError(''); return }
@@ -131,8 +128,7 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
       const previous = catalogRef.current
       catalogRef.current = next; setCatalog(next)
       if (next.manifest) {
-        if (scope.kind === 'CHECKOUT') setScope(value => ({ ...value, kind: 'ALL_REFS' }))
-        else if (previous?.manifest && previous.manifest.revision !== next.manifest.revision) void load()
+        if (previous?.manifest && previous.manifest.revision !== next.manifest.revision) void load()
       }
     }
     const stop = () => { void window.codeAwareness.stopGitAtlasCollection(context).catch(() => {}) }
@@ -165,19 +161,43 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     if (accepted) setCollectionSession(value => value + 1)
     return !!accepted
   } })
+  const remoteEvidence = synchronization.value?.evidence
+  const remoteRevision = remoteEvidence?.status === 'VERIFIED' ? JSON.stringify([remoteEvidence.remote, remoteEvidence.ref, remoteEvidence.remoteHead]) : null
+  const remoteReconciled = useRef<string | null>(null)
+  useEffect(() => {
+    if (!core || remoteEvidence?.status !== 'VERIFIED' || remoteEvidence.tracking !== 'TRACKING_CURRENT') return
+    const tracking = core.git.refs.find(ref => ref.name === core.checkout.upstream || ref.ref === core.checkout.upstream)
+    if (tracking?.sha === remoteEvidence.trackingHead) return
+    const revision = JSON.stringify([context, core.gitSnapshot, remoteRevision])
+    if (remoteReconciled.current === revision) return
+    remoteReconciled.current = revision
+    void load()
+  }, [context, core?.gitSnapshot, remoteRevision, remoteEvidence?.status === 'VERIFIED' ? remoteEvidence.trackingHead : null, load])
   useEffect(() => {
     let current = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let pending = false, visibilityRevision = 0
     setEnrichment(null)
     if (!core || !prRequested) { setPrState('NOT_REQUESTED'); return }
     setPrState('LOADING')
-    window.codeAwareness.getGitAtlasPrEvidence({ context, window: 'ALL', scope: core.git.scope, limit: 100, snapshot: core.gitSnapshot }).then(result => {
-      if (!current) return
-      if (result.success && result.data.repositoryId === core.repositoryId && result.data.gitSnapshot === core.gitSnapshot && result.data.worktreeId === core.worktreeId && result.data.worktreeGeneration === core.worktreeGeneration) {
-        setEnrichment(result.data); setPrState(result.data.coverage === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'READY')
-      } else setPrState('UNAVAILABLE')
-    }).catch(() => { if (current) setPrState('UNAVAILABLE') })
-    return () => { current = false }
-  }, [core?.gitSnapshot, context, prRequested])
+    const read = () => {
+      if (!current || document.hidden || pending) return
+      pending = true
+      const revision = visibilityRevision
+      window.codeAwareness.getGitAtlasPrEvidence({ context, window: 'ALL', scope: core.git.scope, limit: 100, snapshot: core.gitSnapshot }).then(result => {
+        if (!current || document.hidden || revision !== visibilityRevision) return
+        if (result.success && result.data.repositoryId === core.repositoryId && result.data.gitSnapshot === core.gitSnapshot && result.data.worktreeId === core.worktreeId && result.data.worktreeGeneration === core.worktreeGeneration) {
+          setEnrichment(result.data); setPrState(result.data.coverage === 'UNAVAILABLE' ? 'UNAVAILABLE' : 'READY')
+        } else setPrState('UNAVAILABLE')
+      }).catch(() => { if (current && revision === visibilityRevision) setPrState('UNAVAILABLE') }).finally(() => {
+        pending = false
+        if (current && !document.hidden) timer = setTimeout(read, revision === visibilityRevision ? 60000 : 0)
+      })
+    }
+    const visibility = () => { visibilityRevision++; clearTimeout(timer); if (!document.hidden) read() }
+    read(); document.addEventListener('visibilitychange', visibility)
+    return () => { current = false; clearTimeout(timer); document.removeEventListener('visibilitychange', visibility) }
+  }, [core?.gitSnapshot, context, prRequested, remoteRevision])
   const actionsActive = drawer && !selection && selectedPr === null
   useEffect(() => {
     if (!actionsActive || !core) return
@@ -240,10 +260,9 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
     requestAnimationFrame(() => inspectorFocus.current?.focus())
   }
   const refresh = async () => {
-    const previous = checkoutSynchronizationRevision(loadedPage.current)
     synchronization.invalidate()
     await Promise.all([load(undefined, true), readOverview()])
-    if (checkoutSynchronizationRevision(loadedPage.current) === previous) await synchronization.verify()
+    await synchronization.verify()
     setCollectionSession(value => value + 1)
   }
   const synchronize = (value: GitCheckoutSynchronization) => {
@@ -267,6 +286,11 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
   const selected = selection?.kind === 'COMMIT' ? selection.sha : selection?.ref.sha
   const mergeContexts = useMemo(() => classifyAtlasMerges(history, base), [history, base])
   const selectedMergeContext = selection?.kind === 'COMMIT' ? mergeContexts.get(selection.sha) : undefined
+  const remoteEvents = useMemo(() => {
+    const nodes = history?.nodes ?? [], present = new Set(nodes.map(node => node.sha))
+    const latest = nodes.reduce((time, node) => Math.max(time, Date.parse(node.timestamp)), -Infinity)
+    return enrichment?.events.filter(event => event.kind === 'PR_MERGED' && !present.has(event.mergeCommitSha ?? '') || event.kind === 'PR_CREATED' && Date.parse(event.at) > latest) ?? []
+  }, [history?.nodes, enrichment])
   const catalogComplete = catalog?.coverage === 'COMPLETE' && catalog.diagnostic.state === 'READY' && !catalog.reason
   const catalogUnavailable = catalog && (catalog.diagnostic.state !== 'READY' || !!catalog.reason)
   const prStatus = !prRequested ? 'PRs ocultos' : prState === 'LOADING' ? 'Carregando PRs' : prState === 'UNAVAILABLE' ? 'GitHub indisponível; mapa local preservado' : enrichment?.coverage === 'PARTIAL' ? 'PRs com cobertura parcial' : 'PRs habilitados no gráfico'
@@ -311,6 +335,10 @@ export function GitManagementView({ state, commitIntent, onIntentConsumed }: { s
           {enrichment?.events.some(event => event.kind !== 'GIT_MERGE_COMMIT') && <span><GitPullRequest size={13} />PR</span>}
         </div>{history?.coverage === 'PARTIAL' && <span>Trecho parcial</span>}</div>
         {history?.referenceCoverage === 'SELECTED' ? <p className="gm-atlas-note" role="status">Contexto do checkout e da base; outras referências e worktrees ainda não consultadas.</p> : history?.detachedCoverage === 'PARTIAL' && <p className="gm-atlas-note" role="status">Alguns HEADs de worktrees não puderam ser verificados.</p>}
+        {!!remoteEvents.length && <div className="gm-atlas-note" aria-label="Eventos remotos fora do histórico local">
+          <strong>Atividade confirmada no GitHub</strong>
+          {remoteEvents.map(event => event.kind !== 'GIT_MERGE_COMMIT' && <button key={`${event.kind}:${event.prNumber}`} onClick={() => choosePr(event.prNumber)}>PR #{event.prNumber} · {event.kind === 'PR_MERGED' ? 'integrado remotamente; commit fora do trecho local' : 'criado remotamente'} · {new Date(event.at).toLocaleString()}</button>)}
+        </div>}
         {history && !history.nextCursor && !loading && <p className="gm-atlas-note">Fim do histórico do escopo consultado.</p>}
         <GitAtlasCanvas key={`${context.projectId}:${context.revision}`} page={history} core={core} enrichment={enrichment} choosePr={choosePr} base={base} focus={focus} mode={mode} comparison={comparison} selected={selected} select={select} loading={loading} requestMore={history?.nextCursor && !error ? () => void load(history.nextCursor!) : undefined} focusTrajectory={(ref, sha) => { returnFocus.current = document.activeElement as HTMLElement; setSelectedPr(null); setDrawer(true); setFocus(ref); setMode('Foco'); const branch = history?.refs.find(item => item.ref === ref); setSelection(branch ? { kind: 'BRANCH', ref: branch } : { kind: 'COMMIT', sha }) }} />
         {!history?.nodes.length && <p className="gm-placeholder">{loading ? 'Carregando histórico…' : error ? 'Histórico indisponível.' : 'Nenhum commit no escopo consultado.'}</p>}

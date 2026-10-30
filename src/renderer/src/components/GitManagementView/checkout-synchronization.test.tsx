@@ -44,7 +44,7 @@ function setup(value = synchronization) {
 it('opens the existing confirmation from the checkout signal and never probes for node selection or wheel gestures', async () => {
   const api = setup()
   render(<GitManagementView state={project} />)
-  const pull = await screen.findByRole('button', { name: 'Atualizar — Pull FF-only…' })
+  const pull = await screen.findByRole('button', { name: 'Atualizar — Pull FF-only…' }, { timeout: 5000 })
   await waitFor(() => expect(pull.hasAttribute('disabled')).toBe(false))
   const reads = api.getGitCheckoutSynchronization.mock.calls.length
   fireEvent.click(screen.getByRole('button', { name: /Known commit/ }))

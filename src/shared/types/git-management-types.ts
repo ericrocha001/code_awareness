@@ -72,6 +72,7 @@ export interface GitOverview {
   changes: GitLocalChange[]
 }
 export interface GitCheckoutSynchronization {
+  automaticFetch?: 'FETCHED' | 'FAILED' | 'PENDING'
   state: GitManagementState
   evidence: RemoteEvidence
   action: 'FETCH' | 'PULL_FF_ONLY' | 'COMPARE' | 'REVIEW_PUBLICATION' | null

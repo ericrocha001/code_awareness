@@ -70,7 +70,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getGitAtlasPrEvidence: (request: GitAtlasPrRequest): Promise<GitManagementResult<GitAtlasPrEvidence>> => ipcRenderer.invoke('git-management:atlas-pr-evidence', request),
   compareGitAtlas: (request: GitAtlasCompareRequest): Promise<GitManagementResult<GitAtlasComparison>> => ipcRenderer.invoke('git-management:atlas-compare', request),
   getGitManagementOverview: (context: GitManagementContext): Promise<GitManagementResult<GitOverview>> => ipcRenderer.invoke('git-management:overview', context),
-  getGitCheckoutSynchronization: (context: GitManagementContext): Promise<GitManagementResult<import('../shared/types/git-management-types').GitCheckoutSynchronization>> => ipcRenderer.invoke('git-management:checkout-synchronization', context),
+  getGitCheckoutSynchronization: (context: GitManagementContext, observe?: boolean): Promise<GitManagementResult<import('../shared/types/git-management-types').GitCheckoutSynchronization>> => ipcRenderer.invoke('git-management:checkout-synchronization', context, observe),
   getGitManagementCommit: (request: GitCommitRequest): Promise<GitManagementResult<GitCommitDetail>> => ipcRenderer.invoke('git-management:commit-detail', request),
   getGitManagementPatch: (request: GitPatchRequest): Promise<GitManagementResult<GitPatch>> => ipcRenderer.invoke('git-management:patch', request),
   mutateGitManagement: (request: GitMutationRequest): Promise<GitManagementResult<GitOperationalResult>> => ipcRenderer.invoke('git-management:mutate', request),

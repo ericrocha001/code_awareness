@@ -25,6 +25,16 @@ export class GitManagementController {
   } | null = null
   private readonly mutations = new Set<Promise<unknown>>()
   hasPendingMutations() { return this.mutations.size > 0 }
+  observeRemote(context: GitManagementContext) {
+    if (this.hasPendingMutations()) return Promise.resolve({ success: false as const, code: 'GIT_OPERATION_IN_PROGRESS' })
+    const selected = this.active
+    const promise = this.read(context, service => service.observeCheckoutSynchronization(context, () => {
+      const state = this.projects.getState()
+      if (this.active !== selected || state.project?.id !== context.projectId || state.revision !== context.revision) throw new Error('PROJECT_CONTEXT_CHANGED')
+    }), false)
+    this.mutations.add(promise)
+    return promise.finally(() => this.mutations.delete(promise))
+  }
   constructor(
     private readonly projects: Pick<ActiveProjectService, 'getState'>
   ) {}
@@ -206,8 +216,10 @@ function validMutation(value: GitMutationRequest): boolean {
 export function registerGitManagementHandlers(
   controller: GitManagementController
 ): void {
-  ipcMain.handle('git-management:checkout-synchronization', (_event, context: GitManagementContext) =>
-    controller.read(context, service => service.getCheckoutSynchronization(), false))
+  ipcMain.handle('git-management:checkout-synchronization', (_event, context: GitManagementContext, observe?: boolean) => {
+    if (observe !== undefined && typeof observe !== 'boolean') return { success: false, code: 'INVALID_ARGUMENT' }
+    return observe ? controller.observeRemote(context) : controller.read(context, service => service.getCheckoutSynchronization(), false)
+  })
   const validScope = (scope: GitAtlasScope | undefined) => scope === undefined || !!scope && typeof scope === 'object' && !Array.isArray(scope) &&
     Object.keys(scope).every(key => ['kind', 'anchor', 'baseRef', 'focusRef'].includes(key)) &&
     ['CHECKOUT', 'ALL_REFS'].includes(scope.kind) && ['AUTO', 'PRESENT'].includes(scope.anchor) &&

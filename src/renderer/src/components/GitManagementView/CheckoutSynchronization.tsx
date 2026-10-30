@@ -15,7 +15,7 @@ export function CheckoutSynchronization({ value, loading, error, blocked, verify
   value: GitCheckoutSynchronization | null; loading: boolean; error: string; blocked: boolean
   verify: () => void; act: (value: GitCheckoutSynchronization) => void
 }) {
-  if (loading) return <span className="gm-checkout-sync" role="status">Verificando remoto…</span>
+  if (loading && !value) return <span className="gm-checkout-sync" role="status">Verificando remoto…</span>
   const evidence = value?.evidence
   if (!evidence || evidence.status !== 'VERIFIED') return <span className="gm-checkout-sync">
     <span role="status">{error || (evidence?.status === 'UNAVAILABLE' ? `Não foi possível verificar: ${unavailableReason[evidence.reason]}.` : 'Estado local do último fetch; remoto ainda não verificado.')}</span>
@@ -38,5 +38,7 @@ export function CheckoutSynchronization({ value, loading, error, blocked, verify
     {value.action && <button disabled={blocked} onClick={() => act(value)}>{actionLabel}</button>}
     {value.action && blocked && <small>Aguarde a leitura ou conclua/recupere a operação Git existente no painel de alterações.</small>}
     {value.blockedReason && <small>{value.blockedReason}</small>}
+    {value.automaticFetch === 'FAILED' && <small>O fetch automático falhou. Use Fetch para tentar novamente.</small>}
+    {value.automaticFetch === 'PENDING' && <button disabled={blocked} onClick={verify}>Recuperar fetch automático</button>}
   </span>
 }
