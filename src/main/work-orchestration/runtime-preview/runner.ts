@@ -157,9 +157,9 @@ export class RuntimePreviewRunner {
       let createRequested = false
       try {
         if (prepared.snapshot) {
-          await this.snapshots!.builds.bundles.retain(prepared.snapshot.buildId, sessionId)
           const { captureId, buildId, runtimeId } = prepared.snapshot
           record = this.change(record, { build: { captureId, buildId, runtimeId } })
+          await this.snapshots!.builds.bundles.acquire(prepared.snapshot.manifest, sessionId)
         }
         if (profile.bootstrap) {
           if (!this.contextProvisioner || !preflight.snapshot) throw new Error('PREVIEW_CONTEXT_PROVISIONER_REQUIRED')

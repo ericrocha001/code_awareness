@@ -34,10 +34,13 @@ export async function validatePreviewContext(raw: unknown, input: { sessionId: s
     if (identity.worktreeId !== selection.worktreeId || identity.generation !== selection.generation || realpathSync(identity.path).toLowerCase() !== input.worktree.toLowerCase() || identity.locked || identity.detached || identity.prunable || identity.missing) throw new Error('PREVIEW_WORKTREE_IDENTITY_MISMATCH')
     if (snapshot.head !== source.head || snapshot.branch !== source.branch || snapshot.indexRevision !== source.indexRevision || snapshot.worktreeRevision !== source.worktreeRevision || snapshot.operation) throw new Error('PREVIEW_SOURCE_CHANGED_BEFORE_BOOT')
   }
-  try { await verifyGit() } catch (error) {
-    if (error instanceof Error && /^PREVIEW_[A-Z_]+$/.test(error.message)) throw error
-    throw new Error('PREVIEW_GIT_IDENTITY_UNAVAILABLE')
+  const verifyIdentity = async () => {
+    try { await verifyGit() } catch (error) {
+      if (error instanceof Error && /^PREVIEW_[A-Z_]+$/.test(error.message)) throw error
+      throw new Error('PREVIEW_GIT_IDENTITY_UNAVAILABLE')
+    }
   }
+  if (data.policy !== 'ARTIFACT_FIRST') await verifyIdentity()
   const userData = join(input.directory, 'userData'), catalogFile = previewCatalogPath(userData), corpus = previewCorpusPath(userData, selection.repositoryId)
   for (const file of data.policy === 'ARTIFACT_FIRST' ? [catalogFile] : [catalogFile, corpus]) if (realpathSync(file).toLowerCase() !== file.toLowerCase()) throw new Error('PREVIEW_DATA_PATH_ESCAPED')
   if (bytesFingerprint(readFileSync(catalogFile)) !== context.catalogDigest || (data.policy !== 'ARTIFACT_FIRST' && bytesFingerprint(readFileSync(corpus)) !== data.digest)) throw new Error('PREVIEW_DATA_DIGEST_MISMATCH')
@@ -47,7 +50,7 @@ export async function validatePreviewContext(raw: unknown, input: { sessionId: s
     if (rows.length !== 1 || rows[0].id !== selection.repositoryId || realpathSync(rows[0].checkout_path).toLowerCase() !== input.worktree.toLowerCase() || rows[0].normalized_checkout_path !== normalizeRepositoryPath(input.worktree) || rows[0].status !== 'ACTIVE' || rows[0].availability !== 'AVAILABLE' || rows[0].git_state !== 'GIT') throw new Error('PREVIEW_CATALOG_IDENTITY_MISMATCH')
     if (catalog.pragma('quick_check', { simple: true }) !== 'ok' || (catalog.prepare('SELECT count(*) AS n FROM repository_catalog_github_links').get() as { n: number }).n) throw new Error('PREVIEW_CATALOG_INVALID')
   } finally { catalog.close() }
-  if (data.policy === 'ARTIFACT_FIRST') { await verifyGit(); return context }
+  if (data.policy === 'ARTIFACT_FIRST') { await verifyIdentity(); return context }
   const db = new Database(corpus, { readonly: true, fileMustExist: true })
   try {
     const expected = expectedCorpusSchema(input.directory, selection.repositoryId)

@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { z } from 'zod'
 import type { PreviewBuildPreparation } from '../preview-build/preparation'
-import { absent, digest, hash, verify } from '../preview-build/files'
+import { absent, digest, verify, type BuildFile } from '../preview-build/files'
 import { previewFingerprint } from '../preview-profile'
 import type { PreviewRepositories } from '../preview-repositories'
 import type { PreviewProfileStore } from '../preview-profile-store'
@@ -21,7 +21,7 @@ export class SnapshotLaunch {
   constructor(readonly builds: PreviewBuildPreparation, private readonly repositories: PreviewRepositories, private readonly profiles: PreviewProfileStore) {}
   async prepare(selection: PreviewSelection, requested: SnapshotSelector) {
     snapshotSelector.parse(requested)
-    const manifest = await this.builds.bundles.read(requested.buildId).catch(error => { if (absent(error)) throw Error('PREPARE_REQUIRED'); throw error })
+    const manifest = await this.builds.bundles.readManifest(requested.buildId).catch(error => { if (absent(error)) throw Error('PREPARE_REQUIRED'); throw error })
     const capture = await this.builds.captures.get(requested.captureId)
     if (manifest.captureId !== capture.captureId || manifest.runtimeId !== capture.runtimeId || previewFingerprint(capture.selection) !== previewFingerprint(selection) || capture.profile.bootstrap?.dataPolicy !== 'ARTIFACT_FIRST') throw Error('BUILD_SCOPE_REJECTED')
     for (const input of capture.profile.command.inputs) if (capture.files.find(file => file.path === input.path)?.sha256 !== input.fingerprint) throw Error('CAPTURE_PROFILE_INPUT_MISMATCH')
@@ -41,7 +41,8 @@ export class SnapshotLaunch {
     const { runtimeId, ...basis } = runtime
     if (runtimeId !== manifest.runtimeId || digest(basis) !== runtimeId || ['electron', 'abi', 'platform', 'arch'].some(key => runtime[key] !== manifest.compatibility[key as keyof typeof manifest.compatibility])) throw Error('BUILD_RUNTIME_INCOMPATIBLE')
     await verify(join(runtimeRoot, 'dist'), runtime.files)
-    const executable = join(runtimeRoot, 'dist/electron.exe'), executableHash = hash(await readFile(executable))
+    const executable = join(runtimeRoot, 'dist/electron.exe'), executableHash = (runtime.files as BuildFile[]).find(file => file.path === 'electron.exe')?.sha256
+    if (!executableHash) throw Error('BUILD_RUNTIME_INCOMPATIBLE')
     if (capture.profile.adapter?.runtimeExecutableHash && capture.profile.adapter.runtimeExecutableHash !== executableHash) throw Error('BUILD_RUNTIME_INCOMPATIBLE')
     const bundle = join(this.builds.bundles.root, 'bundle-' + manifest.buildId, 'bundle')
     return { profile: capture.profile, worktree: identity.record.path, gitFingerprint: previewFingerprint(capture.source),

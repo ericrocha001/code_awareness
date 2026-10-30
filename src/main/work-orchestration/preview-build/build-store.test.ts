@@ -6,10 +6,15 @@ import { PreviewBuildStore } from './build-store'
 import type { BuildCapture, PreviewCaptureStore } from './capture'
 import type { BuildToolchain, PreviewBuildToolchains } from './toolchain'
 import { snapshot, tree } from './files'
+import * as files from './files'
+import { randomUUID } from 'node:crypto'
+import { RuntimePreviewRunner } from '../runtime-preview/runner'
+import { PreviewSessionStore } from '../runtime-preview/session-store'
+import { bytesFingerprint, previewFingerprint } from '../preview-profile'
 import type { compileElectronBundle } from './electron-build'
 
 const roots: string[] = []
-afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true }) })
+afterEach(async () => { vi.restoreAllMocks(); for (const root of roots.splice(0)) await rm(root, { recursive: true }) })
 async function setup() {
   const root = await mkdtemp(join(tmpdir(), 'pvo-build-store-test-')); roots.push(root)
   const capture = { captureId: 'a'.repeat(64), toolchainId: 'b'.repeat(64), runtimeId: 'c'.repeat(64), source: { head: 'head', branch: 'feature', indexRevision: 'index', worktreeRevision: 'source', dirty: true } } as BuildCapture
@@ -22,7 +27,7 @@ async function setup() {
     for (const path of ['app/package.json', 'app/out/main/main.js', 'app/out/preload/preload.js', 'app/out/renderer/index.html', 'app/out/renderer/assets/main.js', 'app/node_modules/better-sqlite3/build/Release/better_sqlite3.node', 'resources/runtime-preview/preview-owner.exe', 'resources/local-mcp/launcher.cjs']) {
       await mkdir(dirname(join(bundle, path)), { recursive: true }); await writeFile(join(bundle, path), 'controlled fixture bytes')
     }
-    return { files: await snapshot(bundle, await tree(bundle)), compatibility: { ...runtime, node: '20.16.0', buildNode: '24.18.0', nativeModules: ['better-sqlite3'] } }
+    return { files: await snapshot(bundle, await tree(bundle)), compatibility: { electron: runtime.electron, abi: runtime.abi, platform: runtime.platform, arch: runtime.arch, node: '20.16.0', buildNode: '24.18.0', nativeModules: ['better-sqlite3'] } }
   })
   const store = new PreviewBuildStore(join(root, 'store'), captured as unknown as PreviewCaptureStore, tools as unknown as PreviewBuildToolchains, approve, compile)
   return { root, store, capture, captured, tools, approve, compile }
@@ -39,6 +44,76 @@ it('reuses the verified bundle without source or toolchain traversal and preserv
   await writeFile(join(first.directory, 'app/out/main/main.js'), 'corruption')
   await expect(f.store.prepare(f.capture.captureId)).rejects.toThrow('BUILD_INTEGRITY_FAILED')
   expect(f.compile).toHaveBeenCalledTimes(1)
+})
+
+it('selects metadata without hashing and admits exactly once under the prune lock with a session lease', async () => {
+  const f = await setup(), built = await f.store.prepare(f.capture.captureId), original = files.verify, verify = vi.spyOn(files, 'verify')
+  const selected = await f.store.readManifest(built.buildId), sessionId = randomUUID()
+  expect(verify).not.toHaveBeenCalled()
+  let enter!: () => void, finish!: () => void
+  const entered = new Promise<void>(resolve => { enter = resolve }), barrier = new Promise<void>(resolve => { finish = resolve })
+  verify.mockImplementationOnce(async (...args) => { enter(); await barrier; return original(...args) })
+  const acquired = f.store.acquire(selected, sessionId)
+  await entered
+  try { await expect(f.store.prune(0)).rejects.toThrow('BUILD_STORE_BUSY') } finally { finish() }
+  expect(await acquired).toEqual(selected)
+  expect(verify).toHaveBeenCalledTimes(1)
+  expect(JSON.parse(await readFile(join(f.store.root, 'references', built.buildId, sessionId + '.json'), 'utf8'))).toEqual({ buildId: built.buildId, referenceId: sessionId })
+  await expect(f.store.acquire(selected, sessionId)).rejects.toThrow('BUILD_REFERENCE_EXISTS')
+  expect(await f.store.prune(0)).toEqual({ removed: [], retained: 1 })
+  await f.store.release(built.buildId, sessionId)
+  expect(await f.store.prune(0)).toEqual({ removed: [built.buildId], retained: 0 })
+})
+
+it.each(['bytes', 'manifest', 'malformed', 'removed', 'selection'])('refuses %s changed between metadata selection and acquisition without retaining it', async fault => {
+  const f = await setup(), built = await f.store.prepare(f.capture.captureId), selected = await f.store.readManifest(built.buildId), sessionId = randomUUID()
+  if (fault === 'bytes') await writeFile(join(built.directory, 'app/out/main/main.js'), 'tampered after PREPARE')
+  if (fault === 'manifest') await writeFile(join(f.store.root, 'bundle-' + built.buildId, 'manifest.json'), JSON.stringify({ ...selected, runtimeId: 'f'.repeat(64) }))
+  if (fault === 'malformed') await writeFile(join(f.store.root, 'bundle-' + built.buildId, 'manifest.json'), '{invalid json')
+  if (fault === 'removed') await f.store.prune(0)
+  if (fault === 'selection') selected.captureId = 'f'.repeat(64)
+  await expect(f.store.acquire(selected, sessionId)).rejects.toThrow(fault === 'removed' ? 'BUILD_SELECTION_UNAVAILABLE' : fault === 'selection' ? 'BUILD_SELECTION_CHANGED' : 'BUILD_INTEGRITY_FAILED')
+  expect(await readdir(join(f.store.root, 'references', built.buildId)).catch(() => [])).toEqual([])
+  expect(await readdir(f.store.root)).not.toContain('store.lock')
+})
+
+it.each(['stop', 'crash', 'tamper', 'guard'])('integrates one Host verification with START and %s cleanup', async fault => {
+  const f = await setup(), built = await f.store.prepare(f.capture.captureId), manifest = await f.store.readManifest(built.buildId)
+  const store = new PreviewSessionStore(join(f.root, 'sessions'))
+  const worktree = join(f.root, 'checkout'); await mkdir(worktree)
+  const profile = { profileId: 'profile', repositoryId: 'repo', revision: 1, runtime: 'ELECTRON_DEV', env: {}, resources: [],
+    command: { executable: process.execPath, executableHash: bytesFingerprint(await readFile(process.execPath)), cwd: '.', args: [], inputs: [] },
+    security: { mode: 'profile_only', requirements: [] }, shutdown: { spawn: 'JOB_LIST_AT_CREATE', graceMs: 0, forceMs: 1000 } }
+  const selection = { repositoryId: 'repo', worktreeId: 'tree', generation: 'generation', profileId: profile.profileId, fingerprint: previewFingerprint(profile) }
+  const snapshot = { buildId: built.buildId, captureId: built.captureId, runtimeId: built.runtimeId, manifest, executable: process.execPath, executableHash: profile.command.executableHash, bundle: built.directory }
+  const guard = vi.fn(async () => {})
+  const prepare = vi.fn(async () => {
+    if (fault === 'tamper') await writeFile(join(built.directory, 'app/out/main/main.js'), 'changed after selection')
+    return { profile, worktree, gitFingerprint: 'source', preflight: { selection, status: 'SUPPORTED', profileRevision: 1 }, guard, snapshot }
+  })
+  const live = { pid: 42, created: '123', rootSignaled: false, knownHandlesClosed: false, activeProcesses: 1, jobClosed: false, eventClosed: false, assignedAtCreation: true, ownerOutsideJob: true, phase: 'RUNNING' }
+  const drained = { ...live, rootSignaled: true, knownHandlesClosed: true, activeProcesses: 0, jobClosed: true, eventClosed: true, phase: 'DRAINED' }
+  const owner = { start: vi.fn(async () => live), inspect: vi.fn(async () => fault === 'crash' ? drained : live), stop: vi.fn(async () => drained), shutdown: vi.fn(async () => {}) }
+  const runner = new RuntimePreviewRunner(store, {} as any, {} as any, undefined, { prepare, builds: { bundles: f.store } } as any)
+  vi.spyOn(runner as any, 'owner').mockImplementation(async () => { if (fault === 'guard') guard.mockRejectedValue(Error('WORKTREE_STALE')); return owner })
+  const verify = vi.spyOn(files, 'verify'), acquire = vi.spyOn(f.store, 'acquire'), operationId = randomUUID()
+  const request = { selection, operationId, snapshot: { captureId: built.captureId, buildId: built.buildId } }
+  const result = await runner.start(request)
+  expect(verify).toHaveBeenCalledTimes(1)
+  expect(acquire).toHaveBeenCalledWith(manifest, result.sessionId)
+  if (fault === 'tamper' || fault === 'guard') {
+    expect(result).toMatchObject({ state: 'FAILED', resources: 'RELEASED', readiness: 'NOT_OBSERVED', failure: fault === 'tamper' ? 'BUILD_INTEGRITY_FAILED' : 'WORKTREE_STALE' })
+    expect(owner.start).not.toHaveBeenCalled()
+  } else {
+    expect(result.state).toBe('RUNNING')
+    expect(owner.start).toHaveBeenCalledOnce()
+    expect((await runner.start(request)).sessionId).toBe(result.sessionId)
+    expect(acquire).toHaveBeenCalledOnce()
+    const terminal = fault === 'crash' ? await runner.inspect(result.sessionId) : await runner.stop(result.sessionId)
+    expect(terminal).toMatchObject({ state: fault === 'crash' ? 'FAILED' : 'STOPPED', resources: 'RELEASED' })
+  }
+  expect(await readdir(join(f.store.root, 'references', built.buildId)).catch(() => [])).toEqual([])
+  expect(store.active()).toBeUndefined()
 })
 it('cannot execute before approval and rejects incomplete or ABI-incompatible artifacts', async () => {
   const f = await setup(); f.approve.mockResolvedValueOnce(false)

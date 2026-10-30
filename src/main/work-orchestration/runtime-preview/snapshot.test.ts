@@ -23,7 +23,7 @@ describe('Snapshot launch admission', () => {
     const selection = { repositoryId: 'repo', worktreeId: 'tree', generation: 'g1', profileId: 'profile', fingerprint: previewFingerprint(profile) }
     const capture = { captureId: 'a'.repeat(64), runtimeId, files: [], selection, profile, source: { head: 'captured-head' } }
     const build = { buildId: 'b'.repeat(64), captureId: capture.captureId, runtimeId, compatibility: runtimeBasis }
-    const builds = { bundles: { root, read: vi.fn(async () => build) }, captures: { get: vi.fn(async () => capture), source: () => join(root, 'source') }, toolchains: { runtimeRoot: () => root } }
+    const builds = { bundles: { root, readManifest: vi.fn(async () => build), read: vi.fn(() => { throw Error('FULL_READ_BEFORE_LEASE_FORBIDDEN') }) }, captures: { get: vi.fn(async () => capture), source: () => join(root, 'source') }, toolchains: { runtimeRoot: () => root } }
     const identity = { repositoryId: 'repo', record: { generation: 'g1', path: root } }
     const target = { guard: vi.fn(), git: { getCoordinationIdentity: vi.fn(async () => identity), getCoordinationSnapshot: vi.fn(() => { throw Error('SOURCE_SCAN_FORBIDDEN') }) } }
     const repositories = { open: vi.fn(async () => target) }
@@ -36,6 +36,8 @@ describe('Snapshot launch admission', () => {
     try {
       const prepared = await f.launch.prepare(f.selection, f.requested)
       expect(prepared.snapshot.buildId).toBe(f.build.buildId)
+      expect(f.builds.bundles.readManifest).toHaveBeenCalledOnce()
+      expect(f.builds.bundles.read).not.toHaveBeenCalled()
       expect(prepared.preflight.snapshot).toEqual(f.capture.source)
       await prepared.guard()
       expect(f.target.git.getCoordinationSnapshot).not.toHaveBeenCalled()

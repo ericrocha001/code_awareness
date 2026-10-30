@@ -1,6 +1,8 @@
 import { mkdir, mkdtemp, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { z } from 'zod'
+import { previewContextManifest } from '../runtime-preview/context-contract'
 import type { BuildCapture, PreviewCaptureStore } from './capture'
 import type { PreviewBuildToolchains } from './toolchain'
 import { compileElectronBundle, electronBuildRecipe, validateBundleFiles, type CompiledBundle } from './electron-build'
@@ -11,6 +13,13 @@ export interface BuildBundle extends CompiledBundle {
 }
 export interface BuildReceipt { captureId: string; buildId: string; runtimeId: string; reused: boolean; directory: string; manifest: BuildBundle }
 export type BuildApproval = (capture: BuildCapture, recipe: string) => Promise<boolean>
+const identityHash = z.string().regex(/^[a-f0-9]{64}$/)
+const bundleSchema = z.object({
+  version: z.literal(1), buildId: identityHash, captureId: identityHash, toolchainId: identityHash, runtimeId: identityHash, recipe: identityHash,
+  source: previewContextManifest.shape.source,
+  files: z.array(z.object({ path: z.string().min(1), bytes: z.number().int().nonnegative(), sha256: identityHash }).strict()).max(100000),
+  compatibility: z.object({ electron: z.string(), node: z.string(), abi: z.string(), platform: z.string(), arch: z.string(), buildNode: z.string(), nativeModules: z.array(z.string()) }).strict()
+}).strict()
 export class PreviewBuildStore {
   private readonly recipe: string
   constructor(readonly root: string, private readonly captures: PreviewCaptureStore, private readonly tools: PreviewBuildToolchains,
@@ -25,14 +34,31 @@ export class PreviewBuildStore {
   }
   private id(id: string) { if (!/^[a-f0-9]{64}$/.test(id)) throw Error('BUILD_ID_INVALID'); return id }
   private directory(id: string) { return join(this.root, 'bundle-' + this.id(id)) }
-  async read(buildId: string): Promise<BuildBundle> {
+  async readManifest(buildId: string): Promise<BuildBundle> {
     const directory = await physical(this.directory(buildId))
-    const manifest = JSON.parse(await readFile(join(directory, 'manifest.json'), 'utf8')) as BuildBundle
+    const content = await readFile(join(directory, 'manifest.json'), 'utf8')
+    let manifest: BuildBundle
+    try { manifest = JSON.parse(content) } catch { throw Error('BUILD_INTEGRITY_FAILED') }
+    if (!bundleSchema.safeParse(manifest).success) throw Error('BUILD_INTEGRITY_FAILED')
     const { buildId: actualId, ...identity } = manifest
     if (manifest.version !== 1 || actualId !== buildId || digest(identity) !== buildId) throw Error('BUILD_INTEGRITY_FAILED')
     validateBundleFiles(manifest.files)
-    await verify(join(directory, 'bundle'), manifest.files)
     return manifest
+  }
+  async read(buildId: string): Promise<BuildBundle> {
+    const manifest = await this.readManifest(buildId)
+    await verify(join(this.directory(buildId), 'bundle'), manifest.files)
+    return manifest
+  }
+  async acquire(selected: BuildBundle, sessionId: string) {
+    if (!z.string().uuid().safeParse(sessionId).success) throw Error('BUILD_REFERENCE_INVALID')
+    const unlock = await this.lock()
+    try {
+      const manifest = await this.read(selected.buildId).catch(error => { if (absent(error)) throw Error('BUILD_SELECTION_UNAVAILABLE'); throw error })
+      if (digest(manifest) !== digest(selected)) throw Error('BUILD_SELECTION_CHANGED')
+      await this.reference(manifest.buildId, sessionId)
+      return manifest
+    } finally { await unlock() }
   }
   async prepare(captureId: string, guard: () => void = () => {}): Promise<BuildReceipt> {
     const release = await this.lock()
@@ -93,10 +119,14 @@ export class PreviewBuildStore {
     const release = await this.lock()
     try {
       await this.read(buildId)
-      const directory = join(this.root, 'references', this.id(buildId)); await mkdir(directory, { recursive: true })
-      await writeFile(join(directory, referenceId + '.json'), JSON.stringify({ buildId, referenceId }), { flag: 'wx' })
+      await this.reference(buildId, referenceId)
       return referenceId
     } finally { await release() }
+  }
+  private async reference(buildId: string, referenceId: string) {
+    const directory = join(this.root, 'references', this.id(buildId)); await mkdir(directory, { recursive: true })
+    try { await writeFile(join(directory, referenceId + '.json'), JSON.stringify({ buildId, referenceId }), { flag: 'wx' }) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw Error('BUILD_REFERENCE_EXISTS'); throw error }
   }
   async release(buildId: string, referenceId: string) {
     if (!/^[a-zA-Z0-9-]{1,128}$/.test(referenceId)) throw Error('BUILD_REFERENCE_INVALID')
