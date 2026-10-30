@@ -39,7 +39,7 @@ async function smallJson(path: string): Promise<Record<string, unknown>> {
 function validSession(value: unknown): value is ProviderSession {
   if (!value || typeof value !== 'object') return false
   const v = value as ProviderSession
-  return typeof v.session_id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(v.session_id) && v.agent === 'codex' && typeof v.status === 'string' && typeof v.worktree_path === 'string'
+  return typeof v.session_id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(v.session_id) && typeof v.agent === 'string' && v.agent.toLowerCase() === 'codex' && typeof v.status === 'string' && typeof v.worktree_path === 'string'
 }
 const date = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined
 

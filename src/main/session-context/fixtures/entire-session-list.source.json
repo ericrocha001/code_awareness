@@ -1,0 +1,10 @@
+{
+  "provenance": {
+    "cli": "Entire CLI",
+    "version": "0.12.2",
+    "release": "https://github.com/entireio/cli/releases/tag/v0.12.2",
+    "command": "entire session list --json"
+  },
+  "sanitization": "Real session UUID, user-specific absolute paths, repository branch, and private prompts redacted or substituted with test placeholders.",
+  "license": "MIT"
+}

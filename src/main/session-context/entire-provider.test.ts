@@ -34,7 +34,7 @@ async function setup() {
   expect(await runReadOnly('git', ['init', '-q'], root, 4096)).toMatchObject({ code: 0, limited: false })
   const calls: string[][] = []
   let transcript = fixture(root)
-  const metadata = { session_id: 'session-1', agent: 'codex', status: 'ENDED', worktree_path: root, ended_at: '2026-10-30T01:00:00Z' }
+  let metadata: any = { session_id: 'session-1', agent: 'codex', status: 'ENDED', worktree_path: root, ended_at: '2026-10-30T01:00:00Z' }
   const run: CommandRunner = async (exe, args, cwd, limit, consume) => {
     calls.push(args)
     if (exe === 'git') return runReadOnly(exe, args, cwd, limit)
@@ -46,10 +46,10 @@ async function setup() {
       for (let n = 0; n < bytes.length; n += 7) if (consume && !consume(bytes.subarray(n, n + 7))) { limited = true; break }
       return { code: limited ? -1 : 0, text: '', limited }
     }
-    return { code: 0, text: JSON.stringify(args[1] === 'list' ? [metadata] : metadata), limited: false }
+    return { code: 0, text: JSON.stringify(args[1] === 'list' ? (Array.isArray(metadata) ? metadata : [metadata]) : (Array.isArray(metadata) ? metadata[0] : metadata)), limited: false }
   }
   const provider = new EntireProvider(store, root, () => {}, run)
-  return { base, root, store, provider, calls, metadata, configPath, localPath, setTranscript: (text: string) => { transcript = text } }
+  return { base, root, store, provider, calls, metadata, configPath, localPath, setTranscript: (text: string) => { transcript = text }, setMetadata: (m: unknown) => { metadata = m } }
 }
 
 describe('Entire read-only Codex ingestion', () => {
@@ -94,6 +94,42 @@ describe('Entire read-only Codex ingestion', () => {
     rmSync(f.configPath)
     expect(await f.provider.refresh()).toMatchObject({ coverage: 'UNAVAILABLE', code: 'PROVIDER_UNAVAILABLE' })
     expect(f.store.count()).toBe(0)
+  })
+  it('accepts both Codex and codex agent casing and rejects non-codex agents', async () => {
+    const f = await setup()
+    f.metadata.agent = 'Codex'
+    expect(await f.provider.refresh()).toMatchObject({ imported: 1, skipped: 0, transcriptImported: false })
+    const id = f.store.byProvider('session-1')!.id
+    expect(f.store.session(id).agent).toBe('codex')
+
+    const f2 = await setup()
+    f2.metadata.agent = 'claude'
+    expect(await f2.provider.refresh()).toMatchObject({ imported: 0, skipped: 1, coverage: 'PARTIAL' })
+    expect(f2.store.count()).toBe(0)
+  })
+  it('discovers sessions using literal Entire 0.12.2 metadata fixture and rejects non-codex agents', async () => {
+    const fixturePath = join(process.cwd(), 'src/main/session-context/fixtures/entire-session-list.json')
+    const rawFixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as Array<{ session_id: string; agent: string; status: string; worktree_path: string }>
+    expect(rawFixture[0].agent).toBe('Codex')
+
+    const f = await setup()
+    const sessionList = rawFixture.map(row => ({ ...row, worktree_path: f.root }))
+    f.setMetadata(sessionList)
+
+    const discovery = await f.provider.refresh()
+    expect(discovery).toMatchObject({ imported: 1, skipped: 0, transcriptImported: false })
+    expect(f.calls.some(args => args.includes('--transcript'))).toBe(false)
+
+    const session = f.store.byProvider(sessionList[0].session_id as string)!
+    expect(session).toBeDefined()
+    expect(session.agent).toBe('codex')
+    expect(session.state).toBe('ENDED')
+
+    const f2 = await setup()
+    const nonCodexList = rawFixture.map(row => ({ ...row, worktree_path: f2.root, agent: 'Claude' }))
+    f2.setMetadata(nonCodexList)
+    expect(await f2.provider.refresh()).toMatchObject({ imported: 0, skipped: 1, coverage: 'PARTIAL' })
+    expect(f2.store.count()).toBe(0)
   })
   it('bounds malformed/huge input and subprocess output, supports exec JSONL and coalesces refresh', async () => {
     const publicParser = new CodexParser()
