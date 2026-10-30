@@ -1,3 +1,5 @@
+import type { RemoteEvidence } from './git-evidence-types'
+
 export interface GitManagementContext {
   projectId: string
   revision: number
@@ -50,6 +52,7 @@ export interface GitLocalChange {
   previousPath?: string
 }
 export interface GitManagementState {
+  remoteEvidence?: RemoteEvidence
   branch: string | null
   head: string | null
   upstream: string | null
@@ -67,6 +70,12 @@ export interface GitManagementState {
 export interface GitOverview {
   state: GitManagementState
   changes: GitLocalChange[]
+}
+export interface GitCheckoutSynchronization {
+  state: GitManagementState
+  evidence: RemoteEvidence
+  action: 'FETCH' | 'PULL_FF_ONLY' | 'COMPARE' | 'REVIEW_PUBLICATION' | null
+  blockedReason: string | null
 }
 export interface GitCommitFile {
   path: string
@@ -107,7 +116,7 @@ export type GitBasicAction =
   | { action: 'STAGE' | 'UNSTAGE'; paths: string[] }
   | { action: 'COMMIT'; message: string }
   | { action: 'CREATE' | 'SWITCH'; branch: string }
-  | { action: 'FETCH' | 'PULL_FF_ONLY' | 'PUSH' }
+  | { action: 'FETCH' | 'PULL_FF_ONLY' | 'PUSH'; contextual?: true }
 export interface GitMutationRequest {
   context: GitManagementContext
   operationId: string

@@ -1,10 +1,11 @@
-import React, { useEffect, useRef, useState } from 'react'
+import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import type {
   GitBasicAction,
   GitHistoryPage,
   GitManagementContext,
   GitMutationRequest,
-  GitOverview
+  GitOverview,
+  GitManagementState
 } from '../../../../shared/types/git-management-types'
 
 const errorText: Record<string, string> = {
@@ -24,23 +25,36 @@ const errorText: Record<string, string> = {
   PROJECT_CONTEXT_CHANGED:
     'O projeto ativo mudou. Reabra este repositório para reconciliar a operação.'
 }
-export function GitActions({
-  context,
-  overview,
-  history,
-  refresh,
-  blocked
-}: {
+export interface GitActionsHandle {
+  confirm: (operation: GitBasicAction, snapshot: GitManagementState) => void
+}
+export const GitActions = forwardRef<GitActionsHandle, {
   context: GitManagementContext
   overview: GitOverview
   history: GitHistoryPage | null
   refresh: () => Promise<void>
   blocked: boolean
-}) {
+  onMutationStart?: () => void
+  onLockedChange?: (locked: boolean) => void
+}>(function GitActions({
+  context,
+  overview,
+  history,
+  refresh,
+  blocked,
+  onMutationStart,
+  onLockedChange
+}, ref) {
   const [paths, setPaths] = useState<string[]>([])
   const [message, setMessage] = useState('')
   const [branch, setBranch] = useState('')
-  const [confirmation, setConfirmation] = useState<GitBasicAction | null>(null)
+  const [confirmation, updateConfirmation] = useState<GitBasicAction | null>(null)
+  const confirmationSnapshot = useRef<GitManagementState | null>(null)
+  const setConfirmation = (operation: GitBasicAction | null) => {
+    confirmationSnapshot.current = null
+    updateConfirmation(operation)
+  }
+  const confirmationDialog = useRef<HTMLDivElement>(null)
   const [pending, setPending] = useState<GitMutationRequest | null>(() => {
     try {
       const value = sessionStorage.getItem(
@@ -65,10 +79,19 @@ export function GitActions({
     !!pending ||
     !!overview.state.operation ||
     overview.state.conflictCount > 0
+  useEffect(() => { onLockedChange?.(locked) }, [locked, onLockedChange])
+  useEffect(() => {
+    if (confirmation && confirmationSnapshot.current) confirmationDialog.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [confirmation])
   useEffect(() => {
     setPaths([])
-    setConfirmation(null)
+    if (!confirmationSnapshot.current) setConfirmation(null)
   }, [overview])
+  useImperativeHandle(ref, () => ({ confirm(operation, snapshot) {
+    if (locked) return
+    confirmationSnapshot.current = snapshot
+    updateConfirmation(operation)
+  } }), [locked])
   useEffect(() => {
     mounted.current = true
     return () => {
@@ -90,11 +113,13 @@ export function GitActions({
     activeRequest.current = true
     const request = recover ?? {
       context,
-      snapshot: overview.state,
+      snapshot: confirmationSnapshot.current ?? overview.state,
       operation,
       operationId: crypto.randomUUID()
     }
     persist(request)
+    onMutationStart?.()
+    confirmationSnapshot.current = null
     setBusy(true)
     setPending(request)
     setStatus('Executando operação Git…')
@@ -318,6 +343,7 @@ export function GitActions({
       </details>
       {confirmation && (
         <div
+          ref={confirmationDialog}
           className="gm-confirm"
           role="dialog"
           aria-label="Confirmar operação Git"
@@ -359,4 +385,4 @@ export function GitActions({
       {status && <p role="status">{status}</p>}
     </section>
   )
-}
+})

@@ -978,7 +978,7 @@ export class GitService implements FileListingPort {
 
   async compareCommits(dirPath: string, localHead: string, remoteHead: string): Promise<{ ahead: number; behind: number } | null> {
     try {
-      const counts = (await this.runGit(['rev-list', '--left-right', '--count', `${localHead}...${remoteHead}`], dirPath)).trim().split(/\s+/).map(Number)
+      const counts = (await this.runGit(['rev-list', '--left-right', '--count', `${localHead}...${remoteHead}`], dirPath, { env: this.localReadEnvironment() })).trim().split(/\s+/).map(Number)
       return counts.length === 2 && counts.every(Number.isSafeInteger) ? { ahead: counts[0], behind: counts[1] } : null
     } catch { return null }
   }

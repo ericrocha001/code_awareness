@@ -83,7 +83,8 @@ export class GitManagementController {
   }
   async read<T>(
     context: GitManagementContext,
-    action: (service: GitOperationsService) => Promise<T>
+    action: (service: GitOperationsService) => Promise<T>,
+    atlasInteraction = true
   ): Promise<GitManagementResult<T>> {
     if (
       !context ||
@@ -109,7 +110,7 @@ export class GitManagementController {
       )
     }
     if (!current()) return { success: false, code: 'PROJECT_CONTEXT_CHANGED' }
-    const release = selected!.service.beginAtlasInteraction()
+    const release = atlasInteraction ? selected!.service.beginAtlasInteraction() : () => {}
     try {
       const data = await action(selected!.service)
       return current()
@@ -169,11 +170,12 @@ function validMutation(value: GitMutationRequest): boolean {
     COMMIT: ['action', 'message'],
     CREATE: ['action', 'branch'],
     SWITCH: ['action', 'branch'],
-    FETCH: ['action'],
-    PULL_FF_ONLY: ['action'],
-    PUSH: ['action']
+    FETCH: ['action', 'contextual'],
+    PULL_FF_ONLY: ['action', 'contextual'],
+    PUSH: ['action', 'contextual']
   }
   const allowed = fields[operation.action]
+  if ('contextual' in operation && operation.contextual !== true) return false
   if (
     !Array.isArray(allowed) ||
     Object.keys(operation).some((key) => !allowed.includes(key))
@@ -204,6 +206,8 @@ function validMutation(value: GitMutationRequest): boolean {
 export function registerGitManagementHandlers(
   controller: GitManagementController
 ): void {
+  ipcMain.handle('git-management:checkout-synchronization', (_event, context: GitManagementContext) =>
+    controller.read(context, service => service.getCheckoutSynchronization(), false))
   const validScope = (scope: GitAtlasScope | undefined) => scope === undefined || !!scope && typeof scope === 'object' && !Array.isArray(scope) &&
     Object.keys(scope).every(key => ['kind', 'anchor', 'baseRef', 'focusRef'].includes(key)) &&
     ['CHECKOUT', 'ALL_REFS'].includes(scope.kind) && ['AUTO', 'PRESENT'].includes(scope.anchor) &&

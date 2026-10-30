@@ -320,3 +320,6 @@
  .gm-atlas-legend { margin:0 0 0 42px; }
  .gm-segmented button { padding:8px 14px; }
 }
+.gm-checkout-sync { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 12px; }
+.gm-checkout-sync small { color: var(--text-secondary); }
+.gm-checkout-sync button { white-space: nowrap; }
