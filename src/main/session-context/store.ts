@@ -130,7 +130,7 @@ export class SessionStore {
       for (const { event, text, hash, ordinal } of normalized.slice(prefix)) {
         const allowed = Math.min(LIMITS.event, LIMITS.session - sessionBytes, LIMITS.repository - repositoryBytes)
         const payload = utf8Prefix(text, Math.max(0, allowed)), bytes = Buffer.byteLength(payload)
-        const omission = !event.text ? 'UNAVAILABLE' : payload !== text ? 'LIMIT_REACHED' : null
+        const omission = event.omission ?? (!event.text ? 'UNAVAILABLE' : payload !== text ? 'LIMIT_REACHED' : null)
         partial ||= omission === 'LIMIT_REACHED'
         const eventId = randomUUID()
         const files = [...new Set((event.files ?? []).map(safeFile).filter((file): file is string => !!file))].slice(0, 10)

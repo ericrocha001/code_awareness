@@ -22,6 +22,7 @@ export interface EventInput {
   files?: string[]
   sourcePosition: number
   providerEventId?: string
+  omission?: 'LIMIT_REACHED' | 'REDACTED' | 'UNAVAILABLE'
 }
 export interface SessionRow {
   id: string; providerSessionId: string; providerVersion: string; agent: string
