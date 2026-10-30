@@ -1,0 +1,14 @@
+[
+  {
+    "session_id": "0192e852-0000-7000-8000-000000000001",
+    "agent": "Codex",
+    "model": "gpt-6.1-sol",
+    "status": "ended",
+    "branch": "feature/session-context",
+    "worktree_id": "worktree-fixture",
+    "worktree_path": "__WORKTREE_PATH__",
+    "started_at": "2026-10-30T16:38:47.823151-03:00",
+    "ended_at": "2026-10-30T16:39:36.120756-03:00",
+    "turns": 1
+  }
+]
