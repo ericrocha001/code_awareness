@@ -52,6 +52,8 @@ it('opens the existing confirmation from the checkout signal and never probes fo
   expect(api.getGitCheckoutSynchronization).toHaveBeenCalledTimes(reads)
   fireEvent.click(pull)
   const dialog = await screen.findByRole('dialog', { name: 'Confirmar operação Git' })
+  expect(within(dialog).getByText('Atualizar branch')).toBeTruthy()
+  expect(within(dialog).getByText(/Atualizar topic a partir de origin\/topic.*sem criar merge/)).toBeTruthy()
   expect(api.mutateGitManagement).not.toHaveBeenCalled()
   fireEvent.click(within(dialog).getByText('Confirmar operação'))
   await waitFor(() => expect(api.mutateGitManagement).toHaveBeenCalledTimes(1))

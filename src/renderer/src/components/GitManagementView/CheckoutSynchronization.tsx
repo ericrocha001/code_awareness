@@ -1,6 +1,16 @@
 import React from 'react'
 import type { GitCheckoutSynchronization } from '../../../../shared/types/git-management-types'
 
+const unavailableReason = {
+  NO_UPSTREAM: 'esta branch não tem upstream configurado',
+  REMOTE_MISSING: 'o remoto configurado não está disponível',
+  REMOTE_REF_MISSING: 'a referência upstream não existe no remoto',
+  TIMEOUT: 'o remoto não respondeu no prazo',
+  ACCESS_DENIED: 'acesso ao remoto recusado; verifique suas credenciais',
+  NETWORK_ERROR: 'falha de conexão com o remoto',
+  INVALID_REMOTE_RESPONSE: 'o remoto devolveu uma resposta inválida'
+}
+
 export function CheckoutSynchronization({ value, loading, error, blocked, verify, act }: {
   value: GitCheckoutSynchronization | null; loading: boolean; error: string; blocked: boolean
   verify: () => void; act: (value: GitCheckoutSynchronization) => void
@@ -8,7 +18,7 @@ export function CheckoutSynchronization({ value, loading, error, blocked, verify
   if (loading) return <span className="gm-checkout-sync" role="status">Verificando remoto…</span>
   const evidence = value?.evidence
   if (!evidence || evidence.status !== 'VERIFIED') return <span className="gm-checkout-sync">
-    <span role="status">{error || (evidence?.status === 'UNAVAILABLE' ? `Não foi possível verificar: ${evidence.reason === 'NO_UPSTREAM' ? 'upstream não configurado' : evidence.reason}` : 'Estado local do último fetch; remoto ainda não verificado.')}</span>
+    <span role="status">{error || (evidence?.status === 'UNAVAILABLE' ? `Não foi possível verificar: ${unavailableReason[evidence.reason]}.` : 'Estado local do último fetch; remoto ainda não verificado.')}</span>
     {value?.blockedReason && <small>{value.blockedReason}</small>}
     <button disabled={blocked} onClick={verify}>Verificar remoto</button>
   </span>
