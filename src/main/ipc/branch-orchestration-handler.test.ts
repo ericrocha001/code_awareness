@@ -2,6 +2,18 @@ import { expect, it, vi } from 'vitest'
 import { BranchOrchestrationController } from './branch-orchestration-handler'
 vi.mock('electron', () => ({ ipcMain: { handle: vi.fn() } }))
 const context = { projectId: 'a', revision: 1 }
+it('prepares an explicit PVO selection without invoking the V5 runtime or accepting extra commands', async () => {
+  const prepare = vi.fn(async (_input, guard) => { guard(); return { success: false, code: 'BUILD_APPROVAL_REQUIRED', captureId: 'a'.repeat(64) } })
+  const runtime = { handle: vi.fn() }
+  const controller = new BranchOrchestrationController({ getState: () => ({ project: { id: 'a' }, revision: 1 }) as any }, async () => false,
+    undefined, undefined, undefined, undefined, runtime as any, { prepare } as any)
+  controller.bind({} as any, {} as any, '/a')
+  const request = { selection: { repositoryId: 'a', worktreeId: 'tree', generation: 'generation', profileId: 'profile', fingerprint: 'a'.repeat(64) }, allowDirty: true }
+  expect(await controller.request({ context, operation: { action: 'PREVIEW_PREPARE', request } })).toMatchObject({ success: true, data: { kind: 'PREVIEW_PREPARE', result: { code: 'BUILD_APPROVAL_REQUIRED' } } })
+  expect(runtime.handle).not.toHaveBeenCalled()
+  expect(await controller.request({ context, operation: { action: 'PREVIEW_PREPARE', request: { ...request, command: 'forbidden' } } } as any)).toEqual({ success: false, code: 'INVALID_ARGUMENT' })
+  expect(prepare).toHaveBeenCalledTimes(1)
+})
 it('rejects unavailable preview access, arbitrary commands and stale UI context', async () => {
   const inventory = vi.fn(async () => ({ repositoryId: 'a' }))
   const controller = new BranchOrchestrationController({ getState: () => ({ project: { id: 'a' }, revision: 1 }) as any }, async () => false)

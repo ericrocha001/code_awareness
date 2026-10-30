@@ -105,6 +105,8 @@ import { RuntimePreviewRunner, CatalogPreviewLaunchAuthority } from './work-orch
 import { PreviewSessionStore } from './work-orchestration/runtime-preview/session-store'
 import { RuntimePreviewOperations } from './work-orchestration/runtime-preview/operations'
 import { PreviewPreflightService } from './work-orchestration/preview-preflight'
+import { PreviewBuildPreparation } from './work-orchestration/preview-build/preparation'
+import { confirmPreviewBuild } from './work-orchestration/preview-build/authorization'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
@@ -453,13 +455,15 @@ app.whenReady().then(async () => {
       runtimePreview = new RuntimePreviewOperations(previewRepositories, previewProfiles, sessions, runner, confirmPreview, validationLedger, continuumSession, branchProfiles)
     } catch { console.error('[Runtime Preview] PREVIEW_HELPER_UNAVAILABLE') }
   }
+  const buildPreparation = !isRuntimePreview() && process.platform === 'win32' ? new PreviewBuildPreparation(join(previewDirectory, 'build-store'), previewRepositories, previewProfiles,
+    (capture, recipe) => !!mainWindow && !mainWindow.isDestroyed() ? confirmPreviewBuild(mainWindow, capture, recipe) : Promise.resolve(false)) : undefined
   const branchOrchestration = new BranchOrchestrationController(activeProjects, async preview => {
     const response = await dialog.showMessageBox({ type: 'warning', title: 'Liberar e remover Worktree',
       message: 'Confirme que a IDE e os agentes desta Worktree foram encerrados e liberaram o diretório.',
       detail: `${preview.worktree.path}\nBranch preservada: ${preview.preservationRef}\nHEAD: ${preview.preservationHead}\n\nA remoção será revalidada. A branch e seus commits serão mantidos.`,
       buttons: ['Cancelar', 'IDE e agentes liberados; remover Worktree'], defaultId: 0, cancelId: 0, noLink: true })
     return response.response === 1
-  }, continuumSession, previewProfiles, confirmPreview, previewRepositories, runtimePreview)
+  }, continuumSession, previewProfiles, confirmPreview, previewRepositories, runtimePreview, buildPreparation)
   registerBranchOrchestrationHandlers(branchOrchestration)
   powerMonitor.on('suspend', () => workOrchestration.pause(true))
   powerMonitor.on('resume', () => workOrchestration.pause(false))
