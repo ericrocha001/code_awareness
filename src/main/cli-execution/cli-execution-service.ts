@@ -35,6 +35,7 @@ export class CliExecutionService {
   private readonly executions = new Map<string, CliExecutionRecord>()
   private readonly executionBuffers = new Map<string, CliOutputBuffer>()
   private activeOperationId: string | null = null
+  private activeExecutionToken: string | null = null
 
   constructor(options: CliExecutionServiceOptions) {
     this.repoRoot = realpathSync(options.repoRoot)
@@ -56,6 +57,7 @@ export class CliExecutionService {
   setEnabled(enabled: boolean): void {
     this.enabled = enabled
     if (!enabled) {
+      this.activeExecutionToken = null
       void this.abortActive('CLI_EXECUTION_DISABLED')
       this.invalidateAllProposals()
     }
@@ -100,7 +102,7 @@ export class CliExecutionService {
     return proposal
   }
 
-  async start(input: StartCliExecutionInput): Promise<CliExecutionSnapshot> {
+  start(input: StartCliExecutionInput): CliExecutionSnapshot {
     if (!this.enabled) {
       throw new Error('CLI_EXECUTION_DISABLED: Local execution capability is currently disabled')
     }
@@ -112,7 +114,7 @@ export class CliExecutionService {
       throw new Error('INVALID_ARGUMENT: proposalId is required')
     }
 
-    // Check idempotency for existing operationId
+    // Check idempotency for existing operationId synchronously
     const existing = this.executions.get(input.operationId)
     if (existing) {
       if (existing.proposalId !== input.proposalId) {
@@ -121,7 +123,7 @@ export class CliExecutionService {
       return this.getSnapshot(input.operationId)
     }
 
-    // Enforce single execution concurrency
+    // Enforce single execution concurrency synchronously
     if (this.activeOperationId !== null) {
       throw new Error(`CLI_EXECUTION_BUSY: active operation ${this.activeOperationId} in progress`)
     }
@@ -144,11 +146,10 @@ export class CliExecutionService {
       throw new Error('PROPOSAL_REFUSED: Proposal was rejected')
     }
 
-    // Verify repository checkout fingerprint hasn't changed
-    const currentFingerprint = await this.getFingerprintFn()
-    if (currentFingerprint !== proposal.checkoutFingerprint) {
-      throw new Error('CHECKOUT_CHANGED: Repository state changed since proposal was prepared')
-    }
+    // Atomic reservation before any await
+    const token = randomUUID()
+    this.activeOperationId = input.operationId
+    this.activeExecutionToken = token
 
     const record: CliExecutionRecord = {
       operationId: input.operationId,
@@ -159,14 +160,27 @@ export class CliExecutionService {
     }
 
     this.executions.set(input.operationId, record)
-    this.activeOperationId = input.operationId
 
-    // Request native approval
+    // Trigger approval and execution flow asynchronously in background (non-blocking MCP)
+    void this.runApprovalAndExecution(input.operationId, input.proposalId, token)
+
+    return this.getSnapshot(input.operationId)
+  }
+
+  private async runApprovalAndExecution(
+    operationId: string,
+    proposalId: string,
+    token: string
+  ): Promise<void> {
+    const record = this.executions.get(operationId)
+    const proposal = this.proposals.get(proposalId)
+    if (!record || !proposal) return
+
     let approved = false
     try {
       approved = await this.approvalHandler({
         proposalId: proposal.proposalId,
-        operationId: input.operationId,
+        operationId,
         command: proposal.command,
         repositoryDirectory: this.repoRoot,
         repositoryId: this.repositoryId,
@@ -176,23 +190,75 @@ export class CliExecutionService {
       approved = false
     }
 
+    // CRITICAL: Revalidate everything after the approval await
+    if (this.activeOperationId !== operationId || this.activeExecutionToken !== token) {
+      // Operation was cancelled, project changed, or shutdown occurred during dialog
+      return
+    }
+
+    if (record.status !== 'AWAITING_APPROVAL') {
+      return
+    }
+
+    if (!this.enabled) {
+      record.status = 'CANCELLED'
+      record.diagnostic = 'SERVICE_DISABLED_DURING_APPROVAL'
+      record.finishedAt = new Date().toISOString()
+      this.activeOperationId = null
+      this.activeExecutionToken = null
+      return
+    }
+
+    if (proposal.status !== 'PENDING' || Date.now() > Date.parse(proposal.expiresAt)) {
+      proposal.status = 'EXPIRED'
+      record.status = 'REFUSED'
+      record.diagnostic = 'PROPOSAL_EXPIRED_DURING_APPROVAL'
+      record.finishedAt = new Date().toISOString()
+      this.activeOperationId = null
+      this.activeExecutionToken = null
+      return
+    }
+
+    // Revalidate repository checkout fingerprint
+    let currentFingerprint = ''
+    try {
+      currentFingerprint = await this.getFingerprintFn()
+    } catch {
+      currentFingerprint = 'CHECKOUT_FINGERPRINT_ERROR'
+    }
+
+    if (this.activeOperationId !== operationId || this.activeExecutionToken !== token) {
+      return
+    }
+
+    if (currentFingerprint !== proposal.checkoutFingerprint) {
+      record.status = 'REFUSED'
+      proposal.status = 'REFUSED'
+      record.diagnostic = 'CHECKOUT_CHANGED'
+      record.finishedAt = new Date().toISOString()
+      this.activeOperationId = null
+      this.activeExecutionToken = null
+      return
+    }
+
     if (!approved) {
       record.status = 'REFUSED'
       proposal.status = 'REFUSED'
-      record.finishedAt = new Date().toISOString()
       record.diagnostic = 'NATIVE_APPROVAL_REFUSED'
+      record.finishedAt = new Date().toISOString()
       this.activeOperationId = null
-      return this.getSnapshot(input.operationId)
+      this.activeExecutionToken = null
+      return
     }
 
+    // Consume proposal and transition to RUNNING
     proposal.status = 'CONSUMED'
     record.status = 'RUNNING'
-    record.startedAt = new Date().toISOString()
 
     try {
       const completionPromise = this.supervisor.launch(proposal.command)
       if (this.supervisor.output) {
-        this.executionBuffers.set(input.operationId, this.supervisor.output)
+        this.executionBuffers.set(operationId, this.supervisor.output)
       }
 
       completionPromise
@@ -209,8 +275,9 @@ export class CliExecutionService {
           record.diagnostic = `EXECUTION_FAILED: ${err instanceof Error ? err.message : String(err)}`
         })
         .finally(() => {
-          if (this.activeOperationId === input.operationId) {
+          if (this.activeOperationId === operationId) {
             this.activeOperationId = null
+            this.activeExecutionToken = null
           }
         })
     } catch (err) {
@@ -218,9 +285,8 @@ export class CliExecutionService {
       record.finishedAt = new Date().toISOString()
       record.diagnostic = `SPAWN_FAILED: ${err instanceof Error ? err.message : String(err)}`
       this.activeOperationId = null
+      this.activeExecutionToken = null
     }
-
-    return this.getSnapshot(input.operationId)
   }
 
   get(input: GetCliExecutionInput): CliExecutionSnapshot {
@@ -244,6 +310,7 @@ export class CliExecutionService {
       record.status = 'CANCELLED'
       record.diagnostic = 'CANCELLED_BEFORE_APPROVAL'
       record.finishedAt = new Date().toISOString()
+      this.activeExecutionToken = null
       if (this.activeOperationId === input.operationId) {
         this.activeOperationId = null
       }
@@ -257,6 +324,7 @@ export class CliExecutionService {
       record.durationMs = res.durationMs
       record.finishedAt = new Date().toISOString()
       if (res.diagnostic) record.diagnostic = res.diagnostic
+      this.activeExecutionToken = null
       if (this.activeOperationId === input.operationId) {
         this.activeOperationId = null
       }
@@ -267,6 +335,7 @@ export class CliExecutionService {
   }
 
   async shutdown(): Promise<void> {
+    this.activeExecutionToken = null
     await this.abortActive('SERVICE_SHUTDOWN')
     this.invalidateAllProposals()
   }
@@ -274,13 +343,18 @@ export class CliExecutionService {
   private async abortActive(reason: string): Promise<void> {
     if (this.activeOperationId) {
       const record = this.executions.get(this.activeOperationId)
-      if (record && (record.status === 'RUNNING' || record.status === 'AWAITING_APPROVAL')) {
+      if (record && record.status === 'AWAITING_APPROVAL') {
+        record.status = 'CANCELLED'
+        record.diagnostic = reason
+        record.finishedAt = new Date().toISOString()
+      } else if (record && record.status === 'RUNNING') {
         await this.supervisor.cancel()
         record.status = 'CANCELLED'
         record.diagnostic = reason
         record.finishedAt = new Date().toISOString()
       }
       this.activeOperationId = null
+      this.activeExecutionToken = null
     }
   }
 

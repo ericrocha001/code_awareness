@@ -4,6 +4,22 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { CliExecutionService } from './cli-execution-service'
 
+
+async function waitForStatus(
+  service: CliExecutionService,
+  operationId: string,
+  statuses: string[],
+  timeoutMs = 6000
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const snap = service.get({ operationId })
+    if (statuses.includes(snap.status)) return snap
+    await new Promise((r) => setTimeout(r, 30))
+  }
+  return service.get({ operationId })
+}
+
 describe('U1 — CLI Execution Service & Local Process Supervision', () => {
   let testDir: string
   let service: CliExecutionService
@@ -35,20 +51,13 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
     expect(proposal.proposalId).toBeDefined()
     expect(proposal.command.args).toContain('-e')
 
-    const startSnapshot = await service.start({
+    service.start({
       proposalId: proposal.proposalId,
       operationId: 'op-inoffensive-1'
     })
 
-    expect(startSnapshot.status).toBe('RUNNING')
-
-    // Wait for completion
-    let snapshot = service.get({ operationId: 'op-inoffensive-1' })
-    const deadline = Date.now() + 5000
-    while (snapshot.status === 'RUNNING' && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 50))
-      snapshot = service.get({ operationId: 'op-inoffensive-1' })
-    }
+    // Wait until approval + launch completes (AWAITING_APPROVAL -> RUNNING -> SUCCEEDED)
+    const snapshot = await waitForStatus(service, 'op-inoffensive-1', ['SUCCEEDED', 'FAILED', 'REFUSED'])
 
     expect(snapshot.status).toBe('SUCCEEDED')
     expect(snapshot.exitCode).toBe(0)
@@ -63,17 +72,12 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
       args: ['-e', 'console.log(process.argv[1])', spaceArg]
     })
 
-    await service.start({
+    service.start({
       proposalId: proposal.proposalId,
       operationId: 'op-spaces-1'
     })
 
-    let snapshot = service.get({ operationId: 'op-spaces-1' })
-    const deadline = Date.now() + 5000
-    while (snapshot.status === 'RUNNING' && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 50))
-      snapshot = service.get({ operationId: 'op-spaces-1' })
-    }
+    const snapshot = await waitForStatus(service, 'op-spaces-1', ['SUCCEEDED', 'FAILED', 'REFUSED'])
 
     expect(snapshot.status).toBe('SUCCEEDED')
     expect(snapshot.stdout.trim()).toBe(spaceArg)
@@ -118,10 +122,13 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
       args: ['-e', script]
     })
 
-    await service.start({
+    service.start({
       proposalId: proposal.proposalId,
       operationId: 'op-tree-cancel'
     })
+
+    // Wait for RUNNING (approval done)
+    await waitForStatus(service, 'op-tree-cancel', ['RUNNING'])
 
     // Poll until grandchild pid is logged
     let grandchildPid: number | null = null
@@ -173,18 +180,13 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
       args: ['-e', script]
     })
 
-    await timeoutService.start({
+    timeoutService.start({
       proposalId: proposal.proposalId,
       operationId: 'op-tree-timeout'
     })
 
-    // Wait for timeout (over 1s)
-    let snapshot = timeoutService.get({ operationId: 'op-tree-timeout' })
-    const deadline = Date.now() + 4000
-    while (snapshot.status === 'RUNNING' && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 100))
-      snapshot = timeoutService.get({ operationId: 'op-tree-timeout' })
-    }
+    // Wait until execution finishes (AWAITING_APPROVAL -> RUNNING -> TIMED_OUT)
+    const snapshot = await waitForStatus(timeoutService, 'op-tree-timeout', ['TIMED_OUT', 'SUCCEEDED', 'FAILED'], 5000)
 
     expect(snapshot.status).toBe('TIMED_OUT')
     await timeoutService.shutdown()
@@ -202,17 +204,12 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
       args: ['-e', script]
     })
 
-    await service.start({
+    service.start({
       proposalId: proposal.proposalId,
       operationId: 'op-pagination-1'
     })
 
-    const deadline = Date.now() + 5000
-    let snap = service.get({ operationId: 'op-pagination-1' })
-    while (snap.status === 'RUNNING' && Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 50))
-      snap = service.get({ operationId: 'op-pagination-1' })
-    }
+    const snap = await waitForStatus(service, 'op-pagination-1', ['SUCCEEDED', 'FAILED', 'REFUSED'])
 
     expect(snap.status).toBe('SUCCEEDED')
     expect(snap.totalStdoutBytes).toBeGreaterThan(20000)
@@ -235,14 +232,17 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
       args: ['-e', 'setTimeout(() => {}, 2000)']
     })
 
-    const snap1 = await service.start({
+    service.start({
       proposalId: proposal.proposalId,
       operationId: 'op-idempotent-1'
     })
+
+    // Wait until approval completes and status is RUNNING
+    const snap1 = await waitForStatus(service, 'op-idempotent-1', ['RUNNING'])
     expect(snap1.status).toBe('RUNNING')
 
     // Second call with same proposalId and operationId returns same active execution
-    const snap2 = await service.start({
+    const snap2 = service.start({
       proposalId: proposal.proposalId,
       operationId: 'op-idempotent-1'
     })
@@ -262,17 +262,20 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
       args: ['-e', 'console.log("second")']
     })
 
-    await service.start({
+    service.start({
       proposalId: proposal1.proposalId,
       operationId: 'op-concurrency-1'
     })
 
-    await expect(
-      service.start({
+    // Wait until first operation is RUNNING before attempting second
+    await waitForStatus(service, 'op-concurrency-1', ['RUNNING'])
+
+    expect(
+      () => service.start({
         proposalId: proposal2.proposalId,
         operationId: 'op-concurrency-2'
       })
-    ).rejects.toThrow(/CLI_EXECUTION_BUSY/)
+    ).toThrow(/CLI_EXECUTION_BUSY/)
 
     await service.cancel({ operationId: 'op-concurrency-1' })
   })

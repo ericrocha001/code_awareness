@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
-import { Activity, ArrowRight, ArrowUpRight, Blocks, CheckCircle2, CircleHelp, Clock3, Code2, FileDown, Folder, GitBranch, GraduationCap, Infinity, Layers3, Loader2, Power, Radio, Server, ShieldCheck, Timer, TriangleAlert, Users, Zap, type LucideIcon } from 'lucide-react'
+import { Activity, ArrowRight, ArrowUpRight, Blocks, CheckCircle2, CircleHelp, Clock3, Code2, FileDown, Folder, GitBranch, GraduationCap, Infinity, Layers3, Loader2, Power, Radio, Server, ShieldCheck, Terminal, Timer, TriangleAlert, Users, Zap, type LucideIcon } from 'lucide-react'
 import type { ChannelAvailability, ChannelState } from '../../../../shared/types/channel-state-types'
 import type { ChannelActivityCounters } from '../../../../shared/types/channel-types'
 import { DiagnosticModal } from '../SystemHealth/DiagnosticModal'
 import './ChannelView.css'
 import { LocalMcpSetup } from './LocalMcpSetup'
+import { updateSettings } from '../../utils/update-settings'
 
 const availabilityCopy: Record<ChannelAvailability, { title: string; description: string }> = {
   DISABLED: { title: 'Acesso remoto desativado', description: 'Ative o acesso remoto para disponibilizar o projeto ativo ao ChatGPT.' },
@@ -44,6 +45,7 @@ export function ChannelView({ active = true }: { active?: boolean }) {
   const [error, setError] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [pending, setPending] = useState(false)
+  const [cliPending, setCliPending] = useState(false)
   const [showDiagnostic, setShowDiagnostic] = useState(false)
   const mounted = useRef(false)
   const updating = useRef(false)
@@ -81,6 +83,25 @@ export function ChannelView({ active = true }: { active?: boolean }) {
     finally { updating.current = false; if (mounted.current) setPending(false) }
   }
 
+  async function toggleCli() {
+    if (!state || updating.current) return
+    updating.current = true
+    setCliPending(true); setError(null)
+    try {
+      await updateSettings(current => ({
+        ...current,
+        cliExecutionEnabled: !state.cliExecutionEnabled
+      }))
+      receive(await window.codeAwareness.getChannelState())
+    } catch {
+      if (mounted.current) setError('Não foi possível atualizar a execução local CLI.')
+    } finally {
+      updating.current = false
+      if (mounted.current) setCliPending(false)
+    }
+  }
+
+
   const health = state?.functionalHealth
   const activity = state?.activity
   const capabilities = activity ? Object.entries(activity.byCapability) : []
@@ -94,6 +115,7 @@ export function ChannelView({ active = true }: { active?: boolean }) {
         <div className="channel-header-controls">
           <div className="channel-project"><Folder size={19} aria-hidden="true" /><div><span className="channel-label">Projeto ativo</span><strong title={state?.activeProject?.name}>{state ? state.activeProject?.name ?? 'Nenhum projeto ativo' : 'Não verificado'}</strong></div></div>
           <button type="button" className="channel-action" disabled={!state || pending} aria-busy={pending} onClick={toggle}>{pending ? <Loader2 className="channel-spinner" size={16} aria-hidden="true" /> : <Power size={16} aria-hidden="true" />}{pending ? 'Atualizando…' : state?.remoteAccessEnabled ? 'Desativar acesso remoto' : 'Ativar acesso remoto'}</button>
+          <button type="button" className="channel-action channel-action-cli" disabled={!state || pending || cliPending} aria-busy={cliPending} onClick={toggleCli}>{cliPending ? <Loader2 className="channel-spinner" size={16} aria-hidden="true" /> : <Terminal size={16} aria-hidden="true" />}{cliPending ? 'Atualizando CLI…' : state?.cliExecutionEnabled ? 'Desativar execução CLI' : 'Ativar execução CLI'}</button>
         </div>
         {state && copy && <div className="channel-status" aria-label="Disponibilidade" role="status" aria-live="polite"><StatusBadge tone={mainTone}>{readyTitle}</StatusBadge><p>{copy.description}</p>{state.availability === 'READY' && health && <span className="channel-header-health">{healthCopy[health.status]}</span>}</div>}
       </header>
@@ -106,6 +128,7 @@ export function ChannelView({ active = true }: { active?: boolean }) {
           <div className="channel-section-heading"><h2 id="channel-path-title"><Radio size={19} aria-hidden="true" />Caminho operacional</h2><span>Controle local do acesso</span></div>
           <dl className="channel-path">
             <PathStep icon={ShieldCheck} label="Acesso remoto · ChatGPT" value={!state.installationConfigured ? 'Configuração necessária' : state.remoteAccessEnabled ? 'Ativado' : 'Desativado'} detail={!state.installationConfigured ? 'Instalação requer atenção' : undefined} tone={!state.installationConfigured ? 'warning' : state.remoteAccessEnabled ? 'healthy' : 'neutral'} />
+            <PathStep icon={Terminal} label="Execução local CLI" value={state.cliExecutionEnabled ? 'Ativado' : 'Desativado'} tone={state.cliExecutionEnabled ? 'healthy' : 'neutral'} />
             <PathStep icon={Server} label={state.transport === 'relay' ? 'Relay' : 'Transporte de desenvolvimento'} value={connectionCopy[state.connectionStatus] ?? 'Indisponível'} tone={connectionTone(state.connectionStatus)} />
             <PathStep icon={Blocks} label="MCP Online" value={connectionCopy[state.mcpStatus] ?? 'Indisponível'} tone={connectionTone(state.mcpStatus)} />
             <PathStep icon={Folder} label="Projeto atendido" value={state.activeProject?.name ?? 'Aguardando projeto'} tone={state.activeProject ? 'healthy' : 'neutral'} />

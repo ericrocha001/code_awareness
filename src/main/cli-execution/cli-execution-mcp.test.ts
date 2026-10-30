@@ -21,6 +21,22 @@ function createFakeNavigation(): ContextNavigationPort {
   }
 }
 
+
+async function waitForStatus(
+  service: CliExecutionService,
+  operationId: string,
+  statuses: string[],
+  timeoutMs = 6000
+): Promise<any> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const snap = service.get({ operationId })
+    if (statuses.includes(snap.status)) return snap
+    await new Promise((r) => setTimeout(r, 30))
+  }
+  return service.get({ operationId })
+}
+
 describe('U2 — Local Authorization & MCP Integration', () => {
   let testDir: string
   let service: CliExecutionService
@@ -124,13 +140,13 @@ describe('U2 — Local Authorization & MCP Integration', () => {
       args: ['-v']
     })
 
-    const res = await executeCliTool(service, 'start_cli_execution', {
+    await executeCliTool(service, 'start_cli_execution', {
       proposalId: prep.proposalId,
       operationId: 'op-refused-1'
     })
 
-    expect(res.isError).toBeUndefined()
-    const snap = JSON.parse(textContent(res.content[0]))
+    // start returns AWAITING_APPROVAL; poll until approval settles
+    const snap = await waitForStatus(service, 'op-refused-1', ['REFUSED', 'SUCCEEDED', 'FAILED'])
     expect(snap.status).toBe('REFUSED')
     expect(snap.diagnostic).toBe('NATIVE_APPROVAL_REFUSED')
   })
@@ -141,11 +157,12 @@ describe('U2 — Local Authorization & MCP Integration', () => {
       args: ['-e', 'setTimeout(() => {}, 2000)']
     })
 
-    const res1 = await executeCliTool(service, 'start_cli_execution', {
+    await executeCliTool(service, 'start_cli_execution', {
       proposalId: prep.proposalId,
       operationId: 'op-replay-1'
     })
-    const snap1 = JSON.parse(textContent(res1.content[0]))
+    // Wait until approval done and process is RUNNING
+    const snap1 = await waitForStatus(service, 'op-replay-1', ['RUNNING'])
     expect(snap1.status).toBe('RUNNING')
 
     // Second call with identical arguments
@@ -153,7 +170,8 @@ describe('U2 — Local Authorization & MCP Integration', () => {
       proposalId: prep.proposalId,
       operationId: 'op-replay-1'
     })
-    const snap2 = JSON.parse(textContent(res2.content[0]))
+    // Replay with same args returns existing RUNNING execution
+    const snap2 = service.get({ operationId: 'op-replay-1' })
     expect(snap2.operationId).toBe('op-replay-1')
     expect(snap2.status).toBe('RUNNING')
 
@@ -195,13 +213,15 @@ describe('U2 — Local Authorization & MCP Integration', () => {
     // Simulate checkout fingerprint change (git branch switch or new commit)
     fingerprintValue = 'mutated-fingerprint-456'
 
-    const res = await executeCliTool(service, 'start_cli_execution', {
+    await executeCliTool(service, 'start_cli_execution', {
       proposalId: prep.proposalId,
       operationId: 'op-checkout-changed'
     })
-    expect(res.isError).toBe(true)
-    const err = JSON.parse(textContent(res.content[0]))
-    expect(err.code).toBe('CHECKOUT_CHANGED')
+
+    // CHECKOUT_CHANGED is detected after fingerprint revalidation post-approval
+    const snap = await waitForStatus(service, 'op-checkout-changed', ['REFUSED', 'FAILED'])
+    expect(snap.status).toBe('REFUSED')
+    expect(snap.diagnostic).toBe('CHECKOUT_CHANGED')
   })
 
   it('Property 8: Fluxo E2E através do ChannelMcpAdapter (callTool)', async () => {
@@ -229,7 +249,9 @@ describe('U2 — Local Authorization & MCP Integration', () => {
     })
     expect(startRes.isError).toBeUndefined()
     const startSnap = JSON.parse(textContent(startRes.content[0]))
-    expect(startSnap.status).toBe('RUNNING')
+    // start_cli_execution returns immediately with AWAITING_APPROVAL; poll for RUNNING
+    const startSnap2 = await waitForStatus(service, 'op-mcp-e2e', ['RUNNING', 'SUCCEEDED'])
+    expect(startSnap2.status).toBe('RUNNING')
 
     // 3. get_cli_execution
     let getSnap: any

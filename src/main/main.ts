@@ -112,6 +112,7 @@ import { RepositoryFileIngress } from './repository-file-ingress/repository-file
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { CliExecutionService } from './cli-execution/cli-execution-service'
 import { confirmCliExecution } from './cli-execution/cli-authorization'
+import { captureValidationSource, validationSourceFingerprint } from './validation-execution/validation-source'
 
 
 
@@ -523,9 +524,26 @@ app.whenReady().then(async () => {
       repoRoot: project.path,
       repositoryId: gitRepositoryId ?? null,
       enabledByDefault: settingsService.loadSettings().cliExecutionEnabled ?? false,
+      getFingerprint: async () => {
+        try {
+          const source = await captureValidationSource(project.path, gitRepositoryId ?? null)
+          return validationSourceFingerprint(source)
+        } catch {
+          try {
+            const snap = await gitService.captureWorktreeReadSnapshot(project.path)
+            return `${gitRepositoryId ?? project.path}:${snap.head ?? Date.now()}`
+          } catch {
+            return `${project.path}:${Date.now()}`
+          }
+        }
+      },
       approvalHandler: async (req) => {
-        if (!mainWindow || mainWindow.isDestroyed() || activeProjects?.getState().project?.id !== project.id) return false
-        return confirmCliExecution(mainWindow, req)
+        if (!mainWindow || mainWindow.isDestroyed() || activeProjects?.getState().project?.id !== project.id || activeProjects?.getState().revision !== gitProjectRevision) return false
+        const approved = await confirmCliExecution(mainWindow, req)
+        if (!approved || activeProjects?.getState().project?.id !== project.id || activeProjects?.getState().revision !== gitProjectRevision) {
+          return false
+        }
+        return true
       }
     })
     activeWorktreeValidation = gitRepositoryId ? new GitWorktreeValidation(project.path, gitService, {

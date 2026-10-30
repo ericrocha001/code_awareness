@@ -12,7 +12,7 @@ let state: ChannelState
 let receive: (state: ChannelState) => void
 const unsubscribe = vi.fn()
 beforeEach(() => {
-  state = { revision: 1, availability: 'READY', remoteAccessEnabled: true, transport: 'relay', connectionStatus: 'CONNECTED', mcpStatus: 'RUNNING', activeProject: { id: 'A', name: 'project-a' }, installationConfigured: true,
+  state = { revision: 1, availability: 'READY', remoteAccessEnabled: true, cliExecutionEnabled: false, transport: 'relay', connectionStatus: 'CONNECTED', mcpStatus: 'RUNNING', activeProject: { id: 'A', name: 'project-a' }, installationConfigured: true,
     lastError: null, functionalHealth: { status: 'UNKNOWN', lastSuccessfulToolCall: null, lastSuccessfulAt: null, lastFailedToolCall: null, lastFailedAt: null, lastFailureStage: null, lastError: null, lastStageLatencyMs: null, lastDeadlineRemainingMs: null },
     activity: { activeRequests: 0, peakConcurrentRequests: 0, totalRequests: 0, succeededRequests: 0, failedRequests: 0, timedOutRequests: 0, latency: { completedRequests: 0, totalDurationMs: 0, lastDurationMs: null, maxDurationMs: null }, byTool: {}, byCapability: {} }
   }
@@ -22,6 +22,8 @@ beforeEach(() => {
     getChannelState: vi.fn(async () => structuredClone(state)),
     onChannelChanged: vi.fn(callback => { receive = callback; return unsubscribe }),
     connect: vi.fn(async () => ({ success: true })), disconnect: vi.fn(async () => ({ success: true })),
+    loadSettings: vi.fn(async () => ({ cliExecutionEnabled: state.cliExecutionEnabled })),
+    saveSettings: vi.fn(async (settings: any) => { state.cliExecutionEnabled = !!settings.cliExecutionEnabled; return { success: true } }),
     getSystemHealthState: vi.fn(async () => ({ status: 'UNKNOWN', stale: false, lastFailure: { operation: 'read_code', at: '2026-10-06T10:00:00Z', traceId: 'trace', firstFailedBoundary: 'CodeScope Execution', lastSuccessfulStage: 'MCP Dispatch', reasonCode: 'INVALID_TARGET', stages: [{ stage: 'CodeScope Execution', status: 'FAILED', durationMs: 10, reasonCode: 'INVALID_TARGET' }] }, lastFunctionalProof: null })),
     onSystemHealthChanged: vi.fn(() => () => {})
   } as unknown as Window['codeAwareness']
@@ -188,7 +190,7 @@ it('keeps a four-stage operational path and surfaces installation attention in r
   state.availability = 'SETUP_REQUIRED'; state.installationConfigured = false
   render(<ChannelView />)
   const path = await screen.findByRole('region', { name: 'Caminho operacional' })
-  expect(within(path).getAllByRole('term').map(term => term.textContent)).toEqual(['Acesso remoto · ChatGPT', 'Relay', 'MCP Online', 'Projeto atendido'])
+  expect(within(path).getAllByRole('term').map(term => term.textContent)).toEqual(['Acesso remoto · ChatGPT', 'Execução local CLI', 'Relay', 'MCP Online', 'Projeto atendido'])
   expect(within(path).getByText('Configuração necessária')).toBeTruthy()
   expect(within(path).getByText('Instalação requer atenção')).toBeTruthy()
 })
@@ -199,5 +201,20 @@ it('keeps activity runtime-scoped without illustrated history, charts or invente
   expect(screen.getByText('Nesta execução')).toBeTruthy()
   expect(document.body.textContent).not.toMatch(/Last 24 hours|últimas 24 horas|tendência|período anterior|CodeScope/i)
   expect(screen.getAllByRole('combobox')).toHaveLength(2)
-  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Diagnosticar problemas', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Abrir diagnóstico'])
+  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Ativar execução CLI', 'Diagnosticar problemas', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Abrir diagnóstico'])
+})
+
+it('toggles local CLI execution through settings and reflects state reactively', async () => {
+  render(<ChannelView />)
+  await screen.findByText('Pronto para acesso remoto')
+
+  const toggleBtn = screen.getByRole('button', { name: 'Ativar execução CLI' })
+  expect(toggleBtn).toBeTruthy()
+  expect(screen.getByText('Execução local CLI').nextElementSibling?.textContent).toBe('Desativado')
+
+  fireEvent.click(toggleBtn)
+
+  await waitFor(() => {
+    expect(window.codeAwareness.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ cliExecutionEnabled: true }))
+  })
 })
