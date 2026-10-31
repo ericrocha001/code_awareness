@@ -177,6 +177,7 @@ export class GitOperationsService {
   }
   async executeManagementMutation(request: GitMutationRequest, assertCurrent: () => void): Promise<GitOperationalResult> {
     const { operation, snapshot, operationId } = request
+    if (this.automaticFetchRequest && this.automaticFetchRequest.operationId !== operationId) return { value: { code: 'GIT_OPERATION_IN_PROGRESS' }, isError: true }
     let name: string, args: Record<string, unknown>
     if (operation.action === 'STAGE' || operation.action === 'UNSTAGE') {
       name = 'stage_git_changes'; args = { mode: operation.action, paths: operation.paths, expectedIndexRevision: snapshot.indexRevision, expectedWorktreeRevision: snapshot.worktreeRevision }
@@ -1140,7 +1141,49 @@ export class GitOperationsService {
     })
   }
 
-  clearAtlasCache() { this.atlasReader?.invalidate(true); this.atlasReader = undefined; this.atlasCores.clear() }
+  clearAtlasCache() { this.remoteEpoch++; this.atlasReader?.invalidate(true); this.atlasReader = undefined; this.atlasCores.clear() }
+  private remoteEpoch = 0
+  private remotePending?: Promise<GitCheckoutSynchronization>
+  private automaticFetchRequest?: GitMutationRequest
+  private automaticFetch = () => false
+  private publicationPolicy?: (branch: string) => Promise<{ defaultBranch: string; protected: boolean; canPush: boolean }>
+  bindManagementPublicationPolicy(reader: NonNullable<GitOperationsService['publicationPolicy']>) { this.publicationPolicy = reader }
+  bindAtlasRemotePolicy(enabled: () => boolean) { this.automaticFetch = enabled }
+  async observeCheckoutSynchronization(context: GitMutationRequest['context'], assertCurrent: () => void): Promise<GitCheckoutSynchronization> {
+    if (this.remotePending) return this.remotePending
+    const epoch = this.remoteEpoch
+    const guard = () => {
+      assertCurrent()
+      if (epoch !== this.remoteEpoch || this.coordinationIdentity && !this.coordinationIdentity.isActive()) fail('PROJECT_CONTEXT_CHANGED')
+    }
+    const run = async () => {
+      const observed = await this.getCheckoutSynchronization()
+      guard()
+      const evidence = observed.evidence
+      const remoteKey = evidence.status === 'VERIFIED' ? JSON.stringify([context, observed.state.branch, evidence.remote, evidence.ref, evidence.remoteHead]) : null
+      if (remoteKey && this.lastRemoteHead !== remoteKey) {
+        this.atlasPrRevision++
+        this.lastRemoteHead = remoteKey
+      }
+      if (!this.automaticFetchRequest && (!this.automaticFetch() || observed.action !== 'FETCH' || observed.blockedReason)) return observed
+      const request = this.automaticFetchRequest ??= { context, operationId: randomUUID(), snapshot: observed.state, operation: { action: 'FETCH', contextual: true } }
+      const receipt = await this.executeManagementMutation(request, () => {
+        guard()
+        if (!this.automaticFetch()) fail('GIT_STATE_CHANGED')
+      })
+      guard()
+      if (['OPERATION_OUTCOME_UNKNOWN', 'RECEIPT_UNAVAILABLE', 'RECEIPT_BUSY', 'RECEIPT_CAPACITY_EXCEEDED'].includes(String(receipt.value.code))) return { ...observed, action: null, blockedReason: 'O resultado do fetch automático ainda não foi confirmado. Verifique novamente para recuperar a mesma operação.', automaticFetch: 'PENDING' as const }
+      this.automaticFetchRequest = undefined
+      if (receipt.isError) return { ...observed, automaticFetch: 'FAILED' as const }
+      return { ...await this.getCheckoutSynchronization(), automaticFetch: 'FETCHED' as const }
+    }
+    const promise = run().finally(() => { if (this.remotePending === promise) this.remotePending = undefined })
+    this.remotePending = promise
+    return promise
+  }
+  private lastRemoteHead?: string
+  private atlasPrRevision = 0
+  private atlasPrReadRevision = 0
   private atlasActivity = 0
   beginAtlasInteraction() { this.atlasActivity++; return () => { this.atlasActivity-- } }
   stopAtlasCollection() { this.atlasReader?.stopCollection() }
@@ -1161,13 +1204,13 @@ export class GitOperationsService {
   async getAtlasCheckoutState(lightweight = false) {
     return this.git.getAtlasObservation(this.repoRoot, lightweight, true)
   }
-  private atlasPullRequests?: (inventory: BranchInventory) => Promise<BranchPullRequests>
+  private atlasPullRequests?: (inventory: BranchInventory, force?: boolean) => Promise<BranchPullRequests>
   private readonly atlasCores = new AtlasCache(8, 2 * 1024 * 1024)
   private readonly atlasCorePending = new Map<string, Promise<GitAtlasCoreEvidence>>()
   private readonly atlasPrPending = new Map<string, Promise<GitAtlasPrEvidence>>()
   private atlasCoreKey(request: GitAtlasEvidenceQuery) { return JSON.stringify([request.contextKey, request.scope, request.window, request.limit ?? 100, request.cursor ?? null]) }
 
-  bindAtlasPullRequests(reader: (inventory: BranchInventory) => Promise<BranchPullRequests>) {
+  bindAtlasPullRequests(reader: (inventory: BranchInventory, force?: boolean) => Promise<BranchPullRequests>) {
     this.atlasPullRequests = reader
   }
 
@@ -1255,7 +1298,8 @@ export class GitOperationsService {
     if (inventory.repositoryId !== core.repositoryId) fail('REPOSITORY_CONTEXT_CHANGED')
     await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey, request.scope)
     let branches: BranchPullRequests
-    try { branches = await this.atlasPullRequests(inventory) }
+    const remoteRevision = this.atlasPrRevision
+    try { branches = await this.atlasPullRequests(inventory, remoteRevision !== this.atlasPrReadRevision); this.atlasPrReadRevision = remoteRevision }
     catch {
       await this.atlas().assertSnapshot(core.gitSnapshot, request.contextKey, request.scope)
       if (!this.coordinationIdentity?.isActive()) fail('REPOSITORY_CONTEXT_CHANGED')
@@ -1365,7 +1409,17 @@ export class GitOperationsService {
     if (evidence.relationship === 'IN_SYNC') return result(null)
     if (evidence.tracking === 'TRACKING_STALE' || evidence.relationship === 'UNKNOWN' || !evidence.remoteCounts)
       return evidence.remote === 'origin' ? result('FETCH') : result(null, `Fetch contextual disponível somente para origin; upstream em ${evidence.remote}.`)
-    if (evidence.relationship === 'AHEAD') return result('REVIEW_PUBLICATION', 'Push direto depende de política e autorização comprovadas; revise os commits e use o fluxo autorizado de publicação.')
+    if (evidence.relationship === 'AHEAD') {
+      if (this.publicationPolicy && evidence.remote === 'origin' && evidence.ref === `refs/heads/${state.branch}` && !['main', 'master'].includes(state.branch!)) {
+        try {
+          const primary = await this.git.getAtlasSelectedBase(this.repoRoot)
+          const policy = await this.publicationPolicy(state.branch!)
+          if (!sameCheckoutSnapshot(state, await this.getState())) fail('GIT_STATE_CHANGED')
+          if (primary !== `refs/heads/${state.branch}` && primary !== `refs/remotes/${evidence.remote}/${state.branch}` && policy.canPush === true && policy.protected === false && policy.defaultBranch && policy.defaultBranch !== state.branch) return result('PUSH')
+        } catch (error) { if (error instanceof GitOperationsError && error.code === 'GIT_STATE_CHANGED') throw error }
+      }
+      return result('REVIEW_PUBLICATION', 'Push direto depende de política e autorização comprovadas; revise os commits e use o fluxo autorizado de publicação.')
+    }
     if (evidence.relationship === 'DIVERGED') return result('COMPARE')
     if (evidence.remote !== 'origin') return result(null, `O executor atual usa origin; upstream ${evidence.remote}/${evidence.ref.replace('refs/heads/', '')} não suportado pelo atalho.`)
     if (evidence.ref !== `refs/heads/${state.branch}`) return result(null, 'O upstream difere de origin/<branch ativa>; Pull contextual indisponível para este destino.')

@@ -72,9 +72,10 @@ export interface GitOverview {
   changes: GitLocalChange[]
 }
 export interface GitCheckoutSynchronization {
+  automaticFetch?: 'FETCHED' | 'FAILED' | 'PENDING'
   state: GitManagementState
   evidence: RemoteEvidence
-  action: 'FETCH' | 'PULL_FF_ONLY' | 'COMPARE' | 'REVIEW_PUBLICATION' | null
+  action: 'FETCH' | 'PULL_FF_ONLY' | 'PUSH' | 'COMPARE' | 'REVIEW_PUBLICATION' | null
   blockedReason: string | null
 }
 export interface GitCommitFile {

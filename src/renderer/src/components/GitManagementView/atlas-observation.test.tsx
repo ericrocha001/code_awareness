@@ -45,6 +45,52 @@ function setup() {
   return api
 }
 
+it('revisits PR evidence independently of unchanged Git and shows a later remote event without a fictitious node', async () => {
+  const api = setup()
+  const evidence = { phase: 'PR_ENRICHMENT', gitSnapshot: page.snapshot, repositoryId: 'repo', worktreeId: 'tree', worktreeGeneration: 'g', coverage: 'COMPLETE', pullRequests: [], events: [] }
+  api.getGitAtlasPrEvidence.mockResolvedValue(ok(evidence) as any)
+  render(<GitManagementView state={state} />); await tick(1500)
+  const reads = api.getGitAtlasCore.mock.calls.length
+  api.getGitAtlasPrEvidence.mockResolvedValue(ok({ ...evidence, events: [{ kind: 'PR_CREATED', prNumber: 77, at: '2026-10-21T12:00:00Z', observedAt: '2026-10-21T12:01:00Z', source: 'GITHUB_REST' }] }) as any)
+  await tick(60000)
+  expect(screen.getByLabelText('Eventos remotos fora do histórico local').textContent).toContain('PR #77 · criado remotamente')
+  expect(api.getGitAtlasCore).toHaveBeenCalledTimes(reads)
+  expect(document.querySelectorAll('.gm-atlas-node')).toHaveLength(1)
+})
+
+it('keeps a larger remote catalog in a bounded disclosure while surfacing its latest event', async () => {
+  const api = setup()
+  const events = Array.from({ length: 40 }, (_, index) => ({ kind: 'PR_CREATED', prNumber: index + 1, at: new Date(Date.UTC(2026, 10, index + 1)).toISOString(), observedAt: '2026-12-11T12:00:00Z' }))
+  api.getGitAtlasPrEvidence.mockResolvedValue(ok({ phase: 'PR_ENRICHMENT', gitSnapshot: page.snapshot, repositoryId: 'repo', worktreeId: 'tree', worktreeGeneration: 'g', coverage: 'COMPLETE', pullRequests: [], events }) as any)
+  render(<GitManagementView state={state} />); await tick(1500)
+  const activity = screen.getByLabelText('Eventos remotos fora do histórico local')
+  expect(activity.querySelector(':scope > button')?.textContent).toContain('PR #40')
+  expect(activity.querySelector('details')?.open).toBe(false)
+  expect(activity.querySelector('summary')?.textContent).toContain('Mais 39 eventos')
+  expect(document.querySelectorAll('.gm-atlas-node')).toHaveLength(1)
+})
+
+it('reconciles fetched tracking once while preserving the live behind observation and checkout marker', async () => {
+  const api = setup(), remote = 'b'.repeat(40)
+  const local = { ...branch('main'), upstream: 'origin/main' }
+  const tracking = { ...branch('origin/main'), ref: 'refs/remotes/origin/main', kind: 'REMOTE' as const, upstream: null }
+  const initial = { ...page, refs: [local, tracking] } as GitAtlasPage
+  const delivered = (git: GitAtlasPage) => ({ ...core(git), checkout: { ...core(git).checkout, upstream: 'origin/main' } })
+  api.getGitAtlasCore.mockResolvedValue(ok(delivered(initial)))
+  const sync = (head: string, behind: number) => ok({ state: { head: sha, branch: 'main', upstream: 'origin/main' }, evidence: { status: 'VERIFIED', remote: 'origin', ref: 'refs/heads/main', remoteHead: head, trackingHead: head, tracking: 'TRACKING_CURRENT', relationship: behind ? 'BEHIND' : 'IN_SYNC', remoteCounts: { ahead: 0, behind }, observedAt: new Date().toISOString() }, action: null, blockedReason: null })
+  api.getGitCheckoutSynchronization.mockResolvedValue(sync(sha, 0) as any)
+  render(<GitManagementView state={state} />); await tick(1500)
+  const reads = api.getGitAtlasCore.mock.calls.length
+  const changed = { ...initial, snapshot: 'new', refs: [local, { ...tracking, sha: remote }], nodes: [...initial.nodes, { ...initial.nodes[0], sha: remote, subject: 'External merge', parents: [sha] }] }
+  api.getGitAtlasCore.mockResolvedValue(ok(delivered(changed)))
+  api.getGitCheckoutSynchronization.mockResolvedValue(sync(remote, 1) as any)
+  fireEvent.focus(window); await tick(1500)
+  expect(api.getGitAtlasCore).toHaveBeenCalledTimes(reads + 1)
+  expect(document.querySelector('.gm-checkout-sync')?.textContent).toContain('1 commit atrás')
+  expect(document.querySelectorAll('.gm-checkout-marker')).toHaveLength(1)
+  expect(screen.getByRole('button', { name: /External merge/ })).toBeTruthy()
+})
+
 it('keeps the delivered revision stable without SQLite and reconciles two decorations at the same SHA once', async () => {
   const api = setup(); render(<GitManagementView state={state} />); await tick(1500)
   await tick(100)
@@ -61,7 +107,7 @@ it('keeps the delivered revision stable without SQLite and reconciles two decora
   expect(option('external-a')).toBeTruthy()
   expect(option('external-b')).toBeTruthy()
   expect(api.getGitAtlasCore).toHaveBeenCalledTimes(initial.core + 1)
-  expect(api.getGitAtlasCore.mock.calls.at(-1)?.[0]).toMatchObject({ scope: { kind: 'CHECKOUT' }, window: 'ALL', limit: 100 })
+  expect(api.getGitAtlasCore.mock.calls.at(-1)?.[0]).toMatchObject({ scope: { kind: 'ALL_REFS' }, window: 'ALL', limit: 100 })
   expect(api.getGitAtlasCore.mock.calls.at(-1)?.[0].refresh).toBeUndefined()
   await tick(12000)
   expect(api.getGitAtlasCore).toHaveBeenCalledTimes(initial.core + 1)

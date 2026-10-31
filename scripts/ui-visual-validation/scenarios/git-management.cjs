@@ -103,7 +103,9 @@ exports.run = async (ctx) => {
     secondRoot,
     nonGitRoot,
     ctx.projectRoot,
-    proof ? path.join(ctx.temporary, 'atlas-cache') : undefined
+    proof ? path.join(ctx.temporary, 'atlas-cache') : undefined,
+    proof?.automaticFetch === true,
+    proof?.directPublication === true
   )
   if (proof) proof.prepare(backend)
   await build({

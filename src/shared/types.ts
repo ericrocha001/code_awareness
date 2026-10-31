@@ -20,6 +20,7 @@ export interface ProjectPreferences {
 }
 
 export interface AppSettings {
+  gitManagement?: { automaticFetch?: boolean }
   lastActiveRepositoryId?: string
   hiddenNavigationItems?: string[]
   ngrokDomain?: string
