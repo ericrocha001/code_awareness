@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -32,6 +33,35 @@ function setup() {
 function events(n: number): EventInput[] { return Array.from({ length: n }, (_, index) => ({ type: index === 487 ? 'ERROR' : 'AGENT_UPDATE', text: index === 487 ? 'unique failure evidence: token=private-value' : `progress ${index}`, sourcePosition: index + 1 })) }
 
 describe('Session Context progressive MCP disclosure', () => {
+  it('keeps projected literal pages within the wire budget and preserves exact bytes, cursors and metadata', async () => {
+    const f = setup()
+    for (const text of ['public '.repeat(4000), ('"\\\n🧪').repeat(4000)]) {
+      const imported = f.store.ingest(sessionInput('public-' + text.length), [{ type: 'INPUT', text, sourcePosition: 1 }])
+      const event = f.store.events(imported.sessionId, {}, 0, 1)[0]
+      const stored = f.store.event(imported.sessionId, event.id)
+      let cursor: string | undefined, literal = '', offset = 0, pages = 0
+      do {
+        const result = await f.adapter.callTool('read_agent_session_event', { sessionId: imported.sessionId, eventId: event.id, expectedRevision: imported.revision, cursor })
+        const first = result.content[0]
+        if (first.type !== 'text') throw new Error('EXPECTED_TEXT')
+        const page = JSON.parse(first.text)
+        expect(result.structuredContent).toEqual(page)
+        expect(Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 1, result }))).toBeLessThanOrEqual(SESSION_RESPONSE_BUDGETS.read_agent_session_event)
+        expect(page).toMatchObject({ sessionId: imported.sessionId, eventId: event.id, revision: imported.revision, provenance: 'OBSERVED_FROM_PROVIDER', untrusted: true, sourcePosition: 1, payloadDigest: createHash('sha256').update(stored.text ?? '').digest('hex') })
+        expect(page.range).toEqual({ startByte: offset, endByte: offset + Buffer.byteLength(page.content) })
+        expect(page.omission).toBe(stored.omission)
+        expect(page.sanitized).toBe(!!stored.sanitized)
+        literal += page.content; offset = page.range.endByte; cursor = page.nextCursor; pages++
+      } while (cursor)
+      expect(literal).toBe(stored.text)
+      expect(literal).not.toContain('�')
+      expect(pages).toBeGreaterThan(1)
+      const stale = await f.adapter.callTool('read_agent_session_event', { sessionId: imported.sessionId, eventId: event.id, expectedRevision: imported.revision + 1 })
+      expect(stale.isError).toBe(true)
+      expect(stale.structuredContent).toBeUndefined()
+    }
+  })
+
   it('finds a specific failure in 740 events with four real Channel HTTP calls and no transcript expansion', async () => {
     const f = setup()
     f.store.ingest(sessionInput('large-session'), events(740))

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 import { ContextNavigationError } from '../../shared/types/context-navigation-types'
 import type { ContextNavigationPort } from '../core/context/context-navigation-port'
+import { bindProjectNavigation } from '../core/context/project-context-navigation'
 import { createEfficiencyFixture } from '../core/context/context-efficiency-fixture'
 import { serializeDiscovery, serializeRelationships, serializeInspectFiles, serializeReadCode, serializeReferences, serializeSymbolDependencies, serializeSymbolHierarchy } from '../core/context/context-navigation-serializer'
 import { ChannelMcpAdapter } from './channel-mcp-adapter'
@@ -37,6 +38,40 @@ function createNavigation(): ContextNavigationPort {
 }
 
 describe('ChannelMcpAdapter', () => {
+  it('projects the selected session event with its schema, literal text and all metadata while preserving errors', async () => {
+    const content = 'public literal 🧪\r\n${source}\t"quoted"\\tail'
+    const args = { sessionId: 'session-public', eventId: 'event-public', expectedRevision: 2 }
+    const payload = {
+      sessionId: args.sessionId, eventId: args.eventId, revision: 2, content, range: { startByte: 0, endByte: Buffer.byteLength(content) },
+      coverage: 'PARTIAL', complete: false, partial: true, omission: 'LIMIT_REACHED', sanitized: true,
+      untrusted: true, claimsVerified: false, provenance: 'OBSERVED_FROM_PROVIDER', sourcePosition: 7,
+      payloadDigest: createHash('sha256').update(content).digest('hex'), nextCursor: 'opaque-public-cursor'
+    }
+    const legacy = { content: [{ type: 'text' as const, text: JSON.stringify(payload) }] }
+    const call = vi.fn(async (_name: string, _args: unknown) => legacy)
+    const adapter = new ChannelMcpAdapter({ projectId: 'repo', repoRoot: 'repo', navigation: bindProjectNavigation(createNavigation(), 'repo'), sessionContext: { call } })
+    expect(adapter.listTools().find(tool => tool.name === 'read_agent_session_event')!.outputSchema)
+      .toMatchObject({ type: 'object', properties: { content: { type: 'string' } }, required: ['content'], additionalProperties: true })
+    const result = await adapter.callTool('read_agent_session_event', args)
+    expect(call).toHaveBeenCalledExactlyOnceWith('read_agent_session_event', args)
+    expect(result.content).toEqual(legacy.content)
+    expect(result.structuredContent).toEqual(payload)
+    expect(result.structuredContent).toEqual(JSON.parse(textContent(result.content[0])))
+    expect(result.structuredContent?.content).toBe(content)
+    const failure = { content: [{ type: 'text' as const, text: '{"code":"REVISION_CONFLICT"}' }], isError: true as const }
+    call.mockResolvedValueOnce(failure)
+    const rejected = await adapter.callTool('read_agent_session_event', { ...args, expectedRevision: 1 })
+    expect(rejected).toEqual(failure)
+    expect(rejected.structuredContent).toBeUndefined()
+    call.mockResolvedValueOnce({ ...legacy, isError: true } as typeof legacy)
+    expect((await adapter.callTool('read_agent_session_event', args)).structuredContent).toBeUndefined()
+    call.mockResolvedValueOnce({ content: [{ type: 'text', text: '{}' }] })
+    expect((await adapter.callTool('read_agent_session_event', args)).structuredContent).toBeUndefined()
+    for (const name of ['list_agent_sessions', 'inspect_agent_session', 'list_agent_session_events']) {
+      expect(adapter.listTools().find(tool => tool.name === name)?.outputSchema).toBeUndefined()
+    }
+  })
+
   it.each(['read_artifact_section', 'read_worktree_file'])('exposes %s data explicitly without changing legacy text or source fields', async name => {
     const adapter = new ChannelMcpAdapter(createNavigation(), 'repo')
     const data = { content: 'literal 🚀\r\n${source}', revision: 2, start: 10, end: 35, nextCursor: 'opaque' }
