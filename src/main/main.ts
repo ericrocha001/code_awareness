@@ -3,7 +3,7 @@
 */
 
 import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage, powerMonitor } from 'electron'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync, realpathSync } from 'fs'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'node:url'
 import { registerFileHandlers } from './ipc/file-handler'
@@ -112,7 +112,8 @@ import { RepositoryFileIngress } from './repository-file-ingress/repository-file
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { CliExecutionService } from './cli-execution/cli-execution-service'
 import { confirmCliExecution } from './cli-execution/cli-authorization'
-import { captureValidationSource, validationSourceFingerprint } from './validation-execution/validation-source'
+import { createCliProjectAuthority } from './cli-execution/cli-project-authority'
+import { locateCliJobOwner } from './cli-execution/windows/cli-job-owner-locator'
 
 
 
@@ -524,19 +525,21 @@ app.whenReady().then(async () => {
       repoRoot: project.path,
       repositoryId: gitRepositoryId ?? null,
       enabledByDefault: settingsService.loadSettings().cliExecutionEnabled ?? false,
-      getFingerprint: async () => {
-        try {
-          const source = await captureValidationSource(project.path, gitRepositoryId ?? null)
-          return validationSourceFingerprint(source)
-        } catch {
-          try {
-            const snap = await gitService.captureWorktreeReadSnapshot(project.path)
-            return `${gitRepositoryId ?? project.path}:${snap.head ?? Date.now()}`
-          } catch {
-            return `${project.path}:${Date.now()}`
-          }
+      ownerPath: (() => {
+        try { return locateCliJobOwner(app.getAppPath(), app.isPackaged ? process.resourcesPath : '') }
+        catch { return join(app.getAppPath(), 'out', 'cli-execution', 'unavailable.exe') }
+      })(),
+      getFingerprint: createCliProjectAuthority({
+        selection: activeProjects!.getState(),
+        getSelection: () => activeProjects!.getState(),
+        findRepository: path => repositoryCatalog?.findByPath(path) ?? null,
+        captureGitIdentity: async path => {
+          const directories = await gitService.getRepositoryDirectories(path)
+          const snapshot = await gitService.captureWorktreeReadSnapshot(path)
+          return { commonDirectory: realpathSync(directories.common), worktreeDirectory: realpathSync(directories.admin),
+            head: snapshot.head, branch: snapshot.branch, operation: snapshot.operation }
         }
-      },
+      }),
       approvalHandler: async (req) => {
         if (!mainWindow || mainWindow.isDestroyed() || activeProjects?.getState().project?.id !== project.id || activeProjects?.getState().revision !== gitProjectRevision) return false
         const approved = await confirmCliExecution(mainWindow, req)

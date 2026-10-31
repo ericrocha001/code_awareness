@@ -8,7 +8,7 @@ using System.Web.Script.Serialization;
 
 internal sealed class CliLaunch
 {
-    public string executable, cwd;
+    public string executable, cwd, commandLine;
     public string[] args;
 #if CLI_TEST
     public string fault;
@@ -21,6 +21,10 @@ internal sealed class CliJobOwner
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer { MaxJsonLength = 65536 };
     private static void Send(StreamWriter writer, object value) { writer.WriteLine(Json.Serialize(value)); writer.Flush(); }
     private static void Main(string[] args)
+    {
+        try { Run(args); } catch { }
+    }
+    private static void Run(string[] args)
     {
         if (args.Length != 1) return;
         IntPtr job = IntPtr.Zero, root = IntPtr.Zero, thread = IntPtr.Zero;
@@ -59,6 +63,10 @@ internal sealed class CliJobOwner
                         startup.startup.flags = 0x100; startup.startup.input = inherited[0]; startup.startup.output = inherited[1]; startup.startup.error = inherited[2];
                         var command = new StringBuilder(Win32.Quote(launch.executable));
                         foreach (string arg in launch.args) command.Append(' ').Append(Win32.Quote(arg));
+                        if (launch.commandLine != null) {
+                            if (!String.Equals(Path.GetFileName(launch.executable), "cmd.exe", StringComparison.OrdinalIgnoreCase)) throw new Exception("INVALID_INTERPRETER");
+                            command = new StringBuilder(launch.commandLine);
+                        }
                         if (command.Length > 30000) throw new Exception("COMMAND_LIMIT");
                         Win32.ProcessInfo process;
                         Win32.Check(Win32.CreateProcessW(launch.executable, command, IntPtr.Zero, IntPtr.Zero, true, 0x00080000 | 0x08000000 | 4, IntPtr.Zero, launch.cwd, ref startup, out process), "CREATE_PROCESS_FAILED");

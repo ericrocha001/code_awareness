@@ -9,6 +9,8 @@ export type CliExecutionStatus =
   | 'INTERRUPTED'
 
 export interface CliCommandDescriptor {
+  originalArgs?: string[]
+  windowsCommandLine?: string
   executable: string
   originalExecutable: string
   args: string[]

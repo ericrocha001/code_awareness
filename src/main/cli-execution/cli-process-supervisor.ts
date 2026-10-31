@@ -71,6 +71,7 @@ export class CliProcessSupervisor {
     if (process.platform !== 'win32') throw new Error('WINDOWS_OWNERSHIP_REQUIRED')
     const executable = options.ownerPath ?? locateCliJobOwner(process.cwd(), undefined)
     this.busy = true
+    this.control = null
     this.stopReason = null
     this.phase = 'LAUNCHING'
     this.currentStatus = 'AWAITING_APPROVAL'
@@ -97,13 +98,14 @@ export class CliProcessSupervisor {
         resolve(result)
       }
       const failure = (code: string) => {
+        if (settled) return
         this.control?.destroy()
         // Losing control closes the owner's pipe; KillOnClose still applies. Only an explicit
         // empty-job receipt can release a slot after a process might have been created.
         finish({ status: 'FAILED', durationMs: Date.now() - this.startedAt,
           diagnostic: targetCreated ? 'TERMINATION_UNCONFIRMED:' + code : code }, !targetCreated && ownerClosed)
       }
-      const send = (value: string) => { if (this.control?.writable) this.control.write(value + '\n') }
+      const send = (value: string) => { if (!settled && this.control?.writable) this.control.write(value + '\n') }
       const armWatchdog = () => {
         if (watchdog) clearTimeout(watchdog)
         watchdog = setTimeout(() => failure('NATIVE_HANDSHAKE_TIMEOUT'), 5000)
@@ -113,7 +115,7 @@ export class CliProcessSupervisor {
         if (value.version !== 1) throw new Error('NATIVE_VERSION_MISMATCH')
         if (value.phase === 'READY' && stage === 'CONNECTING') {
           stage = 'CREATING'; targetCreated = true
-          send(JSON.stringify({ executable: command.executable, args: command.args, cwd: command.cwd }))
+          send(JSON.stringify({ executable: command.executable, args: command.args, cwd: command.cwd, commandLine: command.windowsCommandLine }))
         } else if (value.phase === 'OWNED' && stage === 'CREATING' && value.assignedAtCreation === true && value.suspended === true && value.activeProcesses === 1) {
           stage = 'AUTHORIZING'; this.phase = 'OWNED'
           const allowed = options.authorizeResume ? await options.authorizeResume().catch(() => false) : true

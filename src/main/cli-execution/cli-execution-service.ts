@@ -267,7 +267,11 @@ export class CliExecutionService {
         ownerPath: this.ownerPath,
         authorizeResume: async () => {
           const fingerprint = await this.getFingerprintFn()
-          return this.activeOperationId === operationId && this.activeExecutionToken === token &&
+          const effective = resolveCliCommand(this.repoRoot, proposal.command.originalExecutable,
+            proposal.command.originalArgs ?? proposal.command.args, proposal.command.relativeCwd)
+          const sameInvocation = effective.executable === proposal.command.executable && effective.cwd === proposal.command.cwd &&
+            effective.windowsCommandLine === proposal.command.windowsCommandLine && JSON.stringify(effective.args) === JSON.stringify(proposal.command.args)
+          return sameInvocation && this.activeOperationId === operationId && this.activeExecutionToken === token &&
             this.enabled && proposal.status === 'CONSUMED' && Date.now() <= Date.parse(proposal.expiresAt) &&
             fingerprint === proposal.checkoutFingerprint
         },

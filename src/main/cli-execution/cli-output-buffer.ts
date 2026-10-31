@@ -1,9 +1,14 @@
+import { StringDecoder } from 'node:string_decoder'
 import type { CliOutputPage } from './cli-execution-types'
 
 export class CliOutputBuffer {
   private stdoutBuffer = ''
   private stderrBuffer = ''
   private truncatedFlag = false
+  private stdoutBytes = 0
+  private stderrBytes = 0
+  private readonly stdoutDecoder = new StringDecoder('utf8')
+  private readonly stderrDecoder = new StringDecoder('utf8')
 
   constructor(
     private readonly maxBytesPerStream = 512 * 1024,
@@ -11,29 +16,21 @@ export class CliOutputBuffer {
   ) {}
 
   appendStdout(chunk: Buffer | string): void {
-    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-    if (this.stdoutBuffer.length + text.length > this.maxBytesPerStream) {
-      const remaining = Math.max(0, this.maxBytesPerStream - this.stdoutBuffer.length)
-      if (remaining > 0) {
-        this.stdoutBuffer += text.slice(0, remaining)
-      }
-      this.truncatedFlag = true
-    } else {
-      this.stdoutBuffer += text
-    }
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+    const remaining = Math.max(0, this.maxBytesPerStream - this.stdoutBytes)
+    const accepted = bytes.subarray(0, remaining)
+    this.stdoutBytes += accepted.length
+    this.stdoutBuffer += this.stdoutDecoder.write(accepted)
+    if (bytes.length > remaining) this.truncatedFlag = true
   }
 
   appendStderr(chunk: Buffer | string): void {
-    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
-    if (this.stderrBuffer.length + text.length > this.maxBytesPerStream) {
-      const remaining = Math.max(0, this.maxBytesPerStream - this.stderrBuffer.length)
-      if (remaining > 0) {
-        this.stderrBuffer += text.slice(0, remaining)
-      }
-      this.truncatedFlag = true
-    } else {
-      this.stderrBuffer += text
-    }
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+    const remaining = Math.max(0, this.maxBytesPerStream - this.stderrBytes)
+    const accepted = bytes.subarray(0, remaining)
+    this.stderrBytes += accepted.length
+    this.stderrBuffer += this.stderrDecoder.write(accepted)
+    if (bytes.length > remaining) this.truncatedFlag = true
   }
 
   readPage(cursorStr?: string, maxBytes = this.defaultPageBytes): CliOutputPage {

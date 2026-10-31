@@ -79,7 +79,7 @@ export function resolveExecutablePath(nameOrPath: string, cwd: string): string |
   const pathDirs = (process.env.PATH || '').split(process.platform === 'win32' ? ';' : ':')
   const extensions =
     process.platform === 'win32'
-      ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')
+      ? ['', ...(process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD').split(';')]
       : ['']
 
   for (const dir of pathDirs) {
@@ -157,12 +157,29 @@ export function resolveCliCommand(
   }
 
   const cleanArgs = rawArgs.map((arg) => String(arg))
-  const displayCommandLine = formatCommandLine(rawExecutable, cleanArgs)
+  if ([resolvedExecutable, ...cleanArgs].some(value => value.includes('\0'))) throw new Error('INVALID_COMMAND_ARGUMENT')
+  let executable = resolvedExecutable, args = cleanArgs
+  let windowsCommandLine: string | undefined
+  if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(resolvedExecutable)) {
+    if ([resolvedExecutable, ...cleanArgs].some(value => /["&|<>%^!\r\n()]/.test(value)) || cleanArgs.some(value => /\\$/.test(value))) {
+      throw new Error('WINDOWS_WRAPPER_ARGUMENT_UNREPRESENTABLE')
+    }
+    const interpreter = resolveExecutablePath(join(process.env.SystemRoot ?? 'C:/Windows', 'System32', 'cmd.exe'), canonicalCwd)
+    if (!interpreter) throw new Error('WINDOWS_INTERPRETER_UNAVAILABLE')
+    executable = interpreter
+    const script = [resolvedExecutable, ...cleanArgs].map(value => `"${value}"`).join(' ')
+    args = ['/d', '/v:off', '/s', '/c', script]
+    windowsCommandLine = `"${interpreter}" /d /v:off /s /c "${script}"`
+  }
+  const displayCommandLine = windowsCommandLine ?? formatCommandLine(executable, args)
+  if (displayCommandLine.length > 30000) throw new Error('COMMAND_LIMIT')
 
   return {
-    executable: resolvedExecutable,
+    executable,
+    windowsCommandLine,
+    originalArgs: cleanArgs,
     originalExecutable: rawExecutable,
-    args: cleanArgs,
+    args,
     cwd: canonicalCwd,
     relativeCwd: rel || '.',
     displayCommandLine

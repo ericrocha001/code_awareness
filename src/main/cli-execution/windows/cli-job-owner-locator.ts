@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
-export function locateCliJobOwner(root = process.cwd(), resources = process.resourcesPath): string {
+export function locateCliJobOwner(root = process.cwd(), resources = ''): string {
   const directory = resources ? join(resources, 'cli-execution') : join(root, 'out/cli-execution/production')
   try {
     const receipt = JSON.parse(readFileSync(join(directory, 'receipt.json'), 'utf8'))
