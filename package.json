@@ -9,11 +9,11 @@
   "scripts": {
     "preinstall": "node scripts/native-runtime-policy.cjs --check-npm",
     "postinstall": "npm run native:prepare && npm run native:doctor",
-    "predev": "node scripts/dependency-readiness.cjs && npm run native:doctor",
+    "predev": "node scripts/dependency-readiness.cjs && npm run native:doctor && npm run cli-execution:build",
     "dev": "node scripts/dev-supervisor.cjs",
     "dev:runtime": "electron-vite dev",
     "prebuild": "node scripts/dependency-readiness.cjs && npm run native:doctor",
-    "build": "node scripts/dependency-readiness.cjs --build-fallback && electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && npm run native:bundle-guard",
+    "build": "node scripts/dependency-readiness.cjs --build-fallback && node scripts/cli-execution/build.cjs && electron-vite build && node scripts/local-mcp/build.cjs && node scripts/runtime-preview/build.cjs && npm run native:bundle-guard",
     "runtime-preview:build": "node scripts/runtime-preview/build.cjs",
     "test:runtime-preview:windows": "node scripts/test-output.cjs run -- node --test --test-concurrency=1 scripts/runtime-preview/build.test.cjs scripts/runtime-preview/windows.test.cjs",
     "preview": "electron-vite preview",
@@ -66,7 +66,8 @@
     "harness:ui:scenario": "node scripts/test-output.cjs run -- node scripts/ui-visual-validation/harness.cjs",
     "harness:ui:compare": "node scripts/ui-visual-validation/compare.cjs",
     "test:agent": "node scripts/test-output.cjs run --",
-    "test:output": "node scripts/test-output.cjs run -- node --test scripts/test-output.test.cjs"
+    "test:output": "node scripts/test-output.cjs run -- node --test scripts/test-output.test.cjs",
+    "cli-execution:build": "node scripts/cli-execution/build.cjs"
   },
   "devDependencies": {
     "@electron/rebuild": "^3.7.2",
@@ -107,11 +108,23 @@
       {
         "from": "scripts/runtime-preview",
         "to": "runtime-preview/sdk",
-        "filter": ["launch.cjs", "cooperation.cjs", "build-identity.cjs"]
+        "filter": [
+          "launch.cjs",
+          "cooperation.cjs",
+          "build-identity.cjs"
+        ]
       },
       {
         "from": "out/local-mcp/launcher.cjs",
         "to": "local-mcp/launcher.cjs"
+      },
+      {
+        "from": "out/cli-execution/production",
+        "to": "cli-execution",
+        "filter": [
+          "cli-job-owner.exe",
+          "receipt.json"
+        ]
       }
     ],
     "win": {

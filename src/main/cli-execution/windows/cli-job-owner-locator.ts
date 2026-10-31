@@ -1,58 +1,15 @@
-import { existsSync, mkdirSync, realpathSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { spawnSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { join } from 'node:path'
 
-let cachedBinaryPath: string | null = null
-
-export function getOrBuildCliJobOwnerBinary(): string | null {
-  if (process.platform !== 'win32') {
-    return null
-  }
-
-  if (cachedBinaryPath && existsSync(cachedBinaryPath)) {
-    return cachedBinaryPath
-  }
-
-  // Pre-compiled location or out/cli-execution
-  const root = realpathSync(resolve(__dirname, '../../../..'))
-  const targetDir = join(root, 'out', 'cli-execution')
-  mkdirSync(targetDir, { recursive: true })
-  const targetExe = join(targetDir, 'cli-job-owner.exe')
-
-  if (existsSync(targetExe)) {
-    cachedBinaryPath = targetExe
-    return targetExe
-  }
-
-  // Compile using framework csc.exe
-  const systemRoot = process.env.SystemRoot || 'C:\\Windows'
-  const compiler = join(systemRoot, 'Microsoft.NET', 'Framework64', 'v4.0.30319', 'csc.exe')
-
-  if (!existsSync(compiler)) {
-    return null
-  }
-
-  const win32Cs = join(root, 'src', 'main', 'work-orchestration', 'runtime-preview', 'windows', 'Win32.cs')
-  const cliOwnerCs = join(root, 'src', 'main', 'cli-execution', 'windows', 'CliJobOwner.cs')
-
-  if (!existsSync(win32Cs) || !existsSync(cliOwnerCs)) {
-    return null
-  }
-
-  const result = spawnSync(
-    compiler,
-    ['/nologo', '/target:exe', `/out:${targetExe}`, win32Cs, cliOwnerCs],
-    {
-      windowsHide: true,
-      encoding: 'utf8',
-      timeout: 15000
-    }
-  )
-
-  if (result.status === 0 && existsSync(targetExe)) {
-    cachedBinaryPath = targetExe
-    return targetExe
-  }
-
-  return null
+export function locateCliJobOwner(root = process.cwd(), resources = process.resourcesPath): string {
+  const directory = resources ? join(resources, 'cli-execution') : join(root, 'out/cli-execution/production')
+  try {
+    const receipt = JSON.parse(readFileSync(join(directory, 'receipt.json'), 'utf8'))
+    const executable = join(directory, 'cli-job-owner.exe')
+    const bytes = readFileSync(executable)
+    if (receipt.version !== 1 || receipt.inputs.test !== false || receipt.output.size !== bytes.length ||
+      receipt.output.sha256 !== createHash('sha256').update(bytes).digest('hex')) throw new Error('INTEGRITY')
+    return executable
+  } catch { throw new Error('NATIVE_OWNERSHIP_UNAVAILABLE_OR_INVALID') }
 }

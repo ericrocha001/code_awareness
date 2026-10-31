@@ -1,7 +1,9 @@
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
+import { createServer, type Socket } from 'node:net'
+import { randomUUID } from 'node:crypto'
 import type { CliCommandDescriptor, CliExecutionStatus } from './cli-execution-types'
 import { CliOutputBuffer } from './cli-output-buffer'
-import { getOrBuildCliJobOwnerBinary } from './windows/cli-job-owner-locator'
+import { locateCliJobOwner } from './windows/cli-job-owner-locator'
 
 export interface SupervisorExecutionResult {
   status: CliExecutionStatus
@@ -9,13 +11,13 @@ export interface SupervisorExecutionResult {
   durationMs: number
   diagnostic?: string
 }
-
 export interface SupervisorLaunchOptions {
   timeoutMs?: number
   maxOutputBytes?: number
-  requireNativeJobOwner?: boolean
+  ownerPath?: string
+  authorizeResume?: () => Promise<boolean>
+  onRunning?: () => void
 }
-
 const SAFE_ENV_VARS = [
   'PATH',
   'PATHEXT',
@@ -46,264 +48,137 @@ export function buildSafeEnvironment(): NodeJS.ProcessEnv {
   return env
 }
 
-export function killProcessTree(pid: number): void {
-  if (process.platform === 'win32') {
-    try {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-        windowsHide: true,
-        stdio: 'ignore'
-      })
-    } catch {
-      try {
-        process.kill(pid, 'SIGKILL')
-      } catch {}
-    }
-  } else {
-    try {
-      process.kill(-pid, 'SIGKILL')
-    } catch {
-      try {
-        process.kill(pid, 'SIGKILL')
-      } catch {}
-    }
-  }
-}
-
-export async function verifyProcessDead(pid: number, timeoutMs = 3000): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs
-  while (Date.now() < deadline) {
-    try {
-      process.kill(pid, 0)
-      await new Promise((r) => setTimeout(r, 50))
-    } catch (e: any) {
-      if (e.code === 'ESRCH') return true
-    }
-  }
-  try {
-    process.kill(pid, 0)
-    return false
-  } catch {
-    return true
-  }
-}
 
 export class CliProcessSupervisor {
-  private activeChild: ChildProcess | null = null
-  private activeJobOwner: ChildProcess | null = null
-  private activeTimeout: NodeJS.Timeout | null = null
-  private completionPromise: Promise<SupervisorExecutionResult> | null = null
-  private finalizeFn: ((status: CliExecutionStatus, exitCode?: number | null, diagnostic?: string) => void) | null = null
-  private outputBuffer: CliOutputBuffer | null = null
+  private owner: ChildProcess | null = null
+  private control: Socket | null = null
+  private completion: Promise<SupervisorExecutionResult> | null = null
+  private stopReason: 'CANCELLED' | 'TIMED_OUT' | null = null
+  private busy = false
   private startedAt = 0
-  private executionStatus: CliExecutionStatus = 'RUNNING'
-  private exitDiagnostic?: string
+  private buffer: CliOutputBuffer | null = null
+  private currentStatus: CliExecutionStatus = 'AWAITING_APPROVAL'
+  private diagnostic?: string
+  phase: 'IDLE' | 'LAUNCHING' | 'OWNED' | 'RUNNING' | 'STOPPING' | 'TERMINAL' | 'TERMINATION_UNCONFIRMED' = 'IDLE'
+  constructor(private readonly defaultTimeoutMs = 60000) {}
+  get isRunning() { return this.busy }
+  get status() { return this.currentStatus }
+  get output() { return this.buffer }
 
-  constructor(private readonly defaultTimeoutMs = 60_000) {}
-
-  get isRunning(): boolean {
-    return this.activeChild !== null && this.executionStatus === 'RUNNING'
-  }
-
-  get status(): CliExecutionStatus {
-    return this.executionStatus
-  }
-
-  get output(): CliOutputBuffer | null {
-    return this.outputBuffer
-  }
-
-  launch(
-    command: CliCommandDescriptor,
-    options: SupervisorLaunchOptions = {}
-  ): Promise<SupervisorExecutionResult> {
-    if (this.isRunning) {
-      throw new Error('SUPERVISOR_BUSY')
-    }
-
-    const timeoutMs = Math.min(options.timeoutMs ?? this.defaultTimeoutMs, 120_000)
-    const outputBuffer = new CliOutputBuffer(options.maxOutputBytes)
-    this.outputBuffer = outputBuffer
+  launch(command: CliCommandDescriptor, options: SupervisorLaunchOptions = {}): Promise<SupervisorExecutionResult> {
+    if (this.busy) throw new Error('SUPERVISOR_BUSY')
+    if (process.platform !== 'win32') throw new Error('WINDOWS_OWNERSHIP_REQUIRED')
+    const executable = options.ownerPath ?? locateCliJobOwner(process.cwd(), undefined)
+    this.busy = true
+    this.stopReason = null
+    this.phase = 'LAUNCHING'
+    this.currentStatus = 'AWAITING_APPROVAL'
+    this.diagnostic = undefined
     this.startedAt = Date.now()
-    this.executionStatus = 'RUNNING'
-    this.exitDiagnostic = undefined
-
-    let childExecutable = command.executable
-    let childArgs = command.args
-
-    // Handle .cmd / .bat invocation on Windows safely
-    if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(command.executable)) {
-      childExecutable = process.env.COMSPEC || process.env.ComSpec || 'cmd.exe'
-      childArgs = ['/d', '/s', '/c', command.executable, ...command.args]
-    }
-
-    let child: ChildProcess
-    try {
-      child = spawn(childExecutable, childArgs, {
-        cwd: command.cwd,
-        env: buildSafeEnvironment(),
-        windowsHide: true,
-        shell: false,
-        stdio: ['ignore', 'pipe', 'pipe']
-      })
-    } catch (err) {
-      this.executionStatus = 'FAILED'
-      const diagnostic = `SPAWN_FAILED: ${err instanceof Error ? err.message : String(err)}`
-      this.exitDiagnostic = diagnostic
-      return Promise.resolve({
-        status: 'FAILED',
-        durationMs: Date.now() - this.startedAt,
-        diagnostic
-      })
-    }
-
-    this.activeChild = child
-
-    // Attach Windows Job Object supervisor if on Windows
-    if (process.platform === 'win32' && child.pid) {
-      const jobOwnerExe = getOrBuildCliJobOwnerBinary()
-      if (jobOwnerExe) {
-        try {
-          const owner = spawn(jobOwnerExe, [String(child.pid)], {
-            windowsHide: true,
-            stdio: ['pipe', 'pipe', 'ignore']
-          })
-          this.activeJobOwner = owner
-        } catch {
-          // If native ownership fails and was strictly required
-          if (options.requireNativeJobOwner) {
-            killProcessTree(child.pid)
-            this.activeChild = null
-            this.executionStatus = 'FAILED'
-            return Promise.resolve({
-              status: 'FAILED',
-              durationMs: 0,
-              diagnostic: 'NATIVE_OWNERSHIP_FAILED'
-            })
-          }
-        }
-      } else if (options.requireNativeJobOwner) {
-        killProcessTree(child.pid)
-        this.activeChild = null
-        this.executionStatus = 'FAILED'
-        return Promise.resolve({
-          status: 'FAILED',
-          durationMs: 0,
-          diagnostic: 'NATIVE_OWNERSHIP_UNAVAILABLE'
-        })
-      }
-    }
-
-    this.completionPromise = new Promise<SupervisorExecutionResult>((resolve) => {
-      let settled = false
-      const finalize = async (
-        status: CliExecutionStatus,
-        exitCode?: number | null,
-        diagnostic?: string
-      ) => {
+    this.buffer = new CliOutputBuffer(options.maxOutputBytes)
+    const pipeName = 'CodeAwareness.Cli.' + randomUUID()
+    const server = createServer()
+    let stage = 'CONNECTING', incoming = '', terminal = false, settled = false
+    let poll: NodeJS.Timeout | undefined
+    let ownerClosed = false, targetCreated = false
+    let terminalExit: number | undefined
+    let watchdog: NodeJS.Timeout | undefined
+    let timeout: NodeJS.Timeout | undefined
+    const stopTimers = () => { if (poll) clearTimeout(poll); if (watchdog) clearTimeout(watchdog); if (timeout) clearTimeout(timeout) }
+    this.completion = new Promise(resolve => {
+      const finish = (result: SupervisorExecutionResult, confirmed: boolean) => {
         if (settled) return
-        settled = true
-        if (this.activeTimeout) {
-          clearTimeout(this.activeTimeout)
-          this.activeTimeout = null
-        }
-        if (this.activeJobOwner) {
-          try {
-            this.activeJobOwner.stdin?.write('terminate\n')
-            this.activeJobOwner.kill()
-          } catch {}
-          this.activeJobOwner = null
-        }
-        this.executionStatus = status
-        this.exitDiagnostic = diagnostic
-        this.activeChild = null
-        this.finalizeFn = null
-        resolve({
-          status,
-          exitCode: exitCode ?? null,
-          durationMs: Date.now() - this.startedAt,
-          diagnostic
-        })
+        settled = true; stopTimers(); server.close()
+        this.currentStatus = result.status; this.diagnostic = result.diagnostic
+        this.busy = !confirmed
+        this.phase = confirmed ? 'TERMINAL' : 'TERMINATION_UNCONFIRMED'
+        if (confirmed) { this.control?.end(); this.owner = null }
+        resolve(result)
       }
-
-      this.finalizeFn = finalize
-
-      this.activeTimeout = setTimeout(async () => {
-        if (child.pid) {
-          if (this.activeJobOwner) {
-            try {
-              this.activeJobOwner.stdin?.write('terminate\n')
-            } catch {}
+      const failure = (code: string) => {
+        this.control?.destroy()
+        // Losing control closes the owner's pipe; KillOnClose still applies. Only an explicit
+        // empty-job receipt can release a slot after a process might have been created.
+        finish({ status: 'FAILED', durationMs: Date.now() - this.startedAt,
+          diagnostic: targetCreated ? 'TERMINATION_UNCONFIRMED:' + code : code }, !targetCreated && ownerClosed)
+      }
+      const send = (value: string) => { if (this.control?.writable) this.control.write(value + '\n') }
+      const armWatchdog = () => {
+        if (watchdog) clearTimeout(watchdog)
+        watchdog = setTimeout(() => failure('NATIVE_HANDSHAKE_TIMEOUT'), 5000)
+      }
+      const message = async (value: any) => {
+        if (settled) return
+        if (value.version !== 1) throw new Error('NATIVE_VERSION_MISMATCH')
+        if (value.phase === 'READY' && stage === 'CONNECTING') {
+          stage = 'CREATING'; targetCreated = true
+          send(JSON.stringify({ executable: command.executable, args: command.args, cwd: command.cwd }))
+        } else if (value.phase === 'OWNED' && stage === 'CREATING' && value.assignedAtCreation === true && value.suspended === true && value.activeProcesses === 1) {
+          stage = 'AUTHORIZING'; this.phase = 'OWNED'
+          const allowed = options.authorizeResume ? await options.authorizeResume() : true
+          if (settled) return
+          stage = 'RESUMING'
+          send(allowed && !this.stopReason ? 'resume' : 'terminate')
+          if (!allowed) this.stopReason = 'CANCELLED'
+        } else if (value.phase === 'RUNNING' && stage === 'RESUMING') {
+          stage = 'RUNNING'; this.phase = 'RUNNING'; this.currentStatus = 'RUNNING'; options.onRunning?.()
+        } else if (value.phase === 'OBSERVATION' && ['RUNNING', 'RESUMING', 'POLLING'].includes(stage) && Number.isInteger(value.activeProcesses) && value.activeProcesses >= 0) {
+          stage = 'POLLING'
+          poll = setTimeout(() => send(this.stopReason ? 'terminate' : 'inspect'), 20)
+        } else if (value.phase === 'TERMINAL' && value.activeProcesses === 0 && value.handlesClosed === true && Number.isInteger(value.exitCode)) {
+          terminal = true; terminalExit = value.exitCode
+          this.control?.end()
+        } else if (value.phase === 'ERROR' && typeof value.code === 'string') {
+          // A pre-create error is confirmed only after helper exit. A possible create remains quarantined.
+          this.diagnostic = /^[A-Z_]+$/.test(value.code) ? value.code : 'NATIVE_FAILURE'
+        } else throw new Error('NATIVE_PROTOCOL_ERROR')
+        armWatchdog()
+      }
+      server.on('connection', socket => {
+        if (this.control) { socket.destroy(); return }
+        this.control = socket
+        socket.setEncoding('utf8')
+        socket.on('data', chunk => {
+          incoming += chunk
+          if (incoming.length > 65536) { failure('NATIVE_RESPONSE_LIMIT'); return }
+          let index: number
+          while ((index = incoming.indexOf('\n')) >= 0) {
+            const line = incoming.slice(0, index); incoming = incoming.slice(index + 1)
+            try { void message(JSON.parse(line)).catch(() => failure('NATIVE_PROTOCOL_ERROR')) }
+            catch { failure('NATIVE_PROTOCOL_ERROR') }
           }
-          killProcessTree(child.pid)
-          const isDead = await verifyProcessDead(child.pid)
-          const diag = isDead ? 'PROCESS_TIMED_OUT' : 'FAILED_TERMINATION: Process tree could not be verified dead'
-          void finalize('TIMED_OUT', null, diag)
-        } else {
-          void finalize('TIMED_OUT', null, 'PROCESS_TIMED_OUT')
-        }
-      }, timeoutMs)
-
-      child.stdout?.on('data', (chunk) => outputBuffer.appendStdout(chunk))
-      child.stderr?.on('data', (chunk) => outputBuffer.appendStderr(chunk))
-
-      child.once('error', (err) => {
-        void finalize('FAILED', null, `PROCESS_ERROR: ${err.message}`)
+        })
+        socket.on('error', () => failure('CONTROL_LOST'))
+        socket.on('close', () => { if (!terminal && !ownerClosed) armWatchdog() })
       })
-
-      child.once('exit', (code, signal) => {
-        if (signal) {
-          void finalize('INTERRUPTED', code, `PROCESS_INTERRUPTED: ${signal}`)
-        } else if (code === 0) {
-          void finalize('SUCCEEDED', 0)
-        } else {
-          void finalize('FAILED', code, `PROCESS_EXIT_FAILED: code ${code}`)
-        }
+      server.on('error', () => failure('CONTROL_UNAVAILABLE'))
+      server.listen('\\\\.\\pipe\\' + pipeName, () => {
+        try {
+          this.owner = spawn(executable, [pipeName], { shell: false, windowsHide: true,
+            env: buildSafeEnvironment(), stdio: ['ignore', 'pipe', 'pipe'] })
+          this.owner.stdout?.on('data', chunk => this.buffer?.appendStdout(chunk))
+          this.owner.stderr?.on('data', chunk => this.buffer?.appendStderr(chunk))
+          this.owner.on('error', () => { ownerClosed = true; failure('NATIVE_OWNER_UNAVAILABLE') })
+          this.owner.on('close', () => {
+            ownerClosed = true
+            if (terminal) finish({ status: this.stopReason ?? (terminalExit === 0 ? 'SUCCEEDED' : 'FAILED'), exitCode: terminalExit,
+              durationMs: Date.now() - this.startedAt }, true)
+            else failure(this.diagnostic ?? 'OWNER_LOST')
+          })
+          armWatchdog()
+          timeout = setTimeout(() => { this.stopReason = 'TIMED_OUT'; this.phase = 'STOPPING'; send('terminate') }, Math.min(options.timeoutMs ?? this.defaultTimeoutMs, 120000))
+        } catch { ownerClosed = true; failure('NATIVE_OWNER_UNAVAILABLE') }
       })
     })
-
-    return this.completionPromise
+    return this.completion
   }
-
   async cancel(): Promise<SupervisorExecutionResult> {
-    if (!this.isRunning || !this.activeChild) {
-      return {
-        status: this.executionStatus,
-        durationMs: this.startedAt ? Date.now() - this.startedAt : 0,
-        diagnostic: this.exitDiagnostic
-      }
-    }
-
-    const child = this.activeChild
-    const finalize = this.finalizeFn
-
-    if (this.activeTimeout) {
-      clearTimeout(this.activeTimeout)
-      this.activeTimeout = null
-    }
-
-    let isDead = true
-    if (child.pid) {
-      if (this.activeJobOwner) {
-        try {
-          this.activeJobOwner.stdin?.write('terminate\n')
-        } catch {}
-      }
-      killProcessTree(child.pid)
-      isDead = await verifyProcessDead(child.pid)
-    }
-
-    const diag = isDead
-      ? 'PROCESS_CANCELLED_BY_SUPERVISOR'
-      : 'FAILED_TERMINATION: Process tree could not be verified dead'
-
-    if (finalize) {
-      void finalize('CANCELLED', null, diag)
-    }
-
-    return this.completionPromise!
+    if (!this.busy || !this.completion) return { status: this.currentStatus, durationMs: Date.now() - this.startedAt, diagnostic: this.diagnostic }
+    if (this.phase === 'TERMINATION_UNCONFIRMED') return this.completion
+    this.stopReason = 'CANCELLED'; this.phase = 'STOPPING'
+    // Before OWNED, the handshake sends terminate instead of authorizing ResumeThread.
+    if (this.currentStatus === 'RUNNING') this.control?.write('terminate\n')
+    return this.completion
   }
-
-  async shutdown(): Promise<void> {
-    await this.cancel()
-  }
+  async shutdown() { await this.cancel() }
 }
