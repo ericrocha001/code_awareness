@@ -41,7 +41,8 @@ export const SESSION_CONTEXT_TOOLS: McpToolDefinition[] = definitions.map(([name
   annotations: { readOnlyHint: name !== 'refresh_agent_sessions', destructiveHint: false, openWorldHint: false } }))
 export const SESSION_RESPONSE_BUDGETS: Record<SessionToolName, number> = { list_agent_sessions: 8192, inspect_agent_session: 12288, list_agent_session_events: 12288, read_agent_session_event: 16384, refresh_agent_sessions: 8192 }
 const wrap = (data: object): McpToolResult => ({ content: [{ type: 'text', text: JSON.stringify(data) }] })
-const fits = (data: object, budget: number) => Buffer.byteLength(JSON.stringify(wrap(data))) + 512 <= budget
+const fits = (data: object, budget: number, literalProjection = false) =>
+  Buffer.byteLength(JSON.stringify({ ...wrap(data), ...(literalProjection ? { structuredContent: data } : {}) })) + 512 <= budget
 function metadata(row: SessionRow) {
   return { sessionId: row.id, provider: 'entire', agent: row.agent, state: row.state, startedAt: row.startedAt, endedAt: row.endedAt,
     lastObserved: row.lastObserved, revision: row.revision, eventCount: row.eventCount, payloadBytes: row.payloadBytes, coverage: row.coverage,
@@ -108,14 +109,14 @@ export async function executeSessionTool(store: SessionStore, provider: Pick<Ent
             complete: !hasMore && !event.omission, partial: hasMore || !!event.omission, omission: event.omission, sanitized: !!event.sanitized,
             provenance: 'OBSERVED_FROM_PROVIDER', sourcePosition: event.sourcePosition, payloadDigest: digest(event.text ?? ''), untrusted: true, claimsVerified: false,
             ...(hasMore ? { nextCursor: store.cursor(scope, end) } : {}) }
-          if (fits(data, budget)) break
+          if (fits(data, budget, true)) break
           size = Math.floor(size / 2)
           if (size < 4) throw new Error('RESPONSE_LIMIT_REACHED')
         }
       }
     }
     assertActive()
-    if (!fits(data, budget)) throw new Error('RESPONSE_LIMIT_REACHED')
+    if (!fits(data, budget, name === 'read_agent_session_event')) throw new Error('RESPONSE_LIMIT_REACHED')
     return wrap(data)
   } catch (error) {
     const code = error instanceof z.ZodError ? 'INVALID_ARGUMENT' : error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'
