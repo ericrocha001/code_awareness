@@ -92,7 +92,18 @@ internal sealed class CliJobOwner
                         Thread.Sleep(10);
                     }
                 } catch (Exception error) {
-                    try { Send(writer, new { phase = "ERROR", version = 1, code = error is NativeFailure ? error.Message : "NATIVE_CONTROL_FAILED" }); } catch { }
+                    try {
+                        bool drained = job == IntPtr.Zero;
+                        if (job != IntPtr.Zero) {
+                            Win32.Check(Win32.TerminateJobObject(job, 1), "JOB_TERMINATION_FAILED");
+                            var deadline = DateTime.UtcNow.AddSeconds(3);
+                            do { drained = Win32.Active(job) == 0; if (!drained) Thread.Sleep(10); } while (!drained && DateTime.UtcNow < deadline);
+                        }
+                        if (!drained || (root != IntPtr.Zero && Win32.WaitForSingleObject(root, 0) != Win32.WaitSignaled)) throw new Exception("TERMINATION_UNCONFIRMED");
+                        foreach (IntPtr handle in new IntPtr[] { thread, root, job }) if (handle != IntPtr.Zero) Win32.Check(Win32.CloseHandle(handle), "HANDLE_CLOSE_FAILED");
+                        thread = root = job = IntPtr.Zero;
+                        Send(writer, new { phase = "TERMINAL", version = 1, activeProcesses = 0, handlesClosed = true, exitCode = 1, diagnostic = error is NativeFailure ? error.Message : "NATIVE_CONTROL_FAILED" });
+                    } catch { try { Send(writer, new { phase = "ERROR", version = 1, code = "TERMINATION_UNCONFIRMED" }); } catch { } }
                 } finally {
                     if (job != IntPtr.Zero) { Win32.TerminateJobObject(job, 1); Win32.CloseHandle(job); }
                     if (root != IntPtr.Zero) Win32.CloseHandle(root);

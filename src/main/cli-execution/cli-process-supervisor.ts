@@ -6,6 +6,7 @@ import { CliOutputBuffer } from './cli-output-buffer'
 import { locateCliJobOwner } from './windows/cli-job-owner-locator'
 
 export interface SupervisorExecutionResult {
+  treeObservation?: { activeProcesses: 0; handlesClosed: true }
   status: CliExecutionStatus
   exitCode?: number | null
   durationMs: number
@@ -115,7 +116,7 @@ export class CliProcessSupervisor {
           send(JSON.stringify({ executable: command.executable, args: command.args, cwd: command.cwd }))
         } else if (value.phase === 'OWNED' && stage === 'CREATING' && value.assignedAtCreation === true && value.suspended === true && value.activeProcesses === 1) {
           stage = 'AUTHORIZING'; this.phase = 'OWNED'
-          const allowed = options.authorizeResume ? await options.authorizeResume() : true
+          const allowed = options.authorizeResume ? await options.authorizeResume().catch(() => false) : true
           if (settled) return
           stage = 'RESUMING'
           send(allowed && !this.stopReason ? 'resume' : 'terminate')
@@ -127,6 +128,7 @@ export class CliProcessSupervisor {
           poll = setTimeout(() => send(this.stopReason ? 'terminate' : 'inspect'), 20)
         } else if (value.phase === 'TERMINAL' && value.activeProcesses === 0 && value.handlesClosed === true && Number.isInteger(value.exitCode)) {
           terminal = true; terminalExit = value.exitCode
+          if (typeof value.diagnostic === 'string' && /^[A-Z_]+$/.test(value.diagnostic)) this.diagnostic = value.diagnostic
           this.control?.end()
         } else if (value.phase === 'ERROR' && typeof value.code === 'string') {
           // A pre-create error is confirmed only after helper exit. A possible create remains quarantined.
@@ -162,7 +164,7 @@ export class CliProcessSupervisor {
           this.owner.on('close', () => {
             ownerClosed = true
             if (terminal) finish({ status: this.stopReason ?? (terminalExit === 0 ? 'SUCCEEDED' : 'FAILED'), exitCode: terminalExit,
-              durationMs: Date.now() - this.startedAt }, true)
+              durationMs: Date.now() - this.startedAt, diagnostic: this.diagnostic, treeObservation: { activeProcesses: 0, handlesClosed: true } }, true)
             else failure(this.diagnostic ?? 'OWNER_LOST')
           })
           armWatchdog()

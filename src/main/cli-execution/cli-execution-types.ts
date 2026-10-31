@@ -41,6 +41,8 @@ export interface CliOutputPage {
 }
 
 export interface CliExecutionRecord {
+  treeObservation?: { activeProcesses: 0; handlesClosed: true }
+  phase?: 'AWAITING_APPROVAL' | 'LAUNCHING' | 'RUNNING' | 'STOPPING' | 'TERMINAL' | 'TERMINATION_UNCONFIRMED'
   operationId: string
   proposalId: string
   status: CliExecutionStatus

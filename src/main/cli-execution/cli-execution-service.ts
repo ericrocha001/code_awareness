@@ -21,6 +21,7 @@ export interface CliExecutionServiceOptions {
   approvalHandler?: CliApprovalHandler
   defaultTimeoutMs?: number
   enabledByDefault?: boolean
+  ownerPath?: string
 }
 
 export class CliExecutionService {
@@ -30,6 +31,7 @@ export class CliExecutionService {
   private approvalHandler: CliApprovalHandler
   private readonly supervisor: CliProcessSupervisor
   private enabled: boolean
+  private readonly ownerPath?: string
 
   private readonly proposals = new Map<string, CliProposal>()
   private readonly executions = new Map<string, CliExecutionRecord>()
@@ -44,6 +46,7 @@ export class CliExecutionService {
     this.approvalHandler = options.approvalHandler ?? (async () => false)
     this.supervisor = new CliProcessSupervisor(options.defaultTimeoutMs)
     this.enabled = options.enabledByDefault ?? false
+    this.ownerPath = options.ownerPath
   }
 
   setApprovalHandler(handler: CliApprovalHandler): void {
@@ -81,6 +84,7 @@ export class CliExecutionService {
 
     const risks = detectRisks(command.executable, command.originalExecutable, command.args)
     const fingerprint = await this.getFingerprintFn()
+    if (!this.enabled) throw new Error('CLI_EXECUTION_DISABLED')
 
     const proposalId = `prop-${randomUUID()}`
     const createdAt = new Date().toISOString()
@@ -155,6 +159,7 @@ export class CliExecutionService {
       operationId: input.operationId,
       proposalId: input.proposalId,
       status: 'AWAITING_APPROVAL',
+      phase: 'AWAITING_APPROVAL',
       command: proposal.command,
       startedAt: new Date().toISOString()
     }
@@ -251,41 +256,45 @@ export class CliExecutionService {
       return
     }
 
-    // Consume proposal and transition to RUNNING
+    if (!this.enabled || proposal.status !== 'PENDING' || Date.now() > Date.parse(proposal.expiresAt)) {
+      await this.cancel({ operationId })
+      return
+    }
     proposal.status = 'CONSUMED'
-    record.status = 'RUNNING'
-
+    record.phase = 'LAUNCHING'
     try {
-      const completionPromise = this.supervisor.launch(proposal.command)
-      if (this.supervisor.output) {
-        this.executionBuffers.set(operationId, this.supervisor.output)
-      }
-
-      completionPromise
-        .then((res) => {
-          record.status = res.status
-          record.exitCode = res.exitCode
-          record.durationMs = res.durationMs
-          record.finishedAt = new Date().toISOString()
-          if (res.diagnostic) record.diagnostic = res.diagnostic
-        })
-        .catch((err) => {
-          record.status = 'FAILED'
-          record.finishedAt = new Date().toISOString()
-          record.diagnostic = `EXECUTION_FAILED: ${err instanceof Error ? err.message : String(err)}`
-        })
-        .finally(() => {
-          if (this.activeOperationId === operationId) {
-            this.activeOperationId = null
-            this.activeExecutionToken = null
-          }
-        })
-    } catch (err) {
+      const completion = this.supervisor.launch(proposal.command, {
+        ownerPath: this.ownerPath,
+        authorizeResume: async () => {
+          const fingerprint = await this.getFingerprintFn()
+          return this.activeOperationId === operationId && this.activeExecutionToken === token &&
+            this.enabled && proposal.status === 'CONSUMED' && Date.now() <= Date.parse(proposal.expiresAt) &&
+            fingerprint === proposal.checkoutFingerprint
+        },
+        onRunning: () => {
+          record.status = 'RUNNING'
+          record.phase = 'RUNNING'
+        }
+      })
+      if (this.supervisor.output) this.executionBuffers.set(operationId, this.supervisor.output)
+      const result = await completion
+      record.status = result.status
+      record.exitCode = result.exitCode
+      record.durationMs = result.durationMs
+      record.treeObservation = result.treeObservation
+      record.diagnostic = result.diagnostic
+      record.phase = this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL'
+      if (!this.supervisor.isRunning) record.finishedAt = new Date().toISOString()
+    } catch {
       record.status = 'FAILED'
-      record.finishedAt = new Date().toISOString()
-      record.diagnostic = `SPAWN_FAILED: ${err instanceof Error ? err.message : String(err)}`
-      this.activeOperationId = null
-      this.activeExecutionToken = null
+      record.phase = this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL'
+      record.diagnostic = this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'NATIVE_LAUNCH_FAILED'
+      if (!this.supervisor.isRunning) record.finishedAt = new Date().toISOString()
+    } finally {
+      if (this.activeOperationId === operationId && !this.supervisor.isRunning) {
+        this.activeOperationId = null
+        this.activeExecutionToken = null
+      }
     }
   }
 
@@ -306,56 +315,48 @@ export class CliExecutionService {
       throw new Error(`OPERATION_NOT_FOUND: ${input.operationId}`)
     }
 
-    if (record.status === 'AWAITING_APPROVAL') {
+    if (record.phase === 'LAUNCHING' || record.phase === 'RUNNING' || record.phase === 'STOPPING' || record.phase === 'TERMINATION_UNCONFIRMED') {
+      this.activeExecutionToken = null
+      record.phase = 'STOPPING'
+      const result = await this.supervisor.cancel()
+      record.status = result.status
+      record.diagnostic = result.diagnostic
+      record.exitCode = result.exitCode
+      record.durationMs = result.durationMs
+      record.treeObservation = result.treeObservation
+      record.phase = this.supervisor.isRunning ? 'TERMINATION_UNCONFIRMED' : 'TERMINAL'
+      if (!this.supervisor.isRunning) {
+        record.finishedAt = new Date().toISOString()
+        if (this.activeOperationId === input.operationId) this.activeOperationId = null
+      }
+    } else if (record.status === 'AWAITING_APPROVAL') {
       record.status = 'CANCELLED'
+      record.phase = 'TERMINAL'
       record.diagnostic = 'CANCELLED_BEFORE_APPROVAL'
       record.finishedAt = new Date().toISOString()
+      const proposal = this.proposals.get(record.proposalId)
+      if (proposal) proposal.status = 'REFUSED'
       this.activeExecutionToken = null
-      if (this.activeOperationId === input.operationId) {
-        this.activeOperationId = null
-      }
-      return this.getSnapshot(input.operationId)
-    }
-
-    if (record.status === 'RUNNING') {
-      const res = await this.supervisor.cancel()
-      record.status = res.status
-      record.exitCode = res.exitCode
-      record.durationMs = res.durationMs
-      record.finishedAt = new Date().toISOString()
-      if (res.diagnostic) record.diagnostic = res.diagnostic
-      this.activeExecutionToken = null
-      if (this.activeOperationId === input.operationId) {
-        this.activeOperationId = null
-      }
-      return this.getSnapshot(input.operationId)
+      if (this.activeOperationId === input.operationId) this.activeOperationId = null
     }
 
     return this.getSnapshot(input.operationId)
   }
 
   async shutdown(): Promise<void> {
+    this.enabled = false
     this.activeExecutionToken = null
     await this.abortActive('SERVICE_SHUTDOWN')
     this.invalidateAllProposals()
+    if (this.supervisor.isRunning) throw new Error('TERMINATION_UNCONFIRMED')
   }
 
   private async abortActive(reason: string): Promise<void> {
-    if (this.activeOperationId) {
-      const record = this.executions.get(this.activeOperationId)
-      if (record && record.status === 'AWAITING_APPROVAL') {
-        record.status = 'CANCELLED'
-        record.diagnostic = reason
-        record.finishedAt = new Date().toISOString()
-      } else if (record && record.status === 'RUNNING') {
-        await this.supervisor.cancel()
-        record.status = 'CANCELLED'
-        record.diagnostic = reason
-        record.finishedAt = new Date().toISOString()
-      }
-      this.activeOperationId = null
-      this.activeExecutionToken = null
-    }
+    const operationId = this.activeOperationId
+    if (!operationId) return
+    await this.cancel({ operationId })
+    const record = this.executions.get(operationId)
+    if (record?.phase === 'TERMINAL') record.diagnostic = reason
   }
 
   private invalidateAllProposals(): void {

@@ -44,11 +44,11 @@ function owner(launch, handle, executable = binary) {
 test('Windows U1: Job creation/assignment failures execute zero target instructions', async () => {
   for (const fault of ['job', 'assignment']) {
     const sentinel = join(dir, fault)
-    const result = await owner({ executable: process.execPath, cwd: dir, args: ['-e', `require('fs').writeFileSync(${JSON.stringify(sentinel)},'unsafe')`], fault }, value => assert.equal(value.phase, 'ERROR'))
+    const result = await owner({ executable: process.execPath, cwd: dir, args: ['-e', `require('fs').writeFileSync(${JSON.stringify(sentinel)},'unsafe')`], fault }, value => assert.equal(value.phase, 'TERMINAL'))
       .catch(error => { throw error })
     assert.equal(fs.existsSync(sentinel), false)
     assert.equal(result.events.some(e => e.phase === 'RUNNING'), false)
-    assert.equal(result.events.at(-1).phase, 'ERROR')
+    assert.equal(result.events.at(-1).phase, 'TERMINAL')
   }
 })
 test('Windows U1: suspended owner contains three generations and terminal receipt proves empty job', async () => {
@@ -109,4 +109,18 @@ test('Windows U1: killing owner closes job for all generations', async () => {
   assert.equal(pids.length, 3)
   await new Promise(resolve => setTimeout(resolve, 100))
   for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
+})
+
+test('Windows U2: timeout includes child and grandchild and releases slot only with empty-job receipt', async () => {
+  const leaf = `console.log('PID:'+process.pid);setInterval(()=>{},1000)`
+  const middle = `console.log('PID:'+process.pid);require('child_process').spawn(process.execPath,['-e',${JSON.stringify(leaf)}],{stdio:'inherit'});setInterval(()=>{},1000)`
+  const script = `console.log('PID:'+process.pid);require('child_process').spawn(process.execPath,['-e',${JSON.stringify(middle)}],{stdio:'inherit'});setInterval(()=>{},1000)`
+  const supervisor = new CliProcessSupervisor(2500)
+  const result = await supervisor.launch({ executable: process.execPath, args: ['-e', script], cwd: dir }, { ownerPath: build(false).executable })
+  assert.equal(result.status, 'TIMED_OUT')
+  assert.deepEqual(result.treeObservation, { activeProcesses: 0, handlesClosed: true })
+  const pids = [...supervisor.output.readPage().stdout.matchAll(/PID:(\d+)/g)].map(m => Number(m[1]))
+  assert.equal(pids.length, 3)
+  for (const pid of pids) assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' })
+  assert.equal(supervisor.isRunning, false)
 })
