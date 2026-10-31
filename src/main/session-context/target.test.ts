@@ -39,7 +39,7 @@ async function setup() {
   const resolve = sessionTargetResolver(registry, assertActive)
   return { base, main, sibling, git, registry, resolve, selection, switchProject: () => { current = false }, assertActive }
 }
-async function workerFixture() {
+async function workerFixture(timeoutMs?: number) {
   const f = await setup()
   const storage = join(f.base, 'private'), storePath = sessionStorePath(storage, 'A')
   const store = new SessionStore(storePath, 'A'); cleanup.push(() => store.close())
@@ -59,8 +59,17 @@ async function workerFixture() {
     if(args.includes('--help')) { console.log('--json --transcript'); process.exit(0); }
     const row={session_id:'sibling-session',agent:'codex',status:'ACTIVE',worktree_path:process.cwd()};
     if(!args.includes('--transcript')) { console.log(JSON.stringify(args[0]==='list'?[row]:row)); process.exit(0); }
+    if(fs.existsSync('suspend-transcript')) {
+      fs.writeFileSync('suspended-pid',String(process.pid));
+      const timer=setInterval(() => {
+        if(!fs.existsSync('release-transcript')) return;
+        clearInterval(timer);
+        console.log(JSON.stringify({type:'event_msg',payload:{type:'agent_message',message:'LATE_EVENT_MUST_NOT_COMMIT'}}));
+      },20);
+    } else {
     console.log(JSON.stringify({type:'session_meta',payload:{id:row.session_id,cwd:process.cwd()}}));
     for(let n=0;n<740;n++) console.log(JSON.stringify({type:'event_msg',payload:{type:n===487?'error':'agent_message',message:n===487?'sibling failure token=fixture-secret':'progress '+n}}));
+    }
     if(fs.existsSync('replace-before-commit')) {
       const root=process.cwd(), pointer=fs.readFileSync('.git');
       process.chdir(path.dirname(root)); fs.renameSync(root,root+'-old'); fs.mkdirSync(root); fs.writeFileSync(path.join(root,'.git'),pointer);
@@ -71,13 +80,62 @@ async function workerFixture() {
     const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
     writeFileSync(output, `require = require('node:module').createRequire(${JSON.stringify(join(process.cwd(), 'package.json'))});\n` + code)
   }
-  const client = new SessionContextClient(storage, 'A', f.main, () => { try { f.assertActive(); return true } catch { return false } }, output, f.resolve)
+  const client = new SessionContextClient(storage, 'A', f.main, () => { try { f.assertActive(); return true } catch { return false } }, output, f.resolve, timeoutMs)
   cleanup.push(async () => { client.dispose(); await new Promise(resolve => setTimeout(resolve, 150)) })
   const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: f.main, navigation: {} as McpProjectContext['navigation'], sessionContext: client })
   return { ...f, store, client, adapter }
 }
 
 describe('refresh in an explicitly selected sibling Worktree', () => {
+  it('recovers after a suspended transcript times out, kills its process and discards the old worker before a new read', async () => {
+    const f = await workerFixture(9000)
+    expect(data(await f.client.call('refresh_agent_sessions', f.selection))).toMatchObject({ imported: 1 })
+    const id = f.store.byProvider('sibling-session')!.id
+    writeFileSync(join(f.sibling, 'suspend-transcript'), '')
+    const oldWorker = (f.client as any).generation.worker
+    const task = f.client.call('refresh_agent_sessions', { ...f.selection, sessionId: id })
+    expect(f.client.call('refresh_agent_sessions', { ...f.selection, sessionId: id })).toBe(task)
+    expect(data(await task)).toMatchObject({ code: 'SESSION_CONTEXT_TIMEOUT', phase: 'transcript' })
+    const pid = Number(readFileSync(join(f.sibling, 'suspended-pid'), 'utf8'))
+    const catalog = data(await f.client.call('list_agent_sessions', {}))
+    expect(catalog.sessions).toHaveLength(1)
+    expect(catalog.sessions[0].eventCount).toBe(0)
+    expect(oldWorker.threadId).toBe(-1)
+    expect((f.client as any).generation.worker).not.toBe(oldWorker)
+    expect(() => process.kill(pid, 0)).toThrow()
+    writeFileSync(join(f.sibling, 'release-transcript'), '')
+    rmSync(join(f.sibling, 'suspend-transcript'))
+    expect(f.store.session(id).eventCount).toBe(0)
+    expect((f.client as any).refresh).toBeUndefined()
+    const failedWorker = (f.client as any).generation.worker
+    await failedWorker.terminate()
+    expect(data(await f.client.call('list_agent_sessions', {})).sessions[0].eventCount).toBe(0)
+    expect((f.client as any).generation.worker).not.toBe(failedWorker)
+    const worker = (f.client as any).generation.worker
+    await f.client.dispose()
+    expect(worker.threadId).toBe(-1)
+    expect(data(await f.client.call('list_agent_sessions', {})).code).toBe('PROJECT_CONTEXT_CHANGED')
+  }, 45_000)
+  it('ignores a validation released after timeout and keeps an actual project change terminal', async () => {
+    const f = await workerFixture(1500)
+    let release!: () => void
+    const barrier = new Promise<void>(resolve => { release = resolve })
+    const target = await f.resolve(f.selection)
+    const client = new SessionContextClient(f.base, 'A', f.main, () => { try { f.assertActive(); return true } catch { return false } },
+      (f.client as any).workerPath, async () => ({ ...target, validate: () => barrier }), 1500)
+    cleanup.push(() => client.dispose())
+    const task = client.call('refresh_agent_sessions', f.selection)
+    expect(data(await task)).toMatchObject({ code: 'SESSION_CONTEXT_TIMEOUT', phase: 'target-validation' })
+    const read = client.call('list_agent_sessions', {})
+    release()
+    expect(data(await read).sessions).toEqual([])
+    expect(f.store.count()).toBe(0)
+    f.switchProject()
+    expect(data(await client.call('list_agent_sessions', {})).code).toBe('PROJECT_CONTEXT_CHANGED')
+    await client.dispose()
+    expect(data(await client.call('list_agent_sessions', {})).code).toBe('PROJECT_CONTEXT_CHANGED')
+  }, 15_000)
+
   it('imports and reads a sibling session through the genuine worker and Channel without switching the main project or changing refs', async () => {
     const f = await workerFixture(), refs = f.git(f.main, 'show-ref'), state = f.git(f.main, 'status', '--porcelain')
     const refresh = await f.adapter.callTool('refresh_agent_sessions', f.selection)

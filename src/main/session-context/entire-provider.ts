@@ -10,17 +10,17 @@ import type { SessionInput } from './types'
 
 interface ProviderConfig { enabled: true; repositoryId: string; executable: string; sha256: string; version: string }
 interface ProviderSession { session_id: string; agent: string; status: string; worktree_path: string; started_at?: string; ended_at?: string }
-export interface CommandOutput { code: number; text: string; limited: boolean }
+export interface CommandOutput { code: number; text: string; limited: boolean; timedOut?: boolean }
 export type CommandRunner = (executable: string, args: string[], cwd: string, limit: number, consume?: (chunk: Buffer) => boolean, timeoutMs?: number, signal?: AbortSignal) => Promise<CommandOutput>
 export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume, timeoutMs = 10_000, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) { reject(new Error('PROJECT_CONTEXT_CHANGED')); return }
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^(GIT_|ENTIRE_)/i.test(key)))
   const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...env, NO_COLOR: '1', CI: '1', ENTIRE_LOG_LEVEL: 'error' } })
-  let text = '', bytes = 0, limited = false, stderrBytes = 0
+  let text = '', bytes = 0, limited = false, stderrBytes = 0, timedOut = false
   const cancel = () => { limited = true; child.kill() }
   signal?.addEventListener('abort', cancel, { once: true })
-  const timer = setTimeout(cancel, Math.max(1, Math.min(10_000, timeoutMs)))
+  const timer = setTimeout(() => { timedOut = true; cancel() }, Math.max(1, Math.min(10_000, timeoutMs)))
   child.stdout.on('data', (chunk: Buffer) => {
     if (limited) return
     bytes += chunk.length
@@ -29,7 +29,7 @@ export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume
   })
   child.stderr.on('data', (chunk: Buffer) => { stderrBytes += chunk.length; if (stderrBytes > 64 * 1024) { limited = true; child.kill() } })
   child.once('error', () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); reject(new Error('PROVIDER_UNAVAILABLE')) })
-  child.once('close', code => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve({ code: code ?? -1, text, limited }) })
+  child.once('close', code => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve({ code: code ?? -1, text, limited, ...(timedOut ? { timedOut } : {}) }) })
 })
 async function smallJson(path: string): Promise<Record<string, unknown>> {
   const stat = await lstat(path)
@@ -46,13 +46,27 @@ const date = (value?: string) => value && Number.isFinite(Date.parse(value)) ? n
 export class EntireProvider {
   private pending?: { key: string; task: Promise<object> }
   private deadline = 0
+  private phase = 'preflight'
   constructor(private readonly store: SessionStore, private readonly root: string, private readonly assertActive: () => void, private readonly run: CommandRunner = runReadOnly,
-    private readonly validateTarget: () => Promise<void> = async () => {}) {}
-  private command(exe: string, args: string[], cwd: string, limit: number, consume?: (chunk: Buffer) => boolean): Promise<CommandOutput> {
-    this.assertActive()
+    private readonly validateTarget: () => Promise<void> = async () => {},
+    private readonly observePhase: (phase: string) => void = () => {}) {}
+  private mark(phase: string): void { this.phase = phase; this.observePhase(phase) }
+  private assertDeadline(): void { if (Date.now() >= this.deadline) throw new Error('PROVIDER_TIMEOUT') }
+  private assertWithinDeadline(): void { this.assertActive(); this.assertDeadline() }
+  private async validate(): Promise<void> {
+    this.mark('target-validation')
+    this.assertWithinDeadline()
+    await this.validateTarget()
+    this.assertWithinDeadline()
+  }
+  private async command(exe: string, args: string[], cwd: string, limit: number, consume?: (chunk: Buffer) => boolean): Promise<CommandOutput> {
+    this.assertWithinDeadline()
+    this.mark(args.includes('--transcript') ? 'transcript' : args.includes('--help') ? 'cli-schema' : args.includes('--json') ? 'metadata' : args[0] === 'version' ? 'version' : 'privacy')
     const remaining = this.deadline - Date.now()
-    if (remaining <= 0) throw new Error('IMPORT_LIMIT_REACHED')
-    return this.run(exe, args, cwd, limit, consume, remaining)
+    const output = await this.run(exe, args, cwd, limit, consume, remaining)
+    this.assertWithinDeadline()
+    if (output.timedOut) throw new Error('PROVIDER_TIMEOUT')
+    return output
   }
   refresh(sessionId?: string): Promise<object> {
     this.assertActive()
@@ -71,8 +85,10 @@ export class EntireProvider {
     const executable = await realpath(config.executable)
     const executableStat = await lstat(executable)
     if (!executableStat.isFile() || executableStat.size > 256 * 1024 * 1024) throw new Error('PROVIDER_CONFIG_UNSAFE')
+    this.mark('executable-hash')
     const hash = createHash('sha256')
-    for await (const chunk of createReadStream(executable)) hash.update(chunk)
+    for await (const chunk of createReadStream(executable)) { this.assertDeadline(); hash.update(chunk) }
+    this.assertWithinDeadline()
     if (hash.digest('hex') !== config.sha256) throw new Error('PROVIDER_VERSION_MISMATCH')
     const localPath = join(this.root, '.entire', 'settings.local.json')
     let local: Record<string, unknown>
@@ -90,18 +106,19 @@ export class EntireProvider {
       const help = await this.command(executable, [...args], this.root, 32 * 1024)
       if (help.code !== 0 || help.limited || !flags.every(flag => help.text.includes(flag))) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
     }
-    this.assertActive()
+    this.assertWithinDeadline()
     return { ...config, executable }
   }
   private async perform(sessionId?: string): Promise<object> {
-    this.deadline = Date.now() + 12_000
+    this.deadline = Date.now() + (sessionId ? 12_000 : 10_000)
     try {
-      await this.validateTarget()
+      await this.validate()
       const known = sessionId ? this.store.session(sessionId) : undefined
+      this.mark('preflight')
       const config = await this.preflight()
       const args = known ? ['session', 'info', known.providerSessionId, '--json'] : ['session', 'list', '--json']
       const output = await this.command(config.executable, args, this.root, 1024 * 1024)
-      this.assertActive()
+      this.assertWithinDeadline()
       if (output.limited || output.code !== 0) throw new Error(output.limited ? 'IMPORT_LIMIT_REACHED' : 'PROVIDER_UNAVAILABLE')
       let values: unknown[]
       try { const parsed = JSON.parse(output.text); values = known ? [parsed] : Array.isArray(parsed) ? parsed : (() => { throw new Error() })() }
@@ -121,32 +138,36 @@ export class EntireProvider {
         if (known) {
           const parser = new CodexParser()
           const transcript = await this.command(config.executable, ['session', 'info', value.session_id, '--transcript'], this.root, 32 * 1024 * 1024, chunk => parser.push(chunk))
-          this.assertActive()
+          this.assertWithinDeadline()
           if (transcript.code !== 0 && !transcript.limited) throw new Error('PROVIDER_UNAVAILABLE')
+          this.mark('parsing')
           const parsed = parser.finish()
+          this.assertWithinDeadline()
           if (!parsed.events.length || (parser.sessionId && parser.sessionId !== value.session_id) || (parser.cwd && await realpath(parser.cwd) !== root)) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
-          await this.validateTarget()
-          this.assertActive()
-          const result = this.store.ingest({ ...metadata, ...parsed, coverage: transcript.limited ? 'PARTIAL' : parsed.coverage }, parsed.events, this.assertActive)
-          await this.validateTarget()
-          this.assertActive()
+          await this.validate()
+          this.assertWithinDeadline()
+          this.mark('sqlite-ingest')
+          const result = this.store.ingest({ ...metadata, ...parsed, coverage: transcript.limited ? 'PARTIAL' : parsed.coverage }, parsed.events, () => this.assertWithinDeadline())
+          await this.validate()
+          this.assertWithinDeadline()
+          this.mark('sqlite-maintenance')
           this.store.maintain()
           return { ...result, imported: 1, lastObserved: new Date().toISOString(), sourceBytes: parsed.sourceBytes, provider: 'entire', provenance: 'OBSERVED_FROM_PROVIDER' }
         }
         if (!this.store.byProvider(value.session_id)) {
-          await this.validateTarget()
-          this.assertActive()
-          this.store.ingest(metadata, [], this.assertActive); imported++
+          await this.validate()
+          this.assertWithinDeadline()
+          this.store.ingest(metadata, [], () => this.assertWithinDeadline()); imported++
         }
       }
-      await this.validateTarget()
-      this.assertActive()
+      await this.validate()
+      this.assertWithinDeadline()
       this.store.maintain()
       return { imported, skipped, coverage: skipped || values.length > 500 ? 'PARTIAL' : 'COMPLETE', lastObserved: new Date().toISOString(), provider: 'entire', transcriptImported: false }
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
-      const allowed = ['PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH']
-      return { coverage: 'UNAVAILABLE', code: allowed.includes(message) ? message : 'PROVIDER_UNAVAILABLE', lastObserved: new Date().toISOString(), imported: 0 }
+      const allowed = ['PROVIDER_TIMEOUT', 'SESSION_CONTEXT_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH']
+      return { coverage: 'UNAVAILABLE', code: allowed.includes(message) ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), lastObserved: new Date().toISOString(), imported: 0 }
     }
   }
 }
