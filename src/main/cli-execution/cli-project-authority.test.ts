@@ -1,3 +1,4 @@
+import './cli-native-test-setup'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'

@@ -1,3 +1,4 @@
+import './cli-native-test-setup'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
