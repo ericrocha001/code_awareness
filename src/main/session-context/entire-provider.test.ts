@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -8,7 +8,7 @@ import { digest } from './privacy'
 import { EntireProvider, runReadOnly, type CommandRunner } from './entire-provider'
 
 const cleanup: (() => void)[] = []
-afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
+afterEach(() => { vi.restoreAllMocks(); for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
 const line = (value: unknown) => JSON.stringify(value) + '\n'
 function fixture(root: string) {
   return [
@@ -49,10 +49,44 @@ async function setup() {
     return { code: 0, text: JSON.stringify(args[1] === 'list' ? (Array.isArray(metadata) ? metadata : [metadata]) : (Array.isArray(metadata) ? metadata[0] : metadata)), limited: false }
   }
   const provider = new EntireProvider(store, root, () => {}, run)
-  return { base, root, store, provider, calls, metadata, configPath, localPath, setTranscript: (text: string) => { transcript = text }, setMetadata: (m: unknown) => { metadata = m } }
+  return { base, root, store, provider, run, calls, metadata, configPath, localPath, setTranscript: (text: string) => { transcript = text }, setMetadata: (m: unknown) => { metadata = m } }
 }
 
 describe('Entire read-only Codex ingestion', () => {
+  it('rejects a late finite transcript before SQLite, reports the phase and permits a manual retry', async () => {
+    const f = await setup()
+    await f.provider.refresh()
+    const id = f.store.byProvider('session-1')!.id
+    let clock = Date.now(), late = true
+    vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    const budgets: number[] = []
+    const provider = new EntireProvider(f.store, f.root, () => {}, async (exe, args, cwd, limit, consume, timeout) => {
+      budgets.push(timeout!)
+      const output = await f.run(exe, args, cwd, limit, consume, timeout)
+      if (late && args.includes('--transcript')) clock += 12_001
+      return output
+    })
+    expect(await provider.refresh(id)).toMatchObject({ code: 'PROVIDER_TIMEOUT', phase: 'transcript', imported: 0 })
+    expect(f.store.session(id).eventCount).toBe(0)
+    expect(budgets.every(value => value > 0 && value <= 12_000)).toBe(true)
+    late = false
+    expect(await provider.refresh(id)).toMatchObject({ imported: 1, eventCount: 4, coverage: 'COMPLETE' })
+  })
+  it('distinguishes a subprocess deadline from a byte limit and leaves no child process running', async () => {
+    const output = await runReadOnly(process.execPath, ['-e', 'console.log(process.pid);setInterval(()=>{},1000)'], process.cwd(), 1024, undefined, 500)
+    expect(output).toMatchObject({ limited: true, timedOut: true })
+    const pid = Number(output.text.trim())
+    expect(pid).toBeGreaterThan(0)
+    expect(() => process.kill(pid, 0)).toThrow()
+    const f = await setup()
+    await f.provider.refresh()
+    const id = f.store.byProvider('session-1')!.id
+    const provider = new EntireProvider(f.store, f.root, () => {}, async (exe, args, cwd, limit, consume, timeout) =>
+      args.includes('--transcript') ? { code: -1, text: '', limited: true, timedOut: true } : f.run(exe, args, cwd, limit, consume, timeout))
+    expect(await provider.refresh(id)).toMatchObject({ code: 'PROVIDER_TIMEOUT', phase: 'transcript', imported: 0 })
+    expect(f.store.session(id).eventCount).toBe(0)
+  }, 10_000)
+
   it('discovers metadata only, then sanitizes a selected transcript, replays and reconciles reordered source without Git writes', async () => {
     const f = await setup()
     const before = await runReadOnly('git', ['show-ref'], f.root, 4096)
