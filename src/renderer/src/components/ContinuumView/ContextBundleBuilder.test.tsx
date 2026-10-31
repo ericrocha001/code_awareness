@@ -130,9 +130,9 @@ it('discards a late component after closing and sends explicit cancellation', as
 })
 it('keeps generation literal, removes compression controls and labels only applied legacy history', async () => {
   const api = vi.mocked(window.codeAwareness.continuumBuilder), original = api.getMockImplementation()!
-  api.mockImplementation(async request => request.action === 'recent'
-    ? [{ id: 'legacy', name: 'Legado', format: 'copy', generatedAt: '2026-01-01', count: 1, bytes: 20, tokenCount: 10, compression: { applied: true, profile: 'strong' } }, { id: 'plain', name: 'Integral', format: 'copy', generatedAt: '2026-01-02', count: 1, bytes: 20, tokenCount: 10, compression: { applied: false, profile: 'off' } }]
-    : original(request))
+  api.mockImplementation(((async (request: any) => request.action === 'recent'
+    ? [{ id: 'legacy', name: 'Legado', format: 'copy' as const, generatedAt: '2026-01-01', count: 1, bytes: 20, tokenCount: 10, compression: { applied: true, profile: 'strong' } }, { id: 'plain', name: 'Integral', format: 'copy' as const, generatedAt: '2026-01-02', count: 1, bytes: 20, tokenCount: 10, compression: { applied: false, profile: 'off' } }]
+    : original(request)) as any))
   render(<ContextBundleBuilder repositoryId="A" facets={[]} tags={[]} onClose={vi.fn()} />)
   expect(screen.queryByLabelText('Compressão PAKT')).toBeNull()
   fireEvent.click(await screen.findByRole('button', { name: /Source DOCUMENT/ }))

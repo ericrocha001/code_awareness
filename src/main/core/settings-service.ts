@@ -11,6 +11,7 @@ import { desktopProfilePaths } from '../desktop-profile'
 const DEFAULT_SETTINGS = {
   rootFolders: [],
   remoteAccessEnabled: false,
+  cliExecutionEnabled: false,
   transportKind: 'ngrok',
   individualProjects: [],
   hiddenProjects: [],

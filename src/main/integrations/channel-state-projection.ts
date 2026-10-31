@@ -14,17 +14,21 @@ export class ChannelStateProjection {
   private readonly listeners = new Set<(state: ChannelState) => void>()
   private readonly unsubscribes: Array<() => void>
 
+  private cliExecutionEnabled = false
+
   constructor(
     private readonly remote: Pick<RemoteAccessService, 'getState' | 'onChanged'>,
     private readonly projects: Pick<ActiveProjectService, 'getState' | 'onChanged'>,
     private readonly mcp: Pick<McpLifecycle, 'getState' | 'onChanged' | 'getActivityState' | 'onActivityChanged'>,
     private readonly installationConfigured: () => boolean,
-    settings: { onChanged(listener: () => void): () => void },
+    private readonly settings: { loadSettings?(): import('../../shared/types').AppSettings; getCliExecutionEnabled?(): boolean; onChanged(listener: () => void): () => void },
     private readonly functional: { getState(): ChannelFunctionalHealth; onChanged(listener: () => void): () => void }
   ) {
+    this.refreshCliEnabled()
     this.getState()
     const publish = () => {
       const previousRevision = this.revision
+      this.refreshCliEnabled()
       const state = this.getState()
       if (state.revision === previousRevision) return
       for (const listener of this.listeners) {
@@ -32,6 +36,16 @@ export class ChannelStateProjection {
       }
     }
     this.unsubscribes = [remote.onChanged(publish), projects.onChanged(publish), mcp.onChanged(publish), settings.onChanged(publish), functional.onChanged(publish), mcp.onActivityChanged(publish)]
+  }
+
+  private refreshCliEnabled(): void {
+    try {
+      if (typeof this.settings.getCliExecutionEnabled === 'function') {
+        this.cliExecutionEnabled = this.settings.getCliExecutionEnabled()
+      } else if (typeof this.settings.loadSettings === 'function') {
+        this.cliExecutionEnabled = this.settings.loadSettings().cliExecutionEnabled === true
+      }
+    } catch {}
   }
 
   getState(): ChannelState {
@@ -53,7 +67,7 @@ export class ChannelStateProjection {
     else if (error) availability = 'OFFLINE'
     else availability = ready ? 'READY' : 'CONNECTING'
     const value: Omit<ChannelState, 'revision'> = {
-      availability, remoteAccessEnabled: enabled, installationConfigured: configured, transport,
+      availability, remoteAccessEnabled: enabled, cliExecutionEnabled: this.cliExecutionEnabled, installationConfigured: configured, transport,
       connectionStatus: remote.status, mcpStatus: mcp.status,
       activeProject: project ? { id: project.id, name: project.name } : null,
       lastError,

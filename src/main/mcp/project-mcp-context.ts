@@ -8,6 +8,7 @@ import type { GitHubIntegrationService } from '../github/github-integration-serv
 import type { RepositoryFileIngress } from '../repository-file-ingress/repository-file-ingress'
 import type { RepositoryFileEditing } from '../repository-file-ingress/repository-file-editing'
 import type { IVisualContinuumService } from '../continuum/continuum-types'
+import type { CliExecutionService } from '../cli-execution/cli-execution-service'
 
 export interface McpProjectContext {
   sessionContext?: import('../session-context/mcp').SessionContextPort
@@ -19,6 +20,7 @@ export interface McpProjectContext {
   continuum?: IContinuumService
   visualContinuum?: IVisualContinuumService
   validationExecution?: ValidationExecution
+  cliExecution?: CliExecutionService
   diagnosticSourceAccess?: DiagnosticSourceAccess
   runtimeRestart?: RuntimeRestartController
   gitOperations?: GitOperationsService

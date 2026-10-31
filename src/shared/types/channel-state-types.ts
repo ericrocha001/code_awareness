@@ -6,6 +6,7 @@ export interface ChannelState {
   revision: number
   availability: ChannelAvailability
   remoteAccessEnabled: boolean
+  cliExecutionEnabled: boolean
   installationConfigured: boolean
   transport: 'relay' | 'ngrok'
   connectionStatus: string

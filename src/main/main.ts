@@ -3,7 +3,7 @@
 */
 
 import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage, powerMonitor } from 'electron'
-import { existsSync, mkdirSync } from 'fs'
+import { existsSync, mkdirSync, realpathSync } from 'fs'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'node:url'
 import { registerFileHandlers } from './ipc/file-handler'
@@ -110,6 +110,10 @@ import { PreviewPreflightService } from './work-orchestration/preview-preflight'
 import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
+import { CliExecutionService } from './cli-execution/cli-execution-service'
+import { confirmCliExecution } from './cli-execution/cli-authorization'
+import { createCliProjectAuthority } from './cli-execution/cli-project-authority'
+import { locateCliJobOwner } from './cli-execution/windows/cli-job-owner-locator'
 
 
 
@@ -160,6 +164,7 @@ const runtimeRestart = new RuntimeRestartController(
   () => app.quit()
 )
 let activeValidationExecution: ValidationExecution | null = null
+let activeCliExecution: CliExecutionService | null = null
 let activeSessionContext: SessionContextClient | undefined
 let activeWorktreeValidation: GitWorktreeValidation | null = null
 let diagnosticInstallationId: string | null = null
@@ -475,6 +480,8 @@ app.whenReady().then(async () => {
     await branchOrchestration.deactivate()
     await mcpLifecycle.quiesce()
     await activeValidationExecution?.shutdown()
+    await activeCliExecution?.shutdown()
+    activeCliExecution = null
     await activeWorktreeValidation?.shutdown()
     activeWorktreeValidation = null
     activeValidationExecution = null
@@ -514,6 +521,34 @@ app.whenReady().then(async () => {
     const gitRepositoryId = repositoryCatalog?.findByPath(project.path)?.id
     const gitProjectRevision = activeProjects?.getState().revision
     activeValidationExecution = new ValidationExecution(project.path, validationLedger, runtimeIdentityProvider, undefined, undefined, gitRepositoryId ?? null)
+    activeCliExecution = new CliExecutionService({
+      repoRoot: project.path,
+      repositoryId: gitRepositoryId ?? null,
+      enabledByDefault: settingsService.loadSettings().cliExecutionEnabled ?? false,
+      ownerPath: (() => {
+        try { return locateCliJobOwner(app.getAppPath(), app.isPackaged ? process.resourcesPath : '') }
+        catch { return join(app.getAppPath(), 'out', 'cli-execution', 'unavailable.exe') }
+      })(),
+      getFingerprint: createCliProjectAuthority({
+        selection: activeProjects!.getState(),
+        getSelection: () => activeProjects!.getState(),
+        findRepository: path => repositoryCatalog?.findByPath(path) ?? null,
+        captureGitIdentity: async path => {
+          const directories = await gitService.getRepositoryDirectories(path)
+          const snapshot = await gitService.captureWorktreeReadSnapshot(path)
+          return { commonDirectory: realpathSync(directories.common), worktreeDirectory: realpathSync(directories.admin),
+            head: snapshot.head, branch: snapshot.branch, operation: snapshot.operation }
+        }
+      }),
+      approvalHandler: async (req) => {
+        if (!mainWindow || mainWindow.isDestroyed() || activeProjects?.getState().project?.id !== project.id || activeProjects?.getState().revision !== gitProjectRevision) return false
+        const approved = await confirmCliExecution(mainWindow, req)
+        if (!approved || activeProjects?.getState().project?.id !== project.id || activeProjects?.getState().revision !== gitProjectRevision) {
+          return false
+        }
+        return true
+      }
+    })
     activeWorktreeValidation = gitRepositoryId ? new GitWorktreeValidation(project.path, gitService, {
       repositoryId: gitRepositoryId,
       isActive: () => activeProjects?.getState().revision === gitProjectRevision && activeProjects?.getState().project?.id === project.id
@@ -564,6 +599,7 @@ app.whenReady().then(async () => {
         continuum.assertRepository(gitRepositoryId)
       } } } : {}),
       validationExecution: activeValidationExecution,
+      cliExecution: activeCliExecution,
       ...(runtimePreview ? { runtimePreview: { service: runtimePreview, isCurrent: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision } } : {}),
       diagnosticSourceAccess: new DiagnosticSourceAccess(project.path),
       gitOperations,
@@ -643,6 +679,9 @@ app.whenReady().then(async () => {
   // Registrar todos os handlers IPC dinâmicos e estáticos de forma única no ciclo de vida
   registerFileHandlers()
   registerSettingsHandlers(settingsService)
+  settingsService.onChanged(() => {
+    activeCliExecution?.setEnabled(settingsService.loadSettings().cliExecutionEnabled ?? false)
+  })
   registerGitHandlers(watcherService, settingsService, compressionService, codeAwarenessIgnoreService)
   registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime, target => activeProjects!.assertContextSelection(target))
   registerGitHubHandlers(githubIntegration)
@@ -704,6 +743,8 @@ registerApplicationShutdown(app, async () => {
   codeMapLifecycleMonitor.dispose()
   await remoteAccess.dispose()
   await activeValidationExecution?.shutdown()
+  await activeCliExecution?.shutdown()
+  activeCliExecution = null
   await activeWorktreeValidation?.shutdown()
   activeWorktreeValidation = null
   activeValidationExecution = null
