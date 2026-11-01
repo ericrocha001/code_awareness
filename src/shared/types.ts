@@ -26,6 +26,7 @@ export interface AppSettings {
   ngrokDomain?: string
   remoteAccessEnabled?: boolean
   cliExecutionEnabled?: boolean
+  cliAutonomy?: Record<string, import('./types/cli-policy-types').CliTrustGrant>
   transportKind?: 'relay' | 'ngrok'
   rootFolders: string[]
   individualProjects: string[]

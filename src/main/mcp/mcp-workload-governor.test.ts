@@ -62,7 +62,7 @@ describe('MCP workload admission', () => {
     expect(await governor.run('read_code', {}, 'c', undefined, async () => ok)).toEqual(ok)
   })
 
-  it.each(['commit_git_changes', 'start_validation'])('preserves single-flight and no timer for %s', async name => {
+  it.each(['commit_git_changes', 'start_validation', 'start_cli_investigation', 'cancel_cli_investigation'])('preserves single-flight and no timer for %s', async name => {
     vi.useFakeTimers()
     const governor = new McpWorkloadGovernor(100, 50)
     const work = deferred()

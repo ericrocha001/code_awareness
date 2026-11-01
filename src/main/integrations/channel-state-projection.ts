@@ -22,7 +22,8 @@ export class ChannelStateProjection {
     private readonly mcp: Pick<McpLifecycle, 'getState' | 'onChanged' | 'getActivityState' | 'onActivityChanged'>,
     private readonly installationConfigured: () => boolean,
     private readonly settings: { loadSettings?(): import('../../shared/types').AppSettings; getCliExecutionEnabled?(): boolean; onChanged(listener: () => void): () => void },
-    private readonly functional: { getState(): ChannelFunctionalHealth; onChanged(listener: () => void): () => void }
+    private readonly functional: { getState(): ChannelFunctionalHealth; onChanged(listener: () => void): () => void },
+    private readonly cliPolicy?: () => import('../../shared/types/cli-policy-types').CliPolicy
   ) {
     this.refreshCliEnabled()
     this.getState()
@@ -68,6 +69,7 @@ export class ChannelStateProjection {
     else availability = ready ? 'READY' : 'CONNECTING'
     const value: Omit<ChannelState, 'revision'> = {
       availability, remoteAccessEnabled: enabled, cliExecutionEnabled: this.cliExecutionEnabled, installationConfigured: configured, transport,
+      cliMode: this.cliPolicy?.().mode ?? 'SUPERVISED',
       connectionStatus: remote.status, mcpStatus: mcp.status,
       activeProject: project ? { id: project.id, name: project.name } : null,
       lastError,

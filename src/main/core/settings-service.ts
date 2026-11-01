@@ -76,6 +76,7 @@ export class SettingsService {
 
       merged.rootFolders = rest.rootFolders || []
       merged.remoteAccessEnabled = rest.remoteAccessEnabled === true
+      merged.cliExecutionEnabled = rest.cliExecutionEnabled === true
       merged.transportKind = rest.transportKind === 'relay' ? 'relay' : 'ngrok'
       merged.individualProjects = rest.individualProjects || []
       merged.hiddenProjects = rest.hiddenProjects || []
@@ -114,7 +115,13 @@ export class SettingsService {
   }
 
   saveSettings(settings: AppSettings): void {
-    this.writeSettings({ ...settings, lastActiveRepositoryId: this.loadSettings().lastActiveRepositoryId })
+    const current = this.loadSettings()
+    this.writeSettings({ ...settings, lastActiveRepositoryId: current.lastActiveRepositoryId, cliAutonomy: current.cliAutonomy })
+  }
+
+  setLocalCliTrust(repositoryId: string, grant: import('../../shared/types/cli-policy-types').CliTrustGrant): void {
+    const settings = this.loadSettings()
+    this.writeSettings({ ...settings, cliAutonomy: { ...settings.cliAutonomy, [repositoryId]: grant } })
   }
 
   rememberActiveRepository(repositoryId: string): void {

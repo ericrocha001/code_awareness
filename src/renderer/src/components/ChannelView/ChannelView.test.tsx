@@ -200,8 +200,8 @@ it('keeps activity runtime-scoped without illustrated history, charts or invente
   await screen.findByText('Pronto para acesso remoto')
   expect(screen.getByText('Nesta execução')).toBeTruthy()
   expect(document.body.textContent).not.toMatch(/Last 24 hours|últimas 24 horas|tendência|período anterior|CodeScope/i)
-  expect(screen.getAllByRole('combobox')).toHaveLength(2)
-  expect(screen.getAllByRole('button').map(button => button.textContent)).toEqual(['Desativar acesso remoto', 'Ativar execução CLI', 'Diagnosticar problemas', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Verificar', 'Conectar', 'Abrir diagnóstico'])
+  expect(within(screen.getByRole('region', { name: 'Atividade por capacidade' })).queryAllByRole('button')).toHaveLength(0)
+  expect(screen.getByRole('combobox', { name: 'Modo de execução' })).toBeTruthy()
 })
 
 it('toggles local CLI execution through settings and reflects state reactively', async () => {
@@ -210,11 +210,30 @@ it('toggles local CLI execution through settings and reflects state reactively',
 
   const toggleBtn = screen.getByRole('button', { name: 'Ativar execução CLI' })
   expect(toggleBtn).toBeTruthy()
-  expect(screen.getByText('Execução local CLI').nextElementSibling?.textContent).toBe('Desativado')
+  expect(screen.getByText('Execução local CLI').nextElementSibling?.textContent).toBe('OFF')
 
   fireEvent.click(toggleBtn)
 
   await waitFor(() => {
     expect(window.codeAwareness.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ cliExecutionEnabled: true }))
   })
+})
+
+it('shows trust scope and honest OS limits, changes mode only through local IPC and provides revoke/stop', async () => {
+  state.cliExecutionEnabled = true
+  state.cliMode = 'SUPERVISED'
+  window.codeAwareness.chooseCliMode = vi.fn(async mode => { state.cliMode = mode; state.revision++; return { accepted: true } })
+  window.codeAwareness.stopCliExecution = vi.fn(async () => ({ stopped: true }))
+  render(<ChannelView />)
+  const select = await screen.findByRole('combobox', { name: 'Modo de execução' })
+  expect(screen.getByText(/Autonomia confiável não é sandbox/)).toBeTruthy()
+  expect(screen.getByText(/todos os clientes autenticados/)).toBeTruthy()
+  fireEvent.change(select, { target: { value: 'AUTONOMOUS_TRUSTED' } })
+  await waitFor(() => expect(window.codeAwareness.chooseCliMode).toHaveBeenCalledWith('AUTONOMOUS_TRUSTED'))
+  await waitFor(() => expect((select as HTMLSelectElement).value).toBe('AUTONOMOUS_TRUSTED'))
+  fireEvent.click(screen.getByRole('button', { name: 'Desativar autonomia' }))
+  await waitFor(() => expect(window.codeAwareness.chooseCliMode).toHaveBeenCalledWith('SUPERVISED'))
+  fireEvent.click(screen.getByRole('button', { name: 'Interromper execução CLI' }))
+  await waitFor(() => expect(window.codeAwareness.stopCliExecution).toHaveBeenCalledTimes(1))
+  expect(window.codeAwareness.saveSettings).not.toHaveBeenCalled()
 })
