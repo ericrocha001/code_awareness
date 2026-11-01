@@ -22,6 +22,65 @@ export function input(id: string, overrides: Partial<SessionInput> = {}): Sessio
 const event = (text = 'output'): EventInput => ({ type: 'TOOL_RESULT', text, sourcePosition: 1 })
 
 describe('repository Session Context SQLite', () => {
+  it('compares preserved timestamp offsets by instant for selection and retention', () => {
+    const store = setup()('A')
+    const first = store.ingest(input('offset-first', { startedAt: '2026-01-01T00:30:00+01:00', endedAt: '2026-01-01T00:30:00+01:00' }), [
+      { type: 'INPUT', text: 'earlier', sourcePosition: 1, timestamp: '2026-01-01T00:30:00+01:00' },
+      { type: 'INPUT', text: 'later', sourcePosition: 2, timestamp: '2026-01-01T00:15:00Z' }
+    ])
+    store.ingest(input('utc-next', { startedAt: '2026-01-01T00:00:00Z' }), [])
+    expect(store.events(first.sessionId, { after: '2026-01-01T00:00:00Z' }, 0, 5).map(event => event.ordinal)).toEqual([2])
+    const clockFixture = new Database(store.path); clockFixture.exec('UPDATE sessions SET lastObserved=startedAt'); clockFixture.close()
+    expect(store.sessions({ after: '2026-01-01T00:00:00Z' }, 0, 5).map(row => row.providerSessionId)).toEqual(['utc-next'])
+    for (let n = 2; n <= 500; n++) store.ingest(input('retained-' + n, { endedAt: '2026-02-01T00:00:00Z' }), [])
+    expect(() => store.session(first.sessionId)).toThrow('SESSION_UNAVAILABLE')
+    expect(store.byProvider('utc-next')).toBeDefined()
+  })
+
+  it('reconciles payload omissions, materialization and diagnostics across replay without metadata downgrade', () => {
+    const store = setup()('A')
+    const source = input('diagnostics', { importState: 'TRANSCRIPT_IMPORTED', coverageReasons: {} })
+    const values: EventInput[] = [event('x'.repeat(LIMITS.event + 10)), { type: 'INPUT', sourcePosition: 2 }, { type: 'INPUT', text: '', sourcePosition: 3 }]
+    const imported = store.ingest(source, values)
+    expect(imported).toMatchObject({ importState: 'TRANSCRIPT_IMPORTED', eventCount: 3, coverage: 'PARTIAL', coverageReasons: { PAYLOAD_LIMIT: 1, PAYLOAD_UNAVAILABLE: 1 } })
+    expect(store.ingest(source, values)).toMatchObject({ replay: true, revision: 1, coverageReasons: imported.coverageReasons })
+    expect(store.ingest(input('diagnostics', { importState: 'METADATA_ONLY', coverage: 'UNAVAILABLE', coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 } }), []))
+      .toMatchObject({ replay: true, revision: 1, eventCount: 3, importState: 'TRANSCRIPT_IMPORTED', coverageReasons: imported.coverageReasons })
+    expect(() => store.ingest(input('unsafe', { coverageReasons: { PRIVATE_SAMPLE: 1 } as never }), [])).toThrow('INVALID_IMPORT')
+    expect(store.events(imported.sessionId, {}, 0, 5)[2].omission).toBeNull()
+    const sourceReason = input('source-reason', { importState: 'TRANSCRIPT_IMPORTED', coverageReasons: { UNKNOWN_RECORD: 2 } })
+    expect(store.ingest(sourceReason, [event()])).toMatchObject({ coverage: 'PARTIAL', coverageReasons: { UNKNOWN_RECORD: 2 } })
+    expect(store.ingest(sourceReason, [event()])).toMatchObject({ replay: true, revision: 1, coverage: 'PARTIAL' })
+    expect(() => store.ingest(input('invalid-metadata', { importState: 'METADATA_ONLY' }), [event()])).toThrow('INVALID_IMPORT')
+  })
+  it.each([1, 2])('migrates legacy v%i idempotently without guessing history, preserving data, revision and cursors after restart', version => {
+    const base = mkdtempSync(join(tmpdir(), 'session-migration-')), path = sessionStorePath(base, 'A')
+    cleanup.push(() => rmSync(base, { recursive: true, force: true }))
+    let store = new SessionStore(path, 'A')
+    cleanup.push(() => store.close())
+    const zero = store.ingest(input('legacy-zero'), [])
+    const partial = store.ingest(input('legacy-partial', { coverage: 'PARTIAL' }), [event('retained')])
+    const catalogRevision = store.catalogRevision(), cursor = store.cursor({ legacy: true }, 1)
+    store.close()
+    const legacy = new Database(path)
+    if (version === 1) legacy.exec('ALTER TABLE sessions DROP COLUMN sourceObservation')
+    legacy.exec('ALTER TABLE sessions DROP COLUMN importState; ALTER TABLE sessions DROP COLUMN coverageReasons')
+    legacy.pragma('user_version = ' + version); legacy.close()
+    store = new SessionStore(path, 'A')
+    expect(store.session(zero.sessionId)).toMatchObject({ importState: 'UNKNOWN', eventCount: 0, revision: 1 })
+    expect(store.session(partial.sessionId)).toMatchObject({ importState: 'UNKNOWN', eventCount: 1, revision: 1 })
+    expect(JSON.parse(store.session(partial.sessionId).coverageReasons)).toEqual({ LEGACY_COVERAGE_UNEXPLAINED: 1 })
+    expect(store.sourceObservation(store.session(partial.sessionId)).identity).toBe('UNKNOWN')
+    expect(store.catalogRevision()).toBe(catalogRevision)
+    expect(store.offset(cursor, { legacy: true })).toBe(1)
+    store.close(); store = new SessionStore(path, 'A')
+    expect(store.session(partial.sessionId).eventCount).toBe(1)
+    const row = store.events(partial.sessionId, {}, 0, 1)[0]
+    expect(store.event(partial.sessionId, row.id).text).toBe('retained')
+    const foreign = new SessionStore(sessionStorePath(base, 'B'), 'B'); cleanup.push(() => foreign.close())
+    expect(foreign.count()).toBe(0)
+  })
+
   it('serializes competing writers and reopens persistent banks after their workers exit', async () => {
     const base = mkdtempSync(join(tmpdir(), 'session-concurrency-'))
     cleanup.push(() => rmSync(base, { recursive: true, force: true }))

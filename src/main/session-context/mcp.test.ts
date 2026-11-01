@@ -33,6 +33,24 @@ function setup() {
 function events(n: number): EventInput[] { return Array.from({ length: n }, (_, index) => ({ type: index === 487 ? 'ERROR' : 'AGENT_UPDATE', text: index === 487 ? 'unique failure evidence: token=private-value' : `progress ${index}`, sourcePosition: index + 1 })) }
 
 describe('Session Context progressive MCP disclosure', () => {
+  it('exposes cheap materialization and bounded reasons without adding source diagnostics to literal pages', async () => {
+    const f = setup()
+    const discovered = f.store.ingest({ ...sessionInput('metadata-only'), importState: 'METADATA_ONLY', coverage: 'UNAVAILABLE', coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 } }, [])
+    const catalog = data(await f.call('list_agent_sessions', {}))
+    expect(catalog.sessions[0]).toMatchObject({ importState: 'METADATA_ONLY', eventCount: 0, coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 } })
+    expect(catalog.sessions[0].sourceObservation).toBeUndefined()
+    const imported = f.store.ingest({ ...sessionInput('metadata-only'), importState: 'TRANSCRIPT_IMPORTED', sourceDigest: 'materialized', coverage: 'PARTIAL', coverageReasons: { UNKNOWN_RECORD: 2 } }, [{ type: 'INPUT', text: 'public selected literal', sourcePosition: 1 }])
+    const map = data(await f.call('inspect_agent_session', { sessionId: discovered.sessionId }))
+    expect(map).toMatchObject({ importState: 'TRANSCRIPT_IMPORTED', eventCount: 1, coverageReasons: { UNKNOWN_RECORD: 2 }, sourceObservation: { identity: 'UNKNOWN' }, associationCoverage: 'UNAVAILABLE' })
+    const selected = data(await f.call('list_agent_session_events', { sessionId: imported.sessionId }))
+    const literal = await f.adapter.callTool('read_agent_session_event', { sessionId: imported.sessionId, eventId: selected.events[0].eventId, expectedRevision: imported.revision })
+    expect(literal.structuredContent).toMatchObject({ content: 'public selected literal', untrusted: true })
+    expect(literal.structuredContent?.importState).toBeUndefined()
+    expect(literal.structuredContent?.sourceObservation).toBeUndefined()
+    expect(JSON.stringify(catalog)).not.toContain('public selected literal')
+    expect(f.refresh).not.toHaveBeenCalled()
+  })
+
   it('keeps projected literal pages within the wire budget and preserves exact bytes, cursors and metadata', async () => {
     const f = setup()
     for (const text of ['public '.repeat(4000), ('"\\\n🧪').repeat(4000)]) {
