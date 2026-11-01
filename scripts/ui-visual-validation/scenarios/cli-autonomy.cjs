@@ -7,11 +7,18 @@ exports.run = async ctx => {
   const backend = path.join(ctx.evidenceDir, 'backend.cjs')
   buildSync({ stdin: { contents: "export {SettingsService} from './src/main/core/settings-service'; export {CliTrustPolicy} from './src/main/cli-execution/cli-trust-policy'; export {confirmCliAutonomy,confirmCliExecution} from './src/main/cli-execution/cli-authorization'; export {registerCliPolicyHandlers} from './src/main/ipc/cli-policy-handler'; export {CliExecutionService} from './src/main/cli-execution/cli-execution-service'; export {executeCliTool} from './src/main/cli-execution/cli-execution-mcp'; export {GitService} from './src/main/core/git-service'; export {createCliProjectAuthority} from './src/main/cli-execution/cli-project-authority'", resolveDir: ctx.projectRoot }, outfile: backend, bundle: true, platform: 'node', format: 'cjs', packages: 'external', logLevel: 'silent' })
   const api = require(backend)
+  const worktreeBackend = path.join(ctx.evidenceDir, 'worktree-backend.cjs')
+  buildSync({ stdin: { contents: "export {GitWorktreeRegistry} from './src/main/git-operations/git-worktree-registry'; export {resolveCliWorktree} from './src/main/cli-execution/cli-worktree-authority'", resolveDir: ctx.projectRoot }, outfile: worktreeBackend, bundle: true, platform: 'node', format: 'cjs', packages: 'external', logLevel: 'silent' })
+  const { GitWorktreeRegistry, resolveCliWorktree } = require(worktreeBackend)
   const root = path.join(ctx.temporary, 'repository'); fs.mkdirSync(root)
   execFileSync('git', ['-c', 'core.fsmonitor=false', 'init', '-q', root], { windowsHide: true, timeout: 10000 })
   execFileSync('git', ['-C', root, '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-c', 'core.hooksPath=' + path.join(root, 'no-hooks'), '-c', 'user.name=CLI Fixture', '-c', 'user.email=cli@example.test', 'commit', '--allow-empty', '-qm', 'fixture'], { windowsHide: true, timeout: 10000 })
   const settings = new api.SettingsService(), git = new api.GitService()
   const selection = { revision: 1, project: { id: 'cli-fixture', path: root } }
+  const sibling = path.join(ctx.temporary, 'sibling')
+  execFileSync('git', ['-C', root, '-c', 'core.fsmonitor=false', 'worktree', 'add', '-qb', 'sibling', sibling], { windowsHide: true, timeout: 10000 })
+  const registry = new GitWorktreeRegistry(root, git, { repositoryId: 'cli-fixture', isActive: () => true })
+  const selected = (await registry.discover()).worktrees.find(tree => tree.branch === 'sibling')
   let initialDialogs = 0, commandDialogs = 0, stateRevision = 1
   const nativeDecision = async (decide, required, button) => {
     ctx.window.showInactive()
@@ -19,7 +26,7 @@ exports.run = async ctx => {
     const handle = ctx.window.getNativeWindowHandle()
     const owner = (handle.length === 8 ? handle.readBigUInt64LE() : BigInt(handle.readUInt32LE())).toString()
     let output = '', errors = ''
-    native.stdout.on('data', bytes => { output += bytes }); native.stderr.on('data', bytes => { errors += bytes })
+    native.stdout.on('data', bytes => { output += bytes; fs.writeFileSync(path.join(ctx.evidenceDir, `consent-${commandDialogs}.log`), output) }); native.stderr.on('data', bytes => { errors += bytes })
     const done = new Promise((resolve, reject) => { native.once('error', reject); native.once('close', code => code === 0 ? resolve(JSON.parse(output)) : reject(new Error('Native consent: ' + output + errors))) })
     native.stdin.end(JSON.stringify({ processId: process.pid, owner, required, button }))
     try {
@@ -35,10 +42,12 @@ exports.run = async ctx => {
   const service = new api.CliExecutionService({ repoRoot: root, repositoryId: 'cli-fixture', enabledByDefault: false,
     ownerPath: require(path.join(ctx.projectRoot, 'scripts/cli-execution/build.cjs')).ensureProduction(ctx.projectRoot).executable,
     getPolicy: () => policy.getPolicy({ repositoryId: 'cli-fixture', path: root }),
+    resolveWorktree: selector => resolveCliWorktree(registry, git, selector),
     getFingerprint: api.createCliProjectAuthority({ selection, getSelection: () => selection, findRepository: () => ({ id: 'cli-fixture', localCheckout: { path: root, availability: 'AVAILABLE', gitState: 'GIT' } }), captureGitIdentity: async selected => { const snapshot = await git.captureWorktreeReadSnapshot(selected); return { head: snapshot.head, branch: snapshot.branch } } }),
     approvalHandler: request => {
       commandDialogs++
-      return nativeDecision(() => api.confirmCliExecution(ctx.window, request), [request.manifestHash, ...request.commands.map((_, index) => `Comando ${index + 1}`), JSON.stringify(['--version']), 'NÃO confina'], 'Autorizar e executar')
+      const required = request.worktree ? [request.worktree.worktreeId, request.worktree.generation, request.worktree.head, request.worktree.indexRevision, root, sibling, JSON.stringify(request.command.args), 'não concede lease Git', 'NÃO confina'] : [request.manifestHash, ...request.commands.map((_, index) => `Comando ${index + 1}`), JSON.stringify(['--version']), 'NÃO confina']
+      return nativeDecision(() => api.confirmCliExecution(ctx.window, request), required, 'Autorizar e executar')
     }
   })
   const counters = { activeRequests: 0, peakConcurrentRequests: 0, totalRequests: 0, succeededRequests: 0, failedRequests: 0, timedOutRequests: 0, latency: { completedRequests: 0, totalDurationMs: 0, lastDurationMs: null, maxDurationMs: null } }
@@ -83,6 +92,14 @@ exports.run = async ctx => {
     ctx.check('Batch completes with prepare/start/get and no aggregate output', aggregate.status === 'SUCCEEDED' && aggregate.steps.length === 3 && aggregate.steps.every(step => step.status === 'SUCCEEDED') && !JSON.stringify(aggregate).match(/stdout|stderr/))
     ctx.check('Initial native decision replaces all per-command and per-batch dialogs', initialDialogs === 1 && commandDialogs === 0)
     const trustedCommandDialogs = commandDialogs
+    const target = await call('prepare_cli_execution', { executable: 'node.exe', args: ['-e', 'console.log(process.cwd())'], worktree: { worktreeId: selected.worktreeId, generation: selected.generation } })
+    ctx.check('Sibling proposal preserves physical-checkout trust scope', target.policy.mode === 'SUPERVISED' && !target.autoAuthorized)
+    await call('start_cli_execution', { proposalId: target.proposalId, operationId: 'selected-sibling' })
+    const siblingDeadline = Date.now() + 30000
+    while (service.get({ operationId: 'selected-sibling' }).phase !== 'TERMINAL' && Date.now() < siblingDeadline) await new Promise(resolve => setTimeout(resolve, 50))
+    const siblingResult = service.get({ operationId: 'selected-sibling' })
+    ctx.check('Selected sibling receives real native identity consent and executes without project switch', siblingResult.status === 'SUCCEEDED' && fs.realpathSync(siblingResult.stdout.trim()) === fs.realpathSync(sibling) && siblingResult.worktree.generation === selected.generation && selection.project.path === root && commandDialogs === 1 && policy.getPolicy().mode === 'AUTONOMOUS_TRUSTED')
+    const selectedWorktreeDialogs = commandDialogs
     const running = await call('prepare_cli_execution', { executable: 'node.exe', args: ['-e', 'setInterval(()=>{},1000)'] })
     await call('start_cli_execution', { proposalId: running.proposalId, operationId: 'interactive' })
     const runDeadline = Date.now() + 8000
@@ -101,11 +118,11 @@ exports.run = async ctx => {
     const supervised = await call('prepare_cli_investigation', { commands: [{ executable: 'node.exe', args: ['--version'] }, { executable: 'hostname.exe', args: [] }] })
     await call('start_cli_investigation', { proposalId: supervised.proposalId, operationId: 'supervised' })
     const supervisedResult = await waitTerminal('get_cli_investigation', 'supervised')
-    ctx.check('Supervised batch receives one real complete native manifest consent', supervisedResult.status === 'SUCCEEDED' && commandDialogs === 1)
+    ctx.check('Supervised batch receives one real complete native manifest consent', supervisedResult.status === 'SUCCEEDED' && commandDialogs === selectedWorktreeDialogs + 1)
     await ctx.viewport(460, 900)
     await ctx.evaluate(() => document.querySelector('#cli-autonomy-title').closest('section').scrollIntoView({ block: 'start' }))
     await ctx.capture('cli-supervised-narrow')
     await ctx.overflow()
-    fs.writeFileSync(path.join(ctx.evidenceDir, 'cli-autonomy-proof.json'), JSON.stringify({ initialDialogs, trustedCommandDialogs, supervisedManifestDialogs: commandDialogs, unitQueries: 3, batchCommands: 3, batchCalls: 3, maxIpcMs, latencyBudgetMs: 750, revoked: true, nativeSupervisor: true, scope: 'Isolated Electron profile, real preload/IPC/settings/CLI service and native consent; Channel state is a fixture, not full application bootstrap' }, null, 2))
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'cli-autonomy-proof.json'), JSON.stringify({ initialDialogs, trustedCommandDialogs, selectedWorktreeDialogs, selectedWorktreeId: selected.worktreeId, selectedGeneration: selected.generation, supervisedManifestDialogs: commandDialogs - selectedWorktreeDialogs, unitQueries: 3, batchCommands: 3, batchCalls: 3, maxIpcMs, latencyBudgetMs: 750, revoked: true, nativeSupervisor: true, scope: 'Isolated Electron profile, real preload/IPC/settings/CLI service and native consent; Channel state is a fixture, not full application bootstrap' }, null, 2))
   } finally { await service.shutdown() }
 }
