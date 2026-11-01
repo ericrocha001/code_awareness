@@ -53,6 +53,120 @@ async function setup() {
 }
 
 describe('Entire read-only Codex ingestion', () => {
+  it('reports only observed discovery omissions as compact typed reasons', async () => {
+    const f = await setup()
+    f.setMetadata([
+      f.metadata,
+      { ...f.metadata, session_id: 'foreign', worktree_path: f.base },
+      { ...f.metadata, session_id: 'missing', worktree_path: join(f.base, 'missing') },
+      { ...f.metadata, session_id: 'invalid', agent: 'unknown-agent', privateValue: 'NEVER_PUBLISH_METADATA_SAMPLE' }
+    ])
+    const receipt = await f.provider.refresh()
+    expect(receipt).toMatchObject({ imported: 1, skipped: 3, coverage: 'PARTIAL', importMode: 'METADATA_ONLY',
+      coverageReasons: { FOREIGN_SOURCE: 1, SOURCE_PATH_UNAVAILABLE: 1, INVALID_SESSION_METADATA: 1 } })
+    expect(JSON.stringify(receipt)).not.toContain('NEVER_PUBLISH_METADATA_SAMPLE')
+    expect(f.calls.some(args => args.includes('--transcript'))).toBe(false)
+  })
+
+  it('does not claim within-window for sub-millisecond divergence or invalid calendar clocks', () => {
+    const parser = new CodexParser()
+    parser.push(Buffer.from(line({ type: 'thread.started', thread_id: 'public', timestamp: '2026-01-01T00:00:00.000000002Z' })))
+    expect(parser.observation('2026-01-01T00:00:00Z', '2026-01-01T01:00:00.000000001+01:00').streamTime.windowRelation).toBe('OUTSIDE_PROVIDER_WINDOW')
+    const invalid = new CodexParser()
+    invalid.push(Buffer.from(line({ type: 'thread.started', thread_id: 'public', timestamp: '2026-02-30T00:00:00Z' }) +
+      line({ type: 'event_msg', timestamp: null, payload: { type: 'agent_message', message: 'public' } })))
+    expect(invalid.observation('2026-01-01T00:00:00Z', '2027-01-01T00:00:00Z').streamTime).toMatchObject({ windowRelation: 'UNAVAILABLE', invalidTimestamps: 2 })
+  })
+
+  it('persists metadata-only versus a genuinely imported zero-event stream, without downgrading on discovery or replay', async () => {
+    const f = await setup()
+    expect(await f.provider.refresh()).toMatchObject({ importMode: 'METADATA_ONLY', transcriptImported: false })
+    const id = f.store.byProvider('session-1')!.id
+    expect(f.store.session(id)).toMatchObject({ importState: 'METADATA_ONLY', eventCount: 0, coverage: 'PARTIAL' })
+    expect(JSON.parse(f.store.session(id).coverageReasons)).toEqual({ TRANSCRIPT_NOT_IMPORTED: 1 })
+    f.setTranscript(line({ type: 'session_meta', payload: { id: 'session-1', cwd: f.root } }))
+    expect(await f.provider.refresh(id)).toMatchObject({ importState: 'TRANSCRIPT_IMPORTED', eventCount: 0, coverage: 'COMPLETE', coverageReasons: {} })
+    const imported = f.store.session(id)
+    await f.provider.refresh()
+    expect(f.store.session(id)).toEqual(imported)
+    expect(await f.provider.refresh(id)).toMatchObject({ replay: true, revision: 2, importState: 'TRANSCRIPT_IMPORTED', eventCount: 0 })
+  })
+  it('explains observed malformed, unknown and bounded source records without payload samples', async () => {
+    const f = await setup()
+    await f.provider.refresh()
+    const id = f.store.byProvider('session-1')!.id
+    f.setTranscript(fixture(f.root) + line({ type: 'unknown-public-format', payload: { privateValue: 'NEVER_EXPOSE_DIAGNOSTIC_SAMPLE' } }) + '{malformed}\n')
+    expect(await f.provider.refresh(id)).toMatchObject({ importState: 'TRANSCRIPT_IMPORTED', eventCount: 4, coverage: 'PARTIAL', coverageReasons: { INVALID_RECORD: 1, UNKNOWN_RECORD: 1 }, sourceObservation: { identity: 'UNKNOWN' } })
+    expect(f.store.session(id).coverageReasons).not.toContain('NEVER_EXPOSE_DIAGNOSTIC_SAMPLE')
+    const malformed = new CodexParser()
+    malformed.push(Buffer.from('x'.repeat(300_000) + '\n'))
+    expect(malformed.finish().coverageReasons).toEqual({ LINE_LIMIT: 1 })
+    const bounded = new CodexParser()
+    expect(bounded.push(Buffer.alloc(32 * 1024 * 1024 + 1))).toBe(false)
+    expect(bounded.finish().coverageReasons).toEqual({ IMPORT_LIMIT: 1 })
+    const ignored = new CodexParser()
+    ignored.push(Buffer.from(line({ type: 'event_msg', payload: { type: 'token_count' } }) + line({ type: 'response_item', payload: { type: 'reasoning' } })))
+    expect(ignored.finish()).toMatchObject({ coverage: 'COMPLETE', coverageReasons: {}, events: [] })
+    const limited = await setup()
+    await limited.provider.refresh()
+    const limitedId = limited.store.byProvider('session-1')!.id
+    const provider = new EntireProvider(limited.store, limited.root, () => {}, async (exe, args, cwd, limit, consume, timeout) => {
+      const output = await limited.run(exe, args, cwd, limit, consume, timeout)
+      return args.includes('--transcript') ? { ...output, limited: true, limitReason: 'STDOUT_LIMIT' } : output
+    })
+    expect(await provider.refresh(limitedId)).toMatchObject({ coverage: 'PARTIAL', eventCount: 4, coverageReasons: { IMPORT_LIMIT: 1 } })
+  })
+
+  it('rejects conflicting or unverifiable stream identities before ingestion and accepts repeated canonical headers', async () => {
+    const f = await setup()
+    await f.provider.refresh()
+    const id = f.store.byProvider('session-1')!.id, before = f.store.session(id)
+    const header = (id: string, cwd: string) => line({ type: 'session_meta', payload: { id, cwd } })
+    for (const transcript of [
+      fixture(f.root) + header('foreign-session', f.root) + header('session-1', f.root),
+      fixture(f.root) + line({ type: 'thread.started', thread_id: 'foreign-session' }) + line({ type: 'thread.started', thread_id: 'session-1' }),
+      fixture(f.root) + header('session-1', f.base) + header('session-1', f.root),
+      header('session-1', f.base) + line({ type: 'event_msg', payload: { type: 'agent_message', message: 'foreign worktree' } })
+    ]) {
+      f.setTranscript(transcript)
+      expect(await f.provider.refresh(id)).toMatchObject({ code: 'SOURCE_IDENTITY_CONFLICT', imported: 0 })
+      expect(f.store.session(id)).toEqual(before)
+    }
+    f.setTranscript(line({ type: 'event_msg', payload: { type: 'agent_message', message: 'no identity' } }))
+    expect(await f.provider.refresh(id)).toMatchObject({ code: 'SOURCE_IDENTITY_UNAVAILABLE', imported: 0 })
+    expect(f.store.session(id)).toEqual(before)
+    f.setTranscript(header('session-1', '.'))
+    expect(await f.provider.refresh(id)).toMatchObject({ code: 'SOURCE_IDENTITY_UNAVAILABLE', imported: 0 })
+    expect(f.store.session(id)).toEqual(before)
+    f.setTranscript(fixture(f.root) + header('session-1', f.root + '/.') + line({ type: 'thread.started', thread_id: 'session-1' }))
+    expect(await f.provider.refresh(id)).toMatchObject({ imported: 1, eventCount: 4, sourceObservation: { identity: 'VERIFIED' } })
+  })
+  it('preserves the declared window and stream timestamps without filtering outside events, including replay and reopen', async () => {
+    const f = await setup()
+    f.metadata.started_at = '2026-10-30T00:00:00+00:00'
+    await f.provider.refresh()
+    const id = f.store.byProvider('session-1')!.id
+    f.setTranscript(fixture(f.root) +
+      line({ type: 'event_msg', timestamp: '2026-10-29T12:00:00Z', payload: { type: 'agent_message', message: 'before declared window' } }) +
+      line({ type: 'event_msg', timestamp: '2026-10-30T02:00:00+00:00', payload: { type: 'agent_message', message: 'after declared window' } }) +
+      line({ type: 'event_msg', timestamp: 'invalid', payload: { type: 'agent_message', message: 'invalid clock' } }))
+    const result = await f.provider.refresh(id)
+    expect(result).toMatchObject({ eventCount: 7, sourceObservation: { identity: 'VERIFIED', streamTime: {
+      first: '2026-10-29T12:00:00Z', last: '2026-10-30T02:00:00+00:00', invalidTimestamps: 1, windowRelation: 'OUTSIDE_PROVIDER_WINDOW'
+    } } })
+    expect(f.store.session(id).startedAt).toBe(f.metadata.started_at)
+    expect(f.store.events(id, {}, 0, 10).map(event => event.timestamp)).toContain('2026-10-30T02:00:00+00:00')
+    const reopened = new SessionStore(f.store.path, 'A'); cleanup.push(() => reopened.close())
+    expect(reopened.sourceObservation(reopened.session(id))).toEqual(f.store.sourceObservation(f.store.session(id)))
+    expect(await f.provider.refresh(id)).toMatchObject({ replay: true, revision: 2, eventCount: 7 })
+    const missing = new CodexParser()
+    missing.push(Buffer.from(line({ type: 'thread.started', thread_id: 'public' })))
+    expect(missing.observation('2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z').streamTime).toMatchObject({ windowRelation: 'UNAVAILABLE', missingTimestamps: 1 })
+    const inside = new CodexParser()
+    inside.push(Buffer.from(line({ type: 'thread.started', thread_id: 'public', timestamp: '2026-01-01T01:00:00+01:00' })))
+    expect(inside.observation('2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z').streamTime.windowRelation).toBe('WITHIN_PROVIDER_WINDOW')
+  })
+
   it('rejects a late finite transcript before SQLite, reports the phase and permits a manual retry', async () => {
     const f = await setup()
     await f.provider.refresh()

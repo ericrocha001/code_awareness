@@ -1,16 +1,17 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
+import { createReadStream, realpathSync } from 'node:fs'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { CodexParser } from './codex-parser'
+import { sourceTimestamp as date } from './source-time'
 import { digest } from './privacy'
 import type { SessionStore } from './store'
-import type { SessionInput } from './types'
+import type { SessionInput, SessionRow, CoverageReasons } from './types'
 
 interface ProviderConfig { enabled: true; repositoryId: string; executable: string; sha256: string; version: string }
 interface ProviderSession { session_id: string; agent: string; status: string; worktree_path: string; started_at?: string; ended_at?: string }
-export interface CommandOutput { code: number; text: string; limited: boolean; timedOut?: boolean }
+export interface CommandOutput { code: number; text: string; limited: boolean; timedOut?: boolean; limitReason?: 'STDOUT_LIMIT' | 'STDERR_LIMIT' | 'CONSUMER_LIMIT' }
 export type CommandRunner = (executable: string, args: string[], cwd: string, limit: number, consume?: (chunk: Buffer) => boolean, timeoutMs?: number, signal?: AbortSignal) => Promise<CommandOutput>
 export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume, timeoutMs = 10_000, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) { reject(new Error('PROJECT_CONTEXT_CHANGED')); return }
@@ -18,18 +19,20 @@ export const runReadOnly: CommandRunner = (executable, args, cwd, limit, consume
   const child = spawn(executable, args, { cwd, shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
     env: { ...env, NO_COLOR: '1', CI: '1', ENTIRE_LOG_LEVEL: 'error' } })
   let text = '', bytes = 0, limited = false, stderrBytes = 0, timedOut = false
+  let limitReason: CommandOutput['limitReason']
   const cancel = () => { limited = true; child.kill() }
   signal?.addEventListener('abort', cancel, { once: true })
   const timer = setTimeout(() => { timedOut = true; cancel() }, Math.max(1, Math.min(10_000, timeoutMs)))
   child.stdout.on('data', (chunk: Buffer) => {
     if (limited) return
     bytes += chunk.length
-    if (bytes > limit || (consume && !consume(chunk))) { limited = true; child.kill(); return }
+    if (bytes > limit) { limitReason = 'STDOUT_LIMIT'; limited = true; child.kill(); return }
+    if (consume && !consume(chunk)) { limitReason = 'CONSUMER_LIMIT'; limited = true; child.kill(); return }
     if (!consume) text += chunk.toString('utf8')
   })
-  child.stderr.on('data', (chunk: Buffer) => { stderrBytes += chunk.length; if (stderrBytes > 64 * 1024) { limited = true; child.kill() } })
+  child.stderr.on('data', (chunk: Buffer) => { stderrBytes += chunk.length; if (stderrBytes > 64 * 1024) { limitReason ??= 'STDERR_LIMIT'; limited = true; child.kill() } })
   child.once('error', () => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); reject(new Error('PROVIDER_UNAVAILABLE')) })
-  child.once('close', code => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve({ code: code ?? -1, text, limited, ...(timedOut ? { timedOut } : {}) }) })
+  child.once('close', code => { clearTimeout(timer); signal?.removeEventListener('abort', cancel); resolve({ code: code ?? -1, text, limited, ...(limitReason ? { limitReason } : {}), ...(timedOut ? { timedOut } : {}) }) })
 })
 async function smallJson(path: string): Promise<Record<string, unknown>> {
   const stat = await lstat(path)
@@ -41,7 +44,6 @@ function validSession(value: unknown): value is ProviderSession {
   const v = value as ProviderSession
   return typeof v.session_id === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(v.session_id) && typeof v.agent === 'string' && v.agent.toLowerCase() === 'codex' && typeof v.status === 'string' && typeof v.worktree_path === 'string'
 }
-const date = (value?: string) => value && Number.isFinite(Date.parse(value)) ? new Date(value).toISOString() : undefined
 
 export class EntireProvider {
   private pending?: { key: string; task: Promise<object> }
@@ -111,9 +113,10 @@ export class EntireProvider {
   }
   private async perform(sessionId?: string): Promise<object> {
     this.deadline = Date.now() + (sessionId ? 12_000 : 10_000)
+    let known: SessionRow | undefined
     try {
       await this.validate()
-      const known = sessionId ? this.store.session(sessionId) : undefined
+      known = sessionId ? this.store.session(sessionId) : undefined
       this.mark('preflight')
       const config = await this.preflight()
       const args = known ? ['session', 'info', known.providerSessionId, '--json'] : ['session', 'list', '--json']
@@ -124,30 +127,42 @@ export class EntireProvider {
       try { const parsed = JSON.parse(output.text); values = known ? [parsed] : Array.isArray(parsed) ? parsed : (() => { throw new Error() })() }
       catch { throw new Error('PROVIDER_SCHEMA_UNSUPPORTED') }
       let imported = 0, skipped = 0
+      const discoveryReasons: CoverageReasons = {}
+      const skip = (reason: 'INVALID_SESSION_METADATA' | 'SOURCE_PATH_UNAVAILABLE' | 'FOREIGN_SOURCE') => { skipped++; discoveryReasons[reason] = (discoveryReasons[reason] ?? 0) + 1 }
       const root = await realpath(this.root)
       for (const value of values.slice(0, 500)) {
-        if (!validSession(value)) { skipped++; continue }
+        if (!validSession(value)) { skip('INVALID_SESSION_METADATA'); continue }
         let observedPath: string
-        try { observedPath = await realpath(value.worktree_path) } catch { skipped++; continue }
-        if (observedPath !== root || (known && value.session_id !== known.providerSessionId)) { skipped++; continue }
+        try { if (!isAbsolute(value.worktree_path)) throw new Error(); observedPath = await realpath(value.worktree_path) } catch { skip('SOURCE_PATH_UNAVAILABLE'); continue }
+        if (observedPath !== root || (known && value.session_id !== known.providerSessionId)) { skip('FOREIGN_SOURCE'); continue }
         const terminal = value.status.toUpperCase() === 'ENDED' && !!date(value.ended_at)
         const metadata: SessionInput = { providerSessionId: value.session_id, providerVersion: config.version, agent: 'codex',
           state: terminal ? 'ENDED' : value.status.toUpperCase() === 'ACTIVE' ? 'ACTIVE' : 'UNKNOWN',
           startedAt: date(value.started_at), endedAt: terminal ? date(value.ended_at) : undefined,
-          coverage: 'UNAVAILABLE', sourceDigest: digest(JSON.stringify({ id: value.session_id, status: value.status, ended: value.ended_at })), sourceBytes: 0 }
+          coverage: 'UNAVAILABLE', importState: 'METADATA_ONLY', coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 }, sourceDigest: digest(JSON.stringify({ id: value.session_id, status: value.status, ended: value.ended_at })), sourceBytes: 0 }
         if (known) {
-          const parser = new CodexParser()
+          const parser = new CodexParser(cwd => { if (!isAbsolute(cwd)) throw new Error('SOURCE_IDENTITY_UNAVAILABLE'); return realpathSync(cwd) })
           const transcript = await this.command(config.executable, ['session', 'info', value.session_id, '--transcript'], this.root, 32 * 1024 * 1024, chunk => parser.push(chunk))
           this.assertWithinDeadline()
           if (transcript.code !== 0 && !transcript.limited) throw new Error('PROVIDER_UNAVAILABLE')
           this.mark('parsing')
           const parsed = parser.finish()
           this.assertWithinDeadline()
-          if (!parsed.events.length || (parser.sessionId && parser.sessionId !== value.session_id) || (parser.cwd && await realpath(parser.cwd) !== root)) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+          if (parser.identityConflict || (parser.sessionId && parser.sessionId !== value.session_id) || (parser.cwd && await realpath(parser.cwd) !== root)) throw new Error('SOURCE_IDENTITY_CONFLICT')
+          if (!parser.sessionId || parser.identityUnavailable) throw new Error('SOURCE_IDENTITY_UNAVAILABLE')
+          const sourceObservation = parser.observation(metadata.startedAt, metadata.endedAt)
+          if (transcript.limited) {
+            sourceObservation.identity = 'UNKNOWN'
+            if (sourceObservation.streamTime.windowRelation === 'WITHIN_PROVIDER_WINDOW') sourceObservation.streamTime.windowRelation = 'UNAVAILABLE'
+          }
+          const coverageReasons: CoverageReasons = { ...parsed.coverageReasons }
+          if (transcript.limitReason === 'STDERR_LIMIT') throw new Error('STREAM_UNAVAILABLE')
+          if (transcript.limitReason === 'STDOUT_LIMIT') coverageReasons.IMPORT_LIMIT = (coverageReasons.IMPORT_LIMIT ?? 0) + 1
+          else if (transcript.limited && !Object.keys(coverageReasons).length) coverageReasons.STREAM_LIMIT = 1
           await this.validate()
           this.assertWithinDeadline()
           this.mark('sqlite-ingest')
-          const result = this.store.ingest({ ...metadata, ...parsed, coverage: transcript.limited ? 'PARTIAL' : parsed.coverage }, parsed.events, () => this.assertWithinDeadline())
+          const result = this.store.ingest({ ...metadata, ...parsed, sourceObservation, importState: 'TRANSCRIPT_IMPORTED', coverageReasons, coverage: transcript.limited ? 'PARTIAL' : parsed.coverage }, parsed.events, () => this.assertWithinDeadline())
           await this.validate()
           this.assertWithinDeadline()
           this.mark('sqlite-maintenance')
@@ -163,11 +178,14 @@ export class EntireProvider {
       await this.validate()
       this.assertWithinDeadline()
       this.store.maintain()
-      return { imported, skipped, coverage: skipped || values.length > 500 ? 'PARTIAL' : 'COMPLETE', lastObserved: new Date().toISOString(), provider: 'entire', transcriptImported: false }
+      if (values.length > 500) discoveryReasons.SESSION_LIMIT = values.length - 500
+      return { imported, skipped, coverageReasons: discoveryReasons, coverage: skipped || values.length > 500 ? 'PARTIAL' : 'COMPLETE', lastObserved: new Date().toISOString(), provider: 'entire', importMode: 'METADATA_ONLY', transcriptImported: false }
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
-      const allowed = ['PROVIDER_TIMEOUT', 'SESSION_CONTEXT_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH']
-      return { coverage: 'UNAVAILABLE', code: allowed.includes(message) ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), lastObserved: new Date().toISOString(), imported: 0 }
+      const allowed = ['STREAM_UNAVAILABLE', 'SOURCE_IDENTITY_CONFLICT', 'SOURCE_IDENTITY_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'SESSION_CONTEXT_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH']
+      const coverageReasons: CoverageReasons = message === 'SOURCE_IDENTITY_CONFLICT' || message === 'SOURCE_IDENTITY_UNAVAILABLE' ? { [message]: 1 }
+        : message === 'STREAM_UNAVAILABLE' || (this.phase === 'transcript' && message === 'PROVIDER_UNAVAILABLE') ? { STREAM_UNAVAILABLE: 1 } : {}
+      return { coverage: 'UNAVAILABLE', importState: known?.importState ?? 'UNKNOWN', coverageReasons, code: allowed.includes(message) ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), lastObserved: new Date().toISOString(), imported: 0 }
     }
   }
 }
