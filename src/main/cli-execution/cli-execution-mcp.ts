@@ -8,10 +8,19 @@ export const CLI_EXECUTION_TOOLS: McpToolDefinition[] = [
   {
     name: 'prepare_cli_execution',
     description:
-      'Prepare local CLI execution in the active project checkout without spawning a process. Resolves real executable and working directory, verifies policy, and returns an ephemeral proposalId with security risks.',
+      'Prepare general CLI execution without spawning. Default: active checkout under Desktop policy. Optional worktreeId and generation must come from discover_worktrees in this repository; a sibling checkout requires exact-command native approval and never inherits active-checkout autonomy. Never switches project or grants a Git lease. Tools must already be configured in the target.',
     inputSchema: {
       type: 'object',
       properties: {
+        worktree: {
+          type: 'object',
+          properties: {
+            worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+            generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }
+          },
+          required: ['worktreeId', 'generation'], additionalProperties: false,
+          description: 'Previously discovered Worktree in this repository; identity, HEAD and index are pinned until launch.'
+        },
         executable: {
           type: 'string',
           minLength: 1,
@@ -24,7 +33,7 @@ export const CLI_EXECUTION_TOOLS: McpToolDefinition[] = [
         },
         relativeCwd: {
           type: 'string',
-          description: 'Relative working directory within the active repository checkout.'
+          description: 'Relative working directory within the selected Worktree, or the active checkout when omitted.'
         }
       },
       required: ['executable'],
@@ -126,9 +135,10 @@ const investigationTool = (name: string, description: string, properties: Record
   annotations: { readOnlyHint: !mutation, openWorldHint: mutation, idempotentHint: true, ...(mutation ? { destructiveHint: true } : {}), title: name }, securitySchemes
 })
 const proposalOperation = { proposalId: { type: 'string', minLength: 1 }, operationId: { type: 'string', minLength: 1, maxLength: 128 } }
+const { worktree: _worktree, ...investigationCommandProperties } = CLI_EXECUTION_TOOLS[0].inputSchema.properties as Record<string, unknown>
 CLI_EXECUTION_TOOLS.push(
   investigationTool('prepare_cli_investigation', 'Resolve a closed ordered manifest of 2–5 literal commands in the active checkout without spawning. Same host policy as unitary CLI. Limits: 30s/step, 90s total, 64KiB combined output/step and 256KiB total; manifest limited to 6KiB. No dynamic insertion or executable placeholders.',
-    { commands: { type: 'array', minItems: 2, maxItems: 5, items: CLI_EXECUTION_TOOLS[0].inputSchema } }, ['commands'], false),
+    { commands: { type: 'array', minItems: 2, maxItems: 5, items: { ...CLI_EXECUTION_TOOLS[0].inputSchema, properties: investigationCommandProperties } } }, ['commands'], false),
   investigationTool('start_cli_investigation', 'Start a prepared manifest sequentially with the shared Windows supervisor. One complete native approval in SUPERVISED, zero in locally authorized autonomous modes. Any failure or authority drift stops remaining steps. Recover lost responses with the same operationId; after restart missing receipts are not recoverable.', proposalOperation, ['proposalId', 'operationId'], true),
   investigationTool('get_cli_investigation', 'Get bounded manifest/step status without stdout/stderr. Supply index and optional cursor to read only that step output, at most 8KiB combined per page. Unknown operation after restart is not recoverable; never automatically replay using a new ID.',
     { operationId: { type: 'string', minLength: 1 }, index: { type: 'integer', minimum: 0, maximum: 4 }, cursor: { type: 'string' } }, ['operationId'], false),
@@ -165,7 +175,7 @@ export async function executeCliTool(
 
   try {
     const allowed: Record<string, string[]> = {
-      prepare_cli_execution: ['executable', 'args', 'relativeCwd'], start_cli_execution: ['proposalId', 'operationId'],
+      prepare_cli_execution: ['executable', 'args', 'relativeCwd', 'worktree'], start_cli_execution: ['proposalId', 'operationId'],
       get_cli_execution: ['operationId', 'cursor'], cancel_cli_execution: ['operationId'],
       prepare_cli_investigation: ['commands'], start_cli_investigation: ['proposalId', 'operationId'],
       get_cli_investigation: ['operationId', 'index', 'cursor'], cancel_cli_investigation: ['operationId']
@@ -196,6 +206,12 @@ export async function executeCliTool(
       return result(service.getInvestigation({ operationId: values.operationId, index: values.index as number | undefined, cursor: values.cursor as string | undefined }))
     }
     if (name === 'prepare_cli_execution') {
+      const worktree = values.worktree === undefined ? undefined : asObject(values.worktree)
+      if (values.worktree !== undefined && (!worktree || Object.keys(worktree).some(key => !['worktreeId', 'generation'].includes(key)) ||
+        typeof worktree.worktreeId !== 'string' || !/^[a-f0-9]{64}$/.test(worktree.worktreeId) ||
+        typeof worktree.generation !== 'string' || !/^[a-f0-9]{64}$/.test(worktree.generation))) {
+        return error('INVALID_ARGUMENT', 'worktree requires discovered worktreeId and generation; paths are not accepted')
+      }
       if (typeof values.executable !== 'string' || !values.executable.trim()) {
         return error('INVALID_ARGUMENT', 'executable is required')
       }
@@ -210,6 +226,7 @@ export async function executeCliTool(
       }
 
       const proposal = await service.prepare({
+        ...(worktree ? { worktree: { worktreeId: worktree.worktreeId as string, generation: worktree.generation as string } } : {}),
         executable: values.executable,
         args: values.args as string[] | undefined,
         relativeCwd: values.relativeCwd as string | undefined
@@ -261,6 +278,7 @@ export async function executeCliTool(
     return error('UNKNOWN_TOOL', `Unknown tool: ${name}`)
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : String(caught)
+    if (/^(WORKTREE_[A-Z_]+|INVALID_WORKTREE_SELECTOR|GIT_OPERATION_IN_PROGRESS|PROJECT_CONTEXT_CHANGED)$/.test(message)) return error(message)
     const code = message.split(':')[0]
     if (['NOT_AUTO_AUTHORIZED', 'POLICY_CHANGED', 'OPERATION_KIND_CONFLICT', 'INVESTIGATION_COMMAND_LIMIT', 'MANIFEST_SIZE_LIMIT', 'SUMMARY_SIZE_LIMIT', 'INVALID_OUTPUT_INDEX', 'INVALID_OUTPUT_CURSOR', 'OUTPUT_INDEX_REQUIRED'].includes(code)) return error(code, code === 'NOT_AUTO_AUTHORIZED' ? 'Select SUPERVISED locally; no command was executed' : undefined)
     if (/CLI_EXECUTION_BUSY/.test(message)) {

@@ -113,6 +113,7 @@ import { RepositoryFileEditing } from './repository-file-ingress/repository-file
 import { CliExecutionService } from './cli-execution/cli-execution-service'
 import { confirmCliExecution, confirmCliAutonomy } from './cli-execution/cli-authorization'
 import { createCliProjectAuthority } from './cli-execution/cli-project-authority'
+import { resolveCliWorktree } from './cli-execution/cli-worktree-authority'
 import { CliTrustPolicy } from './cli-execution/cli-trust-policy'
 import { registerCliPolicyHandlers } from './ipc/cli-policy-handler'
 import { locateCliJobOwner } from './cli-execution/windows/cli-job-owner-locator'
@@ -535,6 +536,10 @@ app.whenReady().then(async () => {
       repoRoot: project.path,
       repositoryId: gitRepositoryId ?? null,
       getPolicy: () => cliTrustPolicy.getPolicy({ repositoryId: gitRepositoryId ?? null, path: project.path }),
+      resolveWorktree: async selector => {
+        if (!gitOperations.worktrees) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+        return resolveCliWorktree(gitOperations.worktrees, gitService, selector)
+      },
       enabledByDefault: settingsService.loadSettings().cliExecutionEnabled ?? false,
       ownerPath: (() => {
         try { return locateCliJobOwner(app.getAppPath(), app.isPackaged ? process.resourcesPath : '') }

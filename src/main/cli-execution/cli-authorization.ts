@@ -29,6 +29,16 @@ export async function confirmCliExecution(
   const detailLines = [
     `Operação: ${operationId}`,
     `Repositório: ${repositoryId ?? repositoryDirectory}`,
+    ...(request.worktree ? [
+      `Checkout ativo preservado: ${request.activeCheckoutDirectory}`,
+      `Worktree alvo: ${request.worktree.worktreeId}`,
+      `Geração: ${request.worktree.generation}`,
+      `Branch: ${request.worktree.branch ?? 'detached HEAD'}`,
+      `HEAD: ${request.worktree.head ?? 'sem commit'}`,
+      `Índice: ${request.worktree.indexRevision}`,
+      'CLI geral na Worktree selecionada. Esta aprovação autoriza somente este comando e não concede lease Git.',
+      'Antes de autorizar escrita, coordene e pause outros executores que utilizem esta Worktree.'
+    ] : []),
     ...(request.commands ?? [command]).flatMap((item, index) => [
       `Comando ${index + 1} · CWD: ${item.cwd}`,
       `Executável resolvido: ${item.executable}`,
@@ -49,7 +59,7 @@ export async function confirmCliExecution(
     const response = await dialog.showMessageBox(window, {
       type: 'warning',
       title: 'Autorização Nativa — Execução de Comando CLI',
-      message: request.commands ? `Executar os ${request.commands.length} comandos deste manifesto, em ordem?` : 'Solicitação de execução de comando CLI no checkout ativo',
+      message: request.commands ? `Executar os ${request.commands.length} comandos deste manifesto, em ordem?` : request.worktree ? 'Executar comando CLI na Worktree selecionada?' : 'Solicitação de execução de comando CLI no checkout ativo',
       detail: detailLines.join('\n'),
       buttons: ['Recusar comando', 'Autorizar e executar'],
       defaultId: 0,

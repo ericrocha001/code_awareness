@@ -6,6 +6,7 @@ import { detectRisks, resolveCliCommand } from './cli-command-resolver'
 import { isConsultativeCommand } from './cli-consultative-policy'
 import { CliProcessSupervisor } from './cli-process-supervisor'
 import { CliOutputBuffer } from './cli-output-buffer'
+import type { CliResolvedWorktree, CliWorktreeSelector } from './cli-execution-types'
 
 export interface CliExecutionServiceOptions {
   repoRoot: string
@@ -16,6 +17,7 @@ export interface CliExecutionServiceOptions {
   defaultTimeoutMs?: number
   enabledByDefault?: boolean
   ownerPath?: string
+  resolveWorktree?: (selector: CliWorktreeSelector) => Promise<CliResolvedWorktree>
 }
 const supervised: CliPolicy = { mode: 'SUPERVISED', revision: 'default', rule: 'native-command-consent' }
 const budgets = { commandTimeoutMs: 30000, totalTimeoutMs: 90000, stepOutputBytes: 65536, totalOutputBytes: 262144 }
@@ -31,6 +33,8 @@ export class CliExecutionService {
   private readonly supervisor: CliProcessSupervisor
   private enabled: boolean
   private readonly ownerPath?: string
+  private readonly resolveWorktree?: CliExecutionServiceOptions['resolveWorktree']
+  private readonly proposalWorktrees = new Map<string, CliResolvedWorktree>()
   private readonly proposals = new Map<string, CliProposal>()
   private readonly executions = new Map<string, CliExecutionRecord>()
   private readonly executionBuffers = new Map<string, CliOutputBuffer>()
@@ -50,6 +54,7 @@ export class CliExecutionService {
     this.supervisor = new CliProcessSupervisor(options.defaultTimeoutMs)
     this.enabled = options.enabledByDefault ?? false
     this.ownerPath = options.ownerPath
+    this.resolveWorktree = options.resolveWorktree
   }
   setApprovalHandler(handler: CliApprovalHandler): void { this.approvalHandler = handler }
   isEnabled(): boolean { return this.enabled }
@@ -73,24 +78,34 @@ export class CliExecutionService {
   }
   private async prepareCommands(inputs: PrepareCliExecutionInput[], investigation: boolean): Promise<CliProposal> {
     this.assertEnabled()
-    const policy = { ...this.getPolicyFn() }
-    const commands = inputs.map(input => resolveCliCommand(this.repoRoot, input.executable, input.args ?? [], input.relativeCwd))
+    if (investigation && inputs.some(input => input.worktree !== undefined)) throw new Error('INVALID_WORKTREE_SELECTOR')
+    const selector = inputs[0].worktree
+    if (selector !== undefined && !this.resolveWorktree) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+    const target = selector !== undefined ? await this.resolveWorktree!({ ...selector }) : undefined
+    const directory = target?.directory ?? this.repoRoot
+    const policy = this.policyForTarget(target)
+    const commands = inputs.map(input => resolveCliCommand(directory, input.executable, input.args ?? [], input.relativeCwd))
     if (investigation && Buffer.byteLength(JSON.stringify(commands)) > 6144) throw new Error('MANIFEST_SIZE_LIMIT')
     if (investigation) {
       for (const command of commands) { Object.freeze(command.args); Object.freeze(command.originalArgs); Object.freeze(command) }
       Object.freeze(commands)
     }
-    const fingerprint = await this.getFingerprintFn()
+    const fingerprint = await this.captureFingerprint(target)
     this.assertEnabled()
-    if (digest(policy) !== digest(this.getPolicyFn())) throw new Error('POLICY_CHANGED')
+    if (digest(policy) !== digest(this.policyForTarget(target))) throw new Error('POLICY_CHANGED')
     const proposal: CliProposal = {
       proposalId: `prop-${randomUUID()}`, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 300000).toISOString(),
-      repositoryId: this.repositoryId, repositoryDirectory: this.repoRoot, checkoutFingerprint: fingerprint,
+      repositoryId: this.repositoryId, repositoryDirectory: directory, checkoutFingerprint: fingerprint,
+      ...(target ? { worktree: { ...target.identity } } : {}),
       command: commands[0], risks: [...new Set(commands.flatMap(command => detectRisks(command.executable, command.originalExecutable, command.args)))],
       policy, autoAuthorized: policy.mode === 'AUTONOMOUS_TRUSTED' || policy.mode === 'AUTONOMOUS_CONSULTATIVE' && commands.every(isConsultativeCommand), status: 'PENDING',
       ...(investigation ? { commands, budgets: { ...budgets }, manifestHash: digest({ commands, budgets, fingerprint, policy, repositoryId: this.repositoryId }) } : {})
     }
     this.proposals.set(proposal.proposalId, proposal)
+    if (target) {
+      proposal.risks.push('SELECTED_WORKTREE_GENERAL_CLI_NO_GIT_LEASE_GRANTED')
+      this.proposalWorktrees.set(proposal.proposalId, target)
+    }
     return proposal
   }
   start(input: StartCliExecutionInput): CliExecutionSnapshot { this.reserve(input, false); return this.get(input) }
@@ -112,7 +127,7 @@ export class CliExecutionService {
     if (Date.now() > Date.parse(proposal.expiresAt) || proposal.status === 'EXPIRED') throw new Error('PROPOSAL_EXPIRED')
     if (proposal.status === 'CONSUMED') throw new Error('PROPOSAL_ALREADY_CONSUMED')
     if (proposal.status === 'REFUSED') throw new Error('PROPOSAL_REFUSED')
-    if (digest(proposal.policy) !== digest(this.getPolicyFn())) throw new Error('POLICY_CHANGED')
+    if (digest(proposal.policy) !== digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId)))) throw new Error('POLICY_CHANGED')
     if (proposal.policy?.mode === 'AUTONOMOUS_CONSULTATIVE' && !(proposal.commands ?? [proposal.command]).every(isConsultativeCommand)) throw new Error('NOT_AUTO_AUTHORIZED: Select SUPERVISED locally for native command approval')
     const record = this.record(input.operationId, proposal, proposal.command)
     this.executions.set(input.operationId, record)
@@ -123,20 +138,23 @@ export class CliExecutionService {
   }
   private record(operationId: string, proposal: CliProposal, command: CliCommandDescriptor): CliExecutionRecord {
     return { operationId, proposalId: proposal.proposalId, command, policy: proposal.policy, repositoryId: this.repositoryId,
+      ...(proposal.worktree ? { worktree: { ...proposal.worktree } } : {}),
       origin: 'CLI_EXECUTION_CAPABILITY', status: 'AWAITING_APPROVAL', phase: 'AWAITING_APPROVAL', startedAt: new Date().toISOString() }
   }
   private current(record: CliExecutionRecord, proposal: CliProposal, token: string): boolean {
     try {
       return this.enabled && this.activeOperationId === record.operationId && this.activeExecutionToken === token &&
-        digest(proposal.policy) === digest(this.getPolicyFn()) && Date.now() <= Date.parse(proposal.expiresAt)
+        digest(proposal.policy) === digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId))) && Date.now() <= Date.parse(proposal.expiresAt)
     } catch { return false }
   }
   private async authorize(record: CliExecutionRecord, proposal: CliProposal, token: string, command?: CliCommandDescriptor): Promise<boolean> {
-    const fingerprint = await this.getFingerprintFn()
+    let fingerprint: string
+    try { fingerprint = await this.captureFingerprint(this.proposalWorktrees.get(proposal.proposalId)) }
+    catch { throw new Error('CHECKOUT_CHANGED') }
     if (!this.current(record, proposal, token)) return false
     if (fingerprint !== proposal.checkoutFingerprint) throw new Error('CHECKOUT_CHANGED')
     if (command) {
-      const effective = resolveCliCommand(this.repoRoot, command.originalExecutable, command.originalArgs ?? command.args, command.relativeCwd)
+      const effective = resolveCliCommand(proposal.repositoryDirectory, command.originalExecutable, command.originalArgs ?? command.args, command.relativeCwd)
       if (JSON.stringify(effective) !== JSON.stringify(command)) throw new Error('COMMAND_CHANGED')
       if (proposal.policy?.mode === 'AUTONOMOUS_CONSULTATIVE' && !isConsultativeCommand(effective)) throw new Error('NOT_AUTO_AUTHORIZED')
     }
@@ -146,11 +164,13 @@ export class CliExecutionService {
     const steps = this.investigationSteps.get(record.operationId)
     let monitor: NodeJS.Timeout | undefined
     try {
+      if (proposal.worktree && !await this.authorize(record, proposal, token)) return
       let approved = true
       if (proposal.policy?.mode === 'SUPERVISED') {
         try { approved = await this.approvalHandler({ proposalId: proposal.proposalId, operationId: record.operationId,
           command: proposal.command, commands: proposal.commands, manifestHash: proposal.manifestHash, budgets: proposal.budgets,
-          repositoryDirectory: this.repoRoot, repositoryId: this.repositoryId, risks: proposal.risks }) } catch { approved = false }
+          repositoryDirectory: proposal.repositoryDirectory, repositoryId: this.repositoryId, risks: proposal.risks,
+          worktree: proposal.worktree, activeCheckoutDirectory: this.repoRoot }) } catch { approved = false }
       }
       if (!this.current(record, proposal, token)) {
         if (record.status === 'AWAITING_APPROVAL') { record.status = 'CANCELLED'; record.diagnostic = 'POLICY_CHANGED_OR_PROPOSAL_EXPIRED' }
@@ -273,6 +293,18 @@ export class CliExecutionService {
     if (record?.phase === 'TERMINAL') record.diagnostic = reason
   }
   private assertEnabled(): void { if (!this.enabled) throw new Error('CLI_EXECUTION_DISABLED') }
+  private policyForTarget(target?: CliResolvedWorktree): CliPolicy {
+    const policy = { ...this.getPolicyFn() }
+    if (target && target.directory !== this.repoRoot) return { ...policy, mode: 'SUPERVISED', rule: 'native-worktree-command-consent' }
+    return policy
+  }
+  private async captureFingerprint(target?: CliResolvedWorktree): Promise<string> {
+    const active = await this.getFingerprintFn()
+    if (!target) return active
+    const selected = await target.getFingerprint()
+    if (active !== await this.getFingerprintFn()) throw new Error('PROJECT_CONTEXT_CHANGED')
+    return digest([active, target.directory, selected])
+  }
   private invalidateAllProposals(): void { for (const proposal of this.proposals.values()) if (proposal.status === 'PENDING') proposal.status = 'EXPIRED' }
   private getSnapshot(operationId: string, cursor?: string): CliExecutionSnapshot {
     const record = this.executions.get(operationId)

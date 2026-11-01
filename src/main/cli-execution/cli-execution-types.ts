@@ -22,6 +22,7 @@ export interface CliCommandDescriptor {
 }
 
 export interface CliProposal {
+  worktree?: CliWorktreeIdentity
   policy?: CliPolicy
   autoAuthorized?: boolean
   commands?: CliCommandDescriptor[]
@@ -50,6 +51,7 @@ export interface CliOutputPage {
 }
 
 export interface CliExecutionRecord {
+  worktree?: CliWorktreeIdentity
   policy?: CliPolicy
   repositoryId?: string | null
   origin?: 'CLI_EXECUTION_CAPABILITY'
@@ -70,6 +72,7 @@ export interface CliExecutionRecord {
 export interface CliExecutionSnapshot extends CliExecutionRecord, CliOutputPage {}
 
 export interface PrepareCliExecutionInput {
+  worktree?: CliWorktreeSelector
   executable: string
   args?: string[]
   relativeCwd?: string
@@ -90,6 +93,8 @@ export interface CancelCliExecutionInput {
 }
 
 export interface CliApprovalRequest {
+  worktree?: CliWorktreeIdentity
+  activeCheckoutDirectory?: string
   commands?: CliCommandDescriptor[]
   manifestHash?: string
   budgets?: CliProposal['budgets']
@@ -103,7 +108,18 @@ export interface CliApprovalRequest {
 
 export type CliApprovalHandler = (request: CliApprovalRequest) => Promise<boolean>
 
-export interface PrepareCliInvestigationInput { commands: PrepareCliExecutionInput[] }
+export interface PrepareCliInvestigationInput { commands: Omit<PrepareCliExecutionInput, 'worktree'>[] }
+export interface CliWorktreeSelector { worktreeId: string; generation: string }
+export interface CliWorktreeIdentity extends CliWorktreeSelector {
+  head: string | null
+  branch: string | null
+  indexRevision: string
+}
+export interface CliResolvedWorktree {
+  directory: string
+  identity: CliWorktreeIdentity
+  getFingerprint: () => Promise<string>
+}
 export interface GetCliInvestigationInput extends GetCliExecutionInput { index?: number }
 export interface CliInvestigationSummary {
   operationId: string
