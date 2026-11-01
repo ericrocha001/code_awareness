@@ -21,6 +21,7 @@ interface PopoverProps {
   children: React.ReactNode
   placement?: PopoverPlacement
   offset?: number
+  guardNavigation?: boolean
 }
 
 const MARGIN = 8
@@ -33,12 +34,13 @@ export const Popover: React.FC<PopoverProps> = ({
   onClose,
   children,
   placement = 'auto-start',
-  offset = 8
+  offset = 8,
+  guardNavigation = true
 }) => {
   const popoverRef = useRef<HTMLDivElement>(null)
   const onCloseRef = useRef(onClose)
   onCloseRef.current = onClose
-  const [coords, setCoords] = useState<Coords>(null)
+  const [coords, setCoords] = useState<{ top: number; left: number } | null>(null)
   const [measured, setMeasured] = useState(false)
 
   // --- Medição de geometria (síncrona, antes da pintura) ---
@@ -112,14 +114,14 @@ export const Popover: React.FC<PopoverProps> = ({
     }
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' && (guardNavigation || popoverRef.current?.contains(e.target as Node) || anchorRef.current?.contains(e.target as Node))) {
         onCloseRef.current()
       }
     }
 
     // Guarda de teclado em fase de captura: suprime rolagem nativa de navegação externa
     const handleKeyDownCapture = (e: KeyboardEvent) => {
-      if (!MANAGED_NAV_KEYS.has(e.key)) return
+      if (!guardNavigation || !MANAGED_NAV_KEYS.has(e.key)) return
 
       const target = e.target as Node
       const inBaloon = popoverRef.current?.contains(target)
@@ -154,7 +156,7 @@ export const Popover: React.FC<PopoverProps> = ({
       document.removeEventListener('scroll', handleScroll, { capture: true })
       window.removeEventListener('resize', handleResize)
     }
-  }, [open, anchorRef])
+  }, [open, anchorRef, guardNavigation])
 
   // Sem hooks condicionais — apenas retorno condicional
   if (!open) return null

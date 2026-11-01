@@ -1,0 +1,13 @@
+.primitive-fixture { box-sizing: border-box; min-height: 100vh; padding: 32px; background: radial-gradient(ellipse at top left, color-mix(in srgb, var(--brand-blue) 16%, transparent), transparent 65%), radial-gradient(ellipse at top right, color-mix(in srgb, var(--brand-violet) 20%, transparent), transparent 65%), var(--bg-primary); }
+.primitive-fixture header { display: flex; align-items: center; gap: 16px; margin-bottom: 24px; }
+.primitive-fixture-icon { width: 60px; height: 60px; flex-shrink: 0; border-radius: 16px; display: grid; place-items: center; color: white; background: linear-gradient(135deg, var(--brand-blue), var(--brand-violet)); }
+.primitive-fixture h1 { margin: 0; font-size: 28px; }
+.primitive-fixture header p { margin: 6px 0 0; color: var(--text-secondary); font-size: 14px; }
+.primitive-fixture section { max-width: 820px; padding: 24px; margin: 16px 0; border-radius: 18px; border: 1px solid var(--border); background: var(--bg-primary); }
+.primitive-fixture h2 { margin: 0 0 16px; font-size: 18px; }
+.primitive-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.primitive-field-heading { display: flex; align-items: baseline; gap: 8px; }
+.primitive-warning { color: var(--text-primary); border-left: 3px solid var(--color-warning); padding-left: 12px; font-size: 14px; line-height: 1.5; }
+.primitive-fixture output { font-size: 14px; color: var(--text-secondary); }
+.ui-context-help a { color: var(--ui-focus); }
+@media (max-width: 600px) { .primitive-fixture { padding: 20px; } .primitive-fixture section { padding: 18px; } .primitive-fixture h1 { font-size: 24px; } }

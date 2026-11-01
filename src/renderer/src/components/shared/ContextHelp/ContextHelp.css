@@ -1,0 +1,20 @@
+.ui-context-help {
+  box-sizing: border-box;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 16px));
+  max-height: calc(100vh - 16px);
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font-size: var(--ui-control-font-size);
+  line-height: 1.6;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, var(--shadow-opacity));
+}
+.ui-context-help:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
+.ui-context-help-content { margin: 8px 0; }
+.ui-context-help-content p { margin: 8px 0; }
+.ui-context-help-content input { box-sizing: border-box; max-width: 100%; }

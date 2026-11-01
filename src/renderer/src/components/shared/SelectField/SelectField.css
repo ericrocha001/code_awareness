@@ -1,0 +1,24 @@
+.ui-select-field { display: grid; gap: 8px; min-width: 0; font-size: var(--ui-control-font-size); }
+.ui-select-field > label { color: var(--text-primary); font-weight: 600; }
+.ui-select-surface { position: relative; min-width: 0; }
+.ui-select-surface select {
+  box-sizing: border-box;
+  appearance: none;
+  width: 100%;
+  min-height: var(--ui-control-height);
+  border: 1px solid var(--border);
+  border-radius: var(--ui-control-radius);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  padding: 8px 40px 8px 12px;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.ui-select-surface > svg { position: absolute; right: 12px; top: 50%; transform: translateY(-50%); pointer-events: none; color: var(--text-primary); }
+.ui-select-surface select:hover:not(:disabled) { border-color: var(--ui-focus); }
+.ui-select-surface select:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 3px; }
+.ui-select-surface select:disabled { opacity: 0.5; cursor: not-allowed; }
+.ui-select-surface select[aria-invalid="true"] { border-color: var(--ui-danger); }
+.ui-select-description { color: var(--text-secondary); line-height: 1.5; }
+.ui-select-error { color: var(--ui-danger); line-height: 1.5; }
