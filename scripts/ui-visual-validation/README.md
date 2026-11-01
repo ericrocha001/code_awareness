@@ -19,6 +19,30 @@ These scenarios prove real Chromium rendering and the exercised interactions, no
 The Continuum scenario renders the actual product component and styles with explicitly synthetic read API fixtures.
 Scenarios remain opt-in; they are not added to the global validation gate.
 
+## Shared UI primitives (opt-in)
+
+`npm run harness:ui:scenario -- ui-primitives` renders the real `Button`, `ContextHelp`
+and `SelectField`, shared production CSS and explicitly synthetic content. It exercises
+native keyboard selection, help focus/Tab/Escape/outside click, selected/disabled/named
+actions, danger hover, dark/light, narrow layouts and contrast of central controls.
+It records source HEAD/branch/dirty state at start, isolated-profile cleanup and named
+captures. No product route, application API or personal repository data is involved.
+
+For a future visual delivery: recover the canonical Design System and use Academy
+`otimizacao-de-ui`; run `ui:acceptance` on the relevant explicit scope; capture the
+smallest states that discriminate the actual change in this Harness; **inspect the
+images** and correct material divergences. Use an approved reference/comparator only
+when such a reference really exists. A fixture proves its stated renderer contracts,
+not application backend integration or user approval.
+
+In the Handoff, distinguish mechanical/interaction PASS, capture receipt, actual visual
+judgment and any [agent judgment evaluation](../ui-quality/agent-evals.md). Cite run,
+source/dirty state, theme/viewport and inspected captures; state uncovered integration
+or approval explicitly. Classify a material failure/risk as Design System,
+`otimizacao-de-ui`, primitive, guardrail or visual proof, and route a reusable cause
+through Academy `harness-improvement`. Do not add a rule or expand feature scope for
+every defect. The Design System remains the visual norm; this is the evidence path.
+
 ## Native Windows Open/Save (opt-in)
 
 `native-dialogs` is a real Electron Main/Windows acceptance scenario:

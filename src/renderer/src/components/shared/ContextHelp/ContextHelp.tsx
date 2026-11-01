@@ -34,7 +34,7 @@ export function ContextHelp({ label, hint, children }: ContextHelpProps) {
       onClick={() => { setOpen(value => !value); setPreview(false) }}>
       <span aria-hidden="true">i</span>
     </Button>
-    <Popover open={open || Boolean(preview && hint)} anchorRef={anchorRef} onClose={close} guardNavigation={false}>
+    <Popover key={open ? 'dialog' : 'hint'} open={open || Boolean(preview && hint)} anchorRef={anchorRef} onClose={close} guardNavigation={false}>
       {open ? <div ref={panelRef} id={id} className="ui-context-help" role="dialog" aria-label={label} tabIndex={-1}
         onKeyDown={event => {
           if (event.key === 'Escape') {

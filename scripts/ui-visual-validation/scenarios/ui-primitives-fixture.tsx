@@ -27,13 +27,14 @@ function Fixture() {
       <div className="primitive-field-heading"><h2>Onde salvar</h2>
         <ContextHelp label="Ajuda sobre o destino" hint="Compare os destinos disponíveis.">
           <p>O destino local permanece nesta execução. O temporário será removido ao encerrar.</p>
-          <label>Buscar na ajuda <input aria-label="Buscar na ajuda" /></label>
+          <label className="primitive-help-search">Buscar na ajuda <input aria-label="Buscar na ajuda" /></label>
           <p><a href="#destino">Ver escolha de destino</a></p>
         </ContextHelp></div>
       <SelectField id="destino" label="Destino do arquivo" description="Escolha o destino para esta execução sintética."
         value={destination} onChange={event => setDestination(event.target.value)}>
         <option value="local">Local — manter nesta execução</option>
         <option value="temporary">Temporário — remover ao encerrar</option>
+        <option value="long">Diretório temporário com nome longo para verificar leitura e truncamento em largura reduzida</option>
       </SelectField>
       <p className="primitive-warning" role="note">Atenção: excluir remove o arquivo. Confirme o destino antes de continuar.</p>
       <output aria-label="Destino selecionado">{destination === 'local' ? 'Local selecionado' : 'Temporário selecionado'}</output>

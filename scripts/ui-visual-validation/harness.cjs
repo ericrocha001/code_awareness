@@ -14,7 +14,7 @@ async function run({ scenario = 'preflight', timeout = 30000, executable, output
   try {
     if (!isStem(scenario)) throw Object.assign(new Error('Scenario must be a filename stem'), { code: 'SCENARIO_INVALID' })
     if (comparison && (!isStem(comparison.capture) || comparison.approvedReference !== true || !comparison.reference)) throw Object.assign(new Error('Select an approved reference and named capture'), { code: 'COMPARISON_ARGUMENT_INVALID' })
-    if (comparison || scenario === 'codemap-convergence') {
+    if (comparison || scenario === 'codemap-convergence' || scenario === 'ui-primitives') {
       const git = args => { const result = spawnSync('git', args, { cwd: projectRoot, windowsHide: true, encoding: 'utf8' }); return result.status === 0 ? result.stdout.trim() : null }
       receipt.source = { observedAt: new Date().toISOString(), observation: 'SCENARIO_START', checkout: projectRoot, head: git(['rev-parse', 'HEAD']), branch: git(['branch', '--show-current']), changes: git(['-c', 'core.fsmonitor=false', 'status', '--porcelain']) }
     }

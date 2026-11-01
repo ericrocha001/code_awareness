@@ -10,4 +10,7 @@
 .primitive-warning { color: var(--text-primary); border-left: 3px solid var(--color-warning); padding-left: 12px; font-size: 14px; line-height: 1.5; }
 .primitive-fixture output { font-size: 14px; color: var(--text-secondary); }
 .ui-context-help a { color: var(--ui-focus); }
+.primitive-help-search { display: grid; gap: 8px; }
+.primitive-help-search input { min-height: 32px; border: 1px solid var(--border); border-radius: var(--ui-control-radius); padding: 4px 8px; font: inherit; color: var(--text-primary); background: var(--bg-primary); }
+.primitive-help-search input:focus-visible { outline: 2px solid var(--ui-focus); outline-offset: 2px; }
 @media (max-width: 600px) { .primitive-fixture { padding: 20px; } .primitive-fixture section { padding: 18px; } .primitive-fixture h1 { font-size: 24px; } }
