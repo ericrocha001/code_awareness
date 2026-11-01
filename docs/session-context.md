@@ -4,7 +4,17 @@ O histórico pertence ao repositório canônico do catálogo. Worktrees reconhec
 
 `<perfil>/continuum/repositories/<repositoryId em base64url>/session-context.sqlite`
 
-O banco é independente do Continuum e do Git Atlas. A consulta não inicia subprocessos, captura, hooks ou sincronização. Somente `refresh_agent_sessions` solicita ingestão. Sem `sessionId`, atualiza o catálogo sem importar bodies; com um ID descoberto, importa somente aquela sessão. A ausência de associação provada deixa `executionId`, Worktree e commit indisponíveis. Uma alegação de teste ou commit no texto não equivale a prova do Validation Ledger ou Git Operations.
+O banco é independente do Continuum e do Git Atlas. As cinco ferramentas de histórico mantêm o contrato de consulta local; somente `refresh_agent_sessions` solicita ingestão. Sem `sessionId`, atualiza o catálogo sem importar bodies; com um ID descoberto, importa somente aquela sessão. A ausência de associação provada deixa `executionId`, Worktree e commit indisponíveis. Uma alegação de teste ou commit no texto não equivale a prova do Validation Ledger ou Git Operations.
+
+## Fonte consultiva live — CH-13
+
+`discover_entire_sessions` consulta uma vez `session list --json` do Entire 0.12.2 e retorna até 20 registros `ENTIRE_LIVE` das Worktrees governadas. Não importa transcripts nem altera a materialização `TRANSCRIPT_IMPORTED` do histórico. Filtros opcionais de Worktree exigem `worktreeId` e `generation` juntos; estado e intervalo de início também podem restringir a seleção. Inventário limitado ou fontes indisponíveis produzem cobertura parcial explícita, com contagens de omissão; não há truncamento silencioso nem promessa de inventário completo.
+
+`inspect_entire_session` exige `providerSessionId`, `worktreeId` e `generation`. Confere a origem retornada pelo provider contra o registry e revalida contexto e identidade antes de devolver o resultado. Expõe metadados, turnos e `pendingTurns`; o alias depreciado `checkpoints` não é projetado. Arquivos tocados só aparecem com `includeFiles:true`, em paths repo-relativos seguros, até `fileLimit` (máximo 20), com cobertura própria. Checkpoint consolidado e associação com sessão SQLite permanecem indisponíveis sem prova.
+
+`get_entire_session_usage` usa a mesma seleção, verifica primeiro `session info` e projeta `session tokens --json` como `ENTIRE_REPORTED`: input, output, cache, total e chamadas. Métricas ausentes não viram zero. A razão de input+cache sobre total, quando observável e pelo menos 90%, é um sinal tipado `HEURISTIC`, não instrução ou custo faturável. Recomendações textuais do fornecedor não são transmitidas.
+
+As três operações usam o executor seguro existente, sem shell, auth, rede, mutações Git ou captura automática. Exigem opt-in pinned e configuração local privada com `push_sessions:false` e `telemetry:false`. A verificação de hash/versão/ajuda pode ser reutilizada somente enquanto a identidade física, tamanho e timestamps do executável e o pin permanecem iguais; opt-in e privacidade são relidos. Saída CLI tem limite de 1 MiB, stderr 64 KiB, prazo de provider 12 segundos e orçamento MCP de 12 KiB para descoberta/8 KiB para detalhes e métricas. Cancelamento, drift e falhas são erros explícitos. Nenhuma projeção inclui `last_prompt`, transcript, credenciais ou caminhos físicos.
 
 ## Opt-in do operador
 

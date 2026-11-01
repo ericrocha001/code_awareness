@@ -5,7 +5,11 @@ import type { GitWorktreeRegistry } from '../git-operations/git-worktree-registr
 
 export interface SessionTargetSelection { worktreeId: string; generation: string }
 export interface SessionTarget { root: string; fingerprint: string; validate: () => Promise<void> }
-export type SessionTargetResolver = (selection: SessionTargetSelection) => Promise<SessionTarget>
+export interface LiveSessionTarget extends SessionTargetSelection { root: string; fingerprint: string }
+export interface SessionTargetResolver {
+  (selection: SessionTargetSelection): Promise<SessionTarget>
+  discover?: () => Promise<LiveSessionTarget[]>
+}
 
 export function sourceFingerprint(root: string): string {
   const physical = realpathSync(root)
@@ -26,7 +30,7 @@ export function sourceFingerprint(root: string): string {
 }
 
 export function sessionTargetResolver(registry: GitWorktreeRegistry, assertActive: () => void): SessionTargetResolver {
-  return async selection => {
+  const resolveTarget: SessionTargetResolver = async selection => {
     const inspect = async () => {
       assertActive()
       const record = await registry.revalidateSelection(selection.worktreeId)
@@ -40,4 +44,18 @@ export function sessionTargetResolver(registry: GitWorktreeRegistry, assertActiv
     }
     return { root, fingerprint, validate }
   }
+  resolveTarget.discover = async () => {
+    assertActive()
+    const { worktrees } = await registry.discover({ reuseValidatedDirectories: true })
+    const targets: LiveSessionTarget[] = []
+    for (const record of worktrees) {
+      if (record.missing || record.prunable || record.detached || !record.branch || !record.head) continue
+      const selection = { worktreeId: record.worktreeId, generation: record.generation }
+      const root = realpathSync(record.path)
+      targets.push({ ...selection, root, fingerprint: sourceFingerprint(root) })
+    }
+    assertActive()
+    return targets
+  }
+  return resolveTarget
 }

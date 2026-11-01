@@ -4,10 +4,13 @@ import type { SessionStore } from './store'
 import type { EntireProvider } from './entire-provider'
 import { EVENT_TYPES, type SessionRow } from './types'
 import { digest, utf8Prefix } from './privacy'
+import { LIVE_SESSION_SCHEMAS, isLiveSessionTool } from './entire-live'
+import type { LiveSessionTarget } from './target'
 
 const id = z.string().uuid(), revision = z.number().int().positive(), cursor = z.string().max(512).optional()
 const date = z.string().datetime({ offset: true }).optional()
 const schemas = {
+  ...LIVE_SESSION_SCHEMAS,
   list_agent_sessions: z.object({ state: z.enum(['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL']).optional(), agent: z.literal('codex').optional(), after: date, before: date,
     executionId: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(20).default(20), cursor }).strict(),
   inspect_agent_session: z.object({ sessionId: id, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor }).strict(),
@@ -25,6 +28,12 @@ const str = { type: 'string', minLength: 1, maxLength: 200 }, uuid = { type: 'st
 const cur = { type: 'string', maxLength: 512 }, time = { type: 'string', format: 'date-time' }
 const session = { sessionId: uuid, expectedRevision: rev }
 const definitions: [SessionToolName, string, Record<string, unknown>, string[]][] = [
+  ['discover_entire_sessions', 'Discover at most 20 ENTIRE_LIVE sessions in governed Worktrees of this repository. No prompts, paths, transcripts or SQLite import. Optional worktreeId and generation must be paired. Coverage reports omitted or limited inventory explicitly; imported transcripts remain in list_agent_sessions.',
+    { worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN'] }, after: time, before: time, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 } }, []],
+  ['inspect_entire_session', 'Inspect a selected Entire provider session in an explicitly governed Worktree. Read-only live metadata, turns and pending turns; no prompt or transcript import. Pending turns are not consolidated checkpoints. Repo-relative touched files require includeFiles and remain bounded. No inferred link to imported session or commit.',
+    { providerSessionId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' }, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, includeFiles: { type: 'boolean', default: false }, fileLimit: { type: 'integer', minimum: 1, maximum: 20, default: 10 } }, ['providerSessionId', 'worktreeId', 'generation']],
+  ['get_entire_session_usage', 'Read ENTIRE_REPORTED token metrics for one provider session in a governed Worktree. Input/output/cache/total/API calls and typed heuristic context-pressure signals only. Cache tokens are not billable-token or monetary estimates. Missing usage remains unavailable; no vendor recommendations, prompts, transcript import, auth or network.',
+    { providerSessionId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' }, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['providerSessionId', 'worktreeId', 'generation']],
   ['list_agent_sessions', 'Discover at most 20 sessions in the active repository only. Metadata and coverage; no events or bodies. Continue with the same filters. Never imports or runs Entire. importState distinguishes metadata discovery from materialized transcript; coverageReasons contain only observed codes and counts.',
     { state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'] }, agent: { type: 'string', enum: ['codex'] }, after: time, before: time, executionId: str, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: cur }, []],
   ['inspect_agent_session', 'Inspect the cheap deterministic map of a selected session: category counts, tools, files and ordinal segments. No bodies. Cursor is bound to this repository and revision. Source identity means checked stream headers, never authorship; the time range is observed, not causal proof.',
@@ -39,7 +48,7 @@ const definitions: [SessionToolName, string, Record<string, unknown>, string[]][
 export const SESSION_CONTEXT_TOOLS: McpToolDefinition[] = definitions.map(([name, description, properties, required]) => ({ name, description,
   securitySchemes: [{ type: 'oauth2', scopes: [] }], inputSchema: { type: 'object', properties, required, additionalProperties: false },
   annotations: { readOnlyHint: name !== 'refresh_agent_sessions', destructiveHint: false, openWorldHint: false } }))
-export const SESSION_RESPONSE_BUDGETS: Record<SessionToolName, number> = { list_agent_sessions: 8192, inspect_agent_session: 12288, list_agent_session_events: 12288, read_agent_session_event: 16384, refresh_agent_sessions: 8192 }
+export const SESSION_RESPONSE_BUDGETS: Record<SessionToolName, number> = { discover_entire_sessions: 12288, inspect_entire_session: 8192, get_entire_session_usage: 8192, list_agent_sessions: 8192, inspect_agent_session: 12288, list_agent_session_events: 12288, read_agent_session_event: 16384, refresh_agent_sessions: 8192 }
 const wrap = (data: object): McpToolResult => ({ content: [{ type: 'text', text: JSON.stringify(data) }] })
 const fits = (data: object, budget: number, literalProjection = false) =>
   Buffer.byteLength(JSON.stringify({ ...wrap(data), ...(literalProjection ? { structuredContent: data } : {}) })) + 512 <= budget
@@ -58,8 +67,25 @@ function page<T>(store: SessionStore, scope: object, offset: number, rows: T[], 
   if (rows.length && !selected.length) throw new Error('RESPONSE_LIMIT_REACHED')
   return { ...base, [key]: selected, ...(rows.length > selected.length ? { nextCursor: store.cursor(scope, offset + selected.length) } : {}) }
 }
-export async function executeSessionTool(store: SessionStore, provider: Pick<EntireProvider, 'refresh'>, name: SessionToolName, raw: unknown, assertActive: () => void,
-  selectedTarget?: { worktreeId: string; generation: string }): Promise<McpToolResult> {
+export async function executeLiveSessionTool(provider: Partial<Pick<EntireProvider, 'queryLive'>>, name: keyof typeof LIVE_SESSION_SCHEMAS, raw: unknown,
+  assertActive: () => void, targets: LiveSessionTarget[]): Promise<McpToolResult> {
+  try {
+    assertActive()
+    const q = LIVE_SESSION_SCHEMAS[name].parse(raw ?? {})
+    if (!provider.queryLive) throw new Error('PROVIDER_UNAVAILABLE')
+    const data = await provider.queryLive(name, q, targets)
+    assertActive()
+    if (!fits(data, SESSION_RESPONSE_BUDGETS[name])) throw new Error('RESPONSE_LIMIT_REACHED')
+    return wrap(data)
+  } catch (error) {
+    const code = error instanceof z.ZodError ? 'INVALID_ARGUMENT' : error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'
+    const phase = code === 'PROVIDER_TIMEOUT' && error && typeof error === 'object' && 'phase' in error && typeof error.phase === 'string' && /^[a-z-]{1,40}$/.test(error.phase) ? error.phase : undefined
+    return { ...wrap({ code, ...(phase ? { phase } : {}) }), isError: true }
+  }
+}
+export async function executeSessionTool(store: SessionStore, provider: Pick<EntireProvider, 'refresh'> & Partial<Pick<EntireProvider, 'queryLive'>>, name: SessionToolName, raw: unknown, assertActive: () => void,
+  selectedTarget?: { worktreeId: string; generation: string }, liveTargets: LiveSessionTarget[] = []): Promise<McpToolResult> {
+  if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
     assertActive()
     if (!(name in schemas)) throw new Error('INVALID_ARGUMENT')

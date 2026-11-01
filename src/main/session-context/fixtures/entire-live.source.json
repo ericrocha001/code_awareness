@@ -1,0 +1,9 @@
+{
+  "provider": "Entire CLI 0.12.2",
+  "observedOn": "2026-11-01",
+  "commands": ["session list --json", "session info <id> --json", "session tokens <id> --json"],
+  "fixture": "../entire-live.test.ts setup",
+  "provenance": "Locally observed JSON field names and token metrics; mixed-Worktree fixture derived from the existing repository sessions.",
+  "sanitization": "Session IDs, branches and physical roots replaced; last_prompt and private data replaced by adversarial sentinels. Transcript/auth fields and invalid file paths are synthetic negative controls. No transcript was acquired.",
+  "limitations": "Schema/projection fixtures do not prove live capture or checkpoint association. The opt-in Channel acceptance uses the installed pinned executable and preexisting real sessions."
+}
