@@ -65,6 +65,9 @@
     "harness:ui:test": "node scripts/test-output.cjs run -- node --test scripts/ui-visual-validation/harness.test.cjs scripts/ui-visual-validation/compare.test.cjs",
     "harness:ui:scenario": "node scripts/test-output.cjs run -- node scripts/ui-visual-validation/harness.cjs",
     "harness:ui:compare": "node scripts/ui-visual-validation/compare.cjs",
+    "ui:check": "node scripts/ui-quality/check.cjs",
+    "ui:check:test": "node scripts/test-output.cjs run -- node --test scripts/ui-quality/check.test.cjs",
+    "ui:acceptance": "npm run ui:check && node scripts/test-output.cjs run -- node node_modules/vitest/vitest.mjs run src/renderer/src/components/shared/ui-primitives.test.tsx src/renderer/src/components/shared/Popover/Popover.test.tsx",
     "test:agent": "node scripts/test-output.cjs run --",
     "test:output": "node scripts/test-output.cjs run -- node --test scripts/test-output.test.cjs",
     "cli-execution:build": "node scripts/cli-execution/build.cjs"

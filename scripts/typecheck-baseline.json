@@ -1131,14 +1131,6 @@
     },
     {
       "project": "web",
-      "file": "src/renderer/src/components/shared/Popover/Popover.tsx",
-      "code": 2304,
-      "category": "Error",
-      "message": "Cannot find name 'Coords'.",
-      "count": 1
-    },
-    {
-      "project": "web",
       "file": "src/renderer/src/components/shared/TagPopover/TagPopover.tsx",
       "code": 2353,
       "category": "Error",

@@ -2,6 +2,15 @@
 -T --- */
 
 :root {
+  --brand-violet: #6915B6;
+  --brand-blue: #0487ED;
+  --ui-control-height: 40px;
+  --ui-control-compact-height: 32px;
+  --ui-control-font-size: 14px;
+  --ui-control-radius: 10px;
+  --ui-pill-radius: 999px;
+  --ui-focus: #6D28D9;
+  --ui-danger: #B91C1C;
   --bg-primary: #FFFFFF;
   --bg-secondary: #F9FAFB;
   --border: #E4E4E7;
@@ -35,6 +44,8 @@
 }
 
 [data-theme="dark"] {
+  --ui-focus: #B8A3FF;
+  --ui-danger: #FCA5A5;
   --bg-primary: #18181B;
   --bg-secondary: #27272A;
   --border: #3F3F46;
@@ -68,6 +79,8 @@
 
 @media (prefers-color-scheme: dark) {
   [data-theme="system"] {
+    --ui-focus: #B8A3FF;
+    --ui-danger: #FCA5A5;
     --bg-primary: #18181B;
     --bg-secondary: #27272A;
     --border: #3F3F46;
