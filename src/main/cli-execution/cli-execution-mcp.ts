@@ -40,7 +40,7 @@ export const CLI_EXECUTION_TOOLS: McpToolDefinition[] = [
   {
     name: 'start_cli_execution',
     description:
-      'Request native local human authorization and start the approved CLI proposal in the active checkout. Idempotent by (proposalId, operationId). Returns immediately without blocking MCP during execution.',
+      'Start the exact proposal under host-selected policy. SUPERVISED requests native consent; autonomous modes skip per-command dialogs only when authorized locally. NOT_AUTO_AUTHORIZED requires selecting SUPERVISED in Desktop. Idempotent by proposalId/operationId.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -121,6 +121,21 @@ export const CLI_EXECUTION_TOOLS: McpToolDefinition[] = [
   }
 ]
 
+const investigationTool = (name: string, description: string, properties: Record<string, unknown>, required: string[], mutation: boolean): McpToolDefinition => ({
+  name, description, inputSchema: { type: 'object', properties, required, additionalProperties: false },
+  annotations: { readOnlyHint: !mutation, openWorldHint: mutation, idempotentHint: true, ...(mutation ? { destructiveHint: true } : {}), title: name }, securitySchemes
+})
+const proposalOperation = { proposalId: { type: 'string', minLength: 1 }, operationId: { type: 'string', minLength: 1, maxLength: 128 } }
+CLI_EXECUTION_TOOLS.push(
+  investigationTool('prepare_cli_investigation', 'Resolve a closed ordered manifest of 2–5 literal commands in the active checkout without spawning. Same host policy as unitary CLI. Limits: 30s/step, 90s total, 64KiB combined output/step and 256KiB total; manifest limited to 6KiB. No dynamic insertion or executable placeholders.',
+    { commands: { type: 'array', minItems: 2, maxItems: 5, items: CLI_EXECUTION_TOOLS[0].inputSchema } }, ['commands'], false),
+  investigationTool('start_cli_investigation', 'Start a prepared manifest sequentially with the shared Windows supervisor. One complete native approval in SUPERVISED, zero in locally authorized autonomous modes. Any failure or authority drift stops remaining steps. Recover lost responses with the same operationId; after restart missing receipts are not recoverable.', proposalOperation, ['proposalId', 'operationId'], true),
+  investigationTool('get_cli_investigation', 'Get bounded manifest/step status without stdout/stderr. Supply index and optional cursor to read only that step output, at most 8KiB combined per page. Unknown operation after restart is not recoverable; never automatically replay using a new ID.',
+    { operationId: { type: 'string', minLength: 1 }, index: { type: 'integer', minimum: 0, maximum: 4 }, cursor: { type: 'string' } }, ['operationId'], false),
+  investigationTool('cancel_cli_investigation', 'Cancel the active manifest and its process tree, prevent all subsequent steps, and return observed status without output. TERMINATION_UNCONFIRMED retains the shared execution slot.',
+    { operationId: { type: 'string', minLength: 1 } }, ['operationId'], true)
+)
+
 function result(value: unknown): McpToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
 }
@@ -149,6 +164,37 @@ export async function executeCliTool(
   }
 
   try {
+    const allowed: Record<string, string[]> = {
+      prepare_cli_execution: ['executable', 'args', 'relativeCwd'], start_cli_execution: ['proposalId', 'operationId'],
+      get_cli_execution: ['operationId', 'cursor'], cancel_cli_execution: ['operationId'],
+      prepare_cli_investigation: ['commands'], start_cli_investigation: ['proposalId', 'operationId'],
+      get_cli_investigation: ['operationId', 'index', 'cursor'], cancel_cli_investigation: ['operationId']
+    }
+    if (allowed[name] && Object.keys(values).some(key => !allowed[name].includes(key))) return error('INVALID_ARGUMENT', 'Unknown argument; autonomy is controlled only in Desktop')
+    if (name === 'prepare_cli_investigation') {
+      if (!Array.isArray(values.commands) || values.commands.length < 2 || values.commands.length > 5) return error('INVALID_ARGUMENT', 'Expected 2–5 commands')
+      const commands: import('./cli-execution-types').PrepareCliExecutionInput[] = []
+      for (const value of values.commands) {
+        const command = asObject(value)
+        if (!command || Object.keys(command).some(key => !['executable', 'args', 'relativeCwd'].includes(key)) ||
+          typeof command.executable !== 'string' || !command.executable.trim() ||
+          command.args !== undefined && (!Array.isArray(command.args) || command.args.some(arg => typeof arg !== 'string')) ||
+          command.relativeCwd !== undefined && typeof command.relativeCwd !== 'string') return error('INVALID_ARGUMENT', 'Invalid literal command')
+        commands.push(command as unknown as import('./cli-execution-types').PrepareCliExecutionInput)
+      }
+      const proposal = await service.prepareInvestigation({ commands })
+      return result({ ...proposal, command: undefined })
+    }
+    if (name === 'start_cli_investigation' || name === 'get_cli_investigation' || name === 'cancel_cli_investigation') {
+      if (typeof values.operationId !== 'string' || !values.operationId.trim()) return error('INVALID_ARGUMENT', 'operationId is required')
+      if (name === 'start_cli_investigation') {
+        if (typeof values.proposalId !== 'string' || !values.proposalId.trim()) return error('INVALID_ARGUMENT', 'proposalId is required')
+        return result(service.startInvestigation({ operationId: values.operationId, proposalId: values.proposalId }))
+      }
+      if (name === 'cancel_cli_investigation') return result(await service.cancelInvestigation({ operationId: values.operationId }))
+      if (values.index !== undefined && (typeof values.index !== 'number' || !Number.isInteger(values.index)) || values.cursor !== undefined && typeof values.cursor !== 'string') return error('INVALID_ARGUMENT')
+      return result(service.getInvestigation({ operationId: values.operationId, index: values.index as number | undefined, cursor: values.cursor as string | undefined }))
+    }
     if (name === 'prepare_cli_execution') {
       if (typeof values.executable !== 'string' || !values.executable.trim()) {
         return error('INVALID_ARGUMENT', 'executable is required')
@@ -215,6 +261,8 @@ export async function executeCliTool(
     return error('UNKNOWN_TOOL', `Unknown tool: ${name}`)
   } catch (caught) {
     const message = caught instanceof Error ? caught.message : String(caught)
+    const code = message.split(':')[0]
+    if (['NOT_AUTO_AUTHORIZED', 'POLICY_CHANGED', 'OPERATION_KIND_CONFLICT', 'INVESTIGATION_COMMAND_LIMIT', 'MANIFEST_SIZE_LIMIT', 'SUMMARY_SIZE_LIMIT', 'INVALID_OUTPUT_INDEX', 'INVALID_OUTPUT_CURSOR', 'OUTPUT_INDEX_REQUIRED'].includes(code)) return error(code, code === 'NOT_AUTO_AUTHORIZED' ? 'Select SUPERVISED locally; no command was executed' : undefined)
     if (/CLI_EXECUTION_BUSY/.test(message)) {
       return operationalFailure({
         code: 'CLI_EXECUTION_BUSY',

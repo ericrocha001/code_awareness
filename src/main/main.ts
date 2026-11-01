@@ -111,8 +111,10 @@ import { GitWorktreeValidation } from './git-operations/git-worktree-validation'
 import { RepositoryFileIngress } from './repository-file-ingress/repository-file-ingress'
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { CliExecutionService } from './cli-execution/cli-execution-service'
-import { confirmCliExecution } from './cli-execution/cli-authorization'
+import { confirmCliExecution, confirmCliAutonomy } from './cli-execution/cli-authorization'
 import { createCliProjectAuthority } from './cli-execution/cli-project-authority'
+import { CliTrustPolicy } from './cli-execution/cli-trust-policy'
+import { registerCliPolicyHandlers } from './ipc/cli-policy-handler'
 import { locateCliJobOwner } from './cli-execution/windows/cli-job-owner-locator'
 
 
@@ -488,6 +490,14 @@ app.whenReady().then(async () => {
     continuumSession.deactivate()
   })
   let boundProjectRevision = -1
+  const cliTrustPolicy = new CliTrustPolicy(settingsService, () => {
+    const state = activeProjects?.getState(), project = state?.project
+    if (!project || state?.context?.identity !== 'IDENTITY_BOUND') return null
+    const repository = repositoryCatalog?.findByPath(project.path)
+    if (!repository || repository.id !== project.id || state.context.repositoryId !== repository.id || repository.localCheckout?.availability !== 'AVAILABLE') return null
+    return { repositoryId: repository.id, path: project.path, revision: state.revision }
+  }, (mode, context) => confirmCliAutonomy(mainWindow, mode, context))
+  registerCliPolicyHandlers(cliTrustPolicy, () => mainWindow, () => activeCliExecution)
   activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
     boundProjectRevision = revision
@@ -524,6 +534,7 @@ app.whenReady().then(async () => {
     activeCliExecution = new CliExecutionService({
       repoRoot: project.path,
       repositoryId: gitRepositoryId ?? null,
+      getPolicy: () => cliTrustPolicy.getPolicy({ repositoryId: gitRepositoryId ?? null, path: project.path }),
       enabledByDefault: settingsService.loadSettings().cliExecutionEnabled ?? false,
       ownerPath: (() => {
         try { return locateCliJobOwner(app.getAppPath(), app.isPackaged ? process.resourcesPath : '') }
@@ -615,7 +626,8 @@ app.whenReady().then(async () => {
   registerActiveProjectHandlers(activeProjects)
   registerConnectionHandlers(remoteAccess)
   channelProjection = new ChannelStateProjection(remoteAccess, activeProjects, mcpLifecycle,
-    () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, channelFunctionalHealth)
+    () => isInstallationConfigured(desktopProfilePaths(app.getPath('userData')).installationPath, safeStorage), settingsService, channelFunctionalHealth,
+    () => cliTrustPolicy.getPolicy())
   const unsubscribeContextChannel = channelProjection.onChanged(state => {
     const active = activeProjects?.getState()
     if (!active?.project || state.activeProject?.id !== active.project.id) return
@@ -683,6 +695,7 @@ app.whenReady().then(async () => {
   registerSettingsHandlers(settingsService)
   settingsService.onChanged(() => {
     activeCliExecution?.setEnabled(settingsService.loadSettings().cliExecutionEnabled ?? false)
+    activeCliExecution?.refreshPolicy()
   })
   registerGitHandlers(watcherService, settingsService, compressionService, codeAwarenessIgnoreService)
   registerWorkspaceHandlers(settingsService, repositoryCatalog, repositoryRuntime, target => activeProjects!.assertContextSelection(target))

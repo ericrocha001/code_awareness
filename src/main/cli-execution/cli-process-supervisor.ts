@@ -15,6 +15,7 @@ export interface SupervisorExecutionResult {
 export interface SupervisorLaunchOptions {
   timeoutMs?: number
   maxOutputBytes?: number
+  maxTotalOutputBytes?: number
   ownerPath?: string
   authorizeResume?: () => Promise<boolean>
   onRunning?: () => void
@@ -77,7 +78,7 @@ export class CliProcessSupervisor {
     this.currentStatus = 'AWAITING_APPROVAL'
     this.diagnostic = undefined
     this.startedAt = Date.now()
-    this.buffer = new CliOutputBuffer(options.maxOutputBytes)
+    this.buffer = new CliOutputBuffer(options.maxOutputBytes, undefined, options.maxTotalOutputBytes)
     const pipeName = 'CodeAwareness.Cli.' + randomUUID()
     const server = createServer()
     let stage = 'CONNECTING', incoming = '', terminal = false, settled = false

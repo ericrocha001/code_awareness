@@ -98,6 +98,8 @@ declare global {
       confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string) => Promise<AcademyOpenAiRelease>
       revealAcademyOpenAiPackage: (releaseId: string) => Promise<boolean>
       getChannelState: () => Promise<ChannelState>
+      chooseCliMode: (mode: import('../../shared/types/cli-policy-types').CliMode) => Promise<{ accepted: boolean }>
+      stopCliExecution: () => Promise<{ stopped: boolean }>
       localMcpClients: import('../../shared/types/local-mcp-client-types').LocalMcpClientApi
       onChannelChanged: (callback: (state: ChannelState) => void) => () => void
       getSystemHealthState: () => Promise<SystemHealthState>

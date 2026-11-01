@@ -1,3 +1,5 @@
+import type { CliPolicy } from '../../shared/types/cli-policy-types'
+
 export type CliExecutionStatus =
   | 'AWAITING_APPROVAL'
   | 'RUNNING'
@@ -20,6 +22,11 @@ export interface CliCommandDescriptor {
 }
 
 export interface CliProposal {
+  policy?: CliPolicy
+  autoAuthorized?: boolean
+  commands?: CliCommandDescriptor[]
+  manifestHash?: string
+  budgets?: { commandTimeoutMs: number; totalTimeoutMs: number; stepOutputBytes: number; totalOutputBytes: number }
   proposalId: string
   createdAt: string
   expiresAt: string
@@ -43,6 +50,9 @@ export interface CliOutputPage {
 }
 
 export interface CliExecutionRecord {
+  policy?: CliPolicy
+  repositoryId?: string | null
+  origin?: 'CLI_EXECUTION_CAPABILITY'
   treeObservation?: { activeProcesses: 0; handlesClosed: true }
   phase?: 'AWAITING_APPROVAL' | 'LAUNCHING' | 'RUNNING' | 'STOPPING' | 'TERMINAL' | 'TERMINATION_UNCONFIRMED'
   operationId: string
@@ -80,6 +90,9 @@ export interface CancelCliExecutionInput {
 }
 
 export interface CliApprovalRequest {
+  commands?: CliCommandDescriptor[]
+  manifestHash?: string
+  budgets?: CliProposal['budgets']
   proposalId: string
   operationId: string
   command: CliCommandDescriptor
@@ -89,3 +102,19 @@ export interface CliApprovalRequest {
 }
 
 export type CliApprovalHandler = (request: CliApprovalRequest) => Promise<boolean>
+
+export interface PrepareCliInvestigationInput { commands: PrepareCliExecutionInput[] }
+export interface GetCliInvestigationInput extends GetCliExecutionInput { index?: number }
+export interface CliInvestigationSummary {
+  operationId: string
+  proposalId: string
+  manifestHash: string
+  repositoryId: string | null
+  policy: CliPolicy
+  status: CliExecutionStatus
+  phase: CliExecutionRecord['phase']
+  diagnostic?: string
+  durationMs?: number
+  treeObservation?: CliExecutionRecord['treeObservation']
+  steps: Array<{ index: number; operationId: string; status: CliExecutionStatus | 'NOT_STARTED'; phase?: CliExecutionRecord['phase']; exitCode?: number | null; durationMs?: number; diagnostic?: string; treeObservation?: CliExecutionRecord['treeObservation'] }>
+}
