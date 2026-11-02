@@ -45,7 +45,11 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:openai-state', () => service.getOpenAiPublicationState())
   ipcMain.handle('academy:package-distribution-state', () => service.getPackageDistributionState())
   ipcMain.handle('academy:openai-releases', () => service.listOpenAiReleases())
-  ipcMain.handle('academy:openai-prepare', () => service.prepareOpenAiRelease())
+  ipcMain.handle('academy:openai-prepare', (_event, input?: import('../../shared/types/academy-git-source-types').AcademyGitBuildRequest) => {
+    const request = input ?? { mode: 'LATEST' }
+    if (request.mode !== 'LATEST' && (request.mode !== 'REBUILD' || !/^[a-f0-9]{40,64}$/.test(request.sourceCommitSha))) throw new Error('INVALID_ARGUMENT')
+    return service.prepareOpenAiRelease(request)
+  })
   ipcMain.handle('academy:openai-confirm-upload', (_event, releaseId: string, artifactHash: string) => service.confirmOpenAiUpload(releaseId, artifactHash))
   ipcMain.handle('academy:openai-reveal', (_event, releaseId: string) => {
     const release = service.getOpenAiRelease(releaseId)

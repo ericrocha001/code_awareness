@@ -23,6 +23,10 @@ export function assertPublicationPaths(root: string, paths: string[]): void {
   }
 }
 
+export function assertSourcePath(path: string): void {
+  if (!path || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..' || part.includes(':') || /[. ]$/.test(part))) throw new AcademyError('GIT_SOURCE_UNSAFE_PATH', path)
+}
+
 export function computeGitSnapshotHash(entries: Array<Omit<AcademyGitSnapshotEntry, 'package'>>): string {
   const sorted = [...entries].sort((a, b) => a.name.localeCompare(b.name))
   const hash = createHash('sha256')
@@ -30,6 +34,10 @@ export function computeGitSnapshotHash(entries: Array<Omit<AcademyGitSnapshotEnt
     hash.update(`${item.skillId}:${item.name}:${item.version}:${item.packageHash};`)
   }
   return hash.digest('hex')
+}
+
+export function assertNoAcademySecrets(text: string, context: string): void {
+  if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}|\bAKIA[0-9A-Z]{16}\b/.test(text)) throw new AcademyError('KNOWN_SECRET_DETECTED', `KNOWN_SECRET_DETECTED: ${context}`)
 }
 
 export function validateGitSnapshot(
@@ -47,9 +55,7 @@ export function validateGitSnapshot(
     }
     const allTexts = [pkg.skillMd, ...Object.values(pkg.artifacts)]
     for (const text of allTexts) {
-      if (/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----|\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}|\bAKIA[0-9A-Z]{16}\b/.test(text)) {
-        throw new AcademyError('KNOWN_SECRET_DETECTED', `KNOWN_SECRET_DETECTED: ${entry.name}`)
-      }
+      assertNoAcademySecrets(text, entry.name)
     }
   }
 }

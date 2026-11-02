@@ -1,14 +1,21 @@
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cpSync } from 'node:fs'
+import { AcademyGitSyncService } from './git/academy-git-sync-service'
+import { AcademyGitMaterializer } from './git/academy-git-materializer'
+import { GitService } from '../core/git-service'
+import { gitExec, writeFile } from '../core/git-test-helpers'
+import type { RepositoryRecord } from '../../shared/types/repository-catalog-types'
 import { AcademyService } from './academy-service'
+import { AcademyStore } from './academy-store'
 import { readZipEntries, createDeterministicZip } from './publication/deterministic-zip'
 import { calculateOpenAiDelta, hashOpenAiSnapshot, nextOpenAiPluginVersion } from './publication/openai-plugin-model'
 import { validateOpenAiPluginPackage } from './publication/openai-plugin-validator'
 
 const roots: string[] = []
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 const skillMd = (name: string, body = 'v1') => `---\nname: ${name}\ndescription: Use ${name}.\n---\n\n# ${name}\n\n${body}\n`
 
@@ -42,6 +49,179 @@ async function fixture() {
   await service.bootstrapOpenAiPlugin(plugin)
   return { root, service, global, project, archived }
 }
+
+async function gitFixture() {
+  const f = await fixture()
+  const remote = join(f.root, 'remote.git'), human = join(f.root, 'human')
+  await gitExec(f.root, ['init', '--bare', remote])
+  await gitExec(f.root, ['clone', remote, human])
+  await gitExec(human, ['switch', '-c', 'main'])
+  await gitExec(human, ['config', 'user.name', 'Release Proof'])
+  await gitExec(human, ['config', 'user.email', 'proof@example.com'])
+  cpSync(join(f.root, 'installed', 'academy-skills'), human, { recursive: true })
+  const manifest = JSON.parse(readFileSync(join(human, 'plugin.json'), 'utf8'))
+  manifest.version = '0.2.0'
+  writeFile(human, 'plugin.json', JSON.stringify(manifest))
+  const commit = async (message: string, push = true) => {
+    await gitExec(human, ['add', '--', 'plugin.json', 'assets'])
+    if (existsSync(join(human, 'skills'))) await gitExec(human, ['add', '--', 'skills'])
+    await gitExec(human, ['commit', '-m', message])
+    if (push) await gitExec(human, ['push', '-u', 'origin', 'main'])
+    return new GitService().resolveCommit(human, 'HEAD')
+  }
+  await commit('published baseline')
+  const git = new GitService()
+  const transport = {
+    fetch: (path: string, origin: string) => git.fetchRemote(path, origin),
+    readRemoteHead: (path: string, origin: string, ref: string) => git.readRemoteHead(path, origin, ref),
+    push: (path: string, branch: string, origin = 'origin', head?: string) => git.push(path, origin, branch, head)
+  }
+  const record = { id: 'release-destination', name: 'Academy', status: 'ACTIVE', localCheckout: { path: human, availability: 'AVAILABLE', gitState: 'GIT' },
+    github: { repositoryId: 'release-github', fullName: 'proof/academy', cloneUrl: remote, visibility: 'PRIVATE' } } as RepositoryRecord
+  const sync = new AcademyGitSyncService(f.service.store, new AcademyGitMaterializer(), git, transport,
+    { resolveRepository: () => record, findByGitHubId: () => record, listEligibleRepositories: () => [record] })
+  f.service.initializeGitSync(sync)
+  expect((await sync.bindRepository(record.id)).syncState).toBe('SYNCED')
+  const bump = (version: string) => { manifest.version = version; writeFile(human, 'plugin.json', JSON.stringify(manifest)) }
+  return { ...f, git, sync, transport, human, commit, bump, manifest }
+}
+
+describe('Academy Git-pinned plugin publication', () => {
+  it('refuses unsafe authored metadata before ingestion and validates assets before reserving a release version', async () => {
+    const f = await gitFixture()
+    try {
+      const first = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      f.manifest.extensions['com.openai'].interface.logo = './assets/missing.png'
+      f.bump('0.4.0'); await f.commit('missing authored asset')
+      await expect(f.service.prepareOpenAiRelease({ mode: 'LATEST' })).rejects.toMatchObject({ code: 'OPENAI_PACKAGE_INVALID' })
+      expect(f.service.store.listPluginPackageRevisions().some(item => item.version === '0.4.0')).toBe(false)
+      expect(f.service.store.listOpenAiReleases().filter(item => !item.baseline)).toHaveLength(1)
+      delete f.manifest.extensions['com.openai'].interface.logo
+      f.manifest.description = 'sk-proj-' + 'x'.repeat(30)
+      f.bump('0.4.1'); await f.commit('unsafe metadata')
+      const accepted = f.service.store.getGitAuthority()!.processedCommitSha
+      await expect(f.service.prepareOpenAiRelease({ mode: 'LATEST' })).rejects.toMatchObject({ code: 'GIT_SOURCE_LATEST_UNVERIFIED' })
+      expect(f.sync.getStatus().lastError).toBe('KNOWN_SECRET_DETECTED')
+      expect(f.service.store.getGitAuthority()!.processedCommitSha).toBe(accepted)
+      expect((await f.service.prepareOpenAiRelease({ mode: 'REBUILD', sourceCommitSha: first.source!.sourceCommitSha })).artifactHash).toBe(first.artifactHash)
+    } finally { await f.service.close() }
+  }, 90000)
+
+  it('builds exclusively from one integrated commit, preserves disabled Skills, and reproduces bytes across retries', async () => {
+    const f = await gitFixture()
+    try {
+      const baseline = f.service.listOpenAiReleases().find(release => release.baseline)!
+      expect(baseline.source).toBeUndefined()
+      expect(f.service.getOpenAiPublicationState().currentPackageRevision?.version).toBe('0.2.0')
+      expect(f.service.store.listPluginPackageRevisions()).toEqual([])
+      const script = 'throw new Error("never execute a synchronized resource")\n'
+      writeFile(f.human, 'skills/global-skill/scripts/release.cjs', script)
+      f.bump('0.2.0')
+      const head = await f.commit('approved resources and version')
+      await f.sync.syncNow()
+      await f.service.setEnabled(f.global.id, false, 1)
+      const draft = await f.sync.saveDraft({ skillId: f.global.id, expectedVersion: 2,
+        package: { skillMd: skillMd('global-skill', 'PRIVATE DRAFT'), artifacts: {} }, origin: 'UI' })
+      await gitExec(f.human, ['switch', '-c', 'unmerged'])
+      writeFile(f.human, 'skills/contribution/SKILL.md', skillMd('contribution'))
+      f.bump('0.2.2'); await f.commit('candidate only', false)
+      const originalProfile = f.service.store.getOpenAiPluginProfile()!
+      writeFileSync(originalProfile.logoPath!, Buffer.from('unversioned logo must not be read'))
+      const persist = vi.spyOn(f.service.store, 'persistGitBuild').mockImplementationOnce(() => { throw new Error('database interrupted') })
+      await expect(f.service.prepareOpenAiRelease({ mode: 'LATEST' })).rejects.toThrow('database interrupted')
+      expect(f.service.listOpenAiReleases().filter(release => !release.baseline)).toHaveLength(0)
+      persist.mockRestore()
+      const first = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      const second = await f.service.prepareOpenAiRelease({ mode: 'REBUILD', sourceCommitSha: head })
+      expect(second.id).toBe(first.id)
+      expect(second.artifactHash).toBe(first.artifactHash)
+      expect(second.source).toMatchObject({ sourceRepositoryId: 'release-github', branch: 'main', sourceCommitSha: head, pluginVersion: '0.2.0', remoteConfirmation: 'CACHED', zipSha256: first.artifactHash, buildSchema: 1 })
+      const entries = readZipEntries(readFileSync(first.artifactPath!))
+      expect(entries.find(entry => entry.path.endsWith('/scripts/release.cjs'))?.data.toString()).toBe(script)
+      expect(entries.find(entry => entry.path.endsWith('/SKILL.md'))?.data.toString()).toBe(f.global.current.package.skillMd)
+      expect(entries.find(entry => entry.path.endsWith('/assets/logo.png'))?.data.equals(png())).toBe(true)
+      expect(JSON.parse(entries.find(entry => entry.path.endsWith('/plugin.json'))!.data.toString()).version).toBe('0.2.0')
+      expect(first.snapshot.map(item => item.name)).toEqual(['global-skill'])
+      expect(f.service.get(f.global.id).status).toBe('DISABLED')
+      expect((await f.sync.getDraft('global-skill')).workspaceCommitSha).toBe(draft.workspaceCommitSha)
+      expect(f.service.store.getOpenAiRelease(baseline.id)).toEqual(baseline)
+      expect(f.service.store.listGitBuildReceipts(first.id).length).toBeGreaterThanOrEqual(2)
+      expect(f.service.confirmOpenAiUpload(first.id, first.artifactHash!).status).toBe('UPLOADED_UNVERIFIED')
+      expect(f.service.openAiPublication.verifyRelease(first.id, 'Explicit manual verification evidence').status).toBe('VERIFIED')
+      await gitExec(f.human, ['switch', 'main'])
+      await gitExec(f.human, ['merge', '--no-ff', 'unmerged', '-m', 'approved contribution'])
+      await gitExec(f.human, ['push', 'origin', 'main'])
+      const merged = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      expect(merged.pluginVersion).toBe('0.2.2')
+      expect(merged.snapshot.map(item => item.name).sort()).toEqual(['contribution', 'global-skill'])
+      expect(merged.source?.sourceCommitSha).toBe(await f.git.resolveCommit(f.human, 'HEAD'))
+      expect(f.service.get(f.global.id).currentVersion).toBe(2)
+    } finally { await f.service.close() }
+  }, 120000)
+
+  it('refuses reused versions and dirty source, retains immutable receipts, and rebuilds verified commits offline', async () => {
+    const f = await gitFixture()
+    try {
+      const first = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      const receipts = f.service.store.listGitBuildReceipts(first.id)
+      writeFile(f.human, 'skills/global-skill/SKILL.md', skillMd('global-skill', 'published changed content'))
+      await f.commit('skill changed without version bump')
+      await expect(f.service.prepareOpenAiRelease({ mode: 'LATEST' })).rejects.toMatchObject({ code: 'VERSION_REUSE_FOR_DIFFERENT_CONTENT' })
+      expect(f.service.get(f.global.id).currentVersion).toBe(2)
+      expect(f.service.getOpenAiPublicationState().sourceError).toBe('VERSION_REUSE_FOR_DIFFERENT_CONTENT')
+      f.bump('0.2.1'); await f.commit('approved version bump')
+      const newer = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      expect(newer.pluginVersion).toBe('0.2.1')
+      expect(newer.artifactHash).not.toBe(first.artifactHash)
+      writeFile(f.human, 'README.md', 'An unrelated approved documentation change')
+      await gitExec(f.human, ['add', '--', 'README.md'])
+      const documentationHead = await f.commit('documentation only')
+      const unchangedPackage = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      expect(unchangedPackage.id).toBe(newer.id)
+      expect(unchangedPackage.artifactHash).toBe(newer.artifactHash)
+      expect(unchangedPackage.source!.sourceCommitSha).toBe(documentationHead)
+      const sourceRoot = f.sync.getStatus().publication!.checkoutPath
+      writeFile(sourceRoot, 'plugin.json', '{}')
+      await expect(f.service.prepareOpenAiRelease({ mode: 'LATEST' })).rejects.toBeDefined()
+      vi.spyOn(f.transport, 'fetch').mockRejectedValue(new Error('offline'))
+      await expect(f.service.prepareOpenAiRelease({ mode: 'LATEST' })).rejects.toMatchObject({ code: 'GIT_SOURCE_LATEST_UNVERIFIED' })
+      const offline = await f.service.prepareOpenAiRelease({ mode: 'REBUILD', sourceCommitSha: first.source!.sourceCommitSha })
+      expect(offline.artifactHash).toBe(first.artifactHash)
+      expect(offline.source?.remoteConfirmation).toBe('CACHED')
+      expect(offline.status).toBe('STALE')
+      expect(f.service.store.listGitBuildReceipts(first.id).slice(0, receipts.length)).toEqual(receipts)
+      const reopened = new AcademyStore(f.service.store.databasePath)
+      try {
+        expect(reopened.listGitBuildReceipts(first.id)).toEqual(f.service.store.listGitBuildReceipts(first.id))
+        expect(reopened.getOpenAiRelease(newer.id).source?.sourceCommitSha).toBe(documentationHead)
+      } finally { reopened.close() }
+      const cached = await f.sync.getSourceSnapshot({ mode: 'REBUILD', sourceCommitSha: first.source!.sourceCommitSha })
+      cached.snapshot.authoredFiles['skills/../escape'] = Buffer.from('bad').toString('base64')
+      expect(() => f.service.openAiPublication.prepareGitRelease(cached)).toThrow('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
+    } finally { await f.service.close() }
+  }, 120000)
+
+  it('keeps destructive delta authorization separate from source confirmation and ZIP/upload states', async () => {
+    const f = await gitFixture()
+    try {
+      await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      await gitExec(f.human, ['rm', '-r', 'skills/global-skill'])
+      f.bump('0.3.0'); await f.commit('approved removal')
+      const blocked = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      expect(blocked).toMatchObject({ status: 'BLOCKED', artifactHash: null, source: { pluginVersion: '0.3.0', zipSha256: null } })
+      expect(f.service.history(f.global.id)).toHaveLength(1)
+      expect(f.service.store.listGitBuildReceipts(blocked.id)).toHaveLength(1)
+      f.service.openAiPublication.recordDeletionSemantics('PROVEN_REPLACE', 'Explicitly demonstrated replace behavior')
+      const ready = await f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      expect(ready.id).toBe(blocked.id)
+      expect(ready.status).toBe('READY_TO_UPLOAD')
+      expect(ready.snapshot).toEqual([])
+      expect(f.service.store.listGitBuildReceipts(blocked.id)[0].zipSha256).toBeNull()
+      expect(f.service.confirmOpenAiUpload(ready.id, ready.artifactHash!).status).toBe('UPLOADED_UNVERIFIED')
+      expect(f.service.openAiPublication.verifyRelease(ready.id, 'Manual verification').status).toBe('VERIFIED')
+    } finally { await f.service.close() }
+  }, 90000)
+})
 
 describe('Academy OpenAI plugin publication', () => {
   it('bootstraps the existing identity and creates a complete validated deterministic ZIP from canonical GLOBAL ACTIVE Skills', async () => {

@@ -378,7 +378,8 @@ app.whenReady().then(async () => {
       catch (error: any) { console.warn('[Academy] OpenAI plugin profile bootstrap pending:', error?.code ?? error?.message) }
     }
     if (academyService.store.getOpenAiPluginProfile()) {
-      academyService.initializePluginPackage()
+      try { academyService.initializePluginPackage() }
+      catch (error: any) { console.warn('[Academy] Git package source pending:', error?.code ?? error?.message) }
       academyService.recordMarketplaceProbeUnsupported()
     }
     const gitProfile = academyService.store.getGitProfile()

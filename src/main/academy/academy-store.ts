@@ -14,6 +14,7 @@ export class AcademyStore {
   private ingestingGit = false
   private gitFirstRequired = false
   enforceGitFirst(): void { this.gitFirstRequired = true }
+  usesGitFirst(): boolean { return this.gitFirstRequired || Boolean(this.getGitProfile() || this.getGitAuthority()) }
 
   constructor(readonly databasePath: string) {
     mkdirSync(dirname(databasePath), { recursive: true })
@@ -85,6 +86,10 @@ export class AcademyStore {
         upload_confirmation_json TEXT, verification_evidence TEXT
       );
       CREATE INDEX IF NOT EXISTS academy_openai_releases_created ON academy_openai_plugin_releases(created_at DESC);
+      CREATE TABLE IF NOT EXISTS academy_openai_git_builds (
+        id TEXT PRIMARY KEY, release_id TEXT NOT NULL REFERENCES academy_openai_plugin_releases(id), receipt_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS academy_openai_git_builds_release ON academy_openai_git_builds(release_id);
       CREATE TABLE IF NOT EXISTS academy_plugin_package_revisions (
         id TEXT PRIMARY KEY,
         version TEXT NOT NULL UNIQUE,
@@ -514,11 +519,32 @@ export class AcademyStore {
   getOpenAiRelease(id: string): AcademyOpenAiRelease {
     const row = this.db.prepare('SELECT * FROM academy_openai_plugin_releases WHERE id=?').get(id) as Row | undefined
     if (!row) throw new AcademyError('OPENAI_RELEASE_NOT_FOUND')
-    return openAiReleaseFromRow(row)
+    return this.withGitBuildSource(openAiReleaseFromRow(row))
   }
 
   listOpenAiReleases(): AcademyOpenAiRelease[] {
-    return (this.db.prepare('SELECT * FROM academy_openai_plugin_releases ORDER BY created_at DESC, rowid DESC').all() as Row[]).map(openAiReleaseFromRow)
+    return (this.db.prepare('SELECT * FROM academy_openai_plugin_releases ORDER BY created_at DESC, rowid DESC').all() as Row[]).map(row => this.withGitBuildSource(openAiReleaseFromRow(row)))
+  }
+
+  private withGitBuildSource(release: AcademyOpenAiRelease): AcademyOpenAiRelease {
+    const row = this.db.prepare('SELECT receipt_json FROM academy_openai_git_builds WHERE release_id=? ORDER BY rowid DESC LIMIT 1').get(release.id) as Row | undefined
+    return row ? { ...release, source: JSON.parse(row.receipt_json) } : release
+  }
+
+  listGitBuildReceipts(releaseId: string): import('../../shared/types/academy-git-source-types').AcademyGitBuildReceipt[] {
+    return (this.db.prepare('SELECT receipt_json FROM academy_openai_git_builds WHERE release_id=? ORDER BY rowid').all(releaseId) as Row[]).map(row => JSON.parse(row.receipt_json))
+  }
+
+  persistGitBuild(release: AcademyOpenAiRelease, receipt: import('../../shared/types/academy-git-source-types').AcademyGitBuildReceipt): AcademyOpenAiRelease {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT id FROM academy_openai_plugin_releases WHERE id=?').get(release.id)
+      if (!existing) this.insertOpenAiRelease(release)
+      else if (this.getOpenAiRelease(release.id).status === 'BLOCKED' && release.artifactPath && release.artifactHash && release.manifest) {
+        this.materializeBlockedOpenAiRelease(release.id, { manifest: release.manifest, artifactPath: release.artifactPath, artifactHash: release.artifactHash, status: release.status === 'STALE' ? 'STALE' : 'READY_TO_UPLOAD' })
+      }
+      this.db.prepare('INSERT OR IGNORE INTO academy_openai_git_builds VALUES (?,?,?)').run(receipt.id, release.id, JSON.stringify(receipt))
+      return { ...this.getOpenAiRelease(release.id), source: receipt }
+    }).immediate()
   }
 
   transitionOpenAiRelease(id: string, expected: AcademyOpenAiReleaseStatus[], status: AcademyOpenAiReleaseStatus, values: {

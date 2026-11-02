@@ -63,6 +63,21 @@ it('requires reviewed conflict content and forwards the exact observed revision'
   expect(screen.queryByText('Git sincronizado.')).toBeNull()
 })
 
+it('shows Git provenance and requests an explicit cached rebuild without implying latest or upload', async () => {
+  const state = await window.codeAwareness.getAcademyOpenAiPublicationState()
+  const source = { id: 'build', releaseId: openAiRelease.id, buildSchema: 1 as const, sourceRepositoryId: 'repository', branch: 'main',
+    sourceCommitSha: 'b'.repeat(40), managedTreeHash: 'tree', manifestFingerprint: 'manifest', assetFingerprint: 'asset',
+    entriesFingerprint: 'entries', pluginVersion: openAiRelease.pluginVersion, zipSha256: openAiRelease.artifactHash,
+    remoteConfirmation: 'CACHED' as const, confirmedAt: detail.createdAt }
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockResolvedValue({ ...state, selectedRelease: { ...openAiRelease, source } })
+  render(<AcademyView />)
+  await screen.findByText(/Rebuild em cache; atualidade remota não verificada/)
+  expect(screen.getByText(/main@bbbbbbbbbbbb/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Rebuild do commit em cache' }))
+  await waitFor(() => expect(window.codeAwareness.prepareAcademyOpenAiRelease).toHaveBeenCalledWith({ mode: 'REBUILD', sourceCommitSha: source.sourceCommitSha }))
+  expect(window.codeAwareness.confirmAcademyOpenAiUpload).not.toHaveBeenCalled()
+})
+
 it('reports a Git draft without claiming a canonical version or scheduling delivery', async () => {
   window.codeAwareness.getAcademyDraft = vi.fn(async () => ({ package: detail.current.package, workspaceCommitSha: 'draft-base', sourceBaseCommitSha: 'confirmed-main' }))
   vi.mocked(window.codeAwareness.updateAcademySkill).mockResolvedValue({ state: 'DRAFT_SAVED', skillId: detail.id, name: detail.name, baseVersion: 1, sourceBaseCommitSha: 'confirmed-main', workspaceCommitSha: 'draft-next', packageHash: 'draft-hash', distribution: { status: 'NOT_APPLICABLE' } })

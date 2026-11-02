@@ -26,6 +26,12 @@ export class AcademyLocalAdapter implements LocalChannelAdapter {
     }
     this.operations = {
       git_status: operation(input => object(input, []), () => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(service.gitSync.getStatus()) }),
+      prepare_openai_release: operation(input => {
+        const value = object(input, ['mode', 'sourceCommitSha'])
+        if (value.mode === undefined || value.mode === 'LATEST') return { mode: 'LATEST' as const }
+        if (value.mode !== 'REBUILD') invalid()
+        return { mode: 'REBUILD' as const, sourceCommitSha: text(value.sourceCommitSha) }
+      }, request => service.prepareOpenAiRelease(request)),
       git_fetch: operation(input => object(input, []), async () => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(await service.gitSync.fetch()) }),
       git_update: operation(input => object(input, []), async () => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(await service.gitSync.syncNow()) }),
       git_publish: operation(input => { const value = object(input, ['localHead', 'remoteHead', 'confirmed']); if (value.confirmed !== true) invalid(); return { localHead: text(value.localHead), remoteHead: text(value.remoteHead) } }, async expected => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(await service.gitSync.publish(expected)) }),

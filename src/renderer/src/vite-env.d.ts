@@ -106,7 +106,7 @@ declare global {
       getAcademyOpenAiPublicationState: () => Promise<AcademyOpenAiPublicationState>
       getAcademyPackageDistributionState: () => Promise<AcademyPackageDistributionState>
       listAcademyOpenAiReleases: () => Promise<AcademyOpenAiRelease[]>
-      prepareAcademyOpenAiRelease: () => Promise<AcademyOpenAiRelease>
+      prepareAcademyOpenAiRelease: (input?: import('../../shared/types/academy-git-source-types').AcademyGitBuildRequest) => Promise<AcademyOpenAiRelease>
       confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string) => Promise<AcademyOpenAiRelease>
       revealAcademyOpenAiPackage: (releaseId: string) => Promise<boolean>
       getChannelState: () => Promise<ChannelState>

@@ -24,12 +24,14 @@ exports.run = async ctx => {
   const pkg = text => ({ skillMd: `---\nname: alpha\ndescription: GitHub reconciliation proof\n---\n${text}\n`, artifacts: {} })
   fs.mkdirSync(path.join(human, 'skills', 'alpha'), { recursive: true })
   fs.writeFileSync(path.join(human, 'skills', 'alpha', 'SKILL.md'), pkg('baseline').skillMd)
+  fs.writeFileSync(path.join(human, 'plugin.json'), JSON.stringify({ $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json', name: 'academy-skills', version: '0.2.0', description: 'Academy Skills proof', author: { name: 'Academy' }, extensions: { 'com.openai': { interface: { displayName: 'Academy Skills' } } } }))
   fs.writeFileSync(path.join(human, 'README.md'), 'documentation')
   gitCommand(human, 'add', '.'); gitCommand(human, 'commit', '-m', 'baseline'); gitCommand(human, 'push', '-u', 'origin', 'main')
   gitCommand(ctx.temporary, 'clone', '--branch', 'main', remote, external)
   gitCommand(external, 'config', 'user.name', 'Writer'); gitCommand(external, 'config', 'user.email', 'writer@example.com')
   const service = new AcademyService(path.join(ctx.temporary, 'data', 'academy.db'))
   const skill = service.store.create({ package: pkg('baseline'), scope: 'GLOBAL', origin: 'UI' })
+  await service.bootstrapOpenAiPlugin(human, '0.1.0')
   const git = new GitService()
   const transport = { fetch: (root, origin) => git.fetchRemote(root, origin), readRemoteHead: (root, origin, ref) => git.readRemoteHead(root, origin, ref), push: (root, branch, origin, head) => git.push(root, origin, branch, head) }
   const record = { id: 'proof', name: 'Academy', status: 'ACTIVE', localCheckout: { path: human, availability: 'AVAILABLE', gitState: 'GIT' }, github: { repositoryId: 'proof-github', fullName: 'proof/academy', visibility: 'PRIVATE', cloneUrl: remote } }
@@ -84,6 +86,13 @@ exports.run = async ctx => {
     await settle(() => !!document.querySelector('.academy-toast.success'))
     ctx.check('Normal UI reconciles real Git and shows remote confirmation', sync.getStatus().publication.phase === 'CONFIRMED' && await ctx.evaluate(() => document.body.textContent.includes('Última confirmação remota:')))
     await ctx.capture('confirmed-dark')
+    await ctx.click('.academy-fallback-card .academy-inline-actions button')
+    await settle(() => document.querySelector('.academy-fallback-card')?.textContent.includes('READY_TO_UPLOAD'))
+    const release = service.getOpenAiPublicationState().selectedRelease
+    ctx.check('Normal publication UI prepares ZIP from the verified source commit', release.source.sourceCommitSha === service.store.getGitAuthority().processedCommitSha && release.status === 'READY_TO_UPLOAD' && release.artifactHash === release.source.zipSha256)
+    await ctx.click('.academy-fallback-card details summary')
+    ctx.check('Publication UI exposes source SHA, ZIP hash, version and separate upload state', await ctx.evaluate(({ commit, hash }) => { const card = document.querySelector('.academy-fallback-card'); return card.textContent.includes(commit) && card.textContent.includes(hash) && card.textContent.includes('v0.2.0') && card.textContent.includes('READY_TO_UPLOAD') }, { commit: release.source.sourceCommitSha, hash: release.artifactHash }))
+    await ctx.capture('release-source-dark')
     ctx.check('Human index and HEAD remain unchanged', humanHead === gitCommand(human, 'rev-parse', 'HEAD') && humanIndex === await git.getIndexRevision(human))
     await ctx.click('input[aria-label="Buscar Skills"]')
     await ctx.evaluate(() => document.querySelector('input[aria-label="Buscar Skills"]').select())

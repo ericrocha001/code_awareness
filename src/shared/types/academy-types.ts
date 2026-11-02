@@ -314,6 +314,7 @@ export interface AcademyOpenAiUploadConfirmation {
 }
 
 export interface AcademyOpenAiRelease {
+  source?: import('./academy-git-source-types').AcademyGitBuildReceipt
   id: string
   pluginVersion: string
   createdAt: string
@@ -332,6 +333,7 @@ export interface AcademyOpenAiRelease {
 }
 
 export interface AcademyOpenAiPublicationState {
+  sourceError?: string | null
   profile: AcademyOpenAiPluginProfile | null
   latestPrepared: AcademyOpenAiRelease | null
   latestUploaded: AcademyOpenAiRelease | null

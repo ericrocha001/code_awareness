@@ -275,9 +275,9 @@ export const AcademyView: React.FC = () => {
     })
   }
 
-  const prepareOpenAiRelease = async () => {
+  const prepareOpenAiRelease = async (sourceCommitSha?: string) => {
     try {
-      const release = await window.codeAwareness.prepareAcademyOpenAiRelease()
+      const release = await window.codeAwareness.prepareAcademyOpenAiRelease(sourceCommitSha ? { mode: 'REBUILD', sourceCommitSha } : { mode: 'LATEST' })
       showMessage(`Release ${release.pluginVersion}: ${release.status}`)
       await refresh(selected?.id)
     } catch (error) { reportError(error) }
@@ -347,6 +347,7 @@ export const AcademyView: React.FC = () => {
         open={operationsOpen} destinations={snapshot.destinations} artifacts={artifacts} conflicts={snapshot.conflicts} distribution={distribution} packageDistribution={packageDistribution} openAiPublication={openAiPublication} gitStatus={gitStatus} eligibleRepos={eligibleRepos} selectedRepoId={selectedRepoId} onSelectedRepoChange={setSelectedRepoId} onClose={() => setOperationsOpen(false)} onOpenDestinations={() => setDestinationsOpen(true)} onOpenArtifact={openArtifact} onAddArtifact={() => { setArtifactDraft({ mode: 'create', originalPath: null, path: '', content: '' }); setIsEditing(true) }}
         onReconcile={() => void (async () => { try { await window.codeAwareness.reconcileAcademyDistribution(); showMessage('Distribuição reconciliada.'); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
         onPrepareRelease={() => void prepareOpenAiRelease()}
+        onRebuildRelease={() => void prepareOpenAiRelease(openAiPublication?.selectedRelease?.source?.sourceCommitSha)}
         onBootstrapPlugin={() => void (async () => { try { await window.codeAwareness.bootstrapAcademyOpenAiPlugin(); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
         onRevealRelease={() => { const release = openAiPublication?.selectedRelease; if (release) void window.codeAwareness.revealAcademyOpenAiPackage(release.id) }}
         onConfirmUpload={requestConfirmOpenAiUpload}

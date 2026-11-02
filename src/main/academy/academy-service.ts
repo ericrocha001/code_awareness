@@ -13,6 +13,8 @@ import { AcademyDistributionService } from './distribution/academy-distribution-
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
+import type { AcademyGitBuildRequest } from '../../shared/types/academy-git-source-types'
+import type { AcademyOpenAiRelease } from '../../shared/types/academy-types'
 import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
 import type { AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
@@ -640,6 +642,7 @@ export class AcademyService {
       : this.openAiPublication.bootstrapInstalledPlugin(publishedVersion)
   }
   initializePluginPackage() {
+    if (this.store.usesGitFirst()) return this.packageRevisions.resolveCurrent()
     this.packageRevisions.bootstrapBaseline()
     const profile = this.store.getOpenAiPluginProfile()
     if (!profile) throw new Error('OPENAI_PLUGIN_PROFILE_MISSING')
@@ -675,7 +678,17 @@ export class AcademyService {
   getOpenAiPublicationState() { return this.openAiPublication.state() }
   listOpenAiReleases() { return this.openAiPublication.listReleases() }
   getOpenAiRelease(id: string) { return this.openAiPublication.getRelease(id) }
-  prepareOpenAiRelease() { if (this.gitSync) throw new AcademyError('GIT_SOURCE_SNAPSHOT_REQUIRED'); this.initializePluginPackage(); return this.openAiPublication.prepareRelease() }
+  prepareOpenAiRelease(): AcademyOpenAiRelease
+  prepareOpenAiRelease(input: AcademyGitBuildRequest): Promise<AcademyOpenAiRelease>
+  prepareOpenAiRelease(input?: AcademyGitBuildRequest): AcademyOpenAiRelease | Promise<AcademyOpenAiRelease> {
+    if (input) {
+      if (!this.gitSync) throw new AcademyError('GIT_SYNC_NOT_CONFIGURED')
+      return this.gitSync.getSourceSnapshot(input).then(source => this.openAiPublication.prepareGitRelease(source))
+    }
+    if (this.store.usesGitFirst()) throw new AcademyError('GIT_SOURCE_SNAPSHOT_REQUIRED')
+    this.initializePluginPackage()
+    return this.openAiPublication.prepareRelease()
+  }
   confirmOpenAiUpload(releaseId: string, artifactHash: string) { return this.openAiPublication.confirmUpload(releaseId, artifactHash) }
   start(): void {
     this.assertNotClosed()

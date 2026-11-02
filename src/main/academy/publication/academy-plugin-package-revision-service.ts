@@ -8,14 +8,18 @@ import type {
 } from '../../../shared/types/academy-types'
 import { AcademyError } from '../academy-package'
 import type { AcademyStore } from '../academy-store'
+import type { AcademyGitSourceSnapshot } from '../../../shared/types/academy-git-source-types'
 import {
   buildCanonicalOpenAiSnapshot,
+  buildGitOpenAiInput,
+  gitOpenAiValidationProfile,
   buildOpenAiManifest,
   calculateOpenAiDelta,
   canonicalJson,
   hashOpenAiSnapshot,
   sha256
 } from './openai-plugin-model'
+import { validateOpenAiPluginPackage } from './openai-plugin-validator'
 
 const EMPTY_ASSET_HASH = sha256('NO_ASSET')
 
@@ -23,6 +27,7 @@ export class AcademyPluginPackageRevisionService {
   constructor(private readonly store: AcademyStore) {}
 
   bootstrapBaseline(): AcademyPluginPackageRevision {
+    if (this.store.usesGitFirst()) return this.resolveCurrent()
     const profile = this.requireProfile()
     const releases = this.store.listOpenAiReleases()
     const baseline = releases.find((release) => release.pluginVersion === profile.publishedVersion)
@@ -53,6 +58,13 @@ export class AcademyPluginPackageRevisionService {
   }
 
   resolveCurrent(): AcademyPluginPackageRevision {
+    const authority = this.store.getGitAuthority()
+    if (authority) {
+      const source = this.store.getGitSnapshot(authority.repositoryId, authority.processedCommitSha)
+      if (!source) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
+      return this.resolveGit(source)
+    }
+    if (this.store.usesGitFirst()) throw new AcademyError('GIT_MIGRATION_REQUIRED')
     const profile = this.requireProfile()
     if (!this.store.getCurrentPluginPackageRevision()) this.bootstrapBaseline()
     const snapshot = buildCanonicalOpenAiSnapshot(this.store)
@@ -67,6 +79,25 @@ export class AcademyPluginPackageRevisionService {
     const delta = calculateOpenAiDelta(previousSnapshot, snapshot)
     const version = bumpVersion(previous.version, delta)
     return this.persistRevision({ version, profile, snapshot, manifest, delta })
+  }
+
+  resolveGit(source: AcademyGitSourceSnapshot, persist = false): AcademyPluginPackageRevision {
+    const input = buildGitOpenAiInput(this.store, source)
+    validateOpenAiPluginPackage(input.entries, gitOpenAiValidationProfile(this.requireProfile(), input), input.snapshot)
+    const existing = this.store.getPluginPackageRevisionByFingerprint(input.entriesFingerprint)
+    if (existing) return existing
+    const sameVersion = this.store.listPluginPackageRevisions().find(revision => revision.version === input.pluginVersion)
+    const release = this.store.listOpenAiReleases().find(item => item.pluginVersion === input.pluginVersion)
+    if (sameVersion || release) throw new AcademyError('VERSION_REUSE_FOR_DIFFERENT_CONTENT')
+    const versions = [...this.store.listPluginPackageRevisions().map(item => item.version), ...this.store.listOpenAiReleases().map(item => item.pluginVersion)]
+    if (versions.some(version => compareSemver(input.pluginVersion, version) <= 0)) throw new AcademyError('OPENAI_PLUGIN_VERSION_NOT_PROGRESSIVE')
+    const previous = this.store.listOpenAiReleases().find(item => item.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(item.status))
+    if (!previous) throw new AcademyError('OPENAI_PLUGIN_BASELINE_MISSING')
+    const revision: AcademyPluginPackageRevision = { id: sha256(`GIT_PACKAGE:${input.entriesFingerprint}`), version: input.pluginVersion,
+      contentFingerprint: input.entriesFingerprint, skillSnapshotHash: hashOpenAiSnapshot(input.snapshot),
+      profileFingerprint: input.manifestFingerprint, assetHash: input.assetFingerprint,
+      delta: calculateOpenAiDelta(previous.snapshot, input.snapshot), createdAt: source.observedAt }
+    return persist ? this.store.insertPluginPackageRevision(revision, input.snapshot) : revision
   }
 
   private persistRevision(input: {

@@ -134,7 +134,7 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getAcademyOpenAiPublicationState: (): Promise<AcademyOpenAiPublicationState> => ipcRenderer.invoke('academy:openai-state'),
   getAcademyPackageDistributionState: (): Promise<AcademyPackageDistributionState> => ipcRenderer.invoke('academy:package-distribution-state'),
   listAcademyOpenAiReleases: (): Promise<AcademyOpenAiRelease[]> => ipcRenderer.invoke('academy:openai-releases'),
-  prepareAcademyOpenAiRelease: (): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-prepare'),
+  prepareAcademyOpenAiRelease: (input?: import('../shared/types/academy-git-source-types').AcademyGitBuildRequest): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-prepare', input),
   confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-confirm-upload', releaseId, artifactHash),
   revealAcademyOpenAiPackage: (releaseId: string): Promise<boolean> => ipcRenderer.invoke('academy:openai-reveal', releaseId),
   getAcademyGitStatus: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-status'),

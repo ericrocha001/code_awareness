@@ -36,7 +36,7 @@ export const ACADEMY_MCP_TOOLS: McpToolDefinition[] = [
   tool('resolve_academy_conflict_batch', 'Resolve only certified historical/equivalent conflicts after confirmation of the exact preview.', { type: 'object', properties: { token: id, confirmed: { type: 'boolean', const: true } }, required: ['token', 'confirmed'], additionalProperties: false }),
   tool('resolve_academy_conflict', 'Keep canonical content or explicitly adopt reviewed divergent content as a new canonical version. Requires confirmation and a current review token.', { type: 'object', properties: { conflictId: id, resolution: { type: 'string', enum: ['CANONICAL', 'DIVERGENT'] }, reconciledPackage: packageSchema, token: id, confirmed: { type: 'boolean', const: true } }, required: ['conflictId', 'resolution', 'token', 'confirmed'], additionalProperties: false }),
   tool('get_openai_plugin_publication', 'Inspect the Academy Skills OpenAI publication profile, drift, and current release state.', { type: 'object', properties: {}, additionalProperties: false }),
-  tool('prepare_openai_plugin_release', 'Prepare one complete validated Academy Skills ZIP from canonical GLOBAL and ACTIVE Skills.', { type: 'object', properties: {}, additionalProperties: false }),
+  tool('prepare_openai_plugin_release', 'Prepare a deterministic ZIP from the verified publication branch, including locally disabled Skills. LATEST requires remote observation; REBUILD requires a previously verified SHA and reports cached confirmation. Never uploads.', { type: 'object', properties: { mode: { type: 'string', enum: ['LATEST', 'REBUILD'] }, sourceCommitSha: id }, additionalProperties: false }),
   tool('get_openai_plugin_release', 'Read one immutable OpenAI plugin release and its delta.', { type: 'object', properties: { releaseId: id }, required: ['releaseId'], additionalProperties: false }),
   tool('confirm_openai_plugin_upload', 'Record that one exact READY_TO_UPLOAD artifact was manually submitted to OpenAI. This does not verify runtime availability.', { type: 'object', properties: { releaseId: id, artifactHash: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, required: ['releaseId', 'artifactHash'], additionalProperties: false })
 ]
@@ -75,7 +75,11 @@ export async function executeAcademyTool(service: AcademyService, name: string, 
       case 'resolve_academy_conflict_batch': result = await service.resolveConflictBatch(string(values.token, 'token'), values.confirmed === true); break
       case 'resolve_academy_conflict': result = await service.resolveConflict(string(values.conflictId, 'conflictId'), enumValue(values.resolution, ['CANONICAL', 'DIVERGENT'], 'resolution') as 'CANONICAL' | 'DIVERGENT', values.reconciledPackage === undefined ? undefined : pkg(values.reconciledPackage), { token: string(values.token, 'token'), confirmed: values.confirmed === true }); break
       case 'get_openai_plugin_publication': result = service.getOpenAiPublicationState(); break
-      case 'prepare_openai_plugin_release': result = service.prepareOpenAiRelease(); break
+      case 'prepare_openai_plugin_release': {
+        const mode = values.mode === undefined ? 'LATEST' : enumValue(values.mode, ['LATEST', 'REBUILD'], 'mode')
+        const request = mode === 'LATEST' ? { mode: 'LATEST' as const } : { mode: 'REBUILD' as const, sourceCommitSha: string(values.sourceCommitSha, 'sourceCommitSha') }
+        result = await service.prepareOpenAiRelease(request); break
+      }
       case 'get_openai_plugin_release': result = service.getOpenAiRelease(string(values.releaseId, 'releaseId')); break
       case 'confirm_openai_plugin_upload': result = service.confirmOpenAiUpload(string(values.releaseId, 'releaseId'), sha256(values.artifactHash)); break
       default: throw new Error('METHOD_NOT_FOUND')

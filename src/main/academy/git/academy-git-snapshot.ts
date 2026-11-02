@@ -3,13 +3,10 @@ import type { AcademyGitSourceSnapshot } from '../../../shared/types/academy-git
 import type { AcademyPackage } from '../../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage } from '../academy-package'
 import { sha256 } from '../publication/openai-plugin-model'
-import { validateGitSnapshot } from './academy-git-materializer'
+import { assertNoAcademySecrets, assertSourcePath, validateGitSnapshot } from './academy-git-materializer'
+export { assertSourcePath } from './academy-git-materializer'
 
 export const ACADEMY_AUTHORED_PATHS = ['skills', 'plugin.json', 'assets']
-
-export function assertSourcePath(path: string): void {
-  if (!path || path.includes('\\') || path.includes('\0') || path.split('/').some(part => !part || part === '.' || part === '..' || part.includes(':') || /[. ]$/.test(part))) throw new AcademyError('GIT_SOURCE_UNSAFE_PATH', path)
-}
 
 export async function verifyStagedAcademyPackage(git: GitService, root: string, tree: string, name: string, pkg: AcademyPackage): Promise<void> {
   const expected = new Map(Object.entries({ 'SKILL.md': pkg.skillMd, ...pkg.artifacts }).map(([path, text]) => [`skills/${name}/${path}`, text]))
@@ -44,6 +41,7 @@ export async function readAcademyGitSnapshot(git: GitService, root: string, iden
     totalBytes += bytes.length
     if (totalBytes > 16 * 1024 * 1024) throw new AcademyError('GIT_SOURCE_TOO_LARGE')
     if (path !== 'assets/logo.png' && (bytes.includes(0) || !Buffer.from(bytes.toString('utf8')).equals(bytes))) throw new AcademyError('GIT_SOURCE_INVALID_TEXT', path)
+    if (path !== 'assets/logo.png') assertNoAcademySecrets(bytes.toString('utf8'), path)
     files[path] = bytes.toString('base64')
   }
   const packages = new Map<string, { skillMd: string; artifacts: Record<string, string> }>()
