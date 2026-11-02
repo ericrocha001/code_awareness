@@ -4,7 +4,17 @@ O histórico pertence ao repositório canônico do catálogo. Worktrees reconhec
 
 `<perfil>/continuum/repositories/<repositoryId em base64url>/session-context.sqlite`
 
-O banco é independente do Continuum e do Git Atlas. A consulta não inicia subprocessos, captura, hooks ou sincronização. Somente `refresh_agent_sessions` solicita ingestão. Sem `sessionId`, atualiza o catálogo sem importar bodies; com um ID descoberto, importa somente aquela sessão. A ausência de associação provada deixa `executionId`, Worktree e commit indisponíveis. Uma alegação de teste ou commit no texto não equivale a prova do Validation Ledger ou Git Operations.
+O banco é independente do Continuum e do Git Atlas. As cinco ferramentas de histórico mantêm o contrato de consulta local; somente `refresh_agent_sessions` solicita ingestão. Sem `sessionId`, atualiza o catálogo sem importar bodies; com um ID descoberto, importa somente aquela sessão. A ausência de associação provada deixa `executionId`, Worktree e commit indisponíveis. Uma alegação de teste ou commit no texto não equivale a prova do Validation Ledger ou Git Operations.
+
+## Fonte consultiva live — CH-13
+
+`discover_entire_sessions` consulta uma vez `session list --json` do Entire 0.12.2 e retorna até 20 registros `ENTIRE_LIVE` das Worktrees governadas. Não importa transcripts nem altera a materialização `TRANSCRIPT_IMPORTED` do histórico. Filtros opcionais de Worktree exigem `worktreeId` e `generation` juntos; estado e intervalo de início também podem restringir a seleção. Inventário limitado ou fontes indisponíveis produzem cobertura parcial explícita, com contagens de omissão; não há truncamento silencioso nem promessa de inventário completo.
+
+`inspect_entire_session` exige `providerSessionId`, `worktreeId` e `generation`. Confere a origem retornada pelo provider contra o registry e revalida contexto e identidade antes de devolver o resultado. Expõe metadados, turnos e `pendingTurns`; o alias depreciado `checkpoints` não é projetado. Arquivos tocados só aparecem com `includeFiles:true`, em paths repo-relativos seguros, até `fileLimit` (máximo 20), com cobertura própria. Checkpoint consolidado e associação com sessão SQLite permanecem indisponíveis sem prova.
+
+`get_entire_session_usage` usa a mesma seleção, verifica primeiro `session info` e projeta `session tokens --json` como `ENTIRE_REPORTED`: input, output, cache, total e chamadas. Métricas ausentes não viram zero. A razão de input+cache sobre total, quando observável e pelo menos 90%, é um sinal tipado `HEURISTIC`, não instrução ou custo faturável. Recomendações textuais do fornecedor não são transmitidas.
+
+As três operações usam o executor seguro existente, sem shell, auth, rede, mutações Git ou captura automática. Exigem opt-in pinned e configuração local privada com `push_sessions:false` e `telemetry:false`. A verificação de hash/versão/ajuda pode ser reutilizada somente enquanto a identidade física, tamanho e timestamps do executável e o pin permanecem iguais; opt-in e privacidade são relidos. Saída CLI tem limite de 1 MiB, stderr 64 KiB, prazo de provider 12 segundos e orçamento MCP de 12 KiB para descoberta/8 KiB para detalhes e métricas. Cancelamento, drift e falhas são erros explícitos. Nenhuma projeção inclui `last_prompt`, transcript, credenciais ou caminhos físicos.
 
 ## Opt-in do operador
 
@@ -25,6 +35,24 @@ Ao lado do SQLite, o operador cria `session-context.provider.json`, fora do Git,
 O caminho precisa ser absoluto; o arquivo executável é fixado por hash e versão. A atualização do Entire exige nova conferência pelo operador. O preflight confirma os comandos `session list --json` e `session info <id> --json|--transcript` na ajuda da versão local antes de consumir dados. O adaptador aceita os formatos JSONL Codex rollout e exec; schemas desconhecidos permanecem PARTIAL/UNAVAILABLE. Não configura nem instala o provider para satisfazer o preflight. Remover ou desativar o opt-in impede novas importações; o histórico já armazenado continua consultável.
 
 Para atualizar uma Worktree irmã sem mudar o projeto ativo, descubra-a pelo Git Operations e forneça `worktreeId` e `generation` juntos a `refresh_agent_sessions`, com `sessionId` opcional. O registry do repositório ativo resolve e revalida o alvo; paths e branches não são aceitos. Sem alvo, permanece o checkout ativo. Worktrees estrangeiras, missing/prunable, detached ou de geração antiga são recusadas. O Entire usa o cwd e a configuração local segura do alvo, mantendo o mesmo SQLite do repositoryId. A identidade é conferida antes da consulta, antes do commit SQLite e após a importação; resultados obsoletos são recusados. Não se deduz autoria por nome de branch, pasta ou HEAD. Não há busca global de sessões.
+
+## Captura Codex no Windows
+
+O Entire instala os hooks; o Codex executa os comandos no shell do ambiente selecionado. Em Worktree vinculada, o arquivo efetivamente carregado pode ser `.codex/hooks.json` do checkout principal. Descoberta e confiança não comprovam execução: confirme separadamente os eventos reais `SessionStart` e `UserPromptSubmit` e seus resultados.
+
+No Entire 0.12.2, o `SessionStart` Windows gerado pode conter sintaxe direta de `cmd.exe`, incompatível com PowerShell. O wrapper silencioso Windows usado pelos demais handlers evita essa incompatibilidade:
+
+```text
+cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex session-start)"
+```
+
+Essa forma não emite o aviso de CLI ausente; confirme antes a disponibilidade do executável. Uma reinstalação pelo mesmo gerador pode restaurar o comando incompatível. Não reinstale repetidamente nem altere o produto para compensar esse problema operacional.
+
+Qualquer ajuste no arquivo efetivo compartilhado exige autorização específica, backup privado dos bytes originais e conferência de que somente o handler pretendido mudou. Preserve os demais handlers e a privacidade. Reaprove a confiança do comando alterado pelo mecanismo do Codex, vinculada ao hash atual; não use bypass. Para reverter, restaure apenas a alteração autorizada após conferir que o arquivo não recebeu mudanças concorrentes e revalide a confiança correspondente. Não versione o JSON privado.
+
+Após o ajuste, inicie uma sessão Codex genuína e verifique `entire session current --json`: `resolution` deve identificar o chamador (`caller-env` ou `ancestry`), com sessão e Worktree corretas. A captura pode ser inicializada por `UserPromptSubmit` mesmo quando `SessionStart` falha; isso não torna o handler com falha saudável. Preserve `push_sessions:false`, `telemetry:false` e `checkpoint_push_disabled:true`.
+
+Antes de um commit legítimo, confirme trabalho pendente correspondente aos arquivos realmente alterados. Depois do commit normal, confira o trailer `Entire-Checkpoint` e a resolução local por `entire checkpoint explain --commit <SHA> --json`; IDs, origem e arquivos devem ser coerentes. Não use commit vazio, alteração fictícia, attach forçado ou reescrita de histórico para produzir essa evidência. Checkpoints e transcripts permanecem locais e não acompanham o push da branch de código.
 
 ## Limites e cobertura
 

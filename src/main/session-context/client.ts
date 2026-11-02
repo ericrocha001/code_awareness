@@ -4,6 +4,7 @@ import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
 import { parseSessionRefresh } from './mcp'
 import type { SessionTargetResolver } from './target'
+import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
 interface Generation { worker: Worker; cancellation: Int32Array; closing: boolean }
@@ -34,6 +35,9 @@ export class SessionContextClient implements SessionContextPort {
     if (Buffer.byteLength(JSON.stringify(args ?? {})) > 8192) return Promise.resolve(failure('INVALID_ARGUMENT'))
     if (name === 'refresh_agent_sessions') {
       try { parseSessionRefresh(args) } catch { return Promise.resolve(failure('INVALID_ARGUMENT')) }
+    }
+    if (isLiveSessionTool(name)) {
+      try { parseLiveSessionQuery(name, args) } catch { return Promise.resolve(failure('INVALID_ARGUMENT')) }
     }
     const key = JSON.stringify(args ?? {})
     if (name === 'refresh_agent_sessions' && this.refresh) return this.refresh.key === key ? this.refresh.task : Promise.resolve(failure('BACKPRESSURE'))
@@ -110,7 +114,7 @@ export class SessionContextClient implements SessionContextPort {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
-      const timeoutMs = this.timeoutMs ?? (name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : 5000)
+      const timeoutMs = this.timeoutMs ?? (isLiveSessionTool(name) ? 20_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : 5000)
       const deadline = Date.now() + timeoutMs
       const request: Request = { resolve, deadline, phase: 'worker-recovery', timer: setTimeout(() => this.expire(id), timeoutMs) }
       this.pending.set(id, request)
@@ -119,6 +123,25 @@ export class SessionContextClient implements SessionContextPort {
           await this.retiring
           if (!this.pending.has(id) || !this.active()) return
           let target
+          let liveTargets
+          if (isLiveSessionTool(name)) {
+            const q = parseLiveSessionQuery(name, args)
+            if (!this.resolveTarget?.discover) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+            request.phase = 'target-resolution'
+            if (q.worktreeId) {
+              const selection = { worktreeId: q.worktreeId, generation: q.generation! }
+              target = { ...await this.resolveTarget(selection), selection }
+              request.validate = target.validate
+              liveTargets = [{ ...selection, root: target.root, fingerprint: target.fingerprint }]
+            } else {
+              liveTargets = await this.resolveTarget.discover()
+              const snapshot = liveTargets
+              request.validate = async () => {
+                const fresh = await this.resolveTarget!.discover!()
+                if (snapshot.some(t => !fresh.some(f => f.worktreeId === t.worktreeId && f.generation === t.generation && f.root === t.root && f.fingerprint === t.fingerprint))) throw new Error('WORKTREE_STALE')
+              }
+            }
+          }
           if (name === 'refresh_agent_sessions') {
             let q
             try { q = parseSessionRefresh(args) } catch { throw new Error('INVALID_ARGUMENT') }
@@ -134,7 +157,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }
