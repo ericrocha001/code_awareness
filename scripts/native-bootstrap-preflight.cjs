@@ -8,10 +8,14 @@ const https = require('https')
 const net = require('net')
 const path = require('path')
 const tls = require('tls')
+const { spawn } = require('node:child_process')
 const {
   detectCurrentNpmVersion,
   formatIssues,
   readPackageJson,
+  resolveNpmCli,
+  readNpmLifecyclePolicy,
+  lifecyclePreparationEnvironment,
   validateNpmVersion,
   validatePackageManifest
 } = require('./native-runtime-policy.cjs')
@@ -245,6 +249,8 @@ async function evaluatePreflight(options = {}) {
     }
   }
 
+  const ready = { ok: true, phase: 'install-ready', runtimeChecked: false, npmVersion, registryUrl }
+  if (options.checkNetwork === false) return ready
   const registryResult = await checkRegistryAvailability(registryUrl, adapters)
   if (!registryResult.ok) {
     return {
@@ -272,12 +278,73 @@ async function evaluatePreflight(options = {}) {
     }
   }
 
-  return {
-    ok: true,
-    phase: 'ready',
-    npmVersion,
-    registryUrl
-  }
+  return ready
+}
+
+function execute(command, args, options) {
+  return new Promise(resolve => {
+    const child = spawn(command, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, shell: false })
+    let stdout = '', stderr = ''
+    child.stdout.on('data', bytes => { stdout = (stdout + bytes).slice(-16000) })
+    child.stderr.on('data', bytes => { stderr = (stderr + bytes).slice(-16000) })
+    child.once('error', error => resolve({ status: null, error, stdout, stderr }))
+    child.once('close', (status, signal) => resolve({ status, signal, stdout, stderr }))
+  })
+}
+
+function requireSuccess(result, step) {
+  if (result.status === 0 && !result.error) return
+  throw new Error(`NATIVE_BOOTSTRAP_${step}_FAILED: ${result.error?.message ?? result.signal ?? result.status}\n${(result.stderr || result.stdout || '').slice(-6000)}\nAction: inspect the failure and retry npm run bootstrap only after resolving network, credential or host policy restrictions.`)
+}
+
+function reportLifecycle(policy, log) {
+  log(`${policy.code}: ignore-scripts=${policy.ignoreScripts} (${policy.source}); ${policy.declarations.map(item => `${item.source}=${item.ignoreScripts}${item.overridden ? ' overridden' : ' effective'}`).join(', ')}`)
+  if (policy.ignoreScripts) log('Bootstrap opt-in: ci/recovery use --ignore-scripts=false only in preparation subprocesses. User/global npm configuration is unchanged. If host policy forbids scripts, stop and contact its administrator.')
+}
+
+async function runBootstrap(options = {}) {
+  const root = fs.realpathSync(options.projectRoot ?? process.cwd())
+  const environment = options.environment ?? process.env
+  const preflight = options.preflight ?? evaluatePreflight
+  const initial = await preflight({ projectRoot: root, checkNetwork: false })
+  if (!initial.ok) throw new Error(formatIssues(initial.issues))
+  const policy = (options.readLifecycle ?? readNpmLifecyclePolicy)({ projectRoot: root, environment })
+  const log = options.log ?? console.log
+  reportLifecycle(policy, log)
+  const scoped = lifecyclePreparationEnvironment(environment)
+  const cli = resolveNpmCli(environment)
+  const run = options.execute ?? execute
+  const npm = args => run(process.execPath, [cli, ...args], { cwd: root, env: scoped })
+  const { ensureDependencyReadiness, inspectInstallation } = require('./dependency-readiness.cjs')
+  const doctor = options.doctor ?? require('./native-runtime-doctor.cjs').inspectRuntime
+  const ensure = options.ensureReadiness ?? ensureDependencyReadiness
+  const result = await ensure({ root, log, install: async (checkout, state) => {
+    const installPreflight = await preflight({ projectRoot: checkout })
+    if (!installPreflight.ok) throw new Error(formatIssues(installPreflight.issues))
+    log('Native Bootstrap  INSTALLING (npm ci --ignore-scripts=false)')
+    const installed = await npm(['ci', '--ignore-scripts=false', '--no-audit', '--no-fund', '--include=dev', '--include=optional'])
+    const refusal = /EACCES|EPERM|ENOTFOUND|EAI_AGAIN|ECONN|ETIMEDOUT|E401|E403|access.*denied|permission denied|host policy|network unavailable|credential.*denied/i.test(`${installed.stdout ?? ''}\n${installed.stderr ?? ''}`)
+    if (installed.status !== 0 && /Native Runtime\s+INVALID/.test(installed.stdout ?? '') && !installed.error && !refusal && inspectInstallation(checkout, state).problems.length === 0) {
+      log('NATIVE_BOOTSTRAP_POSTINSTALL_RUNTIME_INVALID: installation is complete; native:doctor must prove recovery.')
+    } else requireSuccess(installed, 'INSTALL')
+  }, verifyRuntime: async () => {
+    let observed = doctor()
+    if (observed.ok && observed.checkout !== root) throw new Error('NATIVE_BOOTSTRAP_CHECKOUT_MISMATCH')
+    if (observed.ok) return observed
+    if (!observed.repairable) throw new Error(`NATIVE_BOOTSTRAP_RUNTIME_BLOCKED\n${formatIssues(observed.issues)}\nAction: resolve the reported policy/environment restriction before npm run bootstrap.`)
+    log('Native Bootstrap  RECOVERING (one bounded attempt)')
+    if (observed.issues.some(issue => issue.code === 'ELECTRON_BINARY_MISSING' || issue.property === 'Electron runtime')) requireSuccess(await npm(['rebuild', 'electron', '--ignore-scripts=false']), 'ELECTRON_PREPARE')
+    const addons = { 'tree-sitter': 'tree-sitter', 'TS grammar': 'tree-sitter-typescript', 'JS grammar': 'tree-sitter-javascript' }
+    const rebuild = [...new Set(observed.issues.map(issue => addons[issue.property]).filter(Boolean))]
+    if (rebuild.length) requireSuccess(await npm(['rebuild', ...rebuild, '--ignore-scripts=false']), 'ADDON_PREPARE')
+    requireSuccess(await npm(['run', 'native:prepare', '--ignore-scripts=false', '--', '--force']), 'NATIVE_PREPARE')
+    observed = doctor()
+    if (!observed.ok) throw new Error(`NATIVE_BOOTSTRAP_RUNTIME_INVALID_AFTER_REPAIR: ${observed.issues.map(issue => `${issue.code} (${issue.property})`).join('; ')}\nAction: inspect npm run native:doctor; automatic recovery will not repeat within this bootstrap.`)
+    if (observed.checkout !== root) throw new Error('NATIVE_BOOTSTRAP_CHECKOUT_MISMATCH')
+    return { ...observed, repaired: true }
+  } })
+  log(`Native Bootstrap  ${result.status} (${root}; Electron/native verified)`)
+  return result
 }
 
 function printPass(label) {
@@ -285,6 +352,11 @@ function printPass(label) {
 }
 
 async function runCli() {
+  if (process.argv.includes('--bootstrap')) {
+    if (fs.realpathSync(process.cwd()) !== fs.realpathSync(path.join(__dirname, '..'))) throw new Error('NATIVE_BOOTSTRAP_CHECKOUT_MISMATCH: run bootstrap inside its own Worktree.')
+    await runBootstrap()
+    return
+  }
   const result = await evaluatePreflight()
 
   if (!result.ok) {
@@ -299,13 +371,15 @@ async function runCli() {
   printPass('npm registry')
   printPass('GitHub DNS')
   printPass('GitHub HTTPS')
-  console.log('Native Bootstrap  READY')
+  reportLifecycle(readNpmLifecyclePolicy(), console.log)
+  console.log('Native Preflight  INSTALL_READY (runtime not checked; use npm run bootstrap)')
 }
 
 if (require.main === module) {
   runCli().catch((error) => {
     console.error('NATIVE_BOOTSTRAP_FAILED')
-    console.error(error && error.stack ? error.stack : error)
+    console.error(error.message ?? String(error))
+    console.log('Native Bootstrap  BLOCKED')
     process.exit(1)
   })
 }
@@ -316,5 +390,6 @@ module.exports = {
   checkGithubHttps,
   checkRegistryAvailability,
   evaluatePreflight,
+  runBootstrap,
   validateLockfileCompatibility
 }

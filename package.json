@@ -46,7 +46,7 @@
     "test:context:node": "npm run test:lanes:guard && node scripts/test-output.cjs run -- node node_modules/vitest/vitest.mjs run src/main/core/tokenizer.test.ts src/main/core/dash src/renderer/src/components/CodeDashView src/main/ipc/dash-handler-v2.test.ts",
     "test:context:native": "npm run test:native -- --run src/main/core/dash/dash-v2-acceptance.e2e.test.ts src/main/core/context/context-navigation.e2e.test.ts",
     "test:ui": "npm run test:lanes:guard && node scripts/test-output.cjs run -- node node_modules/vitest/vitest.mjs run src/renderer/src/components/CodeJourneyView/restore-modal.test.tsx",
-    "bootstrap": "npm run native:preflight && npm ci",
+    "bootstrap": "node scripts/native-bootstrap-preflight.cjs --bootstrap",
     "native:prepare": "electron-rebuild --only better-sqlite3",
     "native:preflight": "node scripts/native-bootstrap-preflight.cjs",
     "native:preflight:test": "node scripts/native-bootstrap-preflight.test.cjs",

@@ -133,7 +133,7 @@ function installIncrementally(root, state, environment = process.env) {
     child.once('close', (code, signal) => code === 0 ? resolve() : reject(new Error(`npm terminou com ${signal ?? code}`)))
   })
 }
-async function ensureDependencyReadiness({ root = process.cwd(), install = installIncrementally, log = console.log, lockTimeoutMs = 180000 } = {}) {
+async function ensureDependencyReadiness({ root = process.cwd(), install = installIncrementally, verifyRuntime, log = console.log, lockTimeoutMs = 180000 } = {}) {
   root = fs.realpathSync(root)
   const release = await acquire(root, lockTimeoutMs)
   try {
@@ -147,6 +147,15 @@ async function ensureDependencyReadiness({ root = process.cwd(), install = insta
       observed = inspectInstallation(root, current)
       if (observed.problems.length) throw failure('DEPENDENCY_INSTALL_INCOMPLETE', observed.problems.slice(0, 5).join('; '), 'Confira a instalação local e repare com npm 10 antes de iniciar o runtime.')
       repaired = true
+    }
+    if (verifyRuntime) {
+      const runtime = await verifyRuntime(root, initial)
+      if (!runtime?.ok) throw failure('DEPENDENCY_NATIVE_VALIDATION_FAILED', 'native:doctor não comprovou prontidão.', 'Execute npm run bootstrap e confira o diagnóstico nativo.')
+      repaired ||= Boolean(runtime.repaired)
+      const current = snapshot(root)
+      if (current.manifestHash !== initial.manifestHash || current.lockHash !== initial.lockHash) throw failure('DEPENDENCY_MANIFEST_CHANGED', 'Os manifests mudaram durante o preparo nativo.', 'Revise as alterações e tente novamente.')
+      observed = inspectInstallation(root, current)
+      if (observed.problems.length) throw failure('DEPENDENCY_INSTALL_INCOMPLETE', observed.problems.slice(0, 5).join('; '), 'Repare a instalação local antes de iniciar o runtime.')
     }
     const marker = path.join(root, 'node_modules', '.code-awareness-readiness.json')
     const readiness = { schema: 1, checkout: root, manifestHash: initial.manifestHash, lockHash: initial.lockHash, installationHash: observed.installationHash }

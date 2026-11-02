@@ -11,6 +11,7 @@ const {
   createDesktopEnvironmentIssue,
   formatIssues,
   inspectElectronDesktopEnvironment,
+  readNpmLifecyclePolicy,
   readPackageJson,
   validatePackageManifest
 } = require('./native-runtime-policy.cjs')
@@ -45,7 +46,9 @@ function runElectron(electronPath, args) {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1'
     },
-    encoding: 'utf8'
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30000
   })
 }
 
@@ -56,12 +59,14 @@ function observeElectronVersions(electronPath) {
   ])
 
   if (result.status !== 0) {
-    throw createIssue(
+    const issue = createIssue(
       'Electron runtime',
       'executable Electron runtime',
-      result.stderr || result.stdout || `exit ${result.status}`,
+      result.error?.message || result.stderr || result.stdout || `exit ${result.status}`,
       'Run npm ci with npm 10, or npm run native:prepare after a deliberate dependency change.'
     )
+    if (['EACCES', 'EPERM'].includes(result.error?.code)) issue.code = 'NATIVE_RUNTIME_EXECUTION_BLOCKED'
+    throw issue
   }
 
   return JSON.parse(result.stdout.trim())
@@ -81,17 +86,17 @@ function failWithIssues(issues) {
   }
   console.error(formatIssues(issues))
   console.log('Native Runtime    INVALID')
-  process.exit(1)
+  throw Object.assign(new Error('NATIVE_RUNTIME_INVALID'), { issues })
 }
 
-function runCli() {
+function runChecks() {
   const environmentIssue = createDesktopEnvironmentIssue(process.env)
   if (environmentIssue) {
     printStatus(environmentIssue.property, false)
     console.error(formatIssues([environmentIssue]))
     console.error(inspectElectronDesktopEnvironment(process.env).reason)
     console.log('Native Runtime    INVALID')
-    process.exit(1)
+    throw Object.assign(new Error(environmentIssue.code), { issues: [environmentIssue] })
   }
   printStatus('Electron Desktop Environment', true)
 
@@ -176,10 +181,11 @@ function runCli() {
     electronPath = resolveElectronExecutable()
     versions = observeElectronVersions(electronPath)
   } catch (issueOrError) {
+    const missingElectron = !fs.existsSync(path.join(projectRoot, 'node_modules/electron/path.txt')) || /Electron failed to install correctly/.test(issueOrError.message)
     failWithIssues([
       issueOrError.code === 'NATIVE_RUNTIME_INVALID'
         ? issueOrError
-        : createIssue('Electron runtime', 'observable Electron runtime', issueOrError.message, 'Run npm ci with npm 10.')
+        : { ...createIssue('Electron runtime', 'observable Electron runtime', issueOrError.message, 'Run npm run bootstrap.'), code: issueOrError.code === 'NATIVE_RUNTIME_EXECUTION_BLOCKED' ? issueOrError.code : missingElectron ? 'ELECTRON_BINARY_MISSING' : 'NATIVE_RUNTIME_INVALID' }
     ])
   }
 
@@ -209,12 +215,14 @@ function runCli() {
     const ok = result.status === 0
     printStatus(label, ok)
     if (!ok) {
-      probeIssues.push(createIssue(
+      const issue = createIssue(
         label,
         'functional native module under Electron',
-        result.stderr || result.stdout || `exit ${result.status}`,
+        result.error?.message || result.stderr || result.stdout || `exit ${result.status}`,
         'Run npm run native:prepare. If it still fails, stop and inspect the reported addon.'
-      ))
+      )
+      if (['EACCES', 'EPERM'].includes(result.error?.code)) issue.code = 'NATIVE_RUNTIME_EXECUTION_BLOCKED'
+      probeIssues.push(issue)
     }
   }
 
@@ -225,6 +233,28 @@ function runCli() {
   console.log('Native Runtime    HEALTHY')
 }
 
+function inspectRuntime() {
+  try { runChecks(); return { ok: true, checkout: fs.realpathSync(projectRoot), issues: [] } }
+  catch (error) {
+    const issues = error.issues ?? [createIssue('Native runtime', 'functional runtime', error.message, 'Inspect native:doctor before retrying bootstrap.')]
+    const repairable = issues.every(issue => issue.code === 'ELECTRON_BINARY_MISSING' || issue.code === 'NATIVE_RUNTIME_INVALID' && ['Electron runtime', 'better-sqlite3', 'tree-sitter', 'TS grammar', 'JS grammar'].includes(issue.property))
+    return { ok: false, issues, repairable }
+  }
+}
+
+function runCli() {
+  const result = inspectRuntime()
+  if (!result.ok) {
+    try {
+      const policy = readNpmLifecyclePolicy({ projectRoot })
+      if (policy.ignoreScripts) console.error(`${policy.code}: ignore-scripts=true (${policy.source}); installation hooks may have been skipped. Run npx --yes --package npm@10.9.4 npm run bootstrap for scoped preparation; do not change user/global npm config.`)
+    } catch (error) { console.error(error.message) }
+    process.exitCode = 1
+  }
+}
+
 if (require.main === module) {
   runCli()
 }
+
+module.exports = { inspectRuntime }
