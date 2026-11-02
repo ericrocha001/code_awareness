@@ -1,16 +1,39 @@
 import { z } from 'zod'
 import type { McpToolDefinition, McpToolResult } from '../mcp/mcp-types'
 import type { SessionStore } from './store'
-import type { EntireProvider } from './entire-provider'
+import { EntireProvider, runReadOnly, type CommandRunner } from './entire-provider'
 import { EVENT_TYPES, type SessionRow } from './types'
 import { digest, utf8Prefix } from './privacy'
 import { LIVE_SESSION_SCHEMAS, isLiveSessionTool } from './entire-live'
 import type { LiveSessionTarget } from './target'
+import { inspectCodeProvenance } from './provenance'
+import { inspectEntireCheckpoint } from './checkpoint'
 
 const id = z.string().uuid(), revision = z.number().int().positive(), cursor = z.string().max(512).optional()
 const date = z.string().datetime({ offset: true }).optional()
 const schemas = {
   ...LIVE_SESSION_SCHEMAS,
+  inspect_code_provenance: z.object({
+    file: z.string().min(1).max(500),
+    startLine: z.number().int().min(1).optional(),
+    endLine: z.number().int().min(1).optional(),
+    mode: z.enum(['MAP', 'DETAIL']).default('MAP'),
+    worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    generation: z.string().regex(/^[a-f0-9]{64}$/).optional()
+  }).strict().refine(q => !q.worktreeId === !q.generation),
+  inspect_entire_checkpoint: z.object({
+    checkpointId: z.string().regex(/^[A-Za-z0-9]{10,40}$/).optional(),
+    commit: z.string().regex(/^[a-f0-9]{40}$/i).optional(),
+    mode: z.enum(['INSPECT', 'DISAMBIGUATE', 'READ_FIELD']).default('INSPECT'),
+    file: z.string().min(1).max(500).optional(),
+    includePromptPreview: z.boolean().default(false),
+    sessionIndex: z.number().int().min(0).optional(),
+    field: z.enum(['STORED_PROMPT', 'INTENT']).optional(),
+    promptIndex: z.number().int().min(0).default(0),
+    cursor: z.string().max(512).optional(),
+    worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    generation: z.string().regex(/^[a-f0-9]{64}$/).optional()
+  }).strict().refine(q => (!q.worktreeId === !q.generation) && (!!q.checkpointId || !!q.commit)),
   list_agent_sessions: z.object({ state: z.enum(['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL']).optional(), agent: z.literal('codex').optional(), after: date, before: date,
     executionId: z.string().min(1).max(200).optional(), limit: z.number().int().min(1).max(20).default(20), cursor }).strict(),
   inspect_agent_session: z.object({ sessionId: id, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor }).strict(),
@@ -19,7 +42,7 @@ const schemas = {
     segmentId: z.string().regex(/^S[1-9]\d{0,2}$/).optional(), limit: z.number().int().min(1).max(15).default(15), cursor }).strict(),
   read_agent_session_event: z.object({ sessionId: id, eventId: id, expectedRevision: revision, cursor }).strict(),
   refresh_agent_sessions: z.object({ sessionId: id.optional(), worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(), generation: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict()
-    .refine(q => !!q.worktreeId === !!q.generation),
+    .refine(q => !q.worktreeId === !q.generation),
 }
 export const parseSessionRefresh = (args: unknown) => schemas.refresh_agent_sessions.parse(args ?? {})
 export type SessionToolName = keyof typeof schemas
@@ -34,6 +57,10 @@ const definitions: [SessionToolName, string, Record<string, unknown>, string[]][
     { providerSessionId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' }, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' }, includeFiles: { type: 'boolean', default: false }, fileLimit: { type: 'integer', minimum: 1, maximum: 20, default: 10 } }, ['providerSessionId', 'worktreeId', 'generation']],
   ['get_entire_session_usage', 'Read ENTIRE_REPORTED token metrics for one provider session in a governed Worktree. Input/output/cache/total/API calls and typed heuristic context-pressure signals only. Cache tokens are not billable-token or monetary estimates. Missing usage remains unavailable; no vendor recommendations, prompts, transcript import, auth or network.',
     { providerSessionId: { type: 'string', pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$' }, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['providerSessionId', 'worktreeId', 'generation']],
+  ['inspect_code_provenance', 'Consultative Git-first provenance for a repo-relative file and line range. Returns compact segments, commit SHA, and verified Entire checkpoint association without exposing source code or prompt bodies. In DETAIL mode, discovers selectable candidate sessions for verified checkpoints.',
+    { file: { type: 'string', minLength: 1, maxLength: 500 }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 }, mode: { type: 'string', enum: ['MAP', 'DETAIL'], default: 'MAP' }, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['file']],
+  ['inspect_entire_checkpoint', 'Inspect local Entire checkpoint metadata, candidate sessions, or selectively read literal prompt/intent fields from a specific session without loading transcripts or neighboring sessions. Requires checkpointId or verified commit SHA. READ_FIELD is bounded and pageable.',
+    { checkpointId: { type: 'string', pattern: '^[A-Za-z0-9]{10,40}$' }, commit: { type: 'string', pattern: '^[a-f0-9]{40}$' }, mode: { type: 'string', enum: ['INSPECT', 'DISAMBIGUATE', 'READ_FIELD'], default: 'INSPECT' }, file: { type: 'string', minLength: 1, maxLength: 500 }, includePromptPreview: { type: 'boolean', default: false }, sessionIndex: { type: 'integer', minimum: 0 }, field: { type: 'string', enum: ['STORED_PROMPT', 'INTENT'] }, promptIndex: { type: 'integer', minimum: 0, default: 0 }, cursor: cur, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, []],
   ['list_agent_sessions', 'Discover at most 20 sessions in the active repository only. Metadata and coverage; no events or bodies. Continue with the same filters. Never imports or runs Entire. importState distinguishes metadata discovery from materialized transcript; coverageReasons contain only observed codes and counts.',
     { state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'] }, agent: { type: 'string', enum: ['codex'] }, after: time, before: time, executionId: str, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: cur }, []],
   ['inspect_agent_session', 'Inspect the cheap deterministic map of a selected session: category counts, tools, files and ordinal segments. No bodies. Cursor is bound to this repository and revision. Source identity means checked stream headers, never authorship; the time range is observed, not causal proof.',
@@ -48,7 +75,18 @@ const definitions: [SessionToolName, string, Record<string, unknown>, string[]][
 export const SESSION_CONTEXT_TOOLS: McpToolDefinition[] = definitions.map(([name, description, properties, required]) => ({ name, description,
   securitySchemes: [{ type: 'oauth2', scopes: [] }], inputSchema: { type: 'object', properties, required, additionalProperties: false },
   annotations: { readOnlyHint: name !== 'refresh_agent_sessions', destructiveHint: false, openWorldHint: false } }))
-export const SESSION_RESPONSE_BUDGETS: Record<SessionToolName, number> = { discover_entire_sessions: 12288, inspect_entire_session: 8192, get_entire_session_usage: 8192, list_agent_sessions: 8192, inspect_agent_session: 12288, list_agent_session_events: 12288, read_agent_session_event: 16384, refresh_agent_sessions: 8192 }
+export const SESSION_RESPONSE_BUDGETS: Record<SessionToolName, number> = {
+  discover_entire_sessions: 12288,
+  inspect_entire_session: 8192,
+  get_entire_session_usage: 8192,
+  inspect_code_provenance: 12288,
+  inspect_entire_checkpoint: 16384,
+  list_agent_sessions: 8192,
+  inspect_agent_session: 12288,
+  list_agent_session_events: 12288,
+  read_agent_session_event: 16384,
+  refresh_agent_sessions: 8192
+}
 const wrap = (data: object): McpToolResult => ({ content: [{ type: 'text', text: JSON.stringify(data) }] })
 const fits = (data: object, budget: number, literalProjection = false) =>
   Buffer.byteLength(JSON.stringify({ ...wrap(data), ...(literalProjection ? { structuredContent: data } : {}) })) + 512 <= budget
@@ -83,8 +121,17 @@ export async function executeLiveSessionTool(provider: Partial<Pick<EntireProvid
     return { ...wrap({ code, ...(phase ? { phase } : {}) }), isError: true }
   }
 }
-export async function executeSessionTool(store: SessionStore, provider: Pick<EntireProvider, 'refresh'> & Partial<Pick<EntireProvider, 'queryLive'>>, name: SessionToolName, raw: unknown, assertActive: () => void,
-  selectedTarget?: { worktreeId: string; generation: string }, liveTargets: LiveSessionTarget[] = []): Promise<McpToolResult> {
+export async function executeSessionTool(
+  store: SessionStore | Pick<SessionStore, 'path' | 'repositoryId'>,
+  provider: Pick<EntireProvider, 'refresh'> & Partial<Pick<EntireProvider, 'queryLive'>>,
+  name: SessionToolName,
+  raw: unknown,
+  assertActive: () => void,
+  selectedTarget?: { worktreeId: string; generation: string },
+  liveTargets: LiveSessionTarget[] = [],
+  runner: CommandRunner = runReadOnly,
+  root?: string
+): Promise<McpToolResult> {
   if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
     assertActive()
@@ -92,31 +139,43 @@ export async function executeSessionTool(store: SessionStore, provider: Pick<Ent
     const q = schemas[name].parse(raw ?? {})
     const budget = SESSION_RESPONSE_BUDGETS[name]
     let data: object
-    if (name === 'refresh_agent_sessions') {
+    if (name === 'inspect_code_provenance') {
+      const request = q as z.infer<typeof schemas.inspect_code_provenance>
+      if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
+      const targetRoot = (selectedTarget && liveTargets.find(t => t.worktreeId === selectedTarget.worktreeId)?.root) || root || process.cwd()
+      data = await inspectCodeProvenance(runner, targetRoot, request, assertActive)
+    } else if (name === 'inspect_entire_checkpoint') {
+      const request = q as z.infer<typeof schemas.inspect_entire_checkpoint>
+      if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
+      const targetRoot = (selectedTarget && liveTargets.find(t => t.worktreeId === selectedTarget.worktreeId)?.root) || root || process.cwd()
+      data = await inspectEntireCheckpoint(runner, targetRoot, request, assertActive)
+    } else if (name === 'refresh_agent_sessions') {
       const request = q as z.infer<typeof schemas.refresh_agent_sessions>
       if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
       data = { ...await provider.refresh(request.sessionId), ...(selectedTarget ? { worktreeId: selectedTarget.worktreeId, generation: selectedTarget.generation } : {}) }
     } else if (name === 'list_agent_sessions') {
+      const actualStore = store as SessionStore
       const { cursor, ...filter } = q as z.infer<typeof schemas.list_agent_sessions>
-      const scope = { name, repositoryId: store.repositoryId, revision: store.catalogRevision(), filter }, offset = store.offset(cursor, scope)
-      data = page(store, scope, offset, store.sessions(filter, offset, filter.limit + 1), filter.limit, budget,
-        { repositoryId: store.repositoryId, revision: store.catalogRevision(), associationCoverage: 'UNAVAILABLE' }, metadata, 'sessions')
+      const scope = { name, repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), filter }, offset = actualStore.offset(cursor, scope)
+      data = page(actualStore, scope, offset, actualStore.sessions(filter, offset, filter.limit + 1), filter.limit, budget,
+        { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'UNAVAILABLE' }, metadata, 'sessions')
     } else {
+      const actualStore = store as SessionStore
       const query = q as z.infer<typeof schemas.inspect_agent_session>
-      const row = store.revision(query.sessionId, query.expectedRevision)
+      const row = actualStore.revision(query.sessionId, query.expectedRevision)
       const { cursor, ...filter } = q as z.infer<typeof schemas.list_agent_session_events>
-      const scope = { name, repositoryId: store.repositoryId, revision: row.revision, filter }, offset = store.offset(cursor, scope)
+      const scope = { name, repositoryId: actualStore.repositoryId, revision: row.revision, filter }, offset = actualStore.offset(cursor, scope)
       if (name === 'inspect_agent_session') {
-        const map = store.map(row.id, offset, query.limit + 1)
-        data = page(store, scope, offset, map.segments, query.limit, budget, { ...metadata(row), types: map.types, tools: map.tools.slice(0, 5), files: map.files.slice(0, 5),
-          provenance: 'DERIVED_INDEX', claimsVerified: false, sourceObservation: store.sourceObservation(row), diagnostics: store.diagnostics() }, segment => segment, 'segments')
+        const map = actualStore.map(row.id, offset, query.limit + 1)
+        data = page(actualStore, scope, offset, map.segments, query.limit, budget, { ...metadata(row), types: map.types, tools: map.tools.slice(0, 5), files: map.files.slice(0, 5),
+          provenance: 'DERIVED_INDEX', claimsVerified: false, sourceObservation: actualStore.sourceObservation(row), diagnostics: actualStore.diagnostics() }, segment => segment, 'segments')
       } else if (name === 'list_agent_session_events') {
         const { types, tool, ordinalFrom, ordinalTo, after, before, segmentId, limit } = q as z.infer<typeof schemas.list_agent_session_events>
         const segment = segmentId ? Number(segmentId.slice(1)) : undefined
         const from = Math.max(ordinalFrom ?? 1, segment ? (segment - 1) * 100 + 1 : 1)
         const to = Math.min(ordinalTo ?? Number.MAX_SAFE_INTEGER, segment ? segment * 100 : Number.MAX_SAFE_INTEGER)
         if (from > to) throw new Error('INVALID_ARGUMENT')
-        data = page(store, scope, offset, store.events(row.id, { types, tool, from, to, after, before }, offset, limit + 1), limit, budget,
+        data = page(actualStore, scope, offset, actualStore.events(row.id, { types, tool, from, to, after, before }, offset, limit + 1), limit, budget,
           { sessionId: row.id, revision: row.revision, coverage: row.coverage, untrusted: true, claimsVerified: false }, event => ({
             eventId: event.id, ordinal: event.ordinal, type: event.type, timestamp: event.timestamp, tool: event.tool, summary: event.summary,
             sourcePosition: event.sourcePosition, bytes: event.bytes, omission: event.omission, provenance: 'OBSERVED_FROM_PROVIDER', classificationProvenance: 'DERIVED_INDEX',
@@ -124,7 +183,7 @@ export async function executeSessionTool(store: SessionStore, provider: Pick<Ent
           }), 'events')
       } else {
         const request = q as z.infer<typeof schemas.read_agent_session_event>
-        const event = store.event(row.id, request.eventId)
+        const event = actualStore.event(row.id, request.eventId)
         const bytes = Buffer.from(event.text ?? '')
         if (offset > bytes.length) throw new Error('CURSOR_STALE')
         let size = Math.min(8192, bytes.length - offset)
@@ -134,7 +193,7 @@ export async function executeSessionTool(store: SessionStore, provider: Pick<Ent
           data = { sessionId: row.id, eventId: event.id, revision: row.revision, content, range: { startByte: offset, endByte: end },
             complete: !hasMore && !event.omission, partial: hasMore || !!event.omission, omission: event.omission, sanitized: !!event.sanitized,
             provenance: 'OBSERVED_FROM_PROVIDER', sourcePosition: event.sourcePosition, payloadDigest: digest(event.text ?? ''), untrusted: true, claimsVerified: false,
-            ...(hasMore ? { nextCursor: store.cursor(scope, end) } : {}) }
+            ...(hasMore ? { nextCursor: actualStore.cursor(scope, end) } : {}) }
           if (fits(data, budget, true)) break
           size = Math.floor(size / 2)
           if (size < 4) throw new Error('RESPONSE_LIMIT_REACHED')
@@ -142,7 +201,8 @@ export async function executeSessionTool(store: SessionStore, provider: Pick<Ent
       }
     }
     assertActive()
-    if (!fits(data, budget, name === 'read_agent_session_event')) throw new Error('RESPONSE_LIMIT_REACHED')
+    const isLiteral = name === 'read_agent_session_event' || (name === 'inspect_entire_checkpoint' && 'content' in data && typeof (data as any).content === 'string')
+    if (!fits(data, budget, isLiteral)) throw new Error('RESPONSE_LIMIT_REACHED')
     return wrap(data)
   } catch (error) {
     const code = error instanceof z.ZodError ? 'INVALID_ARGUMENT' : error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'

@@ -60,7 +60,17 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       phase => { if (!closing) parentPort?.postMessage({ id: message.id, phase }) })
     const result = isLiveSessionTool(message.name)
       ? await executeLiveSessionTool(provider, message.name, message.args, assertRequest, message.liveTargets ?? [])
-      : await executeSessionTool(store!, provider, message.name, message.args, assertRequest, target?.selection)
+      : await executeSessionTool(
+          store!,
+          provider,
+          message.name,
+          message.args,
+          assertRequest,
+          target?.selection,
+          message.liveTargets ?? [],
+          (exe, args, cwd, limit, consume, timeout) => runReadOnly(exe, args, cwd, limit, consume, timeout, abort.signal),
+          target?.root ?? root
+        )
     if (!closing && !Atomics.load(cancelled, 0)) parentPort?.postMessage({ id: message.id, result })
   }
   finally { pending--; close() }

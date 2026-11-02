@@ -1,4 +1,5 @@
 const nativeTestFiles = Object.freeze([
+  'src/main/session-context/provenance.test.ts',
   'src/main/session-context/store.test.ts',
   'src/main/session-context/entire-provider.test.ts',
   'src/main/session-context/entire-live.test.ts',
