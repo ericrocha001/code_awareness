@@ -190,6 +190,38 @@ function detectCurrentNpmVersion() {
   return null
 }
 
+function resolveNpmCli(environment = process.env) {
+  const candidates = [environment.npm_execpath, path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), path.resolve(path.dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js')]
+  const cli = candidates.find(file => file && path.isAbsolute(file) && fs.existsSync(file))
+  if (!cli) throw new Error('NPM_LIFECYCLE_POLICY_UNKNOWN: npm CLI unavailable; use npx --yes --package npm@10.9.4 npm run bootstrap.')
+  return cli
+}
+
+function readNpmLifecyclePolicy({ projectRoot = process.cwd(), environment = process.env, run = spawnSync } = {}) {
+  const result = run(process.execPath, [resolveNpmCli(environment), 'config', 'list', '--long'], { cwd: projectRoot, env: environment, encoding: 'utf8', windowsHide: true, shell: false, timeout: 15000 })
+  if (result.error || result.status !== 0) throw new Error('NPM_LIFECYCLE_POLICY_UNKNOWN: cannot read effective npm configuration; inspect npm config get ignore-scripts before bootstrap.')
+  let source = 'unknown', effective
+  const declarations = []
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const section = /^; "([^"]+)" config from /.exec(line)
+    if (section) source = section[1]
+    const setting = /^(;\s*)?ignore-scripts\s*=\s*(true|false)(?:\s*;.*)?$/.exec(line)
+    if (!setting) continue
+    const declaration = { source, ignoreScripts: setting[2] === 'true', overridden: Boolean(setting[1]) }
+    declarations.push(declaration)
+    if (!declaration.overridden) {
+      if (effective) throw new Error('NPM_LIFECYCLE_POLICY_UNKNOWN: ambiguous ignore-scripts configuration.')
+      effective = declaration
+    }
+  }
+  if (!effective) throw new Error('NPM_LIFECYCLE_POLICY_UNKNOWN: npm did not report effective ignore-scripts.')
+  return { ...effective, declarations, code: effective.ignoreScripts ? 'NPM_LIFECYCLE_SCRIPTS_DISABLED' : 'NPM_LIFECYCLE_SCRIPTS_ENABLED' }
+}
+
+function lifecyclePreparationEnvironment(environment = process.env) {
+  return { ...Object.fromEntries(Object.entries(environment).filter(([key]) => key.toLowerCase() !== 'npm_config_ignore_scripts')), npm_config_ignore_scripts: 'false' }
+}
+
 function formatIssues(issues) {
   return issues.map((issue) => [
     issue.code,
@@ -242,6 +274,9 @@ module.exports = {
   parseNpmMajorFromVersion,
   parseNpmMajorFromUserAgent,
   readPackageJson,
+  resolveNpmCli,
+  readNpmLifecyclePolicy,
+  lifecyclePreparationEnvironment,
   validateNpmVersion,
   validateNpmUserAgent,
   validatePackageManifest

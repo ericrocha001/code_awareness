@@ -265,10 +265,12 @@ The repository currently expects the npm version declared in `package.json` and 
 ### Bootstrap
 
 ```bash
-npm run bootstrap
+npx --yes --package npm@10.9.4 npm run bootstrap
 ```
 
-The bootstrap flow performs the native-runtime preflight, installs dependencies, rebuilds the required native module for Electron, and runs the native runtime doctor.
+The bootstrap checks the effective npm lifecycle policy and its configuration precedence. When preparation is needed, it uses reproducible `npm ci` with lifecycle scripts enabled only in its preparation subprocesses; user/global npm configuration stays unchanged. It shares the checkout dependency lock, verifies Electron and addons with the real native runtime doctor, and permits one bounded recovery using the existing preparation commands. Host policy, network or credential failures block preparation with a diagnostic.
+
+`Native Bootstrap READY` or `REPAIRED` means the runtime passed in this Worktree. A ready checkout is checked again without reinstalling or rebuilding. The standalone preflight reports only `INSTALL_READY`; it does not prove runtime readiness. Use the pinned npm bootstrap command above when `NPM_LIFECYCLE_SCRIPTS_DISABLED` reports skipped installation hooks.
 
 ### Development
 

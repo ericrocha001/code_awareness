@@ -113,3 +113,32 @@ test('a held checkout lock blocks repair rather than allowing overlapping instal
   await assert.rejects(f.run({ lockTimeoutMs: 1, install: () => { throw Error('must not install') } }), /DEPENDENCY_LOCK_TIMEOUT/)
   assert.equal(JSON.parse(fs.readFileSync(lock)).token, 'other-initialization')
 })
+
+test('runtime failure cannot publish readiness and releases the existing checkout lock', async () => {
+  const f = fixture()
+  await assert.rejects(f.run({ verifyRuntime: async () => ({ ok: false }) }), /DEPENDENCY_NATIVE_VALIDATION_FAILED/)
+  assert.equal(fs.existsSync(f.marker), false)
+  assert.equal(fs.existsSync(path.join(f.root, '.code-awareness/dependency-readiness.lock')), false)
+  await assert.rejects(f.run({ verifyRuntime: async () => {
+    f.manifest.dependencies.alpha = '^2.0.0'
+    f.lock.packages[''].dependencies.alpha = '^2.0.0'
+    write(path.join(f.root, 'package.json'), f.manifest); write(path.join(f.root, 'package-lock.json'), f.lock)
+    return { ok: true }
+  } }), /DEPENDENCY_MANIFEST_CHANGED/)
+  assert.equal(fs.existsSync(f.marker), false)
+})
+
+test('the checkout lock covers native recovery and rechecks runtime on reexecution', async () => {
+  const f = fixture(), events = []
+  let started, finish
+  const entered = new Promise(resolve => { started = resolve }), gate = new Promise(resolve => { finish = resolve })
+  const first = f.run({ verifyRuntime: async () => { events.push('first'); started(); await gate; return { ok: true, repaired: true } } })
+  await entered
+  const second = f.run({ verifyRuntime: async () => { events.push('second'); return { ok: true } } })
+  assert.deepEqual(events, ['first'])
+  assert.equal(fs.existsSync(f.marker), false)
+  finish()
+  assert.equal((await first).status, 'REPAIRED')
+  assert.equal((await second).status, 'READY')
+  assert.deepEqual(events, ['first', 'second'])
+})
