@@ -158,9 +158,10 @@ interface SkillWorkspaceProps {
   onCancel: () => void
   activationPending: boolean
   onSetEnabled: () => void
+  onRemoveFromGit?: () => void
 }
 
-export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEditing, activeTab, skillMd, scope, projectIds, destinations, history, distribution, onTabChange, onSkillMdChange, onScopeChange, onProjectIdsChange, onEdit, onSave, onCancel, activationPending, onSetEnabled }) => {
+export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEditing, activeTab, skillMd, scope, projectIds, destinations, history, distribution, onTabChange, onSkillMdChange, onScopeChange, onProjectIdsChange, onEdit, onSave, onCancel, activationPending, onSetEnabled, onRemoveFromGit }) => {
   if (!selected && !isEditing) {
     return <main className="academy-skill-workspace academy-workspace-empty">
       <span className="academy-empty-icon"><FileCode2 size={30} /></span>
@@ -208,6 +209,8 @@ export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEdit
       </section>}
 
       {activeTab === 'overview' && <section className="academy-overview" aria-label="Visão geral da Skill">
+        {selected?.source && <p>Fonte: {selected.source.state} · {selected.source.sourceCommitSha?.slice(0, 8) ?? 'legado privado'}</p>}
+        {selected?.source?.state === 'CONFIRMED' && !isEditing && <button className="academy-danger-button" onClick={onRemoveFromGit}>Preparar remoção do Git</button>}
         <div className="academy-metadata-grid">
           <div><span>Versão</span><strong>{selected ? `v${selected.currentVersion}` : 'Novo draft'}</strong></div>
           <div><span>Status</span><strong>{selected?.status ?? 'Não persistida'}</strong></div>
@@ -255,18 +258,21 @@ interface OperationsRailProps {
   onAddArtifact: () => void
   onReconcile: () => void
   onPrepareRelease: () => void
+  onRebuildRelease?: () => void
   onBootstrapPlugin: () => void
   onRevealRelease: () => void
   onConfirmUpload: () => void
   onBindRepository: () => void
   onSyncGit: () => void
+  onPublishCandidate?: () => void
+  onGitAutomation?: (autoPublish: boolean, autoUpdate: boolean) => void
   onResolveGitConflict: () => void
   onOpenGit: () => void
   onReviewConflict: (id: string) => void
   onPreviewConflictBatch: () => void
 }
 
-export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
+export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onRebuildRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
   const release = openAiPublication?.selectedRelease
   return <aside className={`academy-operations ${open ? 'is-open' : ''}`} aria-label="Operações da Academy">
     <div className="academy-operations-mobile-header"><strong>Operações</strong><button className="academy-icon-button" aria-label="Fechar operações" onClick={onClose}><X size={18} /></button></div>
@@ -301,18 +307,36 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinatio
       <div className="academy-git-summary"><div><strong>{gitStatus?.repository?.fullName ?? 'Não configurado'}</strong><small>{gitStatus?.repository ? `${gitStatus.repository.branch} · ${gitStatus.lastCommitSha?.slice(0, 8) ?? 'sem commit'}` : 'Vincule um repository elegível'}</small></div><StatusBadge tone={gitStatus?.syncState === 'SYNCED' ? 'success' : gitStatus?.syncState === 'ERROR' ? 'danger' : 'warning'}>{gitStatus?.syncState ?? 'UNCONFIGURED'}</StatusBadge></div>
       {gitStatus?.lastError && <p className="academy-inline-error">{gitStatus.lastError}</p>}
       {!gitStatus?.repository && eligibleRepos.length > 0 && <div className="academy-git-bind"><select aria-label="Repository da Academy" value={selectedRepoId} onChange={(event) => onSelectedRepoChange(event.target.value)}>{eligibleRepos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select><button onClick={onBindRepository}>Vincular</button></div>}
-      {gitStatus?.repository && <><small className="academy-muted">Última confirmação remota: {formatDate(gitStatus.lastSyncAt)} · {gitStatus.publication?.remoteHead?.slice(0, 8) ?? 'sem observação'}</small><small className="academy-muted">{gitStatus.publication?.phase ?? 'Migração pendente'}</small>{Boolean(gitStatus.publication?.conflictPaths.length) && <small>Conflito protegido: {gitStatus.publication?.conflictPaths.join(', ')}</small>}<div className="academy-inline-actions"><button data-academy-action="sync-git" onClick={onSyncGit}>Sync Now</button>{gitStatus.publication?.phase === 'CONFLICT' && <button data-academy-action="resolve-git" onClick={onResolveGitConflict}>Publicar versão canônica</button>}<button onClick={onOpenGit}>Abrir no Explorer</button></div></>}
+      {gitStatus?.repository && <>
+        <small className="academy-muted">Última confirmação remota: {formatDate(gitStatus.lastSyncAt)} · {gitStatus.publication?.remoteHead?.slice(0, 8) ?? 'sem observação'}</small>
+        {gitStatus.publication?.pendingCommit && <small className="academy-muted">Commit local pendente: {gitStatus.publication.pendingCommit.slice(0, 8)}</small>}
+        {Boolean(gitStatus.publication?.conflictPaths.length) && <small>Revisão necessária: {gitStatus.publication?.conflictPaths.join(', ')}</small>}
+        <div className="academy-inline-actions">
+          {gitStatus.syncState === 'CONFLICT' ? <button data-academy-action="resolve-git" onClick={onResolveGitConflict}>Resolver</button>
+            : gitStatus.syncState === 'PR_PENDING' ? <span>Aguardando revisão de PR</span>
+            : <button data-academy-action="sync-git" onClick={onSyncGit}>{gitStatus.syncState === 'LOCAL_CHANGES' ? 'Publicar' : 'Atualizar'}</button>}
+          <button onClick={onOpenGit}>Abrir workspace</button>
+          {['LOCAL_CHANGES', 'PR_PENDING'].includes(gitStatus.syncState) && !gitStatus.publication?.candidateBranch && <button onClick={onPublishCandidate}>Publicar branch para revisão</button>}
+        </div>
+        {gitStatus.publication?.candidateBranch && <p>Branch publicada: {gitStatus.publication.candidateBranch}. Abertura e merge de PR são ações separadas.</p>}
+        <label className="academy-git-option"><input type="checkbox" checked={gitStatus.publication?.autoPublish ?? false} onChange={event => onGitAutomation?.(event.target.checked, gitStatus.publication?.autoUpdate ?? false)} />Publicação automática de edições locais</label>
+        <label className="academy-git-option"><input type="checkbox" checked={gitStatus.publication?.autoUpdate ?? false} onChange={event => onGitAutomation?.(gitStatus.publication?.autoPublish ?? false, event.target.checked)} />Atualização automática do remoto</label>
+      </>}
     </RailCard>
 
     <RailCard icon={<Cloud size={18} />} title="Hosted ZIP fallback" className="academy-fallback-card">
       <div className="academy-hosted-summary"><span><strong>Hosted Personal</strong><small>Hospedagem manual de fallback</small></span><StatusBadge tone={packageDistribution?.hosted.status === 'CURRENT' ? 'success' : 'warning'}>{packageDistribution?.hosted.status === 'HOSTED_UPDATE_AVAILABLE' ? 'UPDATE' : packageDistribution?.hosted.status ?? 'UNCONFIGURED'}</StatusBadge></div>
       <div className="academy-hosted-versions"><span>Hosted <strong>{packageDistribution?.hosted.version ? `v${packageDistribution.hosted.version}` : '—'}</strong></span><span>Package <strong>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version}` : '—'}</strong></span></div>
+      {openAiPublication?.sourceError && <p className="academy-inline-error">{openAiPublication.sourceError}</p>}
+      {release && <p className="academy-muted">v{release.pluginVersion} · {release.status}{release.source ? ` · ${release.source.branch}@${release.source.sourceCommitSha.slice(0, 12)}` : ' · Legado sem SHA Git'}</p>}
+      {release?.source && <p className="academy-muted">{release.source.remoteConfirmation === 'CACHED' ? 'Rebuild em cache; atualidade remota não verificada' : 'Fonte observada no remoto'} · {formatDate(release.source.confirmedAt)}{gitStatus?.syncState === 'OFFLINE' || gitStatus?.syncState === 'UNKNOWN' ? ' · Remoto não revalidado' : ''}</p>}
       <div className="academy-inline-actions">
         {openAiPublication?.profile ? <button onClick={onPrepareRelease}>Prepare ZIP fallback</button> : <button onClick={onBootstrapPlugin}>Registrar plugin existente</button>}
+        {release?.source && <button onClick={onRebuildRelease}>Rebuild do commit em cache</button>}
         <button disabled={!release?.artifactPath} onClick={onRevealRelease}>Reveal Package</button>
         <button disabled={release?.status !== 'READY_TO_UPLOAD'} onClick={onConfirmUpload}>Confirm Upload</button>
       </div>
-      {release && <details className="academy-technical-details"><summary>Detalhes técnicos</summary><dl><dt>Status</dt><dd>{release.status}</dd><dt>Artifact</dt><dd>{release.artifactHash ?? 'não produzido'}</dd><dt>Path</dt><dd>{release.artifactPath ?? '—'}</dd></dl></details>}
+      {release && <details className="academy-technical-details"><summary>Detalhes técnicos</summary><dl><dt>Status</dt><dd>{release.status}</dd><dt>ZIP SHA-256</dt><dd>{release.artifactHash ?? 'não produzido'}</dd>{release.source && <><dt>Commit de origem</dt><dd>{release.source.sourceCommitSha}</dd><dt>Repository / branch</dt><dd>{release.source.sourceRepositoryId} / {release.source.branch}</dd></>}<dt>Path</dt><dd>{release.artifactPath ?? '—'}</dd></dl></details>}
     </RailCard>
   </aside>
 }

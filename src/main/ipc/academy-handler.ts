@@ -1,14 +1,29 @@
-import { ipcMain, shell } from 'electron'
+import { BrowserWindow, ipcMain, shell } from 'electron'
 import { join } from 'node:path'
 import type { AcademyCreateInput, AcademyPackage, AcademyUpdateInput } from '../../shared/types/academy-types'
 import type { AcademyService } from '../academy/academy-service'
 
 export function registerAcademyHandlers(service: AcademyService): void {
+  const changed = () => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('academy:changed') }
+  service.onCanonicalChange?.(changed)
+  service.onDistributionChange?.(changed)
   ipcMain.handle('academy:snapshot', () => service.snapshot())
   ipcMain.handle('academy:get', (_event, id: string) => service.get(id))
   ipcMain.handle('academy:history', (_event, id: string) => service.history(id))
-  ipcMain.handle('academy:create', (_event, input: Omit<AcademyCreateInput, 'origin'>) => service.create({ ...input, origin: 'UI' }))
-  ipcMain.handle('academy:update', (_event, input: Omit<AcademyUpdateInput, 'origin'>) => service.update({ ...input, origin: 'UI' }))
+  ipcMain.handle('academy:create', (_event, input: Omit<AcademyCreateInput, 'origin'>) => service.saveNewSkill({ ...input, origin: 'UI' }))
+  ipcMain.handle('academy:update', (_event, input: Omit<AcademyUpdateInput, 'origin'>) => service.saveSkill({ ...input, origin: 'UI' }))
+  ipcMain.handle('academy:git-draft', (_event, name: string) => service.gitSync?.getDraft(name))
+  ipcMain.handle('academy:git-publish', (_event, expected: { localHead: string; remoteHead: string | null }) => {
+    if (!expected || !/^[a-f0-9]{40,64}$/.test(expected.localHead) || !expected.remoteHead || !/^[a-f0-9]{40,64}$/.test(expected.remoteHead)) throw new Error('PUBLICATION_REVIEW_REQUIRED')
+    return service.gitSync?.publish(expected)
+  })
+  ipcMain.handle('academy:git-candidate', (_event, input) => service.gitSync?.publishCandidate(input))
+  ipcMain.handle('academy:git-delete-draft', (_event, input) => service.gitSync?.deleteDraft(input))
+  ipcMain.handle('academy:git-automation', (_event, input) => service.gitSync?.configureAutomation(input))
+  ipcMain.handle('academy:git-refresh', () => service.gitSync?.refreshAutomatically())
+  ipcMain.handle('academy:git-migration', (_event, head: string, hash: string, confirmed: boolean) => service.gitSync?.completeMigration(head, hash, confirmed))
+  ipcMain.handle('academy:git-conflict-review', (_event, path: string) => service.gitSync?.reviewGitConflict(path))
+  ipcMain.handle('academy:git-conflict-resolve', (_event, input) => service.gitSync?.resolveGitConflict(input))
   ipcMain.handle('academy:archive', (_event, id: string, expectedVersion: number) => service.archive(id, expectedVersion))
   ipcMain.handle('academy:set-enabled', (_event, id: string, enabled: boolean, expectedStateRevision: number) => service.setEnabled(id, enabled, expectedStateRevision))
   ipcMain.handle('academy:restore', (_event, id: string, expectedVersion: number) => service.restore(id, expectedVersion))
@@ -30,7 +45,11 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:openai-state', () => service.getOpenAiPublicationState())
   ipcMain.handle('academy:package-distribution-state', () => service.getPackageDistributionState())
   ipcMain.handle('academy:openai-releases', () => service.listOpenAiReleases())
-  ipcMain.handle('academy:openai-prepare', () => service.prepareOpenAiRelease())
+  ipcMain.handle('academy:openai-prepare', (_event, input?: import('../../shared/types/academy-git-source-types').AcademyGitBuildRequest) => {
+    const request = input ?? { mode: 'LATEST' }
+    if (request.mode !== 'LATEST' && (request.mode !== 'REBUILD' || !/^[a-f0-9]{40,64}$/.test(request.sourceCommitSha))) throw new Error('INVALID_ARGUMENT')
+    return service.prepareOpenAiRelease(request)
+  })
   ipcMain.handle('academy:openai-confirm-upload', (_event, releaseId: string, artifactHash: string) => service.confirmOpenAiUpload(releaseId, artifactHash))
   ipcMain.handle('academy:openai-reveal', (_event, releaseId: string) => {
     const release = service.getOpenAiRelease(releaseId)

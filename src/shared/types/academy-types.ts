@@ -1,6 +1,6 @@
 export type AcademySkillStatus = 'ACTIVE' | 'DISABLED'
 export type AcademySkillScope = 'GLOBAL' | 'PROJECT'
-export type AcademyVersionOrigin = 'IMPORT' | 'FILESYSTEM' | 'UI' | 'MCP' | 'LOCAL_CLI'
+export type AcademyVersionOrigin = 'IMPORT' | 'FILESYSTEM' | 'UI' | 'MCP' | 'LOCAL_CLI' | 'GIT'
 export type AcademyConflictStatus = 'OPEN' | 'RESOLVED'
 export type AcademyDistributionTarget = 'FILESYSTEM_NATIVE' | 'CLAUDE_CODE' | 'ANTIGRAVITY'
 export type AcademyDistributionStatus = 'CURRENT' | 'PENDING' | 'DRIFTED' | 'MISSING' | 'ERROR'
@@ -52,6 +52,7 @@ export interface AcademyImpactFreshnessInput {
 }
 
 export interface AcademySkillSummary {
+  source?: { state: 'CONFIRMED' | 'REMOVED' | 'LEGACY_PRIVATE'; sourceCommitSha: string | null; path: string | null }
   id: string
   name: string
   description: string
@@ -71,6 +72,7 @@ export interface AcademySkillVersion {
   packageHash: string
   origin: AcademyVersionOrigin
   createdAt: string
+  gitSource?: { sourceCommitSha: string; managedTreeHash: string; packageHash: string }
 }
 
 export type AcademySkillVersionMetadata = Omit<AcademySkillVersion, 'package'>
@@ -143,6 +145,7 @@ export interface AcademyConflictBatch {
 }
 
 export interface AcademyCreateInput {
+  expectedDraftCommitSha?: string
   package: AcademyPackage
   scope: AcademySkillScope
   projectIds?: string[]
@@ -158,6 +161,27 @@ export interface AcademyMutationReceipt {
   scope: AcademySkillScope
   projectIds: string[]
   distribution: { status: 'CONVERGED' | 'DEGRADED' | 'NOT_APPLICABLE' | 'ERROR' | 'PENDING'; errorCode?: string }
+}
+
+export interface AcademyDraftReceipt {
+  state: 'DRAFT_SAVED'
+  skillId: string | null
+  name: string
+  baseVersion: number | null
+  sourceBaseCommitSha: string
+  workspaceCommitSha: string
+  packageHash: string
+  distribution: { status: 'NOT_APPLICABLE' }
+}
+
+export interface AcademyGitConflictReview {
+  path: string
+  head: string
+  revision: string
+  base: string | null
+  local: string | null
+  remote: string | null
+  working: string | null
 }
 
 export type AcademyDeliveryConvergence = 'PENDING' | 'CONVERGED' | 'DEGRADED' | 'ERROR' | 'NOT_APPLICABLE'
@@ -185,6 +209,7 @@ export interface AcademySkillDeliveryStatus {
 }
 
 export interface AcademyUpdateInput {
+  expectedDraftCommitSha?: string
   skillId: string
   expectedVersion: number
   package: AcademyPackage
@@ -289,6 +314,7 @@ export interface AcademyOpenAiUploadConfirmation {
 }
 
 export interface AcademyOpenAiRelease {
+  source?: import('./academy-git-source-types').AcademyGitBuildReceipt
   id: string
   pluginVersion: string
   createdAt: string
@@ -307,6 +333,7 @@ export interface AcademyOpenAiRelease {
 }
 
 export interface AcademyOpenAiPublicationState {
+  sourceError?: string | null
   profile: AcademyOpenAiPluginProfile | null
   latestPrepared: AcademyOpenAiRelease | null
   latestUploaded: AcademyOpenAiRelease | null
@@ -331,6 +358,7 @@ export interface AcademyPackageDistributionState {
 }
 
 export type AcademyGitSyncState =
+  | 'LOCAL_CHANGES' | 'REMOTE_CHANGES' | 'MERGEABLE_BOTH' | 'CONFLICT' | 'PR_PENDING' | 'UNKNOWN' | 'OFFLINE'
   | 'UNCONFIGURED'
   | 'SYNCED'
   | 'DIRTY'
@@ -370,6 +398,17 @@ export interface AcademyGitStatusProjection {
 }
 
 export interface AcademyGitPublicationState {
+  sourceMode?: 'GIT_FIRST'
+  workspacePath?: string
+  businessState?: AcademyGitSyncState
+  autoPublish?: boolean
+  autoUpdate?: boolean
+  updateIntervalMs?: number
+  policyIdentity?: string
+  migrationCandidateHash?: string
+  migrationCandidatePath?: string
+  candidateBranch?: string
+  candidateCommitSha?: string
   destinationKey: string
   checkoutPath: string
   baselineTree: string | null

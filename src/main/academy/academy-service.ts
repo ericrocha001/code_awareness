@@ -13,8 +13,10 @@ import { AcademyDistributionService } from './distribution/academy-distribution-
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
+import type { AcademyGitBuildRequest } from '../../shared/types/academy-git-source-types'
+import type { AcademyOpenAiRelease } from '../../shared/types/academy-types'
 import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
-import type { AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
+import type { AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
 const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE', 'ANTIGRAVITY']
 
@@ -50,7 +52,12 @@ export class AcademyService {
 
   initializeGitSync(gitSync: AcademyGitSyncService): void {
     this.gitSync = gitSync
-    this.onCanonicalChange(() => gitSync.notifyCanonicalChange())
+    this.store.enforceGitFirst()
+    gitSync.onStatusChange(() => this.emitDistributionChange())
+    gitSync.onAccepted(ids => {
+      for (const id of ids) this.scheduleReconciliationForSkill(id)
+      this.emitCanonicalChange()
+    })
   }
 
   private assertNotClosed(): void {
@@ -200,6 +207,14 @@ export class AcademyService {
     }
   }
 
+  async saveNewSkill(input: AcademyCreateInput): Promise<AcademySkillDetail | AcademyDraftReceipt>
+  async saveNewSkill(input: AcademyCreateInput, mode: 'RECEIPT'): Promise<AcademyMutationReceipt | AcademyDraftReceipt>
+  async saveNewSkill(input: AcademyCreateInput, mode?: 'RECEIPT') {
+    this.assertNotClosed()
+    if (input.scope === 'GLOBAL' && this.gitSync) return this.gitSync.saveDraft(input)
+    return mode ? this.create(input, mode) : this.create(input)
+  }
+
   async create(input: AcademyCreateInput): Promise<AcademySkillDetail>
   async create(input: AcademyCreateInput, mode: 'RECEIPT'): Promise<AcademyMutationReceipt>
   async create(input: AcademyCreateInput, mode?: 'RECEIPT') {
@@ -209,6 +224,14 @@ export class AcademyService {
     this.scheduleReconciliationForSkill(value.id)
     if (mode === 'RECEIPT') return this.immediateReceipt(value)
     return value
+  }
+
+  async saveSkill(input: AcademyUpdateInput): Promise<AcademySkillDetail | AcademyDraftReceipt>
+  async saveSkill(input: AcademyUpdateInput, mode: 'RECEIPT'): Promise<AcademyMutationReceipt | AcademyDraftReceipt>
+  async saveSkill(input: AcademyUpdateInput, mode?: 'RECEIPT') {
+    this.assertNotClosed()
+    if ((input.scope === 'GLOBAL' || this.store.get(input.skillId).scope === 'GLOBAL') && this.gitSync) return this.gitSync.saveDraft(input)
+    return mode ? this.update(input, mode) : this.update(input)
   }
 
   async update(input: AcademyUpdateInput): Promise<AcademySkillDetail>
@@ -378,6 +401,7 @@ export class AcademyService {
       if (!pkg) throw new Error('DIVERGENT_PACKAGE_REQUIRED')
       if (resolution === 'DIVERGENT' && conflict.projectionPath && review.diskHash !== conflict.divergentHash && review.diskHash !== current.current.packageHash) throw new Error('DIVERGENCE_CHANGED')
       if (resolution === 'DIVERGENT' && hashAcademyPackage(pkg) !== review.candidateHash) throw new Error('RECONCILED_PACKAGE_REVIEW_REQUIRED')
+      if (resolution === 'DIVERGENT' && current.scope === 'GLOBAL' && this.gitSync) throw new AcademyError('GIT_DRAFT_REQUIRED', 'Review and save this package through the Git workspace before publishing.')
       if (conflict.projectionPath) {
         if (shouldExist) {
           if (review.diskHash !== hashAcademyPackage(pkg)) await replaceSkillDirectory(conflict.projectionPath, pkg, review.diskHash)
@@ -618,6 +642,7 @@ export class AcademyService {
       : this.openAiPublication.bootstrapInstalledPlugin(publishedVersion)
   }
   initializePluginPackage() {
+    if (this.store.usesGitFirst()) return this.packageRevisions.resolveCurrent()
     this.packageRevisions.bootstrapBaseline()
     const profile = this.store.getOpenAiPluginProfile()
     if (!profile) throw new Error('OPENAI_PLUGIN_PROFILE_MISSING')
@@ -653,7 +678,17 @@ export class AcademyService {
   getOpenAiPublicationState() { return this.openAiPublication.state() }
   listOpenAiReleases() { return this.openAiPublication.listReleases() }
   getOpenAiRelease(id: string) { return this.openAiPublication.getRelease(id) }
-  prepareOpenAiRelease() { this.initializePluginPackage(); return this.openAiPublication.prepareRelease() }
+  prepareOpenAiRelease(): AcademyOpenAiRelease
+  prepareOpenAiRelease(input: AcademyGitBuildRequest): Promise<AcademyOpenAiRelease>
+  prepareOpenAiRelease(input?: AcademyGitBuildRequest): AcademyOpenAiRelease | Promise<AcademyOpenAiRelease> {
+    if (input) {
+      if (!this.gitSync) throw new AcademyError('GIT_SYNC_NOT_CONFIGURED')
+      return this.gitSync.getSourceSnapshot(input).then(source => this.openAiPublication.prepareGitRelease(source))
+    }
+    if (this.store.usesGitFirst()) throw new AcademyError('GIT_SOURCE_SNAPSHOT_REQUIRED')
+    this.initializePluginPackage()
+    return this.openAiPublication.prepareRelease()
+  }
   confirmOpenAiUpload(releaseId: string, artifactHash: string) { return this.openAiPublication.confirmUpload(releaseId, artifactHash) }
   start(): void {
     this.assertNotClosed()
@@ -697,6 +732,7 @@ export class AcademyService {
 
   async close(): Promise<void> {
     this.isClosed = true
+    await this.gitSync?.close()
     this.watcher.stop()
     this.dirtyDestinations.clear()
     if (this.destinationPassPromises.size > 0) {

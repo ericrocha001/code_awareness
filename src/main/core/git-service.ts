@@ -67,13 +67,46 @@ export interface GitWorktreeReadSnapshot {
 }
 
 export class GitService implements FileListingPort {
-  async initializePublicationRepository(root: string, remoteUrl: string): Promise<void> {
+  private readonly publicationRoots = new Set<string>()
+  async firstParent(root: string, commit: string): Promise<string | null> {
+    const parents = (await this.runGit(['rev-list', '--parents', '-n', '1', commit, '--'], root)).trim().split(' ')
+    return parents[1] ?? null
+  }
+
+  async previewPublicationMerge(root: string, local: string, remote: string): Promise<string[]> {
+    const output = await this.runGit(['merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', local, remote], root, { allowExitOne: true, maxOutputBytes: 1048576 })
+    const [tree, ...paths] = output.split('\0').filter(Boolean)
+    if (!/^[a-f0-9]{40,64}$/.test(tree?.trim() ?? '')) throw new Error('GIT_MERGE_PREVIEW_UNAVAILABLE')
+    return paths
+  }
+
+  async beginPublicationMerge(root: string, remote: string): Promise<void> {
+    await this.runGit(['-c', 'user.name=Code Awareness', '-c', 'user.email=code-awareness@local', 'merge', '--no-commit', '--no-ff', remote], root)
+  }
+
+  async unmergedPaths(root: string): Promise<string[]> {
+    return (await this.runGit(['diff', '--name-only', '--diff-filter=U', '-z'], root)).split('\0').filter(Boolean)
+  }
+
+  async firstParentTransitions(root: string, base: string, head: string): Promise<string[]> {
+    const commits = (await this.runGit(['rev-list', '--first-parent', '--reverse', `${base}..${head}`, '--'], root, { maxOutputBytes: 1048576 })).trim().split('\n').filter(Boolean)
+    let previous = base
+    for (const commit of commits) {
+      if (await this.firstParent(root, commit) !== previous) throw new Error('ACADEMY_HISTORY_REWRITTEN')
+      previous = commit
+    }
+    if (previous !== head) throw new Error('ACADEMY_HISTORY_REWRITTEN')
+    return commits
+  }
+
+  async initializePublicationRepository(root: string, remoteUrl?: string): Promise<void> {
+    this.publicationRoots.add(resolve(root))
     mkdirSync(root, { recursive: true })
     if (!existsSync(join(root, '.git'))) {
       await this.runGit(['init'], root)
-      await this.addRemote(root, 'origin', remoteUrl)
+      if (remoteUrl) await this.addRemote(root, 'origin', remoteUrl)
     }
-    if (await this.getRemoteUrl(root) !== remoteUrl) throw new Error('PUBLICATION_DESTINATION_MISMATCH')
+    if (remoteUrl && await this.getRemoteUrl(root) !== remoteUrl) throw new Error('PUBLICATION_DESTINATION_MISMATCH')
   }
 
   async readManagedTree(root: string, ref: string, paths: string[]): Promise<string> {
@@ -114,8 +147,9 @@ export class GitService implements FileListingPort {
     }
   }
 
-  async preserveLegacyCommits(root: string, legacyPath: string, head: string): Promise<void> {
-    await this.runGit(['fetch', '--', legacyPath, `${head}:refs/academy/legacy-pending`], root)
+  async preserveLegacyCommits(root: string, legacyPath: string, head: string, ref = 'refs/academy/legacy-pending'): Promise<void> {
+    if (!/^refs\/academy\/[a-z-]+$/.test(ref)) throw new Error('INVALID_ARGUMENT')
+    await this.runGit(['fetch', '--', legacyPath, `${head}:${ref}`], root)
   }
 
   async readCommitFile(root: string, commit: string, path: string, maxBytes: number): Promise<Buffer | null> {
@@ -635,23 +669,25 @@ export class GitService implements FileListingPort {
     await this.runGit(['revert', '--abort'], dirPath)
   }
 
-  async commitInspectedIndex(dirPath: string, message: string, expectedHead: string | null, expectedIndexRevision: string): Promise<string> {
+  async commitInspectedIndex(dirPath: string, message: string, expectedHead: string | null, expectedIndexRevision: string, options?: { firstParent: string }): Promise<string> {
     const indexPath = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'index'], dirPath)).trim()
     let lock: number
     try { lock = openSync(`${indexPath}.lock`, 'wx') } catch { throw new Error('GIT_STATE_CHANGED') }
     let temporary: string | undefined
     try {
       if (await this.getCurrentCommitHash(dirPath) !== expectedHead || await this.getIndexRevision(dirPath) !== expectedIndexRevision) throw new Error('GIT_STATE_CHANGED')
-      if (!await this.hasStagedChanges(dirPath)) throw new Error('NOTHING_TO_COMMIT')
+      const mergeHeadPath = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'], dirPath)).trim()
+      const mergeParents = existsSync(mergeHeadPath) ? readFileSync(mergeHeadPath, 'utf8').trim().split('\n') : []
+      if (options && (!expectedHead || mergeParents.length !== 1 || mergeParents[0] !== options.firstParent)) throw new Error('GIT_MERGE_PARENT_CHANGED')
+      if (!await this.hasStagedChanges(dirPath) && !options) throw new Error('NOTHING_TO_COMMIT')
       temporary = mkdtempSync(join(tmpdir(), 'git-inspected-index-'))
       copyFileSync(indexPath, join(temporary, 'index'))
       const tree = (await this.runGit(['write-tree'], dirPath, { env: { ...process.env, GIT_INDEX_FILE: join(temporary, 'index') } })).trim()
       const args: string[] = []
       try { await this.runGit(['var', 'GIT_AUTHOR_IDENT'], dirPath) }
       catch { args.push('-c', 'user.name=Code Awareness', '-c', 'user.email=code-awareness@local') }
-      args.push('commit-tree', tree, ...(expectedHead ? ['-p', expectedHead] : []), '-m', message)
-      const mergeHeadPath = (await this.runGit(['rev-parse', '--path-format=absolute', '--git-path', 'MERGE_HEAD'], dirPath)).trim()
-      if (existsSync(mergeHeadPath)) for (const parent of readFileSync(mergeHeadPath, 'utf8').trim().split('\n')) args.push('-p', parent)
+      const parents = options ? [options.firstParent, expectedHead!] : [...(expectedHead ? [expectedHead] : []), ...mergeParents]
+      args.push('commit-tree', tree, ...parents.flatMap(parent => ['-p', parent]), '-m', message)
       const sha = (await this.runGit(args, dirPath)).trim()
       try { await this.runGit(['update-ref', '-m', message.split('\n')[0], 'HEAD', sha, expectedHead ?? '0'.repeat(40)], dirPath) }
       catch { throw new Error('GIT_STATE_CHANGED') }
@@ -998,11 +1034,14 @@ export class GitService implements FileListingPort {
   }
 
   private runGitBytes(args: string[], cwd: string, options?: GitProcessOptions): Promise<Buffer> {
+    const publication = this.publicationRoots.has(resolve(cwd))
     return new Promise((resolve, reject) => {
       const stdout: Buffer[] = []
       let outputBytes = 0
       let stderr = ''
-      const proc = spawn('git', args, { cwd, shell: false, env: options?.env })
+      const command = publication ? ['-c', `core.hooksPath=${join(cwd, '.git', 'disabled-hooks')}`, '-c', 'core.autocrlf=false', '-c', 'core.longpaths=true', ...args] : args
+      const environment = publication ? { ...process.env, ...options?.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: process.platform === 'win32' ? 'NUL' : '/dev/null' } : options?.env
+      const proc = spawn('git', command, { cwd, shell: false, env: environment })
       proc.stderr.setEncoding('utf8')
 
       // Timeout de proteção contra processos Git travados

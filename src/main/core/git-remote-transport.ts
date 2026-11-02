@@ -1,4 +1,5 @@
 export interface GitRemoteTransport {
+  authorizationIdentity?(): string | null
   readRemoteHead?(repoPath: string, remote: string, ref: string): Promise<string | null>
   push(repoPath: string, branch: string, remote?: string, expectedHead?: string): Promise<void>
   fetch?(repoPath: string, remote: string): Promise<void>

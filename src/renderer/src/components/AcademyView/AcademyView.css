@@ -229,6 +229,11 @@
 .academy-inline-actions { margin-top: 9px; flex-wrap: wrap; gap: 6px; }
 .academy-inline-actions button, .academy-destination-manager button { min-height: 28px; padding-inline: 8px; font-size: 10px; }
 .academy-git-bind { margin-top: 8px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
+.academy-git-option { display: flex; align-items: flex-start; gap: 8px; margin-top: 12px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.academy-git-option input { flex: none; width: 16px; height: 16px; margin: 1px 0 0; }
+.academy-git-conflict { width: min(760px, calc(100vw - 48px)); }
+.academy-git-conflict pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 200px; overflow: auto; }
+.academy-git-conflict textarea { min-height: 240px; font-family: monospace; }
 .academy-git-bind select { min-width: 0; font-size: 10px; }
 .academy-inline-error { margin-top: 8px !important; padding: 7px; color: var(--color-danger); border-radius: 6px; background: color-mix(in srgb, var(--color-danger) 8%, transparent); font-size: 10px; }
 .academy-hosted-versions { margin-top: 9px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }

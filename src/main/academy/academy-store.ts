@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import Database from 'better-sqlite3'
+import type { AcademyGitAuthority, AcademyGitSkillSource, AcademyGitSourceSnapshot } from '../../shared/types/academy-git-source-types'
 import type { AcademyGitPublicationState, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 import type { AcademyConflict, AcademyCreateInput, AcademyDestination, AcademyDistributionState, AcademyDistributionStatus, AcademyDistributionTarget, AcademyGitProfile, AcademyGitSyncState, AcademyMarketplaceState, AcademyMarketplaceTakeoverStatus, AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiRelease, AcademyOpenAiReleaseStatus, AcademyPackage, AcademyPluginPackageRevision, AcademySkillDetail, AcademySkillScope, AcademySkillStatus, AcademySkillSummary, AcademySkillVersion, AcademyUpdateInput, AcademyVersionOrigin } from '../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
@@ -10,6 +11,10 @@ type Row = Record<string, any>
 
 export class AcademyStore {
   private readonly db: Database.Database
+  private ingestingGit = false
+  private gitFirstRequired = false
+  enforceGitFirst(): void { this.gitFirstRequired = true }
+  usesGitFirst(): boolean { return this.gitFirstRequired || Boolean(this.getGitProfile() || this.getGitAuthority()) }
 
   constructor(readonly databasePath: string) {
     mkdirSync(dirname(databasePath), { recursive: true })
@@ -81,6 +86,10 @@ export class AcademyStore {
         upload_confirmation_json TEXT, verification_evidence TEXT
       );
       CREATE INDEX IF NOT EXISTS academy_openai_releases_created ON academy_openai_plugin_releases(created_at DESC);
+      CREATE TABLE IF NOT EXISTS academy_openai_git_builds (
+        id TEXT PRIMARY KEY, release_id TEXT NOT NULL REFERENCES academy_openai_plugin_releases(id), receipt_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS academy_openai_git_builds_release ON academy_openai_git_builds(release_id);
       CREATE TABLE IF NOT EXISTS academy_plugin_package_revisions (
         id TEXT PRIMARY KEY,
         version TEXT NOT NULL UNIQUE,
@@ -114,6 +123,26 @@ export class AcademyStore {
       );
       CREATE TABLE IF NOT EXISTS academy_git_publication (
         destination_key TEXT PRIMARY KEY, state_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS academy_git_authority (
+        id INTEGER PRIMARY KEY CHECK(id=1), state_json TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS academy_git_snapshots (
+        repository_id TEXT NOT NULL, commit_sha TEXT NOT NULL, snapshot_json TEXT NOT NULL,
+        PRIMARY KEY(repository_id, commit_sha)
+      );
+      CREATE TABLE IF NOT EXISTS academy_git_skill_sources (
+        repository_id TEXT NOT NULL, path TEXT NOT NULL,
+        skill_id TEXT NOT NULL UNIQUE REFERENCES academy_skills(id),
+        legacy_baseline_version INTEGER NOT NULL, source_commit_sha TEXT NOT NULL,
+        available INTEGER NOT NULL,
+        PRIMARY KEY(repository_id, path)
+      );
+      CREATE TABLE IF NOT EXISTS academy_git_version_sources (
+        skill_id TEXT NOT NULL, version INTEGER NOT NULL, commit_sha TEXT NOT NULL,
+        managed_tree_hash TEXT NOT NULL, package_hash TEXT NOT NULL,
+        PRIMARY KEY(skill_id, version),
+        FOREIGN KEY(skill_id,version) REFERENCES academy_versions(skill_id,version)
       );
     `)
     this.migrateDistributionTargets()
@@ -176,6 +205,7 @@ export class AcademyStore {
   }
 
   create(input: AcademyCreateInput): AcademySkillDetail {
+    if (input.scope === 'GLOBAL' && (this.gitFirstRequired || this.getGitAuthority()) && !this.ingestingGit) throw new AcademyError('GIT_DRAFT_REQUIRED')
     const pkg = normalizeAcademyPackage(input.package)
     const metadata = parseSkillMetadata(pkg.skillMd)
     const id = randomUUID()
@@ -195,6 +225,7 @@ export class AcademyStore {
   }
 
   update(input: AcademyUpdateInput): AcademySkillDetail {
+    if ((input.scope === 'GLOBAL' || this.get(input.skillId).scope === 'GLOBAL') && (this.gitFirstRequired || this.getGitAuthority()) && !this.ingestingGit) throw new AcademyError('GIT_DRAFT_REQUIRED')
     const pkg = normalizeAcademyPackage(input.package)
     const metadata = parseSkillMetadata(pkg.skillMd)
     const now = new Date().toISOString()
@@ -240,9 +271,9 @@ export class AcademyStore {
     if (options.version !== undefined) return this.getVersion(id, options.version)
     if (options.metadataOnly) {
       return (this.db.prepare('SELECT skill_id, version, package_hash, origin, created_at FROM academy_versions WHERE skill_id=? ORDER BY version DESC').all(id) as Row[])
-        .map(row => ({ skillId: row.skill_id, version: row.version, packageHash: row.package_hash, origin: row.origin, createdAt: row.created_at }))
+        .map(row => this.withGitSource({ skillId: row.skill_id, version: row.version, packageHash: row.package_hash, origin: row.origin, createdAt: row.created_at }))
     }
-    return (this.db.prepare('SELECT * FROM academy_versions WHERE skill_id=? ORDER BY version DESC').all(id) as Row[]).map(versionFromRow)
+    return (this.db.prepare('SELECT * FROM academy_versions WHERE skill_id=? ORDER BY version DESC').all(id) as Row[]).map(row => this.withGitSource(versionFromRow(row)))
   }
 
   readImpactCatalog(skillId: string, baseVersion: number, targetVersion?: number) {
@@ -488,11 +519,32 @@ export class AcademyStore {
   getOpenAiRelease(id: string): AcademyOpenAiRelease {
     const row = this.db.prepare('SELECT * FROM academy_openai_plugin_releases WHERE id=?').get(id) as Row | undefined
     if (!row) throw new AcademyError('OPENAI_RELEASE_NOT_FOUND')
-    return openAiReleaseFromRow(row)
+    return this.withGitBuildSource(openAiReleaseFromRow(row))
   }
 
   listOpenAiReleases(): AcademyOpenAiRelease[] {
-    return (this.db.prepare('SELECT * FROM academy_openai_plugin_releases ORDER BY created_at DESC, rowid DESC').all() as Row[]).map(openAiReleaseFromRow)
+    return (this.db.prepare('SELECT * FROM academy_openai_plugin_releases ORDER BY created_at DESC, rowid DESC').all() as Row[]).map(row => this.withGitBuildSource(openAiReleaseFromRow(row)))
+  }
+
+  private withGitBuildSource(release: AcademyOpenAiRelease): AcademyOpenAiRelease {
+    const row = this.db.prepare('SELECT receipt_json FROM academy_openai_git_builds WHERE release_id=? ORDER BY rowid DESC LIMIT 1').get(release.id) as Row | undefined
+    return row ? { ...release, source: JSON.parse(row.receipt_json) } : release
+  }
+
+  listGitBuildReceipts(releaseId: string): import('../../shared/types/academy-git-source-types').AcademyGitBuildReceipt[] {
+    return (this.db.prepare('SELECT receipt_json FROM academy_openai_git_builds WHERE release_id=? ORDER BY rowid').all(releaseId) as Row[]).map(row => JSON.parse(row.receipt_json))
+  }
+
+  persistGitBuild(release: AcademyOpenAiRelease, receipt: import('../../shared/types/academy-git-source-types').AcademyGitBuildReceipt): AcademyOpenAiRelease {
+    return this.db.transaction(() => {
+      const existing = this.db.prepare('SELECT id FROM academy_openai_plugin_releases WHERE id=?').get(release.id)
+      if (!existing) this.insertOpenAiRelease(release)
+      else if (this.getOpenAiRelease(release.id).status === 'BLOCKED' && release.artifactPath && release.artifactHash && release.manifest) {
+        this.materializeBlockedOpenAiRelease(release.id, { manifest: release.manifest, artifactPath: release.artifactPath, artifactHash: release.artifactHash, status: release.status === 'STALE' ? 'STALE' : 'READY_TO_UPLOAD' })
+      }
+      this.db.prepare('INSERT OR IGNORE INTO academy_openai_git_builds VALUES (?,?,?)').run(receipt.id, release.id, JSON.stringify(receipt))
+      return { ...this.getOpenAiRelease(release.id), source: receipt }
+    }).immediate()
   }
 
   transitionOpenAiRelease(id: string, expected: AcademyOpenAiReleaseStatus[], status: AcademyOpenAiReleaseStatus, values: {
@@ -614,6 +666,7 @@ export class AcademyStore {
 
   isAssigned(skillId: string, destinationId: string): boolean {
     const skill = this.skillRow(skillId)
+    if (skill.scope === 'GLOBAL' && this.getGitAuthority() && !this.getGitSkillSources().some(source => source.skillId === skillId && source.available)) return false
     return skill.scope === 'GLOBAL' || Boolean(this.db.prepare('SELECT 1 FROM academy_skill_projects WHERE skill_id=? AND destination_id=?').get(skillId, destinationId))
   }
 
@@ -710,12 +763,115 @@ export class AcademyStore {
   private getVersion(skillId: string, version: number): AcademySkillVersion {
     const row = this.db.prepare('SELECT * FROM academy_versions WHERE skill_id=? AND version=?').get(skillId, version) as Row | undefined
     if (!row) throw new AcademyError('VERSION_NOT_FOUND')
-    return versionFromRow(row)
+    return this.withGitSource(versionFromRow(row))
+  }
+
+  private withGitSource<T extends AcademySkillVersionMetadata>(version: T): T {
+    const source = this.getGitVersionSource(version.skillId, version.version)
+    return source ? { ...version, gitSource: source } : version
+  }
+
+  getGitAuthority(): AcademyGitAuthority | null {
+    const row = this.db.prepare('SELECT state_json FROM academy_git_authority WHERE id=1').get() as Row | undefined
+    return row ? JSON.parse(row.state_json) : null
+  }
+
+  getGitSnapshot(repositoryId: string, commitSha: string): AcademyGitSourceSnapshot | null {
+    const row = this.db.prepare('SELECT snapshot_json FROM academy_git_snapshots WHERE repository_id=? AND commit_sha=?').get(repositoryId, commitSha) as Row | undefined
+    return row ? JSON.parse(row.snapshot_json) : null
+  }
+
+  getGitSkillSources(): AcademyGitSkillSource[] {
+    return (this.db.prepare('SELECT * FROM academy_git_skill_sources ORDER BY path').all() as Row[]).map(row => ({
+      repositoryId: row.repository_id, path: row.path, skillId: row.skill_id, legacyBaselineVersion: row.legacy_baseline_version,
+      sourceCommitSha: row.source_commit_sha, available: Boolean(row.available)
+    }))
+  }
+
+  getGitVersionSource(skillId: string, version: number): { sourceCommitSha: string; managedTreeHash: string; packageHash: string } | null {
+    const row = this.db.prepare('SELECT * FROM academy_git_version_sources WHERE skill_id=? AND version=?').get(skillId, version) as Row | undefined
+    return row ? { sourceCommitSha: row.commit_sha, managedTreeHash: row.managed_tree_hash, packageHash: row.package_hash } : null
+  }
+
+  migrationDifferences(snapshot: AcademyGitSourceSnapshot): string[] {
+    const differences: string[] = []
+    for (const summary of this.list().filter(skill => skill.scope === 'GLOBAL')) {
+      const remote = snapshot.skills.find(skill => skill.name === summary.name)
+      if (!remote && summary.status === 'DISABLED') continue
+      if (!remote || remote.packageHash !== this.get(summary.id).current.packageHash) differences.push(`skills/${summary.name}`)
+    }
+    for (const remote of snapshot.skills) {
+      const existing = this.findByName(remote.name)
+      if (existing?.scope === 'PROJECT') differences.push(remote.path)
+    }
+    return [...new Set(differences)].sort()
+  }
+
+  acceptGitSnapshots(snapshots: AcademyGitSourceSnapshot[], expectedCommit: string | null, reviewedMigrationHash?: string): string[] {
+    if (!snapshots.length) return []
+    return this.db.transaction(() => {
+      const authority = this.getGitAuthority()
+      if ((authority?.processedCommitSha ?? null) !== expectedCommit) throw new AcademyError('GIT_SOURCE_CHANGED')
+      const first = snapshots[0]
+      if (!authority && this.migrationDifferences(first).length && reviewedMigrationHash !== this.gitMigrationHash(first)) throw new AcademyError('GIT_MIGRATION_RECONCILIATION_REQUIRED')
+      let previous = expectedCommit
+      const changed = new Set<string>()
+      if (!authority) for (const skill of this.list().filter(skill => skill.scope === 'GLOBAL')) changed.add(skill.id)
+      this.ingestingGit = true
+      try {
+        for (const snapshot of snapshots) {
+          if (snapshot.repositoryId !== first.repositoryId || snapshot.remoteUrl !== first.remoteUrl || snapshot.branch !== first.branch ||
+            (authority && (snapshot.repositoryId !== authority.repositoryId || snapshot.remoteUrl !== authority.remoteUrl || snapshot.branch !== authority.branch))) throw new AcademyError('GIT_SOURCE_IDENTITY_CHANGED')
+          if (previous && snapshot.firstParentSha !== previous) throw new AcademyError('ACADEMY_HISTORY_REWRITTEN')
+          const sources = this.getGitSkillSources()
+          const canonicalVersions: NonNullable<AcademyGitSourceSnapshot['canonicalVersions']> = {}
+          for (const skill of snapshot.skills) {
+            if (hashAcademyPackage(skill.package) !== skill.packageHash) throw new AcademyError('GIT_SOURCE_HASH_MISMATCH')
+            let source = sources.find(item => item.repositoryId === snapshot.repositoryId && item.path === skill.path)
+            let detail = source ? this.get(source.skillId) : !authority && !previous ? this.findByName(skill.name) : null
+            const legacyBaselineVersion = detail?.currentVersion ?? 0
+            let introducedVersion = !detail
+            if (!detail) detail = this.create({ package: skill.package, scope: 'GLOBAL', origin: 'GIT' })
+            else if (detail.scope !== 'GLOBAL') throw new AcademyError('GIT_SOURCE_IDENTITY_COLLISION')
+            else if (detail.current.packageHash !== skill.packageHash || source?.available === false) {
+              detail = this.update({ skillId: detail.id, expectedVersion: detail.currentVersion, package: skill.package, origin: 'GIT' })
+              introducedVersion = true
+            }
+            if (!source || !source.available || introducedVersion) changed.add(detail.id)
+            canonicalVersions[skill.path] = { skillId: detail.id, version: detail.currentVersion }
+            this.db.prepare(`INSERT INTO academy_git_skill_sources VALUES(?,?,?,?,?,1) ON CONFLICT(repository_id,path)
+              DO UPDATE SET source_commit_sha=excluded.source_commit_sha, available=1`).run(snapshot.repositoryId, skill.path, detail.id, legacyBaselineVersion, introducedVersion || !source ? snapshot.sourceCommitSha : source.sourceCommitSha)
+            if (introducedVersion) this.db.prepare('INSERT INTO academy_git_version_sources VALUES(?,?,?,?,?)').run(detail.id, detail.currentVersion, snapshot.sourceCommitSha, snapshot.managedTreeHash, detail.current.packageHash)
+          }
+          for (const source of sources.filter(item => item.available && item.repositoryId === snapshot.repositoryId && !snapshot.skills.some(skill => skill.path === item.path))) {
+            this.db.prepare('UPDATE academy_git_skill_sources SET available=0,source_commit_sha=? WHERE repository_id=? AND path=?').run(snapshot.sourceCommitSha, snapshot.repositoryId, source.path)
+            changed.add(source.skillId)
+          }
+          this.db.prepare('INSERT INTO academy_git_snapshots VALUES(?,?,?)').run(snapshot.repositoryId, snapshot.sourceCommitSha, JSON.stringify({ ...snapshot, canonicalVersions }))
+          previous = snapshot.sourceCommitSha
+        }
+        const next: AcademyGitAuthority = authority ? { ...authority, processedCommitSha: previous! } : {
+          repositoryId: first.repositoryId, remoteUrl: first.remoteUrl, branch: first.branch, processedCommitSha: previous!, baselineCommitSha: first.sourceCommitSha, cutoverAt: new Date().toISOString()
+        }
+        this.db.prepare('INSERT INTO academy_git_authority VALUES(1,?) ON CONFLICT(id) DO UPDATE SET state_json=excluded.state_json').run(JSON.stringify(next))
+        if (changed.size) this.db.prepare("UPDATE academy_destinations SET reconciliation_status='PENDING' WHERE enabled=1").run()
+        return [...changed]
+      } finally { this.ingestingGit = false }
+    }).immediate()
+  }
+
+  gitMigrationHash(snapshot: AcademyGitSourceSnapshot): string {
+    return hashAcademyPackage({ skillMd: '---\nname: migration\ndescription: Review\n---\n', artifacts: {
+      'review.json': JSON.stringify({ source: snapshot.sourceCommitSha, skills: this.list().filter(skill => skill.scope === 'GLOBAL').map(skill => ({ id: skill.id, version: skill.currentVersion, hash: this.get(skill.id).current.packageHash, status: skill.status, stateRevision: skill.stateRevision })) })
+    } })
   }
 
   private summary(row: Row): AcademySkillSummary {
     const projects = this.db.prepare('SELECT destination_id FROM academy_skill_projects WHERE skill_id=? ORDER BY destination_id').all(row.id) as Row[]
-    return { id: row.id, name: row.name, description: row.description, status: row.status, stateRevision: row.state_revision, scope: row.scope, currentVersion: row.current_version, projectIds: projects.map((entry) => entry.destination_id), createdAt: row.created_at, updatedAt: row.updated_at }
+    const gitManaged = row.scope === 'GLOBAL' && this.getGitAuthority()
+    const source = gitManaged ? this.db.prepare('SELECT * FROM academy_git_skill_sources WHERE skill_id=?').get(row.id) as Row | undefined : undefined
+    const sourceState: AcademySkillSummary['source'] = gitManaged ? { state: source ? source.available ? 'CONFIRMED' : 'REMOVED' : 'LEGACY_PRIVATE', sourceCommitSha: source?.source_commit_sha ?? null, path: source?.path ?? null } : undefined
+    return { id: row.id, name: row.name, description: row.description, status: row.status, stateRevision: row.state_revision, scope: row.scope, currentVersion: row.current_version, projectIds: projects.map((entry) => entry.destination_id), createdAt: row.created_at, updatedAt: row.updated_at, ...(sourceState ? { source: sourceState } : {}) }
   }
 }
 

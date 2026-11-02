@@ -46,24 +46,55 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
-it('requires confirmation and forwards an empty canonical projection with observed conflict preconditions', async () => {
+it('requires reviewed conflict content and forwards the exact observed revision', async () => {
   const current = await window.codeAwareness.getAcademyGitStatus()
-  const conflict = { ...current, syncState: 'REMOTE_DIVERGED' as const, publication: { destinationKey: 'destination', checkoutPath: 'C:/publication', baselineTree: null, desiredRevision: 'revision', desiredTree: '', localHead: null, remoteHead: 'a'.repeat(40), verifiedAt: null, operationId: null, pendingCommit: null, legacyPendingHead: null, migrationComplete: true, conflictPaths: ['skills/alpha/SKILL.md'], phase: 'CONFLICT' as const } }
+  const conflict = { ...current, syncState: 'CONFLICT' as const, publication: { destinationKey: 'destination', checkoutPath: 'C:/publication', baselineTree: null, desiredRevision: 'revision', desiredTree: '', localHead: null, remoteHead: 'a'.repeat(40), verifiedAt: null, operationId: null, pendingCommit: null, legacyPendingHead: null, migrationComplete: true, conflictPaths: ['skills/alpha/SKILL.md'], phase: 'CONFLICT' as const } }
   vi.mocked(window.codeAwareness.getAcademyGitStatus).mockResolvedValue(conflict)
   window.codeAwareness.resolveAcademyGitConflict = vi.fn(async () => conflict)
+  window.codeAwareness.reviewAcademyGitConflict = vi.fn(async () => ({ path: 'skills/alpha/SKILL.md', head: 'local-head', revision: 'observed-revision', base: 'base', local: 'local text', remote: 'remote text', working: 'conflict markers' }))
+  window.codeAwareness.resolveAcademyGitConflictPath = vi.fn(async () => ({ ...conflict, syncState: 'LOCAL_CHANGES', publication: { ...conflict.publication, conflictPaths: [] } })) as any
   render(<AcademyView />)
-  fireEvent.click(await screen.findByRole('button', { name: 'Publicar versão canônica' }))
-  expect(window.codeAwareness.resolveAcademyGitConflict).not.toHaveBeenCalled()
-  const dialog = await screen.findByRole('alertdialog')
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Publicar versão canônica' }))
-  await waitFor(() => expect(window.codeAwareness.resolveAcademyGitConflict).toHaveBeenCalledWith('a'.repeat(40), ''))
+  fireEvent.click(await screen.findByRole('button', { name: 'Resolver' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Revisar conflito Git' })
+  expect(window.codeAwareness.resolveAcademyGitConflictPath).not.toHaveBeenCalled()
+  fireEvent.change(within(dialog).getByLabelText('Conteúdo reconciliado'), { target: { value: 'reviewed merge' } })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Confirmar conteúdo revisado' }))
+  await waitFor(() => expect(window.codeAwareness.resolveAcademyGitConflictPath).toHaveBeenCalledWith({ path: 'skills/alpha/SKILL.md', head: 'local-head', revision: 'observed-revision', content: 'reviewed merge', confirmed: true }))
   expect(screen.queryByText('Git sincronizado.')).toBeNull()
+})
+
+it('shows Git provenance and requests an explicit cached rebuild without implying latest or upload', async () => {
+  const state = await window.codeAwareness.getAcademyOpenAiPublicationState()
+  const source = { id: 'build', releaseId: openAiRelease.id, buildSchema: 1 as const, sourceRepositoryId: 'repository', branch: 'main',
+    sourceCommitSha: 'b'.repeat(40), managedTreeHash: 'tree', manifestFingerprint: 'manifest', assetFingerprint: 'asset',
+    entriesFingerprint: 'entries', pluginVersion: openAiRelease.pluginVersion, zipSha256: openAiRelease.artifactHash,
+    remoteConfirmation: 'CACHED' as const, confirmedAt: detail.createdAt }
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockResolvedValue({ ...state, selectedRelease: { ...openAiRelease, source } })
+  render(<AcademyView />)
+  await screen.findByText(/Rebuild em cache; atualidade remota não verificada/)
+  expect(screen.getByText(/main@bbbbbbbbbbbb/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Rebuild do commit em cache' }))
+  await waitFor(() => expect(window.codeAwareness.prepareAcademyOpenAiRelease).toHaveBeenCalledWith({ mode: 'REBUILD', sourceCommitSha: source.sourceCommitSha }))
+  expect(window.codeAwareness.confirmAcademyOpenAiUpload).not.toHaveBeenCalled()
+})
+
+it('reports a Git draft without claiming a canonical version or scheduling delivery', async () => {
+  window.codeAwareness.getAcademyDraft = vi.fn(async () => ({ package: detail.current.package, workspaceCommitSha: 'draft-base', sourceBaseCommitSha: 'confirmed-main' }))
+  vi.mocked(window.codeAwareness.updateAcademySkill).mockResolvedValue({ state: 'DRAFT_SAVED', skillId: detail.id, name: detail.name, baseVersion: 1, sourceBaseCommitSha: 'confirmed-main', workspaceCommitSha: 'draft-next', packageHash: 'draft-hash', distribution: { status: 'NOT_APPLICABLE' } })
+  render(<AcademyView />)
+  await selectAlpha()
+  fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+  await screen.findByLabelText('Editar SKILL.md')
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
+  await waitFor(() => expect(window.codeAwareness.updateAcademySkill).toHaveBeenCalledWith(expect.objectContaining({ expectedVersion: 1, expectedDraftCommitSha: 'draft-base' })))
+  expect(await screen.findByText('Rascunho salvo em commit local. Publicação pendente.')).toBeTruthy()
+  expect(window.codeAwareness.getAcademyDeliveryStatus).not.toHaveBeenCalled()
 })
 
 it.each(['ERROR', 'PUSH_PENDING', 'REMOTE_DIVERGED', 'SYNCING'])('does not announce successful Git publication for %s', async (syncState) => {
   vi.mocked(window.codeAwareness.syncAcademyGitNow).mockResolvedValue({ profile: null, repository: null, syncState: syncState as any, lastSyncAt: null, lastCommitSha: null, lastError: 'Publication pending' })
   render(<AcademyView />)
-  const button = await screen.findByRole('button', { name: 'Sync Now' })
+  const button = await screen.findByRole('button', { name: 'Atualizar' })
   fireEvent.click(button)
   expect((await screen.findAllByText('Publication pending')).length).toBeGreaterThan(0)
   expect(screen.queryByText('Git sincronizado.')).toBeNull()

@@ -1,4 +1,6 @@
 import type { ContinuumBundleQuick, ContinuumBundleReceipt } from '../../shared/types/continuum-bundle-types'
+import type { AcademyDraftReceipt } from '../../shared/types/academy-types'
+import type { AcademyGitConflictReview } from '../../shared/types/academy-types'
 import type { BuilderRequest, BuilderPreview, BuilderReceipt, BundleComponent, BundleResult, BundleComposition } from '../../shared/types/continuum-builder-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 /*
@@ -75,8 +77,18 @@ declare global {
       openAcademyGitRepository: () => Promise<boolean>
       getAcademySkill: (id: string) => Promise<AcademySkillDetail>
       getAcademyHistory: (id: string) => Promise<AcademySkillVersion[]>
-      createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>) => Promise<AcademySkillDetail>
-      updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>) => Promise<AcademySkillDetail>
+      createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>) => Promise<AcademySkillDetail | AcademyDraftReceipt>
+      updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>) => Promise<AcademySkillDetail | AcademyDraftReceipt>
+      getAcademyDraft: (name: string) => Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }>
+      onAcademyChanged: (callback: () => void) => (() => void)
+      publishAcademyGit: (expected: { localHead: string; remoteHead: string | null }) => Promise<AcademyGitStatusProjection>
+      publishAcademyGitCandidate: (input: { branch: string; expectedHead: string; confirmed: boolean }) => Promise<AcademyGitStatusProjection>
+      deleteAcademyGitDraft: (input: { skillId: string; expectedVersion: number; expectedDraftCommitSha: string; confirmed: boolean }) => Promise<AcademyGitStatusProjection>
+      configureAcademyGitAutomation: (input: { autoPublish: boolean; autoUpdate: boolean; confirmed: boolean; expectedRepositoryId: string; expectedBranch: string }) => Promise<AcademyGitStatusProjection>
+      refreshAcademyGit: () => Promise<void>
+      completeAcademyGitMigration: (head: string, hash: string, confirmed: boolean) => Promise<AcademyGitStatusProjection>
+      reviewAcademyGitConflict: (path: string) => Promise<AcademyGitConflictReview>
+      resolveAcademyGitConflictPath: (input: { path: string; head: string; revision: string; content: string; confirmed: boolean }) => Promise<AcademyGitStatusProjection>
       archiveAcademySkill: (id: string, expectedVersion: number) => Promise<AcademySkillDetail>
       setAcademySkillEnabled: (id: string, enabled: boolean, expectedStateRevision: number) => Promise<AcademySkillDetail>
       restoreAcademySkill: (id: string, expectedVersion: number) => Promise<AcademySkillDetail>
@@ -94,7 +106,7 @@ declare global {
       getAcademyOpenAiPublicationState: () => Promise<AcademyOpenAiPublicationState>
       getAcademyPackageDistributionState: () => Promise<AcademyPackageDistributionState>
       listAcademyOpenAiReleases: () => Promise<AcademyOpenAiRelease[]>
-      prepareAcademyOpenAiRelease: () => Promise<AcademyOpenAiRelease>
+      prepareAcademyOpenAiRelease: (input?: import('../../shared/types/academy-git-source-types').AcademyGitBuildRequest) => Promise<AcademyOpenAiRelease>
       confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string) => Promise<AcademyOpenAiRelease>
       revealAcademyOpenAiPackage: (releaseId: string) => Promise<boolean>
       getChannelState: () => Promise<ChannelState>

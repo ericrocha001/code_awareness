@@ -3,6 +3,7 @@ import type { GitService } from '../core/git-service'
 import type { GitHubAuthService } from './github-auth-service'
 
 export class GitHubGitTransport implements GitRemoteTransport {
+  authorizationIdentity(): string | null { return this.auth?.authorizationIdentity() ?? null }
   constructor(
     private readonly auth: GitHubAuthService | null,
     private readonly git: GitService

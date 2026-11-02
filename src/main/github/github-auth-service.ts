@@ -97,6 +97,11 @@ export class GitHubAuthService {
     try { return this.store.loadCredentials() !== null } catch { return false }
   }
 
+  authorizationIdentity(): string | null {
+    const metadata = this.store.loadMetadata()
+    return this.hasCredentials() && metadata.user && metadata.connectedAt ? `${metadata.user.id}:${metadata.connectedAt}` : null
+  }
+
   private async poll(device: DeviceCodeResponse, signal: AbortSignal): Promise<string> {
     const deadline = this.now() + device.expires_in * 1000
     let interval = Math.max(device.interval ?? 5, 1) * 1000

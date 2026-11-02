@@ -24,23 +24,25 @@ exports.run = async ctx => {
   const pkg = text => ({ skillMd: `---\nname: alpha\ndescription: GitHub reconciliation proof\n---\n${text}\n`, artifacts: {} })
   fs.mkdirSync(path.join(human, 'skills', 'alpha'), { recursive: true })
   fs.writeFileSync(path.join(human, 'skills', 'alpha', 'SKILL.md'), pkg('baseline').skillMd)
+  fs.writeFileSync(path.join(human, 'plugin.json'), JSON.stringify({ $schema: 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json', name: 'academy-skills', version: '0.2.0', description: 'Academy Skills proof', author: { name: 'Academy' }, extensions: { 'com.openai': { interface: { displayName: 'Academy Skills' } } } }))
   fs.writeFileSync(path.join(human, 'README.md'), 'documentation')
   gitCommand(human, 'add', '.'); gitCommand(human, 'commit', '-m', 'baseline'); gitCommand(human, 'push', '-u', 'origin', 'main')
   gitCommand(ctx.temporary, 'clone', '--branch', 'main', remote, external)
   gitCommand(external, 'config', 'user.name', 'Writer'); gitCommand(external, 'config', 'user.email', 'writer@example.com')
   const service = new AcademyService(path.join(ctx.temporary, 'data', 'academy.db'))
   const skill = service.store.create({ package: pkg('baseline'), scope: 'GLOBAL', origin: 'UI' })
+  await service.bootstrapOpenAiPlugin(human, '0.1.0')
   const git = new GitService()
   const transport = { fetch: (root, origin) => git.fetchRemote(root, origin), readRemoteHead: (root, origin, ref) => git.readRemoteHead(root, origin, ref), push: (root, branch, origin, head) => git.push(root, origin, branch, head) }
   const record = { id: 'proof', name: 'Academy', status: 'ACTIVE', localCheckout: { path: human, availability: 'AVAILABLE', gitState: 'GIT' }, github: { repositoryId: 'proof-github', fullName: 'proof/academy', visibility: 'PRIVATE', cloneUrl: remote } }
   const sync = new AcademyGitSyncService(service.store, new AcademyGitMaterializer(), git, transport, { resolveRepository: () => record, findByGitHubId: () => record, listEligibleRepositories: () => [record] }, service)
-  service.gitSync = sync
+  service.initializeGitSync(sync)
   const settle = async fn => {
     const deadline = Date.now() + 45000
     while (Date.now() < deadline) { if (await ctx.evaluate(fn)) return; await new Promise(resolve => setTimeout(resolve, 100)) }
     throw new Error('Academy Git UI did not settle')
   }
-  const update = text => service.store.update({ skillId: skill.id, expectedVersion: service.store.get(skill.id).currentVersion, package: pkg(text), origin: 'UI' })
+  const update = text => sync.saveDraft({ skillId: skill.id, expectedVersion: service.store.get(skill.id).currentVersion, package: pkg(text), origin: 'UI' })
   const externalCommit = (file, content) => { fs.writeFileSync(path.join(external, file), content); gitCommand(external, 'add', '.'); gitCommand(external, 'commit', '-m', file); gitCommand(external, 'push') }
   try {
     const bound = await sync.bindRepository('proof')
@@ -49,7 +51,7 @@ exports.run = async ctx => {
     fs.writeFileSync(path.join(human, 'third-party.txt'), 'staged human work'); gitCommand(human, 'add', 'third-party.txt')
     const humanIndex = await git.getIndexRevision(human)
     externalCommit('README.md', 'external documentation')
-    update('canonical update'); service.store.updateGitSyncState({ syncState: 'DIRTY' })
+    await sync.syncNow(); await update('local draft update')
     registerAcademyHandlers(service)
     const preload = path.join(ctx.temporary, 'preload.cjs')
     buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')], bundle: true, outfile: preload, platform: 'node', format: 'cjs', external: ['electron'] })
@@ -63,34 +65,55 @@ exports.run = async ctx => {
     await ctx.load(page); await ctx.viewport(1440, 900)
     await ctx.waitFor(() => !!document.querySelector('[data-academy-action="sync-git"]'))
     await ctx.click('[data-academy-action="sync-git"]')
+    const operationDeadline = Date.now() + 3000
+    while (!sync.active && Date.now() < operationDeadline) await new Promise(resolve => setTimeout(resolve, 25))
+    ctx.check('Publication is in progress during interaction sampling', Boolean(sync.active))
+    const latencies = []
+    for (let sample = 0; sample < 3; sample++) {
+      const started = Date.now()
+      await ctx.evaluate(() => window.codeAwareness.getAcademyGitStatus())
+      await ctx.click('input[aria-label="Buscar Skills"]')
+      await ctx.evaluate(() => document.querySelector('input[aria-label="Buscar Skills"]').select())
+      ctx.window.webContents.insertText(`alpha${sample}`)
+      await ctx.waitFor(sample => document.querySelector('input[aria-label="Buscar Skills"]').value === `alpha${sample}`, sample)
+      const responsive = await ctx.evaluate(sample => document.querySelector('input[aria-label="Buscar Skills"]').value === `alpha${sample}`, sample)
+      latencies.push(Date.now() - started)
+      fs.writeFileSync(path.join(ctx.evidenceDir, 'responsiveness.json'), JSON.stringify({ required: true, budgetMs: 1000, latencies, responsive }))
+      ctx.check(`Input and IPC remain available during publication ${sample}`, responsive && latencies[sample] < 1000)
+    }
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'responsiveness.json'), JSON.stringify({ required: true, budgetMs: 1000, latencies, sourceHead: gitCommand(ctx.projectRoot, 'rev-parse', 'HEAD') }))
+    await ctx.input('input[aria-label="Buscar Skills"]', '')
     await settle(() => !!document.querySelector('.academy-toast.success'))
     ctx.check('Normal UI reconciles real Git and shows remote confirmation', sync.getStatus().publication.phase === 'CONFIRMED' && await ctx.evaluate(() => document.body.textContent.includes('Última confirmação remota:')))
     await ctx.capture('confirmed-dark')
+    await ctx.click('.academy-fallback-card .academy-inline-actions button')
+    await settle(() => document.querySelector('.academy-fallback-card')?.textContent.includes('READY_TO_UPLOAD'))
+    const release = service.getOpenAiPublicationState().selectedRelease
+    ctx.check('Normal publication UI prepares ZIP from the verified source commit', release.source.sourceCommitSha === service.store.getGitAuthority().processedCommitSha && release.status === 'READY_TO_UPLOAD' && release.artifactHash === release.source.zipSha256)
+    await ctx.click('.academy-fallback-card details summary')
+    ctx.check('Publication UI exposes source SHA, ZIP hash, version and separate upload state', await ctx.evaluate(({ commit, hash }) => { const card = document.querySelector('.academy-fallback-card'); return card.textContent.includes(commit) && card.textContent.includes(hash) && card.textContent.includes('v0.2.0') && card.textContent.includes('READY_TO_UPLOAD') }, { commit: release.source.sourceCommitSha, hash: release.artifactHash }))
+    await ctx.capture('release-source-dark')
     ctx.check('Human index and HEAD remain unchanged', humanHead === gitCommand(human, 'rev-parse', 'HEAD') && humanIndex === await git.getIndexRevision(human))
+    await ctx.click('input[aria-label="Buscar Skills"]')
+    await ctx.evaluate(() => document.querySelector('input[aria-label="Buscar Skills"]').select())
+    ctx.window.webContents.insertText('alpha')
+    await ctx.waitFor(() => !!document.querySelector('.academy-skill-item'))
+    await ctx.click('.academy-skill-item')
     gitCommand(external, 'pull', '--ff-only')
+    externalCommit('skills/alpha/SKILL.md', pkg('automatic remote update').skillMd)
+    await sync.configureAutomation({ autoPublish: false, autoUpdate: true, confirmed: true, expectedRepositoryId: 'proof-github', expectedBranch: 'main' })
+    await sync.refreshAutomatically()
+    await settle(() => document.querySelector('.academy-code-surface pre')?.textContent.includes('automatic remote update'))
+    ctx.check('External main update reaches the normal UI without the Update action', service.store.get(skill.id).currentVersion === 3)
+    await ctx.capture('automatic-inbound-dark')
     externalCommit('skills/alpha/SKILL.md', pkg('incompatible writer').skillMd)
-    update('canonical resolution')
+    await update('conflicting local draft')
     await ctx.click('[data-academy-action="sync-git"]')
-    await settle(() => !!document.querySelector('[data-academy-action="resolve-git"]'))
+    await settle(() => !!document.querySelector('[data-academy-action="resolve-git"]') && !!document.querySelector('.academy-toast.error'))
     ctx.check('Conflict produces error presentation, never a success toast', await ctx.evaluate(() => !!document.querySelector('.academy-toast.error') && !document.querySelector('.academy-toast.success')))
-    await ctx.capture('protected-conflict-dark')
     const remoteBefore = gitCommand(external, 'rev-parse', 'HEAD')
-    await ctx.click('[data-academy-action="resolve-git"]')
-    await ctx.waitFor(() => !!document.querySelector('[role="alertdialog"]'))
-    ctx.check('Protected resolution requires explicit user confirmation', sync.getStatus().publication.remoteHead === remoteBefore)
-    await ctx.capture('resolution-confirmation-dark')
-    await ctx.click('[role="alertdialog"] .academy-danger-button')
-    await settle(() => !!document.querySelector('.academy-toast.success'))
-    ctx.check('Confirmed resolution preserves external commit and canonical content', await git.isAncestor(sync.getStatus().repository.checkoutPath, remoteBefore, sync.getStatus().publication.remoteHead) && service.store.get(skill.id).current.package.skillMd === pkg('canonical resolution').skillMd)
-    const fetch = transport.fetch
-    transport.fetch = async () => { throw new Error('Proof network unavailable') }
-    await ctx.click('[data-academy-action="sync-git"]')
-    await settle(() => !!document.querySelector('.academy-toast.error'))
-    ctx.check('Network failure remains explicit in normal UI', sync.getStatus().publication.phase === 'REMOTE_UNAVAILABLE')
-    await ctx.capture('remote-unavailable-dark')
-    transport.fetch = fetch
-    await ctx.click('[data-academy-action="sync-git"]')
-    await settle(() => !!document.querySelector('.academy-toast.success'))
-    await ctx.capture('recovered-dark')
-  } finally { service.close(); ctx.window.webContents.session.setPreloads([]) }
+    ctx.check('Inbound main becomes official while local conflicting content remains private', service.store.get(skill.id).current.package.skillMd === pkg('incompatible writer').skillMd && (await sync.getDraft('alpha')).package.skillMd === pkg('conflicting local draft').skillMd)
+    ctx.check('Conflict never changes the remote commit', sync.getStatus().publication.remoteHead === remoteBefore)
+    await ctx.capture('protected-conflict-dark')
+  } finally { await service.close(); ctx.window.webContents.session.setPreloads([]) }
 }
