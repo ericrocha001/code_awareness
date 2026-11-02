@@ -263,7 +263,7 @@ export class ChannelMcpAdapter {
       const health = JSON.parse(first.text)
       return { ...result, content: [{ type: 'text', text: JSON.stringify({ ...health, workloadGovernor: this.governor.snapshot(), activeRunId: this.validationExecution?.getActiveRunId() ?? null }) }] }
     }
-    if (literalReadTools.has(name) && !result.isError && result.content.length === 1 && result.content[0].type === 'text') {
+    if ((literalReadTools.has(name) || name === 'inspect_entire_checkpoint') && !result.isError && result.content.length === 1 && result.content[0].type === 'text') {
       const data: unknown = JSON.parse(result.content[0].text)
       if (data && typeof data === 'object' && !Array.isArray(data) && typeof (data as Record<string, unknown>).content === 'string') {
         return { ...result, structuredContent: data as Record<string, unknown> }

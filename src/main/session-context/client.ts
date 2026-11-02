@@ -114,7 +114,7 @@ export class SessionContextClient implements SessionContextPort {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
-      const timeoutMs = this.timeoutMs ?? (isLiveSessionTool(name) ? 20_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : 5000)
+      const timeoutMs = this.timeoutMs ?? (isLiveSessionTool(name) ? 20_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
       const deadline = Date.now() + timeoutMs
       const request: Request = { resolve, deadline, phase: 'worker-recovery', timer: setTimeout(() => this.expire(id), timeoutMs) }
       this.pending.set(id, request)
@@ -152,6 +152,14 @@ export class SessionContextClient implements SessionContextPort {
               target = { ...await this.resolveTarget(selection), selection }
               request.validate = target.validate
             }
+          }
+          if ((name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') && args && typeof args === 'object' && 'worktreeId' in args && (args as any).worktreeId) {
+            const q = args as { worktreeId: string; generation?: string }
+            if (!this.resolveTarget) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+            request.phase = 'target-resolution'
+            const selection = { worktreeId: q.worktreeId, generation: q.generation! }
+            target = { ...await this.resolveTarget(selection), selection }
+            request.validate = target.validate
           }
           if (!this.pending.has(id) || !this.active()) return
           if (Date.now() >= deadline) { this.expire(id); return }
