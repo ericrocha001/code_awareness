@@ -1,4 +1,6 @@
 import type { ContinuumBundleQuick, ContinuumBundleReceipt } from '../shared/types/continuum-bundle-types'
+import type { AcademyDraftReceipt } from '../shared/types/academy-types'
+import type { AcademyGitConflictReview } from '../shared/types/academy-types'
 import type { BuilderRequest, BuilderPreview, BuilderReceipt, BundleComponent, BundleResult, BundleComposition } from '../shared/types/continuum-builder-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../shared/types/continuum-tag-types'
 /*
@@ -99,8 +101,22 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getAcademySnapshot: (): Promise<AcademySnapshot> => ipcRenderer.invoke('academy:snapshot'),
   getAcademySkill: (id: string): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:get', id),
   getAcademyHistory: (id: string): Promise<AcademySkillVersion[]> => ipcRenderer.invoke('academy:history', id),
-  createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:create', input),
-  updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:update', input),
+  createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>): Promise<AcademySkillDetail | AcademyDraftReceipt> => ipcRenderer.invoke('academy:create', input),
+  updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>): Promise<AcademySkillDetail | AcademyDraftReceipt> => ipcRenderer.invoke('academy:update', input),
+  getAcademyDraft: (name: string): Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }> => ipcRenderer.invoke('academy:git-draft', name),
+  onAcademyChanged: (callback: () => void): (() => void) => {
+    const listener = () => callback()
+    ipcRenderer.on('academy:changed', listener)
+    return () => ipcRenderer.removeListener('academy:changed', listener)
+  },
+  publishAcademyGit: (expected: { localHead: string; remoteHead: string | null }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-publish', expected),
+  publishAcademyGitCandidate: (input: { branch: string; expectedHead: string; confirmed: boolean }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-candidate', input),
+  deleteAcademyGitDraft: (input: { skillId: string; expectedVersion: number; expectedDraftCommitSha: string; confirmed: boolean }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-delete-draft', input),
+  configureAcademyGitAutomation: (input: { autoPublish: boolean; autoUpdate: boolean; confirmed: boolean; expectedRepositoryId: string; expectedBranch: string }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-automation', input),
+  refreshAcademyGit: (): Promise<void> => ipcRenderer.invoke('academy:git-refresh'),
+  completeAcademyGitMigration: (head: string, hash: string, confirmed: boolean): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-migration', head, hash, confirmed),
+  reviewAcademyGitConflict: (path: string): Promise<AcademyGitConflictReview> => ipcRenderer.invoke('academy:git-conflict-review', path),
+  resolveAcademyGitConflictPath: (input: { path: string; head: string; revision: string; content: string; confirmed: boolean }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-conflict-resolve', input),
   archiveAcademySkill: (id: string, expectedVersion: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:archive', id, expectedVersion),
   setAcademySkillEnabled: (id: string, enabled: boolean, expectedStateRevision: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:set-enabled', id, enabled, expectedStateRevision),
   restoreAcademySkill: (id: string, expectedVersion: number): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:restore', id, expectedVersion),

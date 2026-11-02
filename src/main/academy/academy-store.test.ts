@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AcademyStore } from './academy-store'
 import Database from 'better-sqlite3'
+import type { AcademyGitSourceSnapshot } from '../../shared/types/academy-git-source-types'
+import { hashAcademyPackage } from './academy-package'
 
 const roots: string[] = []
 const pkg = (name = 'alpha', body = '# Alpha') => ({ skillMd: `---\nname: ${name}\ndescription: Skill ${name}\n---\n\n${body}\n`, artifacts: { 'references/guide.md': 'Olá β' } })
@@ -16,6 +18,89 @@ const open = () => {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('AcademyStore', () => {
+  const gitSnapshot = (sha: string, parent: string | null, packages = [pkg()]): AcademyGitSourceSnapshot => ({
+    schema: 1, repositoryId: 'academy', remoteUrl: 'https://example.com/academy.git', branch: 'main',
+    sourceCommitSha: sha, firstParentSha: parent, managedTreeHash: `tree-${sha}`, authoredFiles: {}, observedAt: '2026-11-01T00:00:00Z',
+    skills: packages.map(packageValue => ({ path: `skills/${/name: (.+)/.exec(packageValue.skillMd)![1]}`, name: /name: (.+)/.exec(packageValue.skillMd)![1], package: packageValue, packageHash: hashAcademyPackage(packageValue) }))
+  })
+
+  it('preserves V1..V17 byte for byte through cutover and restart, then records V18 from Git', () => {
+    let store = open()
+    const path = store.databasePath
+    const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+    for (let version = 1; version < 17; version++) store.update({ skillId: skill.id, expectedVersion: version, package: pkg('alpha', `v${version + 1}`), origin: 'MCP' })
+    const legacy = store.history(skill.id)
+    const project = store.create({ package: pkg('project'), scope: 'PROJECT', origin: 'UI' })
+    const privateSkill = store.create({ package: pkg('private'), scope: 'GLOBAL', origin: 'UI' })
+    store.setEnabled(privateSkill.id, false, 1)
+    const baseline = gitSnapshot('baseline', null, [pkg('alpha', 'v17')])
+    store.acceptGitSnapshots([baseline], null)
+    store.close()
+    store = new AcademyStore(path)
+    try {
+      expect(store.history(skill.id)).toEqual(legacy)
+      expect(store.get(project.id)).toEqual(project)
+      expect(store.get(privateSkill.id).status).toBe('DISABLED')
+      expect(store.getGitSkillSources()).toEqual([expect.objectContaining({ skillId: skill.id, legacyBaselineVersion: 17 })])
+      store.acceptGitSnapshots([gitSnapshot('next', 'baseline', [pkg('alpha', 'v18')])], 'baseline')
+      expect(store.get(skill.id).currentVersion).toBe(18)
+      expect(store.history(skill.id).slice(1)).toEqual(legacy)
+      expect(store.history(skill.id, { version: 18 }).gitSource?.sourceCommitSha).toBe('next')
+      expect(() => store.update({ skillId: skill.id, expectedVersion: 18, package: pkg(), origin: 'UI' })).toThrow('GIT_DRAFT_REQUIRED')
+    } finally { store.close() }
+  })
+
+  it('ingests first-parent transitions without skips, unrelated increments or duplicate versions; reverts get new versions', () => {
+    const store = open()
+    try {
+      const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      store.acceptGitSnapshots([gitSnapshot('a', null)], null)
+      store.acceptGitSnapshots([
+        gitSnapshot('b', 'a', [pkg('alpha', 'second')]),
+        gitSnapshot('c', 'b', [pkg('alpha', 'third')]),
+        gitSnapshot('d', 'c', [pkg()]),
+        gitSnapshot('e', 'd', [pkg(), pkg('other')])
+      ], 'a')
+      expect(store.history(skill.id).map(item => item.version)).toEqual([4, 3, 2, 1])
+      expect(store.history(skill.id).map(item => item.gitSource?.sourceCommitSha)).toEqual(['d', 'c', 'b', undefined])
+      expect(() => store.acceptGitSnapshots([gitSnapshot('b', 'a')], 'a')).toThrow('GIT_SOURCE_CHANGED')
+      expect(store.get(skill.id).currentVersion).toBe(4)
+      store.acceptGitSnapshots([gitSnapshot('f', 'e', [])], 'e')
+      expect(store.getGitSkillSources().every(source => !source.available)).toBe(true)
+      expect(store.history(skill.id)).toHaveLength(4)
+      expect(() => store.acceptGitSnapshots([gitSnapshot('rewritten', 'unrelated')], 'f')).toThrow('ACADEMY_HISTORY_REWRITTEN')
+      expect(store.getGitAuthority()?.processedCommitSha).toBe('f')
+    } finally { store.close() }
+  })
+
+  it('rolls back the entire batch and HEAD if a later snapshot fails, then recovers once', () => {
+    const store = open()
+    try {
+      const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      store.acceptGitSnapshots([gitSnapshot('a', null)], null)
+      const second = gitSnapshot('c', 'b', [pkg('alpha', 'third')])
+      second.skills[0].packageHash = 'invalid'
+      expect(() => store.acceptGitSnapshots([gitSnapshot('b', 'a', [pkg('alpha', 'second')]), second], 'a')).toThrow('GIT_SOURCE_HASH_MISMATCH')
+      expect(store.get(skill.id).currentVersion).toBe(1)
+      expect(store.getGitAuthority()?.processedCommitSha).toBe('a')
+      expect(store.getGitSnapshot('academy', 'b')).toBeNull()
+      second.skills[0].packageHash = hashAcademyPackage(second.skills[0].package)
+      store.acceptGitSnapshots([gitSnapshot('b', 'a', [pkg('alpha', 'second')]), second], 'a')
+      expect(store.get(skill.id).currentVersion).toBe(3)
+    } finally { store.close() }
+  })
+
+  it('refuses divergent migration without overwriting either history or claiming authority', () => {
+    const store = open()
+    try {
+      const skill = store.create({ package: pkg('alpha', 'private edit'), scope: 'GLOBAL', origin: 'UI' })
+      const before = store.history(skill.id)
+      expect(store.migrationDifferences(gitSnapshot('a', null))).toEqual(['skills/alpha'])
+      expect(() => store.acceptGitSnapshots([gitSnapshot('a', null)], null)).toThrow('GIT_MIGRATION_RECONCILIATION_REQUIRED')
+      expect(store.history(skill.id)).toEqual(before)
+      expect(store.getGitAuthority()).toBeNull()
+    } finally { store.close() }
+  })
   it('discovers metadata and selects an exact immutable package while preserving legacy and archived history', () => {
     const store = open()
     try {

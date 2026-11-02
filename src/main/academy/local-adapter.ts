@@ -2,6 +2,7 @@ import type { AcademyHistoryOptions, AcademyPackage, AcademySkillScope, AcademyC
 import type { AcademyService } from './academy-service'
 import { operation, type LocalChannelAdapter } from '../local-agent-channel/local-channel-types'
 import { object, text, integer, strings, invalid } from '../local-agent-channel/request-validation'
+import { projectAcademyGitStatus } from './git/academy-git-sync-service'
 
 function scope(value: unknown): AcademySkillScope { if (value !== 'GLOBAL' && value !== 'PROJECT') invalid(); return value }
 function pkg(value: unknown): AcademyPackage {
@@ -24,6 +25,23 @@ export class AcademyLocalAdapter implements LocalChannelAdapter {
       return projects
     }
     this.operations = {
+      git_status: operation(input => object(input, []), () => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(service.gitSync.getStatus()) }),
+      git_fetch: operation(input => object(input, []), async () => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(await service.gitSync.fetch()) }),
+      git_update: operation(input => object(input, []), async () => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(await service.gitSync.syncNow()) }),
+      git_publish: operation(input => { const value = object(input, ['localHead', 'remoteHead', 'confirmed']); if (value.confirmed !== true) invalid(); return { localHead: text(value.localHead), remoteHead: text(value.remoteHead) } }, async expected => { if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED'); return projectAcademyGitStatus(await service.gitSync.publish(expected)) }),
+      git_draft: operation(input => text(object(input, ['name']).name), name => service.gitSync?.getDraft(name)),
+      git_conflict_begin: operation(input => { const value = object(input, ['remoteHead', 'localHead']); return { remote: text(value.remoteHead), local: text(value.localHead) } }, value => service.gitSync?.resolveManagedConflict(value.remote, value.local)),
+      git_conflict_review: operation(input => text(object(input, ['path']).path), path => service.gitSync?.reviewGitConflict(path)),
+      git_conflict_resolve: operation(input => {
+        const value = object(input, ['path', 'head', 'revision', 'content', 'confirmed'])
+        if (value.confirmed !== true || typeof value.content !== 'string') invalid()
+        return { path: text(value.path), head: text(value.head), revision: text(value.revision), content: value.content, confirmed: true }
+      }, value => service.gitSync?.resolveGitConflict(value)),
+      git_candidate_publish: operation(input => {
+        const value = object(input, ['branch', 'expectedHead', 'confirmed'])
+        if (value.confirmed !== true) invalid()
+        return { branch: text(value.branch), expectedHead: text(value.expectedHead), confirmed: true }
+      }, value => service.gitSync?.publishCandidate(value)),
       history: operation(input => {
         const { skillId, ...options } = object(input, ['skillId', 'metadataOnly', 'version'])
         return { skillId: text(skillId), options: options as AcademyHistoryOptions }
@@ -59,15 +77,15 @@ export class AcademyLocalAdapter implements LocalChannelAdapter {
       }),
       get: operation(input => text(object(input, ['skillId']).skillId), skillId => ({ ...service.get(skillId), distribution: service.distribution.states(skillId).map(state => ({ destinationId: state.destinationId, target: state.target, status: state.status, canonicalVersion: state.canonicalVersion, distributedVersion: state.distributedVersion, distributedHash: state.distributedHash, errorCode: state.errorCode })) })),
       create: operation((input): AcademyCreateInput => {
-        const value = object(input, ['package', 'scope', 'projectIds']), target = scope(value.scope)
-        return { package: pkg(value.package), scope: target, projectIds: associations(target, value.projectIds), origin: 'LOCAL_CLI' }
-      }, (request, context) => { if (!context.connected()) throw new Error('IPC_CLOSED'); return service.create(request, 'RECEIPT') }),
+        const value = object(input, ['package', 'scope', 'projectIds', 'expectedDraftCommitSha']), target = scope(value.scope)
+        return { package: pkg(value.package), scope: target, projectIds: associations(target, value.projectIds), expectedDraftCommitSha: value.expectedDraftCommitSha === undefined ? undefined : text(value.expectedDraftCommitSha), origin: 'LOCAL_CLI' }
+      }, (request, context) => { if (!context.connected()) throw new Error('IPC_CLOSED'); return service.saveNewSkill(request, 'RECEIPT') }),
       update: operation((input): AcademyUpdateInput => {
-        const value = object(input, ['skillId', 'expectedVersion', 'package', 'scope', 'projectIds'])
+        const value = object(input, ['skillId', 'expectedVersion', 'package', 'scope', 'projectIds', 'expectedDraftCommitSha'])
         if (value.projectIds !== undefined && value.scope === undefined) invalid()
         const target = value.scope === undefined ? undefined : scope(value.scope)
-        return { skillId: text(value.skillId), expectedVersion: integer(value.expectedVersion), package: pkg(value.package), scope: target, projectIds: target === undefined ? undefined : associations(target, value.projectIds) ?? [], origin: 'LOCAL_CLI' }
-      }, (request, context) => { if (!context.connected()) throw new Error('IPC_CLOSED'); return service.update(request, 'RECEIPT') }),
+        return { skillId: text(value.skillId), expectedVersion: integer(value.expectedVersion), package: pkg(value.package), scope: target, projectIds: target === undefined ? undefined : associations(target, value.projectIds) ?? [], expectedDraftCommitSha: value.expectedDraftCommitSha === undefined ? undefined : text(value.expectedDraftCommitSha), origin: 'LOCAL_CLI' }
+      }, (request, context) => { if (!context.connected()) throw new Error('IPC_CLOSED'); return service.saveSkill(request, 'RECEIPT') }),
       delivery_status: operation(input => {
         const value = object(input, ['skillId', 'expectedVersion'])
         return {

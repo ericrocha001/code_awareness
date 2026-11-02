@@ -360,6 +360,7 @@ app.whenReady().then(async () => {
     { packageRevisions: academyService.packageRevisions, publicationRoot: join(app.getPath('userData'), 'academy', 'github-publication') }
   )
   academyService.initializeGitSync(academyGitSyncService)
+  app.on('browser-window-focus', () => { void academyGitSyncService.refreshAutomatically().catch(error => console.warn('[Academy] Remote observation pending:', error.message)) })
   registerAcademyHandlers(academyService)
   registerContinuumHandlers(continuumSession)
   const expectedProfile = canonicalDesktopProfile(app.getPath('appData')).userData
@@ -372,12 +373,6 @@ app.whenReady().then(async () => {
   }
 
   void (async () => {
-    if (academyService.store.list().length === 0) {
-      for (const destination of academyService.store.listDestinations()) {
-        const skillsRoot = join(destination.path, '.skills')
-        if (existsSync(skillsRoot)) await academyService.importer.import(skillsRoot, 'GLOBAL', [destination.id])
-      }
-    }
     if (!academyService.store.getOpenAiPluginProfile() || !academyService.listOpenAiReleases().some((release) => release.baseline)) {
       try { await academyService.bootstrapOpenAiPlugin() }
       catch (error: any) { console.warn('[Academy] OpenAI plugin profile bootstrap pending:', error?.code ?? error?.message) }

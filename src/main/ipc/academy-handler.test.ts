@@ -21,7 +21,7 @@ it('routes conflict resolution with observation preconditions and rejects malfor
 
 it('registers the bounded Academy IPC surface and stamps UI origin server-side', async () => {
   const service = {
-    snapshot: vi.fn(), get: vi.fn(), history: vi.fn(), create: vi.fn(async (value) => value), update: vi.fn(async (value) => value),
+    snapshot: vi.fn(), get: vi.fn(), history: vi.fn(), saveNewSkill: vi.fn(async (value) => value), saveSkill: vi.fn(async (value) => value),
     archive: vi.fn(), restore: vi.fn(), setEnabled: vi.fn(), setDestinationEnabled: vi.fn(), import: vi.fn(), resolveConflict: vi.fn(),
     getDistributionHealth: vi.fn(), listDistributionStates: vi.fn(), reconcileDistribution: vi.fn(), getDeliveryStatus: vi.fn(),
 
@@ -35,11 +35,11 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:distribution-health', 'academy:distribution-states', 'academy:distribution-reconcile', 'academy:delivery-status']))
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:openai-state', 'academy:openai-prepare', 'academy:openai-confirm-upload', 'academy:openai-reveal']))
   await handlers.get('academy:create')!({}, { package: { skillMd: 'x', artifacts: {} }, scope: 'GLOBAL' })
-  expect(service.create).toHaveBeenCalledWith(expect.objectContaining({ origin: 'UI' }))
+  expect(service.saveNewSkill).toHaveBeenCalledWith(expect.objectContaining({ origin: 'UI' }))
   await handlers.get('academy:update')!({}, { skillId: 'id', expectedVersion: 1, package: { skillMd: 'x', artifacts: {} } })
   await handlers.get('academy:set-enabled')!({}, 'id', false, 7)
   expect(service.setEnabled).toHaveBeenCalledWith('id', false, 7)
-  expect(service.update).toHaveBeenCalledWith(expect.objectContaining({ origin: 'UI', expectedVersion: 1 }))
+  expect(service.saveSkill).toHaveBeenCalledWith(expect.objectContaining({ origin: 'UI', expectedVersion: 1 }))
   await handlers.get('academy:import-destination')!({}, 'repo')
   expect(service.import).toHaveBeenCalledWith(join('C:/repo', '.skills'), 'repo')
   await handlers.get('academy:openai-confirm-upload')!({}, 'release', 'hash')

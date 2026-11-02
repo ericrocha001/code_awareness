@@ -97,6 +97,7 @@ export class OpenAiPluginPublicationService {
   listReleases(): AcademyOpenAiRelease[] { this.refreshDrift(); return this.store.listOpenAiReleases() }
 
   prepareRelease(): AcademyOpenAiRelease {
+    if (this.store.getGitProfile() || this.store.getGitAuthority()) throw new AcademyError('GIT_SOURCE_SNAPSHOT_REQUIRED')
     const profile = this.store.getOpenAiPluginProfile()
     if (!profile) throw new AcademyError('OPENAI_PLUGIN_PROFILE_MISSING')
     this.refreshDrift()
