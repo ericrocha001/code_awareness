@@ -36,6 +36,24 @@ O caminho precisa ser absoluto; o arquivo executável é fixado por hash e vers�
 
 Para atualizar uma Worktree irmã sem mudar o projeto ativo, descubra-a pelo Git Operations e forneça `worktreeId` e `generation` juntos a `refresh_agent_sessions`, com `sessionId` opcional. O registry do repositório ativo resolve e revalida o alvo; paths e branches não são aceitos. Sem alvo, permanece o checkout ativo. Worktrees estrangeiras, missing/prunable, detached ou de geração antiga são recusadas. O Entire usa o cwd e a configuração local segura do alvo, mantendo o mesmo SQLite do repositoryId. A identidade é conferida antes da consulta, antes do commit SQLite e após a importação; resultados obsoletos são recusados. Não se deduz autoria por nome de branch, pasta ou HEAD. Não há busca global de sessões.
 
+## Captura Codex no Windows
+
+O Entire instala os hooks; o Codex executa os comandos no shell do ambiente selecionado. Em Worktree vinculada, o arquivo efetivamente carregado pode ser `.codex/hooks.json` do checkout principal. Descoberta e confiança não comprovam execução: confirme separadamente os eventos reais `SessionStart` e `UserPromptSubmit` e seus resultados.
+
+No Entire 0.12.2, o `SessionStart` Windows gerado pode conter sintaxe direta de `cmd.exe`, incompatível com PowerShell. O wrapper silencioso Windows usado pelos demais handlers evita essa incompatibilidade:
+
+```text
+cmd.exe /d /s /c "where.exe entire >nul 2>nul & if errorlevel 1 (ver>nul) else (entire hooks codex session-start)"
+```
+
+Essa forma não emite o aviso de CLI ausente; confirme antes a disponibilidade do executável. Uma reinstalação pelo mesmo gerador pode restaurar o comando incompatível. Não reinstale repetidamente nem altere o produto para compensar esse problema operacional.
+
+Qualquer ajuste no arquivo efetivo compartilhado exige autorização específica, backup privado dos bytes originais e conferência de que somente o handler pretendido mudou. Preserve os demais handlers e a privacidade. Reaprove a confiança do comando alterado pelo mecanismo do Codex, vinculada ao hash atual; não use bypass. Para reverter, restaure apenas a alteração autorizada após conferir que o arquivo não recebeu mudanças concorrentes e revalide a confiança correspondente. Não versione o JSON privado.
+
+Após o ajuste, inicie uma sessão Codex genuína e verifique `entire session current --json`: `resolution` deve identificar o chamador (`caller-env` ou `ancestry`), com sessão e Worktree corretas. A captura pode ser inicializada por `UserPromptSubmit` mesmo quando `SessionStart` falha; isso não torna o handler com falha saudável. Preserve `push_sessions:false`, `telemetry:false` e `checkpoint_push_disabled:true`.
+
+Antes de um commit legítimo, confirme trabalho pendente correspondente aos arquivos realmente alterados. Depois do commit normal, confira o trailer `Entire-Checkpoint` e a resolução local por `entire checkpoint explain --commit <SHA> --json`; IDs, origem e arquivos devem ser coerentes. Não use commit vazio, alteração fictícia, attach forçado ou reescrita de histórico para produzir essa evidência. Checkpoints e transcripts permanecem locais e não acompanham o push da branch de código.
+
 ## Limites e cobertura
 
 Cada banco admite 500 sessões. A inserção seguinte remove atomicamente a ENDED mais antiga, com desempate por ID; ACTIVE, UNKNOWN e estados terminais sem evidência não são removidos. Se não houver vítima elegível, retorna CAPACITY_REACHED. Replay não ocupa outro slot.
