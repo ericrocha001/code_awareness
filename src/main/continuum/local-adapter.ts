@@ -12,12 +12,14 @@ import { isAbsolute } from 'node:path'
 import { VISUAL_MAX_BYTES } from './visual-media'
 import { executeGetVisualArtifact } from './continuum-mcp'
 import { navigationQuery } from './artifact-navigation'
+import type { Artifact } from './continuum-types'
 
 export class ContinuumLocalAdapter implements LocalChannelAdapter {
   readonly domain = 'continuum'
   private registry?: { session: object; value: GitWorktreeRegistry }
   readonly operations: LocalChannelAdapter['operations']
-  constructor(private readonly session: RepositoryContinuumSession) {
+  constructor(private readonly session: RepositoryContinuumSession,
+    private readonly handoffCoverage?: (artifact: Artifact, target: { worktreeId: string; generation: string }) => Promise<object>) {
     const selection = (input: unknown, keys: string[]) => {
       const value = object(input, ['repositoryId', 'worktreeId', ...keys])
       return { value, repositoryId: value.repositoryId, worktreeId: value.worktreeId }
@@ -96,7 +98,20 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
         return artifact
       }),
-      publish: operation(input => { const request = selection(input, ['rawMarkdown']); return { ...request, rawMarkdown: text(request.value.rawMarkdown) } }, async (request, context) => ({ ...(await this.service(request, context)).publish(request.rawMarkdown), state: 'PERSISTED' })),
+      publish: operation(input => { const request = selection(input, ['rawMarkdown']); return { ...request, rawMarkdown: text(request.value.rawMarkdown) } }, async (request, context) => {
+        const service = await this.service(request, context)
+        const receipt = service.publish(request.rawMarkdown)
+        const artifact = service.get(receipt.artifactId)!
+        let sessionCoverage: object | undefined
+        if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF' && this.handoffCoverage) {
+          try {
+            const target = await this.getRegistry(this.session.getActiveSession()!).revalidateSelection(String(request.worktreeId))
+            if (await this.service(request, context, false) !== service) throw new Error('REPOSITORY_MISMATCH')
+            sessionCoverage = await this.handoffCoverage(artifact, { worktreeId: target.worktreeId, generation: target.generation })
+          } catch { sessionCoverage = { coverage: 'UNAVAILABLE', code: 'SESSION_COVERAGE_UNAVAILABLE' } }
+        }
+        return { ...receipt, state: 'PERSISTED', ...(sessionCoverage ? { sessionCoverage } : {}) }
+      }),
       update: operation(input => { const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown']); return { ...request, artifactId: text(request.value.artifactId), expectedRevision: integer(request.value.expectedRevision), rawMarkdown: text(request.value.rawMarkdown) } }, async (request, context) => ({ ...(await this.service(request, context)).update(request.artifactId, request.expectedRevision, request.rawMarkdown), state: 'PERSISTED' }))
     }
   }

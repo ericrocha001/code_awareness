@@ -13,6 +13,14 @@ import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
 import type { McpMultimodalToolResult } from '../mcp/mcp-types'
 import { createHash } from 'node:crypto'
+import { RepositoryContinuumSession } from '../continuum/project-continuum-session'
+import { ContinuumLocalAdapter } from '../continuum/local-adapter'
+import { ValidationLedger } from '../validation-ledger/validation-ledger'
+import { authorizeHandoffAssociation, handoffSessionCoverage } from './handoff'
+import type { AuthorizedCodexArchiveConnection } from './codex-archive'
+import { LocalChannelHost } from '../local-agent-channel/local-channel-host'
+import { TestOutputLocalAdapter } from '../validation-ledger/test-output-adapter'
+import { createRequire } from 'node:module'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.reverse()) await close(); cleanup.length = 0 })
@@ -87,6 +95,108 @@ async function workerFixture(timeoutMs?: number) {
 }
 
 describe('refresh in an explicitly selected sibling Worktree', () => {
+  it('uses only authorized official archived metadata, separates Codex from Entire and never imports transcripts or commits late observations', async () => {
+    const f = await workerFixture()
+    expect(data(await f.client.call('refresh_agent_sessions', f.selection))).toMatchObject({ imported: 1 })
+    const calls: unknown[] = []
+    let mode: 'supported' | 'foreign' | 'suspended' = 'supported'
+    let entered = false
+    let release!: () => void
+    const connection: AuthorizedCodexArchiveConnection = { repositoryId: 'A', accountIdentity: 'fixture-account', version: 'fixture-official-schema', supports: { archived: true, cwd: true },
+      request: async (method, params) => {
+        calls.push({ method, params })
+        if (mode === 'suspended') { entered = true; await new Promise<void>(resolve => { release = resolve }) }
+        return { data: [{ id: 'sibling-session', cwd: mode === 'foreign' ? f.sibling : f.main, createdAt: 1767225600,
+          preview: 'PRIVATE_PREVIEW_MUST_NOT_PERSIST', turns: [{ text: 'PRIVATE_TRANSCRIPT_MUST_NOT_PERSIST' }] }], nextCursor: null }
+      } }
+    const client = new SessionContextClient((f.client as any).storageBase, 'A', f.main, () => true, (f.client as any).workerPath, f.resolve, 10000, undefined, connection)
+    cleanup.push(() => client.dispose())
+    const catalog = data(await client.call('list_agent_sessions', { includeArchived: true, limit: 1 }))
+    expect(calls).toEqual([{ method: 'thread/list', params: { archived: true, cwd: f.main, limit: 20 } }])
+    expect(catalog.archiveCoverage.code).toBe('ARCHIVE_OBSERVED')
+    expect(catalog.nextCursor).toBeTruthy()
+    const continued = data(await client.call('list_agent_sessions', { includeArchived: true, limit: 1, cursor: catalog.nextCursor }))
+    expect(continued.sessions).toHaveLength(1)
+    expect(calls).toHaveLength(1)
+    const codex = f.store.byProvider('sibling-session', 'codex')!
+    expect(codex.id).not.toBe(f.store.byProvider('sibling-session', 'entire')!.id)
+    expect(codex).toMatchObject({ state: 'UNKNOWN', importState: 'METADATA_ONLY', eventCount: 0, payloadBytes: 0 })
+    expect(catalog.sessions.find((row: { sessionId: string }) => row.sessionId === codex.id).archiveState).toBe('ARCHIVED_OBSERVED')
+    expect(JSON.stringify(catalog)).not.toContain('PRIVATE_')
+    expect(data(await client.call('refresh_agent_sessions', { sessionId: codex.id })).code).toBe('TRANSCRIPT_PROVIDER_UNAVAILABLE')
+    expect(f.store.session(codex.id).eventCount).toBe(0)
+    const revision = f.store.catalogRevision()
+    mode = 'foreign'
+    expect(data(await client.call('list_agent_sessions', { includeArchived: true })).archiveCoverage.code).toBe('ARCHIVE_PROVIDER_ERROR')
+    expect(f.store.catalogRevision()).toBe(revision)
+    connection.supports.archived = false
+    const count = calls.length
+    expect(data(await client.call('list_agent_sessions', { includeArchived: true })).archiveCoverage.code).toBe('ARCHIVE_PROVIDER_UNAVAILABLE')
+    expect(calls).toHaveLength(count)
+    connection.supports.archived = true
+    mode = 'suspended'
+    const ready = await f.resolve.current!()
+    const fastResolver = Object.assign(async () => ready, { current: async () => ready })
+    const bounded = new SessionContextClient((f.client as any).storageBase, 'A', f.main, () => true, (f.client as any).workerPath, fastResolver, 1500, undefined, connection)
+    cleanup.push(() => bounded.dispose())
+    const pending = bounded.call('list_agent_sessions', { includeArchived: true })
+    expect(data(await pending).code).toBe('SESSION_CONTEXT_TIMEOUT')
+    expect(entered).toBe(true)
+    release?.()
+    await new Promise(resolve => setTimeout(resolve, 100))
+    expect(f.store.catalogRevision()).toBe(revision)
+    expect(f.store.associations(codex.id).some(link => link.archived)).toBe(true)
+  }, 45000)
+  it('links metadata-only observation through a real Handoff, keeps proof IDs separate, and audits after removing its Worktree', async () => {
+    const f = await workerFixture()
+    expect(data(await f.client.call('refresh_agent_sessions', f.selection))).toMatchObject({ imported: 1 })
+    const session = f.store.byProvider('sibling-session')!
+    expect(f.store.associations(session.id)[0]).toMatchObject({ ...f.selection, evidence: 'WORKTREE_VERIFIED' })
+    expect(data(await f.client.call('refresh_agent_sessions', f.selection))).toMatchObject({ imported: 0 })
+    expect(f.store.associations(session.id)).toHaveLength(1)
+    const continuum = new RepositoryContinuumSession(join(f.base, 'continuum-fixture'), { findByPath: () => ({ id: 'A', localCheckout: { path: f.main } }) })
+    continuum.activate(f.main); cleanup.push(() => continuum.dispose())
+    const service = continuum.getActiveService()!
+    const plan = service.publish('---\nname: Historical fixture\ndescription: Target plan\nkind: EXECUTABLE_PLAN\ndate: 2026-11-03T00:00:00Z\n---\nFixture')
+    const ledger = new ValidationLedger(join(f.base, 'ledger.db')); cleanup.push(() => ledger.close())
+    const profile = join(f.base, 'validation-profile')
+    const channel = new LocalChannelHost([new ContinuumLocalAdapter(continuum), new TestOutputLocalAdapter(continuum, ledger)], profile)
+    await channel.start(); cleanup.push(() => channel.dispose())
+    writeFileSync(join(f.sibling, '.gitignore'), '.code-awareness/\n')
+    writeFileSync(join(f.sibling, 'validation.cjs'), "require('node:test')('composition', () => require('node:assert/strict').equal(1 + 1, 2))")
+    const runner = createRequire(join(process.cwd(), 'package.json'))('./scripts/test-output.cjs')
+    const validation = await runner.run('node', ['--test', '--test-reporter=tap', 'validation.cjs'], { cwd: f.sibling, profile,
+      association: { kind: 'TARGETED_TEST', scope: ['validation.cjs'], evidenceFor: [plan.artifactId] } })
+    expect(validation.registration).toMatchObject({ state: 'PERSISTED', status: 'PASSED' })
+    const proof = ledger.getProof(validation.registration.proofId)!
+    expect(proof.commandProfile?.receipt?.id).toBe(validation.id)
+    const client = new SessionContextClient((f.client as any).storageBase, 'A', f.main, () => true, (f.client as any).workerPath, f.resolve, 15000,
+      async request => authorizeHandoffAssociation(service, ledger, request))
+    cleanup.push(() => client.dispose())
+    const adapter = new ContinuumLocalAdapter(continuum, (artifact, target) => handoffSessionCoverage(client, artifact, target))
+    const commitSha = f.git(f.sibling, 'rev-parse', 'HEAD').trim()
+    const markdown = `---\n${JSON.stringify({ name: 'History handoff', description: 'Fixture coverage', kind: 'IMPLEMENTATION_HANDOFF', date: '2026-11-03T00:00:00Z',
+      sessionLinks: [{ sessionId: session.id }], executionId: 'execution-fixture', commitSha, pullRequest: 89, proofIds: [proof.proofId], relations: [{ artifactId: plan.artifactId, kind: 'implements' }] })}\n---\nFixture Handoff`
+    const receipt = await adapter.operations.publish.execute({ repositoryId: 'A', worktreeId: f.selection.worktreeId, rawMarkdown: markdown }, { connected: () => true }) as any
+    expect(receipt).toMatchObject({ state: 'PERSISTED', sessionCoverage: { coverage: 'LINKED', evidence: 'HANDOFF_DECLARED', transcriptImported: false } })
+    const link = f.store.associations(session.id).find(link => link.sourceArtifactId === receipt.artifactId)!
+    expect(link).toMatchObject({ proofIds: [proof.proofId], evidence: 'HANDOFF_DECLARED', commitSha, pullRequest: 89, sourceRevision: receipt.revision, sourceHash: service.get(receipt.artifactId)!.contentHash })
+    const main = await f.registry.current()
+    const rejected = data(await client.call('refresh_agent_sessions', { sessionId: session.id, worktreeId: main.worktreeId, generation: main.generation,
+      association: { sourceArtifactId: receipt.artifactId, artifactId: plan.artifactId, expectedCatalogRevision: f.store.catalogRevision(), proofIds: [proof.proofId] } }))
+    expect(rejected.code).toBe('ASSOCIATION_WORKTREE_MISMATCH')
+    f.git(f.main, 'worktree', 'remove', '--force', f.sibling)
+    for (const filter of [{ executionId: 'execution-fixture' }, { artifactId: plan.artifactId }, { artifactId: receipt.artifactId }, { commitSha }, { pullRequest: 89 }]) {
+      const result = data(await client.call('list_agent_sessions', filter))
+      expect(result.sessions).toHaveLength(1)
+      expect(result.sessions[0]).toMatchObject({ sessionId: session.id, importState: 'METADATA_ONLY', eventCount: 0, claimsVerified: false, worktreeAvailability: 'NOT_RECHECKED' })
+      expect(JSON.stringify(result)).not.toContain(f.sibling)
+    }
+    expect(data(await client.call('list_agent_sessions', { executionId: 'missing' }))).toMatchObject({ sessions: [], reason: 'NO_ASSOCIATION_OBSERVED' })
+    expect(data(await client.call('list_agent_sessions', { includeArchived: true })).archiveCoverage.code).toBe('ARCHIVE_PROVIDER_UNAVAILABLE')
+    const foreign = new SessionStore(sessionStorePath(f.base, 'B'), 'B'); cleanup.push(() => foreign.close())
+    expect(foreign.sessions({ artifactId: plan.artifactId }, 0, 20)).toEqual([])
+  }, 60000)
   it('recovers after a suspended transcript times out, kills its process and discards the old worker before a new read', async () => {
     const f = await workerFixture(9000)
     expect(data(await f.client.call('refresh_agent_sessions', f.selection))).toMatchObject({ imported: 1 })

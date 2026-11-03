@@ -4,7 +4,23 @@ O histórico pertence ao repositório canônico do catálogo. Worktrees reconhec
 
 `<perfil>/continuum/repositories/<repositoryId em base64url>/session-context.sqlite`
 
-O banco é independente do Continuum e do Git Atlas. As cinco ferramentas de histórico mantêm o contrato de consulta local; somente `refresh_agent_sessions` solicita ingestão. Sem `sessionId`, atualiza o catálogo sem importar bodies; com um ID descoberto, importa somente aquela sessão. A ausência de associação provada deixa `executionId`, Worktree e commit indisponíveis. Uma alegação de teste ou commit no texto não equivale a prova do Validation Ledger ou Git Operations.
+O banco é independente do Continuum e do Git Atlas. As ferramentas de histórico mantêm o contrato de consulta local; `refresh_agent_sessions` solicita ingestão explícita. Sem `sessionId`, atualiza o catálogo sem importar bodies; com um ID descoberto e sem `association`, importa somente aquela sessão. Uma alegação de teste ou commit no texto não equivale a prova do Validation Ledger ou Git Operations.
+
+## Associações históricas e encerramento
+
+`list_agent_sessions` aceita seletores exatos `executionId`, `artifactId`, `commitSha` (SHA completo) e `pullRequest` (número no repositório ativo). Não faz joins por horário, nome de branch ou autor Git. As associações muitos-para-muitos ficam no SessionStore existente, com integridade, revisão CAS e origem tipada. A atualização metadata-only autorizada do Entire preserva o vínculo com a identidade validada da Worktree. Consultas posteriores não exigem remontá-la; `worktreeAvailability: NOT_RECHECKED` evita alegar disponibilidade sem nova observação. Ausência de vínculo retorna `NO_ASSOCIATION_OBSERVED`, não prova de ausência de captura.
+
+`WORKTREE_VERIFIED` corresponde à observação do checkout; `CHECKPOINT_VERIFIED` é registrado somente quando a desambiguação existente do Entire confirma metadados de sessão no checkpoint, com trailer verificado quando há commit. `HANDOFF_DECLARED` preserva somente a declaração. Nenhum nível comprova autoria exclusiva. A retenção continua em 500 sessões: associações sobrevivem à evicção, mas retornam `SESSION_EVICTED`; eventos ausentes não são reconstruídos.
+
+Um Implementation Handoff pode declarar `sessionLinks: [{sessionId: <UUID já descoberto>}]`, `executionId`, `commitSha`, `pullRequest` e `proofIds` na metadata. As relações `implements` selecionam os Planos no mesmo Continuum. Ao publicar pela CLI local, o recibo inclui `sessionCoverage`; o histórico recebe somente declarações compatíveis com a Worktree verificada e com o Artifact persistido. Provas precisam existir no Ledger e referenciar o Plano ou Handoff; não viram evidência de autoria. Sem sessão declarada, a publicação permanece válida e informa `NO_ASSOCIATION_OBSERVED`.
+
+Recuperação explícita usa `refresh_agent_sessions` com `sessionId`, seleção de Worktree e `association: {sourceArtifactId, artifactId?, executionId?, commitSha?, pullRequest?, proofIds?, expectedCatalogRevision}`. Esse modo apenas registra a declaração existente no Handoff; não lê transcript. A revisão vem de `list_agent_sessions`. Uma Worktree diferente não pode alterar o vínculo. Até dez associações por publicação; cobertura parcial não bloqueia commit ou PR.
+
+## Sessões arquivadas no Codex
+
+`list_agent_sessions({includeArchived:true})` pode consultar `thread/list` com `archived:true`, `cwd` exato e limite 20, exclusivamente por conexão local já autorizada, vinculada a conta/repositório e com suporte de schema confirmado. `archiveCursor` continua a página oficial; `cursor` continua o índice sem repetir a consulta ao provedor. O adaptador descarta previews, turns, prompts e paths da projeção; IDs Codex e Entire têm namespaces separados. Arquivamento observado é independente de `ENDED`. Respostas após cancelamento não gravam observações. Capacidade esgotada preserva o índice com `ARCHIVE_INDEX_PARTIAL` e motivo `CAPACITY_REACHED`.
+
+O Code Awareness não possui atualmente uma conexão Codex App Server autorizada instalada por este fluxo: retorna `ARCHIVE_PROVIDER_UNAVAILABLE` e conserva o índice histórico. Não inicia app-server, não lê diretórios privados, não configura hooks nem habilita captura. A integração opcional recebe uma conexão já governada do host; disponibilidade do protocolo público não comprova disponibilidade local. Contrato oficial: [Codex App Server — thread/list](https://developers.openai.com/codex/app-server#list-threads-with-pagination--filters). Não há promessa de recuperação retroativa do PR #89.
 
 ## Fonte consultiva live — CH-13
 

@@ -18,6 +18,7 @@ export interface SourceObservation {
   }
 }
 export interface SessionInput {
+  provider?: 'entire' | 'codex'
   sourceObservation?: SourceObservation
   importState?: ImportState
   coverageReasons?: CoverageReasons
@@ -43,6 +44,8 @@ export interface EventInput {
   omission?: 'LIMIT_REACHED' | 'REDACTED' | 'UNAVAILABLE'
 }
 export interface SessionRow {
+  provider?: 'entire' | 'codex'
+  historicalState?: 'SESSION_EVICTED'
   id: string; providerSessionId: string; providerVersion: string; agent: string
   startedAt: string | null; endedAt: string | null; lastObserved: string
   state: SessionState; coverage: Coverage; revision: number; eventCount: number; payloadBytes: number

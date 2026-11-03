@@ -58,7 +58,8 @@ export class EntireProvider {
   private phase = 'preflight'
   constructor(private readonly store: SessionStore | Pick<SessionStore, 'path' | 'repositoryId'>, private readonly root: string, private readonly assertActive: () => void, private readonly run: CommandRunner = runReadOnly,
     private readonly validateTarget: () => Promise<void> = async () => {},
-    private readonly observePhase: (phase: string) => void = () => {}) {}
+    private readonly observePhase: (phase: string) => void = () => {},
+    private readonly targetIdentity?: { worktreeId: string; generation: string }) {}
   private mark(phase: string): void { this.phase = phase; this.observePhase(phase) }
   private assertDeadline(): void { if (Date.now() >= this.deadline) throw Object.assign(new Error('PROVIDER_TIMEOUT'), { phase: this.phase }) }
   private assertWithinDeadline(): void { this.assertActive(); this.assertDeadline() }
@@ -168,6 +169,7 @@ export class EntireProvider {
       const store = this.store
       await this.validate()
       known = sessionId ? store.session(sessionId) : undefined
+        if (known?.provider && known.provider !== 'entire') throw new Error('TRANSCRIPT_PROVIDER_UNAVAILABLE')
       this.mark('preflight')
       const config = await this.preflight()
       const args = known ? ['session', 'info', known.providerSessionId, '--json'] : ['session', 'list', '--json']
@@ -214,16 +216,23 @@ export class EntireProvider {
           this.assertWithinDeadline()
           this.mark('sqlite-ingest')
           const result = store.ingest({ ...metadata, ...parsed, sourceObservation, importState: 'TRANSCRIPT_IMPORTED', coverageReasons, coverage: transcript.limited ? 'PARTIAL' : parsed.coverage }, parsed.events, () => this.assertWithinDeadline())
+          if (this.targetIdentity) store.observeWorktree(result.sessionId, this.targetIdentity, () => this.assertWithinDeadline())
           await this.validate()
           this.assertWithinDeadline()
           this.mark('sqlite-maintenance')
           store.maintain()
           return { ...result, imported: 1, lastObserved: new Date().toISOString(), sourceBytes: parsed.sourceBytes, provider: 'entire', provenance: 'OBSERVED_FROM_PROVIDER' }
         }
-        if (!store.byProvider(value.session_id)) {
+        const existing = store.byProvider(value.session_id)
+        if (!existing) {
           await this.validate()
           this.assertWithinDeadline()
-          store.ingest(metadata, [], () => this.assertWithinDeadline()); imported++
+          const result = store.ingest(metadata, [], () => this.assertWithinDeadline())
+          if (this.targetIdentity) store.observeWorktree(result.sessionId, this.targetIdentity, () => this.assertWithinDeadline())
+          imported++
+        } else if (this.targetIdentity) {
+          await this.validate()
+          store.observeWorktree(existing.id, this.targetIdentity, () => this.assertWithinDeadline())
         }
       }
       await this.validate()
@@ -233,7 +242,7 @@ export class EntireProvider {
       return { imported, skipped, coverageReasons: discoveryReasons, coverage: skipped || values.length > 500 ? 'PARTIAL' : 'COMPLETE', lastObserved: new Date().toISOString(), provider: 'entire', importMode: 'METADATA_ONLY', transcriptImported: false }
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
-      const allowed = ['STREAM_UNAVAILABLE', 'SOURCE_IDENTITY_CONFLICT', 'SOURCE_IDENTITY_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'SESSION_CONTEXT_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH']
+      const allowed = ['STREAM_UNAVAILABLE', 'SOURCE_IDENTITY_CONFLICT', 'SOURCE_IDENTITY_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'SESSION_CONTEXT_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'TRANSCRIPT_PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'SESSION_EVICTED', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH']
       const coverageReasons: CoverageReasons = message === 'SOURCE_IDENTITY_CONFLICT' || message === 'SOURCE_IDENTITY_UNAVAILABLE' ? { [message]: 1 }
         : message === 'STREAM_UNAVAILABLE' || (this.phase === 'transcript' && message === 'PROVIDER_UNAVAILABLE') ? { STREAM_UNAVAILABLE: 1 } : {}
       return { coverage: 'UNAVAILABLE', importState: known?.importState ?? 'UNKNOWN', coverageReasons, code: allowed.includes(message) ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), lastObserved: new Date().toISOString(), imported: 0 }
