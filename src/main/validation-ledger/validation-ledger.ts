@@ -59,6 +59,7 @@ async function classifyFreshness(
   currentInstanceId: string | null,
   sources = new Map<string, Promise<ValidationSource>>()
 ): Promise<ProofFreshness> {
+  if (proof.commandProfile?.receipt) return 'UNVERIFIABLE'
   if (proof.commandProfile?.checkout) return 'UNVERIFIABLE'
   if (proof.runtimeInstanceId && currentInstanceId && proof.runtimeInstanceId !== currentInstanceId) return 'RUNTIME_HISTORICAL'
   const source = proof.commandProfile?.source
@@ -225,6 +226,19 @@ export class ValidationLedger {
       )
 
     return proof
+  }
+
+  recordReceiptProof(input: RecordProofInput): ValidationProof {
+    return this.db.transaction(() => {
+      const proof = this.recordProof(input)
+      const expected = { ...input, sourceFingerprint: input.sourceFingerprint ?? null, runtimeInstanceId: input.runtimeInstanceId ?? null,
+        metrics: input.metrics ?? null, commandProfile: input.commandProfile ?? null, evidenceFor: input.evidenceFor ?? [], deduplicationKey: input.deduplicationKey ?? null }
+      const { proofId: _id, recordedAt: _at, ...stored } = proof
+      for (const key of Object.keys(expected) as (keyof typeof expected)[]) {
+        if (JSON.stringify(expected[key]) !== JSON.stringify(stored[key])) throw new Error('RECEIPT_IDENTITY_CONFLICT')
+      }
+      return proof
+    }).immediate()
   }
 
   getProof(proofId: string): ValidationProof | null {

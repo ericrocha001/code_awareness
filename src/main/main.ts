@@ -65,6 +65,7 @@ import { SystemHealthCore } from './system-health/system-health-core'
 import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-provider'
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
+import { TestOutputLocalAdapter } from './validation-ledger/test-output-adapter'
 import { RepositoryContinuumSession } from './continuum/project-continuum-session'
 import { LocalChannelHost } from './local-agent-channel/local-channel-host'
 import { ContinuumLocalAdapter } from './continuum/local-adapter'
@@ -157,7 +158,7 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
 }, { ingestCheckout: !isRuntimePreview() })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const localAgentChannel = new LocalChannelHost(
-  [new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)],
+  [new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService), new TestOutputLocalAdapter(continuumSession, validationLedger)],
   app.getPath('userData'),
   () => mcpLifecycle.getLocalEndpoint(runtimeIdentityProvider.getInstanceId())
 )
