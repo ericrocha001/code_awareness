@@ -206,6 +206,15 @@ export async function executeSessionTool(
     return wrap(data)
   } catch (error) {
     const code = error instanceof z.ZodError ? 'INVALID_ARGUMENT' : error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'
-    return { ...wrap({ code }), isError: true }
+    const payload: Record<string, unknown> = { code }
+    if (error && typeof error === 'object') {
+      if ('file' in error) payload.file = (error as any).file
+      if ('range' in error) payload.range = (error as any).range
+      if ('segments' in error) payload.segments = (error as any).segments
+      if ('needExplicitRange' in error) payload.needExplicitRange = (error as any).needExplicitRange
+      if ('unavailableIndices' in error) payload.unavailableIndices = (error as any).unavailableIndices
+      if ('unavailableCount' in error) payload.unavailableCount = (error as any).unavailableCount
+    }
+    return { ...wrap(payload), isError: true }
   }
 }

@@ -143,6 +143,7 @@ export async function readCheckpointDisambiguate(
   const { json, checkpointRef } = await readCheckpointTopMetadata(runner, root, query.checkpointId, assertActive)
   const sessionsCount = json.sessions?.length ?? 0
   const candidateSessions: Array<CodeProvenanceCandidate & { promptPreview?: string; isPreview?: boolean }> = []
+  const unavailableIndices: number[] = []
 
   for (let i = 0; i < sessionsCount; i++) {
     assertActive()
@@ -156,11 +157,15 @@ export async function readCheckpointDisambiguate(
     )
     assertActive()
 
-    if (catSession.code !== 0 || catSession.limited) continue
+    if (catSession.code !== 0 || catSession.limited) {
+      unavailableIndices.push(i)
+      continue
+    }
     let sessionJson: EntireSessionJson
     try {
       sessionJson = JSON.parse(catSession.text)
     } catch {
+      unavailableIndices.push(i)
       continue
     }
 
@@ -213,12 +218,18 @@ export async function readCheckpointDisambiguate(
     })
   }
 
+  const coverage: 'COMPLETE' | 'PARTIAL' = unavailableIndices.length > 0 ? 'PARTIAL' : 'COMPLETE'
+
   return {
     source: 'ENTIRE_CHECKPOINT_LOCAL',
     checkpointId: query.checkpointId,
     commit: query.commit,
     sessions: candidateSessions,
-    coverage: 'COMPLETE'
+    coverage,
+    ...(unavailableIndices.length > 0 ? {
+      unavailableIndices,
+      unavailableCount: unavailableIndices.length
+    } : {})
   }
 }
 
@@ -254,6 +265,8 @@ export interface CursorPayload {
   field: PromptField
   promptIndex: number
   offset: number
+  blobSha?: string
+  worktreeId?: string
 }
 
 export function encodeCursor(payload: CursorPayload): string {
@@ -267,9 +280,17 @@ export function decodeCursor(cursorStr: string): CursorPayload {
     if (
       typeof parsed.checkpointId !== 'string' ||
       typeof parsed.sessionIndex !== 'number' ||
-      typeof parsed.field !== 'string' ||
+      !Number.isSafeInteger(parsed.sessionIndex) ||
+      parsed.sessionIndex < 0 ||
+      (parsed.field !== 'STORED_PROMPT' && parsed.field !== 'INTENT') ||
       typeof parsed.promptIndex !== 'number' ||
-      typeof parsed.offset !== 'number'
+      !Number.isSafeInteger(parsed.promptIndex) ||
+      parsed.promptIndex < 0 ||
+      typeof parsed.offset !== 'number' ||
+      !Number.isSafeInteger(parsed.offset) ||
+      parsed.offset < 0 ||
+      (parsed.blobSha !== undefined && typeof parsed.blobSha !== 'string') ||
+      (parsed.worktreeId !== undefined && typeof parsed.worktreeId !== 'string')
     ) {
       throw new Error()
     }
@@ -359,6 +380,21 @@ export async function inspectEntireCheckpoint(
     let promptIndex = query.promptIndex ?? 0
     let promptCount = 1
 
+    const targetFile = field === 'STORED_PROMPT' ? `${sessionIndex}/prompt.txt` : `${sessionIndex}/metadata.json`
+    const blobRefCheck = await runner(
+      'git',
+      ['-c', 'core.fsmonitor=false', 'rev-parse', '--verify', `${checkpointRef}:${targetFile}`],
+      root,
+      4096,
+      undefined,
+      5000
+    )
+    assertActive()
+    if (blobRefCheck.code !== 0 || blobRefCheck.limited) {
+      throw new Error(field === 'STORED_PROMPT' ? 'PROMPT_UNAVAILABLE' : 'INTENT_UNAVAILABLE')
+    }
+    const currentBlobSha = blobRefCheck.text.trim()
+
     if (field === 'STORED_PROMPT') {
       const promptRead = await runner(
         'git',
@@ -421,9 +457,13 @@ export async function inspectEntireCheckpoint(
         decoded.checkpointId !== cleanCheckpointId ||
         decoded.sessionIndex !== sessionIndex ||
         decoded.field !== field ||
-        decoded.promptIndex !== promptIndex
+        decoded.promptIndex !== promptIndex ||
+        (decoded.worktreeId && query.worktreeId && decoded.worktreeId !== query.worktreeId)
       ) {
         throw new Error('CURSOR_INVALID')
+      }
+      if (decoded.blobSha && decoded.blobSha !== currentBlobSha) {
+        throw new Error('CURSOR_STALE')
       }
       if (decoded.offset > totalBytes) {
         throw new Error('CURSOR_STALE')
@@ -445,7 +485,9 @@ export async function inspectEntireCheckpoint(
           sessionIndex,
           field,
           promptIndex,
-          offset: endByte
+          offset: endByte,
+          blobSha: currentBlobSha,
+          ...(query.worktreeId ? { worktreeId: query.worktreeId } : {})
         })
       : undefined
 
