@@ -333,6 +333,8 @@ export interface AcademyOpenAiRelease {
 }
 
 export interface AcademyOpenAiPublicationState {
+  versionPreflight?: import('./academy-publication-types').AcademyVersionPreflight
+  operation?: import('./academy-publication-types').AcademyPublicationOperation | null
   sourceError?: string | null
   profile: AcademyOpenAiPluginProfile | null
   latestPrepared: AcademyOpenAiRelease | null
@@ -381,6 +383,10 @@ export interface AcademyGitProfile {
 }
 
 export interface AcademyGitStatusProjection {
+  lastKnown?: import('./academy-bootstrap-types').AcademyLastKnownSyncSnapshot | null
+  remoteCheck?: import('./academy-bootstrap-types').AcademyRemoteCheckState
+  lastKnownAgeMs?: number | null
+  provenance?: 'ACADEMY_SQLITE'
   publication?: AcademyGitPublicationState | null
   profile: AcademyGitProfile | null
   repository: {

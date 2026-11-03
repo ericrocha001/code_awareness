@@ -241,6 +241,8 @@ export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEdit
 }
 
 interface OperationsRailProps {
+  hydration?: 'LOADING' | 'READY' | 'ERROR'
+  knownPublication?: import('../../../../shared/types/academy-bootstrap-types').AcademyPersistedPublication | null
   open: boolean
   destinations: AcademyDestination[]
   artifacts: Record<string, string>
@@ -258,7 +260,10 @@ interface OperationsRailProps {
   onAddArtifact: () => void
   onReconcile: () => void
   onPrepareRelease: () => void
+  packagePending?: boolean
+  onRevalidateRelease?: () => void
   onRebuildRelease?: () => void
+  onPrepareManifestVersion?: () => void
   onBootstrapPlugin: () => void
   onRevealRelease: () => void
   onConfirmUpload: () => void
@@ -272,8 +277,13 @@ interface OperationsRailProps {
   onPreviewConflictBatch: () => void
 }
 
-export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onRebuildRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
+export const OperationsRail: React.FC<OperationsRailProps> = ({ hydration = 'READY', knownPublication, open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, packagePending, onRevalidateRelease, onRebuildRelease, onPrepareManifestVersion, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
   const release = openAiPublication?.selectedRelease
+  const loading = hydration !== 'READY'
+  const configured = Boolean(gitStatus?.profile || gitStatus?.repository)
+  const check = gitStatus?.remoteCheck
+  const gitName = gitStatus?.repository?.fullName ?? gitStatus?.lastKnown?.repositoryId ?? (loading ? 'Carregando configuração…' : 'Não configurado')
+  const gitLabel = loading ? 'Carregando…' : configured && check && check.state !== 'OK' ? `Último: ${gitStatus?.lastKnown?.result ?? 'sem confirmação'}` : gitStatus?.syncState ?? 'UNCONFIGURED'
   return <aside className={`academy-operations ${open ? 'is-open' : ''}`} aria-label="Operações da Academy">
     <div className="academy-operations-mobile-header"><strong>Operações</strong><button className="academy-icon-button" aria-label="Fechar operações" onClick={onClose}><X size={18} /></button></div>
     {conflicts.length > 0 && <RailCard icon={<CircleAlert size={18} />} title="Conflitos" count={`${conflicts.length}`} className="academy-conflict-card">
@@ -298,15 +308,16 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinatio
       <div className="academy-distribution-summary">
         <div><span className="academy-summary-icon"><Box size={17} /></span><span><strong>Academy Skills</strong><small>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version} · ${packageDistribution.skillCount} Skills` : 'Pacote não disponível'}</small></span><StatusBadge tone="success">PACKAGE</StatusBadge></div>
         {distribution.targets.map((target) => <div key={target.target}><span className="academy-summary-icon"><Cloud size={17} /></span><span><strong>{friendlyState(target.target)}</strong><small>{target.current} current · {target.error} error</small></span><StatusBadge tone={target.convergence === 'CONVERGED' ? 'success' : 'warning'}>{target.convergence}</StatusBadge></div>)}
-        <div><span className="academy-summary-icon"><GitBranch size={17} /></span><span><strong>Repositório Git</strong><small>{gitStatus?.repository?.fullName ?? packageDistribution?.git.repository?.fullName ?? 'Não configurado'}</small></span><StatusBadge tone={(gitStatus?.syncState ?? packageDistribution?.git.syncState) === 'SYNCED' ? 'success' : 'warning'}>{gitStatus?.syncState ?? packageDistribution?.git.syncState ?? 'UNCONFIGURED'}</StatusBadge></div>
+        <div><span className="academy-summary-icon"><GitBranch size={17} /></span><span><strong>Repositório Git</strong><small>{gitName}</small></span><StatusBadge tone={check?.state === 'OK' && gitStatus?.syncState === 'SYNCED' ? 'success' : 'warning'}>{gitLabel}</StatusBadge></div>
         <div><span className="academy-summary-icon"><Package size={17} /></span><span><strong>Marketplace</strong><small>{packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'Git Managed' : packageDistribution?.marketplace.mode === 'SOURCE_AVAILABLE' ? 'Source Available' : 'Pending Evidence'}</small></span><StatusBadge tone={packageDistribution?.marketplace.mode === 'PENDING_EVIDENCE' ? 'warning' : 'info'}>{packageDistribution?.marketplace.mode === 'PENDING_EVIDENCE' ? 'PENDING' : 'AVAILABLE'}</StatusBadge></div>
       </div>
     </RailCard>
 
     <RailCard icon={<GitBranch size={18} />} title="GitHub Sync">
-      <div className="academy-git-summary"><div><strong>{gitStatus?.repository?.fullName ?? 'Não configurado'}</strong><small>{gitStatus?.repository ? `${gitStatus.repository.branch} · ${gitStatus.lastCommitSha?.slice(0, 8) ?? 'sem commit'}` : 'Vincule um repository elegível'}</small></div><StatusBadge tone={gitStatus?.syncState === 'SYNCED' ? 'success' : gitStatus?.syncState === 'ERROR' ? 'danger' : 'warning'}>{gitStatus?.syncState ?? 'UNCONFIGURED'}</StatusBadge></div>
+      <div className="academy-git-summary"><div><strong>{gitName}</strong><small>{configured ? `${gitStatus?.profile?.branch ?? gitStatus?.repository?.branch} · ${gitStatus?.lastCommitSha?.slice(0, 8) ?? 'sem commit confirmado'}` : loading ? 'Lendo o estado persistido' : 'Vincule um repository elegível'}</small></div><StatusBadge tone={check?.state === 'OK' && gitStatus?.syncState === 'SYNCED' ? 'success' : 'warning'}>{gitLabel}</StatusBadge></div>
+      {configured && check && <p className="academy-muted">{check.state === 'CHECKING' ? 'Verificando atualização · exibindo última sincronização conhecida.' : check.state === 'FAILED' ? 'Falha ao verificar GitHub; exibindo último estado conhecido, sem revalidação atual.' : check.state === 'IDLE' ? 'Última sincronização conhecida · ainda não verificada nesta sessão.' : 'Verificação remota concluída.'}</p>}
       {gitStatus?.lastError && <p className="academy-inline-error">{gitStatus.lastError}</p>}
-      {!gitStatus?.repository && eligibleRepos.length > 0 && <div className="academy-git-bind"><select aria-label="Repository da Academy" value={selectedRepoId} onChange={(event) => onSelectedRepoChange(event.target.value)}>{eligibleRepos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select><button onClick={onBindRepository}>Vincular</button></div>}
+      {!configured && !loading && eligibleRepos.length > 0 && <div className="academy-git-bind"><select aria-label="Repository da Academy" value={selectedRepoId} onChange={(event) => onSelectedRepoChange(event.target.value)}>{eligibleRepos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select><button onClick={onBindRepository}>Vincular</button></div>}
       {gitStatus?.repository && <>
         <small className="academy-muted">Última confirmação remota: {formatDate(gitStatus.lastSyncAt)} · {gitStatus.publication?.remoteHead?.slice(0, 8) ?? 'sem observação'}</small>
         {gitStatus.publication?.pendingCommit && <small className="academy-muted">Commit local pendente: {gitStatus.publication.pendingCommit.slice(0, 8)}</small>}
@@ -325,14 +336,21 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinatio
     </RailCard>
 
     <RailCard icon={<Cloud size={18} />} title="Hosted ZIP fallback" className="academy-fallback-card">
-      <div className="academy-hosted-summary"><span><strong>Hosted Personal</strong><small>Hospedagem manual de fallback</small></span><StatusBadge tone={packageDistribution?.hosted.status === 'CURRENT' ? 'success' : 'warning'}>{packageDistribution?.hosted.status === 'HOSTED_UPDATE_AVAILABLE' ? 'UPDATE' : packageDistribution?.hosted.status ?? 'UNCONFIGURED'}</StatusBadge></div>
-      <div className="academy-hosted-versions"><span>Hosted <strong>{packageDistribution?.hosted.version ? `v${packageDistribution.hosted.version}` : '—'}</strong></span><span>Package <strong>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version}` : '—'}</strong></span></div>
-      {openAiPublication?.sourceError && <p className="academy-inline-error">{openAiPublication.sourceError}</p>}
+      <div className="academy-hosted-summary"><span><strong>Hosted Personal</strong><small>Hospedagem manual de fallback</small></span><StatusBadge tone={packageDistribution?.hosted.status === 'CURRENT' ? 'success' : 'warning'}>{packageDistribution?.hosted.status === 'HOSTED_UPDATE_AVAILABLE' ? 'UPDATE' : packageDistribution?.hosted.status ?? knownPublication?.release?.status ?? (loading ? 'Carregando…' : knownPublication?.publishedVersion ? 'Registrado' : 'UNCONFIGURED')}</StatusBadge></div>
+      <div className="academy-hosted-versions"><span>Hosted <strong>{packageDistribution?.hosted.version || knownPublication?.publishedVersion ? `v${packageDistribution?.hosted.version ?? knownPublication?.publishedVersion}` : '—'}</strong></span><span>Package <strong>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version}` : knownPublication?.release ? `v${knownPublication.release.version}` : '—'}</strong></span></div>
+      {!openAiPublication && knownPublication?.release && <p className="academy-muted">Release registrada: v{knownPublication.release.version} · {knownPublication.release.status} · {knownPublication.release.sourceCommitSha?.slice(0, 12) ?? 'Legado sem SHA Git'}. Detalhes do pacote em carregamento.</p>}
+      {openAiPublication?.versionPreflight && <div className="academy-release-preflight"><p>{openAiPublication.versionPreflight.message}</p><small>Manifesto Git: {openAiPublication.versionPreflight.manifestVersion ?? 'não confirmado'}{openAiPublication.versionPreflight.registeredVersion ? ` · Release registrada: ${openAiPublication.versionPreflight.registeredVersion}` : ''}</small></div>}
+      {openAiPublication?.sourceError && !openAiPublication.versionPreflight && <p className="academy-inline-error">{openAiPublication.sourceError}</p>}
+      {packagePending && <p role="status">{openAiPublication?.operation?.phase === 'PREPARING_PACKAGE' ? 'Preparando e verificando o ZIP…' : 'Verificando a fonte e a versão…'}</p>}
+      {!packagePending && openAiPublication?.operation?.phase === 'READY' && <p role="status">Pacote pronto.</p>}
+      {openAiPublication?.operation?.phase === 'ERROR' && <p className="academy-inline-error">{openAiPublication.operation.error}</p>}
       {release && <p className="academy-muted">v{release.pluginVersion} · {release.status}{release.source ? ` · ${release.source.branch}@${release.source.sourceCommitSha.slice(0, 12)}` : ' · Legado sem SHA Git'}</p>}
-      {release?.source && <p className="academy-muted">{release.source.remoteConfirmation === 'CACHED' ? 'Rebuild em cache; atualidade remota não verificada' : 'Fonte observada no remoto'} · {formatDate(release.source.confirmedAt)}{gitStatus?.syncState === 'OFFLINE' || gitStatus?.syncState === 'UNKNOWN' ? ' · Remoto não revalidado' : ''}</p>}
+      {release?.source && <p className="academy-muted">{release.source.remoteConfirmation === 'CACHED' ? 'Rebuild em cache; atualidade remota não verificada' : 'Fonte observada no remoto'} · {formatDate(release.source.confirmedAt)} · {Math.max(0, Math.floor((Date.now() - Date.parse(release.source.confirmedAt)) / 1000))} s atrás nesta leitura{gitStatus?.syncState === 'OFFLINE' || gitStatus?.syncState === 'UNKNOWN' ? ' · Remoto não revalidado' : ''}</p>}
       <div className="academy-inline-actions">
-        {openAiPublication?.profile ? <button onClick={onPrepareRelease}>Prepare ZIP fallback</button> : <button onClick={onBootstrapPlugin}>Registrar plugin existente</button>}
-        {release?.source && <button onClick={onRebuildRelease}>Rebuild do commit em cache</button>}
+        {openAiPublication?.profile ? <button disabled={packagePending} onClick={onPrepareRelease}>Prepare ZIP fallback</button> : <button disabled={loading || Boolean(knownPublication?.publishedVersion)} onClick={onBootstrapPlugin}>{loading || knownPublication?.publishedVersion ? 'Carregando detalhes do plugin…' : 'Registrar plugin existente'}</button>}
+        {gitStatus?.repository && <button disabled={packagePending} onClick={onRevalidateRelease}>Revalidar fonte e preparar ZIP</button>}
+        {openAiPublication?.versionPreflight?.suggestedVersion && <button onClick={onPrepareManifestVersion}>Preparar nova versão do manifesto</button>}
+        {release?.source && <button disabled={packagePending} onClick={onRebuildRelease}>Rebuild do commit em cache</button>}
         <button disabled={!release?.artifactPath} onClick={onRevealRelease}>Reveal Package</button>
         <button disabled={release?.status !== 'READY_TO_UPLOAD'} onClick={onConfirmUpload}>Confirm Upload</button>
       </div>

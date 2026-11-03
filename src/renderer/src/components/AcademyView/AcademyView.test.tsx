@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from 'react'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AcademyView } from './AcademyView'
 
@@ -18,6 +18,10 @@ const openAiRelease = {
 
 beforeEach(() => {
   window.codeAwareness = {
+    getAcademyBootstrapState: vi.fn(async (initializationId: string) => ({ initializationId, hydration: 'READY', provenance: 'ACADEMY_SQLITE', storeDurationMs: 1,
+      snapshot: await window.codeAwareness.getAcademySnapshot(), git: await window.codeAwareness.getAcademyGitStatus(),
+      publication: { publishedVersion: '0.1.3', release: { id: openAiRelease.id, version: openAiRelease.pluginVersion, status: openAiRelease.status, sourceCommitSha: null }, marketplace: { mode: 'PENDING_EVIDENCE' } } })),
+    checkAcademyGit: vi.fn(async () => window.codeAwareness.getAcademyGitStatus()),
     getAcademySnapshot: vi.fn(async () => ({ skills: [detail], destinations: [destination], conflicts: [] })),
     getAcademySkill: vi.fn(async () => detail), getAcademyHistory: vi.fn(async () => [detail.current]),
     createAcademySkill: vi.fn(async () => detail), updateAcademySkill: vi.fn(async () => ({ ...detail, currentVersion: 2, current: { ...detail.current, version: 2 } })),
@@ -45,6 +49,127 @@ beforeEach(() => {
   } as unknown as Window['codeAwareness']
 })
 afterEach(cleanup)
+
+it('keeps a new unsaved draft when an earlier skill selection completes late', async () => {
+  let finish!: (value: typeof detail) => void
+  vi.mocked(window.codeAwareness.getAcademySkill).mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+  render(<AcademyView />)
+  fireEvent.click(await screen.findByRole('button', { name: /alpha.*Alpha skill/ }))
+  fireEvent.click(screen.getByRole('button', { name: 'Nova Skill' }))
+  fireEvent.change(screen.getByLabelText('Editar SKILL.md'), { target: { value: 'unsaved new draft' } })
+  await act(async () => finish(detail))
+  expect((screen.getByLabelText('Editar SKILL.md') as HTMLTextAreaElement).value).toBe('unsaved new draft')
+})
+
+it('paints only the persisted bootstrap before secondary reads and coalesces slow offline verification without losing flags', async () => {
+  const base = await window.codeAwareness.getAcademyGitStatus()
+  vi.mocked(window.codeAwareness.getAcademyGitStatus).mockClear()
+  const git = { ...base, profile: { repositoryCatalogId: 'repo', githubRepositoryId: 'github-id', branch: 'main' },
+    publication: { autoPublish: true, autoUpdate: true, remoteHead: 'a'.repeat(40), conflictPaths: [] },
+    lastKnown: { repositoryId: 'github-id', branch: 'main', remoteHead: 'a'.repeat(40), confirmedAt: detail.updatedAt, result: 'SYNCED', autoPublish: true, autoUpdate: true, localHead: 'a'.repeat(40) },
+    remoteCheck: { state: 'IDLE', generation: 4, requestId: null, error: null, completedAt: null } } as any
+  let finishBootstrap!: (value: any) => void
+  let finishRemote!: (value: any) => void
+  vi.mocked(window.codeAwareness.getAcademyBootstrapState).mockImplementation(() => new Promise(resolve => { finishBootstrap = resolve }))
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockImplementation(() => new Promise(() => {}))
+  vi.mocked(window.codeAwareness.getAcademyDistributionHealth).mockImplementation(() => new Promise(() => {}))
+  vi.mocked(window.codeAwareness.checkAcademyGit).mockImplementation(() => new Promise(resolve => { finishRemote = resolve }))
+  const log = vi.spyOn(console, 'info').mockImplementation(() => {})
+  try {
+    render(<AcademyView />)
+    expect(screen.getByText('Carregando Academy do estado local…')).toBeTruthy()
+    expect(screen.queryByText('Não configurado')).toBeNull()
+    expect(screen.queryByText('UNCONFIGURED')).toBeNull()
+    expect(window.codeAwareness.getAcademyBootstrapState).toHaveBeenCalledTimes(1)
+    expect(window.codeAwareness.getAcademySnapshot).not.toHaveBeenCalled()
+    expect(window.codeAwareness.getAcademyGitStatus).not.toHaveBeenCalled()
+    expect(window.codeAwareness.getAcademyOpenAiPublicationState).not.toHaveBeenCalled()
+    expect(window.codeAwareness.checkAcademyGit).not.toHaveBeenCalled()
+    finishBootstrap({ initializationId: vi.mocked(window.codeAwareness.getAcademyBootstrapState).mock.calls[0][0], hydration: 'READY', provenance: 'ACADEMY_SQLITE', storeDurationMs: 1,
+      snapshot: { skills: [detail], destinations: [destination], conflicts: [] }, git,
+      publication: { publishedVersion: '0.27.16', release: { id: 'legacy', version: '0.27.16', status: 'UPLOADED_UNVERIFIED', sourceCommitSha: null } } })
+    await screen.findByText('Alpha skill')
+    await waitFor(() => expect(window.codeAwareness.checkAcademyGit).toHaveBeenCalledTimes(1))
+    expect(screen.getAllByText(/ericrocha001\/Academy/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/UPLOADED_UNVERIFIED/).length).toBeGreaterThan(0)
+    const publication = screen.getByRole('checkbox', { name: 'Publicação automática de edições locais' }) as HTMLInputElement
+    const update = screen.getByRole('checkbox', { name: 'Atualização automática do remoto' }) as HTMLInputElement
+    expect(publication.checked && update.checked).toBe(true)
+    const search = screen.getByRole('textbox', { name: 'Buscar Skills' })
+    fireEvent.change(search, { target: { value: 'alpha' } })
+    fireEvent.focus(window); fireEvent(window, new Event('online'))
+    expect(window.codeAwareness.checkAcademyGit).toHaveBeenCalledTimes(1)
+    finishRemote({ ...git, syncState: 'OFFLINE', remoteCheck: { state: 'FAILED', generation: 5, requestId: 'current', error: 'offline', completedAt: detail.updatedAt } })
+    await screen.findByText(/Falha ao verificar GitHub/)
+    expect(screen.getByRole('textbox', { name: 'Buscar Skills' })).toBe(search)
+    expect((search as HTMLInputElement).value).toBe('alpha')
+    expect(publication.checked && update.checked).toBe(true)
+    const marks = log.mock.calls.filter(([tag]) => tag === '[Academy hydration]').map(([, body]) => JSON.parse(body as string))
+    expect(marks.map(mark => mark.milestone)).toEqual(['STORE_RESPONSE', 'FIRST_USEFUL_PAINT', 'REMOTE_CHECK_COMPLETE'])
+    expect(new Set(marks.map(mark => mark.initializationId)).size).toBe(1)
+  } finally { log.mockRestore() }
+})
+
+it('discards older publication and Git responses after selective invalidation and an automation change', async () => {
+  const base = await window.codeAwareness.getAcademyGitStatus()
+  const state = await window.codeAwareness.getAcademyOpenAiPublicationState()
+  const git = { ...base, profile: { repositoryCatalogId: 'repo', githubRepositoryId: 'github-id', branch: 'main' },
+    publication: { autoPublish: false, autoUpdate: true, conflictPaths: [] }, remoteCheck: { state: 'OK', generation: 10, requestId: 'known', error: null, completedAt: detail.updatedAt } } as any
+  vi.mocked(window.codeAwareness.getAcademyBootstrapState).mockResolvedValue({ initializationId: 'fixture', hydration: 'READY', provenance: 'ACADEMY_SQLITE', storeDurationMs: 1,
+    snapshot: { skills: [detail], destinations: [destination], conflicts: [] }, git, publication: { publishedVersion: '0.1.3', release: null, marketplace: { mode: 'PENDING_EVIDENCE' } } } as any)
+  vi.mocked(window.codeAwareness.checkAcademyGit).mockResolvedValue(git)
+  let changed!: Parameters<Window['codeAwareness']['onAcademyChanged']>[0]
+  window.codeAwareness.onAcademyChanged = vi.fn(listener => { changed = listener; return () => {} })
+  let oldPublication!: (error: Error) => void
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockReset().mockImplementationOnce(() => new Promise((_resolve, reject) => { oldPublication = reject }))
+    .mockResolvedValue({ ...state, selectedRelease: { ...openAiRelease, pluginVersion: '0.2.9' } })
+  render(<AcademyView />)
+  await waitFor(() => expect(window.codeAwareness.getAcademyOpenAiPublicationState).toHaveBeenCalledTimes(1))
+  act(() => changed({ kind: 'publication' }))
+  await screen.findByText(/v0.2.9 · READY_TO_UPLOAD/)
+  await act(async () => oldPublication(new Error('obsolete publication response')))
+  expect(screen.queryByText('obsolete publication response')).toBeNull()
+  expect(screen.queryByText(/v0.1.4 · READY_TO_UPLOAD/)).toBeNull()
+  let oldGit!: (value: any) => void
+  vi.mocked(window.codeAwareness.getAcademyGitStatus).mockImplementationOnce(() => new Promise(resolve => { oldGit = resolve }))
+  act(() => changed({ kind: 'git' }))
+  await waitFor(() => expect(oldGit).toBeTypeOf('function'))
+  const newer = { ...git, publication: { autoPublish: false, autoUpdate: false, conflictPaths: [] }, remoteCheck: { ...git.remoteCheck, generation: 12 } }
+  window.codeAwareness.configureAcademyGitAutomation = vi.fn(async () => newer)
+  fireEvent.click(screen.getByRole('checkbox', { name: 'Atualização automática do remoto' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar preferência' }))
+  await waitFor(() => expect((screen.getByRole('checkbox', { name: 'Atualização automática do remoto' }) as HTMLInputElement).checked).toBe(false))
+  await act(async () => oldGit({ ...git, remoteCheck: { ...git.remoteCheck, generation: 11 } }))
+  expect((screen.getByRole('checkbox', { name: 'Atualização automática do remoto' }) as HTMLInputElement).checked).toBe(false)
+  fireEvent.click(screen.getByRole('button', { name: /alpha.*Alpha skill/ }))
+  await screen.findByRole('button', { name: 'Editar' })
+  fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+  const reads = vi.mocked(window.codeAwareness.getAcademySkill).mock.calls.length
+  act(() => changed({ kind: 'catalog' }))
+  await waitFor(() => expect(window.codeAwareness.getAcademySnapshot).toHaveBeenCalled())
+  expect(window.codeAwareness.getAcademySkill).toHaveBeenCalledTimes(reads)
+})
+
+it('explains a legacy version collision and saves only the explicitly reviewed manifest revision', async () => {
+  const state = await window.codeAwareness.getAcademyOpenAiPublicationState()
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockResolvedValue({ ...state, versionPreflight: {
+    outcome: 'VERSION_ALREADY_USED_FOR_OTHER_CONTENT', manifestVersion: '0.27.16', registeredVersion: '0.27.16',
+    highestKnownVersion: '0.27.16', suggestedVersion: '0.27.17', sourceCommitSha: 'a'.repeat(40),
+    message: 'O manifesto declara 0.27.16, mas a release 0.27.16 já está registrada. Prepare uma nova versão no Git.' } })
+  const preview = { repositoryId: 'repo', branch: 'main', sourceCommitSha: 'a'.repeat(40), workspaceCommitSha: 'b'.repeat(40), manifestHash: 'hash',
+    previousVersion: '0.27.16', newVersion: '0.27.17', before: '{"version":"0.27.16"}', after: '{"version":"0.27.17"}', token: 'reviewed' }
+  window.codeAwareness.previewAcademyManifestVersion = vi.fn(async () => preview)
+  const git = await window.codeAwareness.getAcademyGitStatus()
+  window.codeAwareness.saveAcademyManifestVersion = vi.fn(async () => ({ ...git, syncState: 'LOCAL_CHANGES' as const }))
+  render(<AcademyView />)
+  await screen.findByText(/O manifesto declara 0.27.16/)
+  fireEvent.click(screen.getByRole('button', { name: 'Preparar nova versão do manifesto' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Revisar versão do manifesto' })
+  expect(window.codeAwareness.saveAcademyManifestVersion).not.toHaveBeenCalled()
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Salvar revisão no workspace' }))
+  await waitFor(() => expect(window.codeAwareness.saveAcademyManifestVersion).toHaveBeenCalledWith({ preview, confirmed: true }))
+  expect(window.codeAwareness.prepareAcademyOpenAiRelease).not.toHaveBeenCalled()
+})
 
 it('requires reviewed conflict content and forwards the exact observed revision', async () => {
   const current = await window.codeAwareness.getAcademyGitStatus()
@@ -215,7 +340,7 @@ it('keeps operational capabilities in the rail and omits healthy conflict noise'
   render(<AcademyView />)
   expect(await screen.findByText('Destinos de Distribuição')).toBeTruthy()
   expect(screen.queryByText('Nenhum conflito aberto.')).toBeNull()
-  expect(screen.getByText('Source Available')).toBeTruthy()
+  expect(await screen.findByText('Source Available')).toBeTruthy()
   expect(screen.getByText('Hosted ZIP fallback')).toBeTruthy()
   expect(screen.getAllByText('CONVERGED')).toHaveLength(2)
 

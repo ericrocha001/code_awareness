@@ -27,9 +27,11 @@ export interface AcademyGitBuildSource {
   confirmedAt: string
 }
 
-export type AcademyGitBuildRequest = { mode: 'LATEST' } | { mode: 'REBUILD'; sourceCommitSha: string }
+export type AcademyGitBuildRequest = { mode: 'LATEST'; force?: boolean } | { mode: 'REBUILD'; sourceCommitSha: string }
 
 export interface AcademyGitBuildReceipt {
+  buildKey?: string
+  phases?: Record<string, number>
   id: string
   releaseId: string
   buildSchema: 1

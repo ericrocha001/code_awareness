@@ -99,6 +99,7 @@ describe('Academy Git-first source', () => {
     await f.externalCommit('remote content')
     const result = await f.sync.syncNow()
     expect(result.syncState).toBe('CONFLICT')
+    expect(result.remoteCheck?.state).toBe('OK')
     expect(f.store.get(f.skill.id).current.package.skillMd).toContain('remote content')
     expect((await f.sync.getDraft('alpha')).workspaceCommitSha).toBe(draft.workspaceCommitSha)
     expect((await f.sync.getDraft('alpha')).package?.skillMd).toContain('local draft')

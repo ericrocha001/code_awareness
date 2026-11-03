@@ -8,18 +8,15 @@ import type {
 } from '../../../shared/types/academy-types'
 import { AcademyError } from '../academy-package'
 import type { AcademyStore } from '../academy-store'
-import type { AcademyGitSourceSnapshot } from '../../../shared/types/academy-git-source-types'
+import type { AcademyBuildProjection, AcademyGitSnapshotHeader, AcademyVersionPreflight } from '../../../shared/types/academy-publication-types'
 import {
   buildCanonicalOpenAiSnapshot,
-  buildGitOpenAiInput,
-  gitOpenAiValidationProfile,
   buildOpenAiManifest,
   calculateOpenAiDelta,
   canonicalJson,
   hashOpenAiSnapshot,
   sha256
 } from './openai-plugin-model'
-import { validateOpenAiPluginPackage } from './openai-plugin-validator'
 
 const EMPTY_ASSET_HASH = sha256('NO_ASSET')
 
@@ -60,9 +57,12 @@ export class AcademyPluginPackageRevisionService {
   resolveCurrent(): AcademyPluginPackageRevision {
     const authority = this.store.getGitAuthority()
     if (authority) {
-      const source = this.store.getGitSnapshot(authority.repositoryId, authority.processedCommitSha)
-      if (!source) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
-      return this.resolveGit(source)
+      const header = this.store.getGitSnapshotHeader(authority.repositoryId, authority.processedCommitSha)
+      const projection = this.store.getGitBuildProjection(authority.repositoryId, authority.processedCommitSha)
+      const preflight = this.preflight(header, projection)
+      this.assertPreflight(preflight)
+      if (!header || !projection) throw new AcademyError('GIT_BUILD_PROJECTION_PENDING')
+      return this.resolveProjection(header, projection)
     }
     if (this.store.usesGitFirst()) throw new AcademyError('GIT_MIGRATION_REQUIRED')
     const profile = this.requireProfile()
@@ -81,23 +81,58 @@ export class AcademyPluginPackageRevisionService {
     return this.persistRevision({ version, profile, snapshot, manifest, delta })
   }
 
-  resolveGit(source: AcademyGitSourceSnapshot, persist = false): AcademyPluginPackageRevision {
-    const input = buildGitOpenAiInput(this.store, source)
-    validateOpenAiPluginPackage(input.entries, gitOpenAiValidationProfile(this.requireProfile(), input), input.snapshot)
-    const existing = this.store.getPluginPackageRevisionByFingerprint(input.entriesFingerprint)
+  suggestedVersion(header: AcademyGitSnapshotHeader, kind?: 'PATCH' | 'MINOR' | 'MAJOR'): string {
+    const versions = [...this.store.knownPluginVersions(), header.manifest?.version].filter((item): item is string => typeof item === 'string')
+    const highest = versions.sort(compareSemver).at(-1) ?? '0.0.0'
+    const [major, minor, patch] = highest.split('.').map(Number)
+    if (kind === 'MAJOR') return `${major + 1}.0.0`
+    if (kind === 'MINOR') return `${major}.${minor + 1}.0`
+    if (kind === 'PATCH') return `${major}.${minor}.${patch + 1}`
+    const reference = this.store.listOpenAiReleases().find(release => release.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(release.status))
+    return bumpVersion(highest, calculateOpenAiDelta(reference?.snapshot ?? [], header.snapshot))
+  }
+
+  preflight(header: AcademyGitSnapshotHeader | null, projection?: AcademyBuildProjection | null): AcademyVersionPreflight {
+    const versions = this.store.knownPluginVersions().sort(compareSemver)
+    const version = header?.manifest?.version
+    const result: AcademyVersionPreflight = { outcome: 'GIT_SOURCE_NOT_VERIFIED', manifestVersion: typeof version === 'string' ? version : null,
+      highestKnownVersion: versions.at(-1) ?? null, suggestedVersion: null, registeredVersion: null, sourceCommitSha: header?.sourceCommitSha ?? null,
+      message: 'Confirme uma fonte Git válida antes de preparar o pacote.' }
+    if (!header || header.manifest?.name !== 'academy-skills' || typeof version !== 'string' || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) return result
+    result.suggestedVersion = this.suggestedVersion(header)
+    const release = this.store.findOpenAiReleaseVersion(version)
+    const revision = this.store.findPluginPackageRevisionVersion(version)
+    result.registeredVersion = release?.pluginVersion ?? revision?.version ?? null
+    const changedSkills = release && canonicalJson(release.snapshot.map(item => ({ name: item.name, hash: item.packageHash })).sort((a, b) => a.name.localeCompare(b.name))) !== canonicalJson(header.snapshot.map(item => ({ name: item.name, hash: item.packageHash })).sort((a, b) => a.name.localeCompare(b.name)))
+    const conflict = release && (!release.source || changedSkills || release.source.manifestFingerprint !== sha256(canonicalJson(header.manifest))) ||
+      projection && ((release && release.source?.entriesFingerprint !== projection.entriesFingerprint) || (revision && revision.contentFingerprint !== projection.entriesFingerprint))
+    if (conflict) return { ...result, outcome: 'VERSION_ALREADY_USED_FOR_OTHER_CONTENT', message: `O manifesto declara ${version}, mas a release ${version} já está registrada com outra origem ou conteúdo. Prepare uma nova versão do manifesto no Git (${result.suggestedVersion}). O histórico será preservado.` }
+    const reference = this.store.listOpenAiReleases().find(item => item.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(item.status))
+    if (reference && calculateOpenAiDelta(reference.snapshot, header.snapshot).destructive && this.requireProfile().deletionSemantics !== 'PROVEN_REPLACE') return { ...result, outcome: 'DESTRUCTIVE_DELTA_BLOCKED', message: 'A remoção de conteúdo exige comprovação explícita da substituição do pacote antes de preparar a release.' }
+    if (release || revision) {
+      if (projection) return { ...result, outcome: 'REUSE_SAME_SOURCE', message: `A versão ${version} pode reutilizar o pacote após conferir sua integridade.` }
+      return { ...result, outcome: 'CONTENT_CHECK_REQUIRED', message: `A versão ${version} requer conferência do inventário deste commit.` }
+    }
+    if (versions.some(item => compareSemver(version, item) <= 0)) return { ...result, outcome: 'VERSION_NOT_PROGRESSIVE', message: `O manifesto ${version} deve avançar além da versão ${result.highestKnownVersion} já registrada.` }
+    return { ...result, outcome: 'NEW_RELEASE_ALLOWED', message: `Manifesto ${version}: uma nova release pode ser preparada deste commit.` }
+  }
+
+  assertPreflight(result: AcademyVersionPreflight): void {
+    const codes = { VERSION_ALREADY_USED_FOR_OTHER_CONTENT: 'VERSION_REUSE_FOR_DIFFERENT_CONTENT', VERSION_NOT_PROGRESSIVE: 'OPENAI_PLUGIN_VERSION_NOT_PROGRESSIVE', GIT_SOURCE_NOT_VERIFIED: 'GIT_SOURCE_SNAPSHOT_NOT_VERIFIED', DESTRUCTIVE_DELTA_BLOCKED: 'OPENAI_DESTRUCTIVE_DELTA_BLOCKED' }
+    const code = codes[result.outcome as keyof typeof codes]
+    if (code) throw new AcademyError(code, result.message, { preflight: result })
+  }
+
+  resolveProjection(header: AcademyGitSnapshotHeader, projection: AcademyBuildProjection, persist = false): AcademyPluginPackageRevision {
+    this.assertPreflight(this.preflight(header, projection))
+    const existing = this.store.getPluginPackageRevisionByFingerprint(projection.entriesFingerprint)
     if (existing) return existing
-    const sameVersion = this.store.listPluginPackageRevisions().find(revision => revision.version === input.pluginVersion)
-    const release = this.store.listOpenAiReleases().find(item => item.pluginVersion === input.pluginVersion)
-    if (sameVersion || release) throw new AcademyError('VERSION_REUSE_FOR_DIFFERENT_CONTENT')
-    const versions = [...this.store.listPluginPackageRevisions().map(item => item.version), ...this.store.listOpenAiReleases().map(item => item.pluginVersion)]
-    if (versions.some(version => compareSemver(input.pluginVersion, version) <= 0)) throw new AcademyError('OPENAI_PLUGIN_VERSION_NOT_PROGRESSIVE')
-    const previous = this.store.listOpenAiReleases().find(item => item.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(item.status))
-    if (!previous) throw new AcademyError('OPENAI_PLUGIN_BASELINE_MISSING')
-    const revision: AcademyPluginPackageRevision = { id: sha256(`GIT_PACKAGE:${input.entriesFingerprint}`), version: input.pluginVersion,
-      contentFingerprint: input.entriesFingerprint, skillSnapshotHash: hashOpenAiSnapshot(input.snapshot),
-      profileFingerprint: input.manifestFingerprint, assetHash: input.assetFingerprint,
-      delta: calculateOpenAiDelta(previous.snapshot, input.snapshot), createdAt: source.observedAt }
-    return persist ? this.store.insertPluginPackageRevision(revision, input.snapshot) : revision
+    const reference = this.store.listOpenAiReleases().find(item => item.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(item.status))
+    if (!reference) throw new AcademyError('OPENAI_PLUGIN_BASELINE_MISSING')
+    const revision: AcademyPluginPackageRevision = { id: sha256(`GIT_PACKAGE:${projection.entriesFingerprint}`), version: projection.pluginVersion,
+      contentFingerprint: projection.entriesFingerprint, skillSnapshotHash: hashOpenAiSnapshot(projection.snapshot), profileFingerprint: projection.manifestFingerprint,
+      assetHash: projection.assetFingerprint, delta: calculateOpenAiDelta(reference.snapshot, projection.snapshot), createdAt: header.observedAt }
+    return persist ? this.store.insertPluginPackageRevision(revision, projection.snapshot) : revision
   }
 
   private persistRevision(input: {
@@ -167,7 +202,7 @@ function bumpVersion(current: string, delta: AcademyOpenAiReleaseDelta): string 
   return `${major}.${minor}.${patch + 1}`
 }
 
-function compareSemver(left: string, right: string): number {
+export function compareSemver(left: string, right: string): number {
   const parse = (value: string): number[] => {
     const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(value)
     if (!match) throw new AcademyError('OPENAI_PLUGIN_INVALID_VERSION', value)

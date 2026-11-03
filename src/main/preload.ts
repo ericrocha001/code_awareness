@@ -99,13 +99,15 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     return () => { ipcRenderer.removeListener('continuum:changed', listener) }
   },
   getAcademySnapshot: (): Promise<AcademySnapshot> => ipcRenderer.invoke('academy:snapshot'),
+  getAcademyBootstrapState: (initializationId: string): Promise<import('../shared/types/academy-bootstrap-types').AcademyBootstrapState> => ipcRenderer.invoke('academy:bootstrap', initializationId),
+  checkAcademyGit: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-check'),
   getAcademySkill: (id: string): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:get', id),
   getAcademyHistory: (id: string): Promise<AcademySkillVersion[]> => ipcRenderer.invoke('academy:history', id),
   createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>): Promise<AcademySkillDetail | AcademyDraftReceipt> => ipcRenderer.invoke('academy:create', input),
   updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>): Promise<AcademySkillDetail | AcademyDraftReceipt> => ipcRenderer.invoke('academy:update', input),
   getAcademyDraft: (name: string): Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }> => ipcRenderer.invoke('academy:git-draft', name),
-  onAcademyChanged: (callback: () => void): (() => void) => {
-    const listener = () => callback()
+  onAcademyChanged: (callback: (event?: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => void): (() => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, payload: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => callback(payload)
     ipcRenderer.on('academy:changed', listener)
     return () => ipcRenderer.removeListener('academy:changed', listener)
   },
@@ -135,6 +137,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getAcademyPackageDistributionState: (): Promise<AcademyPackageDistributionState> => ipcRenderer.invoke('academy:package-distribution-state'),
   listAcademyOpenAiReleases: (): Promise<AcademyOpenAiRelease[]> => ipcRenderer.invoke('academy:openai-releases'),
   prepareAcademyOpenAiRelease: (input?: import('../shared/types/academy-git-source-types').AcademyGitBuildRequest): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-prepare', input),
+  previewAcademyManifestVersion: (kind?: 'PATCH' | 'MINOR' | 'MAJOR'): Promise<import('../shared/types/academy-publication-types').AcademyManifestPreview> => ipcRenderer.invoke('academy:manifest-version-preview', kind),
+  saveAcademyManifestVersion: (input: { preview: import('../shared/types/academy-publication-types').AcademyManifestPreview; confirmed: boolean }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:manifest-version-save', input),
   confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-confirm-upload', releaseId, artifactHash),
   revealAcademyOpenAiPackage: (releaseId: string): Promise<boolean> => ipcRenderer.invoke('academy:openai-reveal', releaseId),
   getAcademyGitStatus: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-status'),

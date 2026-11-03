@@ -4,10 +4,15 @@ import type { AcademyCreateInput, AcademyPackage, AcademyUpdateInput } from '../
 import type { AcademyService } from '../academy/academy-service'
 
 export function registerAcademyHandlers(service: AcademyService): void {
-  const changed = () => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('academy:changed') }
-  service.onCanonicalChange?.(changed)
+  const changed = (kind: 'catalog' | 'distribution' | 'git' | 'publication') => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('academy:changed', { kind }) }
+  service.onCanonicalChange?.(() => changed('catalog'))
   service.onDistributionChange?.(changed)
   ipcMain.handle('academy:snapshot', () => service.snapshot())
+  ipcMain.handle('academy:bootstrap', (_event, initializationId: string) => {
+    if (typeof initializationId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(initializationId)) throw new Error('INVALID_ARGUMENT')
+    return service.getAcademyBootstrapState(initializationId)
+  })
+  ipcMain.handle('academy:git-check', () => service.gitSync?.verifyRemote() ?? service.getAcademyBootstrapState('unconfigured').git)
   ipcMain.handle('academy:get', (_event, id: string) => service.get(id))
   ipcMain.handle('academy:history', (_event, id: string) => service.history(id))
   ipcMain.handle('academy:create', (_event, input: Omit<AcademyCreateInput, 'origin'>) => service.saveNewSkill({ ...input, origin: 'UI' }))
@@ -43,10 +48,19 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:distribution-reconcile', (_event, destinationId?: string) => service.reconcileDistribution(destinationId))
   ipcMain.handle('academy:openai-bootstrap', (_event, publishedVersion?: string) => service.bootstrapOpenAiPlugin(undefined, publishedVersion))
   ipcMain.handle('academy:openai-state', () => service.getOpenAiPublicationState())
+  ipcMain.handle('academy:manifest-version-preview', (_event, kind?: 'PATCH' | 'MINOR' | 'MAJOR') => {
+    if (kind !== undefined && !['PATCH', 'MINOR', 'MAJOR'].includes(kind)) throw new Error('INVALID_ARGUMENT')
+    return service.previewManifestVersion(kind)
+  })
+  ipcMain.handle('academy:manifest-version-save', (_event, input: { preview: import('../../shared/types/academy-publication-types').AcademyManifestPreview; confirmed: boolean }) => {
+    if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED')
+    return service.gitSync.saveManifestDraft(input)
+  })
   ipcMain.handle('academy:package-distribution-state', () => service.getPackageDistributionState())
   ipcMain.handle('academy:openai-releases', () => service.listOpenAiReleases())
   ipcMain.handle('academy:openai-prepare', (_event, input?: import('../../shared/types/academy-git-source-types').AcademyGitBuildRequest) => {
     const request = input ?? { mode: 'LATEST' }
+    if (request.mode === 'LATEST' && request.force !== undefined && typeof request.force !== 'boolean') throw new Error('INVALID_ARGUMENT')
     if (request.mode !== 'LATEST' && (request.mode !== 'REBUILD' || !/^[a-f0-9]{40,64}$/.test(request.sourceCommitSha))) throw new Error('INVALID_ARGUMENT')
     return service.prepareOpenAiRelease(request)
   })
