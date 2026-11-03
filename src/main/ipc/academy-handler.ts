@@ -4,10 +4,15 @@ import type { AcademyCreateInput, AcademyPackage, AcademyUpdateInput } from '../
 import type { AcademyService } from '../academy/academy-service'
 
 export function registerAcademyHandlers(service: AcademyService): void {
-  const changed = () => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('academy:changed') }
-  service.onCanonicalChange?.(changed)
+  const changed = (kind: 'catalog' | 'distribution' | 'git' | 'publication') => { for (const window of BrowserWindow.getAllWindows()) if (!window.isDestroyed()) window.webContents.send('academy:changed', { kind }) }
+  service.onCanonicalChange?.(() => changed('catalog'))
   service.onDistributionChange?.(changed)
   ipcMain.handle('academy:snapshot', () => service.snapshot())
+  ipcMain.handle('academy:bootstrap', (_event, initializationId: string) => {
+    if (typeof initializationId !== 'string' || !/^[a-zA-Z0-9-]{1,100}$/.test(initializationId)) throw new Error('INVALID_ARGUMENT')
+    return service.getAcademyBootstrapState(initializationId)
+  })
+  ipcMain.handle('academy:git-check', () => service.gitSync?.verifyRemote() ?? service.getAcademyBootstrapState('unconfigured').git)
   ipcMain.handle('academy:get', (_event, id: string) => service.get(id))
   ipcMain.handle('academy:history', (_event, id: string) => service.history(id))
   ipcMain.handle('academy:create', (_event, input: Omit<AcademyCreateInput, 'origin'>) => service.saveNewSkill({ ...input, origin: 'UI' }))

@@ -15,6 +15,8 @@ import type { AcademyPluginRepositoryProjection } from './academy-plugin-reposit
 import type { AcademyPluginPackageRevisionService } from '../publication/academy-plugin-package-revision-service'
 import type { AcademyMarketplaceProjection } from './academy-marketplace-projection'
 import { canonicalJson, sha256 } from '../publication/openai-plugin-model'
+import { randomUUID } from 'node:crypto'
+import type { AcademyRemoteCheckState } from '../../../shared/types/academy-bootstrap-types'
 import { compareSemver } from '../publication/academy-plugin-package-revision-service'
 import { withPublicationLock } from './academy-publication-lock'
 import { ACADEMY_AUTHORED_PATHS, assertSourcePath, readAcademyGitSnapshot, verifyStagedAcademyPackage } from './academy-git-snapshot'
@@ -29,6 +31,7 @@ export interface AcademyDestinationExcluder { excludeDestination(checkoutPath: s
 
 export function projectAcademyGitStatus(status: AcademyGitStatusProjection) {
   return { state: status.syncState, repositoryId: status.profile?.githubRepositoryId ?? null, branch: status.profile?.branch ?? null,
+    lastKnown: status.lastKnown, remoteCheck: status.remoteCheck, provenance: status.provenance, lastKnownAgeMs: status.lastKnownAgeMs,
     sourceCommitSha: status.lastCommitSha, observedRemoteHead: status.publication?.remoteHead ?? null, remoteObservedAt: status.lastSyncAt,
     workspaceCommitSha: status.publication?.localHead ?? null, migrationComplete: status.publication?.migrationComplete ?? false,
     candidateBranch: status.publication?.candidateBranch ?? null, candidateCommitSha: status.publication?.candidateCommitSha ?? null,
@@ -40,6 +43,11 @@ export class AcademyGitSyncService {
   private closing = false
   private latestSource: Promise<AcademyGitStatusProjection> | null = null
   private observation: { policy: string; head: string; at: number } | null = null
+  private check: AcademyRemoteCheckState = { state: 'IDLE', generation: 0, requestId: null, error: null, completedAt: null }
+  private checkIdentity: string | null = null
+  private verification: Promise<AcademyGitStatusProjection> | null = null
+  private operationError: string | null = null
+  private confirmedCheckRequestId: string | null = null
   private readonly publicationRoot: string
   private accepted: (ids: string[]) => void = () => {}
   private statusChanged: () => void = () => {}
@@ -55,7 +63,6 @@ export class AcademyGitSyncService {
     options?: { debounceMs?: number; publicationRoot?: string; packageRevisions?: AcademyPluginPackageRevisionService; marketplaceProjection?: AcademyMarketplaceProjection }
   ) {
     this.publicationRoot = options?.publicationRoot ?? join(dirname(store.databasePath), 'github-publication')
-    if (store.getGitProfile()) { const state = this.state(); this.save(state, 'UNKNOWN') }
   }
 
   onAccepted(listener: (ids: string[]) => void): void { this.accepted = listener }
@@ -77,18 +84,35 @@ export class AcademyGitSyncService {
     }
   }
   private save(state: AcademyGitPublicationState, businessState: AcademyGitSyncState, error: string | null = null): void {
+    if (state.destinationKey !== this.key()) throw new AcademyError('GIT_SOURCE_IDENTITY_CHANGED')
+    if (businessState === 'UNKNOWN' || businessState === 'SYNCING' || businessState === 'OFFLINE') return
     state.businessState = businessState
+    if (canonicalJson(this.store.getGitPublication(state.destinationKey)) === canonicalJson(state) && this.store.getGitProfile()?.lastError === error) return
     this.store.saveGitPublication(state)
-    this.store.updateGitSyncState({ syncState: businessState === 'SYNCED' ? 'SYNCED' : businessState === 'SYNCING' ? 'SYNCING' : businessState === 'CONFLICT' ? 'REMOTE_DIVERGED' : 'DIRTY', lastError: error })
+    this.check = { ...this.check, generation: this.check.generation + 1 }
+    this.store.updateGitSyncState({ syncState: businessState === 'SYNCED' ? 'SYNCED' : businessState === 'CONFLICT' ? 'REMOTE_DIVERGED' : 'DIRTY', lastError: error })
   }
   getStatus(): AcademyGitStatusProjection {
     const profile = this.store.getGitProfile()
-    const record = profile ? this.repositories.resolveRepository(profile.repositoryCatalogId) : null
+    const candidate = profile ? this.repositories.resolveRepository(profile.repositoryCatalogId) : null
+    const record = candidate?.github?.repositoryId === profile?.githubRepositoryId ? candidate : null
     const publication = profile ? this.store.getGitPublication(this.key()) : null
+    const identity = profile ? this.key() : null
+    if (this.checkIdentity !== identity) {
+      this.checkIdentity = identity
+      this.check = { state: 'IDLE', generation: this.check.generation + 1, requestId: null, error: null, completedAt: null }
+      this.operationError = null; this.observation = null
+    }
+    const lastKnown = profile ? { repositoryId: profile.githubRepositoryId, branch: profile.branch, remoteHead: publication?.remoteHead ?? null,
+      confirmedAt: publication?.verifiedAt ?? null, result: publication?.businessState ?? 'UNKNOWN' as const,
+      autoPublish: publication?.autoPublish ?? false, autoUpdate: publication?.autoUpdate ?? false, localHead: publication?.localHead ?? null } : null
     return { profile, publication, repository: record && profile ? { id: record.id, name: record.name, fullName: record.github?.fullName ?? record.name,
       visibility: record.github?.visibility ?? 'PUBLIC', checkoutPath: publication?.migrationComplete ? publication.workspacePath! : publication?.migrationCandidatePath ?? '', branch: profile.branch } : null,
-      syncState: publication?.businessState ?? (profile ? 'UNKNOWN' : 'UNCONFIGURED'), lastSyncAt: publication?.verifiedAt ?? null,
-      lastCommitSha: this.store.getGitAuthority()?.processedCommitSha ?? null, lastError: profile?.lastError ?? null }
+      syncState: this.check.state === 'FAILED' ? 'OFFLINE' : publication?.businessState ?? (profile ? 'UNKNOWN' : 'UNCONFIGURED'), lastSyncAt: publication?.verifiedAt ?? null,
+      lastCommitSha: this.store.getGitAuthority()?.repositoryId === profile?.githubRepositoryId ? this.store.getGitAuthority()?.processedCommitSha ?? null : null,
+      lastError: this.operationError ?? this.check.error ?? profile?.lastError ?? null,
+      lastKnown, remoteCheck: { ...this.check }, provenance: 'ACADEMY_SQLITE',
+      lastKnownAgeMs: lastKnown?.confirmedAt ? Math.max(0, Date.now() - Date.parse(lastKnown.confirmedAt)) : null }
   }
   listEligibleRepositories(): RepositoryRecord[] { return this.repositories.listEligibleRepositories() }
   async bindRepository(id: string): Promise<AcademyGitStatusProjection> {
@@ -107,13 +131,23 @@ export class AcademyGitSyncService {
     if (!this.store.getGitProfile()) throw new AcademyError('GIT_PROFILE_NOT_CONFIGURED')
     this.active = withPublicationLock(join(this.publicationRoot, this.key()), async () => {
       const state = this.state()
+      this.getStatus()
+      const generation = this.check.generation
+      this.operationError = null
       try { await action(state) }
       catch (error) {
         this.observation = null
         const message = error instanceof AcademyError ? error.code : error instanceof Error ? error.message : String(error)
-        this.save(state, state.phase === 'CONFLICT' ? 'CONFLICT' : state.phase === 'REMOTE_UNAVAILABLE' ? 'OFFLINE' : 'UNKNOWN', message)
+        if (state.destinationKey === (this.store.getGitProfile() ? this.key() : null)) {
+          this.operationError = message
+          if (state.phase === 'CONFLICT') this.save(state, 'CONFLICT', message)
+        }
       }
-      if (state.verifiedAt && state.remoteHead && !this.store.getGitProfile()?.lastError && this.store.getGitAuthority()?.processedCommitSha === state.remoteHead) {
+      if (this.check.generation > generation && this.check.state === 'CHECKING' && this.checkIdentity === (this.store.getGitProfile() ? this.key() : null)) {
+        const observed = this.check.requestId === this.confirmedCheckRequestId
+        this.check = { ...this.check, state: observed ? 'OK' : 'FAILED', error: observed ? null : this.operationError, completedAt: new Date().toISOString() }
+      }
+      if (!this.operationError && this.store.getGitProfile() && state.destinationKey === this.key() && state.verifiedAt && state.remoteHead && !this.store.getGitProfile()?.lastError && this.store.getGitAuthority()?.processedCommitSha === state.remoteHead) {
         this.observation = { policy: this.policyIdentity(), head: state.remoteHead, at: Date.parse(state.verifiedAt) }
       }
       this.statusChanged()
@@ -129,6 +163,11 @@ export class AcademyGitSyncService {
   }
   private async observe(state: AcademyGitPublicationState): Promise<AcademyGitSourceSnapshot> {
     const { profile, repositoryId, remoteUrl } = this.identity()
+    const identity = this.key(), policy = this.policyIdentity()
+    this.checkIdentity = identity
+    this.check = { state: 'CHECKING', generation: this.check.generation + 1, requestId: randomUUID(), error: null, completedAt: null }
+    this.confirmedCheckRequestId = null
+    this.statusChanged()
     assertPublicationPaths(state.checkoutPath, [...ACADEMY_AUTHORED_PATHS, '.git'])
     await this.git.initializePublicationRepository(state.checkoutPath, remoteUrl)
     if (!this.transport.fetch || !this.transport.readRemoteHead) throw new AcademyError('REMOTE_OBSERVATION_UNSUPPORTED')
@@ -138,7 +177,10 @@ export class AcademyGitSyncService {
       head = await this.transport.readRemoteHead(state.checkoutPath, 'origin', `refs/heads/${profile.branch}`)
     } catch (error) { state.phase = 'REMOTE_UNAVAILABLE'; throw error }
     if (!head) throw new AcademyError('GIT_SOURCE_BRANCH_MISSING')
+    if (this.key() !== identity || this.policyIdentity() !== policy) throw new AcademyError('GIT_SOURCE_IDENTITY_CHANGED')
     const snapshot = await readAcademyGitSnapshot(this.git, state.checkoutPath, { repositoryId, remoteUrl, branch: profile.branch, sourceCommitSha: head, observedAt: new Date().toISOString() })
+    if (this.key() !== identity || this.policyIdentity() !== policy) throw new AcademyError('GIT_SOURCE_IDENTITY_CHANGED')
+    this.confirmedCheckRequestId = this.check.requestId
     state.remoteHead = head; state.verifiedAt = snapshot.observedAt
     return snapshot
   }
@@ -537,11 +579,17 @@ export class AcademyGitSyncService {
     })
   }
   async recoverOnStartup(): Promise<void> {
-    if (this.store.getGitProfile()) {
-      const state = this.state()
-      this.save(state, 'UNKNOWN')
-      if (state.autoUpdate) await this.syncNow()
+    if (this.store.getGitProfile()) await this.verifyRemote()
+  }
+  verifyRemote(): Promise<AcademyGitStatusProjection> {
+    if (!this.store.getGitProfile()) return Promise.resolve(this.getStatus())
+    if (this.active && this.check.state === 'CHECKING') return this.active
+    if (!this.verification) {
+      const pending = this.state().autoUpdate ? this.syncNow() : this.fetch()
+      this.verification = pending
+      void pending.then(() => { if (this.verification === pending) this.verification = null }, () => { if (this.verification === pending) this.verification = null })
     }
+    return this.verification
   }
   async configureAutomation(input: { autoPublish: boolean; autoUpdate: boolean; confirmed: boolean; expectedRepositoryId: string; expectedBranch: string }): Promise<AcademyGitStatusProjection> {
     const { profile } = this.identity()

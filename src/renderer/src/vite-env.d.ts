@@ -69,6 +69,8 @@ declare global {
       getContinuumArtifact: (repositoryId: string, artifactId: string) => Promise<ContinuumSelection>
       onContinuumChanged: (callback: (change: ContinuumChange) => void) => () => void
       getAcademySnapshot: () => Promise<AcademySnapshot>
+      getAcademyBootstrapState: (initializationId: string) => Promise<import('../../shared/types/academy-bootstrap-types').AcademyBootstrapState>
+      checkAcademyGit: () => Promise<AcademyGitStatusProjection>
       getAcademyGitStatus: () => Promise<AcademyGitStatusProjection>
       syncAcademyGitNow: () => Promise<AcademyGitStatusProjection>
       resolveAcademyGitConflict: (expectedRemoteHead: string | null, expectedDesiredTree: string) => Promise<AcademyGitStatusProjection>
@@ -80,7 +82,7 @@ declare global {
       createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>) => Promise<AcademySkillDetail | AcademyDraftReceipt>
       updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>) => Promise<AcademySkillDetail | AcademyDraftReceipt>
       getAcademyDraft: (name: string) => Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }>
-      onAcademyChanged: (callback: () => void) => (() => void)
+      onAcademyChanged: (callback: (event?: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => void) => (() => void)
       publishAcademyGit: (expected: { localHead: string; remoteHead: string | null }) => Promise<AcademyGitStatusProjection>
       publishAcademyGitCandidate: (input: { branch: string; expectedHead: string; confirmed: boolean }) => Promise<AcademyGitStatusProjection>
       deleteAcademyGitDraft: (input: { skillId: string; expectedVersion: number; expectedDraftCommitSha: string; confirmed: boolean }) => Promise<AcademyGitStatusProjection>

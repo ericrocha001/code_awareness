@@ -30,7 +30,7 @@ export class AcademyService {
   readonly openAiPublication: OpenAiPluginPublicationService
   gitSync: AcademyGitSyncService | null = null
   private readonly canonicalChangeListeners: Set<() => void> = new Set()
-  private readonly distributionChangeListeners: Set<() => void> = new Set()
+  private readonly distributionChangeListeners: Set<(kind: 'distribution' | 'git' | 'publication') => void> = new Set()
   private isClosed = false
   private readonly reconcilingDestinations = new Set<string>()
   private readonly dirtyDestinations = new Set<string>()
@@ -46,7 +46,7 @@ export class AcademyService {
     this.distribution = new AcademyDistributionService(this.store)
     this.packageRevisions = new AcademyPluginPackageRevisionService(this.store)
     this.openAiPublication = new OpenAiPluginPublicationService(this.store, this.packageRevisions, databasePath, downloadsPath, pluginWorkerPath)
-    this.openAiPublication.onOperationChange(() => this.emitDistributionChange())
+    this.openAiPublication.onOperationChange(() => this.emitDistributionChange('publication'))
     this.importer = new AcademyImporter(this.store)
     this.watcher = new AcademyWatcher(this.store, this.projections)
   }
@@ -54,10 +54,14 @@ export class AcademyService {
   initializeGitSync(gitSync: AcademyGitSyncService): void {
     this.gitSync = gitSync
     this.store.enforceGitFirst()
-    gitSync.onStatusChange(() => this.emitDistributionChange())
+    gitSync.onStatusChange(() => this.emitDistributionChange('git'))
+    let acceptedHead = this.store.getGitAuthority()?.processedCommitSha
     gitSync.onAccepted(ids => {
       for (const id of ids) this.scheduleReconciliationForSkill(id)
-      this.emitCanonicalChange()
+      const nextHead = this.store.getGitAuthority()?.processedCommitSha
+      if (ids.length) this.emitCanonicalChange()
+      else if (nextHead !== acceptedHead) this.emitDistributionChange('publication')
+      acceptedHead = nextHead
     })
   }
 
@@ -76,14 +80,14 @@ export class AcademyService {
     }
   }
 
-  onDistributionChange(listener: () => void): () => void {
+  onDistributionChange(listener: (kind: 'distribution' | 'git' | 'publication') => void): () => void {
     this.distributionChangeListeners.add(listener)
     return () => this.distributionChangeListeners.delete(listener)
   }
 
-  emitDistributionChange(): void {
+  emitDistributionChange(kind: 'distribution' | 'git' | 'publication' = 'distribution'): void {
     for (const listener of this.distributionChangeListeners) {
-      try { listener() } catch (err) { console.error('[Academy] Distribution listener error:', err) }
+      try { listener(kind) } catch (err) { console.error('[Academy] Distribution listener error:', err) }
     }
   }
 
@@ -107,6 +111,17 @@ export class AcademyService {
 
 
   snapshot(): AcademySnapshot { return { skills: this.store.list(), destinations: this.store.listDestinations(), conflicts: this.store.conflictSummaries() } }
+  getAcademyBootstrapState(initializationId: string): import('../../shared/types/academy-bootstrap-types').AcademyBootstrapState {
+    this.assertNotClosed()
+    const start = performance.now()
+    const data = this.store.readAcademyBootstrap(() => this.gitSync?.getStatus() ?? {
+      profile: null, repository: null, syncState: 'UNCONFIGURED', lastSyncAt: null, lastCommitSha: null, lastError: null,
+      lastKnown: null, remoteCheck: { state: 'IDLE', generation: 0, requestId: null, error: null, completedAt: null }, provenance: 'ACADEMY_SQLITE', lastKnownAgeMs: null
+    })
+    const result = { ...data, initializationId, hydration: 'READY' as const, provenance: 'ACADEMY_SQLITE' as const, storeDurationMs: performance.now() - start }
+    console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'STORE_RESPONSE', elapsedMs: result.storeDurationMs }))
+    return result
+  }
   list(status?: 'ACTIVE' | 'DISABLED' | 'ARCHIVED') { return this.store.list(status === 'ARCHIVED' ? 'DISABLED' : status) }
   get(id: string) { return this.store.get(id) }
   history(id: string): AcademySkillVersion[]

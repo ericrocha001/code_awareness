@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
+import type { AcademyPersistedPublication } from '../../../../shared/types/academy-bootstrap-types'
 import type {
   AcademyConflictReview,
   AcademyConflictBatch,
@@ -54,6 +55,16 @@ export const AcademyView: React.FC = () => {
   const [openAiPublication, setOpenAiPublication] = useState<AcademyOpenAiPublicationState | null>(null)
   const [packageDistribution, setPackageDistribution] = useState<AcademyPackageDistributionState | null>(null)
   const [gitStatus, setGitStatus] = useState<AcademyGitStatusProjection | null>(null)
+  const [hydration, setHydration] = useState<'LOADING' | 'READY' | 'ERROR'>('LOADING')
+  const [knownPublication, setKnownPublication] = useState<AcademyPersistedPublication | null>(null)
+  const [initializationId] = useState(() => crypto.randomUUID())
+  const startedAt = useRef(performance.now())
+  const mounted = useRef(false)
+  const painted = useRef(false)
+  const sequences = useRef<Record<string, number>>({})
+  const remoteFlight = useRef<Promise<void> | null>(null)
+  const firstRemote = useRef(false)
+  const latestSelection = useRef({ id: selected?.id, isEditing: false })
   const [eligibleRepos, setEligibleRepos] = useState<RepositoryRecord[]>([])
   const [selectedRepoId, setSelectedRepoId] = useState('')
   const [isEditing, setIsEditing] = useState(false)
@@ -70,6 +81,7 @@ export const AcademyView: React.FC = () => {
   const [conflictReview, setConflictReview] = useState<AcademyConflictReview | null>(null)
   const [conflictBatch, setConflictBatch] = useState<AcademyConflictBatch | null>(null)
   const [conflictBusy, setConflictBusy] = useState(false)
+  latestSelection.current = { id: selected?.id, isEditing }
 
   const showMessage = (text: string, kind: 'success' | 'error' = 'success') => setMessage({ text, kind })
   const reportError = (error: unknown) => showMessage(error instanceof Error ? error.message : String(error), 'error')
@@ -80,70 +92,147 @@ export const AcademyView: React.FC = () => {
     return () => window.clearTimeout(timer)
   }, [message])
 
-  const loadSkill = async (id: string) => {
+  const applyGit = (next: AcademyGitStatusProjection) => setGitStatus(current => {
+    if ((next.remoteCheck?.generation ?? 0) < (current?.remoteCheck?.generation ?? 0)) return current
+    return next
+  })
+
+  const readProjection = async <T,>(key: string, read: () => Promise<T>, apply: (value: T) => void) => {
+    const sequence = sequences.current[key] = (sequences.current[key] ?? 0) + 1
+    try {
+      const value = await read()
+      if (mounted.current && sequences.current[key] === sequence) apply(value)
+    } catch (error) { if (mounted.current && sequences.current[key] === sequence) throw error }
+  }
+
+  const loadSkill = async (id: string, preserveEdits = false) => {
+    const sequence = sequences.current.detail = (sequences.current.detail ?? 0) + 1
     const detail = await window.codeAwareness.getAcademySkill(id)
+    if (!mounted.current || sequences.current.detail !== sequence || preserveEdits && latestSelection.current.isEditing) return detail
     setSelected(detail)
     setSkillMd(detail.current.package.skillMd)
     setArtifacts(detail.current.package.artifacts)
     setScope(detail.scope)
     setProjectIds(detail.projectIds)
-    setHistory(await window.codeAwareness.getAcademyHistory(id))
-    setSkillDistribution(await window.codeAwareness.listAcademyDistributionStates(id))
+    const [versions, states] = await Promise.all([window.codeAwareness.getAcademyHistory(id), window.codeAwareness.listAcademyDistributionStates(id)])
+    if (mounted.current && sequences.current.detail === sequence) { setHistory(versions); setSkillDistribution(states) }
     return detail
   }
 
   const refresh = async (selectId?: string) => {
-    const next = await window.codeAwareness.getAcademySnapshot()
-    setSnapshot(next)
-    setDistribution(await window.codeAwareness.getAcademyDistributionHealth())
-    if (window.codeAwareness.getAcademyOpenAiPublicationState) setOpenAiPublication(await window.codeAwareness.getAcademyOpenAiPublicationState())
-    if (window.codeAwareness.getAcademyPackageDistributionState) setPackageDistribution(await window.codeAwareness.getAcademyPackageDistributionState())
-    if (window.codeAwareness.getAcademyGitStatus) setGitStatus(await window.codeAwareness.getAcademyGitStatus())
-    const id = selectId ?? selected?.id
-    if (id) await loadSkill(id)
-    else setSkillDistribution([])
+    await Promise.all([
+      readProjection('catalog', () => window.codeAwareness.getAcademySnapshot(), setSnapshot),
+      readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution),
+      readProjection('publication', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication),
+      readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution),
+      readProjection('git', () => window.codeAwareness.getAcademyGitStatus(), applyGit)
+    ])
+    const id = selectId ?? latestSelection.current.id
+    if (id && !latestSelection.current.isEditing) await loadSkill(id, true)
+  }
+
+  const observe = () => {
+    if (!painted.current || remoteFlight.current) return
+    remoteFlight.current = window.codeAwareness.checkAcademyGit().then(next => {
+      if (!mounted.current) return
+      applyGit(next)
+      if (!firstRemote.current) {
+        firstRemote.current = true
+        console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'REMOTE_CHECK_COMPLETE', elapsedMs: performance.now() - startedAt.current, state: next.remoteCheck?.state ?? next.syncState, requestId: next.remoteCheck?.requestId }))
+      }
+    }).catch(error => {
+      if (!firstRemote.current) {
+        firstRemote.current = true
+        console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'REMOTE_CHECK_COMPLETE', elapsedMs: performance.now() - startedAt.current, state: 'FAILED', error: String(error) }))
+      }
+      if (mounted.current) reportError(error)
+    }).finally(() => { remoteFlight.current = null })
   }
 
   useEffect(() => {
-    void refresh().catch(reportError)
-    const observe = () => { void window.codeAwareness.refreshAcademyGit?.().then(() => window.codeAwareness.getAcademyGitStatus()).then(setGitStatus).catch(reportError) }
+    mounted.current = true
+    const sequence = sequences.current.bootstrap = (sequences.current.bootstrap ?? 0) + 1
+    void window.codeAwareness.getAcademyBootstrapState(initializationId).then(state => {
+      if (!mounted.current || sequences.current.bootstrap !== sequence) return
+      setSnapshot(state.snapshot); applyGit(state.git); setKnownPublication(state.publication); setHydration('READY')
+      console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'STORE_RESPONSE', elapsedMs: performance.now() - startedAt.current, storeDurationMs: state.storeDurationMs, provenance: state.provenance }))
+    }).catch(error => { if (mounted.current && sequences.current.bootstrap === sequence) { setHydration('ERROR'); reportError(error) } })
     window.addEventListener('focus', observe)
     window.addEventListener('online', observe)
-    const timer = window.setInterval(observe, 300000)
-    if (window.codeAwareness.listAcademyGitEligibleRepositories) {
-      void window.codeAwareness.listAcademyGitEligibleRepositories().then((repos) => {
-        setEligibleRepos(repos)
-        if (repos.length > 0) setSelectedRepoId(repos[0].id)
-      }).catch(reportError)
-    }
-    return () => { window.removeEventListener('focus', observe); window.removeEventListener('online', observe); window.clearInterval(timer) }
+    return () => { mounted.current = false; painted.current = false; window.removeEventListener('focus', observe); window.removeEventListener('online', observe) }
   }, [])
+
+  useEffect(() => {
+    if (hydration !== 'READY' || painted.current) return
+    let frame = requestAnimationFrame(() => {
+      frame = requestAnimationFrame(() => {
+        if (!mounted.current) return
+        painted.current = true
+        console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'FIRST_USEFUL_PAINT', elapsedMs: performance.now() - startedAt.current }))
+        void Promise.all([
+          readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution),
+          readProjection('publication', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication),
+          readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution),
+          readProjection('repositories', () => window.codeAwareness.listAcademyGitEligibleRepositories(), repos => { setEligibleRepos(repos); setSelectedRepoId(value => value || repos[0]?.id || '') })
+        ]).catch(reportError)
+        observe()
+      })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [hydration])
 
   const visible = useMemo(() => snapshot.skills.filter((skill) =>
     (status === 'ALL' || skill.status === status)
     && `${skill.name} ${skill.description}`.toLowerCase().includes(query.toLowerCase())
   ), [snapshot.skills, status, query])
 
-  useEffect(() => window.codeAwareness.onAcademyChanged?.(() => {
-    void (async () => {
-      setSnapshot(await window.codeAwareness.getAcademySnapshot())
-      setGitStatus(await window.codeAwareness.getAcademyGitStatus())
-      if (window.codeAwareness.getAcademyOpenAiPublicationState) setOpenAiPublication(await window.codeAwareness.getAcademyOpenAiPublicationState())
-      if (selected && !isEditing) await loadSkill(selected.id)
-    })().catch(reportError)
-  }), [selected?.id, isEditing])
+  useEffect(() => {
+    const pending = new Set<string>()
+    let scheduled = false
+    return window.codeAwareness.onAcademyChanged?.(event => {
+      if (!painted.current) return
+      pending.add(event?.kind ?? 'all')
+      if (scheduled) return
+      scheduled = true
+      queueMicrotask(() => {
+        scheduled = false
+        if (!mounted.current) return
+        const kinds = new Set(pending); pending.clear()
+        const tasks: Promise<unknown>[] = []
+        if (kinds.has('all')) tasks.push(refresh())
+        else {
+          if (kinds.has('git')) tasks.push(readProjection('git', () => window.codeAwareness.getAcademyGitStatus(), applyGit))
+          if (kinds.has('catalog')) {
+            tasks.push(readProjection('catalog', () => window.codeAwareness.getAcademySnapshot(), setSnapshot))
+            if (latestSelection.current.id && !latestSelection.current.isEditing) tasks.push(loadSkill(latestSelection.current.id, true))
+          }
+          if (kinds.has('catalog') || kinds.has('publication')) {
+            tasks.push(readProjection('publication', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication))
+            tasks.push(readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution))
+          }
+          if (kinds.has('distribution')) tasks.push(readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution))
+        }
+        void Promise.all(tasks).catch(reportError)
+      })
+    })
+  }, [])
 
   const choose = async (id: string) => {
+    const request = sequences.current.selection = (sequences.current.selection ?? 0) + 1
+    sequences.current.edit = (sequences.current.edit ?? 0) + 1
+    latestSelection.current.id = id
     try {
       await loadSkill(id)
+      if (!mounted.current || sequences.current.selection !== request) return
       setIsEditing(false)
       setActiveTab('skill')
       setCatalogOpen(false)
       setMessage(null)
-    } catch (error) { reportError(error) }
+    } catch (error) { if (mounted.current && sequences.current.selection === request) reportError(error) }
   }
 
   const createNew = () => {
+    for (const key of ['detail', 'selection', 'edit']) sequences.current[key] = (sequences.current[key] ?? 0) + 1
     setDraftCommit(undefined)
     setSelected(null)
     setHistory([])
@@ -159,6 +248,7 @@ export const AcademyView: React.FC = () => {
   }
 
   const cancelEditing = () => {
+    sequences.current.edit = (sequences.current.edit ?? 0) + 1
     if (selected) {
       setSkillMd(selected.current.package.skillMd)
       setArtifacts(selected.current.package.artifacts)
@@ -182,7 +272,7 @@ export const AcademyView: React.FC = () => {
       if ('state' in detail && detail.state === 'DRAFT_SAVED') {
         setDraftCommit(detail.workspaceCommitSha)
         showMessage('Rascunho salvo em commit local. Publicação pendente.')
-        setGitStatus(await window.codeAwareness.getAcademyGitStatus())
+        applyGit(await window.codeAwareness.getAcademyGitStatus())
         return
       }
       if (!('id' in detail)) return
@@ -201,9 +291,12 @@ export const AcademyView: React.FC = () => {
   }
 
   const editSkill = async () => {
+    const request = sequences.current.edit = (sequences.current.edit ?? 0) + 1
+    const selectedId = selected?.id
     try {
       if (selected?.scope === 'GLOBAL' && window.codeAwareness.getAcademyDraft) {
         const draft = await window.codeAwareness.getAcademyDraft(selected.name)
+        if (!mounted.current || request !== sequences.current.edit || selectedId !== latestSelection.current.id) return
         setDraftCommit(draft.workspaceCommitSha)
         if (draft.package) { setSkillMd(draft.package.skillMd); setArtifacts(draft.package.artifacts) }
       }
@@ -217,7 +310,7 @@ export const AcademyView: React.FC = () => {
       const draft = await window.codeAwareness.getAcademyDraft(selected.name)
       setConfirmation({ title: `Preparar remoção de ${selected.name}?`, description: 'A remoção será salva como commit privado. O conteúdo oficial e o histórico permanecem até a publicação na main. A preferência de ativação local é independente.', confirmLabel: 'Salvar remoção no workspace', destructive: true, action: async () => {
         const result = await window.codeAwareness.deleteAcademyGitDraft({ skillId: selected.id, expectedVersion: selected.currentVersion, expectedDraftCommitSha: draft.workspaceCommitSha, confirmed: true })
-        setGitStatus(result); showMessage(result.lastError ?? 'Remoção salva; publicação pendente.', result.lastError ? 'error' : 'success')
+        applyGit(result); showMessage(result.lastError ?? 'Remoção salva; publicação pendente.', result.lastError ? 'error' : 'success')
       } })
     } catch (error) { reportError(error) }
   }
@@ -345,11 +438,14 @@ export const AcademyView: React.FC = () => {
   }
 
   return <section className="academy-view">
+    {hydration !== 'READY' && <p role="status">{hydration === 'ERROR' ? 'Não foi possível carregar o estado da Academy.' : 'Carregando Academy do estado local…'}</p>}
     <AcademyHeader query={query} status={status} conflictCount={snapshot.conflicts.length} onQueryChange={setQuery} onStatusChange={setStatus} onCreate={createNew} onOpenCatalog={() => setCatalogOpen(true)} onOpenOperations={() => setOperationsOpen(true)} />
     <div className="academy-layout">
       <SkillCatalog skills={visible} selectedId={selected?.id ?? null} open={catalogOpen} onClose={() => setCatalogOpen(false)} onSelect={(id) => void choose(id)} activationPending={activationPending !== null || isEditing} onSetEnabled={(skill) => void setEnabled(skill)} />
       <SkillWorkspace selected={selected} isEditing={isEditing} activeTab={activeTab} skillMd={skillMd} scope={scope} projectIds={projectIds} destinations={snapshot.destinations} history={history} distribution={skillDistribution} onTabChange={setActiveTab} onSkillMdChange={setSkillMd} onScopeChange={setScope} onProjectIdsChange={setProjectIds} onEdit={() => void editSkill()} onSave={() => void save()} onCancel={cancelEditing} activationPending={activationPending !== null} onSetEnabled={() => selected && void setEnabled(selected)} onRemoveFromGit={() => void requestGitRemoval()} />
       <OperationsRail
+        hydration={hydration}
+        knownPublication={knownPublication}
         open={operationsOpen} destinations={snapshot.destinations} artifacts={artifacts} conflicts={snapshot.conflicts} distribution={distribution} packageDistribution={packageDistribution} openAiPublication={openAiPublication} gitStatus={gitStatus} eligibleRepos={eligibleRepos} selectedRepoId={selectedRepoId} onSelectedRepoChange={setSelectedRepoId} onClose={() => setOperationsOpen(false)} onOpenDestinations={() => setDestinationsOpen(true)} onOpenArtifact={openArtifact} onAddArtifact={() => { setArtifactDraft({ mode: 'create', originalPath: null, path: '', content: '' }); setIsEditing(true) }}
         onReconcile={() => void (async () => { try { await window.codeAwareness.reconcileAcademyDistribution(); showMessage('Distribuição reconciliada.'); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
         onPrepareRelease={() => void prepareOpenAiRelease()}
@@ -360,11 +456,11 @@ export const AcademyView: React.FC = () => {
         onBootstrapPlugin={() => void (async () => { try { await window.codeAwareness.bootstrapAcademyOpenAiPlugin(); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
         onRevealRelease={() => { const release = openAiPublication?.selectedRelease; if (release) void window.codeAwareness.revealAcademyOpenAiPackage(release.id) }}
         onConfirmUpload={requestConfirmOpenAiUpload}
-        onBindRepository={() => void (async () => { try { setGitStatus(await window.codeAwareness.bindAcademyGitRepository(selectedRepoId)) } catch (error) { reportError(error) } })()}
-        onSyncGit={() => void (async () => { try { const result = gitStatus?.syncState === 'LOCAL_CHANGES' ? await window.codeAwareness.publishAcademyGit({ localHead: gitStatus.publication!.localHead!, remoteHead: gitStatus.publication!.remoteHead }) : await window.codeAwareness.syncAcademyGitNow(); setGitStatus(result); await refresh(selected?.id); showMessage(result.syncState === 'SYNCED' ? 'Git sincronizado.' : result.lastError ?? 'Verificação remota pendente.', result.syncState === 'SYNCED' ? 'success' : 'error') } catch (error) { reportError(error) } })()}
+        onBindRepository={() => void (async () => { try { applyGit(await window.codeAwareness.bindAcademyGitRepository(selectedRepoId)) } catch (error) { reportError(error) } })()}
+        onSyncGit={() => void (async () => { try { const result = gitStatus?.syncState === 'LOCAL_CHANGES' ? await window.codeAwareness.publishAcademyGit({ localHead: gitStatus.publication!.localHead!, remoteHead: gitStatus.publication!.remoteHead }) : await window.codeAwareness.syncAcademyGitNow(); applyGit(result); await refresh(selected?.id); showMessage(result.syncState === 'SYNCED' ? 'Git sincronizado.' : result.lastError ?? 'Verificação remota pendente.', result.syncState === 'SYNCED' ? 'success' : 'error') } catch (error) { reportError(error) } })()}
         onGitAutomation={(autoPublish, autoUpdate) => setConfirmation({ title: 'Autorizar sincronização automática?', description: `${gitStatus?.repository?.fullName}:${gitStatus?.profile?.branch}. Publicação de Saves: ${autoPublish ? 'habilitada' : 'desabilitada'}; atualização remota: ${autoUpdate ? 'habilitada' : 'desabilitada'}.`, confirmLabel: 'Salvar preferência', action: async () => {
           const profile = gitStatus?.profile
-          if (profile) setGitStatus(await window.codeAwareness.configureAcademyGitAutomation({ autoPublish, autoUpdate, confirmed: true, expectedRepositoryId: profile.githubRepositoryId, expectedBranch: profile.branch }))
+          if (profile) applyGit(await window.codeAwareness.configureAcademyGitAutomation({ autoPublish, autoUpdate, confirmed: true, expectedRepositoryId: profile.githubRepositoryId, expectedBranch: profile.branch }))
         } })}
         onOpenGit={() => void window.codeAwareness.openAcademyGitRepository()}
         onPublishCandidate={() => {
@@ -373,7 +469,7 @@ export const AcademyView: React.FC = () => {
           const branch = `academy/edits-${head.slice(0, 12)}`
           setConfirmation({ title: 'Publicar branch candidata?', description: `${gitStatus?.repository?.fullName}:${branch}. Esta ação publica os commits locais para revisão; não abre nem mescla um PR.`, confirmLabel: 'Publicar branch', action: async () => {
             const result = await window.codeAwareness.publishAcademyGitCandidate({ branch, expectedHead: head, confirmed: true })
-            setGitStatus(result); showMessage(result.lastError ?? 'Branch publicada; revisão e PR pendentes.', result.lastError ? 'error' : 'success')
+            applyGit(result); showMessage(result.lastError ?? 'Branch publicada; revisão e PR pendentes.', result.lastError ? 'error' : 'success')
           } })
         }}
         onResolveGitConflict={() => {
@@ -383,7 +479,7 @@ export const AcademyView: React.FC = () => {
             void (async () => {
               try {
                 const result = await window.codeAwareness.resolveAcademyGitConflict(state.remoteHead, state.localHead!)
-                setGitStatus(result)
+                applyGit(result)
                 const path = result.publication?.conflictPaths[0]
                 if (path) { const review = await window.codeAwareness.reviewAcademyGitConflict(path); setGitReview(review); setGitResolution(review.working ?? '') }
               } catch (error) { reportError(error) }
@@ -392,7 +488,7 @@ export const AcademyView: React.FC = () => {
           }
           setConfirmation({ title: 'Confirmar main revisada?', description: `Revise as diferenças em ${state.conflictPaths.join(', ')}. Adotar main ${state.remoteHead?.slice(0, 8)} preservará todas as versões legadas e os candidatos privados.`, confirmLabel: 'Adotar main revisada', action: async () => {
             const result = await window.codeAwareness.completeAcademyGitMigration(state.remoteHead!, state.migrationCandidateHash!, true)
-            setGitStatus(result)
+            applyGit(result)
             showMessage(result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'Git sincronizado.' : result.lastError ?? 'Verificação remota pendente.', result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'success' : 'error')
           } })
         }}
@@ -412,7 +508,7 @@ export const AcademyView: React.FC = () => {
       <label>Progressão semver<select aria-label="Progressão semver" defaultValue="" onChange={event => void window.codeAwareness.previewAcademyManifestVersion(event.target.value as 'PATCH' | 'MINOR' | 'MAJOR').then(setManifestPreview).catch(reportError)}><option value="" disabled>Sugestão pelo delta</option><option value="PATCH">Patch</option><option value="MINOR">Minor</option><option value="MAJOR">Major</option></select></label>
       <details><summary>Revisar antes e depois de plugin.json</summary><pre>{manifestPreview.before}</pre><pre>{manifestPreview.after}</pre></details>
       <footer><button onClick={() => setManifestPreview(null)}>Cancelar</button><button onClick={() => void (async () => {
-        try { const result = await window.codeAwareness.saveAcademyManifestVersion({ preview: manifestPreview, confirmed: true }); setGitStatus(result); setManifestPreview(null); showMessage(result.lastError ?? 'Versão salva no workspace. Publique a revisão no Git antes de preparar o ZIP.', result.lastError ? 'error' : 'success') }
+        try { const result = await window.codeAwareness.saveAcademyManifestVersion({ preview: manifestPreview, confirmed: true }); applyGit(result); setManifestPreview(null); showMessage(result.lastError ?? 'Versão salva no workspace. Publique a revisão no Git antes de preparar o ZIP.', result.lastError ? 'error' : 'success') }
         catch (error) { reportError(error) }
       })()}>Salvar revisão no workspace</button></footer>
     </section></div>}
@@ -423,7 +519,7 @@ export const AcademyView: React.FC = () => {
       <div className="academy-inline-actions"><button onClick={() => setGitReview(null)}>Fechar</button><button onClick={() => void (async () => {
         try {
           const result = await window.codeAwareness.resolveAcademyGitConflictPath({ path: gitReview.path, head: gitReview.head, revision: gitReview.revision, content: gitResolution, confirmed: true })
-          setGitStatus(result)
+          applyGit(result)
           const path = result.publication?.conflictPaths[0]
           if (path) { const next = await window.codeAwareness.reviewAcademyGitConflict(path); setGitReview(next); setGitResolution(next.working ?? '') }
           else { setGitReview(null); showMessage(result.lastError ?? 'Reconciliação salva; publicação pendente.', result.lastError ? 'error' : 'success') }

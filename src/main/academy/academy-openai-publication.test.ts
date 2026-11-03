@@ -86,10 +86,63 @@ async function gitFixture() {
   f.service.initializeGitSync(sync)
   expect((await sync.bindRepository(record.id)).syncState).toBe('SYNCED')
   const bump = (version: string) => { manifest.version = version; writeFile(human, 'plugin.json', JSON.stringify(manifest)) }
-  return { ...f, git, sync, transport, human, commit, bump, manifest }
+  return { ...f, git, sync, transport, human, commit, bump, manifest, record }
 }
 
 describe('Academy Git-pinned plugin publication', () => {
+  it('hydrates persisted identity, flags and upload state across restart while remote verification fails independently', async () => {
+    const f = await gitFixture()
+    let reopened: AcademyService | undefined
+    try {
+      Object.assign(f.transport, { authorizationIdentity: () => 'authorized-fixture-policy' })
+      await f.sync.configureAutomation({ autoPublish: true, autoUpdate: true, confirmed: true, expectedRepositoryId: 'release-github', expectedBranch: 'main' })
+      const before = f.sync.getStatus()
+      const database = f.service.store.databasePath
+      await f.service.close()
+      reopened = new AcademyService(database, join(f.root, 'Downloads'), 2000, join(f.root, 'academy-plugin-worker.cjs'))
+      const store = reopened.store
+      const sync = new AcademyGitSyncService(store, new AcademyGitMaterializer(), f.git, f.transport,
+        { resolveRepository: () => f.record, findByGitHubId: () => f.record, listEligibleRepositories: () => [f.record] })
+      reopened.initializeGitSync(sync)
+      expect(sync.getStatus()).toMatchObject({ lastKnown: before.lastKnown, remoteCheck: { state: 'IDLE' } })
+      const persisted = store.getGitPublication(before.publication!.destinationKey)
+      const save = vi.spyOn(store, 'saveGitPublication')
+      const scan = vi.spyOn(store, 'getGitSnapshot').mockImplementation(() => { throw new Error('snapshot scan forbidden in bootstrap') })
+      const header = vi.spyOn(store, 'getGitSnapshotHeader').mockImplementation(() => { throw new Error('fingerprint source forbidden in bootstrap') })
+      const publication = vi.spyOn(reopened.openAiPublication, 'state').mockImplementation(() => { throw new Error('expensive projection forbidden in bootstrap') })
+      let fail!: (error: Error) => void
+      const fetch = vi.spyOn(f.transport, 'fetch').mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+      const pending = sync.recoverOnStartup()
+      await vi.waitFor(() => expect(sync.getStatus().remoteCheck?.state).toBe('CHECKING'))
+      const bootstrap = reopened.getAcademyBootstrapState('restart-proof')
+      expect(bootstrap.snapshot.skills.some(skill => skill.name === 'global-skill')).toBe(true)
+      expect(bootstrap).toMatchObject({ hydration: 'READY', provenance: 'ACADEMY_SQLITE',
+        git: { lastKnown: before.lastKnown, remoteCheck: { state: 'CHECKING' }, publication: { autoPublish: true, autoUpdate: true } },
+        publication: { publishedVersion: '0.1.3', release: { version: '0.1.3', status: 'UPLOADED_UNVERIFIED', sourceCommitSha: null } } })
+      expect(save).not.toHaveBeenCalled(); expect(scan).not.toHaveBeenCalled(); expect(header).not.toHaveBeenCalled(); expect(publication).not.toHaveBeenCalled()
+      expect(store.getGitPublication(before.publication!.destinationKey)).toEqual(persisted)
+      await vi.waitFor(() => expect(fail).toBeTypeOf('function'))
+      fail(new Error('simulated offline'))
+      await pending
+      expect(sync.getStatus()).toMatchObject({ syncState: 'OFFLINE', lastKnown: before.lastKnown, remoteCheck: { state: 'FAILED', error: 'simulated offline' } })
+      expect(save).not.toHaveBeenCalled()
+      expect(store.getGitPublication(before.publication!.destinationKey)).toEqual(persisted)
+      scan.mockRestore(); header.mockRestore(); publication.mockRestore()
+      expect((await sync.verifyRemote()).remoteCheck?.state).toBe('OK')
+      expect(sync.getStatus().lastKnown?.autoUpdate).toBe(true)
+      fetch.mockImplementationOnce(() => new Promise((_resolve, reject) => { fail = reject }))
+      const late = sync.verifyRemote()
+      await vi.waitFor(() => expect(sync.getStatus().remoteCheck?.state).toBe('CHECKING'))
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3))
+      store.saveGitProfile({ ...store.getGitProfile()!, repositoryCatalogId: 'other', githubRepositoryId: 'other-repo', branch: 'release' })
+      expect(sync.getStatus()).toMatchObject({ repository: null, lastCommitSha: null, lastSyncAt: null, lastKnown: { repositoryId: 'other-repo', branch: 'release', remoteHead: null }, remoteCheck: { state: 'IDLE' } })
+      fail(new Error('old identity completed late'))
+      await late
+      expect(sync.getStatus()).toMatchObject({ lastKnown: { repositoryId: 'other-repo' }, remoteCheck: { state: 'IDLE', error: null } })
+      console.log('ACADEMY_BOOTSTRAP_STORE', JSON.stringify({ initializationId: bootstrap.initializationId, storeMs: bootstrap.storeDurationMs, source: bootstrap.provenance }))
+    } finally { if (reopened) await reopened.close(); else await f.service.close() }
+  }, 90000)
+
   it('coalesces fresh observations and physical builds, verifies cached bytes, and independently reproduces the archive off-thread', async () => {
     const f = await gitFixture()
     try {

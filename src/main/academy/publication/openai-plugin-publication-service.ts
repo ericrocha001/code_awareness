@@ -117,9 +117,9 @@ export class OpenAiPluginPublicationService {
       canonicalSnapshotHash = profile ? this.currentContentHash() : null
       currentPackageRevision = profile ? header && projection ? this.packageRevisions.resolveProjection(header, projection) : this.packageRevisions.resolveCurrent() : null
     } catch (error) { sourceError = error instanceof AcademyError ? error.code : 'GIT_SOURCE_UNAVAILABLE' }
-    const hostedStatus = !profile || !currentPackageRevision
+    const hostedStatus = !profile
       ? 'UNCONFIGURED'
-      : profile.publishedVersion === currentPackageRevision.version ? 'CURRENT' : 'HOSTED_UPDATE_AVAILABLE'
+      : profile.publishedVersion === (currentPackageRevision?.version ?? header?.manifest?.version ?? profile.publishedVersion) && versionPreflight?.outcome !== 'VERSION_ALREADY_USED_FOR_OTHER_CONTENT' ? 'CURRENT' : 'HOSTED_UPDATE_AVAILABLE'
     return {
       profile, latestPrepared, latestUploaded, selectedRelease, sourceError, versionPreflight, operation: this.operation,
       publicSkillCount: canonical.length, canonicalSnapshotHash,

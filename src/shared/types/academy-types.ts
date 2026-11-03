@@ -383,6 +383,10 @@ export interface AcademyGitProfile {
 }
 
 export interface AcademyGitStatusProjection {
+  lastKnown?: import('./academy-bootstrap-types').AcademyLastKnownSyncSnapshot | null
+  remoteCheck?: import('./academy-bootstrap-types').AcademyRemoteCheckState
+  lastKnownAgeMs?: number | null
+  provenance?: 'ACADEMY_SQLITE'
   publication?: AcademyGitPublicationState | null
   profile: AcademyGitProfile | null
   repository: {

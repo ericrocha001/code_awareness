@@ -804,6 +804,16 @@ export class AcademyStore {
     return row?.snapshot_json ?? null
   }
 
+  readAcademyBootstrap(readGit: () => import('../../shared/types/academy-types').AcademyGitStatusProjection) {
+    return this.db.transaction(() => {
+      const release = this.db.prepare(`SELECT r.id, r.plugin_version version, r.status,
+        (SELECT json_extract(b.receipt_json,'$.sourceCommitSha') FROM academy_openai_git_builds b WHERE b.release_id=r.id ORDER BY b.rowid DESC LIMIT 1) sourceCommitSha
+        FROM academy_openai_plugin_releases r ORDER BY r.created_at DESC, r.rowid DESC LIMIT 1`).get() as import('../../shared/types/academy-bootstrap-types').AcademyPersistedPublication['release'] | undefined
+      return { snapshot: { skills: this.list(), destinations: this.listDestinations(), conflicts: this.conflictSummaries() }, git: readGit(),
+        publication: { publishedVersion: this.getOpenAiPluginProfile()?.publishedVersion ?? null, release: release ?? null, marketplace: this.getMarketplaceState() } }
+    })()
+  }
+
   getGitSnapshotHeader(repositoryId: string, commitSha: string): AcademyGitSnapshotHeader | null {
     const row = this.db.prepare('SELECT header_json FROM academy_git_snapshots WHERE repository_id=? AND commit_sha=?').get(repositoryId, commitSha) as Row | undefined
     if (!row) return null
