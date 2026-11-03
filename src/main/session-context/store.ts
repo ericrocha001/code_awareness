@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { digest, safeFile, sanitize, utf8Prefix } from './privacy'
 import { EVENT_TYPES, LIMITS, COVERAGE_REASON_CODES, type EventInput, type EventRow, type SessionInput, type SessionRow, type SourceObservation, type CoverageReasons } from './types'
 import type { SessionAssociation, SessionFilter, DeclaredSessionAssociation } from './associations'
+import type { CaptureHealthObservation } from './capture-health-types'
 
 export function sessionStorePath(base: string, repositoryId: string): string {
   if (!repositoryId || repositoryId.length > 200) throw new Error('REPOSITORY_REQUIRED')
@@ -32,7 +33,7 @@ export class SessionStore {
       this.db.pragma('journal_mode = WAL')
       this.db.pragma('foreign_keys = ON')
       this.db.pragma('busy_timeout = 3000')
-      if (Number(this.db.pragma('user_version', { simple: true })) > 4) throw new Error('SCHEMA_UNSUPPORTED')
+      if (Number(this.db.pragma('user_version', { simple: true })) > 5) throw new Error('SCHEMA_UNSUPPORTED')
       this.db.transaction(() => {
         this.db.exec(`
           CREATE TABLE IF NOT EXISTS identity(repositoryId TEXT PRIMARY KEY, cursorKey TEXT NOT NULL, revision INTEGER NOT NULL);
@@ -66,6 +67,11 @@ export class SessionStore {
           CREATE INDEX IF NOT EXISTS association_artifact ON session_associations(json_extract(payload, '$.artifactId'));
           CREATE INDEX IF NOT EXISTS association_commit ON session_associations(json_extract(payload, '$.commitSha'));
           CREATE INDEX IF NOT EXISTS association_pr ON session_associations(json_extract(payload, '$.pullRequest'));
+          CREATE TABLE IF NOT EXISTS capture_health(
+            id TEXT PRIMARY KEY, worktreeId TEXT NOT NULL, generation TEXT NOT NULL, cycleId TEXT NOT NULL,
+            observedAt TEXT NOT NULL, payload TEXT NOT NULL, integrity TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS capture_health_target ON capture_health(worktreeId, generation, cycleId, observedAt);
+          CREATE TABLE IF NOT EXISTS capture_health_latest(target TEXT PRIMARY KEY, observationId TEXT NOT NULL REFERENCES capture_health(id));
         `)
         const identities = this.db.prepare('SELECT repositoryId FROM identity').all() as { repositoryId: string }[]
         if (identities.length && (identities.length !== 1 || identities[0].repositoryId !== repositoryId)) throw new Error('REPOSITORY_MISMATCH')
@@ -75,7 +81,7 @@ export class SessionStore {
         if (!columns.some(column => column.name === 'importState')) this.db.exec("ALTER TABLE sessions ADD COLUMN importState TEXT NOT NULL DEFAULT 'UNKNOWN'")
         if (!columns.some(column => column.name === 'coverageReasons')) this.db.exec("ALTER TABLE sessions ADD COLUMN coverageReasons TEXT NOT NULL DEFAULT '{}'")
         this.db.prepare("UPDATE sessions SET coverageReasons = ? WHERE importState = 'UNKNOWN' AND coverageReasons = '{}' AND coverage <> 'COMPLETE'").run(JSON.stringify({ LEGACY_COVERAGE_UNEXPLAINED: 1 }))
-        this.db.pragma('user_version = 4')
+        this.db.pragma('user_version = 5')
       }).immediate()
       this.key = (this.db.prepare('SELECT cursorKey FROM identity').get() as { cursorKey: string }).cursorKey
     } catch (error) { this.db.close(); throw error }
@@ -215,6 +221,34 @@ export class SessionStore {
     }).immediate()
   }
   count(): number { return (this.db.prepare('SELECT COUNT(*) AS n FROM sessions').get() as { n: number }).n }
+  captureHealth(target: { worktreeId: string; generation: string }, cycleId: string): CaptureHealthObservation | undefined {
+    const key = digest(JSON.stringify([this.repositoryId, target.worktreeId, target.generation, cycleId]))
+    const row = this.db.prepare('SELECT payload, integrity FROM capture_health h JOIN capture_health_latest l ON h.id=l.observationId WHERE l.target=?').get(key) as { payload: string; integrity: string } | undefined
+    if (!row) return undefined
+    if (digest(row.payload) !== row.integrity) throw new Error('CAPTURE_HEALTH_INTEGRITY_ERROR')
+    const value = JSON.parse(row.payload) as CaptureHealthObservation
+    this.assertRepository(value.repositoryId)
+    return value
+  }
+  recordCaptureHealth(value: CaptureHealthObservation, assertCurrent: () => void): CaptureHealthObservation {
+    this.assertRepository(value.repositoryId)
+    const { observedAt: _at, ...identity } = value
+    const id = digest(JSON.stringify(identity)), payload = JSON.stringify(value)
+    return this.db.transaction(() => {
+      assertCurrent()
+      const old = this.db.prepare('SELECT payload, integrity FROM capture_health WHERE id=?').get(id) as { payload: string; integrity: string } | undefined
+      if (old) {
+        if (digest(old.payload) !== old.integrity) throw new Error('CAPTURE_HEALTH_INTEGRITY_ERROR')
+        this.db.prepare('INSERT OR REPLACE INTO capture_health_latest VALUES (?, ?)').run(digest(JSON.stringify([this.repositoryId, value.worktreeId, value.generation, value.cycleId])), id)
+        assertCurrent()
+        return JSON.parse(old.payload) as CaptureHealthObservation
+      }
+      this.db.prepare('INSERT INTO capture_health VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, value.worktreeId, value.generation, value.cycleId, value.observedAt, payload, digest(payload))
+      this.db.prepare('INSERT OR REPLACE INTO capture_health_latest VALUES (?, ?)').run(digest(JSON.stringify([this.repositoryId, value.worktreeId, value.generation, value.cycleId])), id)
+      assertCurrent()
+      return value
+    }).immediate()
+  }
   sessions(filter: SessionFilter, offset: number, limit: number): SessionRow[] {
     if (filter.executionId || filter.artifactId || filter.commitSha || filter.pullRequest) return this.historicalSessions(filter, offset, limit)
     const where: string[] = [], params: (string | number)[] = []

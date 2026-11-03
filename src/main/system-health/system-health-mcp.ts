@@ -55,14 +55,19 @@ export interface SystemHealthDiagnosticPayload {
 export const SYSTEM_HEALTH_MCP_TOOL: McpToolDefinition = {
   name: 'get_system_health',
   description:
-    'Inspect the operational health and diagnostic trace of Code Awareness features (currently CodeScope). Use when encountering a failure, timeout, degraded integration, unexpected behavior, or during debugging to identify the exact failed boundary and reason code before investigating. Do not call routinely without operational uncertainty.',
+    'Inspect the operational health of CodeScope or Session Context capture. feature=session_context returns persisted configuration/capture/checkpoint evidence for a governed checkout, never prompts. Configuration readiness is distinct from observed capture. refresh requests a bounded read-only recheck; commitSha inspects a selected commit. No hooks/settings are changed.',
   inputSchema: {
     type: 'object',
     properties: {
       feature: {
         type: 'string',
-        description: 'The feature subsystem to inspect. Supported values: "codescope". Defaults to "codescope".'
-      }
+        description: 'codescope (default) or session_context.'
+      },
+      worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      generation: { type: 'string', pattern: '^[a-f0-9]{64}$' },
+      cycleId: { type: 'string', minLength: 1, maxLength: 200 },
+      commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$' },
+      refresh: { type: 'boolean' }
     },
     additionalProperties: false
   },

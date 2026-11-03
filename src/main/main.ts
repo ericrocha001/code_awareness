@@ -591,6 +591,11 @@ app.whenReady().then(async () => {
         if (continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('REPOSITORY_MISMATCH')
         return authorizeHandoffAssociation(continuumSession.getActiveService(), validationLedger, request)
       })
+    if (activeSessionContext) {
+      const sessionContext = activeSessionContext
+      gitOperations.bindCommitObservation((target, commitSha) => sessionContext.call('inspect_capture_health', { ...target, commitSha, trigger: 'LOCAL_COMMIT' }))
+      void sessionContext.call('inspect_capture_health', { trigger: 'BEGIN' })
+    }
     if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
       const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache.js')
       return GitAtlasSqliteCache.acquire(join(app.getPath('userData'), 'cache', 'git-atlas'), gitRepositoryId, common)

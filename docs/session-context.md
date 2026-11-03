@@ -1,5 +1,13 @@
 # Agent Session Context P0
 
+## Capture Health
+
+`get_system_health({feature:"session_context"})` inspeciona configuração, captura observada e checkpoint do checkout governado; `worktreeId` e `generation` selecionam uma Worktree irmã. `refresh:true` solicita uma rechecagem limitada e `commitSha` seleciona um commit explícito. Nenhum hook, login ou configuração é alterado. O estado e os recibos compactos ficam no mesmo SessionStore, fora da retenção de transcrições.
+
+`READY_CONFIGURED` confirma somente configuração pinada e hooks Git/Codex compatíveis. `CAPTURE_OBSERVED` requer identidade do chamador no Entire e progresso metadata-only da sessão na Worktree correta. Sessão ativa, arquivo de hook ou resolução por Worktree isolados não provam captura; ausência de evidência é `SESSION_UNOBSERVED`. O resultado conserva timestamp e `OBSERVED_SNAPSHOT`, nunca promete atividade atual sem rechecagem.
+
+Ativação do projeto e commit nativo sinalizam observações limitadas; alterações de HEAD/refs/configuração são reconciliadas sob demanda para checkouts externos. Não há timer, crawling histórico ou hook novo. Um commit sem trailer só é `CHECKPOINT_MISSING` se a captura anterior e a origem local comprovarem a expectativa; merge remoto/cherry-pick ou captura não esperada não herdam essa falha. Verificação positiva usa trailer, ref local estável e metadados literais de sessão, sem prompts. Diagnósticos incluem a próxima evidência útil e indicam quando reparo precisa de autorização própria.
+
 O histórico pertence ao repositório canônico do catálogo. Worktrees reconhecidas do mesmo repositório usam o mesmo arquivo privado:
 
 `<perfil>/continuum/repositories/<repositoryId em base64url>/session-context.sqlite`

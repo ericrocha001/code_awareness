@@ -161,6 +161,39 @@ export class EntireProvider {
     if (finalConfig.executable !== config.executable || finalConfig.sha256 !== config.sha256 || finalConfig.version !== config.version) throw new Error('PROVIDER_VERSION_MISMATCH')
     return result
   }
+  async inspectCapture(): Promise<{ configured: boolean; reason: string; providerSessionId?: string }> {
+    this.deadline = Date.now() + 12_000
+    try {
+      await this.validate()
+      const config = await this.preflight(true)
+      if (config.version !== '0.12.2') throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+      const help = await this.command(config.executable, ['session', 'current', '--help'], this.root, 16384)
+      if (help.code !== 0 || help.limited || !help.text.includes('--json')) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
+      const current = await this.command(config.executable, ['session', 'current', '--json'], this.root, 32768)
+      if (current.code !== 0 || current.limited) return { configured: true, reason: 'SESSION_UNOBSERVED' }
+      let envelope
+      try { envelope = JSON.parse(current.text) } catch { return { configured: true, reason: 'SESSION_UNOBSERVED' } }
+      if (!['caller-env', 'ancestry'].includes(envelope.resolution)) return { configured: true, reason: 'SESSION_UNOBSERVED' }
+      const selected = envelope.session ?? envelope
+      const id = selected.session_id
+      if (typeof id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(id)) return { configured: true, reason: 'SESSION_UNOBSERVED' }
+      const output = await this.command(config.executable, ['session', 'info', id, '--json'], this.root, 32768)
+      if (output.code !== 0 || output.limited) return { configured: true, reason: 'SESSION_UNOBSERVED' }
+      let info
+      try { info = JSON.parse(output.text) } catch { return { configured: true, reason: 'SESSION_UNOBSERVED' } }
+      if (!validSession(info) || info.session_id !== id || await realpath(info.worktree_path) !== await realpath(this.root)) throw new Error('SOURCE_IDENTITY_CONFLICT')
+      const metadata = info as ProviderSession & { turns?: unknown; pending_turns?: unknown }
+      const turns = Array.isArray(metadata.turns) ? metadata.turns.length : typeof metadata.turns === 'number' && Number.isSafeInteger(metadata.turns) ? metadata.turns : 0
+      const pending = Array.isArray(metadata.pending_turns) ? metadata.pending_turns.length : 0
+      await this.validate()
+      if (turns <= 0 && pending <= 0) return { configured: true, reason: 'SESSION_UNOBSERVED' }
+      return { configured: true, reason: 'CAPTURE_OBSERVED', providerSessionId: id }
+    } catch (error) {
+      const reason = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'PROVIDER_UNAVAILABLE'
+      if (['WORKTREE_STALE', 'PROJECT_CONTEXT_CHANGED', 'SESSION_CONTEXT_TIMEOUT'].includes(reason)) throw error
+      return { configured: false, reason }
+    }
+  }
   private async perform(sessionId?: string): Promise<object> {
     this.deadline = Date.now() + (sessionId ? 12_000 : 10_000)
     let known: SessionRow | undefined

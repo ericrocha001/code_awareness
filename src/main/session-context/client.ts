@@ -2,7 +2,7 @@ import { Worker } from 'node:worker_threads'
 import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
-import { parseSessionRefresh, parseSessionList } from './mcp'
+import { parseSessionRefresh, parseSessionList, parseCaptureHealth } from './mcp'
 import { queryCodexArchive, type AuthorizedCodexArchiveConnection } from './codex-archive'
 import type { SessionTargetResolver } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
@@ -39,6 +39,9 @@ export class SessionContextClient implements SessionContextPort {
     if (Buffer.byteLength(JSON.stringify(args ?? {})) > 8192) return Promise.resolve(failure('INVALID_ARGUMENT'))
     if (name === 'refresh_agent_sessions') {
       try { parseSessionRefresh(args) } catch { return Promise.resolve(failure('INVALID_ARGUMENT')) }
+    }
+    if (name === 'inspect_capture_health') {
+      try { parseCaptureHealth(args) } catch { return Promise.resolve(failure('INVALID_ARGUMENT')) }
     }
     if (isLiveSessionTool(name)) {
       try { parseLiveSessionQuery(name, args) } catch { return Promise.resolve(failure('INVALID_ARGUMENT')) }
@@ -119,7 +122,7 @@ export class SessionContextClient implements SessionContextPort {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
-      const timeoutMs = this.timeoutMs ?? (isLiveSessionTool(name) ? 20_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
+      const timeoutMs = this.timeoutMs ?? (name === 'inspect_capture_health' ? 20_000 : isLiveSessionTool(name) ? 20_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
       const deadline = Date.now() + timeoutMs
       const request: Request = { resolve, deadline, phase: 'worker-recovery', timer: setTimeout(() => this.expire(id), timeoutMs) }
       this.pending.set(id, request)
@@ -130,6 +133,15 @@ export class SessionContextClient implements SessionContextPort {
           let target
           let liveTargets
           let archiveObservation
+          if (name === 'inspect_capture_health') {
+            const query = parseCaptureHealth(args)
+            if (query.worktreeId && this.resolveTarget) {
+              const selection = { worktreeId: query.worktreeId, generation: query.generation! }
+              target = { ...await this.resolveTarget(selection), selection }
+            } else if (this.resolveTarget?.current) target = await this.resolveTarget.current()
+            if (!target) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+            request.validate = target.validate
+          }
           if (name === 'list_agent_sessions') {
             let query
             try { query = parseSessionList(args) } catch { throw new Error('INVALID_ARGUMENT') }

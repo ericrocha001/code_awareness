@@ -12,10 +12,12 @@ import { declaredAssociation, historicalSelectors } from './associations'
 import { persistArchiveObservation, type ArchiveObservation } from './codex-archive'
 import { sourceTimestamp } from './source-time'
 import type { SessionFilter } from './associations'
+import { captureHealthQuery, inspectCaptureHealth } from './capture-health'
 
 const id = z.string().uuid(), revision = z.number().int().positive(), cursor = z.string().max(512).optional()
 const date = z.string().datetime({ offset: true }).optional()
 const schemas = {
+  inspect_capture_health: captureHealthQuery,
   ...LIVE_SESSION_SCHEMAS,
   inspect_code_provenance: z.object({
     file: z.string().min(1).max(500),
@@ -51,6 +53,7 @@ const schemas = {
 }
 export const parseSessionRefresh = (args: unknown) => schemas.refresh_agent_sessions.parse(args ?? {})
 export const parseSessionList = (args: unknown) => schemas.list_agent_sessions.parse(args ?? {})
+export const parseCaptureHealth = (args: unknown) => captureHealthQuery.parse(args ?? {})
 export type SessionToolName = keyof typeof schemas
 export interface SessionContextPort { call(name: SessionToolName, args: unknown): Promise<McpToolResult> }
 const str = { type: 'string', minLength: 1, maxLength: 200 }, uuid = { type: 'string', format: 'uuid' }, rev = { type: 'integer', minimum: 1 }
@@ -82,6 +85,7 @@ export const SESSION_CONTEXT_TOOLS: McpToolDefinition[] = definitions.map(([name
   securitySchemes: [{ type: 'oauth2', scopes: [] }], inputSchema: { type: 'object', properties, required, additionalProperties: false },
   annotations: { readOnlyHint: name !== 'refresh_agent_sessions', destructiveHint: false, openWorldHint: false } }))
 export const SESSION_RESPONSE_BUDGETS: Record<SessionToolName, number> = {
+  inspect_capture_health: 8192,
   discover_entire_sessions: 12288,
   inspect_entire_session: 8192,
   get_entire_session_usage: 8192,
@@ -138,7 +142,7 @@ export async function executeLiveSessionTool(provider: Partial<Pick<EntireProvid
 }
 export async function executeSessionTool(
   store: SessionStore | Pick<SessionStore, 'path' | 'repositoryId'>,
-  provider: Pick<EntireProvider, 'refresh'> & Partial<Pick<EntireProvider, 'queryLive'>>,
+  provider: Pick<EntireProvider, 'refresh'> & Partial<Pick<EntireProvider, 'queryLive' | 'inspectCapture'>>,
   name: SessionToolName,
   raw: unknown,
   assertActive: () => void,
@@ -155,7 +159,10 @@ export async function executeSessionTool(
     const q = schemas[name].parse(raw ?? {})
     const budget = SESSION_RESPONSE_BUDGETS[name]
     let data: object
-    if (name === 'inspect_code_provenance') {
+    if (name === 'inspect_capture_health') {
+      if (!selectedTarget || !root || !provider.inspectCapture) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+      data = await inspectCaptureHealth(store as SessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, q as ReturnType<typeof parseCaptureHealth>, assertActive)
+    } else if (name === 'inspect_code_provenance') {
       const request = q as z.infer<typeof schemas.inspect_code_provenance>
       if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
       const targetRoot = (selectedTarget && liveTargets.find(t => t.worktreeId === selectedTarget.worktreeId)?.root) || root || process.cwd()
