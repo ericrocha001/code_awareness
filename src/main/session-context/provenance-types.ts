@@ -48,6 +48,8 @@ export interface InspectCodeProvenanceDetailResult {
   checkpointId?: string | null
   candidates: CodeProvenanceCandidate[]
   coverage: 'COMPLETE' | 'PARTIAL'
+  unavailableIndices?: number[]
+  unavailableCount?: number
 }
 
 export interface InspectCheckpointMetadataResult {
@@ -71,6 +73,36 @@ export interface InspectCheckpointDisambiguateResult {
   commit?: string
   sessions: Array<CodeProvenanceCandidate & { promptPreview?: string; isPreview?: boolean }>
   coverage: 'COMPLETE' | 'PARTIAL'
+  unavailableIndices?: number[]
+  unavailableCount?: number
+}
+
+export class AmbiguousProvenanceSelectionError extends Error {
+  code = 'AMBIGUOUS_PROVENANCE_SELECTION' as const
+  file: string
+  range: { startLine: number; endLine: number }
+  segments: Array<{
+    startLine: number
+    endLine: number
+    status: ProvenanceStatus
+    commit?: string | null
+    checkpointId?: string | null
+  }>
+  needExplicitRange = true
+
+  constructor(file: string, range: { startLine: number; endLine: number }, segments: CodeProvenanceSegment[]) {
+    super('AMBIGUOUS_PROVENANCE_SELECTION')
+    this.name = 'AmbiguousProvenanceSelectionError'
+    this.file = file
+    this.range = range
+    this.segments = segments.map(s => ({
+      startLine: s.startLine,
+      endLine: s.endLine,
+      status: s.status,
+      commit: s.commit ?? null,
+      checkpointId: s.checkpointId ?? null
+    }))
+  }
 }
 
 export interface InspectCheckpointReadFieldResult {

@@ -7,6 +7,7 @@ import type {
   InspectCodeProvenanceMapResult,
   ProvenanceStatus
 } from './provenance-types'
+import { AmbiguousProvenanceSelectionError } from './provenance-types'
 import { readCheckpointDisambiguate } from './checkpoint'
 
 export interface InspectCodeProvenanceQuery {
@@ -288,7 +289,32 @@ export async function inspectCodeProvenance(
     }
   }
 
-  const checkpointSegment = segments.find(s => s.status === 'checkpoint' && s.checkpointId)
+  const relevantSegments = segments.filter(s => s.status !== 'unavailable')
+  if (relevantSegments.length === 0) {
+    return {
+      source: 'GIT_BLAME_PROVENANCE',
+      file,
+      range: { startLine, endLine },
+      linkStrength: 'UNKNOWN',
+      commit: null,
+      checkpointId: null,
+      candidates: [],
+      coverage
+    }
+  }
+
+  const distinctCheckpoints = Array.from(
+    new Set(relevantSegments.filter(s => s.status === 'checkpoint' && s.checkpointId).map(s => s.checkpointId!))
+  )
+  const distinctCommits = Array.from(
+    new Set(relevantSegments.map(s => s.commit ?? (s.status === 'uncommitted' ? 'UNCOMMITTED' : 'UNKNOWN')))
+  )
+
+  if (distinctCheckpoints.length > 1 || distinctCommits.length > 1) {
+    throw new AmbiguousProvenanceSelectionError(file, { startLine, endLine }, relevantSegments)
+  }
+
+  const checkpointSegment = relevantSegments.find(s => s.status === 'checkpoint' && s.checkpointId)
   if (checkpointSegment && checkpointSegment.checkpointId) {
     const disambiguate = await readCheckpointDisambiguate(
       runner,
@@ -315,17 +341,21 @@ export async function inspectCodeProvenance(
         promptScope: s.promptScope,
         linkOrigin: s.linkOrigin
       })),
-      coverage
+      coverage: (coverage === 'PARTIAL' || disambiguate.coverage === 'PARTIAL') ? 'PARTIAL' : 'COMPLETE',
+      ...(disambiguate.unavailableIndices && disambiguate.unavailableIndices.length > 0 ? {
+        unavailableIndices: disambiguate.unavailableIndices,
+        unavailableCount: disambiguate.unavailableCount
+      } : {})
     }
   }
 
-  const primaryCommit = segments.find(s => s.commit)?.commit ?? null
+  const singleCommit = relevantSegments[0]?.commit ?? null
   return {
     source: 'GIT_BLAME_PROVENANCE',
     file,
     range: { startLine, endLine },
     linkStrength: 'UNKNOWN',
-    commit: primaryCommit,
+    commit: singleCommit,
     checkpointId: null,
     candidates: [],
     coverage
