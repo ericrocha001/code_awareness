@@ -1,5 +1,13 @@
 # Agent Session Context P0
 
+## Capture Health
+
+`get_system_health({feature:"session_context"})` inspeciona configuração, captura observada e checkpoint do checkout governado; `worktreeId` e `generation` selecionam uma Worktree irmã. `refresh:true` solicita uma rechecagem limitada e `commitSha` seleciona um commit explícito. Nenhum hook, login ou configuração é alterado. O estado e os recibos compactos ficam no mesmo SessionStore, fora da retenção de transcrições.
+
+`READY_CONFIGURED` confirma somente configuração pinada e hooks Git/Codex compatíveis. `CAPTURE_OBSERVED` requer identidade do chamador no Entire e progresso metadata-only da sessão na Worktree correta. Sessão ativa, arquivo de hook ou resolução por Worktree isolados não provam captura; ausência de evidência é `SESSION_UNOBSERVED`. O resultado conserva timestamp e `OBSERVED_SNAPSHOT`, nunca promete atividade atual sem rechecagem.
+
+Ativação do projeto e commit nativo sinalizam observações limitadas; alterações de HEAD/refs/configuração são reconciliadas sob demanda para checkouts externos. Não há timer, crawling histórico ou hook novo. Um commit sem trailer só é `CHECKPOINT_MISSING` se a captura anterior e a origem local comprovarem a expectativa; merge remoto/cherry-pick ou captura não esperada não herdam essa falha. Verificação positiva usa trailer, ref local estável e metadados literais de sessão, sem prompts. Diagnósticos incluem a próxima evidência útil e indicam quando reparo precisa de autorização própria.
+
 O histórico pertence ao repositório canônico do catálogo. Worktrees reconhecidas do mesmo repositório usam o mesmo arquivo privado:
 
 `<perfil>/continuum/repositories/<repositoryId em base64url>/session-context.sqlite`
@@ -71,6 +79,12 @@ Após o ajuste, inicie uma sessão Codex genuína e verifique `entire session cu
 Antes de um commit legítimo, confirme trabalho pendente correspondente aos arquivos realmente alterados. Depois do commit normal, confira o trailer `Entire-Checkpoint` e a resolução local por `entire checkpoint explain --commit <SHA> --json`; IDs, origem e arquivos devem ser coerentes. Não use commit vazio, alteração fictícia, attach forçado ou reescrita de histórico para produzir essa evidência. Checkpoints e transcripts permanecem locais e não acompanham o push da branch de código.
 
 ## Limites e cobertura
+
+O Checkpoint Registry é uma projeção de metadados no mesmo `session-context.sqlite` (schema 6). Identidades externas tipadas e arestas históricas têm retenção independente dos eventos. O aprofundamento de uma sessão já removida retorna `SESSION_EVICTED`; um ID observado apenas em metadata permanece `NOT_IMPORTED`.
+
+Commits locais, observações do Capture Health, publicação de Artifacts e novas provas disparam reconciliação limitada. Consultas exatas do catálogo por commit, PR, execução ou Artifact também reconciliam as fontes e retornam `contextMap`, com caminhos, cobertura e evidência por aresta. Não é necessário preencher `sessionLinks`. A API manual permanece como declaração compatível. Cursores e arestas de um lote são confirmados atomicamente; falhas preservam o watermark anterior. Refs Entire são enumeradas em páginas pequenas, e objetos de checkpoint já verificados são reutilizados pelo SHA imutável após reinício.
+
+Git/Entire, Continuum, Ledger e GitHub continuam autoridades independentes. O Main consulta os serviços existentes por portas de leitura, com política de rede vigente; o worker projeta somente IDs, revisões, hashes e relações. Ausência de GitHub não impede persistência da evidência local. Só a lista de commits do PR confirma participação; head/merge/squash não a substituem. Handoff continua `HANDOFF_DECLARED`, e a freshness do Ledger não é promovida pelo índice. Caminhos permitem navegação, sem inferir autoria. A reconciliação não importa transcrições, não busca refs privadas e não habilita captura ou App Server.
 
 Cada banco admite 500 sessões. A inserção seguinte remove atomicamente a ENDED mais antiga, com desempate por ID; ACTIVE, UNKNOWN e estados terminais sem evidência não são removidos. Se não houver vítima elegível, retorna CAPACITY_REACHED. Replay não ocupa outro slot.
 

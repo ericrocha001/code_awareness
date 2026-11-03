@@ -34,9 +34,10 @@ export function authorizeHandoffAssociation(service: ContinuumService | null, le
 }
 export async function handoffSessionCoverage(port: SessionContextPort | undefined, artifact: Artifact, target: SessionTargetSelection): Promise<object> {
   if (!port) return { code: 'SESSION_CONTEXT_UNAVAILABLE', coverage: 'UNAVAILABLE' }
+  void port.call('reconcile_checkpoint_registry', { artifactId: artifact.artifactId })
   const metadata = details(artifact), declared = linksSchema.safeParse(metadata.sessionLinks ?? [])
   if (!declared.success) return { code: 'INVALID_SESSION_LINKS', coverage: 'PARTIAL' }
-  if (!declared.data.length) return { code: 'NO_ASSOCIATION_OBSERVED', coverage: 'PARTIAL', transcriptImported: false }
+  if (!declared.data.length) return { code: 'RECONCILIATION_REQUESTED', coverage: 'PENDING', transcriptImported: false }
   const artifactIds = artifact.metadata.relations?.filter(relation => relation.kind === 'implements').map(relation => relation.artifactId) ?? []
   if (declared.data.length * Math.max(1, artifactIds.length) > 10) return { code: 'SESSION_LINK_LIMIT', coverage: 'PARTIAL' }
   const proofIds = z.array(z.string()).max(10).safeParse(metadata.proofIds ?? [])

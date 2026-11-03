@@ -228,6 +228,8 @@ export class GitOperationsService {
   private readonly worktreeRepositoryId: string | undefined
   private readonly coordinationIdentity: WorktreeIdentity | undefined
   private commitCorrelation: GitCommitCorrelation | undefined
+  private commitObservation?: (target: { worktreeId: string; generation: string }, sha: string) => Promise<unknown>
+  bindCommitObservation(observe: (target: { worktreeId: string; generation: string }, sha: string) => Promise<unknown>): void { this.commitObservation = observe }
   private pendingCorrelation: Promise<unknown> = Promise.resolve()
   constructor(private readonly repoRoot: string, private readonly git: GitService, private readonly transport: GitRemoteTransport, identity?: WorktreeIdentity, private readonly readOnlyWorktree = false, approval?: WorktreeApprovalPort, private readonly transactionAlreadyHeld = false, private readonly worktreeValidation?: WorktreeValidationPort) {
     this.worktreeRepositoryId = identity?.repositoryId
@@ -283,7 +285,8 @@ export class GitOperationsService {
               if (!observed.snapshot.branch) fail('WORKTREE_BRANCH_REQUIRED')
               if ((await service.getChanges('STAGED')).some(change => !scope.paths.includes(change.path) || change.previousPath && !scope.paths.includes(change.previousPath))) fail('WORKTREE_SCOPE_NOT_GRANTED')
               await assertCurrent()
-              await service.commit({ message: request.message!, expectedHead: observed.snapshot.head, expectedIndexRevision: observed.snapshot.indexRevision })
+              const result = await service.commit({ message: request.message!, expectedHead: observed.snapshot.head, expectedIndexRevision: observed.snapshot.indexRevision })
+              if (this.commitObservation) void this.commitObservation({ worktreeId: selected.record.worktreeId, generation: selected.record.generation }, result.sha).catch(() => {})
             } else {
               if (!scope.branches.includes(request.branch!)) fail('WORKTREE_SCOPE_NOT_GRANTED')
               if ((await this.worktrees!.discover()).worktrees.some(w => w.branch === request.branch)) fail('WORKTREE_BRANCH_OCCUPIED')
@@ -1495,7 +1498,7 @@ export class GitOperationsService {
   }
 
   async commit(request: { message: string; expectedHead: string | null; expectedIndexRevision: string }, guard?: () => Promise<void>) {
-    return this.serialized(async () => {
+    const result = await this.serialized(async () => {
       await this.ready(true)
       await this.checkHead(request.expectedHead)
       if ((await this.getChanges('CONFLICTED')).length) fail('MERGE_CONFLICT')
@@ -1504,6 +1507,13 @@ export class GitOperationsService {
       const sha = await this.git.commitInspectedIndex(this.repoRoot, request.message, request.expectedHead, request.expectedIndexRevision)
       return this.observeMutation(async () => ({ sha, parent: request.expectedHead, branch: await this.git.getCurrentBranch(this.repoRoot), message: request.message, paths: await this.git.getCommittedPaths(this.repoRoot, sha) }))
     })
+    if (this.commitObservation && this.worktrees) {
+      try {
+        const record = await this.worktrees.current()
+        if (record.head === result.sha) void this.commitObservation({ worktreeId: record.worktreeId, generation: record.generation }, result.sha).catch(() => {})
+      } catch {}
+    }
+    return result
   }
 
   async manageBranch(request: BranchRequest, guard?: () => Promise<void>) {

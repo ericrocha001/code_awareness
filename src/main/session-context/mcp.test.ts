@@ -150,7 +150,7 @@ describe('Session Context progressive MCP disclosure', () => {
     const first = f.store.ingest(sessionInput('first'), events(1))
     const payload = f.store.events(first.sessionId, {}, 0, 1)[0]
     for (let n = 1; n <= 500; n++) f.store.ingest({ ...sessionInput(`next-${n}`), endedAt: '2026-02-01T00:00:00Z' }, [])
-    expect(data(await f.call('read_agent_session_event', { sessionId: first.sessionId, eventId: payload.id, expectedRevision: 1 })).code).toBe('SESSION_UNAVAILABLE')
+    expect(data(await f.call('read_agent_session_event', { sessionId: first.sessionId, eventId: payload.id, expectedRevision: 1 })).code).toBe('SESSION_EVICTED')
     const provider = new EntireProvider(f.store, f.base, () => {})
     expect(await provider.refresh()).toMatchObject({ code: 'PROVIDER_UNAVAILABLE', coverage: 'UNAVAILABLE' })
     expect(f.store.count()).toBe(500)

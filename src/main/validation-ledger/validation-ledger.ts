@@ -93,6 +93,8 @@ const VALID_PRODUCERS = new Set(['IMPLEMENTER', 'ARCHITECT', 'USER', 'SYSTEM', '
 const VALID_STATUSES = new Set(['PASSED', 'FAILED', 'ERROR'])
 
 export class ValidationLedger {
+  private readonly listeners = new Set<() => void>()
+  onRecorded(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private readonly db: BetterSqlite3Database
   private readonly runtimeIdentity: RuntimeIdentityProvider | undefined
 
@@ -225,6 +227,7 @@ export class ValidationLedger {
         proof.recordedAt
       )
 
+    queueMicrotask(() => { try { if (this.listeners.size && this.getProof(proofId)) for (const listener of this.listeners) { try { listener() } catch {} } } catch {} })
     return proof
   }
 
@@ -253,6 +256,16 @@ export class ValidationLedger {
     if (!proof) return null
     const freshness = await classifyFreshness(proof, this.getCurrentInstanceId())
     return { ...proof, freshness }
+  }
+
+  async projectionPage(after = '', limit = 20): Promise<{ proofs: ProofWithFreshness[]; cursor: string; more: boolean }> {
+    let position: [string, string] = ['', '']
+    if (after) { const value = JSON.parse(after); if (!Array.isArray(value) || value.length !== 2 || value.some(v => typeof v !== 'string')) throw new Error('INVALID_CURSOR'); position = value as [string, string] }
+    const rows = this.db.prepare('SELECT * FROM validation_proofs WHERE (recorded_at,proof_id)>(?,?) ORDER BY recorded_at,proof_id LIMIT ?').all(...position, Math.min(20, Math.max(1, limit)) + 1) as LedgerRow[]
+    const selected = rows.slice(0, limit), sources = new Map<string, Promise<ValidationSource>>()
+    const proofs = await Promise.all(selected.map(rowToProof).map(async proof => ({ ...proof, freshness: await classifyFreshness(proof, this.getCurrentInstanceId(), sources) })))
+    const last = selected.at(-1)
+    return { proofs, cursor: last ? JSON.stringify([last.recorded_at, last.proof_id]) : after, more: rows.length > selected.length }
   }
 
   async listProofs(filter: ListProofsFilter = {}): Promise<ProofWithFreshness[]> {

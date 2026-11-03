@@ -86,7 +86,7 @@ describe('repository Session Context SQLite', () => {
     const clockFixture = new Database(store.path); clockFixture.exec('UPDATE sessions SET lastObserved=startedAt'); clockFixture.close()
     expect(store.sessions({ after: '2026-01-01T00:00:00Z' }, 0, 5).map(row => row.providerSessionId)).toEqual(['utc-next'])
     for (let n = 2; n <= 500; n++) store.ingest(input('retained-' + n, { endedAt: '2026-02-01T00:00:00Z' }), [])
-    expect(() => store.session(first.sessionId)).toThrow('SESSION_UNAVAILABLE')
+    expect(() => store.session(first.sessionId)).toThrow('SESSION_EVICTED')
     expect(store.byProvider('utc-next')).toBeDefined()
   })
 
@@ -164,7 +164,7 @@ describe('repository Session Context SQLite', () => {
     expect(sameA.count()).toBe(500)
     sameA.ingest(input('a-501'), [event()])
     expect(a.count()).toBe(500); expect(b.count()).toBe(500)
-    expect(() => a.session(firstA)).toThrow('SESSION_UNAVAILABLE')
+    expect(() => a.session(firstA)).toThrow('SESSION_EVICTED')
     expect(a.byProvider('active')?.state).toBe('ACTIVE')
     expect(() => b.session(a.byProvider('active')!.id)).toThrow('SESSION_UNAVAILABLE')
     expect(() => new SessionStore(a.path, 'B')).toThrow('REPOSITORY_MISMATCH')

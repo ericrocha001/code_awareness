@@ -26,6 +26,18 @@ async function fixture() {
 }
 
 describe('project-scoped Git operations with real Git', () => {
+  it('signals a scoped post-commit observation without changing commit outcome when diagnostics fail', async () => {
+    const { root, git } = await fixture()
+    const service = new GitOperationsService(root, git, new GitHubGitTransport(null, git), { repositoryId: 'fixture', isActive: () => true })
+    const observed = vi.fn(async () => { throw new Error('PROVIDER_UNAVAILABLE') })
+    service.bindCommitObservation(observed)
+    writeFile(root, 'file.txt', 'legitimate fixture change\n'); await stageAll(root)
+    const before = await service.getState()
+    const result = await service.commit({ message: 'scoped fixture change', expectedHead: before.head, expectedIndexRevision: before.indexRevision })
+    expect(result.sha).toBe((await service.getState()).head)
+    expect(observed).toHaveBeenCalledTimes(1)
+    expect(observed.mock.calls[0]).toEqual([expect.objectContaining({ worktreeId: expect.stringMatching(/^[a-f0-9]{64}$/), generation: expect.stringMatching(/^[a-f0-9]{64}$/) }), result.sha])
+  }, 20000)
   it('sets current-branch upstream through receipted Git Operations without network or content changes', async () => {
     const { root, git, service } = await fixture()
     const bare = await createTempGitRepo(); roots.push(bare)
