@@ -7,6 +7,7 @@ import { parseSessionRefresh, parseSessionList, parseCaptureHealth } from './mcp
 import { queryCodexArchive, type AuthorizedCodexArchiveConnection } from './codex-archive'
 import type { SessionTargetResolver } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
+import { digest } from './privacy'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
 interface Generation { worker: Worker; cancellation: Int32Array; closing: boolean }
@@ -218,7 +219,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(archiveObservation ? { archiveObservation } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, ...(this.archiveConnection ? { archiveAccountHash: digest(this.archiveConnection.accountIdentity) } : {}), ...(archiveObservation ? { archiveObservation } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }

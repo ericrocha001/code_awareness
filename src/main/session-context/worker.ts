@@ -24,7 +24,7 @@ const validateTarget = (id: number) => new Promise<void>((resolve, reject) => {
   parentPort?.postMessage({ id, validate: validation })
 })
 const close = () => { if (closing && !pending) { store?.close(); parentPort?.close() } }
-parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; archiveObservation?: ArchiveObservation; liveTargets?: LiveSessionTarget[]; target?: { root: string; fingerprint: string; selection: SessionTargetSelection } } | { close: true } | { validation: number; code?: string } | { registryResult: number; batches: RegistryBatch[]; code?: string }) => {
+parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; archiveAccountHash?: string; archiveObservation?: ArchiveObservation; liveTargets?: LiveSessionTarget[]; target?: { root: string; fingerprint: string; selection: SessionTargetSelection } } | { close: true } | { validation: number; code?: string } | { registryResult: number; batches: RegistryBatch[]; code?: string }) => {
   if ('registryResult' in message) {
     const entry = registryReads.get(message.registryResult); registryReads.delete(message.registryResult)
     if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve(message.batches)
@@ -91,7 +91,8 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
           (exe, args, cwd, limit, consume, timeout) => runReadOnly(exe, args, cwd, limit, consume, timeout, abort.signal),
           target?.root ?? root,
           message.archiveObservation,
-          readRegistry
+          readRegistry,
+          message.archiveAccountHash
         )
     if (!closing && !Atomics.load(cancelled, 0)) parentPort?.postMessage({ id: message.id, result })
   }

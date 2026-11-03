@@ -92,6 +92,7 @@ export function registrySources(options: {
       addBatch({ source: 'LEDGER:' + proof.proofId, revision: digest(JSON.stringify([proof.recordedAt, proof.freshness])), status: 'COMPLETE', entities: [{ kind: 'PROOF', id: proof.proofId }], edges })
     }
     try {
+      if (selector?.kind === 'PROOF') projectProof(await options.ledger.getProofWithFreshness(selector.id))
       const page = await options.ledger.projectionPage(cursors.LEDGER)
       for (const proof of page.proofs) projectProof(proof)
       for (const artifact of [...artifacts.values()].slice(0, 3)) for (const proof of await options.ledger.listProofs({ requirementId: artifact.artifactId, limit: 10 })) projectProof(proof)

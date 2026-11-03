@@ -1,5 +1,13 @@
 # Agent Session Context P0
 
+## Descoberta unificada
+
+`discover_execution_context({selector:{type:"PR",id:"91"}})` lê somente o índice local: nenhum comando Git, Entire, acesso de rede, importação ou reconciliação. Seletores tipados incluem PR, COMMIT, CHECKPOINT, SESSION, ARTIFACT, PROOF e EXECUTION. Para IDs externos de sessão, informe `provider`; UUIDs internos podem omiti-lo. O repositório vem do projeto ativo e sessões Codex exigem o escopo de conta já autorizado.
+
+MAP retorna nós, contagens limitadas, relações diretas e caminhos de até quatro saltos com evidência por aresta, sem inferir autoria. RELATION_DETAIL retorna somente metadados de evidência. Freshness, lacunas de captura, indisponibilidade e idade das observações permanecem explícitas. Paginação assinada é vinculada a seletor, conta, modo, limite e snapshot do SQLite; mudanças relevantes recusam o cursor antigo. Cada nó oferece seletor exato e, quando disponível, a ferramenta canônica de aprofundamento.
+
+`refresh_agent_sessions({contextSelector:{type:"PR",id:"91"}})` solicita explicitamente a reconciliação bounded do Registry. Não pode ser combinado com importação de sessão ou associação manual e não habilita captura ou conexão Codex. A primeira leitura de descoberta permanece útil com last-known local e devolve orientação de refresh quando não há relações indexadas.
+
 ## Capture Health
 
 `get_system_health({feature:"session_context"})` inspeciona configuração, captura observada e checkpoint do checkout governado; `worktreeId` e `generation` selecionam uma Worktree irmã. `refresh:true` solicita uma rechecagem limitada e `commitSha` seleciona um commit explícito. Nenhum hook, login ou configuração é alterado. O estado e os recibos compactos ficam no mesmo SessionStore, fora da retenção de transcrições.
