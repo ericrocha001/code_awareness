@@ -1,5 +1,13 @@
 # Code Awareness Local Agent Channel
 
+## Test Output → Validation Ledger
+
+O runner aceita `--association` com JSON `{ "kind": "TARGETED_TEST", "scope": ["src/main/validation-ledger"], "evidenceFor": ["artifact-id-do-plano"] }`. Também aceita `CODE_AWARENESS_VALIDATION_EVIDENCE_FOR` (array JSON) e `CODE_AWARENESS_VALIDATION_KIND`. Com configuração explícita, captura a fonte do checkout antes/depois e tenta registrar automaticamente pelo domínio autenticado `validation`. `--profile` seleciona o perfil Desktop, sem trocar repositório. Sem configuração, conserva o recibo para registro explícito.
+
+`node scripts/test-output.cjs register <receiptId> [--profile <perfil>] [--association <JSON>]` recupera uma única execução local sem executar novamente o comando. Associação posterior fica `POST_RUN_DECLARED`; não altera prova existente. O servidor resolve o diretório pelo registry e pelo ID, valida arquivo/digest/identidade e confirma `proofId` por readback. As consultas existentes `list_validation_proofs(requirementId)` e `get_validation_proof` recuperam a prova durável. Logs e argumentos permanecem na Worktree.
+
+`REGISTRATION_PENDING` preserva o resultado local e o motivo; não significa publicação. Recuperação explícita, sem daemon ou varredura. Fonte incompleta ou alterada não recebe PASS confiável. Confiança sempre `EXECUTOR_REPORTED`, freshness `UNVERIFIABLE`: snapshot relatado não equivale a execução supervisionada pelo Desktop. Prazos limitados (snapshot 12 s; conexão/registro 2 s); falha de registro não altera o exit code do teste.
+
 Um único listener local do Electron oferece adaptadores separados para Continuum e Academy, sem MCP. No Windows, o perfil padrão é `%APPDATA%\code-awareness`; `--profile <diretório>` seleciona explicitamente outro perfil autorizado. O descriptor principal está em `local-agent-channel/endpoint.json`. Credencial e ACL pertencem ao usuário do perfil, nunca ao repositório.
 
 ```powershell

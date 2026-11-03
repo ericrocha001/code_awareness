@@ -8,6 +8,8 @@ import { buildSync } from 'esbuild'
 import { SessionStore, sessionStorePath } from './store'
 import { digest } from './privacy'
 import { LIMITS, type EventInput, type SessionInput } from './types'
+import { executeSessionTool } from './mcp'
+import type { CommandRunner } from './entire-provider'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
@@ -22,6 +24,57 @@ export function input(id: string, overrides: Partial<SessionInput> = {}): Sessio
 const event = (text = 'output'): EventInput => ({ type: 'TOOL_RESULT', text, sourcePosition: 1 })
 
 describe('repository Session Context SQLite', () => {
+  it('records CHECKPOINT_VERIFIED only through existing verified Entire metadata, while missing checkpoints remain unknown', async () => {
+    const store = setup()('A'), commit = 'a'.repeat(40), checkpointId = '0123456789abcdef'
+    const runner: CommandRunner = async (_exe, args) => {
+      let text = ''
+      if (args.includes('log')) text = 'Fixture\nEntire-Checkpoint: ' + checkpointId
+      else if (args.includes('rev-parse')) text = commit
+      else if (args.some(arg => arg.endsWith(':metadata.json'))) text = JSON.stringify({ cli_version: '0.12.2', sessions: [{}] })
+      else if (args.some(arg => arg.endsWith(':0/metadata.json'))) text = JSON.stringify({ session_id: 'checkpoint-session', agent: 'codex' })
+      else text = '0'
+      return { text, code: 0, limited: false }
+    }
+    const target = { worktreeId: 'b'.repeat(64), generation: 'c'.repeat(64) }
+    const result = await executeSessionTool(store, { refresh: async () => ({}) }, 'inspect_entire_checkpoint', { commit, mode: 'DISAMBIGUATE' }, () => {}, target, [], runner, '/fixture')
+    expect(result.isError).toBeFalsy()
+    const row = store.sessions({ commitSha: commit }, 0, 5)[0]
+    expect(row).toMatchObject({ importState: 'METADATA_ONLY', eventCount: 0 })
+    expect(store.associations(row.id)[0]).toMatchObject({ evidence: 'CHECKPOINT_VERIFIED', checkpointId, commitSha: commit })
+    expect(JSON.stringify(store.associations(row.id))).not.toContain('author')
+    const missing: CommandRunner = async () => ({ text: 'No checkpoint trailer', code: 0, limited: false })
+    const absent = await executeSessionTool(store, { refresh: async () => ({}) }, 'inspect_entire_checkpoint', { commit: 'd'.repeat(40) }, () => {}, target, [], missing, '/fixture')
+    expect(JSON.parse(absent.content[0].text).code).toBe('CHECKPOINT_NOT_FOUND')
+    expect(store.sessions({ commitSha: 'd'.repeat(40) }, 0, 5)).toEqual([])
+  })
+  it('preserves immutable many-to-many links through CAS, replay, eviction, upgrade and restart without resurrecting events', async () => {
+    const store = setup()('A')
+    const first = store.ingest(input('historical', { importState: 'METADATA_ONLY' }), [])
+    const target = { worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64) }
+    store.observeWorktree(first.sessionId, target)
+    const revision = store.catalogRevision()
+    const association = { sourceArtifactId: 'handoff', executionId: 'run', artifactId: 'plan-A', commitSha: 'c'.repeat(40), pullRequest: 89, proofIds: [], expectedCatalogRevision: revision }
+    const one = store.declareAssociation(first.sessionId, target, association, () => {})
+    expect(store.declareAssociation(first.sessionId, target, association, () => {})).toMatchObject({ associationId: one.associationId, replay: true })
+    expect(() => store.declareAssociation(first.sessionId, target, { ...association, artifactId: 'plan-B' }, () => {})).toThrow('REVISION_CONFLICT')
+    store.declareAssociation(first.sessionId, target, { ...association, artifactId: 'plan-B', commitSha: 'd'.repeat(40), expectedCatalogRevision: store.catalogRevision() }, () => {})
+    expect(store.sessions({ artifactId: 'plan-A' }, 0, 5)[0].id).toBe(first.sessionId)
+    expect(store.sessions({ artifactId: 'plan-B' }, 0, 5)[0].id).toBe(first.sessionId)
+    for (let n = 0; n < 500; n++) store.ingest(input('retained-' + n, { endedAt: '2026-02-01T00:00:00Z' }), [])
+    expect(store.count()).toBe(500)
+    expect(() => store.session(first.sessionId)).toThrow('SESSION_EVICTED')
+    expect(store.sessions({ executionId: 'run' }, 0, 5)[0]).toMatchObject({ id: first.sessionId, historicalState: 'SESSION_EVICTED', eventCount: 0 })
+    const reopened = new SessionStore(store.path, 'A'); cleanup.push(() => reopened.close())
+    expect(reopened.sessions({ commitSha: 'c'.repeat(40) }, 0, 5)[0].historicalState).toBe('SESSION_EVICTED')
+    const tamper = new Database(store.path)
+    tamper.exec("UPDATE sessions SET state='UNKNOWN', endedAt=NULL")
+    const full = await executeSessionTool(store, { refresh: async () => ({}) }, 'list_agent_sessions', { executionId: 'run', includeArchived: true }, () => {}, target, [], undefined, '/fixture',
+      { code: 'ARCHIVE_OBSERVED', sessions: [{ id: 'archived-over-capacity' }], providerVersion: 'fixture', accountHash: 'e'.repeat(64) })
+    expect(JSON.parse(full.content[0].text)).toMatchObject({ archiveCoverage: { code: 'ARCHIVE_INDEX_PARTIAL', reason: 'CAPACITY_REACHED' }, sessions: [{ sessionId: first.sessionId, reason: 'SESSION_EVICTED' }] })
+    expect(store.count()).toBe(500)
+    tamper.prepare('UPDATE session_associations SET integrity=? WHERE id=?').run('invalid', one.associationId); tamper.close()
+    expect(() => reopened.sessions({ artifactId: 'plan-A' }, 0, 5)).toThrow('ASSOCIATION_INTEGRITY_ERROR')
+  })
   it('compares preserved timestamp offsets by instant for selection and retention', () => {
     const store = setup()('A')
     const first = store.ingest(input('offset-first', { startedAt: '2026-01-01T00:30:00+01:00', endedAt: '2026-01-01T00:30:00+01:00' }), [

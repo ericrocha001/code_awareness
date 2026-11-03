@@ -65,6 +65,8 @@ import { SystemHealthCore } from './system-health/system-health-core'
 import { RuntimeIdentityProvider } from './runtime-identity/runtime-identity-provider'
 import { registerSystemHealthHandlers } from './ipc/system-health-handler'
 import { ValidationLedger } from './validation-ledger/validation-ledger'
+import { TestOutputLocalAdapter } from './validation-ledger/test-output-adapter'
+import { authorizeHandoffAssociation, handoffSessionCoverage } from './session-context/handoff'
 import { RepositoryContinuumSession } from './continuum/project-continuum-session'
 import { LocalChannelHost } from './local-agent-channel/local-channel-host'
 import { ContinuumLocalAdapter } from './continuum/local-adapter'
@@ -157,7 +159,7 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
 }, { ingestCheckout: !isRuntimePreview() })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const localAgentChannel = new LocalChannelHost(
-  [new ContinuumLocalAdapter(continuumSession), new AcademyLocalAdapter(academyService)],
+  [new ContinuumLocalAdapter(continuumSession, (artifact, target) => handoffSessionCoverage(activeSessionContext, artifact, target)), new AcademyLocalAdapter(academyService), new TestOutputLocalAdapter(continuumSession, validationLedger)],
   app.getPath('userData'),
   () => mcpLifecycle.getLocalEndpoint(runtimeIdentityProvider.getInstanceId())
 )
@@ -583,7 +585,12 @@ app.whenReady().then(async () => {
     gitOperations.bindAtlasPullRequests((inventory, force) => githubIntegration.branchPullRequests(project.path, inventory, force))
     const sessionIsCurrent = () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId
     if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path, sessionIsCurrent, undefined,
-      gitOperations.worktrees ? sessionTargetResolver(gitOperations.worktrees, () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : undefined)
+      gitOperations.worktrees ? sessionTargetResolver(gitOperations.worktrees, () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : undefined,
+      undefined, async request => {
+        if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED')
+        if (continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('REPOSITORY_MISMATCH')
+        return authorizeHandoffAssociation(continuumSession.getActiveService(), validationLedger, request)
+      })
     if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
       const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache.js')
       return GitAtlasSqliteCache.acquire(join(app.getPath('userData'), 'cache', 'git-atlas'), gitRepositoryId, common)

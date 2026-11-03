@@ -9,6 +9,7 @@ export interface LiveSessionTarget extends SessionTargetSelection { root: string
 export interface SessionTargetResolver {
   (selection: SessionTargetSelection): Promise<SessionTarget>
   discover?: () => Promise<LiveSessionTarget[]>
+  current?: () => Promise<SessionTarget & { selection: SessionTargetSelection }>
 }
 
 export function sourceFingerprint(root: string): string {
@@ -56,6 +57,12 @@ export function sessionTargetResolver(registry: GitWorktreeRegistry, assertActiv
     }
     assertActive()
     return targets
+  }
+  resolveTarget.current = async () => {
+    assertActive()
+    const record = await registry.current()
+    const selection = { worktreeId: record.worktreeId, generation: record.generation }
+    return { ...await resolveTarget(selection), selection }
   }
   return resolveTarget
 }

@@ -30,6 +30,7 @@ export interface ProofMetrics {
 }
 
 export interface CommandProfile {
+  receipt?: { id: string; digest: string; trust: 'EXECUTOR_REPORTED'; association: 'RUN_CONFIGURED' | 'POST_RUN_DECLARED' }
   source?: ValidationSource
   checkout?: { repositoryId: string; worktreeId: string; generation: string; head: string; issuer: 'VALIDATION_EXECUTION'; runId: string }
   command: string

@@ -4,6 +4,8 @@ const os = require('node:os')
 const crypto = require('node:crypto')
 const readline = require('node:readline')
 const { spawn, spawnSync } = require('node:child_process')
+const { receiptDigest } = require('../src/shared/validation/test-output-receipt.cjs')
+const { validationConnection, registerReceipt } = require('./local-agent/validation.cjs')
 
 const root = path.resolve(__dirname, '..')
 const evidenceRoot = path.join(root, '.code-awareness', 'test-output')
@@ -65,6 +67,7 @@ function project(receipt) {
   if (receipt.counts) summary.counts = receipt.counts
   if (receipt.state !== 'PASS') summary.diagnostic = bounded(receipt.diagnostic || 'See full logs.', 2100)
   if (receipt.cleanupWarning) summary.cleanupWarning = receipt.cleanupWarning
+  if (receipt.registration) summary.registration = receipt.registration
   summary.logs = 'Full stdout/stderr and receipt in evidence; inspect for selective expansion.'
   let output = JSON.stringify(summary)
   while (Buffer.byteLength(output) > budget && summary.diagnostic?.length > 40) {
@@ -91,12 +94,21 @@ function stop(child) {
 async function run(command, args = [], options = {}) {
   const started = Date.now()
   const id = crypto.randomUUID()
-  const directory = path.join(options.evidenceRoot || evidenceRoot, id)
+  const directory = path.join(options.evidenceRoot || path.join(options.cwd || root, '.code-awareness', 'test-output'), id)
   protectDirectory(directory)
   const files = ['stdout.log', 'stderr.log'].map(name => fs.openSync(path.join(directory, name), 'wx', 0o600))
   const expectTests = options.expectTests || [command, ...args].some(value => /(?:^|[/\\])vitest(?:\.mjs|[/\\]dist[/\\]cli\.js)?$/.test(value))
   const testSummaries = []
-  const receipt = { id, command: [command, ...args], cwd: options.cwd || root, directory, startedAt: new Date(started).toISOString(), state: 'RUNNING', pid: null }
+  const tapCounts = {}
+  const receipt = { version: 1, id, command: [command, ...args], cwd: fs.realpathSync(options.cwd || root), directory, startedAt: new Date(started).toISOString(), state: 'RUNNING', pid: null }
+  let connection
+  let before = null
+  const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
+    evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
+  if (!options.evidenceRoot && options.register !== false && (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)) {
+    try { connection = await validationConnection(receipt.cwd, options.profile); before = await connection.snapshot() } catch { /* Receipt remains recoverable without the Desktop. */ }
+  }
+  receipt.ledger = { association, identity: connection?.identity || null, before, after: null }
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
   save()
@@ -139,6 +151,8 @@ async function run(command, args = [], options = {}) {
         const match = text.match(/^\s*(Tests|Test Files)\s+(.+)$/)
         if (match) { receipt.counts ||= {}; receipt.counts[match[1]] = bounded(match[2], 100) }
         if (match?.[1] === 'Tests') testSummaries.push(match[2])
+        const tap = text.match(/^(?:#|ℹ) (tests|pass|fail|skipped|todo) (\d+)$/)
+        if (tap) tapCounts[tap[1]] = Number(tap[2])
       }
       stream.on('data', chunk => {
         try {
@@ -176,13 +190,25 @@ async function run(command, args = [], options = {}) {
     for (const fd of files) fs.closeSync(fd)
   }
   receipt.durationMs = Date.now() - started
+  receipt.finishedAt = new Date().toISOString()
   receipt.processState = receipt.state
+  if (Number.isSafeInteger(tapCounts.tests) && Number.isSafeInteger(tapCounts.pass) && Number.isSafeInteger(tapCounts.fail)) {
+    testSummaries.push(`${tapCounts.pass} passed | ${tapCounts.fail} failed | ${tapCounts.skipped || 0} skipped | ${tapCounts.todo || 0} todo (${tapCounts.tests})`)
+  }
   receipt.validation = testEvidence(expectTests || testSummaries.length > 0, testSummaries, receipt.processState)
   if (receipt.processState === 'PASS' && !['SUFFICIENT', 'NOT_APPLICABLE'].includes(receipt.validation.state)) {
     receipt.state = receipt.validation.state === 'FAILED' ? 'FAIL' : receipt.validation.state
     receipt.diagnostic = receipt.validation.reason || 'Test summary reports failures.'
   }
+  if (connection) { try { receipt.ledger.after = await connection.snapshot() } catch {} }
+  receipt.digest = receiptDigest(receipt)
+  receipt.registration = { state: 'REGISTRATION_PENDING', reason: options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? 'APP_UNAVAILABLE' : 'REGISTRATION_NOT_REQUESTED' }
   save()
+  if (connection) {
+    try { receipt.registration = await connection.register(id) }
+    catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: error.code || 'REGISTRATION_UNAVAILABLE' } }
+    save()
+  }
   return receipt
 }
 
@@ -241,6 +267,16 @@ async function observe(id, { afterState, timeoutMs = 30000, signal } = {}) {
 async function cli() {
   const args = process.argv.slice(2)
   const action = args.shift()
+  if (action === 'register') {
+    const id = args.shift(); let association; let profile
+    while (args.length) {
+      const flag = args.shift(), value = args.shift()
+      if (flag === '--association') association = JSON.parse(value)
+      else if (flag === '--profile') profile = value
+      else throw new Error('Invalid registration option')
+    }
+    console.log(JSON.stringify(await registerReceipt(id, { cwd: root, profile, association }))); return
+  }
   if (action === 'observe') {
     const id = args.shift(); let afterState
     if (args.length) { if (args.shift() !== '--after-state') throw new Error('Invalid observation option'); afterState = args.shift() }
@@ -270,11 +306,13 @@ async function cli() {
     fs.rmSync(directory, { recursive: true }); console.log(JSON.stringify({ removed: id })); return
   }
   if (action !== 'run') throw new Error('Use run [--human] [--expect-tests] [--timeout-ms N] -- command args; inspect id; clean id')
-  let human = false; let timeoutMs; let expectTests = false
+  let human = false; let timeoutMs; let expectTests = false; let association; let profile
   while (args[0] !== '--') {
     const flag = args.shift()
     if (flag === '--human') human = true
     else if (flag === '--expect-tests') expectTests = true
+    else if (flag === '--association') association = JSON.parse(args.shift())
+    else if (flag === '--profile') profile = args.shift()
     else if (flag === '--timeout-ms') { timeoutMs = Number(args.shift()); if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) throw new Error('Invalid timeout') }
     else throw new Error('Invalid run option')
   }
@@ -288,7 +326,7 @@ async function cli() {
     if (result.error) console.error(result.error.message)
     return
   }
-  const receipt = await run(executable, parameters, { timeoutMs, expectTests })
+  const receipt = await run(executable, parameters, { timeoutMs, expectTests, association, profile })
   console.log(project(receipt))
   process.exitCode = receipt.state === 'PASS' ? 0 : receipt.exitCode || 1
 }
