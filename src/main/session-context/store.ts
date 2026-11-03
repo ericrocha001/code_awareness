@@ -7,6 +7,7 @@ import { digest, safeFile, sanitize, utf8Prefix } from './privacy'
 import { EVENT_TYPES, LIMITS, COVERAGE_REASON_CODES, type EventInput, type EventRow, type SessionInput, type SessionRow, type SourceObservation, type CoverageReasons } from './types'
 import type { SessionAssociation, SessionFilter, DeclaredSessionAssociation } from './associations'
 import type { CaptureHealthObservation } from './capture-health-types'
+import { CheckpointRegistry, REGISTRY_SCHEMA } from './checkpoint-registry'
 
 export function sessionStorePath(base: string, repositoryId: string): string {
   if (!repositoryId || repositoryId.length > 200) throw new Error('REPOSITORY_REQUIRED')
@@ -22,6 +23,7 @@ function associationQuery(filter: SessionFilter): { where: string[]; params: (st
 }
 
 export class SessionStore {
+  readonly registry: CheckpointRegistry
   private readonly db: Database.Database
   private readonly key: string
   constructor(readonly path: string, readonly repositoryId: string) {
@@ -33,7 +35,7 @@ export class SessionStore {
       this.db.pragma('journal_mode = WAL')
       this.db.pragma('foreign_keys = ON')
       this.db.pragma('busy_timeout = 3000')
-      if (Number(this.db.pragma('user_version', { simple: true })) > 5) throw new Error('SCHEMA_UNSUPPORTED')
+      if (Number(this.db.pragma('user_version', { simple: true })) > 6) throw new Error('SCHEMA_UNSUPPORTED')
       this.db.transaction(() => {
         this.db.exec(`
           CREATE TABLE IF NOT EXISTS identity(repositoryId TEXT PRIMARY KEY, cursorKey TEXT NOT NULL, revision INTEGER NOT NULL);
@@ -81,9 +83,15 @@ export class SessionStore {
         if (!columns.some(column => column.name === 'importState')) this.db.exec("ALTER TABLE sessions ADD COLUMN importState TEXT NOT NULL DEFAULT 'UNKNOWN'")
         if (!columns.some(column => column.name === 'coverageReasons')) this.db.exec("ALTER TABLE sessions ADD COLUMN coverageReasons TEXT NOT NULL DEFAULT '{}'")
         this.db.prepare("UPDATE sessions SET coverageReasons = ? WHERE importState = 'UNKNOWN' AND coverageReasons = '{}' AND coverage <> 'COMPLETE'").run(JSON.stringify({ LEGACY_COVERAGE_UNEXPLAINED: 1 }))
-        this.db.pragma('user_version = 5')
+        this.db.exec(REGISTRY_SCHEMA)
+        for (const [table, required] of [['registry_edges', ['id', 'source', 'sourceRevision', 'fromId', 'toId', 'payload', 'integrity', 'observedAt', 'state']], ['checkpoint_registry', ['checkpointId', 'refRevision', 'state', 'digest', 'sessionIds', 'integrity', 'observedAt']]] as const) {
+          const names = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
+          if (required.some(name => !names.includes(name))) throw new Error('SCHEMA_INVALID')
+        }
+        this.db.pragma('user_version = 6')
       }).immediate()
       this.key = (this.db.prepare('SELECT cursorKey FROM identity').get() as { cursorKey: string }).cursorKey
+      this.registry = new CheckpointRegistry(this.db, repositoryId)
     } catch (error) { this.db.close(); throw error }
   }
   assertRepository(id: string): void { if (id !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH') }
@@ -92,7 +100,7 @@ export class SessionStore {
   session(id: string): SessionRow {
     const row = this.db.prepare('SELECT * FROM sessions WHERE id = ?').get(id) as SessionRow | undefined
     if (!row) {
-      if (this.db.prepare('SELECT 1 FROM session_associations WHERE sessionId=? LIMIT 1').get(id)) throw new Error('SESSION_EVICTED')
+      if (this.db.prepare('SELECT 1 FROM session_associations WHERE sessionId=? LIMIT 1').get(id) || this.registry.evictedSession(id)) throw new Error('SESSION_EVICTED')
       throw new Error('SESSION_UNAVAILABLE')
     }
     return row
@@ -215,6 +223,7 @@ export class SessionStore {
       const finalReasons = diagnosticsFor(id)
       const coverage = finalReasons === '{}' ? 'COMPLETE' : 'PARTIAL'
       this.db.prepare('UPDATE sessions SET eventCount=?, payloadBytes=?, coverage=?, coverageReasons=? WHERE id=?').run(totals.count, totals.bytes, coverage, finalReasons, id)
+      this.registry.importedSession(provider, input.providerSessionId, id)
       this.db.prepare('UPDATE identity SET revision = revision + 1').run()
       assertCurrent()
       return { sessionId: id, revision, eventCount: totals.count, coverage, replay: false, sourceObservation: this.sourceObservation(this.session(id)), importState, coverageReasons: JSON.parse(finalReasons) }

@@ -90,13 +90,23 @@ export class GitHubIntegrationService {
   }
 
   async pullRequestCommits(repoPath: string, number: number, head: string, page = 1): Promise<PullRequestCommitsPage> {
+    const connection = this.connectionRevision
     const origin = await this.pullRequestOrigin(repoPath)
     const before = await this.api!.getPullRequestCatalogRecord(origin.fullName, number)
     if (before.head.sha !== head || before.base.repository.toLowerCase() !== origin.fullName.toLowerCase()) throw new Error('PR_STATE_CHANGED')
     const commits = await this.api!.getPullRequestCommits(origin.fullName, number, page)
     const after = await this.api!.getPullRequestCatalogRecord(origin.fullName, number)
+    const afterOrigin = await this.pullRequestOrigin(repoPath)
+    if (connection !== this.connectionRevision || origin.repositoryId !== afterOrigin.repositoryId || origin.fullName !== afterOrigin.fullName) throw new Error('REMOTE_CONTEXT_CHANGED')
     if (after.head.sha !== head || after.updatedAt !== before.updatedAt) throw new Error('PR_STATE_CHANGED')
     return { repositoryId: origin.repositoryId, prNumber: number, head, source: 'GITHUB_REST', observedAt: new Date().toISOString(), ...commits }
+  }
+  async commitPullRequests(repoPath: string, sha: string): Promise<number[]> {
+    const connection = this.connectionRevision, origin = await this.pullRequestOrigin(repoPath)
+    const result = await this.api!.getCommitPullRequests(origin.fullName, sha)
+    const after = await this.pullRequestOrigin(repoPath)
+    if (connection !== this.connectionRevision || origin.repositoryId !== after.repositoryId || origin.fullName !== after.fullName) throw new Error('REMOTE_CONTEXT_CHANGED')
+    return result
   }
   private pending: PendingGitHubAuthorization | null = null
   private authorizationError: GitHubIntegrationError | null = null

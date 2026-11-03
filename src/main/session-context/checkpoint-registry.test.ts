@@ -1,0 +1,220 @@
+import { afterEach, expect, it, vi } from 'vitest'
+import Database from 'better-sqlite3'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { SessionStore, sessionStorePath } from './store'
+import { digest } from './privacy'
+import { REGISTRY_SCHEMA, type RegistryBatch } from './checkpoint-registry'
+import { reconcileRegistry } from './registry-reconciliation'
+import { registrySources } from './registry-sources'
+import { executeSessionTool } from './mcp'
+import type { CommandRunner } from './entire-provider'
+import { ValidationLedger } from '../validation-ledger/validation-ledger'
+import { runReadOnly } from './entire-provider'
+import { buildSync } from 'esbuild'
+import { SessionContextClient } from './client'
+import { GitHubApiClient } from '../github/github-api-client'
+import { handoffSessionCoverage } from './handoff'
+import { GitHubIntegrationService } from '../github/github-integration-service'
+
+const cleanup: (() => void)[] = []
+afterEach(() => { for (const f of cleanup.reverse()) f(); cleanup.length = 0 })
+function fixture() {
+  const base = mkdtempSync(join(tmpdir(), 'checkpoint-registry-')), path = sessionStorePath(base, 'repo')
+  let store = new SessionStore(path, 'repo')
+  cleanup.push(() => { store.close(); rmSync(base, { recursive: true, force: true }) })
+  return { base, path, store: () => store, restart: () => { store.close(); store = new SessionStore(path, 'repo') } }
+}
+const commit = 'e9343e7998b877682604bb772a7ecb31bb8b81e5', checkpoint = '01M6EGW7096RMXJE1VPD76NDSQ'
+const runner: CommandRunner = async (_exe, args) => {
+  const text = args.includes('log') ? 'Subject\nEntire-Checkpoint: ' + checkpoint : args.includes('rev-parse') ? 'a'.repeat(40) : args.some(a => a.endsWith(':metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, cli_version: '0.12.2', sessions: [{}, {}] }) : args.some(a => a.endsWith(':0/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, session_id: 'session-one' }) : args.some(a => a.endsWith(':1/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, session_id: 'session-two' }) : ''
+  return { text, code: 0, limited: false }
+}
+const absent: CommandRunner = async (_exe, args) => ({ text: args.includes('log') ? 'No checkpoint' : 'a'.repeat(40), code: 0, limited: false })
+function batch(revision = '1'): RegistryBatch {
+  return { repositoryId: 'repo', source: 'CONTINUUM:handoff', revision, status: 'COMPLETE', edges: [{ from: { kind: 'ARTIFACT', id: 'handoff' }, relation: 'implements', to: { kind: 'ARTIFACT', id: 'plan' }, evidenceKind: 'CONTINUUM_TYPED_RELATION', evidenceRef: 'handoff', digest: digest('artifact'), freshness: 'OBSERVED_SNAPSHOT' }] }
+}
+it('migrates v4 without changing event bytes, ids or cursors; rejects future schemas and foreign namespaces', () => {
+  const f = fixture(), s = f.store()
+  const result = s.ingest({ providerSessionId: 'legacy', providerVersion: 'fixture', agent: 'codex', state: 'ENDED', endedAt: '2026-01-01T00:00:00Z', coverage: 'COMPLETE', sourceDigest: digest('old'), sourceBytes: 8, importState: 'TRANSCRIPT_IMPORTED' }, [{ type: 'INPUT', sourcePosition: 1, text: 'private 🧪 payload' }])
+  const event = s.events(result.sessionId, {}, 0, 1)[0], before = s.event(result.sessionId, event.id), cursor = s.cursor({ old: true }, 1)
+  const db = new Database(f.path)
+  for (const table of ['checkpoint_registry', 'registry_sources', 'registry_edges', 'registry_entities']) db.exec('DROP TABLE ' + table)
+  db.pragma('user_version=4'); db.close(); f.restart()
+  expect(f.store().event(result.sessionId, event.id)).toEqual(before)
+  expect(f.store().offset(cursor, { old: true })).toBe(1)
+  expect(() => f.store().registry.apply({ ...batch(), repositoryId: 'foreign' }, undefined)).toThrow('REPOSITORY_MISMATCH')
+  expect(() => new SessionStore(f.path, 'foreign')).toThrow('REPOSITORY_MISMATCH')
+  const future = new Database(f.path); future.pragma('user_version=999'); future.close()
+  expect(() => new SessionStore(f.path, 'repo')).toThrow('SCHEMA_UNSUPPORTED')
+})
+it('rolls back invalid batches and CAS changes; preserves superseded edges and detects tampering', () => {
+  const f = fixture(), r = f.store().registry
+  r.apply(batch(), undefined)
+  expect(() => r.apply(batch('2'), undefined)).toThrow('REVISION_CONFLICT')
+  expect(() => r.apply({ ...batch('2'), edges: [...batch().edges, { ...batch().edges[0], digest: 'bad' }] }, '1')).toThrow('INVALID_REGISTRY_EVIDENCE')
+  expect(r.source(batch().source)?.revision).toBe('1')
+  expect(() => r.applyAll([{ repositoryId: 'repo', source: 'LEDGER', revision: 'advanced', cursor: 'future', status: 'COMPLETE', edges: [] }, { ...batch('2'), repositoryId: 'foreign' }], () => {})).toThrow('REPOSITORY_MISMATCH')
+  expect(r.source('LEDGER')).toBeUndefined()
+  r.apply(batch('2'), '1'); f.restart()
+  expect(f.store().registry.map({ kind: 'ARTIFACT', id: 'plan' }).edges.map((e: any) => e.state).sort()).toEqual(['OBSERVED', 'SUPERSEDED'])
+  f.store().registry.apply({ ...batch('3'), status: 'CONFLICT', edges: [] }, '2')
+  expect(f.store().registry.map({ kind: 'ARTIFACT', id: 'plan' }).edges.some(e => e.state === 'CONFLICT')).toBe(true)
+  const db = new Database(f.path); db.prepare('UPDATE registry_edges SET payload=?').run('{}'); db.close()
+  expect(() => f.store().registry.map({ kind: 'ARTIFACT', id: 'plan' })).toThrow('REGISTRY_INTEGRITY_FAILED')
+})
+it('discovers checkpoint original identity and two sessions without import or manual session links; replay/restart is idempotent', async () => {
+  const f = fixture()
+  await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'COMMIT', id: commit }, () => {})
+  f.restart()
+  const map = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'COMMIT', id: commit }, () => {}) as any
+  expect(map.edges).toHaveLength(3)
+  expect(map.edges.filter((e: any) => e.to.kind === 'SESSION').map((e: any) => e.to.id).sort()).toEqual(['entire:session-one', 'entire:session-two'])
+  expect(map.edges.some((e: any) => e.evidenceKind === 'CHECKPOINT_VERIFIED')).toBe(true)
+  expect(f.store().count()).toBe(0)
+  const pending = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'CHECKPOINT', id: checkpoint }, () => {}) as any
+  expect(pending.edges.filter((e: any) => e.from.kind === 'CHECKPOINT')).toHaveLength(2)
+  expect(pending.edges.filter((e: any) => e.from.kind === 'COMMIT')).toHaveLength(1)
+})
+it('missing checkpoint and unavailable GitHub preserve other relations, without claiming capture or authorship', async () => {
+  const f = fixture()
+  const map = await reconcileRegistry(f.store(), absent, '/fixture', { kind: 'COMMIT', id: 'b'.repeat(40) }, () => {}, async () => [{ repositoryId: 'repo', source: 'GITHUB', revision: 'offline', status: 'UNAVAILABLE', edges: [] }]) as any
+  expect(map.reason).toBe('CHECKPOINT_NOT_OBSERVED')
+  expect(map.edges).toEqual([])
+  expect(map.authorship).toBe('NOT_INFERRED')
+})
+it('projects legacy declarations with their original evidence and preserves identity after eviction', () => {
+  const f = fixture(), s = f.store()
+  const row = s.ingest({ providerSessionId: 'legacy-session', providerVersion: 'fixture', agent: 'codex', state: 'ENDED', endedAt: '2026-01-01T00:00:00Z', coverage: 'COMPLETE', sourceDigest: digest('legacy'), sourceBytes: 0 }, [])
+  s.recordAssociation({ repositoryId: 'repo', sessionId: row.sessionId, providerSessionId: 'legacy-session', provider: 'entire', worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64), sourceArtifactId: 'handoff', artifactId: 'plan', evidence: 'HANDOFF_DECLARED', origin: 'CONTINUUM_HANDOFF' }, s.catalogRevision())
+  s.registry.legacy(() => {})
+  const db = new Database(f.path); db.prepare('DELETE FROM sessions WHERE id=?').run(row.sessionId); db.close(); f.restart()
+  expect(f.store().registry.map({ kind: 'ARTIFACT', id: 'plan' }).edges.every(e => e.evidenceKind === 'HANDOFF_DECLARED')).toBe(true)
+  expect(() => f.store().session(row.sessionId)).toThrow('SESSION_EVICTED')
+})
+function sources(f: ReturnType<typeof fixture>, allowed = true) {
+  const ledger = new ValidationLedger(join(f.base, 'ledger.sqlite')); cleanup.push(() => ledger.close())
+  const now = '2026-11-03T22:00:00.000Z'
+  const artifacts: Record<string, any> = {
+    handoff: { artifactId: 'handoff', revision: 1, contentHash: digest('handoff'), metadata: { kind: 'IMPLEMENTATION_HANDOFF', pullRequest: 90, relations: [{ artifactId: 'plan', kind: 'implements' }] }, updatedAt: now },
+    plan: { artifactId: 'plan', revision: 1, contentHash: digest('plan'), metadata: { kind: 'EXECUTABLE_PLAN' }, updatedAt: now }
+  }
+  const continuum = { get: (id: string) => artifacts[id] ?? null, list: () => ({ artifacts: Object.values(artifacts) }) }
+  const github = { commitPullRequests: vi.fn(async () => [90]), getPullRequest: vi.fn(async () => ({ pullRequest: { head: { sha: 'd'.repeat(40) } } })), pullRequestCommits: vi.fn(async () => ({ repositoryId: 'repo', commits: [{ sha: commit }], nextPage: null })) }
+  const read = registrySources({ repositoryId: 'repo', root: '/fixture', continuum: () => continuum as any, ledger, github: github as any, networkAllowed: () => allowed, assertCurrent: () => {} })
+  return { ledger, read, github, artifacts }
+}
+it('automatically composes PR → real member → checkpoint → two sessions and Handoff → Plan → UNVERIFIABLE proof without sessionLinks', async () => {
+  const f = fixture(), source = sources(f)
+  source.ledger.recordProof({ kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED', startedAt: '2026-11-03T22:00:00Z', finishedAt: '2026-11-03T22:00:01Z', durationMs: 1000, scope: ['fixture'], summary: 'fixture', evidenceFor: ['plan'] })
+  const map = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'PR', id: '90' }, () => {}, source.read) as any
+  expect(map.edges.some((e: any) => e.to.kind === 'PROOF' && e.freshness === 'UNVERIFIABLE')).toBe(true)
+  expect(map.edges.some((e: any) => e.from.id === 'handoff' && e.evidenceKind === 'HANDOFF_DECLARED')).toBe(true)
+  expect(map.edges.filter((e: any) => e.to.kind === 'SESSION')).toHaveLength(2)
+  expect(map.edges.some((e: any) => e.from.kind === 'COMMIT' && e.from.id === 'd'.repeat(40))).toBe(false)
+  f.restart()
+  const again = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'PR', id: '90' }, () => {}, source.read) as any
+  expect(again.edges.length).toBe(map.edges.length)
+  expect(f.store().count()).toBe(0)
+  const byPlan = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'ARTIFACT', id: 'plan' }, () => {}, source.read) as any
+  expect(byPlan.edges.filter((e: any) => e.to.kind === 'SESSION')).toHaveLength(2)
+})
+it('respects network policy, Ledger repository provenance and project changes; list tool exposes bounded paths', async () => {
+  const f = fixture(), source = sources(f, false)
+  const result = await executeSessionTool(f.store(), { refresh: async () => ({}) }, 'list_agent_sessions', { artifactId: 'plan' }, () => {}, undefined, [], absent, '/fixture', undefined, source.read)
+  expect(result.isError).toBeFalsy()
+  const data = JSON.parse((result.content[0] as any).text)
+  expect(data.contextMap.authorship).toBe('NOT_INFERRED')
+  expect(source.github.getPullRequest).not.toHaveBeenCalled()
+  expect(JSON.stringify(data)).not.toContain('rawMarkdown')
+  let current = true
+  const reader = registrySources({ repositoryId: 'repo', root: '/fixture', continuum: () => null, ledger: source.ledger, github: source.github as any, networkAllowed: () => false, assertCurrent: () => { if (!current) throw new Error('PROJECT_CONTEXT_CHANGED') } })
+  current = false
+  await expect(reader({ cursors: {} })).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
+})
+
+it('rolls back a malformed v4 migration without changing the schema version', () => {
+  const f = fixture(), db = new Database(f.path)
+  db.exec('DROP TABLE registry_edges; DROP TABLE registry_sources; CREATE TABLE registry_edges(id TEXT PRIMARY KEY)')
+  db.pragma('user_version=4')
+  expect(() => new SessionStore(f.path, 'repo')).toThrow()
+  expect(db.pragma('user_version', { simple: true })).toBe(4)
+  expect(db.prepare("SELECT name FROM sqlite_master WHERE name='registry_sources'").get()).toBeUndefined()
+  db.close()
+})
+it('reuses verified immutable checkpoint metadata after restart and preserves local facts before an unavailable remote reader', async () => {
+  const f = fixture(), run = vi.fn(runner)
+  await reconcileRegistry(f.store(), run, '/fixture', { kind: 'COMMIT', id: commit }, () => {})
+  f.restart(); run.mockClear()
+  await reconcileRegistry(f.store(), run, '/fixture', { kind: 'COMMIT', id: commit }, () => {})
+  expect(run.mock.calls.some(call => call[1].includes('cat-file'))).toBe(false)
+  await expect(reconcileRegistry(f.store(), run, '/fixture', { kind: 'COMMIT', id: commit }, () => {}, async () => { throw new Error('OFFLINE') })).rejects.toThrow('OFFLINE')
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges).toHaveLength(3)
+})
+it('reads canonical sources through the existing worker boundary and returns a compact map', async () => {
+  const f = fixture(), workerPath = join(f.base, 'worker.cjs'), root = process.cwd()
+  const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
+  writeFileSync(workerPath, `require = require('node:module').createRequire(${JSON.stringify(join(root, 'package.json'))});\n` + code)
+  const read = vi.fn(async () => [batch()])
+  const client = new SessionContextClient(f.base, 'repo', root, () => true, workerPath, undefined, undefined, undefined, undefined, read)
+  try {
+    const result = await client.call('list_agent_sessions', { artifactId: 'plan' })
+    expect(result.isError).toBeFalsy()
+    expect(read).toHaveBeenCalledOnce()
+    expect(JSON.parse((result.content[0] as any).text).contextMap.edges[0].relation).toBe('implements')
+  } finally { await client.dispose() }
+}, 20000)
+it.skipIf(process.env.CHECKPOINT_REGISTRY_REAL !== '1')('accepts the authorized existing real checkpoint through read-only Git metadata without transcript import', async () => {
+  const f = fixture()
+  const map = await reconcileRegistry(f.store(), runReadOnly, process.cwd(), { kind: 'COMMIT', id: commit }, () => {}) as any
+  expect(map.edges.filter((e: any) => e.to.kind === 'SESSION')).toHaveLength(2)
+  expect(map.edges.some((e: any) => e.to.kind === 'CHECKPOINT' && e.to.id === checkpoint)).toBe(true)
+  expect(f.store().count()).toBe(0)
+}, 20000)
+it('advances durable Ledger cursors and excludes a foreign checkout even when it names a local Artifact', async () => {
+  const f = fixture(), source = sources(f, false)
+  const input = { kind: 'TARGETED_TEST' as const, producer: 'IMPLEMENTER' as const, status: 'PASSED' as const, startedAt: '2026-11-03T22:00:00Z', finishedAt: '2026-11-03T22:00:01Z', durationMs: 1000, scope: ['fixture'], summary: 'fixture', evidenceFor: ['plan'] }
+  const foreign = source.ledger.recordProof({ ...input, commandProfile: { command: 'fixture', checkout: { repositoryId: 'foreign', worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64), head: commit, issuer: 'VALIDATION_EXECUTION', runId: 'fixture' } } })
+  for (let index = 0; index < 21; index++) source.ledger.recordProof({ ...input, deduplicationKey: String(index) })
+  const first = await source.ledger.projectionPage()
+  expect(first.proofs).toHaveLength(20)
+  expect(first.more).toBe(true)
+  const second = await source.ledger.projectionPage(first.cursor)
+  expect(second.proofs).toHaveLength(2)
+  expect(second.more).toBe(false)
+  const batches = await source.read({ selector: { kind: 'ARTIFACT', id: 'plan' }, cursors: {} })
+  expect(batches.some(b => b.source === 'LEDGER:' + foreign.proofId)).toBe(false)
+  expect(batches.find(b => b.source === 'LEDGER')?.status).toBe('PARTIAL')
+})
+it('bounds ref inventory, accepts a checkpoint without a commit and separates observed worktree generations', async () => {
+  const f = fixture(), run: CommandRunner = async (exe, args, ...rest) => args.includes('for-each-ref') ? { code: 0, limited: false, text: `refs/entire/checkpoints/SQ/${checkpoint}\n` } : args.includes('log') ? { code: 0, limited: false, text: 'No trailer' } : runner(exe, args, ...rest)
+  await reconcileRegistry(f.store(), run, '/fixture', undefined, () => {})
+  const map = f.store().registry.map({ kind: 'CHECKPOINT', id: checkpoint })
+  expect(map.edges).toHaveLength(2)
+  expect(map.edges.some(e => e.from.kind === 'COMMIT')).toBe(false)
+  expect(f.store().registry.source('GIT:' + checkpoint)?.status).toBe('PENDING_COMMIT_ASSOCIATION')
+  const capture = (generation: string) => ({ worktreeId: 'a'.repeat(64), generation, sourceFingerprint: 'source', policyDigest: 'policy', configurationDigest: 'config', capture: { state: 'OBSERVED', providerSessionId: 'original-session' }, checkpoint: {}, head: '' }) as any
+  await reconcileRegistry(f.store(), run, '/fixture', undefined, () => {}, undefined, capture('b'.repeat(64)))
+  await reconcileRegistry(f.store(), run, '/fixture', undefined, () => {}, undefined, capture('c'.repeat(64)))
+  expect(f.store().registry.map({ kind: 'SESSION', id: 'entire:original-session' }).edges.filter(e => e.from.kind === 'WORKTREE')).toHaveLength(2)
+})
+it('uses the existing GitHub client for bounded candidate discovery, then requires the PR commit list', async () => {
+  const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => new Response(JSON.stringify([{ number: 90 }]), { status: 200 }))
+  const api = new GitHubApiClient(async () => 'fixture-token', fetcher)
+  expect(await api.getCommitPullRequests('owner/repo', commit)).toEqual([90])
+  expect(String(fetcher.mock.calls[0]?.[0])).toContain('/repos/owner/repo/commits/' + commit + '/pulls?per_page=5')
+  await expect(api.getCommitPullRequests('owner/repo', '../foreign')).rejects.toThrow()
+})
+it('requests automatic reconciliation for a Handoff without sessionLinks without blocking publication or issuing manual associations', async () => {
+  const call = vi.fn(() => new Promise<any>(() => {}))
+  const result = await handoffSessionCoverage({ call }, { artifactId: 'handoff', metadata: { kind: 'IMPLEMENTATION_HANDOFF' } } as any, { worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64) })
+  expect(result).toMatchObject({ code: 'RECONCILIATION_REQUESTED', coverage: 'PENDING', transcriptImported: false })
+  expect(call).toHaveBeenCalledExactlyOnceWith('reconcile_checkpoint_registry', { artifactId: 'handoff' })
+})
+it('rejects PR composition if the authorized GitHub origin changes during the read', async () => {
+  let remote = 'https://github.com/owner/repo.git'
+  const api = { getPullRequestCatalogRecord: async () => ({ head: { sha: commit }, base: { repository: 'owner/repo' }, updatedAt: 'stable' }), getPullRequestCommits: async () => { remote = 'https://github.com/other/repo.git'; return { commits: [{ sha: commit }], nextPage: null } } }
+  const service = new GitHubIntegrationService({ clientId: 'fixture', appSlug: 'fixture' }, {} as any, { hasCredentials: () => true } as any, api as any, { findByPath: () => ({ id: 'repo' }) } as any, { getRemoteUrl: async () => remote } as any, {} as any)
+  await expect(service.pullRequestCommits('/fixture', 90, commit)).rejects.toThrow('REMOTE_CONTEXT_CHANGED')
+})

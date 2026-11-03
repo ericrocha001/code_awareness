@@ -11,6 +11,7 @@ import { observeCheckpoint } from './checkpoint-observation'
 import { digest } from './privacy'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
+import { executeSessionTool } from './mcp'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
@@ -65,6 +66,18 @@ function checkpoint(f: ReturnType<typeof fixture>, id: string) {
   f.git('update-ref', 'refs/entire/checkpoints/' + id.slice(-2) + '/' + id, revision)
   return revision
 }
+it('projects a verified local commit from Capture Health into the same registry without importing sessions', async () => {
+  const f = fixture(), checkpointId = '0123456789abcdef'
+  await f.inspect({ trigger: 'BEGIN' })
+  checkpoint(f, checkpointId)
+  writeFileSync(join(f.root, 'file.txt'), 'legitimate fixture change')
+  f.git('add', 'file.txt'); f.git('commit', '-q', '-m', 'fixture composed\n\nEntire-Checkpoint: ' + checkpointId)
+  const commitSha = f.git('rev-parse', 'HEAD')
+  const result = await executeSessionTool(f.store(), new EntireProvider(f.store(), f.root, () => {}, f.run), 'inspect_capture_health', { trigger: 'LOCAL_COMMIT', commitSha }, () => {}, f.target, [], f.run, f.root)
+  expect(result.isError).toBeFalsy()
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commitSha }).edges.filter(e => e.to.kind === 'SESSION')).toHaveLength(3)
+  expect(f.store().count()).toBe(0)
+}, 20000)
 it('separates configured hooks from capture, reuses observations without CLI work, invalidates configuration and preserves restart/retention', async () => {
   const f = fixture()
   f.mode('unobserved')

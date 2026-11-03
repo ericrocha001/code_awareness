@@ -43,6 +43,7 @@ import { registerActiveProjectHandlers } from './ipc/active-project-handler'
 import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { SessionContextClient } from './session-context/client'
 import { sessionTargetResolver } from './session-context/target'
+import { registrySources } from './session-context/registry-sources'
 import { registerApplicationShutdown } from './application-shutdown'
 import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
 import { NgrokTransport } from './mcp/connection/ngrok-transport'
@@ -171,6 +172,7 @@ const runtimeRestart = new RuntimeRestartController(
 let activeValidationExecution: ValidationExecution | null = null
 let activeCliExecution: CliExecutionService | null = null
 let activeSessionContext: SessionContextClient | undefined
+let sessionProjectionSubscriptions: (() => void)[] = []
 let activeWorktreeValidation: GitWorktreeValidation | null = null
 let diagnosticInstallationId: string | null = null
 let repositoryCatalog: RepositoryCatalogService | null = null
@@ -500,6 +502,8 @@ app.whenReady().then(async () => {
   activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
     boundProjectRevision = revision
+    for (const unsubscribe of sessionProjectionSubscriptions) unsubscribe()
+    sessionProjectionSubscriptions = []
     activeSessionContext?.dispose()
     activeSessionContext = undefined
     if (!project) {
@@ -590,11 +594,30 @@ app.whenReady().then(async () => {
         if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED')
         if (continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('REPOSITORY_MISMATCH')
         return authorizeHandoffAssociation(continuumSession.getActiveService(), validationLedger, request)
-      })
+      }, undefined, registrySources({ repositoryId: gitRepositoryId, root: project.path,
+        continuum: () => continuumSession.getActiveSession()?.repositoryId === gitRepositoryId ? continuumSession.getActiveService() : null,
+        ledger: validationLedger, github: githubIntegration,
+        networkAllowed: () => settingsService.loadSettings().gitManagement?.automaticFetch !== false,
+        assertCurrent: () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') } }))
     if (activeSessionContext) {
       const sessionContext = activeSessionContext
-      gitOperations.bindCommitObservation((target, commitSha) => sessionContext.call('inspect_capture_health', { ...target, commitSha, trigger: 'LOCAL_COMMIT' }))
+      gitOperations.bindCommitObservation(async (target, commitSha) => {
+        await sessionContext.call('inspect_capture_health', { ...target, commitSha, trigger: 'LOCAL_COMMIT' })
+        return sessionContext.call('reconcile_checkpoint_registry', { commitSha })
+      })
       void sessionContext.call('inspect_capture_health', { trigger: 'BEGIN' })
+      let projecting = false
+      let projectionRequested = false
+      const reconcile = () => {
+        if (!sessionIsCurrent()) return
+        if (projecting) { projectionRequested = true; return }
+        projecting = true
+        void sessionContext.call('reconcile_checkpoint_registry', {}).finally(() => {
+          projecting = false
+          if (projectionRequested) { projectionRequested = false; queueMicrotask(reconcile) }
+        })
+      }
+      sessionProjectionSubscriptions = [continuumSession.onChanged(reconcile), validationLedger.onRecorded(reconcile)]
     }
     if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
       const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache.js')

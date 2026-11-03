@@ -60,6 +60,13 @@ export class GitHubApiClient {
     return { commits: value.map(v => ({ sha: v.sha as string, title: v.commit.message.split('\n')[0] as string, committedAt: v.commit.committer.date as string })), nextPage: nextLink(response.headers.get('link')) ? page + 1 : null }
   }
 
+  async getCommitPullRequests(fullName: string, sha: string): Promise<number[]> {
+    if (!/^[a-f0-9]{40}$/.test(sha)) throw malformed()
+    const value = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}/commits/${sha}/pulls?per_page=5`, { signal: AbortSignal.timeout(10_000) })
+    if (!Array.isArray(value) || value.some(v => !Number.isSafeInteger(v?.number) || v.number < 1)) throw malformed()
+    return value.slice(0, 5).map(v => v.number)
+  }
+
   async getBranchProtection(fullName: string, branch: string): Promise<boolean> {
     const value = await this.request<any>(`/repos/${encodeRepositoryFullName(fullName)}/branches/${encodeURIComponent(branch)}`, { signal: AbortSignal.timeout(10_000) })
     if (!value || typeof value.protected !== 'boolean' || value.name !== branch) throw malformed()

@@ -13,10 +13,14 @@ import { persistArchiveObservation, type ArchiveObservation } from './codex-arch
 import { sourceTimestamp } from './source-time'
 import type { SessionFilter } from './associations'
 import { captureHealthQuery, inspectCaptureHealth } from './capture-health'
+import { reconcileRegistry, registrySelector } from './registry-reconciliation'
+import type { RegistryReader } from './checkpoint-registry'
+import type { CaptureHealthObservation } from './capture-health-types'
 
 const id = z.string().uuid(), revision = z.number().int().positive(), cursor = z.string().max(512).optional()
 const date = z.string().datetime({ offset: true }).optional()
 const schemas = {
+  reconcile_checkpoint_registry: z.object({ ...historicalSelectors, checkpointId: z.string().regex(/^[A-Za-z0-9]{10,40}$/).optional() }).strict(),
   inspect_capture_health: captureHealthQuery,
   ...LIVE_SESSION_SCHEMAS,
   inspect_code_provenance: z.object({
@@ -85,6 +89,7 @@ export const SESSION_CONTEXT_TOOLS: McpToolDefinition[] = definitions.map(([name
   securitySchemes: [{ type: 'oauth2', scopes: [] }], inputSchema: { type: 'object', properties, required, additionalProperties: false },
   annotations: { readOnlyHint: name !== 'refresh_agent_sessions', destructiveHint: false, openWorldHint: false } }))
 export const SESSION_RESPONSE_BUDGETS: Record<SessionToolName, number> = {
+  reconcile_checkpoint_registry: 24576,
   inspect_capture_health: 8192,
   discover_entire_sessions: 12288,
   inspect_entire_session: 8192,
@@ -150,7 +155,8 @@ export async function executeSessionTool(
   liveTargets: LiveSessionTarget[] = [],
   runner: CommandRunner = runReadOnly,
   root?: string,
-  archiveObservation?: ArchiveObservation
+  archiveObservation?: ArchiveObservation,
+  registryReader?: RegistryReader
 ): Promise<McpToolResult> {
   if (isLiveSessionTool(name)) return executeLiveSessionTool(provider, name, raw, assertActive, liveTargets)
   try {
@@ -159,9 +165,13 @@ export async function executeSessionTool(
     const q = schemas[name].parse(raw ?? {})
     const budget = SESSION_RESPONSE_BUDGETS[name]
     let data: object
-    if (name === 'inspect_capture_health') {
+    if (name === 'reconcile_checkpoint_registry') {
+      data = await reconcileRegistry(store as SessionStore, runner, root!, registrySelector(q as z.infer<typeof schemas.reconcile_checkpoint_registry>), assertActive, registryReader)
+    } else if (name === 'inspect_capture_health') {
       if (!selectedTarget || !root || !provider.inspectCapture) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
       data = await inspectCaptureHealth(store as SessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, q as ReturnType<typeof parseCaptureHealth>, assertActive)
+      const observation = data as CaptureHealthObservation
+      await reconcileRegistry(store as SessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
     } else if (name === 'inspect_code_provenance') {
       const request = q as z.infer<typeof schemas.inspect_code_provenance>
       if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
@@ -192,6 +202,8 @@ export async function executeSessionTool(
       } else data = { ...await provider.refresh(request.sessionId), ...(selectedTarget ? { worktreeId: selectedTarget.worktreeId, generation: selectedTarget.generation } : {}) }
     } else if (name === 'list_agent_sessions') {
       const actualStore = store as SessionStore
+      const selector = registrySelector(q as z.infer<typeof schemas.list_agent_sessions>)
+      if (selector && !('cursor' in q && q.cursor)) await reconcileRegistry(actualStore, runner, root!, selector, assertActive, registryReader)
       if (archiveObservation && selectedTarget) {
         try { persistArchiveObservation(actualStore, archiveObservation, selectedTarget, assertActive) }
         catch (error) {
@@ -201,10 +213,16 @@ export async function executeSessionTool(
         }
       }
       const { cursor, ...filter } = q as z.infer<typeof schemas.list_agent_sessions>
+      const contextMap = selector ? actualStore.registry.map(selector, 10) : undefined
+      if (contextMap) {
+        contextMap.sources = contextMap.sources.filter(s => !s.source.includes(':')).slice(0, 4)
+        while (!fits(contextMap, 4500) && contextMap.edges.length) { contextMap.edges.pop(); contextMap.coverage = 'PARTIAL' }
+      }
       const scope = { name, repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), filter }, offset = actualStore.offset(cursor, scope)
       const rows = actualStore.sessions(filter, offset, filter.limit + 1)
       data = page(actualStore, scope, offset, rows, filter.limit, budget,
         { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL', reason: rows.some(row => actualStore.associations(row.id, 1).length) ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED',
+          ...(contextMap ? { contextMap } : {}),
           archiveCoverage: { code: archiveObservation?.code ?? 'ARCHIVE_NOT_QUERIED', ...(archiveObservation?.reason ? { reason: archiveObservation.reason } : {}), ...(archiveObservation?.nextCursor ? { nextCursor: archiveObservation.nextCursor } : {}) } }, row => associationMetadata(actualStore, row, filter), 'sessions')
     } else {
       const actualStore = store as SessionStore

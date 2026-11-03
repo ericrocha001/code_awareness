@@ -80,6 +80,12 @@ Antes de um commit legítimo, confirme trabalho pendente correspondente aos arqu
 
 ## Limites e cobertura
 
+O Checkpoint Registry é uma projeção de metadados no mesmo `session-context.sqlite` (schema 6). Identidades externas tipadas e arestas históricas têm retenção independente dos eventos. O aprofundamento de uma sessão já removida retorna `SESSION_EVICTED`; um ID observado apenas em metadata permanece `NOT_IMPORTED`.
+
+Commits locais, observações do Capture Health, publicação de Artifacts e novas provas disparam reconciliação limitada. Consultas exatas do catálogo por commit, PR, execução ou Artifact também reconciliam as fontes e retornam `contextMap`, com caminhos, cobertura e evidência por aresta. Não é necessário preencher `sessionLinks`. A API manual permanece como declaração compatível. Cursores e arestas de um lote são confirmados atomicamente; falhas preservam o watermark anterior. Refs Entire são enumeradas em páginas pequenas, e objetos de checkpoint já verificados são reutilizados pelo SHA imutável após reinício.
+
+Git/Entire, Continuum, Ledger e GitHub continuam autoridades independentes. O Main consulta os serviços existentes por portas de leitura, com política de rede vigente; o worker projeta somente IDs, revisões, hashes e relações. Ausência de GitHub não impede persistência da evidência local. Só a lista de commits do PR confirma participação; head/merge/squash não a substituem. Handoff continua `HANDOFF_DECLARED`, e a freshness do Ledger não é promovida pelo índice. Caminhos permitem navegação, sem inferir autoria. A reconciliação não importa transcrições, não busca refs privadas e não habilita captura ou App Server.
+
 Cada banco admite 500 sessões. A inserção seguinte remove atomicamente a ENDED mais antiga, com desempate por ID; ACTIVE, UNKNOWN e estados terminais sem evidência não são removidos. Se não houver vítima elegível, retorna CAPACITY_REACHED. Replay não ocupa outro slot.
 
 O texto sanitizado tem limites de 32 KiB por evento, 8 MiB por sessão e 512 MiB por repositório. Omissões permanecem no envelope com motivo e cobertura. A fonte pode exigir exportação integral O(n); persistência idempotente não significa cursor incremental do Entire. Há limites de 32 MiB de stdout, 20 mil eventos, 256 KiB por linha de entrada e 12 segundos por atualização. Importação e consultas SQLite ficam em worker dedicado com backpressure e cancelamento na troca de projeto.
