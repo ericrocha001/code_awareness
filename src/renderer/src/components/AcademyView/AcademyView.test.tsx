@@ -46,6 +46,27 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+it('explains a legacy version collision and saves only the explicitly reviewed manifest revision', async () => {
+  const state = await window.codeAwareness.getAcademyOpenAiPublicationState()
+  vi.mocked(window.codeAwareness.getAcademyOpenAiPublicationState).mockResolvedValue({ ...state, versionPreflight: {
+    outcome: 'VERSION_ALREADY_USED_FOR_OTHER_CONTENT', manifestVersion: '0.27.16', registeredVersion: '0.27.16',
+    highestKnownVersion: '0.27.16', suggestedVersion: '0.27.17', sourceCommitSha: 'a'.repeat(40),
+    message: 'O manifesto declara 0.27.16, mas a release 0.27.16 já está registrada. Prepare uma nova versão no Git.' } })
+  const preview = { repositoryId: 'repo', branch: 'main', sourceCommitSha: 'a'.repeat(40), workspaceCommitSha: 'b'.repeat(40), manifestHash: 'hash',
+    previousVersion: '0.27.16', newVersion: '0.27.17', before: '{"version":"0.27.16"}', after: '{"version":"0.27.17"}', token: 'reviewed' }
+  window.codeAwareness.previewAcademyManifestVersion = vi.fn(async () => preview)
+  const git = await window.codeAwareness.getAcademyGitStatus()
+  window.codeAwareness.saveAcademyManifestVersion = vi.fn(async () => ({ ...git, syncState: 'LOCAL_CHANGES' as const }))
+  render(<AcademyView />)
+  await screen.findByText(/O manifesto declara 0.27.16/)
+  fireEvent.click(screen.getByRole('button', { name: 'Preparar nova versão do manifesto' }))
+  const dialog = await screen.findByRole('dialog', { name: 'Revisar versão do manifesto' })
+  expect(window.codeAwareness.saveAcademyManifestVersion).not.toHaveBeenCalled()
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Salvar revisão no workspace' }))
+  await waitFor(() => expect(window.codeAwareness.saveAcademyManifestVersion).toHaveBeenCalledWith({ preview, confirmed: true }))
+  expect(window.codeAwareness.prepareAcademyOpenAiRelease).not.toHaveBeenCalled()
+})
+
 it('requires reviewed conflict content and forwards the exact observed revision', async () => {
   const current = await window.codeAwareness.getAcademyGitStatus()
   const conflict = { ...current, syncState: 'CONFLICT' as const, publication: { destinationKey: 'destination', checkoutPath: 'C:/publication', baselineTree: null, desiredRevision: 'revision', desiredTree: '', localHead: null, remoteHead: 'a'.repeat(40), verifiedAt: null, operationId: null, pendingCommit: null, legacyPendingHead: null, migrationComplete: true, conflictPaths: ['skills/alpha/SKILL.md'], phase: 'CONFLICT' as const } }

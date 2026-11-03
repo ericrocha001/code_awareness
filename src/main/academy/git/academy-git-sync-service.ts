@@ -3,6 +3,7 @@ import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { AcademyCreateInput, AcademyDraftReceipt, AcademyGitConflictReview, AcademyGitPublicationState, AcademyGitStatusProjection, AcademyGitSyncState, AcademyUpdateInput } from '../../../shared/types/academy-types'
 import type { AcademyGitBuildSource, AcademyGitSourceSnapshot } from '../../../shared/types/academy-git-source-types'
+import type { AcademyManifestPreview } from '../../../shared/types/academy-publication-types'
 import type { RepositoryRecord } from '../../../shared/types/repository-catalog-types'
 import type { GitService } from '../../core/git-service'
 import type { GitRemoteTransport } from '../../core/git-remote-transport'
@@ -13,7 +14,8 @@ import { AcademyGitMaterializer, assertPublicationPaths, validateGitSnapshot } f
 import type { AcademyPluginRepositoryProjection } from './academy-plugin-repository-projection'
 import type { AcademyPluginPackageRevisionService } from '../publication/academy-plugin-package-revision-service'
 import type { AcademyMarketplaceProjection } from './academy-marketplace-projection'
-import { sha256 } from '../publication/openai-plugin-model'
+import { canonicalJson, sha256 } from '../publication/openai-plugin-model'
+import { compareSemver } from '../publication/academy-plugin-package-revision-service'
 import { withPublicationLock } from './academy-publication-lock'
 import { ACADEMY_AUTHORED_PATHS, assertSourcePath, readAcademyGitSnapshot, verifyStagedAcademyPackage } from './academy-git-snapshot'
 
@@ -36,6 +38,8 @@ export function projectAcademyGitStatus(status: AcademyGitStatusProjection) {
 export class AcademyGitSyncService {
   private active: Promise<AcademyGitStatusProjection> | null = null
   private closing = false
+  private latestSource: Promise<AcademyGitStatusProjection> | null = null
+  private observation: { policy: string; head: string; at: number } | null = null
   private readonly publicationRoot: string
   private accepted: (ids: string[]) => void = () => {}
   private statusChanged: () => void = () => {}
@@ -105,8 +109,12 @@ export class AcademyGitSyncService {
       const state = this.state()
       try { await action(state) }
       catch (error) {
+        this.observation = null
         const message = error instanceof AcademyError ? error.code : error instanceof Error ? error.message : String(error)
         this.save(state, state.phase === 'CONFLICT' ? 'CONFLICT' : state.phase === 'REMOTE_UNAVAILABLE' ? 'OFFLINE' : 'UNKNOWN', message)
+      }
+      if (state.verifiedAt && state.remoteHead && !this.store.getGitProfile()?.lastError && this.store.getGitAuthority()?.processedCommitSha === state.remoteHead) {
+        this.observation = { policy: this.policyIdentity(), head: state.remoteHead, at: Date.parse(state.verifiedAt) }
       }
       this.statusChanged()
       return this.getStatus()
@@ -255,9 +263,19 @@ export class AcademyGitSyncService {
   }
   async sync(): Promise<AcademyGitStatusProjection> { return this.syncNow() }
 
-  async getSourceSnapshot(input: { mode: 'LATEST' } | { mode: 'REBUILD'; sourceCommitSha: string }): Promise<AcademyGitBuildSource> {
+  async getSourceSnapshot(input: { mode: 'LATEST'; force?: boolean } | { mode: 'REBUILD'; sourceCommitSha: string }): Promise<AcademyGitBuildSource> {
     if (input.mode === 'LATEST') {
-      const status = await this.syncNow()
+      if (this.active) await this.active
+      const observed = this.observation
+      const now = Date.now()
+      const reusable = !input.force && observed && observed.policy === this.policyIdentity() && now - observed.at >= 0 && now - observed.at <= 30000 &&
+        this.store.getGitAuthority()?.processedCommitSha === observed.head && this.state().remoteHead === observed.head && !this.store.getGitProfile()?.lastError
+      if (!reusable && !this.latestSource) {
+        const pending = this.syncNow()
+        this.latestSource = pending
+        void pending.then(() => { if (this.latestSource === pending) this.latestSource = null }, () => { if (this.latestSource === pending) this.latestSource = null })
+      }
+      const status = this.latestSource ? await this.latestSource : this.getStatus()
       const authority = this.store.getGitAuthority()
       if (!authority || status.publication?.remoteHead !== authority.processedCommitSha || ['UNKNOWN', 'OFFLINE'].includes(status.syncState)) throw new AcademyError('GIT_SOURCE_LATEST_UNVERIFIED')
     }
@@ -315,6 +333,60 @@ export class AcademyGitSyncService {
     assertPublicationPaths(state.workspacePath, [`skills/${name}`, '.git'])
     const disk = await observeSkillDirectory(join(state.workspacePath, 'skills', name))
     return { package: disk.package, workspaceCommitSha: await this.git.resolveCommit(state.workspacePath, 'HEAD'), sourceBaseCommitSha: authority.processedCommitSha }
+  }
+
+  async previewManifestUpdate(newVersion: string, sourceCommitSha: string): Promise<AcademyManifestPreview> {
+    let preview: AcademyManifestPreview | undefined
+    const status = await this.exclusive(async state => {
+      const { profile, repositoryId } = this.identity()
+      const source = this.store.getGitSnapshot(repositoryId, sourceCommitSha)
+      if (!source || this.store.getGitAuthority()?.processedCommitSha !== sourceCommitSha || state.remoteHead !== sourceCommitSha) throw new AcademyError('MANIFEST_SOURCE_CHANGED')
+      await this.ensureWorkspace(state, source)
+      const root = state.workspacePath!
+      assertPublicationPaths(root, ['plugin.json', '.git'])
+      if (await this.git.getOperationsStatus(root)) throw new AcademyError('WORKSPACE_UNCOMMITTED_RECOVERY_REQUIRED')
+      const head = await this.git.resolveCommit(root, 'HEAD')
+      const bytes = await this.git.readCommitFile(root, head, 'plugin.json', 1024 * 1024)
+      if (!bytes) throw new AcademyError('OPENAI_PLUGIN_MANIFEST_MISSING')
+      const manifest = JSON.parse(bytes.toString('utf8'))
+      if (manifest.name !== 'academy-skills' || compareSemver(newVersion, manifest.version) <= 0) throw new AcademyError('OPENAI_PLUGIN_VERSION_NOT_PROGRESSIVE')
+      const fields = { repositoryId, branch: profile.branch, sourceCommitSha, workspaceCommitSha: head,
+        manifestHash: sha256(bytes), previousVersion: manifest.version, newVersion, before: bytes.toString('utf8'),
+        after: `${JSON.stringify({ ...manifest, version: newVersion }, null, 2)}\n` }
+      preview = { ...fields, token: sha256(canonicalJson({ ...fields, policy: this.policyIdentity() })) }
+    })
+    if (!preview) throw new AcademyError(status.lastError ?? 'MANIFEST_PREVIEW_FAILED')
+    return preview
+  }
+
+  async saveManifestDraft(input: { preview: AcademyManifestPreview; confirmed: boolean }): Promise<AcademyGitStatusProjection> {
+    if (input.confirmed !== true) throw new AcademyError('MANIFEST_EDIT_AUTHORIZATION_REQUIRED')
+    return this.exclusive(async state => {
+      const { token, ...preview } = input.preview
+      if (token !== sha256(canonicalJson({ ...preview, policy: this.policyIdentity() }))) throw new AcademyError('MANIFEST_REVIEW_STALE')
+      const source = await this.observe(state)
+      await this.applyRemote(state, source)
+      const { profile, repositoryId } = this.identity()
+      if (preview.repositoryId !== repositoryId || preview.branch !== profile.branch || source.sourceCommitSha !== preview.sourceCommitSha) throw new AcademyError('MANIFEST_SOURCE_CHANGED')
+      const root = state.workspacePath!
+      assertPublicationPaths(root, ['plugin.json', '.git'])
+      if (await this.git.getOperationsStatus(root) || await this.git.resolveCommit(root, 'HEAD') !== preview.workspaceCommitSha) throw new AcademyError('MANIFEST_REVIEW_STALE')
+      const before = readFileSync(join(root, 'plugin.json'))
+      if (sha256(before) !== preview.manifestHash) throw new AcademyError('MANIFEST_REVIEW_STALE')
+      const manifest = JSON.parse(before.toString('utf8'))
+      const after = `${JSON.stringify({ ...manifest, version: preview.newVersion }, null, 2)}\n`
+      if (manifest.name !== 'academy-skills' || compareSemver(preview.newVersion, manifest.version) <= 0 || after !== preview.after) throw new AcademyError('MANIFEST_REVIEW_STALE')
+      const revision = this.store.knownPluginVersions()
+      if (revision.some(version => compareSemver(preview.newVersion, version) <= 0)) throw new AcademyError('MANIFEST_VERSION_NO_LONGER_AVAILABLE')
+      writeFileSync(join(root, 'plugin.json'), after)
+      await this.git.stagePaths(root, ['plugin.json'])
+      const tree = await this.git.writeIndexTree(root)
+      const staged = await this.git.readCommitFile(root, tree, 'plugin.json', 1024 * 1024)
+      if (!staged?.equals(Buffer.from(after))) throw new AcademyError('GIT_DRAFT_CONTENT_CHANGED_BY_FILTER')
+      state.localHead = await this.git.commitInspectedIndex(root, `Academy: prepare plugin version ${preview.newVersion}`, preview.workspaceCommitSha, await this.git.getIndexRevision(root))
+      state.pendingCommit = state.localHead; state.desiredTree = state.localHead
+      this.save(state, 'LOCAL_CHANGES')
+    })
   }
 
   async publish(expected?: { localHead: string; remoteHead: string | null }): Promise<AcademyGitStatusProjection> {

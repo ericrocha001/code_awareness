@@ -333,6 +333,8 @@ export interface AcademyOpenAiRelease {
 }
 
 export interface AcademyOpenAiPublicationState {
+  versionPreflight?: import('./academy-publication-types').AcademyVersionPreflight
+  operation?: import('./academy-publication-types').AcademyPublicationOperation | null
   sourceError?: string | null
   profile: AcademyOpenAiPluginProfile | null
   latestPrepared: AcademyOpenAiRelease | null

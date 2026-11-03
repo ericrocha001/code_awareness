@@ -43,10 +43,19 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:distribution-reconcile', (_event, destinationId?: string) => service.reconcileDistribution(destinationId))
   ipcMain.handle('academy:openai-bootstrap', (_event, publishedVersion?: string) => service.bootstrapOpenAiPlugin(undefined, publishedVersion))
   ipcMain.handle('academy:openai-state', () => service.getOpenAiPublicationState())
+  ipcMain.handle('academy:manifest-version-preview', (_event, kind?: 'PATCH' | 'MINOR' | 'MAJOR') => {
+    if (kind !== undefined && !['PATCH', 'MINOR', 'MAJOR'].includes(kind)) throw new Error('INVALID_ARGUMENT')
+    return service.previewManifestVersion(kind)
+  })
+  ipcMain.handle('academy:manifest-version-save', (_event, input: { preview: import('../../shared/types/academy-publication-types').AcademyManifestPreview; confirmed: boolean }) => {
+    if (!service.gitSync) throw new Error('GIT_SYNC_NOT_CONFIGURED')
+    return service.gitSync.saveManifestDraft(input)
+  })
   ipcMain.handle('academy:package-distribution-state', () => service.getPackageDistributionState())
   ipcMain.handle('academy:openai-releases', () => service.listOpenAiReleases())
   ipcMain.handle('academy:openai-prepare', (_event, input?: import('../../shared/types/academy-git-source-types').AcademyGitBuildRequest) => {
     const request = input ?? { mode: 'LATEST' }
+    if (request.mode === 'LATEST' && request.force !== undefined && typeof request.force !== 'boolean') throw new Error('INVALID_ARGUMENT')
     if (request.mode !== 'LATEST' && (request.mode !== 'REBUILD' || !/^[a-f0-9]{40,64}$/.test(request.sourceCommitSha))) throw new Error('INVALID_ARGUMENT')
     return service.prepareOpenAiRelease(request)
   })

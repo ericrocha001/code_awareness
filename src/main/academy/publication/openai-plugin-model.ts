@@ -19,22 +19,22 @@ export function canonicalJson(value: unknown): string {
 
 export function sha256(value: Buffer | string): string { return createHash('sha256').update(value).digest('hex') }
 
-export function buildCanonicalOpenAiSnapshot(store: AcademyStore, source?: AcademyGitSourceSnapshot): AcademyOpenAiSnapshotEntry[] {
-  const authority = store.getGitAuthority()
-  const git = source ?? (authority ? store.getGitSnapshot(authority.repositoryId, authority.processedCommitSha) : null)
+export function buildCanonicalOpenAiSnapshot(store: AcademyStore | null, source?: AcademyGitSourceSnapshot): AcademyOpenAiSnapshotEntry[] {
+  const authority = source ? null : store?.getGitAuthority()
+  const git = source ?? (authority ? store!.getGitSnapshot(authority.repositoryId, authority.processedCommitSha) : null)
   if (git) return git.skills.map(skill => {
     const binding = git.canonicalVersions?.[skill.path]
     if (!binding || hashAcademyPackage(skill.package) !== skill.packageHash) throw new AcademyError('GIT_SOURCE_VERSION_BINDING_REQUIRED')
     return { skillId: binding.skillId, name: skill.name, academyVersion: binding.version, packageHash: skill.packageHash }
   }).sort((left, right) => left.skillId.localeCompare(right.skillId))
-  if (store.usesGitFirst()) return []
+  if (!store || store.usesGitFirst()) return []
   return store.list('ACTIVE').filter((skill) => skill.scope === 'GLOBAL').map((skill) => {
     const detail = store.get(skill.id)
     return { skillId: skill.id, name: skill.name, academyVersion: skill.currentVersion, packageHash: detail.current.packageHash }
   }).sort((left, right) => left.skillId.localeCompare(right.skillId))
 }
 
-export function buildGitOpenAiInput(store: AcademyStore, source: AcademyGitSourceSnapshot) {
+export function buildGitOpenAiInput(store: AcademyStore | null, source: AcademyGitSourceSnapshot) {
   const snapshot = buildCanonicalOpenAiSnapshot(store, source)
   const manifestBytes = source.authoredFiles['plugin.json']
   if (!manifestBytes) throw new AcademyError('OPENAI_PLUGIN_MANIFEST_MISSING')

@@ -40,12 +40,13 @@ export class AcademyService {
   private readonly conflictBatches = new Map<string, AcademyConflictBatch>()
   private readonly batchReviewTokens = new Map<string, Map<string, string>>()
 
-  constructor(databasePath: string, downloadsPath?: string, private readonly closeTimeoutMs = 2000) {
+  constructor(databasePath: string, downloadsPath?: string, private readonly closeTimeoutMs = 2000, pluginWorkerPath?: string) {
     this.store = new AcademyStore(databasePath)
     this.projections = new AcademyProjectionService(this.store)
     this.distribution = new AcademyDistributionService(this.store)
     this.packageRevisions = new AcademyPluginPackageRevisionService(this.store)
-    this.openAiPublication = new OpenAiPluginPublicationService(this.store, this.packageRevisions, databasePath, downloadsPath)
+    this.openAiPublication = new OpenAiPluginPublicationService(this.store, this.packageRevisions, databasePath, downloadsPath, pluginWorkerPath)
+    this.openAiPublication.onOperationChange(() => this.emitDistributionChange())
     this.importer = new AcademyImporter(this.store)
     this.watcher = new AcademyWatcher(this.store, this.projections)
   }
@@ -676,6 +677,13 @@ export class AcademyService {
     }
   }
   getOpenAiPublicationState() { return this.openAiPublication.state() }
+  async previewManifestVersion(kind?: 'PATCH' | 'MINOR' | 'MAJOR') {
+    if (!this.gitSync) throw new AcademyError('GIT_SYNC_NOT_CONFIGURED')
+    const source = await this.gitSync.getSourceSnapshot({ mode: 'LATEST', force: true })
+    const header = this.store.getGitSnapshotHeader(source.snapshot.repositoryId, source.snapshot.sourceCommitSha)
+    if (!header) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
+    return this.gitSync.previewManifestUpdate(this.packageRevisions.suggestedVersion(header, kind), header.sourceCommitSha)
+  }
   listOpenAiReleases() { return this.openAiPublication.listReleases() }
   getOpenAiRelease(id: string) { return this.openAiPublication.getRelease(id) }
   prepareOpenAiRelease(): AcademyOpenAiRelease
@@ -683,7 +691,8 @@ export class AcademyService {
   prepareOpenAiRelease(input?: AcademyGitBuildRequest): AcademyOpenAiRelease | Promise<AcademyOpenAiRelease> {
     if (input) {
       if (!this.gitSync) throw new AcademyError('GIT_SYNC_NOT_CONFIGURED')
-      return this.gitSync.getSourceSnapshot(input).then(source => this.openAiPublication.prepareGitRelease(source))
+      const requestId = this.openAiPublication.beginSourceCheck(), started = performance.now()
+      return this.gitSync.getSourceSnapshot(input).then(source => this.openAiPublication.prepareGitRelease(source, requestId, performance.now() - started)).catch(error => { this.openAiPublication.sourceCheckFailed(requestId, error); throw error })
     }
     if (this.store.usesGitFirst()) throw new AcademyError('GIT_SOURCE_SNAPSHOT_REQUIRED')
     this.initializePluginPackage()
@@ -733,6 +742,7 @@ export class AcademyService {
   async close(): Promise<void> {
     this.isClosed = true
     await this.gitSync?.close()
+    await this.openAiPublication.drain()
     this.watcher.stop()
     this.dirtyDestinations.clear()
     if (this.destinationPassPromises.size > 0) {

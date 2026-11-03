@@ -43,6 +43,7 @@ export const AcademyView: React.FC = () => {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<'ALL' | 'ACTIVE' | 'DISABLED'>('ALL')
   const [activationPending, setActivationPending] = useState<string | null>(null)
+  const [packagePending, setPackagePending] = useState(false)
   const [scope, setScope] = useState<AcademySkillScope>('GLOBAL')
   const [projectIds, setProjectIds] = useState<string[]>([])
   const [skillMd, setSkillMd] = useState(emptyPackage.skillMd)
@@ -59,6 +60,7 @@ export const AcademyView: React.FC = () => {
   const [draftCommit, setDraftCommit] = useState<string>()
   const [gitReview, setGitReview] = useState<AcademyGitConflictReview | null>(null)
   const [gitResolution, setGitResolution] = useState('')
+  const [manifestPreview, setManifestPreview] = useState<import('../../../../shared/types/academy-publication-types').AcademyManifestPreview | null>(null)
   const [activeTab, setActiveTab] = useState<AcademyTab>('skill')
   const [artifactDraft, setArtifactDraft] = useState<ArtifactDraft | null>(null)
   const [destinationsOpen, setDestinationsOpen] = useState(false)
@@ -126,6 +128,7 @@ export const AcademyView: React.FC = () => {
     void (async () => {
       setSnapshot(await window.codeAwareness.getAcademySnapshot())
       setGitStatus(await window.codeAwareness.getAcademyGitStatus())
+      if (window.codeAwareness.getAcademyOpenAiPublicationState) setOpenAiPublication(await window.codeAwareness.getAcademyOpenAiPublicationState())
       if (selected && !isEditing) await loadSkill(selected.id)
     })().catch(reportError)
   }), [selected?.id, isEditing])
@@ -275,12 +278,15 @@ export const AcademyView: React.FC = () => {
     })
   }
 
-  const prepareOpenAiRelease = async (sourceCommitSha?: string) => {
+  const prepareOpenAiRelease = async (sourceCommitSha?: string, force = false) => {
+    if (packagePending) return
+    setPackagePending(true)
     try {
-      const release = await window.codeAwareness.prepareAcademyOpenAiRelease(sourceCommitSha ? { mode: 'REBUILD', sourceCommitSha } : { mode: 'LATEST' })
+      const release = await window.codeAwareness.prepareAcademyOpenAiRelease(sourceCommitSha ? { mode: 'REBUILD', sourceCommitSha } : force ? { mode: 'LATEST', force: true } : { mode: 'LATEST' })
       showMessage(`Release ${release.pluginVersion}: ${release.status}`)
       await refresh(selected?.id)
     } catch (error) { reportError(error) }
+    finally { setPackagePending(false) }
   }
 
   const requestConfirmOpenAiUpload = () => {
@@ -347,7 +353,10 @@ export const AcademyView: React.FC = () => {
         open={operationsOpen} destinations={snapshot.destinations} artifacts={artifacts} conflicts={snapshot.conflicts} distribution={distribution} packageDistribution={packageDistribution} openAiPublication={openAiPublication} gitStatus={gitStatus} eligibleRepos={eligibleRepos} selectedRepoId={selectedRepoId} onSelectedRepoChange={setSelectedRepoId} onClose={() => setOperationsOpen(false)} onOpenDestinations={() => setDestinationsOpen(true)} onOpenArtifact={openArtifact} onAddArtifact={() => { setArtifactDraft({ mode: 'create', originalPath: null, path: '', content: '' }); setIsEditing(true) }}
         onReconcile={() => void (async () => { try { await window.codeAwareness.reconcileAcademyDistribution(); showMessage('Distribuição reconciliada.'); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
         onPrepareRelease={() => void prepareOpenAiRelease()}
+        packagePending={packagePending}
+        onRevalidateRelease={() => void prepareOpenAiRelease(undefined, true)}
         onRebuildRelease={() => void prepareOpenAiRelease(openAiPublication?.selectedRelease?.source?.sourceCommitSha)}
+        onPrepareManifestVersion={() => void window.codeAwareness.previewAcademyManifestVersion().then(setManifestPreview).catch(reportError)}
         onBootstrapPlugin={() => void (async () => { try { await window.codeAwareness.bootstrapAcademyOpenAiPlugin(); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
         onRevealRelease={() => { const release = openAiPublication?.selectedRelease; if (release) void window.codeAwareness.revealAcademyOpenAiPackage(release.id) }}
         onConfirmUpload={requestConfirmOpenAiUpload}
@@ -397,6 +406,16 @@ export const AcademyView: React.FC = () => {
     {artifactDraft && <ArtifactEditor mode={artifactDraft.mode} path={artifactDraft.path} content={artifactDraft.content} onPathChange={(path) => setArtifactDraft({ ...artifactDraft, path })} onContentChange={(content) => setArtifactDraft({ ...artifactDraft, content })} onSave={saveArtifactDraft} onRequestRemove={requestRemoveArtifact} onClose={() => setArtifactDraft(null)} />}
     {destinationsOpen && <DestinationManager destinations={snapshot.destinations} onClose={() => setDestinationsOpen(false)} onToggle={(id, enabled) => void (async () => { try { await window.codeAwareness.setAcademyDestinationEnabled(id, enabled); await refresh(selected?.id) } catch (error) { reportError(error) } })()} onImport={(id) => void (async () => { try { const result = await window.codeAwareness.importAcademyDestination(id); showMessage(`Importação: ${result.filter((item) => item.result === 'IMPORTED').length} importadas, ${result.filter((item) => item.result === 'INVALID').length} inválidas.`); await refresh(selected?.id) } catch (error) { reportError(error) } })()} />}
     {confirmation && <ConfirmationDialog title={confirmation.title} description={confirmation.description} confirmLabel={confirmation.confirmLabel} destructive={confirmation.destructive} onCancel={() => setConfirmation(null)} onConfirm={() => void handleConfirmation()} />}
+    {manifestPreview && <div className="academy-overlay"><section className="academy-drawer" role="dialog" aria-label="Revisar versão do manifesto">
+      <header><h2>Manifesto {manifestPreview.previousVersion} → {manifestPreview.newVersion}</h2></header>
+      <p>{manifestPreview.branch} · fonte {manifestPreview.sourceCommitSha.slice(0, 12)}. A revisão altera somente plugin.json no workspace privado. Publique e confirme o commit na branch remota antes de preparar o ZIP.</p>
+      <label>Progressão semver<select aria-label="Progressão semver" defaultValue="" onChange={event => void window.codeAwareness.previewAcademyManifestVersion(event.target.value as 'PATCH' | 'MINOR' | 'MAJOR').then(setManifestPreview).catch(reportError)}><option value="" disabled>Sugestão pelo delta</option><option value="PATCH">Patch</option><option value="MINOR">Minor</option><option value="MAJOR">Major</option></select></label>
+      <details><summary>Revisar antes e depois de plugin.json</summary><pre>{manifestPreview.before}</pre><pre>{manifestPreview.after}</pre></details>
+      <footer><button onClick={() => setManifestPreview(null)}>Cancelar</button><button onClick={() => void (async () => {
+        try { const result = await window.codeAwareness.saveAcademyManifestVersion({ preview: manifestPreview, confirmed: true }); setGitStatus(result); setManifestPreview(null); showMessage(result.lastError ?? 'Versão salva no workspace. Publique a revisão no Git antes de preparar o ZIP.', result.lastError ? 'error' : 'success') }
+        catch (error) { reportError(error) }
+      })()}>Salvar revisão no workspace</button></footer>
+    </section></div>}
     {gitReview && <div className="academy-modal-backdrop"><section className="academy-drawer academy-git-conflict" role="dialog" aria-label="Revisar conflito Git">
       <h2>Reconciliar {gitReview.path}</h2>
       <details><summary>Base, local e remoto</summary><h3>Base</h3><pre>{gitReview.base ?? 'Arquivo ausente'}</pre><h3>Local</h3><pre>{gitReview.local ?? 'Arquivo ausente'}</pre><h3>Remoto</h3><pre>{gitReview.remote ?? 'Arquivo ausente'}</pre></details>

@@ -258,7 +258,10 @@ interface OperationsRailProps {
   onAddArtifact: () => void
   onReconcile: () => void
   onPrepareRelease: () => void
+  packagePending?: boolean
+  onRevalidateRelease?: () => void
   onRebuildRelease?: () => void
+  onPrepareManifestVersion?: () => void
   onBootstrapPlugin: () => void
   onRevealRelease: () => void
   onConfirmUpload: () => void
@@ -272,7 +275,7 @@ interface OperationsRailProps {
   onPreviewConflictBatch: () => void
 }
 
-export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, onRebuildRelease, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
+export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, packagePending, onRevalidateRelease, onRebuildRelease, onPrepareManifestVersion, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
   const release = openAiPublication?.selectedRelease
   return <aside className={`academy-operations ${open ? 'is-open' : ''}`} aria-label="Operações da Academy">
     <div className="academy-operations-mobile-header"><strong>Operações</strong><button className="academy-icon-button" aria-label="Fechar operações" onClick={onClose}><X size={18} /></button></div>
@@ -327,12 +330,18 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ open, destinatio
     <RailCard icon={<Cloud size={18} />} title="Hosted ZIP fallback" className="academy-fallback-card">
       <div className="academy-hosted-summary"><span><strong>Hosted Personal</strong><small>Hospedagem manual de fallback</small></span><StatusBadge tone={packageDistribution?.hosted.status === 'CURRENT' ? 'success' : 'warning'}>{packageDistribution?.hosted.status === 'HOSTED_UPDATE_AVAILABLE' ? 'UPDATE' : packageDistribution?.hosted.status ?? 'UNCONFIGURED'}</StatusBadge></div>
       <div className="academy-hosted-versions"><span>Hosted <strong>{packageDistribution?.hosted.version ? `v${packageDistribution.hosted.version}` : '—'}</strong></span><span>Package <strong>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version}` : '—'}</strong></span></div>
-      {openAiPublication?.sourceError && <p className="academy-inline-error">{openAiPublication.sourceError}</p>}
+      {openAiPublication?.versionPreflight && <div className="academy-release-preflight"><p>{openAiPublication.versionPreflight.message}</p><small>Manifesto Git: {openAiPublication.versionPreflight.manifestVersion ?? 'não confirmado'}{openAiPublication.versionPreflight.registeredVersion ? ` · Release registrada: ${openAiPublication.versionPreflight.registeredVersion}` : ''}</small></div>}
+      {openAiPublication?.sourceError && !openAiPublication.versionPreflight && <p className="academy-inline-error">{openAiPublication.sourceError}</p>}
+      {packagePending && <p role="status">{openAiPublication?.operation?.phase === 'PREPARING_PACKAGE' ? 'Preparando e verificando o ZIP…' : 'Verificando a fonte e a versão…'}</p>}
+      {!packagePending && openAiPublication?.operation?.phase === 'READY' && <p role="status">Pacote pronto.</p>}
+      {openAiPublication?.operation?.phase === 'ERROR' && <p className="academy-inline-error">{openAiPublication.operation.error}</p>}
       {release && <p className="academy-muted">v{release.pluginVersion} · {release.status}{release.source ? ` · ${release.source.branch}@${release.source.sourceCommitSha.slice(0, 12)}` : ' · Legado sem SHA Git'}</p>}
-      {release?.source && <p className="academy-muted">{release.source.remoteConfirmation === 'CACHED' ? 'Rebuild em cache; atualidade remota não verificada' : 'Fonte observada no remoto'} · {formatDate(release.source.confirmedAt)}{gitStatus?.syncState === 'OFFLINE' || gitStatus?.syncState === 'UNKNOWN' ? ' · Remoto não revalidado' : ''}</p>}
+      {release?.source && <p className="academy-muted">{release.source.remoteConfirmation === 'CACHED' ? 'Rebuild em cache; atualidade remota não verificada' : 'Fonte observada no remoto'} · {formatDate(release.source.confirmedAt)} · {Math.max(0, Math.floor((Date.now() - Date.parse(release.source.confirmedAt)) / 1000))} s atrás nesta leitura{gitStatus?.syncState === 'OFFLINE' || gitStatus?.syncState === 'UNKNOWN' ? ' · Remoto não revalidado' : ''}</p>}
       <div className="academy-inline-actions">
-        {openAiPublication?.profile ? <button onClick={onPrepareRelease}>Prepare ZIP fallback</button> : <button onClick={onBootstrapPlugin}>Registrar plugin existente</button>}
-        {release?.source && <button onClick={onRebuildRelease}>Rebuild do commit em cache</button>}
+        {openAiPublication?.profile ? <button disabled={packagePending} onClick={onPrepareRelease}>Prepare ZIP fallback</button> : <button onClick={onBootstrapPlugin}>Registrar plugin existente</button>}
+        {gitStatus?.repository && <button disabled={packagePending} onClick={onRevalidateRelease}>Revalidar fonte e preparar ZIP</button>}
+        {openAiPublication?.versionPreflight?.suggestedVersion && <button onClick={onPrepareManifestVersion}>Preparar nova versão do manifesto</button>}
+        {release?.source && <button disabled={packagePending} onClick={onRebuildRelease}>Rebuild do commit em cache</button>}
         <button disabled={!release?.artifactPath} onClick={onRevealRelease}>Reveal Package</button>
         <button disabled={release?.status !== 'READY_TO_UPLOAD'} onClick={onConfirmUpload}>Confirm Upload</button>
       </div>

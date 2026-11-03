@@ -135,6 +135,8 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getAcademyPackageDistributionState: (): Promise<AcademyPackageDistributionState> => ipcRenderer.invoke('academy:package-distribution-state'),
   listAcademyOpenAiReleases: (): Promise<AcademyOpenAiRelease[]> => ipcRenderer.invoke('academy:openai-releases'),
   prepareAcademyOpenAiRelease: (input?: import('../shared/types/academy-git-source-types').AcademyGitBuildRequest): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-prepare', input),
+  previewAcademyManifestVersion: (kind?: 'PATCH' | 'MINOR' | 'MAJOR'): Promise<import('../shared/types/academy-publication-types').AcademyManifestPreview> => ipcRenderer.invoke('academy:manifest-version-preview', kind),
+  saveAcademyManifestVersion: (input: { preview: import('../shared/types/academy-publication-types').AcademyManifestPreview; confirmed: boolean }): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:manifest-version-save', input),
   confirmAcademyOpenAiUpload: (releaseId: string, artifactHash: string): Promise<AcademyOpenAiRelease> => ipcRenderer.invoke('academy:openai-confirm-upload', releaseId, artifactHash),
   revealAcademyOpenAiPackage: (releaseId: string): Promise<boolean> => ipcRenderer.invoke('academy:openai-reveal', releaseId),
   getAcademyGitStatus: (): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:git-status'),

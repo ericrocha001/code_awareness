@@ -10,19 +10,44 @@ import type { AcademyPluginPackageRevisionService } from './academy-plugin-packa
 import { createDeterministicZip, readZipEntries, type ZipEntry } from './deterministic-zip'
 import { buildCanonicalOpenAiSnapshot, buildOpenAiManifest, calculateOpenAiDelta, canonicalJson, hashOpenAiSnapshot, sha256 } from './openai-plugin-model'
 import { validateOpenAiPluginPackage } from './openai-plugin-validator'
-import { buildGitOpenAiInput, gitOpenAiValidationProfile } from './openai-plugin-model'
 import type { AcademyGitBuildReceipt, AcademyGitBuildSource } from '../../../shared/types/academy-git-source-types'
+import type { AcademyBuildProjection, AcademyGitSnapshotHeader, AcademyPublicationOperation } from '../../../shared/types/academy-publication-types'
+import { AcademyPluginExecutor, type AcademyPluginTaskResult } from './academy-plugin-executor'
 
 export class OpenAiPluginPublicationService {
   readonly storageRoot: string
+  private readonly executor: AcademyPluginExecutor
+  private readonly inventoryFlights = new Map<string, Promise<AcademyBuildProjection>>()
+  private readonly physicalFlights = new Map<string, Promise<AcademyPluginTaskResult>>()
+  private operation: AcademyPublicationOperation | null = null
+  private changed: () => void = () => {}
 
   constructor(
     private readonly store: AcademyStore,
     private readonly packageRevisions: AcademyPluginPackageRevisionService,
     academyDatabasePath: string,
-    private readonly downloadsPath?: string
+    private readonly downloadsPath?: string,
+    workerPath?: string
   ) {
     this.storageRoot = join(dirname(academyDatabasePath), 'openai-plugin')
+    this.executor = new AcademyPluginExecutor(workerPath)
+  }
+
+  onOperationChange(listener: () => void): void { this.changed = listener }
+
+  async drain(): Promise<void> {
+    while (this.inventoryFlights.size || this.physicalFlights.size) await Promise.allSettled([...this.inventoryFlights.values(), ...this.physicalFlights.values()])
+  }
+
+  beginSourceCheck(): string {
+    const requestId = randomUUID()
+    this.operation = { requestId, phase: 'VERIFYING_SOURCE', phases: {} }; this.changed()
+    return requestId
+  }
+
+  sourceCheckFailed(requestId: string, error: unknown): void {
+    if (this.operation?.requestId !== requestId) return
+    this.operation.phase = 'ERROR'; this.operation.error = error instanceof Error ? error.message : String(error); this.changed()
   }
 
   async bootstrapFromPluginDirectory(pluginRoot: string, publishedVersion?: string): Promise<AcademyOpenAiPluginProfile> {
@@ -80,19 +105,23 @@ export class OpenAiPluginPublicationService {
     const latestPrepared = nonBaseline[0] ?? null
     const latestUploaded = releases.find((release) => ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(release.status)) ?? null
     const selectedRelease = latestPrepared ?? releases[0] ?? null
-    const canonical = profile ? buildCanonicalOpenAiSnapshot(this.store) : []
+    const header = this.currentHeader()
+    const projection = header ? this.cachedProjection(header) : null
+    const versionPreflight = this.store.usesGitFirst() ? this.packageRevisions.preflight(header, projection) : undefined
+    const canonical = header?.snapshot ?? (profile && !this.store.usesGitFirst() ? buildCanonicalOpenAiSnapshot(this.store) : [])
     let sourceError: string | null = null
     let canonicalSnapshotHash: string | null = null
     let currentPackageRevision: AcademyOpenAiPublicationState['currentPackageRevision'] = null
     try {
+      if (versionPreflight) this.packageRevisions.assertPreflight(versionPreflight)
       canonicalSnapshotHash = profile ? this.currentContentHash() : null
-      currentPackageRevision = profile ? this.packageRevisions.resolveCurrent() : null
+      currentPackageRevision = profile ? header && projection ? this.packageRevisions.resolveProjection(header, projection) : this.packageRevisions.resolveCurrent() : null
     } catch (error) { sourceError = error instanceof AcademyError ? error.code : 'GIT_SOURCE_UNAVAILABLE' }
     const hostedStatus = !profile || !currentPackageRevision
       ? 'UNCONFIGURED'
       : profile.publishedVersion === currentPackageRevision.version ? 'CURRENT' : 'HOSTED_UPDATE_AVAILABLE'
     return {
-      profile, latestPrepared, latestUploaded, selectedRelease, sourceError,
+      profile, latestPrepared, latestUploaded, selectedRelease, sourceError, versionPreflight, operation: this.operation,
       publicSkillCount: canonical.length, canonicalSnapshotHash,
       drifted: Boolean(selectedRelease && canonicalSnapshotHash !== selectedRelease.snapshotHash),
       currentPackageRevision,
@@ -155,57 +184,93 @@ export class OpenAiPluginPublicationService {
     })
   }
 
-  prepareGitRelease(source: AcademyGitBuildSource): AcademyOpenAiRelease {
-    const cached = this.store.getGitSnapshot(source.snapshot.repositoryId, source.snapshot.sourceCommitSha)
-    if (!cached || canonicalJson(cached) !== canonicalJson(source.snapshot)) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
-    const operationalProfile = this.store.getOpenAiPluginProfile()
-    if (!operationalProfile) throw new AcademyError('OPENAI_PLUGIN_PROFILE_MISSING')
-    const input = buildGitOpenAiInput(this.store, source.snapshot)
-    const profile = gitOpenAiValidationProfile(operationalProfile, input)
-    const entries = this.buildPackageEntries(profile, input.snapshot, input.manifest, input.entries)
-    validateOpenAiPluginPackage(entries, profile, input.snapshot)
-    const revision = this.packageRevisions.resolveGit(source.snapshot, true)
-    const releases = this.store.listOpenAiReleases()
-    const existing = releases.find(release => release.pluginVersion === input.pluginVersion)
-    if (existing && (!existing.source || existing.source.entriesFingerprint !== input.entriesFingerprint)) throw new AcademyError('VERSION_REUSE_FOR_DIFFERENT_CONTENT')
-    const reference = releases.find(release => release.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(release.status))
-    if (!reference) throw new AcademyError('OPENAI_PLUGIN_BASELINE_MISSING')
-    const delta = calculateOpenAiDelta(reference.snapshot, input.snapshot)
-    const blocked = delta.destructive && operationalProfile.deletionSemantics !== 'PROVEN_REPLACE'
-    let artifactPath: string | null = null, artifactHash: string | null = null
-    const releaseId = existing?.id ?? sha256(`GIT_RELEASE:${revision.contentFingerprint}`)
-    if (!blocked) {
-      const archive = createDeterministicZip(entries)
-      validateOpenAiPluginPackage(readZipEntries(archive), profile, input.snapshot)
-      artifactHash = sha256(archive)
-      if (existing?.artifactHash && existing.artifactHash !== artifactHash) throw new AcademyError('OPENAI_RELEASE_HASH_MISMATCH')
-      artifactPath = join(this.storageRoot, 'releases', releaseId, `academy-skills-${input.pluginVersion}.zip`)
-      mkdirSync(dirname(artifactPath), { recursive: true })
-      if (existsSync(artifactPath) && (lstatSync(artifactPath).isSymbolicLink() || sha256(readFileSync(artifactPath)) !== artifactHash)) throw new AcademyError('OPENAI_RELEASE_ARTIFACT_DRIFT')
-      if (!existsSync(artifactPath)) writeFileSync(artifactPath, archive, { flag: 'wx' })
-      this.copyToDownloads(artifactPath, input.pluginVersion, artifactHash)
+  async prepareGitRelease(source: AcademyGitBuildSource, requestId = this.beginSourceCheck(), gitMs = 0): Promise<AcademyOpenAiRelease> {
+    const started = performance.now()
+    const header = this.store.getGitSnapshotHeader(source.snapshot.repositoryId, source.snapshot.sourceCommitSha)
+    const update = (phase: AcademyPublicationOperation['phase']) => {
+      if (this.operation?.requestId !== requestId) return
+      this.operation.phase = phase; this.operation.sourceCommitSha = header?.sourceCommitSha; this.changed()
     }
-    const receipt: AcademyGitBuildReceipt = { id: '', releaseId, buildSchema: 1,
-      sourceRepositoryId: source.snapshot.repositoryId, branch: source.snapshot.branch,
-      sourceCommitSha: source.snapshot.sourceCommitSha, managedTreeHash: source.snapshot.managedTreeHash,
-      manifestFingerprint: input.manifestFingerprint, assetFingerprint: input.assetFingerprint,
-      entriesFingerprint: input.entriesFingerprint, pluginVersion: input.pluginVersion, zipSha256: artifactHash,
-      remoteConfirmation: source.remoteConfirmation, confirmedAt: source.confirmedAt }
-    receipt.id = sha256(canonicalJson(receipt))
+    const timings: Record<string, number> = { gitConfirmationMs: gitMs }
+    const timed = (phase: string, duration: number) => { timings[phase] = duration }
+    update('PREFLIGHT')
+    let projection = header ? this.cachedProjection(header) : null
+    this.packageRevisions.assertPreflight(this.packageRevisions.preflight(header, projection))
+    if (!header) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
+    const profile = this.store.getOpenAiPluginProfile()
+    if (!profile) throw new AcademyError('OPENAI_PLUGIN_PROFILE_MISSING')
+    const snapshotJson = this.store.getGitSnapshotPayload(header.repositoryId, header.sourceCommitSha)
+    if (!snapshotJson) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
+    timed('sqliteAndVersionMs', performance.now() - started)
+    if (!projection) {
+      const key = header.repositoryId + ':' + header.sourceCommitSha
+      let pending = this.inventoryFlights.get(key)
+      if (!pending) {
+        pending = this.executor.run({ kind: 'inventory', snapshotJson, suppliedSnapshot: source.snapshot, profile }, timed).then(result => {
+          const input = result.projection!
+          this.packageRevisions.assertPreflight(this.packageRevisions.preflight(header, input))
+          this.store.saveGitBuildProjection(input)
+          return input
+        })
+        this.inventoryFlights.set(key, pending)
+        void pending.then(() => this.inventoryFlights.delete(key), () => this.inventoryFlights.delete(key))
+      }
+      projection = await pending
+    }
+    this.packageRevisions.assertPreflight(this.packageRevisions.preflight(header, projection))
+    const revision = this.packageRevisions.resolveProjection(header, projection)
+    const existing = this.store.findOpenAiReleaseVersion(projection.pluginVersion)
+    const reference = this.store.listOpenAiReleases().find(release => release.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(release.status))
+    if (!reference) throw new AcademyError('OPENAI_PLUGIN_BASELINE_MISSING')
+    const releaseId = existing?.id ?? sha256('GIT_RELEASE:' + projection.entriesFingerprint)
+    const artifactPath = existing?.artifactPath ?? join(this.storageRoot, 'releases', releaseId, 'academy-skills-' + projection.pluginVersion + '.zip')
+    const physicalKey = header.repositoryId + ':' + projection.entriesFingerprint
+    update('PREPARING_PACKAGE')
+    let physical = this.physicalFlights.get(physicalKey)
+    if (!physical) {
+      physical = this.executor.run({ kind: existing?.artifactHash && existsSync(artifactPath) ? 'verify' : 'build',
+        snapshotJson, suppliedSnapshot: source.snapshot, projection, profile, storageRoot: this.storageRoot, artifactPath,
+        expectedZipSha: existing?.artifactHash ?? undefined, downloadsPath: this.downloadsPath }, timed)
+      this.physicalFlights.set(physicalKey, physical)
+      void physical.then(() => this.physicalFlights.delete(physicalKey), () => this.physicalFlights.delete(physicalKey))
+    } else {
+      await this.executor.run({ kind: 'source-check', snapshotJson, suppliedSnapshot: source.snapshot, profile }, timed)
+    }
+    const artifact = await physical
+    Object.assign(timings, artifact.phases)
+    this.packageRevisions.assertPreflight(this.packageRevisions.preflight(header, projection))
     let currentHash: string | null = null
-    try { currentHash = this.currentContentHash() } catch { /* Cached builds remain reproducible when the current source is invalid. */ }
-    const release: AcademyOpenAiRelease = { id: releaseId, pluginVersion: input.pluginVersion,
-      createdAt: existing?.createdAt ?? new Date().toISOString(), referenceReleaseId: existing?.referenceReleaseId ?? reference.id,
-      snapshot: input.snapshot, snapshotHash: input.entriesFingerprint, delta, manifest: input.manifest, artifactPath, artifactHash,
-      status: blocked ? 'BLOCKED' : currentHash === input.entriesFingerprint ? 'READY_TO_UPLOAD' : 'STALE',
-      blockedReason: blocked ? `DESTRUCTIVE_DELTA_${operationalProfile.deletionSemantics}` : null,
-      baseline: false, uploadConfirmation: null, verificationEvidence: null }
-    return this.store.persistGitBuild(release, receipt)
+    try { currentHash = this.currentContentHash() } catch { }
+    const release: AcademyOpenAiRelease = {
+      id: releaseId, pluginVersion: projection.pluginVersion, createdAt: existing?.createdAt ?? new Date().toISOString(),
+      referenceReleaseId: existing?.referenceReleaseId ?? reference.id, snapshot: projection.snapshot, snapshotHash: projection.entriesFingerprint,
+      delta: calculateOpenAiDelta(reference.snapshot, projection.snapshot), manifest: projection.manifest,
+      artifactPath: artifact.artifactPath!, artifactHash: artifact.artifactHash!,
+      status: currentHash === projection.entriesFingerprint ? 'READY_TO_UPLOAD' : 'STALE',
+      blockedReason: null, baseline: false, uploadConfirmation: null, verificationEvidence: null
+    }
+    const buildKey = sha256(canonicalJson({ buildSchema: 1, normalizationSchema: 1, sourceRepositoryId: header.repositoryId,
+      sourceCommitSha: header.sourceCommitSha, pluginVersion: projection.pluginVersion, entriesFingerprint: projection.entriesFingerprint, compression: 'deflate-raw:9' }))
+    const receipt: AcademyGitBuildReceipt = { id: '', releaseId, buildSchema: 1, buildKey,
+      sourceRepositoryId: header.repositoryId, branch: header.branch, sourceCommitSha: header.sourceCommitSha, managedTreeHash: header.managedTreeHash,
+      manifestFingerprint: projection.manifestFingerprint, assetFingerprint: projection.assetFingerprint, entriesFingerprint: projection.entriesFingerprint,
+      pluginVersion: projection.pluginVersion, zipSha256: artifact.artifactHash!, remoteConfirmation: source.remoteConfirmation, confirmedAt: source.confirmedAt }
+    receipt.id = sha256(canonicalJson(receipt))
+    const result = this.store.persistGitBuild(release, { ...receipt, phases: timings }, revision)
+    timed('responseMs', performance.now() - started)
+    if (this.operation?.requestId === requestId) this.operation.phases = timings
+    update('READY')
+    console.info('[Academy package]', JSON.stringify({ requestId, buildKey, sourceCommitSha: header.sourceCommitSha, reused: artifact.reused, phases: timings }))
+    return result
   }
-
   confirmUpload(releaseId: string, artifactHash: string): AcademyOpenAiRelease {
     this.refreshDrift()
     const release = this.store.getOpenAiRelease(releaseId)
+    if (this.store.usesGitFirst()) {
+      let current: string
+      try { current = this.currentContentHash() } catch { throw new AcademyError('OPENAI_RELEASE_SOURCE_PREFLIGHT_REQUIRED') }
+      if (current !== release.snapshotHash) throw new AcademyError('OPENAI_RELEASE_NOT_CONFIRMABLE')
+    }
     const latestPrepared = this.store.listOpenAiReleases().find((item) => !item.baseline)
     if (latestPrepared?.id !== release.id) throw new AcademyError('OPENAI_RELEASE_NOT_SELECTED')
     if (release.status !== 'READY_TO_UPLOAD') throw new AcademyError('OPENAI_RELEASE_NOT_CONFIRMABLE')
@@ -231,18 +296,37 @@ export class OpenAiPluginPublicationService {
     if (!this.store.getOpenAiPluginProfile()) return
     let hash: string | null = null
     try { hash = this.currentContentHash() } catch { /* An unavailable source cannot establish freshness. */ }
-    this.store.markOpenAiReadyReleasesStaleExcept(hash ?? 'SOURCE_UNAVAILABLE')
+    if (hash) this.store.markOpenAiReadyReleasesStaleExcept(hash)
   }
 
   private currentContentHash(): string {
     const authority = this.store.getGitAuthority()
     if (authority) {
-      const snapshot = this.store.getGitSnapshot(authority.repositoryId, authority.processedCommitSha)
-      if (!snapshot) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
-      return buildGitOpenAiInput(this.store, snapshot).entriesFingerprint
+      const header = this.store.getGitSnapshotHeader(authority.repositoryId, authority.processedCommitSha)
+      const projection = header ? this.cachedProjection(header) : null
+      if (!projection) throw new AcademyError('GIT_BUILD_PROJECTION_PENDING')
+      return projection.entriesFingerprint
     }
     if (this.store.usesGitFirst()) throw new AcademyError('GIT_MIGRATION_REQUIRED')
     return hashOpenAiSnapshot(buildCanonicalOpenAiSnapshot(this.store))
+  }
+
+  private currentHeader(): AcademyGitSnapshotHeader | null {
+    const authority = this.store.getGitAuthority()
+    return authority ? this.store.getGitSnapshotHeader(authority.repositoryId, authority.processedCommitSha) : null
+  }
+
+  private cachedProjection(header: AcademyGitSnapshotHeader): AcademyBuildProjection | null {
+    if (!header.manifest) return null
+    const manifestFingerprint = sha256(canonicalJson(header.manifest))
+    const cached = this.store.getGitBuildProjection(header.repositoryId, header.sourceCommitSha)
+    if (cached?.schema === 1 && cached.normalizationSchema === 1 && cached.sourceRepositoryId === header.repositoryId && cached.sourceCommitSha === header.sourceCommitSha && cached.managedTreeHash === header.managedTreeHash && cached.manifestFingerprint === manifestFingerprint) return cached
+    const receipt = this.store.findGitBuildReceipt(header.repositoryId, header.sourceCommitSha)
+    if (!receipt || receipt.managedTreeHash !== header.managedTreeHash || receipt.manifestFingerprint !== manifestFingerprint || receipt.pluginVersion !== header.manifest.version) return null
+    return { schema: 1, normalizationSchema: 1, sourceRepositoryId: header.repositoryId, sourceCommitSha: header.sourceCommitSha,
+      managedTreeHash: header.managedTreeHash, manifest: header.manifest, pluginVersion: receipt.pluginVersion,
+      manifestFingerprint, assetFingerprint: receipt.assetFingerprint, entriesFingerprint: receipt.entriesFingerprint,
+      snapshot: header.snapshot, entryCount: header.entryCount }
   }
 
   private buildPackageEntries(profile: AcademyOpenAiPluginProfile, snapshot: AcademyOpenAiSnapshotEntry[], manifest: Record<string, unknown>, gitEntries?: ZipEntry[]): ZipEntry[] {
