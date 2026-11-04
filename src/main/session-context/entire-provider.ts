@@ -12,8 +12,6 @@ import { withParser } from 'stream-json/streamers/StreamArray'
 import { EntireTranscriptStream, ENTIRE_TRANSCRIPT_NORMALIZERS, normalizeEntireRecord, type ReferencedEvent } from './entire-transcript'
 import { localEntireSource, entireFileIdentity, readEntireField, type EntireSource } from './entire-source'
 import { readLiteralPage, type OpenLiteralBody } from './literal-reader'
-import type { ReferenceSource } from './session-references'
-import type { TranscriptField } from './entire-transcript'
 import type { SessionStore } from './store'
 import type { SessionInput, SessionRow, CoverageReasons, EventRow } from './types'
 import { projectLiveSessions, projectLiveUsage, type LiveSessionQuery, type LiveSessionToolName } from './entire-live'
@@ -89,11 +87,11 @@ export class EntireProvider {
     if (output.timedOut) throw new Error('PROVIDER_TIMEOUT')
     return output
   }
-  refresh(sessionId?: string, options: { migrateReferences?: boolean } = {}): Promise<object> {
+  refresh(sessionId?: string): Promise<object> {
     this.assertActive()
-    const key = (sessionId ?? 'discovery') + (options.migrateReferences ? ':migrate-references' : '')
+    const key = sessionId ?? 'discovery'
     if (this.pending) return this.pending.key === key ? this.pending.task : Promise.resolve({ coverage: 'PARTIAL', code: 'BACKPRESSURE' })
-    const task = this.perform(sessionId, options.migrateReferences).finally(() => { this.pending = undefined })
+    const task = this.perform(sessionId).finally(() => { this.pending = undefined })
     this.pending = { key, task }
     return task
   }
@@ -210,7 +208,7 @@ export class EntireProvider {
       return { configured: false, reason, integrations }
     }
   }
-  private async perform(sessionId?: string, migrateReferences = false): Promise<object> {
+  private async perform(sessionId?: string): Promise<object> {
     this.deadline = Date.now() + (sessionId ? 12_000 : 10_000)
     let known: SessionRow | undefined
     try {
@@ -228,7 +226,7 @@ export class EntireProvider {
       this.assertWithinDeadline()
       if (output.limited || output.code !== 0) {
         if (known && await checkpointTranscriptSource(store, known, (exe, args, cwd, limit, consume) => this.command(exe, args, cwd, limit, consume), this.root, () => this.assertWithinDeadline())) {
-          return await this.indexReferences(store, known, { providerSessionId: known.providerSessionId, providerVersion: config.version, agent: known.agent, state: known.state, coverage: known.coverage, sourceDigest: known.sourceDigest, sourceBytes: known.sourceBytes }, config, await realpath(this.root), migrateReferences)
+          return await this.indexReferences(store, known, { providerSessionId: known.providerSessionId, providerVersion: config.version, agent: known.agent, state: known.state, coverage: known.coverage, sourceDigest: known.sourceDigest, sourceBytes: known.sourceBytes }, config, await realpath(this.root))
         }
         throw new Error(output.limited ? 'IMPORT_LIMIT_REACHED' : 'PROVIDER_UNAVAILABLE')
       }
@@ -250,7 +248,7 @@ export class EntireProvider {
           startedAt: date(value.started_at), endedAt: terminal ? date(value.ended_at) : undefined,
           coverage: 'UNAVAILABLE', importState: 'METADATA_ONLY', coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 }, sourceDigest: digest(JSON.stringify({ id: value.session_id, status: value.status, ended: value.ended_at })), sourceBytes: 0 }
         if (known) {
-          return await this.indexReferences(store, known, metadata, config, root, migrateReferences)
+          return await this.indexReferences(store, known, metadata, config, root)
         }
         const existing = store.byProvider(value.session_id, 'entire', metadata.agent)
         if (!existing) {
@@ -270,11 +268,11 @@ export class EntireProvider {
       return { imported, skipped, coverageReasons: discoveryReasons, coverage: skipped ? 'PARTIAL' : 'COMPLETE', lastObserved: new Date().toISOString(), provider: 'entire', importMode: 'METADATA_ONLY', transcriptImported: false }
     } catch (error) {
       const message = error instanceof Error ? error.message : ''
-      const allowed = ['STREAM_UNAVAILABLE', 'SOURCE_IDENTITY_CONFLICT', 'SOURCE_IDENTITY_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'SESSION_CONTEXT_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'TRANSCRIPT_PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'SESSION_EVICTED', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH', 'LEGACY_MIGRATION_REQUIRED', 'SOURCE_REVISION_CHANGED', 'SOURCE_REFERENCE_REQUIRED']
+      const allowed = ['STREAM_UNAVAILABLE', 'SOURCE_IDENTITY_CONFLICT', 'SOURCE_IDENTITY_UNAVAILABLE', 'PROVIDER_TIMEOUT', 'SESSION_CONTEXT_TIMEOUT', 'PROVIDER_UNAVAILABLE', 'TRANSCRIPT_PROVIDER_UNAVAILABLE', 'CAPTURE_NOT_ENABLED', 'PROVIDER_CONFIG_UNSAFE', 'PROVIDER_VERSION_MISMATCH', 'PROVIDER_SCHEMA_UNSUPPORTED', 'IMPORT_LIMIT_REACHED', 'CAPACITY_REACHED', 'SOURCE_PARTIAL_CONFLICT', 'SESSION_UNAVAILABLE', 'SESSION_EVICTED', 'PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'WORKTREE_NOT_DISCOVERED', 'WORKTREE_REPOSITORY_CHANGED', 'WORKTREE_IDENTITY_MISMATCH', 'LEGACY_TEXT_DISCARD_REQUIRED', 'SOURCE_REVISION_CHANGED', 'SOURCE_REFERENCE_REQUIRED']
       const coverageReasons: CoverageReasons = message === 'SOURCE_IDENTITY_CONFLICT' || message === 'SOURCE_IDENTITY_UNAVAILABLE' ? { [message]: 1 }
         : message === 'STREAM_UNAVAILABLE' || (this.phase === 'transcript' && message === 'PROVIDER_UNAVAILABLE') ? { STREAM_UNAVAILABLE: 1 } : {}
-      const migrationFailure = ['LEGACY_SOURCE_RECOVERY_REQUIRED', 'LEGACY_SOURCE_IDENTITY_CONFLICT', 'LEGACY_HISTORY_INTEGRITY_ERROR', 'LEGACY_LITERAL_MISMATCH', 'SOURCE_READER_NO_PROGRESS', 'REVISION_CONFLICT'].includes(message)
-      return { coverage: 'UNAVAILABLE', importState: known?.importState ?? 'UNKNOWN', coverageReasons, code: allowed.includes(message) || migrationFailure ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), lastObserved: new Date().toISOString(), imported: 0 }
+      const indexFailure = ['SOURCE_READER_NO_PROGRESS', 'REVISION_CONFLICT'].includes(message)
+      return { coverage: 'UNAVAILABLE', importState: known?.importState ?? 'UNKNOWN', coverageReasons, code: allowed.includes(message) || indexFailure ? message : 'PROVIDER_UNAVAILABLE', ...(message === 'PROVIDER_TIMEOUT' ? { phase: this.phase } : {}), lastObserved: new Date().toISOString(), imported: 0 }
     }
   }
   private async discoverMetadata(store: SessionStore, config: ProviderConfig): Promise<object> {
@@ -311,7 +309,7 @@ export class EntireProvider {
       return { imported, skipped, coverageReasons: reasons, coverage: skipped ? 'PARTIAL' : 'COMPLETE', lastObserved: new Date().toISOString(), provider: 'entire', importMode: 'METADATA_ONLY', transcriptImported: false }
     } finally { stream.destroy() }
   }
-  private async indexReferences(store: SessionStore, known: SessionRow, metadata: SessionInput, config: ProviderConfig, root: string, migrateReferences = false): Promise<object> {
+  private async indexReferences(store: SessionStore, known: SessionRow, metadata: SessionInput, config: ProviderConfig, root: string): Promise<object> {
     if (config.version !== '0.12.2') throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
     if (!Object.hasOwn(ENTIRE_TRANSCRIPT_NORMALIZERS, metadata.agent)) throw new Error('PROVIDER_SCHEMA_UNSUPPORTED')
     const agent = metadata.agent as keyof typeof ENTIRE_TRANSCRIPT_NORMALIZERS
@@ -345,25 +343,15 @@ export class EntireProvider {
       await this.validate()
       const finalConfig = await this.preflight(false, true)
       if (finalConfig.sha256 !== config.sha256 || finalConfig.version !== config.version || finalConfig.executable !== config.executable) throw new Error('PROVIDER_VERSION_MISMATCH')
-      if (store.references.legacyPayloads(known.id)) {
-        if (!migrateReferences) throw new Error('LEGACY_MIGRATION_REQUIRED')
-        const candidateSource: ReferenceSource = { locator: source, sourceDigest: parsed.sourceDigest, sourceBytes: parsed.sourceBytes, normalizer: ENTIRE_TRANSCRIPT_NORMALIZERS[agent], revision: known.revision + 1 }
-        const verification = await store.references.verifyLegacy(runId, parsed.sourceDigest, async (legacy, candidate, offset) => {
-          const id = digest(JSON.stringify([known.id, parsed.sourceDigest, legacy.ordinal]))
-          return this.readEvent(known, { ...legacy, id } as EventRow, offset, 8192, { source: candidateSource, fields: candidate.fields })
-        }, () => this.assertWithinDeadline(), () => this.deadline - Date.now() < 750)
-        if (!verification.complete) { store.references.discard(runId); return { coverage: 'PARTIAL', code: 'LEGACY_MIGRATION_IN_PROGRESS', verified: verification.verified, payloadsPreserved: true } }
-      }
       const result = store.references.commit(runId, parsed.sourceDigest, parsed.sourceBytes, () => this.assertWithinDeadline(), parsed.coverage)
-      const migration = migrateReferences ? store.references.finalizeLegacySchema(() => this.assertWithinDeadline()) : undefined
       if (this.targetIdentity) store.observeWorktree(result.sessionId, this.targetIdentity, () => this.assertWithinDeadline())
-      return { ...result, ...(migration ? { migration } : {}), imported: 1, provider: 'entire', importState: 'TRANSCRIPT_REFERENCED', coverage: 'COMPLETE', transcriptImported: false, sourceBytes: parsed.sourceBytes, peakScalarBytes: parsed.peakScalarBytes, sourceCoverage: 'SOURCE_VERIFIED' }
+      return { ...result, imported: 1, provider: 'entire', importState: 'TRANSCRIPT_REFERENCED', coverage: 'COMPLETE', transcriptImported: false, sourceBytes: parsed.sourceBytes, peakScalarBytes: parsed.peakScalarBytes, sourceCoverage: 'SOURCE_VERIFIED' }
     } catch (error) { store.references.discard(runId); throw error }
   }
-  async readEvent(session: SessionRow, event: EventRow, offset: number, pageBytes = 8192, candidate?: { source: ReferenceSource; fields: TranscriptField[] }): Promise<Awaited<ReturnType<typeof readLiteralPage>>> {
-    if (!candidate) this.deadline = Date.now() + 12_000
+  async readEvent(session: SessionRow, event: EventRow, offset: number, pageBytes = 8192): Promise<Awaited<ReturnType<typeof readLiteralPage>>> {
+    this.deadline = Date.now() + 12_000
     if (!('references' in this.store)) throw new Error('SOURCE_UNAVAILABLE')
-    const store = this.store, source = candidate?.source ?? store.references.source(session.id), fields = candidate?.fields ?? store.references.fields(event.id)
+    const store = this.store, source = store.references.source(session.id), fields = store.references.fields(event.id)
     if (!source || !fields) throw new Error('SOURCE_UNAVAILABLE')
     await this.validate()
     const config = await this.preflight(false, true)

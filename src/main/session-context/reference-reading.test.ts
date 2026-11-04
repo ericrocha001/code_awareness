@@ -96,33 +96,46 @@ it('reopens the literal from a verified checkpoint blob when the local Entire co
   expect(result.content).toBe('checkpoint literal token=[REDACTED]')
   expect(result.complete).toBe(true)
 }, 30000)
-it('migrates the original file-backed schema only after explicit literal verification and survives restart', async () => {
-  const f = await fixture('legacy literal'), session = f.store.byProvider('legacy')!, event = f.store.events(session.id, {}, 0, 1)[0]
+it('discards legacy text explicitly and reads the available Entire source after restart without comparing old content', async () => {
+  const f = await fixture('old content intentionally discarded'), session = f.store.byProvider('legacy')!, event = f.store.events(session.id, {}, 0, 1)[0]
   const identity = f.store.registry.sessionIdentity(session.id)
-  f.add('legacy', 'codex', [{ type: 'session_meta', payload: { id: 'legacy', cwd: f.root } }, { type: 'event_msg', payload: { type: 'user_message', message: 'legacy literal' } }])
-  expect(await f.provider.refresh(session.id)).toMatchObject({ code: 'LEGACY_MIGRATION_REQUIRED' })
-  expect(f.store.event(session.id, event.id).text).toBe('legacy literal')
-  expect(await f.provider.refresh(session.id, { migrateReferences: true })).toMatchObject({ importState: 'TRANSCRIPT_REFERENCED', migration: { complete: true } })
+  f.add('legacy', 'codex', [{ type: 'session_meta', payload: { id: 'legacy', cwd: f.root } }, { type: 'event_msg', payload: { type: 'user_message', message: 'available Entire literal' } }])
+  expect(await f.provider.refresh(session.id)).toMatchObject({ code: 'LEGACY_TEXT_DISCARD_REQUIRED' })
+  const result = data(await executeSessionTool(f.store, f.provider, 'refresh_agent_sessions', { discardLegacyText: true }, () => {}, { worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64) }))
+  expect(result).toMatchObject({ state: 'LEGACY_TEXT_DISCARDED', discardedSessions: 1 })
+  expect(await f.provider.refresh(session.id)).toMatchObject({ importState: 'TRANSCRIPT_REFERENCED' })
   expect(f.store.events(session.id, {}, 0, 1)[0].id).toBe(event.id)
   expect(f.store.registry.sessionIdentity(session.id)).toEqual(identity)
   const reopened = new SessionStore(f.store.path, 'repo')
   try {
     expect(reopened.event(session.id, event.id).text).toBeNull()
     const provider = new EntireProvider(reopened, f.root, () => {}, f.run)
-    const literal = await provider.readEvent(reopened.session(session.id), reopened.events(session.id, {}, 0, 1)[0], 0)
-    expect(literal.content).toBe('legacy literal')
-    expect(await provider.refresh(session.id, { migrateReferences: true })).toMatchObject({ replay: true, migration: { complete: true } })
+    expect((await provider.readEvent(reopened.session(session.id), reopened.events(session.id, {}, 0, 1)[0], 0)).content).toBe('available Entire literal')
+    expect(await provider.refresh(session.id)).toMatchObject({ replay: true })
   } finally { reopened.close() }
-  const db = new Database(f.store.path, { readonly: true })
-  try { expect(db.prepare("SELECT name FROM sqlite_master WHERE name='event_payloads'").get()).toBeUndefined(); expect(db.pragma('foreign_key_check')).toEqual([]) } finally { db.close() }
 })
-it('preserves the only legacy copy when the available source differs', async () => {
-  const f = await fixture('only historical copy'), session = f.store.byProvider('legacy')!, event = f.store.events(session.id, {}, 0, 1)[0]
-  f.add('legacy', 'codex', [{ type: 'session_meta', payload: { id: 'legacy', cwd: f.root } }, { type: 'event_msg', payload: { type: 'user_message', message: 'different source' } }])
-  expect(await f.provider.refresh(session.id, { migrateReferences: true })).toMatchObject({ code: 'LEGACY_LITERAL_MISMATCH' })
-  expect(f.store.event(session.id, event.id).text).toBe('only historical copy')
-  expect(f.store.references.finalizeLegacySchema(() => {})).toMatchObject({ complete: false, blockedSessions: 1 })
+it('discards a sole legacy copy without source recovery, preserving relations and rollback', async () => {
+  const f = await fixture('sole SQLite copy'), session = f.store.byProvider('legacy')!, event = f.store.events(session.id, {}, 0, 1)[0]
+  const target = { worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64) }
+  f.store.observeWorktree(session.id, target)
+  const relations = f.store.associations(session.id), identity = f.store.registry.sessionIdentity(session.id)
+  let checks = 0
+  expect(() => f.store.references.discardLegacyText(() => { if (++checks === 2) throw new Error('CANCELLED') })).toThrow('CANCELLED')
+  expect(f.store.event(session.id, event.id).text).toBe('sole SQLite copy')
   expect(f.store.session(session.id).revision).toBe(session.revision)
+  expect(f.store.references.discardLegacyText(() => {})).toEqual({ complete: true, discardedSessions: 1 })
+  expect(f.store.event(session.id, event.id).text).toBeNull()
+  expect(f.store.associations(session.id)).toEqual(relations)
+  expect(f.store.registry.sessionIdentity(session.id)).toEqual(identity)
+  const read = data(await executeSessionTool(f.store, f.provider, 'read_agent_session_event', { sessionId: session.id, eventId: event.id, expectedRevision: f.store.session(session.id).revision }, () => {}))
+  expect(read.code).toBe('SOURCE_UNAVAILABLE')
+  expect(f.store.references.discardLegacyText(() => {})).toEqual({ complete: true, discardedSessions: 0 })
+  const db = new Database(f.store.path, { readonly: true })
+  try {
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE name='event_payloads'").get()).toBeUndefined()
+    expect((db.prepare('PRAGMA table_info(events)').all() as { name: string }[]).some(column => column.name === 'summary')).toBe(false)
+    expect(db.pragma('foreign_key_check')).toEqual([])
+  } finally { db.close() }
 })
 it('indexes over 500 identities with overlapping agent IDs and retains namespace isolation', async () => {
   const f = await fixture()

@@ -94,7 +94,7 @@ export class SessionStore {
       }).immediate()
       this.key = (this.db.prepare('SELECT cursorKey FROM identity').get() as { cursorKey: string }).cursorKey
       this.registry = new CheckpointRegistry(this.db, repositoryId)
-      this.references = new SessionReferences(this.db, this.key)
+      this.references = new SessionReferences(this.db)
     } catch (error) { this.db.close(); throw error }
   }
   assertRepository(id: string): void { if (id !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH') }
