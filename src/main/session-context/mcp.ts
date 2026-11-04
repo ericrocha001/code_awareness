@@ -206,6 +206,10 @@ export async function executeSessionTool(
       }
     } else if (name === 'refresh_agent_sessions') {
       const request = q as z.infer<typeof schemas.refresh_agent_sessions>
+      if (request.sessionId) {
+        const identity = (store as SessionStore).registry.sessionIdentity(request.sessionId)
+        if (identity && !(store as SessionStore).registry.visible(identity, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
+      }
       if (request.contextSelector) {
         const selector = executionEntity(store as SessionStore, request.contextSelector, archiveAccountHash)
         if (!selector) throw new Error('SELECTOR_UNAVAILABLE')
@@ -213,11 +217,11 @@ export async function executeSessionTool(
         data = { state: 'RECONCILED', repositoryId: store.repositoryId, selector: request.contextSelector,
           sourceCoverage: (store as SessionStore).registry.sources().filter(s => !s.source.includes(':')).map(s => ({ source: s.source, status: s.status, observedAt: s.observedAt })), transcriptImported: false }
       } else {
-      if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
-      if (request.association) {
-        if (!selectedTarget || !request.sessionId) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
-        data = { ...(store as SessionStore).declareAssociation(request.sessionId, selectedTarget, request.association, assertActive), state: 'PERSISTED', evidence: 'HANDOFF_DECLARED', transcriptImported: false }
-      } else data = { ...await provider.refresh(request.sessionId), ...(selectedTarget ? { worktreeId: selectedTarget.worktreeId, generation: selectedTarget.generation } : {}) }
+        if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
+        if (request.association) {
+          if (!selectedTarget || !request.sessionId) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+          data = { ...(store as SessionStore).declareAssociation(request.sessionId, selectedTarget, request.association, assertActive), state: 'PERSISTED', evidence: 'HANDOFF_DECLARED', transcriptImported: false }
+        } else data = { ...await provider.refresh(request.sessionId), ...(selectedTarget ? { worktreeId: selectedTarget.worktreeId, generation: selectedTarget.generation } : {}) }
       }
     } else if (name === 'list_agent_sessions') {
       const actualStore = store as SessionStore
@@ -237,18 +241,24 @@ export async function executeSessionTool(
         contextMap.sources = contextMap.sources.filter(s => !s.source.includes(':')).slice(0, 4)
         while (!fits(contextMap, 4500) && contextMap.edges.length) { contextMap.edges.pop(); contextMap.coverage = 'PARTIAL' }
       }
-      const scope = { name, repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), filter }, offset = actualStore.offset(cursor, scope)
-      const rows = actualStore.sessions(filter, offset, filter.limit + 1)
+      const scope = { name, repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), accountHash: archiveAccountHash ?? null, filter }, offset = actualStore.offset(cursor, scope)
+      const rows = actualStore.sessions(filter, offset, filter.limit + 1, archiveAccountHash ?? null)
+      for (const row of rows) if (!actualStore.registry.visible({ kind: 'SESSION', id: (row.provider ?? 'entire') + ':' + row.providerSessionId }, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
       data = page(actualStore, scope, offset, rows, filter.limit, budget,
         { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL', reason: rows.some(row => actualStore.associations(row.id, 1).length) ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED',
           ...(contextMap ? { contextMap } : {}),
-          archiveCoverage: { code: archiveObservation?.code ?? 'ARCHIVE_NOT_QUERIED', ...(archiveObservation?.reason ? { reason: archiveObservation.reason } : {}), ...(archiveObservation?.nextCursor ? { nextCursor: archiveObservation.nextCursor } : {}) } }, row => associationMetadata(actualStore, row, filter), 'sessions')
+          archiveCoverage: { code: archiveObservation?.code ?? 'ARCHIVE_NOT_QUERIED', ...(archiveObservation?.providerState ? { providerState: archiveObservation.providerState } : {}),
+            ...(archiveObservation?.code === 'ARCHIVE_PROVIDER_UNAVAILABLE' || archiveObservation?.code === 'ARCHIVE_PROVIDER_ERROR' ? { nextAction: archiveObservation.reason === 'WORKTREE_UNAVAILABLE' ? 'INSPECT_WORKTREE' : 'OPEN_CODEX_ARCHIVE_SETTINGS' } : {}),
+            ...(archiveObservation?.reason ? { reason: archiveObservation.reason } : {}), ...(archiveObservation?.nextCursor ? { nextCursor: archiveObservation.nextCursor } : {}) } }, row => associationMetadata(actualStore, row, filter), 'sessions')
     } else {
       const actualStore = store as SessionStore
       const query = q as z.infer<typeof schemas.inspect_agent_session>
+      const identity = actualStore.registry.sessionIdentity(query.sessionId)
+      if (identity && !actualStore.registry.visible(identity, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
       const row = actualStore.revision(query.sessionId, query.expectedRevision)
+      if (!actualStore.registry.visible({ kind: 'SESSION', id: (row.provider ?? 'entire') + ':' + row.providerSessionId }, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
       const { cursor, ...filter } = q as z.infer<typeof schemas.list_agent_session_events>
-      const scope = { name, repositoryId: actualStore.repositoryId, revision: row.revision, filter }, offset = actualStore.offset(cursor, scope)
+      const scope = { name, repositoryId: actualStore.repositoryId, revision: row.revision, accountHash: archiveAccountHash ?? null, filter }, offset = actualStore.offset(cursor, scope)
       if (name === 'inspect_agent_session') {
         const map = actualStore.map(row.id, offset, query.limit + 1)
         data = page(actualStore, scope, offset, map.segments, query.limit, budget, { ...associationMetadata(actualStore, row), types: map.types, tools: map.tools.slice(0, 5), files: map.files.slice(0, 5),

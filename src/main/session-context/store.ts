@@ -258,9 +258,10 @@ export class SessionStore {
       return value
     }).immediate()
   }
-  sessions(filter: SessionFilter, offset: number, limit: number): SessionRow[] {
-    if (filter.executionId || filter.artifactId || filter.commitSha || filter.pullRequest) return this.historicalSessions(filter, offset, limit)
+  sessions(filter: SessionFilter, offset: number, limit: number, accountHash?: string | null): SessionRow[] {
+    if (filter.executionId || filter.artifactId || filter.commitSha || filter.pullRequest) return this.historicalSessions(filter, offset, limit, accountHash)
     const where: string[] = [], params: (string | number)[] = []
+    if (accountHash !== undefined) { where.push("(provider<>'codex' OR EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=sessions.id AND json_extract(access.payload,'$.providerAccountHash')=?))"); params.push(accountHash ?? '') }
     for (const [key, column, op] of [['state', 'state', '='], ['agent', 'agent', '='], ['after', 'lastObserved', '>='], ['before', 'lastObserved', '<=']] as const) {
       if (filter[key]) { where.push(key === 'after' || key === 'before' ? `julianday(${column}) ${op} julianday(?)` : `${column} ${op} ?`); params.push(filter[key]!) }
     }
@@ -311,8 +312,9 @@ export class SessionStore {
     const { expectedCatalogRevision, ...declared } = input
     return this.recordAssociation({ ...anchor, ...declared, evidence: 'HANDOFF_DECLARED', origin: 'CONTINUUM_HANDOFF' }, expectedCatalogRevision, assertCurrent)
   }
-  private historicalSessions(filter: SessionFilter, offset: number, limit: number): SessionRow[] {
+  private historicalSessions(filter: SessionFilter, offset: number, limit: number, accountHash?: string | null): SessionRow[] {
     const { where, params } = associationQuery(filter)
+    if (accountHash !== undefined) { where.push("(a.provider<>'codex' OR EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=a.sessionId AND json_extract(access.payload,'$.providerAccountHash')=?))"); params.push(accountHash ?? '') }
     for (const key of ['state', 'agent'] as const) { if (filter[key]) { where.push(`s.${key}=?`); params.push(filter[key]!) } }
     for (const [key, op] of [['after', '>='], ['before', '<=']] as const) { if (filter[key]) { where.push(`julianday(COALESCE(s.lastObserved, a.observedAt)) ${op} julianday(?)`); params.push(filter[key]!) } }
     const rows = this.db.prepare(`SELECT a.sessionId, a.providerSessionId, a.provider, a.payload, a.integrity, MAX(a.observedAt) AS observedAt FROM session_associations a LEFT JOIN sessions s ON s.id=a.sessionId

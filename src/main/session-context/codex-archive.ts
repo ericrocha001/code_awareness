@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { digest } from './privacy'
 import type { SessionStore } from './store'
 import type { SessionTargetSelection } from './target'
+import type { CodexArchiveState } from '../../shared/types/codex-archive-types'
 
 export interface AuthorizedCodexArchiveConnection {
   repositoryId: string
@@ -11,8 +12,9 @@ export interface AuthorizedCodexArchiveConnection {
   request(method: 'thread/list', params: { archived: true; cwd: string; limit: number; cursor?: string }, signal: AbortSignal): Promise<unknown>
 }
 export interface ArchiveObservation {
+  providerState?: CodexArchiveState
   code: 'ARCHIVE_PROVIDER_UNAVAILABLE' | 'ARCHIVE_PROVIDER_ERROR' | 'ARCHIVE_OBSERVED' | 'ARCHIVE_INDEX_PARTIAL'
-  reason?: 'CAPACITY_REACHED' | 'SOURCE_IDENTITY_CONFLICT'
+  reason?: 'CAPACITY_REACHED' | 'SOURCE_IDENTITY_CONFLICT' | 'WORKTREE_UNAVAILABLE'
   sessions: { id: string; createdAt?: number; updatedAt?: number }[]
   providerVersion?: string
   accountHash?: string
@@ -42,5 +44,11 @@ export function persistArchiveObservation(store: SessionStore, observation: Arch
       coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 }, sourceDigest: digest(JSON.stringify(row)), sourceBytes: 0 }, [], assertCurrent)
     store.recordAssociation({ repositoryId: store.repositoryId, sessionId: result.sessionId, provider: 'codex', providerSessionId: row.id, ...target,
       evidence: 'WORKTREE_VERIFIED', origin: 'CODEX_APP_SERVER', archived: true, providerAccountHash: observation.accountHash }, store.catalogRevision(), assertCurrent)
+    const source = 'CODEX_ARCHIVE:' + digest(JSON.stringify([observation.accountHash, row.id, target]))
+    const hash = digest(JSON.stringify([row.id, target, observation.providerVersion, observation.accountHash]))
+    store.registry.apply({ repositoryId: store.repositoryId, source, revision: hash, status: 'COMPLETE', edges: [{
+      from: { kind: 'WORKTREE', id: target.worktreeId + ':' + target.generation }, relation: 'observed-session', to: { kind: 'SESSION', id: 'codex:' + row.id },
+      evidenceKind: 'WORKTREE_VERIFIED', evidenceRef: 'CODEX_APP_SERVER:' + observation.accountHash, digest: hash, freshness: 'OBSERVED_SNAPSHOT'
+    }] }, store.registry.source(source)?.revision, assertCurrent)
   }
 }

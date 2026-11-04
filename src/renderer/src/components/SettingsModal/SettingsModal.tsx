@@ -4,6 +4,7 @@ import { NAV_ITEMS, type NavId } from '../../config/navigation'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
 import { updateSettings } from '../../utils/update-settings'
 import './SettingsModal.css'
+import { CodexArchiveSettings } from './CodexArchiveSettings'
 
 interface SettingsModalProps {
   hidden: NavId[]
@@ -47,7 +48,7 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       <h2 id="settings-title">Configurações</h2>
       <button type="button" className="settings-close" aria-label="Fechar configurações" onClick={onClose} autoFocus><X size={20} /></button>
     </header>
-    <div className="settings-intro">
+    <div className="settings-body"><div className="settings-intro">
       <h3>Barra lateral</h3>
       <p id="settings-description">Escolha quais recursos aparecem na navegação. Suas escolhas valem para todos os projetos.</p>
     </div>
@@ -68,6 +69,8 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       <span className="settings-row-label">Fetch automático condicionado ao remoto</span>
       <ToggleSwitch aria-label="Fetch automático condicionado ao remoto" checked={automaticFetch === true} disabled={automaticFetch === null || gitSaving} onChange={value => void changeAutomaticFetch(value)} />
     </div>{gitError && <p role="alert">{gitError}</p>}</div>
+    <CodexArchiveSettings />
+    </div>
     <footer className="settings-footer">
       <p>Home e Configurações ficam sempre disponíveis.</p>
       {error && <p role="alert" className="settings-error">{error}</p>}
