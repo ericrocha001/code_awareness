@@ -8,7 +8,7 @@ export function assertUserOwned(path: string): void {
   let existing = path
   while (!existsSync(existing)) existing = dirname(existing)
   if (process.platform === 'win32') {
-    const literal = existing.replaceAll("'", "''")
+    const literal = existing.split("'").join("''")
     const command = `$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $acl=if ([System.IO.Directory]::Exists('${literal}')) {[System.IO.Directory]::GetAccessControl('${literal}')} else {[System.IO.File]::GetAccessControl('${literal}')}; $owner=$acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value; if ($me -ne $owner) {exit 1}`
     try { execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { stdio: 'pipe', windowsHide: true, timeout: 5000 }) }
     catch { throw new Error('PROFILE_OWNERSHIP_UNVERIFIED') }
@@ -96,7 +96,7 @@ export async function assertUserOwnedAsync(path: string): Promise<void> {
     if ((await fs.lstat(existing)).uid !== process.getuid?.()) throw new Error('PROFILE_OWNERSHIP_UNVERIFIED')
     return
   }
-  const literal = existing.replaceAll("'", "''")
+  const literal = existing.split("'").join("''")
   const command = `$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; $acl=if ([System.IO.Directory]::Exists('${literal}')) {[System.IO.Directory]::GetAccessControl('${literal}')} else {[System.IO.File]::GetAccessControl('${literal}')}; if ($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $me) {exit 1}`
   await new Promise<void>((resolve, reject) => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], { windowsHide: true, timeout: 5000 }, error => error ? reject(new Error('PROFILE_OWNERSHIP_UNVERIFIED')) : resolve()))
 }

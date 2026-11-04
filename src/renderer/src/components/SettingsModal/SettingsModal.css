@@ -35,3 +35,5 @@
 .settings-actions { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; gap: 12px; }
 .settings-actions [role="status"] { font-size: 12px; color: var(--text-secondary); }
 .settings-footer .settings-error { color: var(--color-danger); margin-top: 8px; }
+.settings-codex-location { overflow-wrap: anywhere; }
+.settings-codex select { max-width: 100%; }

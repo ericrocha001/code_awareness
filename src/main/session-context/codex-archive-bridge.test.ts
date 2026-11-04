@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { CodexArchiveBridge, probeCodexArchive } from './codex-archive-bridge'
+import { codexProfileIdentity } from './codex-discovery'
 import { CodexStdio, type CodexProfile } from './codex-stdio'
 import { queryCodexArchive, type AuthorizedCodexArchiveConnection } from './codex-archive'
 
@@ -17,7 +18,7 @@ function fixture() {
   const transport = { request: request as CodexStdio['request'], initialized: vi.fn(), close: vi.fn() }
   const options = { repositoryId: 'repo', root: base, isCurrent: () => current,
     changed: vi.fn((value: AuthorizedCodexArchiveConnection | undefined) => { connection = value }),
-    approveProfile: vi.fn(async () => true), approveAccount: vi.fn(async () => true),
+
     probe: vi.fn(async () => ({ version: '0.155.0', supports: { archived: true, cwd: true, stateDbOnly: true } })), connect: vi.fn(() => transport) }
   const bridge = new CodexArchiveBridge(options); cleanup.push(() => bridge.disable())
   return { base, directory, profile: { executable: process.execPath, directory }, bridge, options, transport, request, connection: () => connection,
@@ -28,14 +29,14 @@ it('does not inspect profiles, probe or start Codex on construction or denied co
   expect(f.bridge.inspect()).toEqual({ state: 'NOT_CONFIGURED' })
   expect((await queryCodexArchive(f.connection(), 'repo', f.base, new AbortController().signal)).code).toBe('ARCHIVE_PROVIDER_UNAVAILABLE')
   expect(f.options.probe).not.toHaveBeenCalled(); expect(f.options.connect).not.toHaveBeenCalled()
-  f.options.approveProfile.mockResolvedValue(false)
+
   expect(await f.bridge.enable({ executable: 'not-an-executable', directory: 'not-a-profile' })).toEqual({ state: 'UNAUTHORIZED' })
   expect(f.options.probe).not.toHaveBeenCalled()
 })
 it('uses measured capabilities and initialize/initialized before account confirmation and metadata-only archive query', async () => {
   const f = fixture()
-  expect(await f.bridge.enable(f.profile)).toEqual({ state: 'READY', version: '0.155.0' })
-  expect(f.options.approveAccount).toHaveBeenCalledWith('chatgpt:fixture@example.invalid')
+  expect(await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))).toEqual({ state: 'READY', version: '0.155.0' })
+
   expect(f.transport.initialized).toHaveBeenCalledOnce()
   const observation = await queryCodexArchive(f.connection(), 'repo', f.base, new AbortController().signal)
   expect(observation).toMatchObject({ code: 'ARCHIVE_OBSERVED', sessions: [{ id: 'archive-one' }], providerVersion: '0.155.0' })
@@ -45,27 +46,37 @@ it('uses measured capabilities and initialize/initialized before account confirm
   const connection = f.connection()!
   await expect(connection.request('thread/read' as any, { archived: true, cwd: f.base, limit: 20 }, new AbortController().signal)).rejects.toThrow('PROTOCOL_UNSUPPORTED')
 })
-it('requires separate account approval and closes the transport on denial without listing threads', async () => {
-  const f = fixture(); f.options.approveAccount.mockResolvedValue(false)
-  expect(await f.bridge.enable(f.profile)).toEqual({ state: 'UNAUTHORIZED' })
-  expect(f.transport.close).toHaveBeenCalledOnce()
-  expect(f.request.mock.calls.some(call => call[0] === 'thread/list')).toBe(false)
+it('rejects consent bound to a different executable or profile before probing', async () => {
+  const f = fixture()
+  expect((await f.bridge.enable(f.profile, 'old-pin')).state).toBe('EXECUTABLE_UNAVAILABLE')
+  expect(f.options.probe).not.toHaveBeenCalled()
+  expect(f.options.connect).not.toHaveBeenCalled()
+})
+it('rejects a binary changed during the probe and an unidentifiable account after handshake', async () => {
+  const f = fixture(), executable = join(f.base, 'codex.exe'); writeFileSync(executable, 'before')
+  const profile = { ...f.profile, executable }, pin = await codexProfileIdentity(profile)
+  f.options.probe.mockImplementationOnce(async () => { writeFileSync(executable, 'changed'); return { version: '0.155.0', supports: { archived: true, cwd: true, stateDbOnly: true } } })
+  expect((await f.bridge.enable(profile, pin)).state).toBe('EXECUTABLE_UNAVAILABLE')
+  expect(f.options.connect).not.toHaveBeenCalled()
+  f.request.mockImplementation(async method => method === 'initialize' ? { userAgent: 'codex/0.155.0' } : { account: null })
+  expect((await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))).state).toBe('ACCOUNT_IDENTITY_UNAVAILABLE')
+  expect(f.connection()).toBeUndefined(); expect(f.transport.close).toHaveBeenCalledOnce()
 })
 it('fails closed for incompatible schema/version and unsafe executable/profile without a remote listener', async () => {
   const f = fixture()
-  for (const profile of [{ executable: 'ws://127.0.0.1:4500', directory: f.directory }, { executable: '\\\\host\\codex.exe', directory: f.directory }, { executable: 'codex', directory: f.directory }, { executable: join(f.base, 'missing.exe'), directory: f.directory }]) expect((await f.bridge.enable(profile)).state).toBe('EXECUTABLE_UNAVAILABLE')
+  for (const profile of [{ executable: 'ws://127.0.0.1:4500', directory: f.directory }, { executable: '\\\\host\\codex.exe', directory: f.directory }, { executable: 'codex', directory: f.directory }, { executable: join(f.base, 'missing.exe'), directory: f.directory }]) expect((await f.bridge.enable(profile, 'authorized-but-invalid')).state).toBe('EXECUTABLE_UNAVAILABLE')
   expect(f.options.connect).not.toHaveBeenCalled()
   f.options.probe.mockResolvedValue({ version: '0.155.0', supports: { archived: true, cwd: true, stateDbOnly: false } })
-  expect((await f.bridge.enable(f.profile)).state).toBe('PROTOCOL_UNSUPPORTED')
+  expect((await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))).state).toBe('PROTOCOL_UNSUPPORTED')
   expect(f.options.connect).not.toHaveBeenCalled()
 })
 it('invalidates account changes before or after listing instead of leaking or assigning another account', async () => {
-  const f = fixture(); await f.bridge.enable(f.profile)
+  const f = fixture(); await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))
   f.account('another@example.invalid')
   const before = await queryCodexArchive(f.connection(), 'repo', f.base, new AbortController().signal)
   expect(before.sessions).toEqual([]); expect(f.bridge.inspect().state).toBe('ACCOUNT_IDENTITY_UNAVAILABLE')
   expect(f.connection()).toBeUndefined(); expect(f.request.mock.calls.some(call => call[0] === 'thread/list')).toBe(false)
-  f.account('fixture@example.invalid'); await f.bridge.enable(f.profile)
+  f.account('fixture@example.invalid'); await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))
   let switched = false
   f.request.mockImplementation(async method => {
     if (method === 'thread/list') { switched = true; return { data: [{ id: 'secret', cwd: f.base }] } }
@@ -77,10 +88,10 @@ it('invalidates account changes before or after listing instead of leaking or as
 })
 it('cancels pending enable on project changes and rejects a cwd outside the validated checkout', async () => {
   const f = fixture()
-  f.options.approveProfile.mockImplementation(async () => { f.current(false); return true })
-  expect((await f.bridge.enable(f.profile)).state).toBe('UNAUTHORIZED')
+  f.current(false)
+  expect((await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))).state).toBe('UNAUTHORIZED')
   expect(f.options.connect).not.toHaveBeenCalled()
-  f.current(true); f.options.approveProfile.mockResolvedValue(true); await f.bridge.enable(f.profile)
+  f.current(true); await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))
   await expect(f.connection()!.request('thread/list', { archived: true, cwd: '/foreign', limit: 20 }, new AbortController().signal)).rejects.toThrow('PROTOCOL_UNSUPPORTED')
   f.bridge.disable(); expect(f.connection()).toBeUndefined()
   expect(f.bridge.inspect().state).toBe('NOT_CONFIGURED')
@@ -101,13 +112,13 @@ it('verifies schema properties from the selected CLI version and cleans only its
 it('ends the owned transport without reading an account if project authority changes during initialization', async () => {
   const f = fixture()
   f.request.mockImplementationOnce(async () => { f.current(false); return { userAgent: 'codex/0.155.0' } })
-  expect((await f.bridge.enable(f.profile)).state).toBe('UNAUTHORIZED')
+  expect((await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))).state).toBe('UNAUTHORIZED')
   expect(f.request.mock.calls.map(call => call[0])).toEqual(['initialize'])
   expect(f.transport.close).toHaveBeenCalledOnce(); expect(f.connection()).toBeUndefined()
 })
 it('binds cwd to the canonical authorized checkout rather than the spelling of its configured path', async () => {
   const f = fixture(); f.options.root = f.base.replace(/\\/g, '/')
-  expect((await f.bridge.enable(f.profile)).state).toBe('READY')
+  expect((await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))).state).toBe('READY')
   expect((await queryCodexArchive(f.connection(), 'repo', f.base, new AbortController().signal)).code).toBe('ARCHIVE_OBSERVED')
 })
 function processFixture(mode: string) {

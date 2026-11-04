@@ -46,7 +46,9 @@ contextBridge.exposeInMainWorld('codeAwareness', {
     },
     inspect: () => ipcRenderer.invoke('codex-archive:inspect'),
     enable: () => ipcRenderer.invoke('codex-archive:enable'),
-    disable: () => ipcRenderer.invoke('codex-archive:disable')
+    disable: () => ipcRenderer.invoke('codex-archive:disable'),
+    select: candidateId => ipcRenderer.invoke('codex-archive:select', candidateId),
+    chooseAdvanced: () => ipcRenderer.invoke('codex-archive:choose-advanced')
   } satisfies import('../shared/types/codex-archive-types').CodexArchiveApi,
   localMcpClients: {
     snapshot: () => ipcRenderer.invoke('local-mcp:snapshot'),

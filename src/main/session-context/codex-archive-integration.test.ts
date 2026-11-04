@@ -7,6 +7,7 @@ import { buildSync } from 'esbuild'
 import { SessionContextClient } from './client'
 import { SessionStore, sessionStorePath } from './store'
 import { CodexArchiveBridge } from './codex-archive-bridge'
+import { codexProfileIdentity } from './codex-discovery'
 import { CodexStdio } from './codex-stdio'
 import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
 import { GitService } from '../core/git-service'
@@ -44,7 +45,7 @@ async function fixture() {
   }
   const createBridge = (root: string, client: SessionContextClient) => {
     const bridge = new CodexArchiveBridge({ repositoryId: 'repo', root, isCurrent: () => true, changed: (connection, readiness) => client.setArchiveConnection(connection, readiness),
-      approveProfile: async () => true, approveAccount: async () => true,
+
       probe: async () => ({ version: '0.155.0', supports: { archived: true, cwd: true, stateDbOnly: true } }),
       connect: (_profile, invalidated) => new CodexStdio(spawn(process.execPath, [script], { cwd: base, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' } }), invalidated) })
     cleanup.push(() => bridge.disable()); return bridge
@@ -57,7 +58,7 @@ it('connects the actual opt-in stdio bridge to the existing client/worker/store 
   const f = await fixture()
   expect(data(await f.client.call('list_agent_sessions', { includeArchived: true }))).toMatchObject({ sessions: [], archiveCoverage: { code: 'ARCHIVE_PROVIDER_UNAVAILABLE', providerState: 'NOT_CONFIGURED' } })
   expect(f.methods()).toEqual([])
-  expect((await f.bridge.enable(f.profile)).state).toBe('READY')
+  expect((await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))).state).toBe('READY')
   expect(f.methods()).not.toContain('thread/list')
   const first = data(await f.client.call('list_agent_sessions', { includeArchived: true }))
   expect(first).toMatchObject({ archiveCoverage: { code: 'ARCHIVE_OBSERVED', providerState: 'READY' }, sessions: [{ provider: 'codex', providerSessionId: 'archived-fixture', importState: 'METADATA_ONLY', eventCount: 0 }] })
@@ -77,13 +78,13 @@ it('connects the actual opt-in stdio bridge to the existing client/worker/store 
   expect(data(await f.client.call('list_agent_sessions', {})).sessions).toEqual([])
   expect(data(await f.client.call('inspect_agent_session', { sessionId: session.sessionId })).code).toBe('SESSION_UNAVAILABLE')
   expect(f.store.count()).toBe(1)
-  f.control({}); await f.bridge.enable(f.profile)
+  f.control({}); await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))
   const reopened = data(await f.client.call('list_agent_sessions', { includeArchived: true }))
   expect(reopened.sessions[0].sessionId).toBe(session.sessionId)
   expect(f.store.associations(session.sessionId).filter(a => a.archived)).toHaveLength(1)
 }, 45000)
 it('preserves exceptional declared history after removing a fixture Worktree and reconnecting the same authorized profile', async () => {
-  const f = await fixture(); await f.bridge.enable(f.profile)
+  const f = await fixture(); await f.bridge.enable(f.profile, await codexProfileIdentity(f.profile))
   const observed = data(await f.client.call('list_agent_sessions', { includeArchived: true })), sessionId = observed.sessions[0].sessionId
   const plan = f.service.publish('---\nname: Archive fixture plan\ndescription: Fixture plan for authorized archive metadata\nkind: EXECUTABLE_PLAN\ndate: 2026-11-03T00:00:00Z\n---\nFixture plan')
   const proof = f.ledger.recordProof({ kind: 'MANUAL_ACCEPTANCE', producer: 'SYSTEM', status: 'PASSED', startedAt: '2026-11-03T00:00:00Z', finishedAt: '2026-11-03T00:00:00Z', durationMs: 0, scope: ['fixture metadata observation'], summary: 'Fixture archive metadata observed', evidenceFor: [plan.artifactId] })
@@ -94,7 +95,7 @@ it('preserves exceptional declared history after removing a fixture Worktree and
   expect(declared).toMatchObject({ state: 'PERSISTED', evidence: 'HANDOFF_DECLARED', transcriptImported: false })
   f.bridge.disable(); await f.client.dispose()
   f.git(f.main, 'worktree', 'remove', '--force', f.sibling)
-  const next = f.makeClient(f.main), bridge = f.createBridge(f.main, next.client); await bridge.enable(f.profile)
+  const next = f.makeClient(f.main), bridge = f.createBridge(f.main, next.client); await bridge.enable(f.profile, await codexProfileIdentity(f.profile))
   for (const selector of [{ artifactId: plan.artifactId }, { commitSha }, { pullRequest: 7 }]) {
     const result = data(await next.client.call('list_agent_sessions', selector))
     expect(result.sessions[0]).toMatchObject({ sessionId, importState: 'METADATA_ONLY', eventCount: 0, worktreeAvailability: 'NOT_RECHECKED' })
