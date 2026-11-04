@@ -28,6 +28,7 @@ export const REGISTRY_SCHEMA = `
 const kinds: EntityKind[] = ['COMMIT', 'CHECKPOINT', 'SESSION', 'PR', 'ARTIFACT', 'PROOF', 'WORKTREE', 'EXECUTION']
 export class CheckpointRegistry {
   constructor(private readonly db: Database.Database, readonly repositoryId: string) {}
+  readSnapshot<T>(read: () => T): T { return this.db.transaction(read).deferred() }
   key(entity: RegistryEntity): string {
     if (!kinds.includes(entity.kind) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,399}$/.test(entity.id)) throw new Error('INVALID_REGISTRY_ENTITY')
     return `${entity.kind}:${this.repositoryId}:${entity.id}`
@@ -95,6 +96,66 @@ export class CheckpointRegistry {
     this.db.prepare('INSERT INTO registry_entities(id,kind,externalId,localSessionId) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET localSessionId=excluded.localSessionId').run(this.key(entity), entity.kind, entity.id, sessionId)
   }
   evictedSession(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM registry_entities WHERE kind='SESSION' AND localSessionId=? LIMIT 1").get(id) }
+  sessionIdentity(id: string): RegistryEntity | undefined {
+    const row = this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='SESSION' AND localSessionId=? LIMIT 1").get(id) as { externalId: string } | undefined
+    return row ? { kind: 'SESSION', id: row.externalId } : undefined
+  }
+  visible(entity: RegistryEntity, accountHash?: string): boolean {
+    if (entity.kind !== 'SESSION' || !entity.id.startsWith('codex:')) return true
+    if (!accountHash) return false
+    const row = this.db.prepare("SELECT payload,integrity FROM session_associations WHERE provider='codex' AND providerSessionId=? AND json_extract(payload,'$.providerAccountHash')=? LIMIT 1").get(entity.id.slice(6), accountHash) as { payload: string; integrity: string } | undefined
+    if (row && (digest(row.payload) !== row.integrity || JSON.parse(row.payload).repositoryId !== this.repositoryId)) throw new Error('ASSOCIATION_INTEGRITY_ERROR')
+    return !!row
+  }
+  contextGraph(selector: RegistryEntity, accountHash?: string) {
+    type Node = { key: string; type: EntityKind; id: string; provider?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
+    type Edge = { id: string; from: string; to: string; relation: string; evidenceKind: string; source: string; state: string; freshness: string; observedAt: string; sourceRevision: string; evidenceRef: string; digest: string }
+    const nodes = new Map<string, Node>(), edges = new Map<string, Edge>(), paths: { target: string; edges: string[] }[] = []
+    let bounded = false
+    const add = (entity: RegistryEntity) => {
+      const key = this.key(entity)
+      if (nodes.has(key)) return key
+      const node: Node = { key, type: entity.kind, id: entity.id }
+      if (entity.kind === 'SESSION') {
+        const row = this.db.prepare('SELECT localSessionId FROM registry_entities WHERE id=?').get(key) as { localSessionId: string | null } | undefined
+        const split = entity.id.indexOf(':'); node.provider = entity.id.slice(0, split); node.id = entity.id.slice(split + 1)
+        node.payloadState = !row?.localSessionId ? 'NOT_IMPORTED' : this.db.prepare('SELECT 1 FROM sessions WHERE id=?').get(row.localSessionId) ? 'IMPORTED' : 'SESSION_EVICTED'
+        if (row?.localSessionId) node.deepen = { tool: 'inspect_agent_session', arguments: { sessionId: row.localSessionId } }
+      } else if (entity.kind === 'ARTIFACT') node.deepen = { tool: 'get_artifact', arguments: { artifactId: entity.id } }
+      else if (entity.kind === 'PROOF') node.deepen = { tool: 'get_validation_proof', arguments: { proofId: entity.id } }
+      else if (entity.kind === 'CHECKPOINT') node.deepen = { tool: 'inspect_entire_checkpoint', arguments: { checkpointId: entity.id } }
+      if (entity.kind !== 'WORKTREE') node.selector = { type: node.type, id: node.id, ...(node.provider ? { provider: node.provider } : {}) }
+      nodes.set(key, node); return key
+    }
+    if (!this.visible(selector, accountHash) || !this.db.prepare('SELECT 1 FROM registry_entities WHERE id=?').get(this.key(selector))) return { nodes: [], edges: [], paths, bounded }
+    const initial = add(selector), visited = new Set([initial]), pending = [{ entity: selector, path: [] as string[] }]
+    for (let depth = 0; depth < 4 && pending.length; depth++) {
+      const level = pending.splice(0)
+      for (const item of level) {
+        const key = this.key(item.entity)
+        const rows = this.db.prepare("SELECT * FROM registry_edges WHERE fromId=? OR toId=? ORDER BY CASE WHEN state='OBSERVED' THEN 0 ELSE 1 END,id LIMIT 65").all(key, key) as { id: string; payload: string; integrity: string; fromId: string; toId: string; source: string; sourceRevision: string; state: string; observedAt: string }[]
+        if (rows.length > 64) bounded = true
+        for (const row of rows.slice(0, 64)) {
+          if (edges.size >= 96) { bounded = true; break }
+          const value = JSON.parse(row.payload) as RegistryEdge
+          if (digest(row.payload) !== row.integrity || this.key(value.from) !== row.fromId || this.key(value.to) !== row.toId) throw new Error('REGISTRY_INTEGRITY_FAILED')
+          if (!this.visible(value.from, accountHash) || !this.visible(value.to, accountHash)) continue
+          if (value.from.kind === 'ARTIFACT' && value.to.kind === 'ARTIFACT' && !['implements', 'resolved-by'].includes(value.relation)) continue
+          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED'].includes(value.evidenceKind)) continue
+          const from = add(value.from), to = add(value.to)
+          const state = row.state === 'CONFLICT' ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : value.evidenceKind === 'HANDOFF_DECLARED' ? 'DECLARED' : 'VERIFIED'
+          edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest })
+          const next = from === key ? value.to : value.from, target = this.key(next)
+          if (!visited.has(target)) {
+            visited.add(target); const path = [...item.path, row.id]; paths.push({ target, edges: path })
+            if (row.state === 'OBSERVED') pending.push({ entity: next, path })
+          }
+        }
+      }
+    }
+    if (pending.length) bounded = true
+    return { nodes: [...nodes.values()], edges: [...edges.values()], paths, bounded }
+  }
   map(selector: RegistryEntity, maxEdges = 24) {
     const start = this.key(selector), found = new Map<string, ObservedEdge>(), visited = new Set([start]), frontier = [start]
     let truncated = false

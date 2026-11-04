@@ -7,6 +7,8 @@ import { parseSessionRefresh, parseSessionList, parseCaptureHealth } from './mcp
 import { queryCodexArchive, type AuthorizedCodexArchiveConnection } from './codex-archive'
 import type { SessionTargetResolver } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
+import { digest } from './privacy'
+import type { CodexArchiveReadiness } from '../../shared/types/codex-archive-types'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
 interface Generation { worker: Worker; cancellation: Int32Array; closing: boolean }
@@ -20,6 +22,7 @@ interface Request {
   phase: string
 }
 export class SessionContextClient implements SessionContextPort {
+  private archiveReadiness: CodexArchiveReadiness = { state: 'NOT_CONFIGURED' }
   private generation?: Generation
   private terminal = false
   private retiring: Promise<void> = Promise.resolve()
@@ -30,8 +33,17 @@ export class SessionContextClient implements SessionContextPort {
     private readonly workerPath = join(__dirname, 'session-context-worker.js'), private readonly resolveTarget?: SessionTargetResolver,
     private readonly timeoutMs?: number,
     private readonly authorizeAssociation?: (request: ReturnType<typeof parseSessionRefresh>) => Promise<{ sourceRevision: number; sourceHash: string }>,
-    private readonly archiveConnection?: AuthorizedCodexArchiveConnection,
-    private readonly registryReader?: RegistryReader) {}
+    private archiveConnection?: AuthorizedCodexArchiveConnection,
+    private readonly registryReader?: RegistryReader) { if (archiveConnection) this.archiveReadiness = { state: 'READY', version: archiveConnection.version } }
+  setArchiveConnection(connection: AuthorizedCodexArchiveConnection | undefined, readiness: CodexArchiveReadiness): void {
+    if (connection && connection.repositoryId !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH')
+    const changed = this.archiveConnection !== connection
+    this.archiveConnection = connection; this.archiveReadiness = { ...readiness }
+    if (changed) {
+      if (this.generation) void this.retire(this.generation, 'ARCHIVE_CONNECTION_CHANGED')
+      for (const id of this.pending.keys()) this.finish(id, failure('ARCHIVE_CONNECTION_CHANGED'))
+    }
+  }
   private active(): boolean {
     if (!this.isCurrent()) void this.dispose()
     return !this.terminal
@@ -163,6 +175,8 @@ export class SessionContextClient implements SessionContextPort {
                 } catch { target = undefined }
               }
               archiveObservation = await queryCodexArchive(target ? this.archiveConnection : undefined, this.repositoryId, target?.root ?? this.root, request.abort.signal, query.archiveCursor)
+              archiveObservation.providerState = this.archiveReadiness.state
+              if (!target && this.archiveConnection) archiveObservation.reason = 'WORKTREE_UNAVAILABLE'
             }
           }
           if (isLiveSessionTool(name)) {
@@ -218,7 +232,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(archiveObservation ? { archiveObservation } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, ...(this.archiveConnection ? { archiveAccountHash: digest(this.archiveConnection.accountIdentity) } : {}), ...(archiveObservation ? { archiveObservation } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }

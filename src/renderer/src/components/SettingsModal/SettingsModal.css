@@ -10,6 +10,9 @@
   overflow: hidden;
 }
 .settings-modal[open] { display: flex; flex-direction: column; }
+.settings-body { flex: 1; min-height: 0; overflow-y: auto; }
+.settings-body .settings-list { overflow: visible; }
+.settings-header, .settings-footer { flex-shrink: 0; }
 .settings-modal::backdrop { background: rgba(0, 0, 0, .6); }
 .settings-header { display: flex; align-items: center; gap: 12px; padding: 20px; border-bottom: 1px solid var(--border-subtle); background: linear-gradient(110deg, rgba(45, 110, 210, .12), rgba(120, 82, 238, .12)); }
 .settings-icon { display: flex; padding: 10px; border-radius: 12px; color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
