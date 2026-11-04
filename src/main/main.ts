@@ -600,19 +600,7 @@ app.whenReady().then(async () => {
         activeSessionContext?.setArchiveConnection(connection, readiness)
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('codex-archive:changed', readiness)
       },
-      approveProfile: async profile => {
-        if (!mainWindow || !sessionIsCurrent()) return false
-        const response = await dialog.showMessageBox(mainWindow, { type: 'question', title: 'Conexão local Codex', message: 'Autorizar este perfil Codex para consulta de metadados?',
-          detail: `Executável: ${profile.executable}\nPerfil: ${profile.directory}\nRepositório: ${gitRepositoryId}\n\nInicia app-server local por stdio e verifica versão, esquema e conta. Não faz login, altera hooks ou importa transcrições. A autorização termina ao desconectar, trocar de projeto ou encerrar o aplicativo.`,
-          buttons: ['Cancelar', 'Autorizar perfil'], defaultId: 0, cancelId: 0 })
-        return response.response === 1 && sessionIsCurrent()
-      },
-      approveAccount: async account => {
-        if (!mainWindow || !sessionIsCurrent()) return false
-        const response = await dialog.showMessageBox(mainWindow, { type: 'question', title: 'Codex Archive', message: 'Autorizar leitura de metadados arquivados neste perfil?',
-          detail: `Conta observada: ${account}\n\nConsulta somente thread/list para o checkout validado, sem abrir prompts ou transcrições. O perfil local selecionado define o acervo autorizado; a conta observada identifica esta conexão, sem provar autoria histórica.`, buttons: ['Cancelar', 'Autorizar metadados'], defaultId: 0, cancelId: 0 })
-        return response.response === 1 && sessionIsCurrent()
-      } })
+    })
     if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path, sessionIsCurrent, undefined,
       gitOperations.worktrees ? sessionTargetResolver(gitOperations.worktrees, () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : undefined,
       undefined, async request => {

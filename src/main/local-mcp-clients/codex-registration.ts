@@ -7,12 +7,20 @@ import { readEntry, sameEntry, type McpEntry } from './config-editors'
 import { assertProfilePath, assertUserOwned } from './safe-config-file'
 
 export function discoverCodex(localAppData: string): string | undefined {
+  const candidates = discoverCodexCandidates(localAppData)
+  if (candidates.length === 1) { assertProfilePath(candidates[0], localAppData); assertUserOwned(candidates[0]) }
+  return candidates.length === 1 ? candidates[0] : undefined
+}
+
+export function discoverCodexCandidates(localAppData: string): string[] {
   const root = join(localAppData, 'OpenAI', 'Codex', 'bin')
-  if (!existsSync(root)) return
-  assertProfilePath(root, localAppData); assertUserOwned(root)
-  return readdirSync(root).slice(0, 32).map(name => join(root, name, 'codex.exe'))
+  if (!existsSync(root)) return []
+  assertProfilePath(root, localAppData)
+  const entries = readdirSync(root)
+  if (entries.length > 32) throw new Error('TOO_MANY_CODEX_CANDIDATES')
+  return [join(root, 'codex.exe'), ...entries.map(name => join(root, name, 'codex.exe'))]
     .filter(path => existsSync(path) && statSync(path).isFile())
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]
+    .sort()
 }
 
 export function codexRegistrar(binary: string, home: string): (entry: McpEntry) => Promise<McpEntry> {

@@ -1,28 +1,19 @@
 import { lstat, realpath, mkdtemp, readFile, rm } from 'node:fs/promises'
-import { isAbsolute, join } from 'node:path'
+import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { CodexArchiveReadiness, CodexArchiveState } from '../../shared/types/codex-archive-types'
 import type { AuthorizedCodexArchiveConnection } from './codex-archive'
 import { CodexStdio, spawnCodex, codexCommand, type CodexProfile } from './codex-stdio'
 import { digest } from './privacy'
+import { codexProfileIdentity as identity } from './codex-discovery'
 
 interface Capabilities { version: string; supports: { archived: boolean; cwd: boolean; stateDbOnly: boolean } }
 interface Transport { request: CodexStdio['request']; initialized(): void; close(): void }
 interface Options {
   repositoryId: string; root: string; isCurrent: () => boolean
   changed: (connection: AuthorizedCodexArchiveConnection | undefined, readiness: CodexArchiveReadiness) => void
-  approveProfile: (profile: CodexProfile) => Promise<boolean>
-  approveAccount: (identity: string) => Promise<boolean>
   probe?: (profile: CodexProfile, signal: AbortSignal) => Promise<Capabilities>
   connect?: (profile: CodexProfile, invalidated: () => void) => Transport
-}
-async function identity(profile: CodexProfile): Promise<string> {
-  try {
-    if (!isAbsolute(profile.executable) || !isAbsolute(profile.directory) || /^[\\/]{2}/.test(profile.executable) || /^[\\/]{2}/.test(profile.directory) || (process.platform === 'win32' && !profile.executable.toLowerCase().endsWith('.exe'))) throw new Error('EXECUTABLE_UNAVAILABLE')
-    const [exe, directory] = await Promise.all([lstat(profile.executable), lstat(profile.directory)])
-    if (!exe.isFile() || exe.isSymbolicLink() || !directory.isDirectory() || directory.isSymbolicLink()) throw new Error('EXECUTABLE_UNAVAILABLE')
-    return digest(JSON.stringify([await realpath(profile.executable), exe.dev, exe.ino, exe.size, exe.mtimeMs, exe.ctimeMs, await realpath(profile.directory), directory.dev, directory.ino]))
-  } catch { throw new Error('EXECUTABLE_UNAVAILABLE') }
 }
 function schemaType(value: unknown, type: string): boolean {
   if (!value || typeof value !== 'object') return false
@@ -71,16 +62,17 @@ export class CodexArchiveBridge {
     const transport = this.transport; this.transport = undefined; this.connection = undefined; transport?.close()
     return this.publish(state)
   }
-  async enable(profile: CodexProfile): Promise<CodexArchiveReadiness> {
+  async enable(profile: CodexProfile, consentPin?: string): Promise<CodexArchiveReadiness> {
     this.disable('UNAUTHORIZED')
     const epoch = this.epoch, abort = new AbortController(); this.abort = abort
     let ownedTransport: Transport | undefined
     const active = () => { if (!this.options.isCurrent() || epoch !== this.epoch || abort.signal.aborted) throw new Error('UNAUTHORIZED') }
     try {
       active()
-      if (!await this.options.approveProfile(profile)) return this.inspect()
+      if (!consentPin) return this.inspect()
       active(); this.publish('CONNECTING')
       const pin = await identity(profile)
+      if (pin !== consentPin) throw new Error('EXECUTABLE_UNAVAILABLE')
       active()
       const capabilities = await (this.options.probe?.(profile, abort.signal) ?? probeCodexArchive(profile, this.options.root, abort.signal))
       active()
@@ -97,8 +89,6 @@ export class CodexArchiveBridge {
       transport.initialized()
       const readAccount = async (signal: AbortSignal) => account(await transport.request('account/read', { refreshToken: false }, signal))
       const observedAccount = await readAccount(abort.signal)
-      active()
-      if (!await this.options.approveAccount(observedAccount)) throw new Error('UNAUTHORIZED')
       active()
       const profileIdentity = await realpath(profile.directory)
       const authorizedRoot = await realpath(this.options.root)
