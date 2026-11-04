@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import { digest } from './privacy'
+import { sessionIdentity, sessionSelector } from './session-identity'
 
 export type EntityKind = 'COMMIT' | 'CHECKPOINT' | 'SESSION' | 'PR' | 'ARTIFACT' | 'PROOF' | 'WORKTREE' | 'EXECUTION'
 export interface RegistryEntity { kind: EntityKind; id: string }
@@ -78,21 +79,22 @@ export class CheckpointRegistry {
       assertCurrent()
     }).immediate()
   }
-  checkpoint(id: string, revision: string, state: string, hash: string, sessionIds: string[]): void {
+  checkpoint(id: string, revision: string, state: string, hash: string, sessionIds: string[], sessionRefs?: { id: string; agent: string }[]): void {
     this.key({ kind: 'CHECKPOINT', id })
-    const payload = JSON.stringify(sessionIds), integrity = digest(JSON.stringify([id, revision, state, hash, payload]))
+    const payload = JSON.stringify(sessionRefs ? { sessionIds, sessionRefs } : sessionIds), integrity = digest(JSON.stringify([id, revision, state, hash, payload]))
     this.db.prepare('INSERT OR IGNORE INTO checkpoint_registry VALUES(?,?,?,?,?,?,?)').run(id, revision, state, hash, payload, integrity, new Date().toISOString())
   }
-  cachedCheckpoint(id: string, revision: string): { state: 'VERIFIED'; reason: string; checkpointId: string; refRevision: string; metadataDigest: string; sessionIds: string[] } | undefined {
+  cachedCheckpoint(id: string, revision: string): { state: 'VERIFIED'; reason: string; checkpointId: string; refRevision: string; metadataDigest: string; sessionIds: string[]; sessionRefs?: { id: string; agent: string }[] } | undefined {
     const row = this.db.prepare("SELECT * FROM checkpoint_registry WHERE checkpointId=? AND refRevision=? AND state='VERIFIED'").get(id, revision) as { digest: string; sessionIds: string; integrity: string } | undefined
     if (!row) return
     if (digest(JSON.stringify([id, revision, 'VERIFIED', row.digest, row.sessionIds])) !== row.integrity) throw new Error('REGISTRY_INTEGRITY_FAILED')
-    const sessionIds = JSON.parse(row.sessionIds)
+    const payload = JSON.parse(row.sessionIds), sessionIds = Array.isArray(payload) ? payload : payload.sessionIds
     if (!Array.isArray(sessionIds) || sessionIds.length > 20 || sessionIds.some(s => typeof s !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(s))) throw new Error('REGISTRY_INTEGRITY_FAILED')
-    return { state: 'VERIFIED', reason: 'VERIFIED', checkpointId: id, refRevision: revision, metadataDigest: row.digest, sessionIds }
+    if (payload.sessionRefs && (!Array.isArray(payload.sessionRefs) || payload.sessionRefs.length > 20 || payload.sessionRefs.some((item: { id: unknown; agent: unknown }) => typeof item.id !== 'string' || !sessionIds.includes(item.id) || typeof item.agent !== 'string' || !/^[a-z][a-z0-9-]{0,79}$/.test(item.agent)))) throw new Error('REGISTRY_INTEGRITY_FAILED')
+    return { state: 'VERIFIED', reason: 'VERIFIED', checkpointId: id, refRevision: revision, metadataDigest: row.digest, sessionIds, ...(payload.sessionRefs ? { sessionRefs: payload.sessionRefs } : {}) }
   }
-  importedSession(provider: string, providerId: string, sessionId: string): void {
-    const entity: RegistryEntity = { kind: 'SESSION', id: `${provider}:${providerId}` }
+  importedSession(provider: string, providerId: string, sessionId: string, agent?: string): void {
+    const entity: RegistryEntity = this.sessionIdentity(sessionId) ?? { kind: 'SESSION', id: sessionIdentity(provider, providerId, agent) }
     this.db.prepare('INSERT INTO registry_entities(id,kind,externalId,localSessionId) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET localSessionId=excluded.localSessionId').run(this.key(entity), entity.kind, entity.id, sessionId)
   }
   evictedSession(id: string): boolean { return !!this.db.prepare("SELECT 1 FROM registry_entities WHERE kind='SESSION' AND localSessionId=? LIMIT 1").get(id) }
@@ -102,13 +104,18 @@ export class CheckpointRegistry {
   }
   visible(entity: RegistryEntity, accountHash?: string): boolean {
     if (entity.kind !== 'SESSION' || !entity.id.startsWith('codex:')) return true
-    if (!accountHash) return false
+    if (!accountHash) {
+      const archived = this.db.prepare("SELECT a.payload,a.integrity FROM sessions s JOIN session_associations a ON a.sessionId=s.id WHERE s.provider='codex' AND s.providerSessionId=? AND s.importState='METADATA_ONLY' AND s.eventCount=0 AND s.payloadBytes=0 AND json_extract(a.payload,'$.origin')='CODEX_APP_SERVER' AND json_extract(a.payload,'$.archived')=1 LIMIT 1").get(entity.id.slice(6)) as { payload: string; integrity: string } | undefined
+      if (!archived) return false
+      if (digest(archived.payload) !== archived.integrity || JSON.parse(archived.payload).repositoryId !== this.repositoryId) throw new Error('ASSOCIATION_INTEGRITY_ERROR')
+      return true
+    }
     const row = this.db.prepare("SELECT payload,integrity FROM session_associations WHERE provider='codex' AND providerSessionId=? AND json_extract(payload,'$.providerAccountHash')=? LIMIT 1").get(entity.id.slice(6), accountHash) as { payload: string; integrity: string } | undefined
     if (row && (digest(row.payload) !== row.integrity || JSON.parse(row.payload).repositoryId !== this.repositoryId)) throw new Error('ASSOCIATION_INTEGRITY_ERROR')
     return !!row
   }
   contextGraph(selector: RegistryEntity, accountHash?: string) {
-    type Node = { key: string; type: EntityKind; id: string; provider?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
+    type Node = { key: string; type: EntityKind; id: string; provider?: string; agent?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
     type Edge = { id: string; from: string; to: string; relation: string; evidenceKind: string; source: string; state: string; freshness: string; observedAt: string; sourceRevision: string; evidenceRef: string; digest: string }
     const nodes = new Map<string, Node>(), edges = new Map<string, Edge>(), paths: { target: string; edges: string[] }[] = []
     let bounded = false
@@ -118,13 +125,13 @@ export class CheckpointRegistry {
       const node: Node = { key, type: entity.kind, id: entity.id }
       if (entity.kind === 'SESSION') {
         const row = this.db.prepare('SELECT localSessionId FROM registry_entities WHERE id=?').get(key) as { localSessionId: string | null } | undefined
-        const split = entity.id.indexOf(':'); node.provider = entity.id.slice(0, split); node.id = entity.id.slice(split + 1)
+        Object.assign(node, sessionSelector(entity.id))
         node.payloadState = !row?.localSessionId ? 'NOT_IMPORTED' : this.db.prepare('SELECT 1 FROM sessions WHERE id=?').get(row.localSessionId) ? 'IMPORTED' : 'SESSION_EVICTED'
         if (row?.localSessionId) node.deepen = { tool: 'inspect_agent_session', arguments: { sessionId: row.localSessionId } }
       } else if (entity.kind === 'ARTIFACT') node.deepen = { tool: 'get_artifact', arguments: { artifactId: entity.id } }
       else if (entity.kind === 'PROOF') node.deepen = { tool: 'get_validation_proof', arguments: { proofId: entity.id } }
       else if (entity.kind === 'CHECKPOINT') node.deepen = { tool: 'inspect_entire_checkpoint', arguments: { checkpointId: entity.id } }
-      if (entity.kind !== 'WORKTREE') node.selector = { type: node.type, id: node.id, ...(node.provider ? { provider: node.provider } : {}) }
+      if (entity.kind !== 'WORKTREE') node.selector = { type: node.type, id: node.id, ...(node.provider ? { provider: node.provider } : {}), ...(node.agent ? { agent: node.agent } : {}) }
       nodes.set(key, node); return key
     }
     if (!this.visible(selector, accountHash) || !this.db.prepare('SELECT 1 FROM registry_entities WHERE id=?').get(this.key(selector))) return { nodes: [], edges: [], paths, bounded }
@@ -183,10 +190,10 @@ export class CheckpointRegistry {
   }
   legacy(assertCurrent: () => void): void {
     const imported = this.source('IMPORTED_SESSIONS'), sessionAfter = Number(imported?.cursor ?? 0)
-    const sessions = this.db.prepare('SELECT rowid AS position,id,provider,providerSessionId FROM sessions WHERE rowid>? ORDER BY rowid LIMIT 20').all(sessionAfter) as { position: number; id: string; provider: string; providerSessionId: string }[]
+    const sessions = this.db.prepare('SELECT rowid AS position,id,provider,providerSessionId,agent FROM sessions WHERE rowid>? ORDER BY rowid LIMIT 20').all(sessionAfter) as { position: number; id: string; provider: string; providerSessionId: string; agent: string }[]
     if (sessions.length) this.db.transaction(() => {
       assertCurrent()
-      for (const session of sessions) this.importedSession(session.provider, session.providerSessionId, session.id)
+      for (const session of sessions) this.importedSession(session.provider, session.providerSessionId, session.id, session.agent)
       const cursor = String(sessions.at(-1)!.position)
       this.apply({ repositoryId: this.repositoryId, source: 'IMPORTED_SESSIONS', revision: cursor, cursor, status: 'PARTIAL', edges: [] }, imported?.revision, assertCurrent)
     }).immediate()
@@ -197,7 +204,7 @@ export class CheckpointRegistry {
     for (const row of rows) {
       if (digest(row.payload) !== row.integrity) throw new Error('ASSOCIATION_INTEGRITY_FAILED')
       const a = JSON.parse(row.payload)
-      const from: RegistryEntity = { kind: 'SESSION', id: `${a.provider}:${a.providerSessionId}` }
+      const from: RegistryEntity = this.sessionIdentity(a.sessionId) ?? { kind: 'SESSION', id: `${a.provider}:${a.providerSessionId}` }
       const target: [EntityKind, unknown][] = [['ARTIFACT', a.sourceArtifactId], ['ARTIFACT', a.artifactId], ['COMMIT', a.commitSha], ['PR', a.pullRequest], ['CHECKPOINT', a.checkpointId], ['EXECUTION', a.executionId]]
       for (const [kind, id] of target) if (id) edges.push({ from, relation: 'legacy-association', to: { kind, id: String(id) }, evidenceKind: a.evidence, evidenceRef: a.sourceArtifactId ?? a.checkpointId ?? 'legacy-origin', digest: row.integrity, freshness: 'HISTORICAL' })
     }

@@ -385,7 +385,7 @@ export class ChannelMcpAdapter {
     if (name === 'get_system_health') {
       if (args && typeof args === 'object' && !Array.isArray(args) && (args as Record<string, unknown>).feature === 'session_context') {
         const { feature: _feature, refresh, ...query } = args as Record<string, unknown>
-        if (refresh !== undefined && typeof refresh !== 'boolean' || Object.keys(query).some(key => !['worktreeId', 'generation', 'cycleId', 'commitSha'].includes(key))) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
+        if (refresh !== undefined && typeof refresh !== 'boolean' || Object.keys(query).some(key => !['worktreeId', 'generation', 'cycleId', 'commitSha', 'agent'].includes(key))) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
         return this.sessionContext ? this.sessionContext.call('inspect_capture_health', { ...query, trigger: refresh ? 'RECHECK' : 'INSPECT' }) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
       }
       const core = this.systemHealth ?? new SystemHealthCore()

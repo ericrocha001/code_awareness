@@ -3,11 +3,14 @@ import { sourceTimestamp } from './source-time'
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { chmodSync, mkdirSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { digest, safeFile, sanitize, utf8Prefix } from './privacy'
-import { EVENT_TYPES, LIMITS, COVERAGE_REASON_CODES, type EventInput, type EventRow, type SessionInput, type SessionRow, type SourceObservation, type CoverageReasons } from './types'
+import { digest, sanitize, utf8Prefix } from './privacy'
+import { COVERAGE_REASON_CODES, type EventInput, type EventRow, type SessionInput, type SessionRow, type SourceObservation, type CoverageReasons } from './types'
 import type { SessionAssociation, SessionFilter, DeclaredSessionAssociation } from './associations'
 import type { CaptureHealthObservation } from './capture-health-types'
 import { CheckpointRegistry, REGISTRY_SCHEMA } from './checkpoint-registry'
+import { entireAgent } from './entire-schema'
+import { migrateSessionNamespace } from './session-namespace-migration'
+import { SessionReferences } from './session-references'
 
 export function sessionStorePath(base: string, repositoryId: string): string {
   if (!repositoryId || repositoryId.length > 200) throw new Error('REPOSITORY_REQUIRED')
@@ -24,6 +27,7 @@ function associationQuery(filter: SessionFilter): { where: string[]; params: (st
 
 export class SessionStore {
   readonly registry: CheckpointRegistry
+  readonly references: SessionReferences
   private readonly db: Database.Database
   private readonly key: string
   constructor(readonly path: string, readonly repositoryId: string) {
@@ -35,7 +39,7 @@ export class SessionStore {
       this.db.pragma('journal_mode = WAL')
       this.db.pragma('foreign_keys = ON')
       this.db.pragma('busy_timeout = 3000')
-      if (Number(this.db.pragma('user_version', { simple: true })) > 6) throw new Error('SCHEMA_UNSUPPORTED')
+      if (Number(this.db.pragma('user_version', { simple: true })) > 8) throw new Error('SCHEMA_UNSUPPORTED')
       this.db.transaction(() => {
         this.db.exec(`
           CREATE TABLE IF NOT EXISTS identity(repositoryId TEXT PRIMARY KEY, cursorKey TEXT NOT NULL, revision INTEGER NOT NULL);
@@ -46,15 +50,13 @@ export class SessionStore {
             revision INTEGER NOT NULL, eventCount INTEGER NOT NULL, payloadBytes INTEGER NOT NULL,
             sourceDigest TEXT NOT NULL, sourceBytes INTEGER NOT NULL,
             worktreeId TEXT, generation TEXT, executionId TEXT, commitSha TEXT,
-            UNIQUE(provider, providerSessionId));
+            UNIQUE(provider, agent, providerSessionId));
           CREATE TABLE IF NOT EXISTS events(
             id TEXT PRIMARY KEY, sessionId TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             ordinal INTEGER NOT NULL, type TEXT NOT NULL, timestamp TEXT, tool TEXT, success INTEGER,
-            summary TEXT NOT NULL, files TEXT NOT NULL, sourcePosition INTEGER NOT NULL,
+            files TEXT NOT NULL, sourcePosition INTEGER NOT NULL,
             digest TEXT NOT NULL, bytes INTEGER NOT NULL, omission TEXT, sanitized INTEGER NOT NULL,
             UNIQUE(sessionId, ordinal));
-          CREATE TABLE IF NOT EXISTS event_payloads(
-            eventId TEXT PRIMARY KEY REFERENCES events(id) ON DELETE CASCADE, text TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS session_chronology ON sessions(lastObserved, id);
           CREATE INDEX IF NOT EXISTS session_execution ON sessions(executionId, lastObserved, id);
           CREATE INDEX IF NOT EXISTS session_state ON sessions(state, endedAt, id);
@@ -88,13 +90,15 @@ export class SessionStore {
           const names = (this.db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(c => c.name)
           if (required.some(name => !names.includes(name))) throw new Error('SCHEMA_INVALID')
         }
-        this.db.pragma('user_version = 6')
+        this.db.pragma('user_version = 8')
       }).immediate()
       this.key = (this.db.prepare('SELECT cursorKey FROM identity').get() as { cursorKey: string }).cursorKey
       this.registry = new CheckpointRegistry(this.db, repositoryId)
+      this.references = new SessionReferences(this.db)
     } catch (error) { this.db.close(); throw error }
   }
   assertRepository(id: string): void { if (id !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH') }
+  migrateAgentNamespace(assertCurrent: () => void): void { assertCurrent(); migrateSessionNamespace(this.db, assertCurrent); assertCurrent() }
   close(): void { this.db.close() }
   catalogRevision(): number { return (this.db.prepare('SELECT revision FROM identity').get() as { revision: number }).revision }
   session(id: string): SessionRow {
@@ -105,7 +109,7 @@ export class SessionStore {
     }
     return row
   }
-  byProvider(id: string, provider = 'entire'): SessionRow | undefined { return this.db.prepare('SELECT * FROM sessions WHERE providerSessionId = ? AND provider = ?').get(id, provider) as SessionRow | undefined }
+  byProvider(id: string, provider = 'entire', agent = 'codex'): SessionRow | undefined { return this.db.prepare('SELECT * FROM sessions WHERE providerSessionId = ? AND provider = ? AND agent = ?').get(id, provider, agent) as SessionRow | undefined }
   revision(id: string, expected?: number): SessionRow {
     const session = this.session(id)
     if (expected !== undefined && expected !== session.revision) throw new Error('REVISION_CONFLICT')
@@ -131,17 +135,17 @@ export class SessionStore {
     return row.sourceObservation === '{}' ? { identity: 'UNKNOWN', streamTime: { timestampedRecords: 0, missingTimestamps: 0, invalidTimestamps: 0, windowRelation: 'UNAVAILABLE' } } : JSON.parse(row.sourceObservation)
   }
   ingest(input: SessionInput, events: EventInput[], assertCurrent: () => void = () => {}): { sessionId: string; revision: number; eventCount: number; coverage: string; replay: boolean; sourceObservation: SourceObservation; importState: SessionRow['importState']; coverageReasons: CoverageReasons } {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(input.providerSessionId) || input.agent !== 'codex' || events.length > LIMITS.events) throw new Error('INVALID_IMPORT')
+    if (events.length) throw new Error('SOURCE_REFERENCE_REQUIRED')
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(input.providerSessionId) || entireAgent(input.agent) !== input.agent) throw new Error('INVALID_IMPORT')
     if (!['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'].includes(input.state) || (input.state === 'ENDED' && (!input.endedAt || !Number.isFinite(Date.parse(input.endedAt))))) throw new Error('INVALID_IMPORT')
     const importState = input.importState ?? 'UNKNOWN'
-    if (importState === 'METADATA_ONLY' && events.length) throw new Error('INVALID_IMPORT')
-    if (!['UNKNOWN', 'METADATA_ONLY', 'TRANSCRIPT_IMPORTED'].includes(importState)) throw new Error('INVALID_IMPORT')
+    if (!['UNKNOWN', 'METADATA_ONLY'].includes(importState)) throw new Error('INVALID_IMPORT')
     const suppliedReasons = input.coverageReasons ?? {}
-    if (Object.entries(suppliedReasons).some(([code, count]) => !COVERAGE_REASON_CODES.includes(code as keyof CoverageReasons) || !Number.isSafeInteger(count) || count! <= 0 || count! > LIMITS.import)) throw new Error('INVALID_IMPORT')
+    if (Object.entries(suppliedReasons).some(([code, count]) => !COVERAGE_REASON_CODES.includes(code as keyof CoverageReasons) || !Number.isSafeInteger(count) || count! <= 0)) throw new Error('INVALID_IMPORT')
     const diagnosticsFor = (id?: string): string => {
       const reasons: CoverageReasons = { ...suppliedReasons }
       delete reasons.PAYLOAD_LIMIT; delete reasons.PAYLOAD_UNAVAILABLE; delete reasons.PAYLOAD_REDACTED
-      if (importState === 'METADATA_ONLY') reasons.TRANSCRIPT_NOT_IMPORTED = 1
+      reasons.TRANSCRIPT_NOT_IMPORTED = 1
       if (id) {
         const omissions = this.db.prepare('SELECT omission, COUNT(*) AS count FROM events WHERE sessionId = ? AND omission IS NOT NULL GROUP BY omission').all(id) as { omission: string; count: number }[]
         for (const row of omissions) {
@@ -155,7 +159,7 @@ export class SessionStore {
     }
     const observation = input.sourceObservation
     if (observation && (!['VERIFIED', 'UNKNOWN'].includes(observation.identity) || !['WITHIN_PROVIDER_WINDOW', 'OUTSIDE_PROVIDER_WINDOW', 'UNAVAILABLE'].includes(observation.streamTime.windowRelation) ||
-      [observation.streamTime.timestampedRecords, observation.streamTime.missingTimestamps, observation.streamTime.invalidTimestamps].some(n => !Number.isSafeInteger(n) || n < 0 || n > LIMITS.import) ||
+      [observation.streamTime.timestampedRecords, observation.streamTime.missingTimestamps, observation.streamTime.invalidTimestamps].some(n => !Number.isSafeInteger(n) || n < 0) ||
       [observation.streamTime.first, observation.streamTime.last].some(value => value !== undefined && (typeof value !== 'string' || !sourceTimestamp(value))))) throw new Error('INVALID_IMPORT')
     const sourceObservation = observation ? JSON.stringify({ identity: observation.identity, streamTime: { first: observation.streamTime.first, last: observation.streamTime.last,
       timestampedRecords: observation.streamTime.timestampedRecords, missingTimestamps: observation.streamTime.missingTimestamps, invalidTimestamps: observation.streamTime.invalidTimestamps, windowRelation: observation.streamTime.windowRelation } }) : '{}'
@@ -163,7 +167,8 @@ export class SessionStore {
       assertCurrent()
       const provider = input.provider ?? 'entire'
       if (!['entire', 'codex'].includes(provider)) throw new Error('INVALID_IMPORT')
-      const old = this.byProvider(input.providerSessionId, provider)
+      const old = this.byProvider(input.providerSessionId, provider, input.agent)
+      if (old && importState !== 'METADATA_ONLY' && this.references.legacyPayloads(old.id)) throw new Error('LEGACY_MIGRATION_REQUIRED')
       if (old && importState === 'METADATA_ONLY') {
         this.db.prepare('UPDATE sessions SET lastObserved = ? WHERE id = ?').run(new Date().toISOString(), old.id)
         this.db.prepare('UPDATE identity SET revision = revision + 1').run()
@@ -178,52 +183,19 @@ export class SessionStore {
         assertCurrent()
         return { sessionId: old.id, revision: old.revision, eventCount: old.eventCount, coverage: old.coverage, replay: true, sourceObservation: this.sourceObservation(old), importState: old.importState, coverageReasons: JSON.parse(old.coverageReasons) }
       }
-      if (!old && this.count() >= LIMITS.sessions) {
-        const victim = this.db.prepare("SELECT id FROM sessions WHERE state = 'ENDED' AND endedAt IS NOT NULL ORDER BY julianday(endedAt), id LIMIT 1").get() as { id: string } | undefined
-        if (!victim) throw new Error('CAPACITY_REACHED')
-        this.db.prepare('DELETE FROM sessions WHERE id = ?').run(victim.id)
-      }
       const id = old?.id ?? randomUUID(), revision = (old?.revision ?? 0) + 1
-      const normalized = events.map((event, index) => {
-        if (!EVENT_TYPES.includes(event.type) || !Number.isSafeInteger(event.sourcePosition) || event.sourcePosition < 0 || (event.omission !== undefined && !['LIMIT_REACHED', 'REDACTED', 'UNAVAILABLE'].includes(event.omission))) throw new Error('INVALID_EVENT')
-        const text = sanitize(event.text ?? '')
-        return { event, text, hash: digest(JSON.stringify({ ...event, text })), ordinal: index + 1 }
-      })
-      let prefix = 0
-      if (old) {
-        const hashes = this.db.prepare('SELECT digest FROM events WHERE sessionId = ? ORDER BY ordinal').all(id) as { digest: string }[]
-        while (prefix < Math.min(hashes.length, normalized.length) && hashes[prefix].digest === normalized[prefix].hash) prefix++
-        if (input.coverage !== 'COMPLETE' && prefix < hashes.length) throw new Error('SOURCE_PARTIAL_CONFLICT')
-        this.db.prepare('DELETE FROM events WHERE sessionId = ? AND ordinal > ?').run(id, prefix)
-      }
-      const kept = this.db.prepare('SELECT COALESCE(SUM(bytes), 0) AS bytes FROM events WHERE sessionId = ?').get(id) as { bytes: number }
-      let sessionBytes = kept.bytes
-      let repositoryBytes = (this.db.prepare('SELECT COALESCE(SUM(bytes), 0) AS bytes FROM events').get() as { bytes: number }).bytes
+      if (old?.eventCount) throw new Error('SOURCE_REFERENCE_REQUIRED')
       this.db.prepare(`INSERT INTO sessions(id, provider, providerSessionId, providerVersion, agent, startedAt, endedAt, lastObserved, state, coverage, revision, eventCount, payloadBytes, sourceDigest, sourceBytes, sourceObservation, importState, coverageReasons)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET providerVersion=excluded.providerVersion, startedAt=excluded.startedAt, endedAt=excluded.endedAt, sourceObservation=excluded.sourceObservation, importState=excluded.importState, coverageReasons=excluded.coverageReasons,
         lastObserved=excluded.lastObserved, state=excluded.state, revision=excluded.revision, sourceDigest=excluded.sourceDigest, sourceBytes=excluded.sourceBytes`).run(
           id, provider, input.providerSessionId, utf8Prefix(sanitize(input.providerVersion), 80), input.agent, input.startedAt ?? null, input.endedAt ?? null,
           new Date().toISOString(), input.state, input.coverage, revision, input.sourceDigest, input.sourceBytes, sourceObservation, importState, coverageReasons)
-      const insertEvent = this.db.prepare('INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-      const insertPayload = this.db.prepare('INSERT INTO event_payloads VALUES (?, ?)')
-      for (const { event, text, hash, ordinal } of normalized.slice(prefix)) {
-        const allowed = Math.min(LIMITS.event, LIMITS.session - sessionBytes, LIMITS.repository - repositoryBytes)
-        const payload = utf8Prefix(text, Math.max(0, allowed)), bytes = Buffer.byteLength(payload)
-        const omission = event.omission ?? (event.text === undefined ? 'UNAVAILABLE' : payload !== text ? 'LIMIT_REACHED' : null)
-        const eventId = randomUUID()
-        const files = [...new Set((event.files ?? []).map(safeFile).filter((file): file is string => !!file))].slice(0, 10)
-        insertEvent.run(eventId, id, ordinal, event.type, event.timestamp ?? null, event.tool ? utf8Prefix(sanitize(event.tool), 80) : null,
-          event.success === undefined ? null : Number(event.success), utf8Prefix(payload.replace(/\s+/g, ' '), 160), JSON.stringify(files), event.sourcePosition,
-          hash, bytes, omission, Number(text !== (event.text ?? '')))
-        if (bytes) insertPayload.run(eventId, payload)
-        sessionBytes += bytes; repositoryBytes += bytes
-      }
       const totals = this.db.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM events WHERE sessionId = ?').get(id) as { count: number; bytes: number }
       const finalReasons = diagnosticsFor(id)
       const coverage = finalReasons === '{}' ? 'COMPLETE' : 'PARTIAL'
       this.db.prepare('UPDATE sessions SET eventCount=?, payloadBytes=?, coverage=?, coverageReasons=? WHERE id=?').run(totals.count, totals.bytes, coverage, finalReasons, id)
-      this.registry.importedSession(provider, input.providerSessionId, id)
+      this.registry.importedSession(provider, input.providerSessionId, id, input.agent === 'codex' ? undefined : input.agent)
       this.db.prepare('UPDATE identity SET revision = revision + 1').run()
       assertCurrent()
       return { sessionId: id, revision, eventCount: totals.count, coverage, replay: false, sourceObservation: this.sourceObservation(this.session(id)), importState, coverageReasons: JSON.parse(finalReasons) }
@@ -261,6 +233,7 @@ export class SessionStore {
   sessions(filter: SessionFilter, offset: number, limit: number, accountHash?: string | null): SessionRow[] {
     if (filter.executionId || filter.artifactId || filter.commitSha || filter.pullRequest) return this.historicalSessions(filter, offset, limit, accountHash)
     const where: string[] = [], params: (string | number)[] = []
+    if (accountHash === undefined) where.push("(provider<>'codex' OR (importState='METADATA_ONLY' AND eventCount=0 AND payloadBytes=0 AND EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=sessions.id AND json_extract(access.payload,'$.origin')='CODEX_APP_SERVER' AND json_extract(access.payload,'$.archived')=1)))")
     if (accountHash !== undefined) { where.push("(provider<>'codex' OR EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=sessions.id AND json_extract(access.payload,'$.providerAccountHash')=?))"); params.push(accountHash ?? '') }
     for (const [key, column, op] of [['state', 'state', '='], ['agent', 'agent', '='], ['after', 'lastObserved', '>='], ['before', 'lastObserved', '<=']] as const) {
       if (filter[key]) { where.push(key === 'after' || key === 'before' ? `julianday(${column}) ${op} julianday(?)` : `${column} ${op} ?`); params.push(filter[key]!) }
@@ -314,6 +287,7 @@ export class SessionStore {
   }
   private historicalSessions(filter: SessionFilter, offset: number, limit: number, accountHash?: string | null): SessionRow[] {
     const { where, params } = associationQuery(filter)
+    if (accountHash === undefined) where.push("(a.provider<>'codex' OR (s.importState='METADATA_ONLY' AND s.eventCount=0 AND s.payloadBytes=0 AND EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=a.sessionId AND json_extract(access.payload,'$.origin')='CODEX_APP_SERVER' AND json_extract(access.payload,'$.archived')=1)))")
     if (accountHash !== undefined) { where.push("(a.provider<>'codex' OR EXISTS (SELECT 1 FROM session_associations access WHERE access.sessionId=a.sessionId AND json_extract(access.payload,'$.providerAccountHash')=?))"); params.push(accountHash ?? '') }
     for (const key of ['state', 'agent'] as const) { if (filter[key]) { where.push(`s.${key}=?`); params.push(filter[key]!) } }
     for (const [key, op] of [['after', '>='], ['before', '<=']] as const) { if (filter[key]) { where.push(`julianday(COALESCE(s.lastObserved, a.observedAt)) ${op} julianday(?)`); params.push(filter[key]!) } }
@@ -338,7 +312,8 @@ export class SessionStore {
     return this.db.prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY ordinal LIMIT ? OFFSET ?`).all(...params, limit, offset) as EventRow[]
   }
   event(sessionId: string, id: string): EventRow & { text: string | null } {
-    const row = this.db.prepare('SELECT e.*, p.text FROM events e LEFT JOIN event_payloads p ON p.eventId=e.id WHERE e.sessionId=? AND e.id=?').get(sessionId, id) as (EventRow & { text: string | null }) | undefined
+    const legacy = !!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='event_payloads'").get()
+    const row = this.db.prepare(`SELECT e.*, ${legacy ? 'p.text' : 'NULL AS text'} FROM events e ${legacy ? 'LEFT JOIN event_payloads p ON p.eventId=e.id' : ''} WHERE e.sessionId=? AND e.id=?`).get(sessionId, id) as (EventRow & { text: string | null }) | undefined
     if (!row) throw new Error('EVENT_UNAVAILABLE')
     return row
   }
@@ -353,7 +328,7 @@ export class SessionStore {
   diagnostics() {
     const size = (path: string) => { try { return statSync(path).size } catch { return 0 } }
     return { sessions: this.count(), payloadBytes: (this.db.prepare('SELECT COALESCE(SUM(payloadBytes), 0) AS n FROM sessions').get() as { n: number }).n,
-      databaseBytes: size(this.path), walBytes: size(this.path + '-wal'), limits: LIMITS }
+      databaseBytes: size(this.path), walBytes: size(this.path + '-wal'), storage: 'REFERENCES_ONLY', capacityQuota: null }
   }
   maintain(): void { this.db.pragma('wal_checkpoint(PASSIVE)'); this.db.pragma('incremental_vacuum(64)') }
 }

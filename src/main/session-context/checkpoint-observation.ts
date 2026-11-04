@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import type { CommandRunner } from './entire-provider'
 import { resolveCheckpointFromCommit, validateCheckpointId } from './checkpoint'
+import { entireAgent } from './entire-schema'
 
 export interface CheckpointObservation {
   state: 'VERIFIED' | 'PARTIAL' | 'MISSING' | 'UNAVAILABLE' | 'UNSUPPORTED' | 'PENDING'
@@ -10,10 +11,12 @@ export interface CheckpointObservation {
   refRevision?: string
   metadataDigest?: string
   sessionIds: string[]
+  sessionRefs?: { id: string; agent: string }[]
 }
 export async function observeCheckpoint(runner: CommandRunner, root: string, query: { checkpointId?: string; commitSha?: string }, assertActive: () => void): Promise<CheckpointObservation> {
   let checkpointId = query.checkpointId
   const sessionIds: string[] = []
+  const sessionRefs: { id: string; agent: string }[] = []
   const read = async (args: string[], limit = 32768) => {
     assertActive()
     const result = await runner('git', ['-c', 'core.fsmonitor=false', ...args], root, limit)
@@ -49,14 +52,18 @@ export async function observeCheckpoint(runner: CommandRunner, root: string, que
       let session
       try { session = JSON.parse(item.text) } catch { omitted++; continue }
       if ((session.cli_version !== undefined && session.cli_version !== '0.12.2') || (session.checkpoint_id !== undefined && session.checkpoint_id !== checkpointId) ||
-        typeof session.session_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(session.session_id) || sessionIds.includes(session.session_id)) { omitted++; continue }
-      sessionIds.push(session.session_id)
+        typeof session.session_id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(session.session_id)) { omitted++; continue }
+      let agent: string
+      try { agent = entireAgent(session.agent) } catch { omitted++; continue }
+      if (sessionRefs.some(item => item.id === session.session_id && item.agent === agent)) { omitted++; continue }
+      sessionRefs.push({ id: session.session_id, agent })
+      if (!sessionIds.includes(session.session_id)) sessionIds.push(session.session_id)
     }
     const after = await read(['rev-parse', '--verify', '--quiet', ref], 4096)
     if (after.code !== 0 || after.text.trim() !== revision) return { state: 'PENDING', reason: 'CHECKPOINT_REF_CHANGED', checkpointId, sessionIds: [] }
     const partial = omitted > 0 || top.sessions.length > 20 || !sessionIds.length
     return { state: partial ? 'PARTIAL' : 'VERIFIED', reason: partial ? 'CHECKPOINT_METADATA_PARTIAL' : 'VERIFIED', checkpointId, commitSha: query.commitSha,
-      refRevision: revision, metadataDigest: hash.digest('hex'), sessionIds }
+      refRevision: revision, metadataDigest: hash.digest('hex'), sessionIds, sessionRefs }
   } catch (error) {
     const reason = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'CHECKPOINT_METADATA_INVALID'
     if (['PROJECT_CONTEXT_CHANGED', 'WORKTREE_STALE', 'SESSION_CONTEXT_TIMEOUT'].includes(reason)) throw error

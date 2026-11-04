@@ -44,6 +44,7 @@ function fixture(repositoryId = 'A') {
     }
     entireCalls++
     if (mode === 'timeout') return { code: -1, text: '', timedOut: true, limited: false }
+    if (args[0] === 'agent') return { code: 0, text: 'Agents:\n  ✓ codex\n  ✓ antigravity\n    claude-code\n', limited: false }
     if (args[0] === 'version') return { code: 0, text: 'Entire CLI 0.12.2', limited: false }
     if (args.includes('--help')) return { code: 0, text: '--json --transcript', limited: false }
     if (mode === 'cancel') active = false
@@ -60,7 +61,7 @@ function fixture(repositoryId = 'A') {
 function checkpoint(f: ReturnType<typeof fixture>, id: string) {
   const blob = (text: string) => execFileSync('git', ['hash-object', '-w', '--stdin'], { cwd: f.root, input: text, encoding: 'utf8', windowsHide: true }).trim()
   const tree = (text: string) => execFileSync('git', ['mktree'], { cwd: f.root, input: text, encoding: 'utf8', windowsHide: true }).trim()
-  const session = (session_id: string) => tree('100644 blob ' + blob(JSON.stringify({ session_id, checkpoint_id: id, cli_version: '0.12.2' })) + '\tmetadata.json\n')
+  const session = (session_id: string) => tree('100644 blob ' + blob(JSON.stringify({ session_id, agent: 'codex', checkpoint_id: id, cli_version: '0.12.2' })) + '\tmetadata.json\n')
   const top = blob(JSON.stringify({ checkpoint_id: id, cli_version: '0.12.2', sessions: [{}, {}] }))
   const revision = tree('040000 tree ' + session('captured-session') + '\t0\n040000 tree ' + session('second-session') + '\t1\n100644 blob ' + top + '\tmetadata.json\n')
   f.git('update-ref', 'refs/entire/checkpoints/' + id.slice(-2) + '/' + id, revision)
@@ -105,7 +106,7 @@ it('separates configured hooks from capture, reuses observations without CLI wor
   const configuration = JSON.parse(readFileSync(codex, 'utf8'))
   configuration.hooks.SessionStart[0].hooks[0].command = 'where.exe entire >nul 2>nul & entire hooks codex session-start'
   writeFileSync(codex, JSON.stringify(configuration))
-  expect(await f.inspect()).toMatchObject({ state: 'UNAVAILABLE', reason: 'HOOK_INCOMPATIBLE', nextEvidence: 'INSPECT_CODEX_HOOKS' })
+  expect(await f.inspect()).toMatchObject({ state: 'UNAVAILABLE', reason: 'HOOK_INCOMPATIBLE', nextEvidence: 'INSPECT_ENTIRE_INTEGRATION' })
   expect(f.store().captureHealth({ ...f.target, generation: 'c'.repeat(64) }, 'worktree')).toBeUndefined()
   const b = fixture('B')
   rmSync(join(b.root, '.entire/settings.local.json'))
@@ -136,24 +137,15 @@ it('never reports capture readiness after provider timeout', async () => {
   f.mode('timeout')
   expect(await f.inspect()).toMatchObject({ state: 'UNAVAILABLE', reason: 'PROVIDER_TIMEOUT', capture: { state: 'UNOBSERVED' } })
 }, 15000)
-it('upgrades v4 additively without changing transcript bytes or legacy cursors and rejects future schemas', () => {
+it('distinguishes installed CLI integrations, missing hooks and unsupported editors without attributing another agent capture', async () => {
   const f = fixture()
-  const old = f.store().ingest({ providerSessionId: 'legacy', providerVersion: 'fixture', agent: 'codex', state: 'ENDED', endedAt: '2026-01-01T00:00:00Z',
-    coverage: 'COMPLETE', importState: 'TRANSCRIPT_IMPORTED', sourceDigest: 'legacy', sourceBytes: 15 }, [{ type: 'INPUT', sourcePosition: 1, text: 'legacy payload 🧪' }])
-  const row = f.store().events(old.sessionId, {}, 0, 1)[0], payload = f.store().event(old.sessionId, row.id)
-  const cursor = f.store().cursor({ legacy: true }, 1), path = f.store().path
-  f.store().close()
-  const db = new Database(path)
-  db.exec('DROP TABLE capture_health_latest; DROP TABLE capture_health')
-  db.pragma('user_version=4'); db.close()
-  f.restart()
-  expect(f.store().event(old.sessionId, row.id)).toEqual(payload)
-  expect(f.store().offset(cursor, { legacy: true })).toBe(1)
-  expect(() => new SessionStore(path, 'foreign')).toThrow('REPOSITORY_MISMATCH')
-  f.store().close()
-  const future = new Database(path); future.pragma('user_version=999'); future.close()
-  expect(() => f.restart()).toThrow('SCHEMA_UNSUPPORTED')
-})
+  const cli = await f.inspect({ agent: 'antigravity' })
+  expect(cli).toMatchObject({ state: 'READY_CONFIGURED', capture: { state: 'UNOBSERVED' } })
+  expect(cli.integrations).toContainEqual(expect.objectContaining({ agent: 'antigravity', surface: 'CLI', state: 'READY_CONFIGURED' }))
+  expect(await f.inspect({ agent: 'claude-code' })).toMatchObject({ state: 'UNAVAILABLE', reason: 'HOOKS_MISSING' })
+  for (const agent of ['cline', 'antigravity-ide']) expect(await f.inspect({ agent })).toMatchObject({ state: 'UNAVAILABLE', integrationState: 'UNSUPPORTED', reason: 'INTEGRATION_UNAVAILABLE' })
+  expect(f.store().count()).toBe(0)
+}, 20000)
 it('exposes capture diagnostics through System Health without adding a transcript or capture tool', async () => {
   const f = fixture()
   const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'],
