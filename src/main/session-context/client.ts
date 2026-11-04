@@ -4,11 +4,8 @@ import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
 import { parseSessionRefresh, parseSessionList, parseCaptureHealth } from './mcp'
-import { queryCodexArchive, type AuthorizedCodexArchiveConnection } from './codex-archive'
-import type { SessionTargetResolver } from './target'
+import type { SessionTargetResolver, SessionTargetSelection } from './target'
 import { isLiveSessionTool, parseLiveSessionQuery } from './entire-live'
-import { digest } from './privacy'
-import type { CodexArchiveReadiness } from '../../shared/types/codex-archive-types'
 
 const failure = (code: string, phase?: string): McpToolResult => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ code, ...(phase ? { phase } : {}) }) }] })
 interface Generation { worker: Worker; cancellation: Int32Array; closing: boolean }
@@ -22,7 +19,6 @@ interface Request {
   phase: string
 }
 export class SessionContextClient implements SessionContextPort {
-  private archiveReadiness: CodexArchiveReadiness = { state: 'NOT_CONFIGURED' }
   private generation?: Generation
   private terminal = false
   private retiring: Promise<void> = Promise.resolve()
@@ -33,17 +29,7 @@ export class SessionContextClient implements SessionContextPort {
     private readonly workerPath = join(__dirname, 'session-context-worker.js'), private readonly resolveTarget?: SessionTargetResolver,
     private readonly timeoutMs?: number,
     private readonly authorizeAssociation?: (request: ReturnType<typeof parseSessionRefresh>) => Promise<{ sourceRevision: number; sourceHash: string }>,
-    private archiveConnection?: AuthorizedCodexArchiveConnection,
-    private readonly registryReader?: RegistryReader) { if (archiveConnection) this.archiveReadiness = { state: 'READY', version: archiveConnection.version } }
-  setArchiveConnection(connection: AuthorizedCodexArchiveConnection | undefined, readiness: CodexArchiveReadiness): void {
-    if (connection && connection.repositoryId !== this.repositoryId) throw new Error('REPOSITORY_MISMATCH')
-    const changed = this.archiveConnection !== connection
-    this.archiveConnection = connection; this.archiveReadiness = { ...readiness }
-    if (changed) {
-      if (this.generation) void this.retire(this.generation, 'ARCHIVE_CONNECTION_CHANGED')
-      for (const id of this.pending.keys()) this.finish(id, failure('ARCHIVE_CONNECTION_CHANGED'))
-    }
-  }
+    private readonly registryReader?: RegistryReader) {}
   private active(): boolean {
     if (!this.isCurrent()) void this.dispose()
     return !this.terminal
@@ -83,7 +69,7 @@ export class SessionContextClient implements SessionContextPort {
     const worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: cancellation.buffer }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
     const generation = { worker, cancellation, closing: false }
     this.generation = generation
-    worker.on('message', async (message: { id: number; result?: McpToolResult; validate?: number; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] } }) => {
+    worker.on('message', async (message: { id: number; result?: McpToolResult; validate?: number; sourceSelection?: SessionTargetSelection; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] } }) => {
       if (generation !== this.generation || generation.closing) return
       const request = this.pending.get(message.id)
       if (!request || request.generation !== generation) return
@@ -102,13 +88,20 @@ export class SessionContextClient implements SessionContextPort {
       }
       if (message.validate !== undefined) {
         let code: string | undefined
+        let target: { root: string; fingerprint: string; selection: SessionTargetSelection } | undefined
         try {
+          if (message.sourceSelection) {
+            if (!this.resolveTarget) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+            const resolved = await this.resolveTarget(message.sourceSelection)
+            request.validate = resolved.validate
+            target = { root: resolved.root, fingerprint: resolved.fingerprint, selection: message.sourceSelection }
+          }
           if (!request.validate) throw new Error('WORKTREE_STALE')
           await request.validate()
         } catch (error) { code = error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'WORKTREE_STALE' }
         if (generation !== this.generation || generation.closing || !this.pending.has(message.id) || !this.active()) return
         if (Date.now() >= request.deadline) { this.expire(message.id); return }
-        worker.postMessage({ validation: message.validate, code })
+        worker.postMessage({ validation: message.validate, code, ...(target ? { target } : {}) })
         return
       }
       if (message.result) this.finish(message.id, message.result)
@@ -143,7 +136,7 @@ export class SessionContextClient implements SessionContextPort {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
-      const timeoutMs = this.timeoutMs ?? (name === 'reconcile_checkpoint_registry' || name === 'list_agent_sessions' || name === 'inspect_capture_health' ? 20_000 : isLiveSessionTool(name) ? 20_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
+      const timeoutMs = this.timeoutMs ?? (name === 'reconcile_checkpoint_registry' || name === 'list_agent_sessions' || name === 'inspect_capture_health' ? 20_000 : isLiveSessionTool(name) ? 20_000 : name === 'read_agent_session_event' ? 14_000 : name === 'refresh_agent_sessions' ? (parseSessionRefresh(args).sessionId ? 14_000 : 12_000) : (name === 'inspect_code_provenance' || name === 'inspect_entire_checkpoint') ? 12_000 : 5000)
       const deadline = Date.now() + timeoutMs
       const request: Request = { resolve, deadline, phase: 'worker-recovery', timer: setTimeout(() => this.expire(id), timeoutMs) }
       this.pending.set(id, request)
@@ -153,7 +146,6 @@ export class SessionContextClient implements SessionContextPort {
           if (!this.pending.has(id) || !this.active()) return
           let target
           let liveTargets
-          let archiveObservation
           if (name === 'inspect_capture_health') {
             const query = parseCaptureHealth(args)
             if (query.worktreeId && this.resolveTarget) {
@@ -164,20 +156,7 @@ export class SessionContextClient implements SessionContextPort {
             request.validate = target.validate
           }
           if (name === 'list_agent_sessions') {
-            let query
-            try { query = parseSessionList(args) } catch { throw new Error('INVALID_ARGUMENT') }
-            if (query.includeArchived && !query.cursor) {
-              request.abort = new AbortController()
-              if (this.resolveTarget?.current && this.archiveConnection) {
-                try {
-                  target = await this.resolveTarget.current()
-                  request.validate = target.validate
-                } catch { target = undefined }
-              }
-              archiveObservation = await queryCodexArchive(target ? this.archiveConnection : undefined, this.repositoryId, target?.root ?? this.root, request.abort.signal, query.archiveCursor)
-              archiveObservation.providerState = this.archiveReadiness.state
-              if (!target && this.archiveConnection) archiveObservation.reason = 'WORKTREE_UNAVAILABLE'
-            }
+            try { parseSessionList(args) } catch { throw new Error('INVALID_ARGUMENT') }
           }
           if (isLiveSessionTool(name)) {
             const q = parseLiveSessionQuery(name, args)
@@ -232,7 +211,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(this.archiveConnection ? { archiveAccountHash: digest(this.archiveConnection.accountIdentity) } : {}), ...(archiveObservation ? { archiveObservation } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }

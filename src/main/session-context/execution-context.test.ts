@@ -100,7 +100,7 @@ it('returns metadata evidence only in RELATION_DETAIL and bounds unrelated Conti
   const serialized = JSON.stringify(detail)
   for (const field of ['transcript', 'rawMarkdown', 'stdout', 'cwd', 'sourceCode', 'tokenUsage']) expect(serialized).not.toContain('"' + field + '"')
 })
-it('keeps evicted sessions navigable through local UUID or exact provider identity without resurrecting payloads', async () => {
+it('retains historical session references through local UUID or exact provider identity without quota eviction', async () => {
   const f = fixture()
   const session = f.store.ingest({ providerSessionId: 'session-one', providerVersion: 'fixture', agent: 'codex', state: 'ENDED', endedAt: '2026-01-01T00:00:00Z', coverage: 'COMPLETE', sourceDigest: digest('fixture'), sourceBytes: 0 }, [])
   composite(f)
@@ -108,8 +108,8 @@ it('keeps evicted sessions navigable through local UUID or exact provider identi
   expect(before.nodes.some((n: any) => n.payloadState === 'IMPORTED')).toBe(true)
   for (let i = 0; i < 500; i++) f.store.ingest({ providerSessionId: 'retention-' + i, providerVersion: 'fixture', agent: 'codex', state: 'ENDED', endedAt: '2026-02-01T00:00:00Z', coverage: 'COMPLETE', sourceDigest: digest(String(i)), sourceBytes: 0 }, [])
   const after = data(await f.call({ selector: { type: 'SESSION', provider: 'entire', id: 'session-one' } }))
-  expect(after.nodes.some((n: any) => n.payloadState === 'SESSION_EVICTED')).toBe(true)
-  expect(() => f.store.session(session.sessionId)).toThrow('SESSION_EVICTED')
+  expect(after.nodes.some((n: any) => n.payloadState === 'IMPORTED')).toBe(true)
+  expect(f.store.session(session.sessionId).eventCount).toBe(0)
 })
 it('hides Codex identity and paths from other accounts while preserving authorized Entire relations', async () => {
   const f = fixture()

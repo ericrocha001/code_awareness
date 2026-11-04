@@ -38,18 +38,6 @@ import type { RepositoryRecord } from '../shared/types/repository-catalog-types'
 import type { GitHubCreateRepositoryInput, GitHubOperationResult, GitHubPublishRepositoryInput, GitHubStatusProjection } from '../shared/types/github-types'
 
 contextBridge.exposeInMainWorld('codeAwareness', {
-  codexArchive: {
-    onChanged: callback => {
-      const listener = (_event: Electron.IpcRendererEvent, readiness: import('../shared/types/codex-archive-types').CodexArchiveReadiness) => callback(readiness)
-      ipcRenderer.on('codex-archive:changed', listener)
-      return () => { ipcRenderer.removeListener('codex-archive:changed', listener) }
-    },
-    inspect: () => ipcRenderer.invoke('codex-archive:inspect'),
-    enable: () => ipcRenderer.invoke('codex-archive:enable'),
-    disable: () => ipcRenderer.invoke('codex-archive:disable'),
-    select: candidateId => ipcRenderer.invoke('codex-archive:select', candidateId),
-    chooseAdvanced: () => ipcRenderer.invoke('codex-archive:choose-advanced')
-  } satisfies import('../shared/types/codex-archive-types').CodexArchiveApi,
   localMcpClients: {
     snapshot: () => ipcRenderer.invoke('local-mcp:snapshot'),
     onChanged: callback => {

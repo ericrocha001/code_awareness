@@ -4,7 +4,6 @@ import { EntireProvider, runReadOnly } from './entire-provider'
 import { executeSessionTool, executeLiveSessionTool, type SessionToolName } from './mcp'
 import { isLiveSessionTool } from './entire-live'
 import { sourceFingerprint, type SessionTargetSelection, type LiveSessionTarget } from './target'
-import type { ArchiveObservation } from './codex-archive'
 import type { RegistryBatch, RegistryReader } from './checkpoint-registry'
 
 const { storageBase, repositoryId, root, cancellation } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer }
@@ -15,16 +14,17 @@ const storeIdentity = { path: sessionStorePath(storageBase, repositoryId), repos
 let store: SessionStore | undefined
 let pending = 0, closing = false
 let validationId = 0
-const validations = new Map<number, { resolve: () => void; reject: (error: Error) => void }>()
+type ResolvedTarget = { root: string; fingerprint: string; selection: SessionTargetSelection }
+const validations = new Map<number, { resolve: (target?: ResolvedTarget) => void; reject: (error: Error) => void }>()
 const registryReads = new Map<number, { resolve: (batches: RegistryBatch[]) => void; reject: (error: Error) => void }>()
-const validateTarget = (id: number) => new Promise<void>((resolve, reject) => {
+const validateTarget = (id: number, sourceSelection?: SessionTargetSelection) => new Promise<ResolvedTarget | undefined>((resolve, reject) => {
   assertActive()
   const validation = ++validationId
   validations.set(validation, { resolve, reject })
-  parentPort?.postMessage({ id, validate: validation })
+  parentPort?.postMessage({ id, validate: validation, ...(sourceSelection ? { sourceSelection } : {}) })
 })
 const close = () => { if (closing && !pending) { store?.close(); parentPort?.close() } }
-parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; archiveAccountHash?: string; archiveObservation?: ArchiveObservation; liveTargets?: LiveSessionTarget[]; target?: { root: string; fingerprint: string; selection: SessionTargetSelection } } | { close: true } | { validation: number; code?: string } | { registryResult: number; batches: RegistryBatch[]; code?: string }) => {
+parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string }) => {
   if ('registryResult' in message) {
     const entry = registryReads.get(message.registryResult); registryReads.delete(message.registryResult)
     if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve(message.batches)
@@ -32,7 +32,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
   }
   if ('validation' in message) {
     const entry = validations.get(message.validation); validations.delete(message.validation)
-    if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve()
+    if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve(message.target)
     return
   }
   if ('close' in message) {
@@ -49,7 +49,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
   if (closing) return
   pending++
   try {
-    const target = message.target
+    let target = message.target
     const assertRequest = () => {
       assertActive()
       if (Date.now() >= message.deadline) throw new Error('SESSION_CONTEXT_TIMEOUT')
@@ -64,19 +64,23 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       }
     }
     const requestStore = isLiveSessionTool(message.name) ? storeIdentity : (store ??= new SessionStore(storeIdentity.path, repositoryId))
+    if (message.name === 'read_agent_session_event' && store && message.args && typeof message.args === 'object' && 'sessionId' in message.args && typeof message.args.sessionId === 'string') {
+      const selection = store.references.source(message.args.sessionId)?.locator.target
+      if (selection) {
+        target = await validateTarget(message.id, selection)
+        if (!target || target.selection.worktreeId !== selection.worktreeId || target.selection.generation !== selection.generation) throw new Error('WORKTREE_STALE')
+        assertRequest()
+      }
+    }
     const readRegistry: RegistryReader = request => new Promise((resolve, reject) => {
       assertRequest()
       const token = ++validationId
       registryReads.set(token, { resolve, reject })
       parentPort?.postMessage({ id: message.id, registryRead: { token, request } })
     })
-    if (message.archiveObservation && store && target) {
-      await validateTarget(message.id)
-      assertRequest()
-    }
     const provider = new EntireProvider(requestStore, target?.root ?? root, assertRequest,
       (exe, args, cwd, limit, consume, timeout) => runReadOnly(exe, args, cwd, limit, consume, timeout, abort.signal),
-      target || message.liveTargets ? () => validateTarget(message.id) : async () => {},
+      target || message.liveTargets ? async () => { await validateTarget(message.id) } : async () => {},
       phase => { if (!closing) parentPort?.postMessage({ id: message.id, phase }) }, target?.selection)
     const result = isLiveSessionTool(message.name)
       ? await executeLiveSessionTool(provider, message.name, message.args, assertRequest, message.liveTargets ?? [])
@@ -90,11 +94,12 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
           message.liveTargets ?? [],
           (exe, args, cwd, limit, consume, timeout) => runReadOnly(exe, args, cwd, limit, consume, timeout, abort.signal),
           target?.root ?? root,
-          message.archiveObservation,
-          readRegistry,
-          message.archiveAccountHash
+          undefined,
+          readRegistry
         )
     if (!closing && !Atomics.load(cancelled, 0)) parentPort?.postMessage({ id: message.id, result })
+  } catch (error) {
+    if (!closing && !Atomics.load(cancelled, 0)) parentPort?.postMessage({ id: message.id, result: { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE' }) }] } })
   }
   finally { pending--; close() }
 })

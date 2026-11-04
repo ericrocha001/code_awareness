@@ -117,7 +117,6 @@ declare global {
       chooseCliMode: (mode: import('../../shared/types/cli-policy-types').CliMode) => Promise<{ accepted: boolean }>
       stopCliExecution: () => Promise<{ stopped: boolean }>
       localMcpClients: import('../../shared/types/local-mcp-client-types').LocalMcpClientApi
-      codexArchive: import('../../shared/types/codex-archive-types').CodexArchiveApi
       onChannelChanged: (callback: (state: ChannelState) => void) => () => void
       getSystemHealthState: () => Promise<SystemHealthState>
       getSystemHealthDiagnosticReport: () => Promise<string>

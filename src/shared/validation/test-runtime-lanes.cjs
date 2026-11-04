@@ -1,5 +1,7 @@
 const nativeTestFiles = Object.freeze([
-  'src/main/session-context/codex-archive-integration.test.ts',
+    'src/main/session-context/reference-reading.test.ts',
+    'src/main/session-context/reference-index-integrity.test.ts',
+    'src/main/session-context/session-namespace-migration.test.ts',
   'src/main/session-context/execution-context.test.ts',
   'src/main/session-context/checkpoint-registry.test.ts',
   'src/main/session-context/capture-health.test.ts',

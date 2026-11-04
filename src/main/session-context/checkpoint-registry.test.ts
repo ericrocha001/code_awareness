@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionStore, sessionStorePath } from './store'
 import { digest } from './privacy'
+import { legacyStoreFixture } from './fixtures/legacy-store-fixture'
 import { REGISTRY_SCHEMA, type RegistryBatch } from './checkpoint-registry'
 import { reconcileRegistry } from './registry-reconciliation'
 import { registrySources } from './registry-sources'
@@ -20,15 +21,20 @@ import { GitHubIntegrationService } from '../github/github-integration-service'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const f of cleanup.reverse()) f(); cleanup.length = 0 })
-function fixture() {
+function fixture(withLegacy = false) {
   const base = mkdtempSync(join(tmpdir(), 'checkpoint-registry-')), path = sessionStorePath(base, 'repo')
+  if (withLegacy) {
+    const legacy = legacyStoreFixture(path, 'repo', base)
+    legacy.ingest({ providerSessionId: 'legacy', providerVersion: 'fixture', agent: 'codex', state: 'ENDED', endedAt: '2026-01-01T00:00:00Z', coverage: 'COMPLETE', sourceDigest: digest('old'), sourceBytes: 8, importState: 'TRANSCRIPT_IMPORTED' }, [{ type: 'INPUT', sourcePosition: 1, text: 'private 🧪 payload' }])
+    legacy.close()
+  }
   let store = new SessionStore(path, 'repo')
   cleanup.push(() => { store.close(); rmSync(base, { recursive: true, force: true }) })
   return { base, path, store: () => store, restart: () => { store.close(); store = new SessionStore(path, 'repo') } }
 }
 const commit = 'e9343e7998b877682604bb772a7ecb31bb8b81e5', checkpoint = '01M6EGW7096RMXJE1VPD76NDSQ'
 const runner: CommandRunner = async (_exe, args) => {
-  const text = args.includes('log') ? 'Subject\nEntire-Checkpoint: ' + checkpoint : args.includes('rev-parse') ? 'a'.repeat(40) : args.some(a => a.endsWith(':metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, cli_version: '0.12.2', sessions: [{}, {}] }) : args.some(a => a.endsWith(':0/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, session_id: 'session-one' }) : args.some(a => a.endsWith(':1/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, session_id: 'session-two' }) : ''
+  const text = args.includes('log') ? 'Subject\nEntire-Checkpoint: ' + checkpoint : args.includes('rev-parse') ? 'a'.repeat(40) : args.some(a => a.endsWith(':metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, cli_version: '0.12.2', sessions: [{}, {}] }) : args.some(a => a.endsWith(':0/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'codex', session_id: 'session-one' }) : args.some(a => a.endsWith(':1/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'antigravity', session_id: 'session-two' }) : ''
   return { text, code: 0, limited: false }
 }
 const absent: CommandRunner = async (_exe, args) => ({ text: args.includes('log') ? 'No checkpoint' : 'a'.repeat(40), code: 0, limited: false })
@@ -36,8 +42,7 @@ function batch(revision = '1'): RegistryBatch {
   return { repositoryId: 'repo', source: 'CONTINUUM:handoff', revision, status: 'COMPLETE', edges: [{ from: { kind: 'ARTIFACT', id: 'handoff' }, relation: 'implements', to: { kind: 'ARTIFACT', id: 'plan' }, evidenceKind: 'CONTINUUM_TYPED_RELATION', evidenceRef: 'handoff', digest: digest('artifact'), freshness: 'OBSERVED_SNAPSHOT' }] }
 }
 it('migrates v4 without changing event bytes, ids or cursors; rejects future schemas and foreign namespaces', () => {
-  const f = fixture(), s = f.store()
-  const result = s.ingest({ providerSessionId: 'legacy', providerVersion: 'fixture', agent: 'codex', state: 'ENDED', endedAt: '2026-01-01T00:00:00Z', coverage: 'COMPLETE', sourceDigest: digest('old'), sourceBytes: 8, importState: 'TRANSCRIPT_IMPORTED' }, [{ type: 'INPUT', sourcePosition: 1, text: 'private 🧪 payload' }])
+  const f = fixture(true), s = f.store(), result = { sessionId: s.byProvider('legacy')!.id }
   const event = s.events(result.sessionId, {}, 0, 1)[0], before = s.event(result.sessionId, event.id), cursor = s.cursor({ old: true }, 1)
   const db = new Database(f.path)
   for (const table of ['checkpoint_registry', 'registry_sources', 'registry_edges', 'registry_entities']) db.exec('DROP TABLE ' + table)
@@ -70,7 +75,7 @@ it('discovers checkpoint original identity and two sessions without import or ma
   f.restart()
   const map = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'COMMIT', id: commit }, () => {}) as any
   expect(map.edges).toHaveLength(3)
-  expect(map.edges.filter((e: any) => e.to.kind === 'SESSION').map((e: any) => e.to.id).sort()).toEqual(['entire:session-one', 'entire:session-two'])
+  expect(map.edges.filter((e: any) => e.to.kind === 'SESSION').map((e: any) => e.to.id).sort()).toEqual(['entire-agent:antigravity:session-two', 'entire:session-one'])
   expect(map.edges.some((e: any) => e.evidenceKind === 'CHECKPOINT_VERIFIED')).toBe(true)
   expect(f.store().count()).toBe(0)
   const pending = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'CHECKPOINT', id: checkpoint }, () => {}) as any
@@ -157,7 +162,7 @@ it('reads canonical sources through the existing worker boundary and returns a c
   const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
   writeFileSync(workerPath, `require = require('node:module').createRequire(${JSON.stringify(join(root, 'package.json'))});\n` + code)
   const read = vi.fn(async () => [batch()])
-  const client = new SessionContextClient(f.base, 'repo', root, () => true, workerPath, undefined, undefined, undefined, undefined, read)
+  const client = new SessionContextClient(f.base, 'repo', root, () => true, workerPath, undefined, undefined, undefined, read)
   try {
     const result = await client.call('list_agent_sessions', { artifactId: 'plan' })
     expect(result.isError).toBeFalsy()

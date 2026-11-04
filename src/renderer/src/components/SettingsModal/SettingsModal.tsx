@@ -4,7 +4,6 @@ import { NAV_ITEMS, type NavId } from '../../config/navigation'
 import { ToggleSwitch } from '../ToggleSwitch/ToggleSwitch'
 import { updateSettings } from '../../utils/update-settings'
 import './SettingsModal.css'
-import { CodexArchiveSettings } from './CodexArchiveSettings'
 
 interface SettingsModalProps {
   hidden: NavId[]
@@ -69,7 +68,6 @@ export function SettingsModal({ hidden, ready, saving, error, onSetVisible, onRe
       <span className="settings-row-label">Fetch automático condicionado ao remoto</span>
       <ToggleSwitch aria-label="Fetch automático condicionado ao remoto" checked={automaticFetch === true} disabled={automaticFetch === null || gitSaving} onChange={value => void changeAutomaticFetch(value)} />
     </div>{gitError && <p role="alert">{gitError}</p>}</div>
-    <CodexArchiveSettings />
     </div>
     <footer className="settings-footer">
       <p>Home e Configurações ficam sempre disponíveis.</p>

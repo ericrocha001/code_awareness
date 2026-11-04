@@ -3,6 +3,7 @@ import type { CommandRunner } from './entire-provider'
 import { observeCheckpoint } from './checkpoint-observation'
 import { resolveCheckpointFromCommit } from './checkpoint'
 import { digest } from './privacy'
+import { sessionIdentity } from './session-identity'
 import type { RegistryBatch, RegistryEntity, RegistryReader } from './checkpoint-registry'
 import type { CaptureHealthObservation } from './capture-health-types'
 
@@ -23,7 +24,7 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
   if (capture?.capture.providerSessionId && capture.capture.state === 'OBSERVED') {
     const from: RegistryEntity = { kind: 'WORKTREE', id: `${capture.worktreeId}:${capture.generation}` }
     apply({ repositoryId: store.repositoryId, source: `CAPTURE:${from.id}`, revision: capture.sourceFingerprint + ':' + capture.policyDigest + ':' + capture.capture.providerSessionId, status: 'COMPLETE',
-      edges: [{ from, relation: 'observed-session', to: { kind: 'SESSION', id: 'entire:' + capture.capture.providerSessionId }, evidenceKind: 'PROVIDER_OBSERVED', evidenceRef: capture.configurationDigest,
+      edges: [{ from, relation: 'observed-session', to: { kind: 'SESSION', id: sessionIdentity('entire', capture.capture.providerSessionId, capture.capture.agent) }, evidenceKind: 'PROVIDER_OBSERVED', evidenceRef: capture.configurationDigest,
         digest: digest(JSON.stringify(capture.capture)), freshness: 'OBSERVED_SNAPSHOT' }] })
   }
   let batches: RegistryBatch[] = []
@@ -76,12 +77,12 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
     if (observation.checkpointId) {
       const checkpoint: RegistryEntity = { kind: 'CHECKPOINT', id: observation.checkpointId }
       entities.push(checkpoint)
-      registry.checkpoint(checkpoint.id, observation.refRevision ?? 'UNOBSERVED', observation.state, observation.metadataDigest ?? revision, observation.sessionIds)
+      registry.checkpoint(checkpoint.id, observation.refRevision ?? 'UNOBSERVED', observation.state, observation.metadataDigest ?? revision, observation.sessionIds, observation.sessionRefs)
       if (observation.refRevision && observation.metadataDigest && ['VERIFIED', 'PARTIAL'].includes(observation.state)) {
         const evidence = { evidenceRef: checkpoint.id, digest: observation.metadataDigest, freshness: 'OBSERVED_SNAPSHOT' }
         if (query.commitSha && observation.commitSha) edges.push({ from: { kind: 'COMMIT', id: query.commitSha }, relation: 'checkpoint', to: checkpoint, evidenceKind: 'CHECKPOINT_VERIFIED', ...evidence })
         apply({ repositoryId: store.repositoryId, source: 'ENTIRE:' + checkpoint.id, revision: observation.refRevision, status: observation.state === 'VERIFIED' ? 'COMPLETE' : 'PARTIAL',
-          entities: [checkpoint], edges: observation.sessionIds.map(id => ({ from: checkpoint, relation: 'contains-session', to: { kind: 'SESSION', id: 'entire:' + id }, evidenceKind: 'CHECKPOINT_SESSION_METADATA', ...evidence })) })
+          entities: [checkpoint], edges: (observation.sessionRefs ?? observation.sessionIds.map(id => ({ id, agent: 'codex' }))).map(session => ({ from: checkpoint, relation: 'contains-session', to: { kind: 'SESSION', id: sessionIdentity('entire', session.id, session.agent) }, evidenceKind: 'CHECKPOINT_SESSION_METADATA', ...evidence })) })
       }
     }
     apply({ repositoryId: store.repositoryId, source, revision, status: observation.reason === 'SOURCE_IDENTITY_CONFLICT' ? 'CONFLICT' : observation.state === 'VERIFIED' ? query.commitSha ? 'COMPLETE' : 'PENDING_COMMIT_ASSOCIATION' : observation.state === 'MISSING' ? 'CHECKPOINT_NOT_OBSERVED' : observation.state, entities, edges })

@@ -44,8 +44,6 @@ import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { SessionContextClient } from './session-context/client'
 import { sessionTargetResolver } from './session-context/target'
 import { registrySources } from './session-context/registry-sources'
-import { CodexArchiveBridge } from './session-context/codex-archive-bridge'
-import { registerCodexArchiveHandlers } from './ipc/codex-archive-handler'
 import { registerApplicationShutdown } from './application-shutdown'
 import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
 import { NgrokTransport } from './mcp/connection/ngrok-transport'
@@ -174,7 +172,6 @@ const runtimeRestart = new RuntimeRestartController(
 let activeValidationExecution: ValidationExecution | null = null
 let activeCliExecution: CliExecutionService | null = null
 let activeSessionContext: SessionContextClient | undefined
-let activeCodexArchive: CodexArchiveBridge | undefined
 let sessionProjectionSubscriptions: (() => void)[] = []
 let activeWorktreeValidation: GitWorktreeValidation | null = null
 let diagnosticInstallationId: string | null = null
@@ -507,9 +504,6 @@ app.whenReady().then(async () => {
     boundProjectRevision = revision
     for (const unsubscribe of sessionProjectionSubscriptions) unsubscribe()
     sessionProjectionSubscriptions = []
-    activeCodexArchive?.disable()
-    activeCodexArchive = undefined
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('codex-archive:changed', { state: 'NOT_CONFIGURED' })
     activeSessionContext?.dispose()
     activeSessionContext = undefined
     if (!project) {
@@ -594,20 +588,13 @@ app.whenReady().then(async () => {
     gitOperations.bindManagementPublicationPolicy(branch => githubIntegration.managementPublicationPolicy(project.path, branch))
     gitOperations.bindAtlasPullRequests((inventory, force) => githubIntegration.branchPullRequests(project.path, inventory, force))
     const sessionIsCurrent = () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision && repositoryCatalog?.findByPath(project.path)?.id === gitRepositoryId
-    if (gitRepositoryId) activeCodexArchive = new CodexArchiveBridge({ repositoryId: gitRepositoryId, root: project.path, isCurrent: sessionIsCurrent,
-      changed: (connection, readiness) => {
-        if (!sessionIsCurrent()) return
-        activeSessionContext?.setArchiveConnection(connection, readiness)
-        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('codex-archive:changed', readiness)
-      },
-    })
     if (gitRepositoryId) activeSessionContext = new SessionContextClient(join(app.getPath('userData'), 'continuum'), gitRepositoryId, project.path, sessionIsCurrent, undefined,
       gitOperations.worktrees ? sessionTargetResolver(gitOperations.worktrees, () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') }) : undefined,
       undefined, async request => {
         if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED')
         if (continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('REPOSITORY_MISMATCH')
         return authorizeHandoffAssociation(continuumSession.getActiveService(), validationLedger, request)
-      }, undefined, registrySources({ repositoryId: gitRepositoryId, root: project.path,
+      }, registrySources({ repositoryId: gitRepositoryId, root: project.path,
         continuum: () => continuumSession.getActiveSession()?.repositoryId === gitRepositoryId ? continuumSession.getActiveService() : null,
         ledger: validationLedger, github: githubIntegration,
         networkAllowed: () => settingsService.loadSettings().gitManagement?.automaticFetch !== false,
@@ -687,8 +674,6 @@ app.whenReady().then(async () => {
   app.on('before-quit', unsubscribeContextChannel)
   registerChannelHandlers(channelProjection)
   registerLocalMcpClientHandlers(createDesktopClientSetup(app, process.resourcesPath), process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href)
-  registerCodexArchiveHandlers(() => activeCodexArchive, () => mainWindow, process.env.ELECTRON_RENDERER_URL || pathToFileURL(join(__dirname, '../renderer/index.html')).href)
-  app.on('before-quit', () => { activeCodexArchive?.disable() })
   registerSystemHealthHandlers(systemHealth)
   try {
     const installPath = desktopProfilePaths(app.getPath('userData')).installationPath

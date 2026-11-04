@@ -66,6 +66,7 @@ export const SYSTEM_HEALTH_MCP_TOOL: McpToolDefinition = {
       worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' },
       generation: { type: 'string', pattern: '^[a-f0-9]{64}$' },
       cycleId: { type: 'string', minLength: 1, maxLength: 200 },
+      agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$', description: 'Session Context: Entire integration name. antigravity identifies CLI only; unknown integrations remain unsupported.' },
       commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$' },
       refresh: { type: 'boolean' }
     },

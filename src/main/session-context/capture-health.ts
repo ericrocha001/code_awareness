@@ -11,6 +11,7 @@ import type { CaptureHealthObservation } from './capture-health-types'
 
 export const captureHealthQuery = z.object({ worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(), generation: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   cycleId: z.string().min(1).max(200).default('worktree'), trigger: z.enum(['INSPECT', 'RECHECK', 'BEGIN', 'LOCAL_COMMIT']).default('INSPECT'),
+  agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional(),
   commitSha: z.string().regex(/^[a-f0-9]{40}$/).optional() }).strict().refine(q => !q.worktreeId === !q.generation)
 type Query = z.infer<typeof captureHealthQuery>
 const pathsCache = new Map<string, { base: string; hooks: string[] }>()
@@ -63,7 +64,7 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
   } catch {}
   const files = [providerPath, join(root, '.entire/settings.local.json'), join(dirs.common, 'config'), join(dirs.admin, 'config.worktree'),
     join(homedir(), '.gitconfig'), join(homedir(), '.config/git/config'), codex.path, ...(executable && isAbsolute(executable) ? [executable] : [])]
-  const base = digest(JSON.stringify(files.map(marker)))
+  const base = digest(JSON.stringify([files.map(marker), query.agent ?? 'all']))
   const key = JSON.stringify([store.repositoryId, target.worktreeId, target.generation])
   const prior = store.captureHealth(target, query.cycleId)
   let cached = pathsCache.get(key)
@@ -99,8 +100,12 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
     } catch (error) { hooks.git = (error as NodeJS.ErrnoException).code === 'ENOENT' ? 'HOOK_MISSING' : 'HOOK_INCOMPATIBLE' }
   }
   const capture = await provider.inspectCapture()
-  const configured = capture.configured && hooks.git === 'READY' && hooks.codex === 'READY'
-  const reason = !capture.configured ? marker(providerPath) === 'MISSING' ? 'NOT_CONFIGURED' : capture.reason : hooks.git !== 'READY' ? hooks.git : hooks.codex !== 'READY' ? hooks.codex : capture.reason
+  const agent = query.agent ?? capture.agent ?? 'codex'
+  const integration = capture.integrations?.find(item => item.agent === agent)
+  const integrationReady = (capture.integrations ? integration?.hooks === 'READY' : agent === 'codex') && (agent !== 'codex' || codex.state === 'READY')
+  const integrationReason = capture.integrations && !integration ? 'INTEGRATION_UNAVAILABLE' : agent === 'codex' && codex.state !== 'READY' ? codex.state : integrationReady ? capture.reason : 'HOOKS_MISSING'
+  const configured = capture.configured && hooks.git === 'READY' && integrationReady
+  const reason = !capture.configured ? marker(providerPath) === 'MISSING' ? 'NOT_CONFIGURED' : capture.reason : hooks.git !== 'READY' ? hooks.git : integrationReason
   const checkpoint: CaptureHealthObservation['checkpoint'] = { state: 'PENDING', reason: 'CHECKPOINT_PENDING' }
   const selectedCommit = query.commitSha ?? (prior && prior.head !== head ? head : undefined)
   if (selectedCommit) {
@@ -116,15 +121,18 @@ export async function inspectCaptureHealth(store: SessionStore, provider: Pick<E
     if (observation.refRevision) checkpoint.refRevision = observation.refRevision
     if (observation.metadataDigest) checkpoint.metadataDigest = observation.metadataDigest
     if (observation.sessionIds.length) checkpoint.sessionIds = observation.sessionIds
+    if (observation.sessionRefs?.length) checkpoint.sessionRefs = observation.sessionRefs
   }
   assertActive()
-  if (sourceFingerprint(root) !== source || signature() !== fingerprint || digest(JSON.stringify(files.map(marker))) !== base) throw new Error('WORKTREE_STALE')
+  if (sourceFingerprint(root) !== source || signature() !== fingerprint || digest(JSON.stringify([files.map(marker), query.agent ?? 'all'])) !== base) throw new Error('WORKTREE_STALE')
   const observation: CaptureHealthObservation = { version: 1, repositoryId: store.repositoryId, ...target, cycleId: query.cycleId, head, configurationDigest: fingerprint,
     policyDigest,
-    nextEvidence: !capture.configured ? 'INSPECT_PROVIDER_CONFIGURATION' : hooks.git !== 'READY' ? 'INSPECT_GIT_HOOKS' : hooks.codex !== 'READY' ? 'INSPECT_CODEX_HOOKS' :
+    agent, integrations: capture.integrations?.map(item => ({ ...item, state: checkpoint.state === 'CHECKPOINT_VERIFIED' && checkpoint.sessionRefs?.some(session => session.agent === item.agent) ? 'CHECKPOINT_VERIFIED' : item.hooks !== 'READY' ? 'HOOKS_MISSING' : item.agent === capture.agent && capture.providerSessionId ? 'CAPTURE_OBSERVED' : 'READY_CONFIGURED', coverage: 'OBSERVED_SNAPSHOT' })),
+    integrationState: !integration && capture.integrations ? 'UNSUPPORTED' : integrationReady ? 'READY_CONFIGURED' : 'HOOKS_MISSING',
+    nextEvidence: !capture.configured ? 'INSPECT_PROVIDER_CONFIGURATION' : hooks.git !== 'READY' ? 'INSPECT_GIT_HOOKS' : !integrationReady ? 'INSPECT_ENTIRE_INTEGRATION' :
       checkpoint.state === 'CHECKPOINT_MISSING' || checkpoint.state === 'UNAVAILABLE' ? 'INSPECT_CHECKPOINT_METADATA' : !capture.providerSessionId ? 'OBSERVE_SESSION_EVENTS' : 'NONE',
     repairRequiresApproval: !configured,
-    sourceFingerprint: source, observedAt: new Date().toISOString(), state: !configured ? 'UNAVAILABLE' : capture.providerSessionId ? 'CAPTURE_OBSERVED' : 'READY_CONFIGURED',
-    reason, hooks, capture: capture.providerSessionId ? { state: 'OBSERVED', providerSessionId: capture.providerSessionId } : { state: 'UNOBSERVED' }, checkpoint }
+    sourceFingerprint: source, observedAt: new Date().toISOString(), state: !configured ? 'UNAVAILABLE' : capture.providerSessionId && capture.agent === agent ? 'CAPTURE_OBSERVED' : 'READY_CONFIGURED',
+    reason, hooks, capture: capture.providerSessionId && capture.agent === agent ? { state: 'OBSERVED', providerSessionId: capture.providerSessionId, agent } : { state: 'UNOBSERVED' }, checkpoint }
   return { feature: 'session_context', ...store.recordCaptureHealth(observation, assertActive), freshness: 'OBSERVED_SNAPSHOT', replay: false }
 }
