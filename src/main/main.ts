@@ -598,7 +598,20 @@ app.whenReady().then(async () => {
         continuum: () => continuumSession.getActiveSession()?.repositoryId === gitRepositoryId ? continuumSession.getActiveService() : null,
         ledger: validationLedger, github: githubIntegration,
         networkAllowed: () => settingsService.loadSettings().gitManagement?.automaticFetch !== false,
-        assertCurrent: () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') } }))
+        assertCurrent: () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') } }), {
+        readReceipt: async receiptId => {
+          if (!sessionIsCurrent() || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('PROJECT_CONTEXT_CHANGED')
+          return continuumSession.getActiveService()!.readPublicationReceipt(receiptId)
+        },
+        associate: async association => {
+          if (!sessionIsCurrent() || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('PROJECT_CONTEXT_CHANGED')
+          return continuumSession.getActiveService()!.associatePublication(association)
+        },
+        invalidate: async (invocationId, state) => {
+          if (!sessionIsCurrent() || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('PROJECT_CONTEXT_CHANGED')
+          continuumSession.getActiveService()!.invalidatePublication(invocationId, state)
+        }
+      })
     if (activeSessionContext) {
       const sessionContext = activeSessionContext
       void sessionContext.call('list_agent_sessions', { source: 'NATIVE_HOOK', limit: 1 }).catch(() => {})

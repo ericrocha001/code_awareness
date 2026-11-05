@@ -17,6 +17,13 @@ export function nativeObservationBatch(event: NativeHookEnvelope): RegistryBatch
     ...(invocation && event.git ? [
       { from: invocation, relation: event.event, to: session, ...evidence, evidenceKind: 'NATIVE_GIT_REQUEST', evidenceRef: JSON.stringify(event.git) },
       { from: invocation, relation: 'scoped-to', to: { kind: 'WORKTREE' as const, id: `${event.worktreeId}:${event.generation}` }, ...evidence, evidenceKind: 'NATIVE_GIT_SCOPE' }
+    ] : []),
+    ...(invocation && event.artifact ? [
+      { from: invocation, relation: event.event, to: session, ...evidence, evidenceKind: 'NATIVE_ARTIFACT_REQUEST',
+        evidenceRef: JSON.stringify({ action: event.artifact.category === 'ARTIFACT_PUBLISH' ? 'PUBLISH' : 'UPDATE', requestDigest: event.artifact.requestDigest,
+          outcome: event.artifact.outcome, context: nativeDigest(JSON.stringify([event.sessionId, event.turnId ?? null, event.subagentId ?? null, event.worktreeId, event.generation])),
+          ...(event.artifact.receipt ? { receipt: event.artifact.receipt } : {}) }) },
+      { from: invocation, relation: 'scoped-to', to: { kind: 'WORKTREE' as const, id: `${event.worktreeId}:${event.generation}` }, ...evidence, evidenceKind: 'NATIVE_ARTIFACT_SCOPE' }
     ] : [])
   ] }
 }

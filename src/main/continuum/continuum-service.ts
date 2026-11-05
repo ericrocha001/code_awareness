@@ -8,7 +8,9 @@ import type { TransportEnvelope } from './artifact-envelope'
 import { ArtifactStore } from './artifact-store'
 import { parseArtifactMarkdown } from './artifact-metadata'
 import { canonicalizePublication } from './artifact-publication'
-import type { ArtifactSemanticFields } from './continuum-types'
+import type { ArtifactSemanticFields, PublicationReceipt } from './continuum-types'
+import { publicationRequestDigest } from '../../shared/types/publication-provenance-types'
+import type { PublicationAssociation } from '../../shared/types/publication-provenance-types'
 import { legacyInput } from './legacy-artifact-migrator'
 import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
@@ -132,7 +134,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const tags = artifactTags(metadata.tags)
     tags.forEach(slug => this.store.requireTag(slug))
     if (tags.length && !confirmedTags) throw new Error('TAGS_CONFIRMATION_REQUIRED: ' + tags.join(', '))
-    const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }))
+    const receipt = this.publishedReceipt(this.store.createPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('PUBLISH', { rawMarkdown })))
     this.changed(); return receipt
   }
   inspectStructure(query: import('./artifact-structure').StructureQuery) {
@@ -177,9 +179,9 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const data = Buffer.from(input)
     const media = await validateVisualMedia(data)
     this.assertActive()
-    const artifact = this.store.createVisual({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, data, media)
+    const published = this.store.createVisualPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, data, media, publicationRequestDigest('PUBLISH', { rawMarkdown }))
     this.changed()
-    return { ...this.receipt(artifact), media }
+    return { ...this.publishedReceipt(published), media }
   }
   getVisual(artifactId: string) { this.assertActive(); this.reconcile?.(); return this.store.getVisual(artifactId) }
   async getVisualThumbnail(artifactId: string): Promise<Buffer> {
@@ -196,6 +198,19 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     } finally { this.thumbnailReads-- }
   }
   private receipt(artifact: Artifact): ArtifactReceipt { return { success: true, artifactId: artifact.artifactId, revision: artifact.revision, updatedAt: artifact.updatedAt } }
+  private publishedReceipt(value: { artifact: Artifact; publicationReceipt: PublicationReceipt }): ArtifactReceipt {
+    return { ...this.receipt(value.artifact), publicationReceipt: value.publicationReceipt, replayed: false }
+  }
+  readPublicationReceipt(receiptId: string): PublicationReceipt | null { this.assertActive(); return this.store.readPublicationReceipt(receiptId) }
+  associatePublication(value: PublicationAssociation) { this.assertActive(); return this.store.associatePublication(value) }
+  invalidatePublication(invocationId: string, state: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS') { this.assertActive(); this.store.invalidatePublication(invocationId, state) }
+  replayPublicationReceipt(receiptId: string): ArtifactReceipt {
+    const receipt = this.readPublicationReceipt(receiptId)
+    if (!receipt) throw new Error('PUBLICATION_RECEIPT_NOT_FOUND')
+    const artifact = this.store.get(receipt.artifactId)!
+    if (artifact.revision !== receipt.revision) throw new Error('STALE_PUBLICATION_RECEIPT')
+    return { ...this.receipt(artifact), publicationReceipt: receipt, replayed: true }
+  }
   async bindExecutionBranch(executionId: string, sourceArtifactId: string, observe: () => Promise<ExecutionBranchSnapshot>) {
     this.assertActive()
     if (!executionId.trim() || executionId.length > 512 || /[\0\r\n]/.test(executionId)) throw new Error('INVALID_ARGUMENT')
@@ -230,7 +245,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const publication = canonicalizePublication(rawMarkdown, fields)
     const { metadata } = publication
     this.assertAgentTags(metadata)
-    const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }))
+    const receipt = this.publishedReceipt(this.store.createPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('PUBLISH', { rawMarkdown, ...fields })))
     this.changed()
     return receipt
   }
@@ -240,11 +255,17 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     if (!prior) throw new Error('ARTIFACT_NOT_FOUND: ' + artifactId)
     const publication = canonicalizePublication(rawMarkdown, fields, prior.metadata)
     this.assertAgentTags(publication.metadata, prior.metadata)
-    const receipt = this.receipt(this.store.update({ artifactId, expectedRevision, ...publication, provenance: this.publicationProvenance() }))
+    const receipt = this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('UPDATE', { rawMarkdown, artifactId, expectedRevision, ...fields })))
     this.changed()
     return receipt
   }
-  get(artifactId: string): Artifact | null { this.reconcile?.(); return this.store.get(artifactId) }
+  get(artifactId: string): Artifact | null {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const artifact = this.store.get(artifactId)
+    if (!artifact) return null
+    const nativeArtifact = this.store.publicationProvenance(artifactId, artifact.revision)
+    return nativeArtifact ? { ...artifact, provenance: { ...artifact.provenance, nativeArtifact } } : artifact
+  }
   list(filter: ListArtifactsFilter = {}): ArtifactPage { this.reconcile?.(); return this.store.list(filter) }
   importArtifact(source: string, input: CreateArtifactInput): ArtifactReceipt {
     const existing = this.store.get(input.artifactId)

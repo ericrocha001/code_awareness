@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
+import { nativeArtifactFact, validNativeArtifactFact, type NativeArtifactFact } from './native-artifact-facts'
 
 export const nativeHookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'SubagentStart', 'SubagentStop', 'Stop', 'SessionEnd'] as const
 export type NativeHookEvent = typeof nativeHookEvents[number]
@@ -50,6 +51,7 @@ export interface NativeHookEnvelope {
   subagentId?: string
   tool?: 'SHELL' | 'MCP' | 'OTHER'
   git?: { operationId: string; fingerprint: string; expectedHead: string | null; sha?: string; parent?: string | null; replayed?: boolean }
+  artifact?: NativeArtifactFact
   observedAt: string
   eventId: string
   digest: string
@@ -137,8 +139,9 @@ export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding
       }
     }
   }
+  const artifact = toolEvent ? nativeArtifactFact(payload, binding.repositoryId) : undefined
   const facts = { schema: 1 as const, source: 'CODEX_NATIVE_HOOK' as const, repositoryId: binding.repositoryId, worktreeId: binding.worktreeId,
-    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(subagentId ? { subagentId } : {}), ...(tool ? { tool } : {}), ...(git ? { git } : {}) }
+    generation: binding.generation, sessionId, event, ...(turnId ? { turnId } : {}), ...(invocationId ? { invocationId } : {}), ...(subagentId ? { subagentId } : {}), ...(tool ? { tool } : {}), ...(git ? { git } : {}), ...(artifact ? { artifact } : {}) }
   const eventId = nativeDigest(JSON.stringify(facts)), observedAt = now.toISOString()
   return { ...facts, observedAt, eventId, digest: nativeDigest(JSON.stringify({ ...facts, observedAt, eventId })) }
 }
@@ -147,7 +150,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
   if (Buffer.byteLength(text) > nativeHookLimits.envelopeBytes) throw new Error('ENVELOPE_LIMIT')
   const value: unknown = JSON.parse(text)
   if (!object(value)) throw new Error('INVALID_ENVELOPE')
-  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'observedAt', 'eventId', 'digest']
+  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'artifact', 'observedAt', 'eventId', 'digest']
   if (Object.keys(value).some(k => !keys.includes(k)) || value.schema !== 1 || value.source !== 'CODEX_NATIVE_HOOK' ||
     typeof value.repositoryId !== 'string' || !idPattern.test(value.repositoryId) || !nativeHookEvents.includes(value.event as NativeHookEvent) ||
     !['worktreeId','generation','sessionId','eventId','digest'].every(k => typeof value[k] === 'string' && hashPattern.test(value[k] as string)) ||
@@ -163,6 +166,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
       (git.sha !== undefined && (typeof git.sha !== 'string' || !/^[a-f0-9]{40}$/.test(git.sha))) ||
       (git.parent !== undefined && git.parent !== git.expectedHead) || (git.replayed !== undefined && typeof git.replayed !== 'boolean')) throw new Error('INVALID_ENVELOPE')
   }
+  if (value.artifact !== undefined && (!['PreToolUse','PostToolUse'].includes(String(value.event)) || !value.invocationId || !validNativeArtifactFact(value.artifact))) throw new Error('INVALID_ENVELOPE')
   const { digest, ...body } = value
   const { eventId, observedAt, ...facts } = body
   if (digest !== nativeDigest(JSON.stringify(body)) || eventId !== nativeDigest(JSON.stringify(facts))) throw new Error('ENVELOPE_INTEGRITY')

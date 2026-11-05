@@ -21,6 +21,7 @@ export const REGISTRY_SCHEMA = `
    payload TEXT NOT NULL, integrity TEXT NOT NULL, observedAt TEXT NOT NULL, state TEXT NOT NULL);
  CREATE INDEX IF NOT EXISTS registry_from ON registry_edges(fromId,state);
  CREATE INDEX IF NOT EXISTS registry_to ON registry_edges(toId,state);
+ CREATE INDEX IF NOT EXISTS registry_scope_scan ON registry_edges(toId,state,fromId);
  CREATE INDEX IF NOT EXISTS registry_source ON registry_edges(source,sourceRevision);
  CREATE TABLE IF NOT EXISTS registry_sources(source TEXT PRIMARY KEY, revision TEXT NOT NULL, cursor TEXT, status TEXT NOT NULL, observedAt TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS checkpoint_registry(checkpointId TEXT NOT NULL, refRevision TEXT NOT NULL, state TEXT NOT NULL, digest TEXT NOT NULL, sessionIds TEXT NOT NULL, integrity TEXT NOT NULL,
@@ -29,6 +30,18 @@ export const REGISTRY_SCHEMA = `
 const kinds: EntityKind[] = ['COMMIT', 'CHECKPOINT', 'SESSION', 'PR', 'ARTIFACT', 'PROOF', 'WORKTREE', 'EXECUTION']
 export class CheckpointRegistry {
   constructor(private readonly db: Database.Database, readonly repositoryId: string) {}
+  nativeArtifactCandidates(worktreeId: string, generation: string, after = '', limit = 32): string[] {
+    const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
+    const rows = this.db.prepare(`SELECT DISTINCT e.fromId FROM registry_edges e
+      WHERE e.toId=? AND e.state='OBSERVED' AND e.fromId>? AND json_extract(e.payload,'$.evidenceKind')='NATIVE_ARTIFACT_SCOPE'
+      ORDER BY e.fromId LIMIT ?`).all(scope, after, limit) as { fromId: string }[]
+    return rows.map(row => row.fromId)
+  }
+  invocationFromKey(key: string): string {
+    const prefix = 'EXECUTION:' + this.repositoryId + ':native-invocation:'
+    if (!key.startsWith(prefix) || !/^[a-f0-9]{64}$/.test(key.slice(prefix.length))) throw new Error('INVALID_NATIVE_CORRELATION')
+    return key.slice(prefix.length)
+  }
   directEvidence(entity: RegistryEntity, evidenceKind: string): RegistryEdge[] {
     const key = this.key(entity)
     const rows = this.db.prepare("SELECT payload,integrity FROM registry_edges WHERE (fromId=? OR toId=?) AND state='OBSERVED' ORDER BY id LIMIT 65").all(key, key) as { payload: string; integrity: string }[]
@@ -129,7 +142,7 @@ export class CheckpointRegistry {
     return !!row
   }
   contextGraph(selector: RegistryEntity, accountHash?: string) {
-    type Node = { key: string; type: EntityKind; id: string; provider?: string; agent?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
+    type Node = { key: string; type: EntityKind; id: string; revision?: number; provider?: string; agent?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
     type Edge = { id: string; from: string; to: string; relation: string; evidenceKind: string; source: string; state: string; freshness: string; observedAt: string; sourceRevision: string; evidenceRef: string; digest: string }
     const nodes = new Map<string, Node>(), edges = new Map<string, Edge>(), paths: { target: string; edges: string[] }[] = []
     let bounded = false
@@ -142,10 +155,14 @@ export class CheckpointRegistry {
         Object.assign(node, sessionSelector(entity.id))
         node.payloadState = !row?.localSessionId ? 'NOT_IMPORTED' : this.db.prepare('SELECT 1 FROM sessions WHERE id=?').get(row.localSessionId) ? 'IMPORTED' : 'SESSION_EVICTED'
         if (row?.localSessionId) node.deepen = { tool: 'inspect_agent_session', arguments: { sessionId: row.localSessionId } }
-      } else if (entity.kind === 'ARTIFACT') node.deepen = { tool: 'get_artifact', arguments: { artifactId: entity.id } }
+      } else if (entity.kind === 'ARTIFACT') {
+        const version = /^(artifact-[a-f0-9-]{36}):([1-9][0-9]*)$/.exec(entity.id)
+        if (version) { node.id = version[1]; node.revision = Number(version[2]) }
+        node.deepen = { tool: 'get_artifact', arguments: { artifactId: node.id } }
+      }
       else if (entity.kind === 'PROOF') node.deepen = { tool: 'get_validation_proof', arguments: { proofId: entity.id } }
       else if (entity.kind === 'CHECKPOINT') node.deepen = { tool: 'inspect_entire_checkpoint', arguments: { checkpointId: entity.id } }
-      if (entity.kind !== 'WORKTREE') node.selector = { type: node.type, id: node.id, ...(node.provider ? { provider: node.provider } : {}), ...(node.agent ? { agent: node.agent } : {}) }
+      if (entity.kind !== 'WORKTREE') node.selector = { type: node.type, id: node.id, ...(node.revision ? { revision: node.revision } : {}), ...(node.provider ? { provider: node.provider } : {}), ...(node.agent ? { agent: node.agent } : {}) }
       nodes.set(key, node); return key
     }
     if (!this.visible(selector, accountHash) || !this.db.prepare('SELECT 1 FROM registry_entities WHERE id=?').get(this.key(selector))) return { nodes: [], edges: [], paths, bounded }
@@ -161,10 +178,10 @@ export class CheckpointRegistry {
           const value = JSON.parse(row.payload) as RegistryEdge
           if (digest(row.payload) !== row.integrity || this.key(value.from) !== row.fromId || this.key(value.to) !== row.toId) throw new Error('REGISTRY_INTEGRITY_FAILED')
           if (!this.visible(value.from, accountHash) || !this.visible(value.to, accountHash)) continue
-          if (value.from.kind === 'ARTIFACT' && value.to.kind === 'ARTIFACT' && !['implements', 'resolved-by'].includes(value.relation)) continue
-          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST'].includes(value.evidenceKind)) continue
+          if (value.from.kind === 'ARTIFACT' && value.to.kind === 'ARTIFACT' && !['implements', 'resolved-by', 'revision'].includes(value.relation)) continue
+          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST', 'NATIVE_ARTIFACT_CAUSAL', 'NATIVE_ARTIFACT_SCOPE', 'NATIVE_ARTIFACT_REQUEST'].includes(value.evidenceKind)) continue
           const from = add(value.from), to = add(value.to)
-          const state = row.state === 'CONFLICT' ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : value.evidenceKind === 'HANDOFF_DECLARED' ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
+          const state = row.state === 'CONFLICT' ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : value.evidenceKind === 'HANDOFF_DECLARED' ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE','NATIVE_ARTIFACT_REQUEST','NATIVE_ARTIFACT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
           edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest })
           const next = from === key ? value.to : value.from, target = this.key(next)
           if (!visited.has(target)) {
