@@ -8,8 +8,11 @@ import type {
   SmcSessionRecord
 } from '../../../shared/types/buildx/session-memory-central-types'
 import type {
+  DefineUnitFlowUnitInput,
   RegisterUnitFlowPlanInput,
-  UnitFlowPlanRecord
+  UnitFlowPlanRecord,
+  UnitFlowUnitHeaderRecord,
+  UnitFlowUnitRecord
 } from '../../../shared/types/buildx/unitflow-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
@@ -70,6 +73,32 @@ export class SessionMemoryCentralService {
 
   getPlan(repositoryId: string, planId: string): UnitFlowPlanRecord | null {
     return this.getStore(repositoryId).getPlan(planId)
+  }
+
+  definePlanUnits(
+    repositoryId: string,
+    sessionId: string,
+    planId: string,
+    units: DefineUnitFlowUnitInput[]
+  ): UnitFlowUnitRecord[] {
+    return this.getStore(repositoryId).definePlanUnits(sessionId, planId, units)
+  }
+
+  listPlanUnits(
+    repositoryId: string,
+    sessionId: string,
+    planId: string
+  ): UnitFlowUnitHeaderRecord[] {
+    return this.getStore(repositoryId).listPlanUnits(sessionId, planId)
+  }
+
+  getPlanUnit(
+    repositoryId: string,
+    sessionId: string,
+    planId: string,
+    unitId: string
+  ): UnitFlowUnitRecord | null {
+    return this.getStore(repositoryId).getPlanUnit(sessionId, planId, unitId)
   }
 
   closeStore(repositoryId: string): void {

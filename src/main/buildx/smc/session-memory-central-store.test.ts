@@ -21,7 +21,14 @@ import {
   UnitFlowService,
   UnitFlowInvalidPlanError,
   UnitFlowPlanConflictError,
-  UnitFlowActivePlanAlreadyExistsError
+  UnitFlowActivePlanAlreadyExistsError,
+  UnitFlowPlanNotFoundError,
+  UnitFlowInvalidUnitError,
+  UnitFlowUnitConflictError,
+  UnitFlowManifestConflictError,
+  type DefineUnitFlowUnitInput,
+  type UnitFlowUnitRecord,
+  type UnitFlowUnitHeaderRecord
 } from '../unitflow'
 import {
   BUILDX_SMC_TOOLS,
@@ -290,10 +297,10 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       expect(recoveredEntry?.provenance).toEqual(entryInput.provenance)
       expect(recoveredEntry?.references).toEqual(entryInput.references)
 
-      // Garante que o schema_version foi migrado (pelo menos versão 2, atualmente 3)
+      // Garante que o schema_version foi migrado (pelo menos versão 2, atualmente 4)
       const versionDb = new Database(dbPath)
       const row = versionDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-      expect(['2', '3']).toContain(row.value)
+      expect(['2', '3', '4']).toContain(row.value)
       versionDb.close()
 
       reopened.close()
@@ -1247,10 +1254,10 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const store = smc.getStore(repoId)
         expect(store.isOpen()).toBe(true)
 
-        // Verifica que schema foi promovido a v3
+        // Verifica que schema foi promovido (v3 ou superior)
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(versionRow.value).toBe('3')
+        expect(['3', '4']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Registra plano ativo
@@ -1648,7 +1655,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         smc.close()
       })
 
-      it('recusa schema futuro (> 3) com SmcUnsupportedSchemaError sem corromper dados', () => {
+      it('recusa schema futuro (> 4) com SmcUnsupportedSchemaError sem corromper dados', () => {
         const repoId = 'repo-future-schema'
         const dbPath = smcDatabasePath(tempBaseDir, repoId)
         mkdirSync(dirname(dbPath), { recursive: true })
@@ -1657,7 +1664,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         dbRaw.exec(`
           CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           INSERT INTO smc_meta (key, value) VALUES ('repository_id', '${repoId}');
-          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '4');
+          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '5');
         `)
         dbRaw.close()
 
@@ -1668,7 +1675,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que o schema_version não foi alterado
         const checkDb = new Database(dbPath)
         const row = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(row.value).toBe('4')
+        expect(row.value).toBe('5')
         checkDb.close()
       })
 
@@ -1694,6 +1701,588 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       })
     })
   })
+
+  describe('BuildX UnitFlow-02 — Definição ordenada de unidades e dependências (Provas Mínimas)', () => {
+    const repoId = 'repo-unitflow-02'
+    let smc: SessionMemoryCentralService
+    let unitFlow: UnitFlowService
+
+    beforeEach(() => {
+      smc = new SessionMemoryCentralService(tempBaseDir)
+      unitFlow = new UnitFlowService(smc)
+    })
+
+    afterEach(() => {
+      smc.close()
+    })
+
+    describe('Prova 1: Migração v3→v4, gravação de manifesto ordenado com dependências e persistência durável', () => {
+      it('migra banco v3 real para v4, grava unidades ordenadas com dependência anterior e recupera tudo após restart', () => {
+        const v3RepoId = 'repo-v3-migration'
+        const dbPath = smcDatabasePath(tempBaseDir, v3RepoId)
+        mkdirSync(dirname(dbPath), { recursive: true })
+
+        const legacySessionId = '11111111-2222-3333-4444-555555555555'
+        const legacyEntryId = '66666666-7777-8888-9999-000000000000'
+        const legacyPlanId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+
+        // 1. Cria esquema v3 manualmente
+        const v3Db = new Database(dbPath)
+        v3Db.exec(`
+          CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          INSERT INTO smc_meta (key, value) VALUES ('repository_id', '${v3RepoId}');
+          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '3');
+
+          CREATE TABLE smc_sessions (
+            session_id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('OPEN', 'CLOSED')),
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_sessions (session_id, repository_id, status, revision, created_at, updated_at)
+          VALUES ('${legacySessionId}', '${v3RepoId}', 'OPEN', 1, '2026-11-04T10:00:00.000Z', '2026-11-04T10:00:00.000Z');
+
+          CREATE TABLE smc_entries (
+            order_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT UNIQUE NOT NULL,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            emitter_role TEXT NOT NULL,
+            emitter_id TEXT,
+            references_json TEXT,
+            supersedes_entry_id TEXT,
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO smc_entries (entry_id, session_id, kind, title, body, emitter_role, created_at)
+          VALUES ('${legacyEntryId}', '${legacySessionId}', 'DECISION', 'Decisão inicial', 'Conteúdo v3', 'HUMAN', '2026-11-04T10:01:00.000Z');
+
+          CREATE TABLE smc_plans (
+            plan_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            title TEXT NOT NULL,
+            source_artifact_id TEXT,
+            status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'COMPLETED', 'CANCELLED')),
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_plans (plan_id, session_id, repository_id, title, status, revision, created_at, updated_at)
+          VALUES ('${legacyPlanId}', '${legacySessionId}', '${v3RepoId}', 'Plano V3 Existente', 'ACTIVE', 1, '2026-11-04T10:02:00.000Z', '2026-11-04T10:02:00.000Z');
+        `)
+        v3Db.close()
+
+        // 2. Abre com o serviço atual para disparar migração v3 -> v4
+        const store = smc.getStore(v3RepoId)
+        expect(store.isOpen()).toBe(true)
+
+        // Verifica que schema foi promovido para v4
+        const checkDb = new Database(dbPath)
+        const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
+        expect(versionRow.value).toBe('4')
+        checkDb.close()
+
+        // 3. Define 3 unidades com dependências estritamente anteriores
+        const unit1Id = '00000000-0000-4000-8000-000000000001'
+        const unit2Id = '00000000-0000-4000-8000-000000000002'
+        const unit3Id = '00000000-0000-4000-8000-000000000003'
+
+        const unitsInput: DefineUnitFlowUnitInput[] = [
+          {
+            unitId: unit1Id,
+            title: 'Unidade 1 - Setup Inicial',
+            objective: 'Preparar a infraestrutura base',
+            acceptanceCriteria: 'Infraestrutura instalada e funcionando'
+          },
+          {
+            unitId: unit2Id,
+            title: 'Unidade 2 - Implementação do Core',
+            objective: 'Implementar a lógica principal',
+            acceptanceCriteria: 'Lógica core passa em testes unitários',
+            dependsOnUnitIds: [unit1Id]
+          },
+          {
+            unitId: unit3Id,
+            title: 'Unidade 3 - Integração e Validação',
+            objective: 'Integrar componentes e validar ponta a ponta',
+            acceptanceCriteria: 'Testes de integração verdes',
+            dependsOnUnitIds: [unit1Id, unit2Id]
+          }
+        ]
+
+        const definedUnits = unitFlow.definePlanUnits(v3RepoId, legacySessionId, legacyPlanId, unitsInput)
+        expect(definedUnits).toHaveLength(3)
+        expect(definedUnits[0].position).toBe(1)
+        expect(definedUnits[0].unitId).toBe(unit1Id)
+        expect(definedUnits[0].dependsOnUnitIds).toEqual([])
+        expect(definedUnits[1].position).toBe(2)
+        expect(definedUnits[1].unitId).toBe(unit2Id)
+        expect(definedUnits[1].dependsOnUnitIds).toEqual([unit1Id])
+        expect(definedUnits[2].position).toBe(3)
+        expect(definedUnits[2].unitId).toBe(unit3Id)
+        expect(definedUnits[2].dependsOnUnitIds).toEqual([unit1Id, unit2Id])
+
+        // 4. Fecha a store e reabre em nova instância do serviço
+        smc.closeStore(v3RepoId)
+
+        const smcReopened = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlowReopened = new UnitFlowService(smcReopened)
+
+        // Preservação do estado v3 anterior
+        const session = smcReopened.getSession(v3RepoId, legacySessionId)
+        expect(session).not.toBeNull()
+        expect(session?.status).toBe('OPEN')
+
+        const entry = smcReopened.getEntry(v3RepoId, legacySessionId, legacyEntryId)
+        expect(entry).not.toBeNull()
+        expect(entry?.body).toBe('Conteúdo v3')
+
+        const activePlan = unitFlowReopened.getActivePlan(v3RepoId, legacySessionId)
+        expect(activePlan).not.toBeNull()
+        expect(activePlan?.planId).toBe(legacyPlanId)
+
+        // Recuperação fiel do manifesto
+        const listHeaders = unitFlowReopened.listPlanUnits(v3RepoId, legacySessionId, legacyPlanId)
+        expect(listHeaders).toHaveLength(3)
+        expect(listHeaders[0]).toEqual({
+          unitId: unit1Id,
+          planId: legacyPlanId,
+          position: 1,
+          title: 'Unidade 1 - Setup Inicial',
+          dependsOnUnitIds: [],
+          createdAt: expect.any(String)
+        })
+        expect(listHeaders[1].position).toBe(2)
+        expect(listHeaders[1].dependsOnUnitIds).toEqual([unit1Id])
+        expect(listHeaders[2].position).toBe(3)
+        expect(listHeaders[2].dependsOnUnitIds).toEqual([unit1Id, unit2Id])
+
+        // Recuperação literal de cada unidade
+        const recovered1 = unitFlowReopened.getPlanUnit(v3RepoId, legacySessionId, legacyPlanId, unit1Id)
+        expect(recovered1?.objective).toBe('Preparar a infraestrutura base')
+        expect(recovered1?.acceptanceCriteria).toBe('Infraestrutura instalada e funcionando')
+
+        const recovered2 = unitFlowReopened.getPlanUnit(v3RepoId, legacySessionId, legacyPlanId, unit2Id)
+        expect(recovered2?.objective).toBe('Implementar a lógica principal')
+        expect(recovered2?.acceptanceCriteria).toBe('Lógica core passa em testes unitários')
+
+        const recovered3 = unitFlowReopened.getPlanUnit(v3RepoId, legacySessionId, legacyPlanId, unit3Id)
+        expect(recovered3?.objective).toBe('Integrar componentes e validar ponta a ponta')
+        expect(recovered3?.acceptanceCriteria).toBe('Testes de integração verdes')
+
+        smcReopened.close()
+      })
+    })
+
+    describe('Prova 2: Replay idêntico idempotente, detecção de divergência e atomicidade concorrente', () => {
+      it('permite replay idêntico sem duplicar registros nem alterar revisão do plano', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '11111111-1111-4111-8111-111111111111',
+          title: 'Plano Replay'
+        })
+
+        const unit1Id = '11111111-0000-4000-8000-000000000001'
+        const unit2Id = '11111111-0000-4000-8000-000000000002'
+        const units: DefineUnitFlowUnitInput[] = [
+          {
+            unitId: unit1Id,
+            title: 'Unidade Alpha',
+            objective: 'Objetivo Alpha',
+            acceptanceCriteria: 'Critério Alpha'
+          },
+          {
+            unitId: unit2Id,
+            title: 'Unidade Beta',
+            objective: 'Objetivo Beta',
+            acceptanceCriteria: 'Critério Beta',
+            dependsOnUnitIds: [unit1Id]
+          }
+        ]
+
+        const firstResult = unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, units)
+        expect(firstResult).toHaveLength(2)
+
+        // Replay idêntico
+        const replayResult = unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, units)
+        expect(replayResult).toEqual(firstResult)
+
+        // Verifica que banco não duplicou linhas
+        const headers = unitFlow.listPlanUnits(repoId, session.sessionId, plan.planId)
+        expect(headers).toHaveLength(2)
+
+        // Verifica que revisão do plano continua 1
+        const planAfter = unitFlow.getPlan(repoId, plan.planId)
+        expect(planAfter?.revision).toBe(1)
+      })
+
+      it('rejeita divergências de título, objetivo, critérios, ordem e dependências com UnitFlowManifestConflictError', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '22222222-2222-4222-8222-222222222222',
+          title: 'Plano Divergências'
+        })
+
+        const unit1Id = '22222222-0000-4000-8000-000000000001'
+        const unit2Id = '22222222-0000-4000-8000-000000000002'
+        const units: DefineUnitFlowUnitInput[] = [
+          {
+            unitId: unit1Id,
+            title: 'Unidade 1',
+            objective: 'Obj 1',
+            acceptanceCriteria: 'Crit 1'
+          },
+          {
+            unitId: unit2Id,
+            title: 'Unidade 2',
+            objective: 'Obj 2',
+            acceptanceCriteria: 'Crit 2',
+            dependsOnUnitIds: [unit1Id]
+          }
+        ]
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, units)
+
+        // Divergência em título
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { ...units[0], title: 'Título Alterado' },
+            units[1]
+          ])
+        }).toThrow(UnitFlowManifestConflictError)
+
+        // Divergência em objetivo
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            units[0],
+            { ...units[1], objective: 'Obj Alterado' }
+          ])
+        }).toThrow(UnitFlowManifestConflictError)
+
+        // Divergência em critério
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { ...units[0], acceptanceCriteria: 'Crit Alterado' },
+            units[1]
+          ])
+        }).toThrow(UnitFlowManifestConflictError)
+
+        // Divergência em dependência
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            units[0],
+            { ...units[1], dependsOnUnitIds: [] }
+          ])
+        }).toThrow(UnitFlowManifestConflictError)
+
+        // Divergência em contagem (menos unidades)
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [units[0]])
+        }).toThrow(UnitFlowManifestConflictError)
+
+        // Divergência em ordem invertida
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { ...units[1], dependsOnUnitIds: [] },
+            { ...units[0], dependsOnUnitIds: [unit2Id] }
+          ])
+        }).toThrow(UnitFlowManifestConflictError)
+      })
+
+      it('duas instâncias de store preservam atomicidade e integridade', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '33333333-3333-4333-8333-333333333333',
+          title: 'Plano Concorrência'
+        })
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const storeB = new SessionMemoryCentralStore(dbPath, repoId)
+
+        const u1 = '33333333-0000-4000-8000-000000000001'
+        const manifestA: DefineUnitFlowUnitInput[] = [
+          { unitId: u1, title: 'Unit A', objective: 'Obj A', acceptanceCriteria: 'Crit A' }
+        ]
+        const manifestB: DefineUnitFlowUnitInput[] = [
+          { unitId: u1, title: 'Unit B Divergente', objective: 'Obj B', acceptanceCriteria: 'Crit B' }
+        ]
+
+        // Store 1 define manifestA
+        const resA = unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, manifestA)
+        expect(resA).toHaveLength(1)
+
+        // Store 2 tenta definir divergente -> conflito
+        expect(() => {
+          storeB.definePlanUnits(session.sessionId, plan.planId, manifestB)
+        }).toThrow(UnitFlowManifestConflictError)
+
+        // Store 2 faz replay idêntico -> sucesso
+        const resB = storeB.definePlanUnits(session.sessionId, plan.planId, manifestA)
+        expect(resB[0].title).toBe('Unit A')
+
+        storeB.close()
+      })
+    })
+
+    describe('Prova 3: Fail-closed — rejeitar plano inexistente/inativo, sessão CLOSED, dependências inválidas e isolamento', () => {
+      it('rejeita plano inexistente com UnitFlowPlanNotFoundError', () => {
+        const session = smc.createSession(repoId)
+        const randomPlanId = '44444444-0000-4000-8000-000000000000'
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, randomPlanId, [
+            { unitId: '44444444-0000-4000-8000-000000000001', title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+          ])
+        }).toThrow(UnitFlowPlanNotFoundError)
+      })
+
+      it('rejeita plano inativo (não ACTIVE) com UnitFlowPlanConflictError', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '55555555-5555-4555-8555-555555555555',
+          title: 'Plano Inativo'
+        })
+
+        // Altera status para COMPLETED no banco
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_plans SET status = ? WHERE plan_id = ?').run('COMPLETED', plan.planId)
+        rawDb.close()
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { unitId: '55555555-0000-4000-8000-000000000001', title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+          ])
+        }).toThrow(UnitFlowPlanConflictError)
+      })
+
+      it('rejeita sessão CLOSED com SmcSessionClosedError', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '66666666-6666-4666-8666-666666666666',
+          title: 'Plano Sessão Fechada'
+        })
+
+        // Fecha a sessão no banco
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_sessions SET status = ? WHERE session_id = ?').run('CLOSED', session.sessionId)
+        rawDb.close()
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { unitId: '66666666-0000-4000-8000-000000000001', title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+          ])
+        }).toThrow(SmcSessionClosedError)
+      })
+
+      it('rejeita manifesto vazio ou inválido com UnitFlowInvalidUnitError', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '77777777-7777-4777-8777-777777777777',
+          title: 'Plano Vazio'
+        })
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [])
+        }).toThrow(UnitFlowInvalidUnitError)
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, null as any)
+        }).toThrow(UnitFlowInvalidUnitError)
+      })
+
+      it('rejeita IDs duplicados no manifesto com UnitFlowInvalidUnitError', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '88888888-8888-4888-8888-888888888888',
+          title: 'Plano IDs Duplicados'
+        })
+        const dupeId = '77777777-0000-4000-8000-000000000001'
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { unitId: dupeId, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' },
+            { unitId: dupeId, title: 'U2', objective: 'O2', acceptanceCriteria: 'C2' }
+          ])
+        }).toThrow(UnitFlowInvalidUnitError)
+      })
+
+      it('rejeita dependência para si mesma com UnitFlowInvalidUnitError', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '99999999-9999-4999-8999-999999999999',
+          title: 'Plano Self Dep'
+        })
+        const id1 = '88888888-0000-4000-8000-000000000001'
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { unitId: id1, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1', dependsOnUnitIds: [id1] }
+          ])
+        }).toThrow(UnitFlowInvalidUnitError)
+      })
+
+      it('rejeita dependência futura com UnitFlowInvalidUnitError (forward dependency)', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          title: 'Plano Forward Dep'
+        })
+        const id1 = '99999999-0000-4000-8000-000000000001'
+        const id2 = '99999999-0000-4000-8000-000000000002'
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { unitId: id1, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1', dependsOnUnitIds: [id2] },
+            { unitId: id2, title: 'U2', objective: 'O2', acceptanceCriteria: 'C2' }
+          ])
+        }).toThrow(UnitFlowInvalidUnitError)
+      })
+
+      it('rejeita dependência externa inexistente com UnitFlowInvalidUnitError', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          title: 'Plano External Dep'
+        })
+        const id1 = 'aaaaaaaa-0000-4000-8000-000000000001'
+        const externalId = 'ffffffff-ffff-4fff-8fff-ffffffffffff'
+
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+            { unitId: id1, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1', dependsOnUnitIds: [externalId] }
+          ])
+        }).toThrow(UnitFlowInvalidUnitError)
+      })
+
+      it('rejeita acesso cruzado entre sessões e repositórios sem escrita parcial', () => {
+        const sessionA = smc.createSession(repoId)
+        const sessionB = smc.createSession(repoId)
+        const planA = unitFlow.registerPlan(repoId, sessionA.sessionId, {
+          planId: 'cccccccc-cccc-4ccc-8ccc-cccccccccccc',
+          title: 'Plano Sessão A'
+        })
+
+        // Tentativa de definir unidades do plano A usando sessão B -> conflito
+        const unitId = 'bbbbbbbb-0000-4000-8000-000000000001'
+        expect(() => {
+          unitFlow.definePlanUnits(repoId, sessionB.sessionId, planA.planId, [
+            { unitId, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+          ])
+        }).toThrow(UnitFlowPlanConflictError)
+
+        // Tentativa de acessar plano A a partir de outro repositório -> plano não encontrado
+        const otherRepoId = 'repo-other-scope'
+        const otherSession = smc.createSession(otherRepoId)
+        expect(() => {
+          unitFlow.definePlanUnits(otherRepoId, otherSession.sessionId, planA.planId, [
+            { unitId, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+          ])
+        }).toThrow(UnitFlowPlanNotFoundError)
+
+        // Verifica que nenhuma linha parcial foi escrita
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        const count = rawDb.prepare('SELECT count(*) as cnt FROM smc_plan_units WHERE plan_id = ?').get(planA.planId) as { cnt: number }
+        expect(count.cnt).toBe(0)
+        rawDb.close()
+      })
+    })
+
+    describe('Prova 4: Leitura seletiva — listPlanUnits compacta e getPlanUnit detalhada pontual', () => {
+      it('listPlanUnits retorna projeção compacta ordenada sem carregar objective nem acceptanceCriteria', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+          title: 'Plano Leitura Seletiva'
+        })
+
+        const u1 = 'cccccccc-0000-4000-8000-000000000001'
+        const u2 = 'cccccccc-0000-4000-8000-000000000002'
+
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+          {
+            unitId: u1,
+            title: 'Unidade 1 - Setup',
+            objective: 'Texto longo de objective da unidade 1 que não deve vir no list',
+            acceptanceCriteria: 'Critérios longos da unidade 1 que não devem vir no list'
+          },
+          {
+            unitId: u2,
+            title: 'Unidade 2 - Feature',
+            objective: 'Texto longo de objective da unidade 2 que não deve vir no list',
+            acceptanceCriteria: 'Critérios longos da unidade 2 que não devem vir no list',
+            dependsOnUnitIds: [u1]
+          }
+        ])
+
+        const headers = unitFlow.listPlanUnits(repoId, session.sessionId, plan.planId)
+        expect(headers).toHaveLength(2)
+
+        for (const h of headers) {
+          expect(h).toHaveProperty('unitId')
+          expect(h).toHaveProperty('planId')
+          expect(h).toHaveProperty('position')
+          expect(h).toHaveProperty('title')
+          expect(h).toHaveProperty('dependsOnUnitIds')
+          expect(h).toHaveProperty('createdAt')
+          // Confirma ausência de campos pesados de payload
+          expect((h as any).objective).toBeUndefined()
+          expect((h as any).acceptanceCriteria).toBeUndefined()
+        }
+
+        expect(headers[0].position).toBe(1)
+        expect(headers[0].unitId).toBe(u1)
+        expect(headers[1].position).toBe(2)
+        expect(headers[1].unitId).toBe(u2)
+        expect(headers[1].dependsOnUnitIds).toEqual([u1])
+      })
+
+      it('getPlanUnit busca exclusivamente a unidade solicitada com texto integral ou devolve null se inexistente', () => {
+        const session = smc.createSession(repoId)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+          title: 'Plano GetUnit'
+        })
+
+        const u1 = 'dddddddd-0000-4000-8000-000000000001'
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+          {
+            unitId: u1,
+            title: 'Unidade Alvo',
+            objective: 'Objetivo Específico Alvo',
+            acceptanceCriteria: 'Critérios Específicos Alvo'
+          }
+        ])
+
+        const unit = unitFlow.getPlanUnit(repoId, session.sessionId, plan.planId, u1)
+        expect(unit).not.toBeNull()
+        expect(unit?.unitId).toBe(u1)
+        expect(unit?.planId).toBe(plan.planId)
+        expect(unit?.position).toBe(1)
+        expect(unit?.title).toBe('Unidade Alvo')
+        expect(unit?.objective).toBe('Objetivo Específico Alvo')
+        expect(unit?.acceptanceCriteria).toBe('Critérios Específicos Alvo')
+        expect(unit?.dependsOnUnitIds).toEqual([])
+
+        // Busca de unit inexistente retorna null
+        const nonExistent = unitFlow.getPlanUnit(repoId, session.sessionId, plan.planId, '00000000-0000-4000-8000-999999999999')
+        expect(nonExistent).toBeNull()
+
+        // Busca com sessionId errada retorna null
+        const wrongSession = unitFlow.getPlanUnit(repoId, '00000000-0000-4000-8000-000000000000', plan.planId, u1)
+        expect(wrongSession).toBeNull()
+
+        // Busca com planId errada retorna null
+        const wrongPlan = unitFlow.getPlanUnit(repoId, session.sessionId, '00000000-0000-4000-8000-000000000000', u1)
+        expect(wrongPlan).toBeNull()
+      })
+    })
+  })
+
 })
 })
 

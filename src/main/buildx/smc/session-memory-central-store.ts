@@ -18,14 +18,21 @@ import type {
   SmcSessionStatus
 } from '../../../shared/types/buildx/session-memory-central-types'
 import type {
+  DefineUnitFlowUnitInput,
   RegisterUnitFlowPlanInput,
   UnitFlowPlanRecord,
-  UnitFlowPlanStatus
+  UnitFlowPlanStatus,
+  UnitFlowUnitHeaderRecord,
+  UnitFlowUnitRecord
 } from '../../../shared/types/buildx/unitflow-types'
 import {
   UnitFlowActivePlanAlreadyExistsError,
   UnitFlowInvalidPlanError,
-  UnitFlowPlanConflictError
+  UnitFlowInvalidUnitError,
+  UnitFlowManifestConflictError,
+  UnitFlowPlanConflictError,
+  UnitFlowPlanNotFoundError,
+  UnitFlowUnitConflictError
 } from '../unitflow/unitflow-errors'
 import { validateRepositoryId } from './session-memory-central-paths'
 
@@ -57,6 +64,10 @@ const MAX_BODY_LENGTH = 1024 * 1024 // 1 MiB
 const MAX_REFERENCES_COUNT = 50
 const MAX_REFERENCE_TARGET_LENGTH = 500
 const MAX_EMITTER_ID_LENGTH = 200
+
+const MAX_UNITS_COUNT = 100
+const MAX_UNIT_TITLE_LENGTH = 300
+const MAX_UNIT_TEXT_LENGTH = 64 * 1024
 
 export class SmcRepositoryScopeMismatchError extends Error {
   constructor(expected: string, actual: string) {
@@ -116,7 +127,7 @@ export class SmcInvalidSupersedesError extends Error {
 
 export class SmcUnsupportedSchemaError extends Error {
   constructor(version: number) {
-    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 3`)
+    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 4`)
     this.name = 'SmcUnsupportedSchemaError'
   }
 }
@@ -154,6 +165,17 @@ interface RawPlanRow {
   revision: number
   created_at: string
   updated_at: string
+}
+
+interface RawUnitRow {
+  unit_id: string
+  plan_id: string
+  position: number
+  title: string
+  objective?: string
+  acceptance_criteria?: string
+  depends_on_json: string | null
+  created_at: string
 }
 
 interface SmcCursorPayload {
@@ -218,13 +240,13 @@ export class SessionMemoryCentralStore {
     const versionRow = this.db.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string } | undefined
     const currentVersion = versionRow ? parseInt(versionRow.value, 10) : 0
 
-    if (currentVersion > 3) {
+    if (currentVersion > 4) {
       this.db.close()
       throw new SmcUnsupportedSchemaError(currentVersion)
     }
 
-    // 4. Migração atômica de v0/v1/v2 para v3
-    if (currentVersion < 3) {
+    // 4. Migração atômica de v0/v1/v2/v3 para v4
+    if (currentVersion < 4) {
       this.db.transaction(() => {
         if (currentVersion < 2) {
           // Tabelas base v1
@@ -270,32 +292,55 @@ export class SessionMemoryCentralStore {
           `)
         }
 
-        // Adições v3 (UnitFlow-01: Planos de sessão com constraint atômica de plano ativo único)
-        this.db.exec(`
-          CREATE TABLE IF NOT EXISTS smc_plans (
-            plan_id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            repository_id TEXT NOT NULL,
-            title TEXT NOT NULL,
-            source_artifact_id TEXT,
-            status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'COMPLETED', 'CANCELLED')),
-            revision INTEGER NOT NULL DEFAULT 1,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            FOREIGN KEY (session_id) REFERENCES smc_sessions(session_id) ON DELETE CASCADE
-          );
+        if (currentVersion < 3) {
+          // Adições v3 (UnitFlow-01: Planos de sessão com constraint atômica de plano ativo único)
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_plans (
+              plan_id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              repository_id TEXT NOT NULL,
+              title TEXT NOT NULL,
+              source_artifact_id TEXT,
+              status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'COMPLETED', 'CANCELLED')),
+              revision INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (session_id) REFERENCES smc_sessions(session_id) ON DELETE CASCADE
+            );
 
-          CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_plans_active_session
-            ON smc_plans (session_id) WHERE status = 'ACTIVE';
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_plans_active_session
+              ON smc_plans (session_id) WHERE status = 'ACTIVE';
 
-          CREATE INDEX IF NOT EXISTS idx_smc_plans_session_created
-            ON smc_plans (session_id, created_at DESC);
-        `)
+            CREATE INDEX IF NOT EXISTS idx_smc_plans_session_created
+              ON smc_plans (session_id, created_at DESC);
+          `)
+        }
+
+        if (currentVersion < 4) {
+          // Adições v4 (UnitFlow-02: Definição ordenada de unidades e dependências)
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_plan_units (
+              unit_id TEXT PRIMARY KEY,
+              plan_id TEXT NOT NULL,
+              position INTEGER NOT NULL,
+              title TEXT NOT NULL,
+              objective TEXT NOT NULL,
+              acceptance_criteria TEXT NOT NULL,
+              depends_on_json TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (plan_id) REFERENCES smc_plans(plan_id) ON DELETE CASCADE,
+              UNIQUE (plan_id, position)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_smc_plan_units_plan_pos
+              ON smc_plan_units (plan_id, position ASC);
+          `)
+        }
 
         if (!versionRow) {
-          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '3')
+          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '4')
         } else {
-          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('3', 'schema_version')
+          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('4', 'schema_version')
         }
       })()
     }
@@ -863,6 +908,335 @@ export class SessionMemoryCentralStore {
       revision: Number(row.revision),
       createdAt: row.created_at,
       updatedAt: row.updated_at
+    }
+  }
+
+  definePlanUnits(sessionId: string, planId: string, units: DefineUnitFlowUnitInput[]): UnitFlowUnitRecord[] {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+
+    if (typeof planId !== 'string' || !planId.trim() || !UUID_REGEX.test(planId.trim())) {
+      throw new UnitFlowInvalidPlanError(`planId must be a valid UUID format, received: "${planId}"`)
+    }
+    const cleanPlanId = planId.trim().toLowerCase()
+
+    if (!Array.isArray(units) || units.length === 0) {
+      throw new UnitFlowInvalidUnitError('Units manifest must be a non-empty array')
+    }
+    if (units.length > MAX_UNITS_COUNT) {
+      throw new UnitFlowInvalidUnitError(`Units manifest exceeds maximum allowed count of ${MAX_UNITS_COUNT}`)
+    }
+
+    const seenUnitIds = new Set<string>()
+    const sanitizedUnits: Array<{
+      unitId: string
+      title: string
+      objective: string
+      acceptanceCriteria: string
+      dependsOnUnitIds: string[]
+    }> = []
+
+    for (let i = 0; i < units.length; i++) {
+      const u = units[i]
+      if (!u || typeof u !== 'object') {
+        throw new UnitFlowInvalidUnitError(`Unit at index ${i} must be an object`)
+      }
+
+      if (typeof u.unitId !== 'string' || !u.unitId.trim() || !UUID_REGEX.test(u.unitId.trim())) {
+        throw new UnitFlowInvalidUnitError(`Unit at index ${i} has invalid unitId UUID format: "${u.unitId}"`)
+      }
+      const cleanUnitId = u.unitId.trim().toLowerCase()
+
+      if (seenUnitIds.has(cleanUnitId)) {
+        throw new UnitFlowInvalidUnitError(`Duplicate unitId in manifest: "${cleanUnitId}" at index ${i}`)
+      }
+
+      if (typeof u.title !== 'string' || !u.title.trim()) {
+        throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" title must be a non-empty string`)
+      }
+      const cleanTitle = u.title.trim()
+      if (cleanTitle.length > MAX_UNIT_TITLE_LENGTH) {
+        throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" title exceeds maximum length of ${MAX_UNIT_TITLE_LENGTH} characters`)
+      }
+
+      if (typeof u.objective !== 'string' || !u.objective.trim()) {
+        throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" objective must be a non-empty string`)
+      }
+      const cleanObjective = u.objective.trim()
+      if (cleanObjective.length > MAX_UNIT_TEXT_LENGTH) {
+        throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" objective exceeds maximum length of ${MAX_UNIT_TEXT_LENGTH} characters`)
+      }
+
+      if (typeof u.acceptanceCriteria !== 'string' || !u.acceptanceCriteria.trim()) {
+        throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" acceptanceCriteria must be a non-empty string`)
+      }
+      const cleanAcceptanceCriteria = u.acceptanceCriteria.trim()
+      if (cleanAcceptanceCriteria.length > MAX_UNIT_TEXT_LENGTH) {
+        throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" acceptanceCriteria exceeds maximum length of ${MAX_UNIT_TEXT_LENGTH} characters`)
+      }
+
+      let sanitizedDeps: string[] = []
+      if (u.dependsOnUnitIds !== undefined) {
+        if (!Array.isArray(u.dependsOnUnitIds)) {
+          throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" dependsOnUnitIds must be an array when provided`)
+        }
+        const seenDepsForUnit = new Set<string>()
+        for (const dep of u.dependsOnUnitIds) {
+          if (typeof dep !== 'string' || !dep.trim() || !UUID_REGEX.test(dep.trim())) {
+            throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" has invalid dependency UUID format: "${dep}"`)
+          }
+          const cleanDepId = dep.trim().toLowerCase()
+          if (cleanDepId === cleanUnitId) {
+            throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" cannot depend on itself`)
+          }
+          if (!seenUnitIds.has(cleanDepId)) {
+            throw new UnitFlowInvalidUnitError(`Dependency "${cleanDepId}" of unit "${cleanUnitId}" must point to a preceding unit in the same manifest`)
+          }
+          if (!seenDepsForUnit.has(cleanDepId)) {
+            seenDepsForUnit.add(cleanDepId)
+            sanitizedDeps.push(cleanDepId)
+          }
+        }
+      }
+
+      seenUnitIds.add(cleanUnitId)
+      sanitizedUnits.push({
+        unitId: cleanUnitId,
+        title: cleanTitle,
+        objective: cleanObjective,
+        acceptanceCriteria: cleanAcceptanceCriteria,
+        dependsOnUnitIds: sanitizedDeps
+      })
+    }
+
+    try {
+      return this.db.transaction(() => {
+        // 1. Valida existência e estado da sessão (OPEN)
+        const sessionRow = this.db.prepare(`
+          SELECT status FROM smc_sessions WHERE session_id = ? AND repository_id = ?
+        `).get(cleanSessionId, this.repositoryId) as { status: string } | undefined
+
+        if (!sessionRow) {
+          throw new SmcSessionNotFoundError(cleanSessionId)
+        }
+        if (sessionRow.status === 'CLOSED') {
+          throw new SmcSessionClosedError(cleanSessionId)
+        }
+
+        // 2. Valida existência e propriedade do plano na sessão
+        const planRow = this.db.prepare(`
+          SELECT plan_id, session_id, repository_id, status FROM smc_plans WHERE plan_id = ? AND repository_id = ?
+        `).get(cleanPlanId, this.repositoryId) as { plan_id: string, session_id: string, repository_id: string, status: string } | undefined
+
+        if (!planRow) {
+          throw new UnitFlowPlanNotFoundError(cleanPlanId)
+        }
+        if (planRow.session_id !== cleanSessionId) {
+          throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" belongs to another session "${planRow.session_id}"`)
+        }
+        if (planRow.status !== 'ACTIVE') {
+          throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" is not ACTIVE (status: ${planRow.status})`)
+        }
+
+        // 3. Verifica se o plano já possui unidades definidas
+        const existingRows = this.db.prepare(`
+          SELECT unit_id, plan_id, position, title, objective, acceptance_criteria, depends_on_json, created_at
+          FROM smc_plan_units
+          WHERE plan_id = ?
+          ORDER BY position ASC
+        `).all(cleanPlanId) as RawUnitRow[]
+
+        if (existingRows.length > 0) {
+          const isIdentical = this.checkManifestIdentical(existingRows, sanitizedUnits)
+          if (isIdentical) {
+            return existingRows.map(r => this.mapRawToUnitRecord(r))
+          }
+          throw new UnitFlowManifestConflictError(cleanPlanId, 'manifest already defined with divergent content')
+        }
+
+        // 4. Insere o manifesto ordenado em transação atômica única
+        const now = new Date().toISOString()
+        const insertStmt = this.db.prepare(`
+          INSERT INTO smc_plan_units (
+            unit_id, plan_id, position, title, objective, acceptance_criteria, depends_on_json, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+
+        const records: UnitFlowUnitRecord[] = []
+        for (let i = 0; i < sanitizedUnits.length; i++) {
+          const item = sanitizedUnits[i]
+          const position = i + 1
+          const depsJson = item.dependsOnUnitIds.length > 0 ? JSON.stringify(item.dependsOnUnitIds) : null
+          insertStmt.run(
+            item.unitId,
+            cleanPlanId,
+            position,
+            item.title,
+            item.objective,
+            item.acceptanceCriteria,
+            depsJson,
+            now
+          )
+          records.push({
+            unitId: item.unitId,
+            planId: cleanPlanId,
+            position,
+            title: item.title,
+            objective: item.objective,
+            acceptanceCriteria: item.acceptanceCriteria,
+            dependsOnUnitIds: item.dependsOnUnitIds,
+            createdAt: now
+          })
+        }
+
+        return records
+      })()
+    } catch (error: any) {
+      if (
+        error?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' ||
+        error?.code === 'SQLITE_CONSTRAINT_UNIQUE' ||
+        error?.message?.includes('UNIQUE constraint failed')
+      ) {
+        const existingRows = this.db.prepare(`
+          SELECT unit_id, plan_id, position, title, objective, acceptance_criteria, depends_on_json, created_at
+          FROM smc_plan_units
+          WHERE plan_id = ?
+          ORDER BY position ASC
+        `).all(cleanPlanId) as RawUnitRow[]
+        if (existingRows.length > 0) {
+          const isIdentical = this.checkManifestIdentical(existingRows, sanitizedUnits)
+          if (isIdentical) {
+            return existingRows.map(r => this.mapRawToUnitRecord(r))
+          }
+          throw new UnitFlowManifestConflictError(cleanPlanId, 'manifest already defined with divergent content')
+        }
+        throw new UnitFlowUnitConflictError(`Database constraint violation: ${error.message}`)
+      }
+      throw error
+    }
+  }
+
+  listPlanUnits(sessionId: string, planId: string): UnitFlowUnitHeaderRecord[] {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+
+    if (typeof planId !== 'string' || !planId.trim() || !UUID_REGEX.test(planId.trim())) {
+      throw new UnitFlowInvalidPlanError(`planId must be a valid UUID format, received: "${planId}"`)
+    }
+    const cleanPlanId = planId.trim().toLowerCase()
+
+    const session = this.getSession(cleanSessionId)
+    if (!session) {
+      throw new SmcSessionNotFoundError(cleanSessionId)
+    }
+
+    const plan = this.getPlan(cleanPlanId)
+    if (!plan) {
+      throw new UnitFlowPlanNotFoundError(cleanPlanId)
+    }
+    if (plan.sessionId !== cleanSessionId) {
+      throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" belongs to session "${plan.sessionId}", not "${cleanSessionId}"`)
+    }
+
+    const rows = this.db.prepare(`
+      SELECT unit_id, plan_id, position, title, depends_on_json, created_at
+      FROM smc_plan_units
+      WHERE plan_id = ?
+      ORDER BY position ASC
+    `).all(cleanPlanId) as Omit<RawUnitRow, 'objective' | 'acceptance_criteria'>[]
+
+    return rows.map(r => this.mapRawToUnitHeader(r))
+  }
+
+  getPlanUnit(sessionId: string, planId: string, unitId: string): UnitFlowUnitRecord | null {
+    if (
+      typeof sessionId !== 'string' || !sessionId.trim() ||
+      typeof planId !== 'string' || !planId.trim() ||
+      typeof unitId !== 'string' || !unitId.trim()
+    ) {
+      return null
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    const cleanPlanId = planId.trim().toLowerCase()
+    const cleanUnitId = unitId.trim().toLowerCase()
+
+    if (!UUID_REGEX.test(cleanSessionId) || !UUID_REGEX.test(cleanPlanId) || !UUID_REGEX.test(cleanUnitId)) {
+      return null
+    }
+
+    const plan = this.getPlan(cleanPlanId)
+    if (!plan || plan.sessionId !== cleanSessionId) {
+      return null
+    }
+
+    const row = this.db.prepare(`
+      SELECT unit_id, plan_id, position, title, objective, acceptance_criteria, depends_on_json, created_at
+      FROM smc_plan_units
+      WHERE plan_id = ? AND unit_id = ?
+    `).get(cleanPlanId, cleanUnitId) as RawUnitRow | undefined
+
+    if (!row) {
+      return null
+    }
+
+    return this.mapRawToUnitRecord(row)
+  }
+
+  private checkManifestIdentical(
+    existing: RawUnitRow[],
+    sanitized: Array<{
+      unitId: string
+      title: string
+      objective: string
+      acceptanceCriteria: string
+      dependsOnUnitIds: string[]
+    }>
+  ): boolean {
+    if (existing.length !== sanitized.length) {
+      return false
+    }
+    for (let i = 0; i < existing.length; i++) {
+      const e = existing[i]
+      const s = sanitized[i]
+      if (e.unit_id !== s.unitId) return false
+      if (e.position !== i + 1) return false
+      if (e.title !== s.title) return false
+      if (e.objective !== s.objective) return false
+      if (e.acceptance_criteria !== s.acceptanceCriteria) return false
+      const eDeps: string[] = e.depends_on_json ? JSON.parse(e.depends_on_json) : []
+      if (eDeps.length !== s.dependsOnUnitIds.length) return false
+      for (let j = 0; j < eDeps.length; j++) {
+        if (eDeps[j] !== s.dependsOnUnitIds[j]) return false
+      }
+    }
+    return true
+  }
+
+  private mapRawToUnitHeader(row: Omit<RawUnitRow, 'objective' | 'acceptance_criteria'>): UnitFlowUnitHeaderRecord {
+    return {
+      unitId: row.unit_id,
+      planId: row.plan_id,
+      position: row.position,
+      title: row.title,
+      dependsOnUnitIds: row.depends_on_json ? JSON.parse(row.depends_on_json) : [],
+      createdAt: row.created_at
+    }
+  }
+
+  private mapRawToUnitRecord(row: RawUnitRow): UnitFlowUnitRecord {
+    return {
+      unitId: row.unit_id,
+      planId: row.plan_id,
+      position: row.position,
+      title: row.title,
+      objective: row.objective ?? '',
+      acceptanceCriteria: row.acceptance_criteria ?? '',
+      dependsOnUnitIds: row.depends_on_json ? JSON.parse(row.depends_on_json) : [],
+      createdAt: row.created_at
     }
   }
 

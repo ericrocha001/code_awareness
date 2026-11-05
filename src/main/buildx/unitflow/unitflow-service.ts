@@ -1,6 +1,9 @@
 import type {
+  DefineUnitFlowUnitInput,
   RegisterUnitFlowPlanInput,
-  UnitFlowPlanRecord
+  UnitFlowPlanRecord,
+  UnitFlowUnitHeaderRecord,
+  UnitFlowUnitRecord
 } from '../../../shared/types/buildx/unitflow-types'
 import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
@@ -46,6 +49,38 @@ export class UnitFlowService {
     const validRepoId = validateRepositoryId(repositoryId)
     const store = this.smcService.getStore(validRepoId)
     return store.getPlan(planId)
+  }
+
+  definePlanUnits(
+    repositoryId: string,
+    sessionId: string,
+    planId: string,
+    units: DefineUnitFlowUnitInput[]
+  ): UnitFlowUnitRecord[] {
+    const validRepoId = validateRepositoryId(repositoryId)
+    const store = this.smcService.getStore(validRepoId)
+    return store.definePlanUnits(sessionId, planId, units)
+  }
+
+  listPlanUnits(
+    repositoryId: string,
+    sessionId: string,
+    planId: string
+  ): UnitFlowUnitHeaderRecord[] {
+    const validRepoId = validateRepositoryId(repositoryId)
+    const store = this.smcService.getStore(validRepoId)
+    return store.listPlanUnits(sessionId, planId)
+  }
+
+  getPlanUnit(
+    repositoryId: string,
+    sessionId: string,
+    planId: string,
+    unitId: string
+  ): UnitFlowUnitRecord | null {
+    const validRepoId = validateRepositoryId(repositoryId)
+    const store = this.smcService.getStore(validRepoId)
+    return store.getPlanUnit(sessionId, planId, unitId)
   }
 
   close(): void {
