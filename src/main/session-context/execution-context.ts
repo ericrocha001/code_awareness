@@ -9,7 +9,7 @@ export const executionSelector = z.discriminatedUnion('type', [
   z.object({ type: z.literal('PR'), id: z.string().regex(/^[1-9][0-9]{0,9}$/) }).strict(),
   z.object({ type: z.literal('COMMIT'), id: z.string().regex(/^[a-f0-9]{40}$/) }).strict(),
   z.object({ type: z.literal('CHECKPOINT'), id: z.string().regex(/^(?:[a-f0-9]{10,40}|[0-9A-HJKMNP-TV-Z]{26})$/) }).strict(),
-  z.object({ type: z.literal('SESSION'), id: identifier, provider: z.enum(['entire', 'codex']).optional(), agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional() }).strict(),
+  z.object({ type: z.literal('SESSION'), id: identifier, provider: z.enum(['entire', 'codex', 'codex-native']).optional(), agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional() }).strict(),
   z.object({ type: z.literal('ARTIFACT'), id: z.string().regex(/^artifact-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/) }).strict(),
   z.object({ type: z.literal('PROOF'), id: z.string().regex(/^proof-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/) }).strict(),
   z.object({ type: z.literal('EXECUTION'), id: identifier }).strict()
@@ -17,7 +17,7 @@ export const executionSelector = z.discriminatedUnion('type', [
 export const executionContextQuery = z.object({ selector: executionSelector, mode: z.enum(['MAP', 'RELATION_DETAIL']).default('MAP'),
   limit: z.number().int().min(1).max(24).default(20), cursor: z.string().max(512).optional() }).strict()
 export type ExecutionSelector = z.infer<typeof executionSelector>
-export const EXECUTION_SELECTOR_SCHEMA = { type: 'object', properties: { type: { type: 'string', enum: ['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION'] }, id: { type: 'string', minLength: 1, maxLength: 200 }, provider: { type: 'string', enum: ['entire', 'codex'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' } }, required: ['type', 'id'], additionalProperties: false }
+export const EXECUTION_SELECTOR_SCHEMA = { type: 'object', properties: { type: { type: 'string', enum: ['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION'] }, id: { type: 'string', minLength: 1, maxLength: 200 }, provider: { type: 'string', enum: ['entire', 'codex', 'codex-native'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' } }, required: ['type', 'id'], additionalProperties: false }
 export function executionEntity(store: SessionStore, selector: ExecutionSelector, accountHash?: string): RegistryEntity | undefined {
   if (selector.type !== 'SESSION') return { kind: selector.type, id: selector.id }
   const entity = selector.provider ? { kind: 'SESSION' as const, id: sessionIdentity(selector.provider, selector.id, selector.agent) } : store.registry.sessionIdentity(selector.id)

@@ -46,8 +46,8 @@ const schemas = {
     generation: z.string().regex(/^[a-f0-9]{64}$/).optional()
   }).strict().refine(q => (!q.worktreeId === !q.generation) && (!!q.checkpointId || !!q.commit)),
   list_agent_sessions: z.object({ state: z.enum(['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL']).optional(), agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional(), after: date, before: date,
-    ...historicalSelectors, includeArchived: z.boolean().optional(), archiveCursor: z.string().max(512).optional(), limit: z.number().int().min(1).max(20).default(20), cursor }).strict()
-    .refine(q => !q.archiveCursor || q.includeArchived === true),
+    ...historicalSelectors, source: z.enum(['IMPORTED', 'NATIVE_HOOK']).optional(), includeArchived: z.boolean().optional(), archiveCursor: z.string().max(512).optional(), limit: z.number().int().min(1).max(20).default(20), cursor }).strict()
+    .refine(q => (!q.archiveCursor || q.includeArchived === true) && (q.source !== 'NATIVE_HOOK' || ![q.state,q.agent,q.after,q.before,q.executionId,q.artifactId,q.commitSha,q.pullRequest,q.includeArchived,q.archiveCursor].some(v => v !== undefined))),
   inspect_agent_session: z.object({ sessionId: id, expectedRevision: revision.optional(), limit: z.number().int().min(1).max(20).default(5), cursor }).strict(),
   list_agent_session_events: z.object({ sessionId: id, expectedRevision: revision.optional(), types: z.array(z.enum(EVENT_TYPES)).min(1).max(9).optional(),
     tool: z.string().min(1).max(80).optional(), ordinalFrom: revision.optional(), ordinalTo: revision.optional(), after: date, before: date,
@@ -79,8 +79,8 @@ const definitions: [SessionToolName, string, Record<string, unknown>, string[]][
     { file: { type: 'string', minLength: 1, maxLength: 500 }, startLine: { type: 'integer', minimum: 1 }, endLine: { type: 'integer', minimum: 1 }, mode: { type: 'string', enum: ['MAP', 'DETAIL'], default: 'MAP' }, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, ['file']],
   ['inspect_entire_checkpoint', 'Inspect local Entire checkpoint metadata, candidate sessions, or selectively read literal prompt/intent fields from a specific session without loading transcripts or neighboring sessions. Requires checkpointId or verified commit SHA. READ_FIELD is bounded and pageable.',
     { checkpointId: { type: 'string', pattern: '^[A-Za-z0-9]{10,40}$' }, commit: { type: 'string', pattern: '^[a-f0-9]{40}$' }, mode: { type: 'string', enum: ['INSPECT', 'DISAMBIGUATE', 'READ_FIELD'], default: 'INSPECT' }, file: { type: 'string', minLength: 1, maxLength: 500 }, includePromptPreview: { type: 'boolean', default: false }, sessionIndex: { type: 'integer', minimum: 0 }, field: { type: 'string', enum: ['STORED_PROMPT', 'INTENT'] }, promptIndex: { type: 'integer', minimum: 0, default: 0 }, cursor: cur, worktreeId: { type: 'string', pattern: '^[a-f0-9]{64}$' }, generation: { type: 'string', pattern: '^[a-f0-9]{64}$' } }, []],
-  ['list_agent_sessions', 'Discover at most 20 sessions in the active repository by exact executionId, artifactId, commitSha or repository-scoped pullRequest. Persisted associations survive missing Worktrees; evidence levels never prove authorship. Metadata only, no events or bodies. includeArchived is retained for compatibility and reports partial coverage of Entire local/checkpoint references; private vendor archives are never queried. Continue with the same filters. Never imports transcripts or runs Entire.',
-    { state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' }, after: time, before: time, executionId: str, artifactId: str, commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$' }, pullRequest: { type: 'integer', minimum: 1 }, includeArchived: { type: 'boolean' }, archiveCursor: cur, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: cur }, []],
+  ['list_agent_sessions', 'Discover at most 20 sessions. source=NATIVE_HOOK accepts only limit/cursor and returns native identities with selective graph navigation. Otherwise filter imported sessions by executionId, artifactId, commitSha or repository-scoped pullRequest. Metadata only; evidence levels never prove authorship. includeArchived reports partial Entire local/checkpoint coverage; private vendor archives are never queried. Continue with the same filters. Never imports transcripts or runs Entire.',
+    { source: { type: 'string', enum: ['IMPORTED', 'NATIVE_HOOK'] }, state: { type: 'string', enum: ['ACTIVE', 'ENDED', 'UNKNOWN', 'PARTIAL'] }, agent: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,79}$' }, after: time, before: time, executionId: str, artifactId: str, commitSha: { type: 'string', pattern: '^[a-f0-9]{40}$' }, pullRequest: { type: 'integer', minimum: 1 }, includeArchived: { type: 'boolean' }, archiveCursor: cur, limit: { type: 'integer', minimum: 1, maximum: 20, default: 20 }, cursor: cur }, []],
   ['inspect_agent_session', 'Inspect the cheap deterministic map of a selected session: category counts, tools, files and ordinal segments. No bodies. Cursor is bound to this repository and revision. Source identity means checked stream headers, never authorship; the time range is observed, not causal proof.',
     { ...session, limit: { type: 'integer', minimum: 1, maximum: 20, default: 5 }, cursor: cur }, ['sessionId']],
   ['list_agent_session_events', 'Select event envelopes from one session by category, tool, ordinal/time range or segment. At most 15 reference envelopes with file references, never event bodies. Agent claims remain unverified.',
@@ -184,6 +184,7 @@ export async function executeSessionTool(
       data = await inspectCaptureHealth(store as SessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, q as ReturnType<typeof parseCaptureHealth>, assertActive)
       const observation = data as CaptureHealthObservation
       await reconcileRegistry(store as SessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
+      data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: (store as SessionStore).registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true } }
     } else if (name === 'inspect_code_provenance') {
       const request = q as z.infer<typeof schemas.inspect_code_provenance>
       if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
@@ -238,6 +239,14 @@ export async function executeSessionTool(
       }
     } else if (name === 'list_agent_sessions') {
       const actualStore = store as SessionStore
+      const nativeQuery = q as z.infer<typeof schemas.list_agent_sessions>
+      if (nativeQuery.source === 'NATIVE_HOOK') {
+        const source = actualStore.registry.source('NATIVE_HOOK')
+        const scope = { name, source: 'NATIVE_HOOK', revision: source?.revision ?? 'empty', limit: nativeQuery.limit }
+        const offset = actualStore.offset(nativeQuery.cursor, scope)
+        const rows = actualStore.registry.nativeSessions(offset, nativeQuery.limit + 1)
+        return wrap(page(actualStore, scope, offset, rows, nativeQuery.limit, budget, { repositoryId: actualStore.repositoryId, source: 'NATIVE_HOOK', captureState: source?.status ?? 'UNOBSERVED', transcriptImported: false, authorship: 'NOT_INFERRED' }, row => row, 'sessions'))
+      }
       const selector = registrySelector(q as z.infer<typeof schemas.list_agent_sessions>)
       if (selector && !('cursor' in q && q.cursor)) await reconcileRegistry(actualStore, runner, root!, selector, assertActive, registryReader)
       const { cursor, ...filter } = q as z.infer<typeof schemas.list_agent_sessions>
@@ -251,7 +260,7 @@ export async function executeSessionTool(
       for (const row of rows) if (!actualStore.registry.visible({ kind: 'SESSION', id: (row.provider ?? 'entire') + ':' + row.providerSessionId }, archiveAccountHash)) throw new Error('SESSION_UNAVAILABLE')
       data = page(actualStore, scope, offset, rows, filter.limit, budget,
         { repositoryId: actualStore.repositoryId, revision: actualStore.catalogRevision(), associationCoverage: 'COVERAGE_PARTIAL', reason: rows.some(row => actualStore.associations(row.id, 1).length) ? 'COVERAGE_PARTIAL' : 'NO_ASSOCIATION_OBSERVED',
-          ...(contextMap ? { contextMap } : {}),
+          ...(contextMap ? { contextMap } : {}), nativeCapture: { state: actualStore.registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', deepen: { tool: 'list_agent_sessions', arguments: { source: 'NATIVE_HOOK' } } },
           archiveCoverage: { code: filter.includeArchived ? 'COVERAGE_PARTIAL' : 'ARCHIVE_NOT_QUERIED', source: 'ENTIRE_LOCAL_AND_CHECKPOINT_INDEX', reason: 'PRIVATE_VENDOR_ARCHIVES_NOT_QUERIED', ...(filter.archiveCursor ? { cursorState: 'ARCHIVE_CURSOR_UNSUPPORTED' } : {}) } }, row => associationMetadata(actualStore, row, filter), 'sessions')
     } else {
       const actualStore = store as SessionStore

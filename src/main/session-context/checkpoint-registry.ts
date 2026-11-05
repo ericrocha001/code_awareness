@@ -29,6 +29,20 @@ export const REGISTRY_SCHEMA = `
 const kinds: EntityKind[] = ['COMMIT', 'CHECKPOINT', 'SESSION', 'PR', 'ARTIFACT', 'PROOF', 'WORKTREE', 'EXECUTION']
 export class CheckpointRegistry {
   constructor(private readonly db: Database.Database, readonly repositoryId: string) {}
+  directEvidence(entity: RegistryEntity, evidenceKind: string): RegistryEdge[] {
+    const key = this.key(entity)
+    const rows = this.db.prepare("SELECT payload,integrity FROM registry_edges WHERE (fromId=? OR toId=?) AND state='OBSERVED' ORDER BY id LIMIT 65").all(key, key) as { payload: string; integrity: string }[]
+    if (rows.length > 64) throw new Error('REGISTRY_EVIDENCE_LIMIT')
+    return rows.map(row => {
+      if (digest(row.payload) !== row.integrity) throw new Error('REGISTRY_INTEGRITY_FAILED')
+      return JSON.parse(row.payload) as RegistryEdge
+    }).filter(edge => edge.evidenceKind === evidenceKind)
+  }
+  nativeSessions(offset: number, limit: number): { provider: string; providerSessionId: string; agent: string; origin: string; aliasState: string; deepen: object }[] {
+    const rows = this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='SESSION' AND externalId LIKE 'codex-native:%' ORDER BY externalId LIMIT ? OFFSET ?").all(limit, offset) as { externalId: string }[]
+    return rows.map(row => ({ provider: 'codex-native', providerSessionId: row.externalId.slice(13), agent: 'codex', origin: 'NATIVE_HOOK', aliasState: 'NOT_RECONCILED',
+      deepen: { tool: 'discover_execution_context', arguments: { selector: { type: 'SESSION', provider: 'codex-native', id: row.externalId.slice(13) } } } }))
+  }
   readSnapshot<T>(read: () => T): T { return this.db.transaction(read).deferred() }
   key(entity: RegistryEntity): string {
     if (!kinds.includes(entity.kind) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,399}$/.test(entity.id)) throw new Error('INVALID_REGISTRY_ENTITY')
@@ -148,9 +162,9 @@ export class CheckpointRegistry {
           if (digest(row.payload) !== row.integrity || this.key(value.from) !== row.fromId || this.key(value.to) !== row.toId) throw new Error('REGISTRY_INTEGRITY_FAILED')
           if (!this.visible(value.from, accountHash) || !this.visible(value.to, accountHash)) continue
           if (value.from.kind === 'ARTIFACT' && value.to.kind === 'ARTIFACT' && !['implements', 'resolved-by'].includes(value.relation)) continue
-          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED'].includes(value.evidenceKind)) continue
+          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST'].includes(value.evidenceKind)) continue
           const from = add(value.from), to = add(value.to)
-          const state = row.state === 'CONFLICT' ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : value.evidenceKind === 'HANDOFF_DECLARED' ? 'DECLARED' : 'VERIFIED'
+          const state = row.state === 'CONFLICT' ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : value.evidenceKind === 'HANDOFF_DECLARED' ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
           edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest })
           const next = from === key ? value.to : value.from, target = this.key(next)
           if (!visited.has(target)) {

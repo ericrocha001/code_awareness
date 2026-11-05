@@ -601,6 +601,7 @@ app.whenReady().then(async () => {
         assertCurrent: () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') } }))
     if (activeSessionContext) {
       const sessionContext = activeSessionContext
+      void sessionContext.call('list_agent_sessions', { source: 'NATIVE_HOOK', limit: 1 }).catch(() => {})
       gitOperations.bindCommitObservation(async (target, commitSha) => {
         await sessionContext.call('inspect_capture_health', { ...target, commitSha, trigger: 'LOCAL_COMMIT' })
         return sessionContext.call('reconcile_checkpoint_registry', { commitSha })

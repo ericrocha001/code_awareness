@@ -26,6 +26,10 @@ function canonical(value: unknown): unknown {
   return value
 }
 
+export function gitReceiptFingerprint(operation: string, args: Record<string, unknown>): string {
+  return createHash('sha256').update(JSON.stringify(canonical({ operation, args }))).digest('hex')
+}
+
 export function isReceiptedGitMutation(name: string, args: Record<string, unknown>): boolean {
   if (['mutate_worktree', 'manage_worktree', 'integrate_worktree', 'publish_worktree', 'start_worktree_validation', 'resolve_worktree_conflict'].includes(name)) return true
   if (['stage_git_changes', 'commit_git_changes', 'merge_git_branch', 'revert_git_commit', 'resolve_git_conflict'].includes(name)) return true
@@ -43,7 +47,7 @@ export class GitOperationReceipts {
 
   async executeResult(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<GitOperationalResult>): Promise<GitOperationalResult> {
     const operationalFailure = (value: Record<string, unknown>): GitOperationalResult => ({ value, isError: true })
-    const fingerprint = createHash('sha256').update(JSON.stringify(canonical({ operation, args }))).digest('hex')
+    const fingerprint = gitReceiptFingerprint(operation, args)
     const recover = (receipt: GitOperationReceipt): GitOperationalResult => {
       if (receipt.argumentFingerprint !== fingerprint) return operationalFailure({ code: 'IDEMPOTENCY_CONFLICT', operationId, retryability: 'NOT_SAFE', recommendedAction: 'USE_NEW_OPERATION_ID' })
       if (receipt.status === 'PREPARED') return operationalFailure({ code: 'OPERATION_OUTCOME_UNKNOWN', operationId, retryability: 'NOT_SAFE', recommendedAction: 'RECONCILE_OPERATION' })
