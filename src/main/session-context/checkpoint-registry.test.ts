@@ -18,6 +18,9 @@ import { SessionContextClient } from './client'
 import { GitHubApiClient } from '../github/github-api-client'
 import { handoffSessionCoverage } from './handoff'
 import { GitHubIntegrationService } from '../github/github-integration-service'
+import { nativeObservationBatch } from './native-hook-ingestion'
+import { correlateNativeGit } from './native-git-correlation'
+import type { NativeHookBinding, NativeHookEnvelope } from './native-hooks'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const f of cleanup.reverse()) f(); cleanup.length = 0 })
@@ -33,6 +36,35 @@ function fixture(withLegacy = false) {
   return { base, path, store: () => store, restart: () => { store.close(); store = new SessionStore(path, 'repo') } }
 }
 const commit = 'e9343e7998b877682604bb772a7ecb31bb8b81e5', checkpoint = '01M6EGW7096RMXJE1VPD76NDSQ'
+it('requires matching native invocation, fresh Git receipt and exact object before causal promotion', async () => {
+  const f = fixture(), registry = f.store().registry
+  const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'repo', worktreeId: '1'.repeat(64), generation: '2'.repeat(64), root: f.base, commonDirectory: f.base, directoryIdentity: '3'.repeat(64), spool: f.base }
+  const invocationId = '4'.repeat(64), fingerprint = '5'.repeat(64), parent = '6'.repeat(40), sessionId = '7'.repeat(64)
+  const observe = (event: 'PreToolUse' | 'PostToolUse', replayed = false) => {
+    const envelope: NativeHookEnvelope = { schema: 1, source: 'CODEX_NATIVE_HOOK', repositoryId: 'repo', worktreeId: binding.worktreeId, generation: binding.generation,
+      sessionId, event, invocationId, observedAt: new Date().toISOString(), eventId: digest(event + replayed), digest: digest('payload' + event + replayed),
+      git: { operationId: 'commit-proof', fingerprint, expectedHead: parent, ...(event === 'PostToolUse' ? { sha: commit, parent, replayed } : {}) } }
+    const batch = nativeObservationBatch(envelope); registry.apply(batch, undefined)
+  }
+  let receiptFingerprint = fingerprint
+  const git = { readOperationReceipt: async () => ({ sha: '8'.repeat(40), receipt: { operationId: 'commit-proof', operation: 'commit_git_changes', argumentFingerprint: receiptFingerprint,
+    status: 'COMPLETED' as const, createdAt: new Date().toISOString(), result: { content: [{ type: 'text' as const, text: JSON.stringify({ sha: commit, parent }) }] } } }),
+    getCommitOperationObjects: async () => [{ sha: commit, parents: [parent], title: 'not persisted' }] }
+  observe('PostToolUse')
+  expect(await correlateNativeGit(registry, binding, invocationId, git, () => {})).toBe('INVOCATION_INCOMPLETE')
+  observe('PreToolUse')
+  expect(await correlateNativeGit(registry, binding, invocationId, git, () => {})).toBe('VERIFIED')
+  const first = registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL')
+  expect(first).toHaveLength(2)
+  f.restart()
+  expect(await correlateNativeGit(f.store().registry, binding, invocationId, git, () => {})).toBe('VERIFIED')
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL')).toHaveLength(2)
+  receiptFingerprint = '0'.repeat(64)
+  expect(await correlateNativeGit(f.store().registry, binding, invocationId, git, () => {})).toBe('RECEIPT_UNVERIFIED')
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL').every(edge => edge.state === 'CONFLICT')).toBe(true)
+  const otherBinding = { ...binding, worktreeId: '9'.repeat(64) }
+  expect(await correlateNativeGit(f.store().registry, otherBinding, invocationId, git, () => {})).toBe('INVOCATION_AMBIGUOUS')
+})
 const runner: CommandRunner = async (_exe, args) => {
   const text = args.includes('log') ? 'Subject\nEntire-Checkpoint: ' + checkpoint : args.includes('rev-parse') ? 'a'.repeat(40) : args.some(a => a.endsWith(':metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, cli_version: '0.12.2', sessions: [{}, {}] }) : args.some(a => a.endsWith(':0/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'codex', session_id: 'session-one' }) : args.some(a => a.endsWith(':1/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'antigravity', session_id: 'session-two' }) : ''
   return { text, code: 0, limited: false }

@@ -5,6 +5,11 @@ import { executeSessionTool, executeLiveSessionTool, type SessionToolName } from
 import { isLiveSessionTool } from './entire-live'
 import { sourceFingerprint, type SessionTargetSelection, type LiveSessionTarget } from './target'
 import type { RegistryBatch, RegistryReader } from './checkpoint-registry'
+import { join } from 'node:path'
+import { readNativeBinding } from './native-hooks'
+import { ingestNativeHooks } from './native-hook-ingestion'
+import { correlateNativeGit } from './native-git-correlation'
+import { GitService } from '../core/git-service'
 
 const { storageBase, repositoryId, root, cancellation } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer }
 const cancelled = new Int32Array(cancellation)
@@ -13,6 +18,7 @@ const assertActive = () => { if (Atomics.load(cancelled, 0)) throw new Error('PR
 const storeIdentity = { path: sessionStorePath(storageBase, repositoryId), repositoryId }
 let store: SessionStore | undefined
 let pending = 0, closing = false
+let nativeIngesting = false
 let validationId = 0
 type ResolvedTarget = { root: string; fingerprint: string; selection: SessionTargetSelection }
 const validations = new Map<number, { resolve: (target?: ResolvedTarget) => void; reject: (error: Error) => void }>()
@@ -24,7 +30,7 @@ const validateTarget = (id: number, sourceSelection?: SessionTargetSelection) =>
   parentPort?.postMessage({ id, validate: validation, ...(sourceSelection ? { sourceSelection } : {}) })
 })
 const close = () => { if (closing && !pending) { store?.close(); parentPort?.close() } }
-parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string }) => {
+parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; nativeTargets?: LiveSessionTarget[]; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string }) => {
   if ('registryResult' in message) {
     const entry = registryReads.get(message.registryResult); registryReads.delete(message.registryResult)
     if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve(message.batches)
@@ -64,6 +70,28 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       }
     }
     const requestStore = isLiveSessionTool(message.name) ? storeIdentity : (store ??= new SessionStore(storeIdentity.path, repositoryId))
+    if (store && message.nativeTargets?.length && !nativeIngesting) {
+      nativeIngesting = true
+      try {
+      for (const nativeTarget of message.nativeTargets) {
+        try {
+          const binding = readNativeBinding(join(nativeTarget.root, '.code-awareness/native-hooks/binding.json'))
+          if (binding.repositoryId !== repositoryId || binding.worktreeId !== nativeTarget.worktreeId || binding.generation !== nativeTarget.generation) throw new Error('WORKTREE_STALE')
+          await ingestNativeHooks(store.registry, binding, async selection => {
+            const resolved = await validateTarget(message.id, selection)
+            if (!resolved) throw new Error('WORKTREE_STALE')
+            return { ...resolved, validate: async () => { await validateTarget(message.id, selection); assertRequest() } }
+          }, assertRequest, Date.now(), async event => {
+            if (event.git && event.invocationId) await correlateNativeGit(store!.registry, binding, event.invocationId, new GitService(), assertRequest)
+          })
+        } catch {
+          assertRequest()
+          const previous = store.registry.source('NATIVE_HOOK')
+          store.registry.apply({ repositoryId, source: 'NATIVE_HOOK', revision: previous?.revision ?? 'unavailable', status: 'PARTIAL', edges: [] }, previous?.revision, assertRequest)
+        }
+      }
+      } finally { nativeIngesting = false }
+    }
     if (message.name === 'read_agent_session_event' && store && message.args && typeof message.args === 'object' && 'sessionId' in message.args && typeof message.args.sessionId === 'string') {
       const selection = store.references.source(message.args.sessionId)?.locator.target
       if (selection) {

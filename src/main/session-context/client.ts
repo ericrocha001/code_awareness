@@ -1,4 +1,5 @@
 import { Worker } from 'node:worker_threads'
+import { existsSync } from 'node:fs'
 import type { RegistryReader } from './checkpoint-registry'
 import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
@@ -23,6 +24,7 @@ export class SessionContextClient implements SessionContextPort {
   private terminal = false
   private retiring: Promise<void> = Promise.resolve()
   private serial = 0
+  private nativeOffset = 0
   private pending = new Map<number, Request>()
   private refresh?: { key: string; task: Promise<McpToolResult> }
   constructor(private readonly storageBase: string, private readonly repositoryId: string, private readonly root: string, private readonly isCurrent: () => boolean,
@@ -146,6 +148,13 @@ export class SessionContextClient implements SessionContextPort {
           if (!this.pending.has(id) || !this.active()) return
           let target
           let liveTargets
+          let nativeTargets
+          if (this.resolveTarget?.discover && ['reconcile_checkpoint_registry','discover_execution_context','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
+            const available = (await this.resolveTarget.discover()).filter(target => existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')))
+            const start = this.nativeOffset % Math.max(1, available.length)
+            nativeTargets = [...available.slice(start), ...available.slice(0, start)].slice(0, 8)
+            this.nativeOffset = (start + nativeTargets.length) % Math.max(1, available.length)
+          }
           if (name === 'inspect_capture_health') {
             const query = parseCaptureHealth(args)
             if (query.worktreeId && this.resolveTarget) {
@@ -211,7 +220,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }
