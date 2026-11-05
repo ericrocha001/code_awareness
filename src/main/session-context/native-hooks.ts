@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs'
+import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
 
@@ -7,6 +7,20 @@ export const nativeHookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'S
 export type NativeHookEvent = typeof nativeHookEvents[number]
 export const nativeHookLimits = { inputBytes: 65536, envelopeBytes: 4096, slots: 1024, retentionMs: 86400000, timeoutMs: 750 }
 export const nativeDigest = (value: string): string => createHash('sha256').update(value).digest('hex')
+export const nativeGapReasons = ['JSON_SYNTAX', 'JSON_STRUCTURE', 'EVENT_UNSUPPORTED', 'REQUIRED_ID_MISSING', 'INVALID_ID', 'CWD_MISSING', 'INVOCATION_ID_MISSING',
+  'WORKTREE_MISMATCH', 'WORKTREE_STALE', 'INVALID_ENVELOPE', 'ENVELOPE_INTEGRITY', 'ENVELOPE_LIMIT', 'UNSAFE_SPOOL', 'IO_FAILURE', 'INPUT_LIMIT', 'SPOOL_FULL', 'READ_FAILURE', 'TIMEOUT', 'EVENT_EXPIRED', 'EVENT_TIME_INVALID', 'LEGACY_UNTYPED', 'DIAGNOSTIC_LIMIT', 'DIAGNOSTIC_INVALID'] as const
+export type NativeGapReason = typeof nativeGapReasons[number]
+export type NativeGapPhase = 'READ' | 'PARSE' | 'NORMALIZE' | 'WRITE' | 'INGEST'
+export interface NativeGap {
+  schema: 2; reasonCode: NativeGapReason; phase: NativeGapPhase; eventType: NativeHookEvent | 'UNKNOWN'; observedAt: string
+}
+export function nativeEventType(payload: unknown): NativeGap['eventType'] {
+  return object(payload) && nativeHookEvents.includes(payload.hook_event_name as NativeHookEvent) ? payload.hook_event_name as NativeHookEvent : 'UNKNOWN'
+}
+export function nativeGapReason(error: unknown): NativeGapReason {
+  const code = error instanceof Error ? error.message : ''
+  return nativeGapReasons.includes(code as NativeGapReason) ? code as NativeGapReason : 'IO_FAILURE'
+}
 const hashPattern = /^[a-f0-9]{64}$/
 const idPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value)
@@ -83,9 +97,13 @@ export function readNativeBinding(path: string): NativeHookBinding {
 
 export function normalizeNativeHook(payload: unknown, binding: NativeHookBinding, now = new Date()): NativeHookEnvelope {
   if (!binding.enabled) throw new Error('DISABLED')
-  if (!object(payload) || !nativeHookEvents.includes(payload.hook_event_name as NativeHookEvent) ||
-    typeof payload.session_id !== 'string' || !idPattern.test(payload.session_id) || typeof payload.cwd !== 'string') throw new Error('INVALID_PAYLOAD')
-  const identity = nativeGitIdentity(payload.cwd)
+  if (!object(payload)) throw new Error('JSON_STRUCTURE')
+  if (!nativeHookEvents.includes(payload.hook_event_name as NativeHookEvent)) throw new Error('EVENT_UNSUPPORTED')
+  if (payload.session_id === undefined || payload.session_id === null || payload.session_id === '') throw new Error('REQUIRED_ID_MISSING')
+  if (typeof payload.session_id !== 'string' || !idPattern.test(payload.session_id)) throw new Error('INVALID_ID')
+  if (typeof payload.cwd !== 'string') throw new Error('CWD_MISSING')
+  let identity: ReturnType<typeof nativeGitIdentity>
+  try { identity = nativeGitIdentity(payload.cwd) } catch { throw new Error('WORKTREE_STALE') }
   if (identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory || identity.directoryIdentity !== binding.directoryIdentity) throw new Error('WORKTREE_MISMATCH')
   const sessionId = nativeDigest(JSON.stringify([binding.repositoryId, 'codex', payload.session_id]))
   const event = payload.hook_event_name as NativeHookEvent
@@ -163,10 +181,10 @@ export function spoolNativeHook(envelope: NativeHookEnvelope, spool: string): 'W
       const previous = parseNativeEnvelope(boundedFile(destination, nativeHookLimits.envelopeBytes))
       if (previous.eventId === envelope.eventId) return 'DUPLICATE'
       continue
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') continue }
+    } catch (error) { const code = (error as NodeJS.ErrnoException).code; if (code && code !== 'ENOENT') throw error; if (code !== 'ENOENT') continue }
     const pending = destination + '.pending'
     try { writeFileSync(pending, text, { flag: 'wx', mode: 0o600, flush: true }) }
-    catch { continue }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; continue }
     try {
       linkSync(pending, destination)
       return 'WRITTEN'
@@ -181,10 +199,24 @@ export function prepareNativeSpool(spool: string): void {
   if (lstatSync(spool).isSymbolicLink() || realpathSync(dirname(spool)) !== resolve(dirname(spool))) throw new Error('UNSAFE_SPOOL')
 }
 
-export function recordNativeGap(spool: string, reason: 'INPUT_LIMIT' | 'INVALID_PAYLOAD' | 'SPOOL_FULL'): void {
+export function recordNativeGap(spool: string, reasonCode: NativeGapReason, phase: NativeGapPhase = 'READ', eventType: NativeGap['eventType'] = 'UNKNOWN'): void {
   try {
-    const path = join(spool, 'gap.json')
-    try { if (lstatSync(path).isSymbolicLink()) return } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return }
-    writeFileSync(path, JSON.stringify({ schema: 1, state: 'PARTIAL', reason, observedAt: new Date().toISOString() }), { mode: 0o600 })
+    if (!nativeGapReasons.includes(reasonCode) || !['READ', 'PARSE', 'NORMALIZE', 'WRITE', 'INGEST'].includes(phase) ||
+      !(eventType === 'UNKNOWN' || nativeHookEvents.includes(eventType))) return
+    if (lstatSync(spool).isSymbolicLink() || realpathSync(spool) !== resolve(spool)) return
+    const text = JSON.stringify({ schema: 2, reasonCode, phase, eventType, observedAt: new Date().toISOString() } satisfies NativeGap)
+    for (let slot = 0; slot < 32; slot++) {
+      const path = join(spool, `gap-${slot}.json`), pending = path + '.pending'
+      if (existsGap(path)) continue
+      try { writeFileSync(pending, text, { flag: 'wx', mode: 0o600 }) } catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST') continue; return }
+      try { linkSync(pending, path); return } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return }
+      finally { unlinkSync(pending) }
+    }
+    const overflow = join(spool, 'gap-overflow.json')
+    try { writeFileSync(overflow, JSON.stringify({ schema: 2, reasonCode: 'DIAGNOSTIC_LIMIT', phase, eventType: 'UNKNOWN', observedAt: new Date().toISOString() }), { flag: 'wx', mode: 0o600 }) }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === 'EEXIST' && !lstatSync(overflow).isSymbolicLink()) utimesSync(overflow, new Date(), new Date()) }
   } catch {}
+}
+function existsGap(path: string): boolean {
+  try { lstatSync(path); return true } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error }
 }

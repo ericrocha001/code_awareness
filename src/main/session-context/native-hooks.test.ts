@@ -2,8 +2,8 @@ import { afterEach, expect, test } from 'vitest'
 import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { execFileSync } from 'node:child_process'
-import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { execFile, execFileSync } from 'node:child_process'
+import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
 import { composeNativeHooks, disableNativeHooks, installNativeHooks } from './native-hook-installation'
 
 const directories: string[] = []
@@ -56,15 +56,68 @@ test('command fails open without output for malformed, oversized or disabled inp
   for (const input of ['{', 'x'.repeat(nativeHookLimits.inputBytes + 1), JSON.stringify({ ...f.payload, session_id: '../private' })]) {
     expect(execFileSync(process.execPath, [command, file], { input, timeout: 3000, encoding: 'utf8' })).toBe('')
   }
-  expect(readdirSync(f.spool)).toEqual(['gap.json'])
+  expect(readdirSync(f.spool)).toHaveLength(3)
   expect(execFileSync(process.execPath, [command, file], { input: JSON.stringify(f.payload), timeout: 3000, encoding: 'utf8' })).toBe('')
-  expect(readdirSync(f.spool)).toHaveLength(2)
-  const eventFile = readdirSync(f.spool).find(file => file !== 'gap.json')!
+  expect(readdirSync(f.spool)).toHaveLength(4)
+  const eventFile = readdirSync(f.spool).find(file => /^\d+\.json$/.test(file))!
   const hash = nativeDigest(readFileSync(join(f.spool, eventFile), 'utf8'))
   writeFileSync(file, JSON.stringify({ ...f.binding, enabled: false }))
   execFileSync(process.execPath, [command, file], { input: JSON.stringify({ ...f.payload, tool_use_id: 'new-call' }), timeout: 3000 })
-  expect(readdirSync(f.spool)).toHaveLength(2)
+  expect(readdirSync(f.spool)).toHaveLength(4)
   expect(nativeDigest(readFileSync(join(f.spool, eventFile), 'utf8'))).toBe(hash)
+})
+
+test('command emits bounded typed diagnostics without payloads at each failing boundary', () => {
+  const cases = [
+    { input: '{PRIVATE_SECRET', reasonCode: 'JSON_SYNTAX', phase: 'PARSE', eventType: 'UNKNOWN' },
+    { input: '[]', reasonCode: 'JSON_STRUCTURE', phase: 'NORMALIZE', eventType: 'UNKNOWN' },
+    { change: { hook_event_name: 'PRIVATE_SECRET' }, reasonCode: 'EVENT_UNSUPPORTED', phase: 'NORMALIZE', eventType: 'UNKNOWN' },
+    { change: { session_id: null }, reasonCode: 'REQUIRED_ID_MISSING', phase: 'NORMALIZE', eventType: 'PreToolUse' },
+    { change: { session_id: '../PRIVATE_SECRET' }, reasonCode: 'INVALID_ID', phase: 'NORMALIZE', eventType: 'PreToolUse' },
+    { change: { tool_use_id: null }, reasonCode: 'INVOCATION_ID_MISSING', phase: 'NORMALIZE', eventType: 'PreToolUse' },
+    { mismatch: true, reasonCode: 'WORKTREE_MISMATCH', phase: 'NORMALIZE', eventType: 'PreToolUse' },
+    { full: true, reasonCode: 'SPOOL_FULL', phase: 'WRITE', eventType: 'PreToolUse' }
+  ]
+  for (const sample of cases) {
+    const f = fixture(), binding = join(f.root, 'binding.json')
+    writeFileSync(binding, JSON.stringify({ ...f.binding, ...(sample.mismatch ? { directoryIdentity: '0'.repeat(64) } : {}) }))
+    if (sample.full) for (let slot = 0; slot < nativeHookLimits.slots; slot++) writeFileSync(join(f.spool, `${slot}.json`), '{}')
+    const input = sample.input ?? JSON.stringify({ ...f.payload, ...sample.change, prompt: 'PRIVATE_SECRET' })
+    expect(execFileSync(process.execPath, [join(process.cwd(), 'out/session-context/native-hook.cjs'), binding], { input, encoding: 'utf8', timeout: 3000 })).toBe('')
+    const text = readFileSync(join(f.spool, 'gap-0.json'), 'utf8')
+    expect(JSON.parse(text)).toMatchObject({ schema: 2, reasonCode: sample.reasonCode, phase: sample.phase, eventType: sample.eventType })
+    expect(text.length).toBeLessThan(256)
+    expect(text).not.toContain('PRIVATE_SECRET'); expect(text).not.toContain(f.root); expect(text).not.toContain('session-1')
+  }
+})
+
+test('concurrent commands preserve both receipts and bound repeated failures', async () => {
+  const f = fixture(), binding = join(f.root, 'binding.json'), command = join(process.cwd(), 'out/session-context/native-hook.cjs')
+  writeFileSync(binding, JSON.stringify(f.binding))
+  await Promise.all(['{', JSON.stringify({ ...f.payload, tool_use_id: null })].map(input => new Promise<void>((resolve, reject) => {
+    const child = execFile(process.execPath, [command, binding], { timeout: 3000 }, (error, stdout, stderr) => {
+      if (error) return reject(error)
+      expect(stdout).toBe(''); expect(stderr).toBe(''); resolve()
+    })
+    child.stdin!.end(input)
+  })))
+  expect(readdirSync(f.spool)).toHaveLength(2)
+  expect(readdirSync(f.spool).map(name => JSON.parse(readFileSync(join(f.spool, name), 'utf8')).reasonCode).sort()).toEqual(['INVOCATION_ID_MISSING', 'JSON_SYNTAX'])
+  const first = readFileSync(join(f.spool, 'gap-0.json'), 'utf8')
+  for (let index = 0; index < 100; index++) recordNativeGap(f.spool, 'INPUT_LIMIT')
+  expect(readdirSync(f.spool)).toHaveLength(33)
+  expect(readFileSync(join(f.spool, 'gap-0.json'), 'utf8')).toBe(first)
+  expect(JSON.parse(readFileSync(join(f.spool, 'gap-overflow.json'), 'utf8')).reasonCode).toBe('DIAGNOSTIC_LIMIT')
+})
+
+test('command classifies a spool I/O failure without recording the system error message', () => {
+  const f = fixture(), binding = join(f.root, 'binding.json'), preloader = join(f.root, 'fault.cjs')
+  writeFileSync(binding, JSON.stringify(f.binding))
+  writeFileSync(preloader, "const fs = require('node:fs'); const original = fs.linkSync; let first = true; fs.linkSync = (...args) => { if (first) { first = false; throw Object.assign(new Error('PRIVATE_DISK_ERROR'), { code: 'EIO' }); } return original(...args); }")
+  expect(execFileSync(process.execPath, ['--require', preloader, join(process.cwd(), 'out/session-context/native-hook.cjs'), binding], { input: JSON.stringify(f.payload), encoding: 'utf8', timeout: 3000 })).toBe('')
+  const text = readFileSync(join(f.spool, 'gap-0.json'), 'utf8')
+  expect(JSON.parse(text)).toMatchObject({ reasonCode: 'IO_FAILURE', phase: 'WRITE', eventType: 'PreToolUse' })
+  expect(text).not.toContain('PRIVATE_DISK_ERROR'); expect(text).not.toContain(f.root)
 })
 test('requires explicit opt-in, preserves Entire handlers and restores exact configuration bytes', () => {
   const f = fixture(), commandPath = join(process.cwd(), 'out/session-context/native-hook.cjs')

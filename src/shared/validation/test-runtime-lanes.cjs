@@ -4,6 +4,7 @@ const nativeTestFiles = Object.freeze([
     'src/main/session-context/session-namespace-migration.test.ts',
   'src/main/session-context/execution-context.test.ts',
   'src/main/session-context/checkpoint-registry.test.ts',
+  'src/main/session-context/native-hook-diagnostics.test.ts',
   'src/main/session-context/capture-health.test.ts',
   'src/main/validation-ledger/test-output-adapter.test.ts',
   'src/main/session-context/provenance.test.ts',

@@ -1,8 +1,9 @@
-import { existsSync, readdirSync, unlinkSync } from 'node:fs'
+import { readdirSync, unlinkSync } from 'node:fs'
 import { join } from 'node:path'
 import type { CheckpointRegistry, RegistryBatch, RegistryEntity } from './checkpoint-registry'
 import type { SessionTargetResolver } from './target'
-import { boundedFile, nativeDigest, nativeGitIdentity, nativeHookLimits, parseNativeEnvelope, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { boundedFile, nativeDigest, nativeGapReason, nativeGitIdentity, nativeHookLimits, parseNativeEnvelope, recordNativeGap, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { persistNativeCapture } from './native-hook-diagnostics'
 
 export function nativeObservationBatch(event: NativeHookEnvelope): RegistryBatch {
   const session: RegistryEntity = { kind: 'SESSION', id: `codex-native:${event.sessionId}` }
@@ -37,9 +38,10 @@ export async function ingestNativeHooks(registry: CheckpointRegistry, binding: N
     const path = join(binding.spool, name)
     let event: NativeHookEnvelope
     try { event = parseNativeEnvelope(boundedFile(path, nativeHookLimits.envelopeBytes)) }
-    catch { receipt.rejected++; continue }
-    if (event.repositoryId !== binding.repositoryId || event.worktreeId !== binding.worktreeId || event.generation !== binding.generation || Date.parse(event.observedAt) > now + 60000) { receipt.rejected++; continue }
-    if (now - Date.parse(event.observedAt) > nativeHookLimits.retentionMs) { receipt.expired++; unlinkSync(path); continue }
+    catch (error) { recordNativeGap(binding.spool, error instanceof SyntaxError ? 'JSON_SYNTAX' : nativeGapReason(error), 'INGEST'); receipt.rejected++; continue }
+    if (event.repositoryId !== binding.repositoryId || event.worktreeId !== binding.worktreeId || event.generation !== binding.generation) { recordNativeGap(binding.spool, 'WORKTREE_MISMATCH', 'INGEST', event.event); receipt.rejected++; continue }
+    if (Date.parse(event.observedAt) > now + 60000) { recordNativeGap(binding.spool, 'EVENT_TIME_INVALID', 'INGEST', event.event); receipt.rejected++; continue }
+    if (now - Date.parse(event.observedAt) > nativeHookLimits.retentionMs) { recordNativeGap(binding.spool, 'EVENT_EXPIRED', 'INGEST', event.event); receipt.expired++; unlinkSync(path); continue }
     if (nativeGitIdentity(binding.root).directoryIdentity !== binding.directoryIdentity) throw new Error('WORKTREE_STALE')
     assertCurrent()
     const batch = nativeObservationBatch(event)
@@ -49,7 +51,8 @@ export async function ingestNativeHooks(registry: CheckpointRegistry, binding: N
     unlinkSync(path)
     receipt.ingested++
   }
-  receipt.state = receipt.rejected || receipt.expired || receipt.pending || existsSync(join(binding.spool, 'gap.json')) ? 'PARTIAL' : receipt.ingested ? 'OBSERVED' : 'READY'
+  const diagnostics = persistNativeCapture(registry, binding, receipt, assertCurrent)
+  receipt.state = receipt.rejected || receipt.expired || receipt.pending || diagnostics.historicalCoverage.state === 'PARTIAL' ? 'PARTIAL' : receipt.ingested ? 'OBSERVED' : 'READY'
   const source = 'NATIVE_HOOK', previous = registry.source(source)
   if (admitted.length || receipt.state === 'PARTIAL' && previous?.status !== 'PARTIAL') {
     const revision = nativeDigest(JSON.stringify([previous?.revision, binding.worktreeId, admitted, receipt.state]))
