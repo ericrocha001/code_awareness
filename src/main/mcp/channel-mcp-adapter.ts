@@ -57,6 +57,8 @@ import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orches
 import { SESSION_CONTEXT_TOOLS, type SessionToolName } from '../session-context/mcp'
 import { CLI_EXECUTION_TOOLS, executeCliTool } from '../cli-execution/cli-execution-mcp'
 import type { CliExecutionService } from '../cli-execution/cli-execution-service'
+import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../session-memory-central/session-memory-central-mcp'
+import type { SessionMemoryCentralService } from '../session-memory-central/session-memory-central-service'
 
 const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file', 'read_agent_session_event'])
 const literalReadOutputSchema = {
@@ -99,6 +101,9 @@ export class ChannelMcpAdapter {
   private readonly runtimePreview?: McpProjectContext['runtimePreview']
   private readonly sessionContext?: McpProjectContext['sessionContext']
   private readonly cliExecution?: CliExecutionService
+  private readonly sessionMemoryCentral?: SessionMemoryCentralService
+  private readonly projectId?: string
+  private readonly assertActiveProject?: () => void
 
   constructor(
     context: McpProjectContext,
@@ -152,6 +157,9 @@ export class ChannelMcpAdapter {
       this.runtimePreview = context.runtimePreview
       this.sessionContext = context.sessionContext
       this.cliExecution = context.cliExecution
+      this.sessionMemoryCentral = context.sessionMemoryCentral
+      this.projectId = context.projectId
+      this.assertActiveProject = context.assertActiveProject
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
     } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
@@ -218,6 +226,7 @@ export class ChannelMcpAdapter {
     if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     if (this.cliExecution) tools.push(...CLI_EXECUTION_TOOLS)
+    if (this.sessionMemoryCentral && this.projectId) tools.push(...BUILDX_SMC_TOOLS)
     return tools.map(tool => literalReadTools.has(tool.name) ? { ...tool, outputSchema: literalReadOutputSchema } : tool)
   }
 
@@ -274,6 +283,7 @@ export class ChannelMcpAdapter {
 
   private capabilityForTool(name: string): string | undefined {
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return 'CLI Execution'
+    if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) return 'BuildX'
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return 'Session Context'
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return 'Work Orchestration'
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
@@ -290,6 +300,14 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+    if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) {
+      if (!this.sessionMemoryCentral || !this.projectId) {
+        return { content: [{ type: 'text', text: JSON.stringify({ code: 'BUILDX_SMC_UNAVAILABLE', message: 'Session Memory Central is not available for active project' }) }], isError: true }
+      }
+      return executeBuildxSmcTool(this.sessionMemoryCentral, this.projectId, name, args, {
+        assertActiveProject: this.assertActiveProject
+      })
+    }
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return this.cliExecution ? executeCliTool(this.cliExecution, name, args) : { content: [{ type: 'text', text: JSON.stringify({ code: 'CLI_EXECUTION_UNAVAILABLE' }) }], isError: true }
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return this.sessionContext ? this.sessionContext.call(name as SessionToolName, args) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
     if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {

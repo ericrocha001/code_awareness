@@ -17,10 +17,22 @@ import {
   SmcInvalidSupersedesError,
   SmcUnsupportedSchemaError
 } from './index'
+import {
+  BUILDX_SMC_TOOLS,
+  LIST_BUILDX_SESSIONS_TOOL,
+  LIST_BUILDX_SESSION_ENTRIES_TOOL,
+  GET_BUILDX_SESSION_ENTRY_TOOL,
+  executeBuildxSmcTool
+} from './session-memory-central-mcp'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
+import { bindProjectNavigation } from '../core/context/project-context-navigation'
+import type { ContextNavigationPort } from '../core/context/context-navigation-port'
+import { textContent } from '../mcp/mcp-test-content'
+
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-describe('Session Memory Central (SMC) — SMC-01 & SMC-02 Provas Mínimas', () => {
+describe('Session Memory Central (SMC) — SMC-01, SMC-02 & SMC-03 Provas Mínimas', () => {
   let tempBaseDir: string
 
   beforeEach(() => {
@@ -504,4 +516,330 @@ describe('Session Memory Central (SMC) — SMC-01 & SMC-02 Provas Mínimas', () 
       service.close()
     })
   })
+
+  describe('SMC-03 — Descoberta e leitura MCP da memória de sessão', () => {
+    function createAdapter(service: SessionMemoryCentralService, projectId: string, assertActiveProject?: () => void) {
+      const stubNavigation: ContextNavigationPort = {
+        discoverRepository: async () => ({ directories: [] }),
+        getRelationships: async () => ({ files: [] }),
+        inspectFiles: async () => ({ files: [] }),
+        readCode: async () => [],
+        getReferences: async () => ({ targets: [] }),
+        getSymbolDependencies: async () => ({ sources: [] }),
+        getSymbolHierarchy: async () => ({ targets: [] })
+      }
+      return new ChannelMcpAdapter({
+        projectId,
+        repoRoot: join(tempBaseDir, projectId),
+        navigation: bindProjectNavigation(stubNavigation, join(tempBaseDir, projectId)),
+        sessionMemoryCentral: service,
+        assertActiveProject
+      })
+    }
+
+    describe('SMC-03 — Prova 1: Catálogo, anotações e roteamento no Channel MCP', () => {
+      it('expõe exatamente as ferramentas de leitura BuildX com readOnlyHint=true e sem ferramentas de escrita', () => {
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        const adapter = createAdapter(service, 'repo-cat')
+        const tools = adapter.listTools()
+
+        const buildxTools = tools.filter(t => BUILDX_SMC_TOOLS.some(bt => bt.name === t.name))
+        expect(buildxTools.map(t => t.name).sort()).toEqual([
+          'get_buildx_session_entry',
+          'list_buildx_session_entries',
+          'list_buildx_sessions'
+        ])
+
+        for (const t of buildxTools) {
+          expect(t.annotations?.readOnlyHint).toBe(true)
+          expect(t.inputSchema.properties).not.toHaveProperty('repositoryId')
+        }
+
+        const anyWriteBuildX = tools.some(t => t.name.includes('buildx') && (t.name.includes('create') || t.name.includes('append') || t.name.includes('write')))
+        expect(anyWriteBuildX).toBe(false)
+
+        service.close()
+      })
+
+      it('não expõe as ferramentas BuildX quando sessionMemoryCentral não for fornecido', () => {
+        const stubNav: ContextNavigationPort = {
+          discoverRepository: async () => ({ directories: [] }),
+          getRelationships: async () => ({ files: [] }),
+          inspectFiles: async () => ({ files: [] }),
+          readCode: async () => [],
+          getReferences: async () => ({ targets: [] }),
+          getSymbolDependencies: async () => ({ sources: [] }),
+          getSymbolHierarchy: async () => ({ targets: [] })
+        }
+        const adapter = new ChannelMcpAdapter({
+          projectId: 'repo-no-smc',
+          repoRoot: join(tempBaseDir, 'repo-no-smc'),
+          navigation: bindProjectNavigation(stubNav, join(tempBaseDir, 'repo-no-smc'))
+        })
+
+        const tools = adapter.listTools()
+        expect(tools.some(t => BUILDX_SMC_TOOLS.some(bt => bt.name === t.name))).toBe(false)
+      })
+    })
+
+    describe('SMC-03 — Prova 2: Autocontextualização progressiva (list_buildx_sessions -> list_buildx_session_entries -> get_buildx_session_entry)', () => {
+      it('executa a jornada completa de autocontextualização sem vazar corpos na listagem e permitindo leitura seletiva', async () => {
+        const repoId = 'repo-flow-1'
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        const adapter = createAdapter(service, repoId)
+
+        const session = service.createSession(repoId)
+        const entry1 = service.appendEntry(repoId, session.sessionId, {
+          kind: 'DECISION',
+          title: 'Decisão de persistência',
+          body: 'Corpo confidencial de decisão arquitetural SQLite WAL.',
+          provenance: { role: 'HUMAN' }
+        })
+        const entry2 = service.appendEntry(repoId, session.sessionId, {
+          kind: 'EVIDENCE',
+          title: 'Evidência de benchmark',
+          body: 'Corpo longo de evidência com tempos de execução.',
+          provenance: { role: 'AGENT' }
+        })
+        const entry3 = service.appendEntry(repoId, session.sessionId, {
+          kind: 'RESULT',
+          title: 'Resultado de validação',
+          body: 'Corpo longo com sumário de aprovação de 13 testes.',
+          provenance: { role: 'AGENT' }
+        })
+
+        // Passo 1: list_buildx_sessions
+        const sessionsResult = await adapter.callTool('list_buildx_sessions', {})
+        expect(sessionsResult.isError).toBeFalsy()
+        const sessionsPayload = JSON.parse(textContent(sessionsResult.content[0]))
+        expect(sessionsPayload.sessions).toBeDefined()
+        const foundSession = sessionsPayload.sessions.find((s: any) => s.sessionId === session.sessionId)
+        expect(foundSession).toBeDefined()
+        expect(foundSession.sessionId).toBe(session.sessionId)
+        expect(foundSession.status).toBe('OPEN')
+        expect(foundSession.revision).toBe(1)
+        expect(foundSession).not.toHaveProperty('body')
+        expect(foundSession).not.toHaveProperty('entries')
+
+        // Passo 2: list_buildx_session_entries
+        const entriesResult = await adapter.callTool('list_buildx_session_entries', { sessionId: session.sessionId })
+        expect(entriesResult.isError).toBeFalsy()
+        const entriesPayload = JSON.parse(textContent(entriesResult.content[0]))
+        expect(entriesPayload.entries).toHaveLength(3)
+        for (const item of entriesPayload.entries) {
+          expect(item.sessionId).toBe(session.sessionId)
+          expect(item.entryId).toBeDefined()
+          expect(item.kind).toBeDefined()
+          expect(item.title).toBeDefined()
+          expect(item).not.toHaveProperty('body')
+        }
+
+        // Filtro por kind
+        const filteredResult = await adapter.callTool('list_buildx_session_entries', { sessionId: session.sessionId, kind: 'DECISION' })
+        const filteredPayload = JSON.parse(textContent(filteredResult.content[0]))
+        expect(filteredPayload.entries).toHaveLength(1)
+        expect(filteredPayload.entries[0].entryId).toBe(entry1.entryId)
+        expect(filteredPayload.entries[0].kind).toBe('DECISION')
+
+        // Paginação por cursor
+        const p1 = await adapter.callTool('list_buildx_session_entries', { sessionId: session.sessionId, limit: 2 })
+        const p1Payload = JSON.parse(textContent(p1.content[0]))
+        expect(p1Payload.entries).toHaveLength(2)
+        expect(p1Payload.nextCursor).toBeTruthy()
+
+        const p2 = await adapter.callTool('list_buildx_session_entries', { sessionId: session.sessionId, limit: 2, cursor: p1Payload.nextCursor })
+        const p2Payload = JSON.parse(textContent(p2.content[0]))
+        expect(p2Payload.entries).toHaveLength(1)
+        expect(p2Payload.entries[0].entryId).toBe(entry3.entryId)
+
+        // Passo 3: get_buildx_session_entry
+        const singleResult = await adapter.callTool('get_buildx_session_entry', { sessionId: session.sessionId, entryId: entry1.entryId })
+        expect(singleResult.isError).toBeFalsy()
+        const singlePayload = JSON.parse(textContent(singleResult.content[0]))
+        expect(singlePayload.entryId).toBe(entry1.entryId)
+        expect(singlePayload.sessionId).toBe(session.sessionId)
+        expect(singlePayload.kind).toBe('DECISION')
+        expect(singlePayload.title).toBe('Decisão de persistência')
+        expect(singlePayload.body).toBe('Corpo confidencial de decisão arquitetural SQLite WAL.')
+        expect(singlePayload.provenance.role).toBe('HUMAN')
+
+        service.close()
+      })
+    })
+
+    describe('SMC-03 — Prova 3: Fronteiras, isolamento entre repositórios e fail-closed', () => {
+      it('isola estritamente repositório A de repositório B', async () => {
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        const adapterA = createAdapter(service, 'repo-a')
+        const adapterB = createAdapter(service, 'repo-b')
+
+        const sessionA = service.createSession('repo-a')
+        const entryA = service.appendEntry('repo-a', sessionA.sessionId, {
+          kind: 'RESULT',
+          title: 'Resultado A',
+          body: 'Dado específico do repo A',
+          provenance: { role: 'AGENT' }
+        })
+
+        const sessionB = service.createSession('repo-b')
+
+        const listA = await adapterA.callTool('list_buildx_sessions', {})
+        const payloadListA = JSON.parse(textContent(listA.content[0]))
+        expect(payloadListA.sessions.map((s: any) => s.sessionId)).toContain(sessionA.sessionId)
+        expect(payloadListA.sessions.map((s: any) => s.sessionId)).not.toContain(sessionB.sessionId)
+
+        const crossList = await adapterA.callTool('list_buildx_session_entries', { sessionId: sessionB.sessionId })
+        expect(crossList.isError).toBe(true)
+        expect(JSON.parse(textContent(crossList.content[0])).code).toBe('SESSION_NOT_FOUND')
+
+        const crossGet = await adapterA.callTool('get_buildx_session_entry', { sessionId: sessionB.sessionId, entryId: entryA.entryId })
+        expect(crossGet.isError).toBe(true)
+        expect(JSON.parse(textContent(crossGet.content[0])).code).toBe('SESSION_NOT_FOUND')
+
+        service.close()
+      })
+
+      it('rejeita com PROJECT_CONTEXT_CHANGED quando o contexto do projeto for invalidado ou trocado', async () => {
+        const repoId = 'repo-context-invalidation'
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        let active = true
+
+        const adapter = createAdapter(service, repoId, () => {
+          if (!active) throw new Error('PROJECT_CONTEXT_CHANGED')
+        })
+
+        const session = service.createSession(repoId)
+        const okRes = await adapter.callTool('list_buildx_sessions', {})
+        expect(okRes.isError).toBeFalsy()
+
+        active = false
+        const invalidatedRes = await adapter.callTool('list_buildx_sessions', {})
+        expect(invalidatedRes.isError).toBe(true)
+        expect(JSON.parse(textContent(invalidatedRes.content[0])).code).toBe('PROJECT_CONTEXT_CHANGED')
+
+        service.close()
+      })
+
+      it('rejeita identificadores inválidos e argumentos malformados com INVALID_ARGUMENT', async () => {
+        const repoId = 'repo-arg-val'
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        const adapter = createAdapter(service, repoId)
+
+        const invalidSession = await adapter.callTool('list_buildx_session_entries', { sessionId: 'not-a-uuid' })
+        expect(invalidSession.isError).toBe(true)
+        expect(JSON.parse(textContent(invalidSession.content[0])).code).toBe('INVALID_ARGUMENT')
+
+        const validSession = service.createSession(repoId)
+        const invalidEntry = await adapter.callTool('get_buildx_session_entry', { sessionId: validSession.sessionId, entryId: '12345' })
+        expect(invalidEntry.isError).toBe(true)
+        expect(JSON.parse(textContent(invalidEntry.content[0])).code).toBe('INVALID_ARGUMENT')
+
+        const invalidKind = await adapter.callTool('list_buildx_session_entries', { sessionId: validSession.sessionId, kind: 'NON_EXISTENT_KIND' })
+        expect(invalidKind.isError).toBe(true)
+        expect(JSON.parse(textContent(invalidKind.content[0])).code).toBe('INVALID_ARGUMENT')
+
+        const invalidLimit = await adapter.callTool('list_buildx_sessions', { limit: -5 })
+        expect(invalidLimit.isError).toBe(true)
+        expect(JSON.parse(textContent(invalidLimit.content[0])).code).toBe('INVALID_ARGUMENT')
+
+        service.close()
+      })
+    })
+
+    describe('SMC-03 — Prova 4: Pureza de leitura, ausência de vazamento e limite de resposta', () => {
+      it('as consultas de leitura não causam qualquer mutação no SQLite nem alteram contagens ou revisões', async () => {
+        const repoId = 'repo-purity'
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        const adapter = createAdapter(service, repoId)
+
+        const session = service.createSession(repoId)
+        const entry = service.appendEntry(repoId, session.sessionId, {
+          kind: 'RESULT',
+          title: 'Purity test',
+          body: 'Corpo de teste para validação de pureza.',
+          provenance: { role: 'AGENT' }
+        })
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const dbInspection = new Database(dbPath, { readonly: true })
+        const initialSessionsCount = dbInspection.prepare('SELECT COUNT(*) as count FROM smc_sessions').get() as { count: number }
+        const initialEntriesCount = dbInspection.prepare('SELECT COUNT(*) as count FROM smc_entries').get() as { count: number }
+        const initialSessionRow = dbInspection.prepare('SELECT * FROM smc_sessions WHERE session_id = ?').get(session.sessionId) as any
+        dbInspection.close()
+
+        for (let i = 0; i < 5; i++) {
+          await adapter.callTool('list_buildx_sessions', {})
+          await adapter.callTool('list_buildx_session_entries', { sessionId: session.sessionId })
+          await adapter.callTool('get_buildx_session_entry', { sessionId: session.sessionId, entryId: entry.entryId })
+        }
+
+        const dbAfter = new Database(dbPath, { readonly: true })
+        const afterSessionsCount = dbAfter.prepare('SELECT COUNT(*) as count FROM smc_sessions').get() as { count: number }
+        const afterEntriesCount = dbAfter.prepare('SELECT COUNT(*) as count FROM smc_entries').get() as { count: number }
+        const afterSessionRow = dbAfter.prepare('SELECT * FROM smc_sessions WHERE session_id = ?').get(session.sessionId) as any
+        dbAfter.close()
+
+        expect(afterSessionsCount.count).toBe(initialSessionsCount.count)
+        expect(afterEntriesCount.count).toBe(initialEntriesCount.count)
+        expect(afterSessionRow.revision).toBe(initialSessionRow.revision)
+        expect(afterSessionRow.updated_at).toBe(initialSessionRow.updated_at)
+
+        service.close()
+      })
+
+      it('não vaza caminhos privados do sistema de arquivos nas saídas do Channel MCP', async () => {
+        const repoId = 'repo-leak-prevention'
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        const adapter = createAdapter(service, repoId)
+
+        const session = service.createSession(repoId)
+        const entry = service.appendEntry(repoId, session.sessionId, {
+          kind: 'RESULT',
+          title: 'Leak test',
+          body: 'Leak check body content',
+          provenance: { role: 'AGENT' }
+        })
+
+        const res1 = await adapter.callTool('list_buildx_sessions', {})
+        const res2 = await adapter.callTool('list_buildx_session_entries', { sessionId: session.sessionId })
+        const res3 = await adapter.callTool('get_buildx_session_entry', { sessionId: session.sessionId, entryId: entry.entryId })
+
+        for (const res of [res1, res2, res3]) {
+          const rawText = textContent(res.content[0])
+          expect(rawText).not.toContain(tempBaseDir)
+          expect(rawText).not.toContain('.db')
+          expect(rawText).not.toContain('session-memory-central.db')
+        }
+
+        service.close()
+      })
+
+      it('rejeita com RESPONSE_LIMIT_REACHED quando o registro excede o orçamento de resposta', () => {
+        const repoId = 'repo-budget'
+        const service = new SessionMemoryCentralService(tempBaseDir)
+        const session = service.createSession(repoId)
+        const entry = service.appendEntry(repoId, session.sessionId, {
+          kind: 'RESULT',
+          title: 'Huge payload test',
+          body: 'X'.repeat(500),
+          provenance: { role: 'AGENT' }
+        })
+
+        const overflowResult = executeBuildxSmcTool(
+          service,
+          repoId,
+          'get_buildx_session_entry',
+          { sessionId: session.sessionId, entryId: entry.entryId },
+          { maxResponseBytes: 200 }
+        )
+
+        expect(overflowResult.isError).toBe(true)
+        const errPayload = JSON.parse(textContent(overflowResult.content[0]))
+        expect(errPayload.code).toBe('RESPONSE_LIMIT_REACHED')
+
+        service.close()
+      })
+    })
+  })
 })
+
