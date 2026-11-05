@@ -18,6 +18,12 @@ import {
   SmcUnsupportedSchemaError
 } from './index'
 import {
+  UnitFlowService,
+  UnitFlowInvalidPlanError,
+  UnitFlowPlanConflictError,
+  UnitFlowActivePlanAlreadyExistsError
+} from '../unitflow'
+import {
   BUILDX_SMC_TOOLS,
   BUILDX_SMC_READ_TOOLS,
   BUILDX_SMC_MUTATION_TOOLS,
@@ -284,10 +290,10 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       expect(recoveredEntry?.provenance).toEqual(entryInput.provenance)
       expect(recoveredEntry?.references).toEqual(entryInput.references)
 
-      // Garante que o schema_version está em 2
+      // Garante que o schema_version foi migrado (pelo menos versão 2, atualmente 3)
       const versionDb = new Database(dbPath)
       const row = versionDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-      expect(row.value).toBe('2')
+      expect(['2', '3']).toContain(row.value)
       versionDb.close()
 
       reopened.close()
@@ -1178,6 +1184,516 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       })
     })
   })
+
+  describe('BuildX UnitFlow-01 — Provas Mínimas', () => {
+    describe('UnitFlow-01 — Prova 1: Migração de banco real SMC v2 com sessão e histórico para v3', () => {
+      it('migra banco v2 atomicamente, preserva sessões e entradas anteriores, registra plano, sobrevive a restart', () => {
+        const repoId = 'repo-v2-migration'
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        mkdirSync(dirname(dbPath), { recursive: true })
+
+        // 1. Cria manualmente banco v2 com sessão e entradas históricas
+        const dbRaw = new Database(dbPath)
+        dbRaw.exec(`
+          CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          INSERT INTO smc_meta (key, value) VALUES ('repository_id', '${repoId}');
+          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '2');
+
+          CREATE TABLE smc_sessions (
+            session_id TEXT PRIMARY KEY,
+            repository_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('OPEN', 'CLOSED')),
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+
+          CREATE TABLE smc_entries (
+            order_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            entry_id TEXT UNIQUE NOT NULL,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            title TEXT NOT NULL,
+            body TEXT NOT NULL,
+            emitter_role TEXT NOT NULL,
+            emitter_id TEXT,
+            references_json TEXT,
+            supersedes_entry_id TEXT,
+            created_at TEXT NOT NULL
+          );
+        `)
+
+        const legacySessionId = '11111111-2222-3333-4444-555555555555'
+        const legacyEntryId = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        const now = new Date().toISOString()
+
+        dbRaw.prepare(`
+          INSERT INTO smc_sessions (session_id, repository_id, status, revision, created_at, updated_at)
+          VALUES (?, ?, 'OPEN', 1, ?, ?)
+        `).run(legacySessionId, repoId, now, now)
+
+        dbRaw.prepare(`
+          INSERT INTO smc_entries (entry_id, session_id, kind, title, body, emitter_role, emitter_id, references_json, supersedes_entry_id, created_at)
+          VALUES (?, ?, 'DECISION', 'Decisão histórica v2', 'Corpo detalhado de decisão v2', 'AGENT', 'arquiteto-v2', null, null, ?)
+        `).run(legacyEntryId, legacySessionId, now)
+
+        dbRaw.close()
+
+        // 2. Abre com o novo UnitFlowService / SessionMemoryCentralStore
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+
+        // Força abertura e migração do Store para o repositório
+        const store = smc.getStore(repoId)
+        expect(store.isOpen()).toBe(true)
+
+        // Verifica que schema foi promovido a v3
+        const checkDb = new Database(dbPath)
+        const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
+        expect(versionRow.value).toBe('3')
+        checkDb.close()
+
+        // 3. Registra plano ativo
+        const planId = '99999999-8888-7777-6666-555555555555'
+        const plan = unitFlow.registerPlan(repoId, legacySessionId, {
+          planId,
+          title: 'Plano migrado v3',
+          sourceArtifactId: 'artifact-plan-v3'
+        })
+
+        expect(plan.planId).toBe(planId)
+        expect(plan.sessionId).toBe(legacySessionId)
+        expect(plan.repositoryId).toBe(repoId)
+        expect(plan.title).toBe('Plano migrado v3')
+        expect(plan.sourceArtifactId).toBe('artifact-plan-v3')
+        expect(plan.status).toBe('ACTIVE')
+        expect(plan.revision).toBe(1)
+
+        // 4. Fecha e reabre store
+        smc.close()
+
+        const reopenedSmc = new SessionMemoryCentralService(tempBaseDir)
+        const reopenedUnitFlow = new UnitFlowService(reopenedSmc)
+
+        // Recupera o mesmo plano
+        const activePlan = reopenedUnitFlow.getActivePlan(repoId, legacySessionId)
+        expect(activePlan).not.toBeNull()
+        expect(activePlan!.planId).toBe(planId)
+        expect(activePlan!.title).toBe('Plano migrado v3')
+        expect(activePlan!.sourceArtifactId).toBe('artifact-plan-v3')
+        expect(activePlan!.status).toBe('ACTIVE')
+        expect(activePlan!.revision).toBe(1)
+
+        // Memória anterior SMC v2 está intacta
+        const historicEntry = reopenedSmc.getEntry(repoId, legacySessionId, legacyEntryId)
+        expect(historicEntry).not.toBeNull()
+        expect(historicEntry!.title).toBe('Decisão histórica v2')
+        expect(historicEntry!.body).toBe('Corpo detalhado de decisão v2')
+        expect(historicEntry!.kind).toBe('DECISION')
+
+        const session = reopenedSmc.getSession(repoId, legacySessionId)
+        expect(session).not.toBeNull()
+        expect(session!.status).toBe('OPEN')
+
+        reopenedUnitFlow.close()
+        reopenedSmc.close()
+      })
+    })
+
+    describe('UnitFlow-01 — Prova 2: Replay, divergência, segundo plano ativo e concorrência entre instâncias', () => {
+      it('replays idênticos retornam o plano sem duplicar ou alterar revisão', () => {
+        const repoId = 'repo-replay'
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+        const session = smc.createSession(repoId)
+
+        const planId = '11111111-1111-4111-8111-111111111111'
+        const first = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId,
+          title: 'Meu Plano Inicial',
+          sourceArtifactId: 'artifact-001'
+        })
+        expect(first.status).toBe('ACTIVE')
+        expect(first.revision).toBe(1)
+
+        // Replay exato
+        const second = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId,
+          title: 'Meu Plano Inicial',
+          sourceArtifactId: 'artifact-001'
+        })
+        expect(second.planId).toBe(first.planId)
+        expect(second.revision).toBe(1)
+        expect(second.createdAt).toBe(first.createdAt)
+        expect(second.updatedAt).toBe(first.updatedAt)
+
+        // Confirma no banco que só existe 1 registro
+        const db = new Database(smcDatabasePath(tempBaseDir, repoId))
+        const countRow = db.prepare('SELECT count(*) as total FROM smc_plans WHERE session_id = ?').get(session.sessionId) as { total: number }
+        expect(countRow.total).toBe(1)
+        db.close()
+
+        smc.close()
+      })
+
+      it('rejeita com conflito quando mesmo planId diverge em título ou sourceArtifactId', () => {
+        const repoId = 'repo-divergence'
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+        const session = smc.createSession(repoId)
+
+        const planId = '22222222-2222-4222-8222-222222222222'
+        unitFlow.registerPlan(repoId, session.sessionId, {
+          planId,
+          title: 'Título Original',
+          sourceArtifactId: 'artifact-abc'
+        })
+
+        // Divergência de título
+        expect(() => {
+          unitFlow.registerPlan(repoId, session.sessionId, {
+            planId,
+            title: 'Título Alterado',
+            sourceArtifactId: 'artifact-abc'
+          })
+        }).toThrow(UnitFlowPlanConflictError)
+
+        // Divergência de sourceArtifactId
+        expect(() => {
+          unitFlow.registerPlan(repoId, session.sessionId, {
+            planId,
+            title: 'Título Original',
+            sourceArtifactId: 'artifact-outro'
+          })
+        }).toThrow(UnitFlowPlanConflictError)
+
+        // Verifica que o plano no banco permaneceu inalterado
+        const current = unitFlow.getActivePlan(repoId, session.sessionId)
+        expect(current!.title).toBe('Título Original')
+        expect(current!.sourceArtifactId).toBe('artifact-abc')
+
+        smc.close()
+      })
+
+      it('rejeita tentativa de segundo plano ativo enquanto o atual estiver ACTIVE', () => {
+        const repoId = 'repo-second-active'
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+        const session = smc.createSession(repoId)
+
+        const plan1Id = '33333333-3333-4333-8333-333333333333'
+        const plan2Id = '44444444-4444-4444-8444-444444444444'
+
+        unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: plan1Id,
+          title: 'Primeiro Plano'
+        })
+
+        // Tenta registrar segundo plano ativo na mesma sessão
+        expect(() => {
+          unitFlow.registerPlan(repoId, session.sessionId, {
+            planId: plan2Id,
+            title: 'Segundo Plano'
+          })
+        }).toThrow(UnitFlowActivePlanAlreadyExistsError)
+
+        // Confirma que apenas o primeiro permanece
+        const active = unitFlow.getActivePlan(repoId, session.sessionId)
+        expect(active!.planId).toBe(plan1Id)
+
+        smc.close()
+      })
+
+      it('impõe atomicamente "um ativo por sessão" entre duas instâncias concorrentes do Store', () => {
+        const repoId = 'repo-store-concurrency'
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+
+        // Inicializa store 1 e cria sessão
+        const store1 = new SessionMemoryCentralStore(dbPath, repoId)
+        const session = store1.createSession()
+
+        // Abre store 2 apontando para o mesmo banco
+        const store2 = new SessionMemoryCentralStore(dbPath, repoId)
+
+        const planA = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa'
+        const planB = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb'
+
+        // Store 1 registra Plano A
+        const regA = store1.registerPlan(session.sessionId, {
+          planId: planA,
+          title: 'Plano da Instância 1'
+        })
+        expect(regA.status).toBe('ACTIVE')
+
+        // Store 2 tenta registrar Plano B na mesma sessão
+        expect(() => {
+          store2.registerPlan(session.sessionId, {
+            planId: planB,
+            title: 'Plano da Instância 2'
+          })
+        }).toThrow(UnitFlowActivePlanAlreadyExistsError)
+
+        // Verifica que o plano ativo no banco é exclusivamente o Plano A
+        const active1 = store1.getActivePlan(session.sessionId)
+        const active2 = store2.getActivePlan(session.sessionId)
+        expect(active1!.planId).toBe(planA)
+        expect(active2!.planId).toBe(planA)
+
+        store1.close()
+        store2.close()
+      })
+    })
+
+    describe('UnitFlow-01 — Prova 3: Sessão CLOSED, inexistente, IDs inválidos, isolamento A/B e fail-closed', () => {
+      it('rejeita registro em sessão CLOSED ou inexistente', () => {
+        const repoId = 'repo-closed-and-missing'
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const store = new SessionMemoryCentralStore(dbPath, repoId)
+
+        const session = store.createSession()
+
+        // Fecha a sessão diretamente no banco
+        const db = new Database(dbPath)
+        db.prepare("UPDATE smc_sessions SET status = 'CLOSED' WHERE session_id = ?").run(session.sessionId)
+        db.close()
+
+        const planId = '55555555-5555-4555-8555-555555555555'
+
+        // Registro em sessão CLOSED falha
+        expect(() => {
+          store.registerPlan(session.sessionId, {
+            planId,
+            title: 'Plano em Sessão Fechada'
+          })
+        }).toThrow(SmcSessionClosedError)
+
+        // Registro em sessão inexistente falha
+        const missingSessionId = '00000000-0000-4000-8000-000000000000'
+        expect(() => {
+          store.registerPlan(missingSessionId, {
+            planId,
+            title: 'Plano em Sessão Inexistente'
+          })
+        }).toThrow(SmcSessionNotFoundError)
+
+        store.close()
+      })
+
+      it('valida formatos de planId, title, sourceArtifactId e sessionId', () => {
+        const repoId = 'repo-validation-rules'
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+        const session = smc.createSession(repoId)
+
+        const validPlanId = '66666666-6666-4666-8666-666666666666'
+
+        // planId inválido
+        expect(() => {
+          unitFlow.registerPlan(repoId, session.sessionId, {
+            planId: 'not-a-uuid',
+            title: 'Válido'
+          })
+        }).toThrow(UnitFlowInvalidPlanError)
+
+        // title vazio
+        expect(() => {
+          unitFlow.registerPlan(repoId, session.sessionId, {
+            planId: validPlanId,
+            title: '   '
+          })
+        }).toThrow(UnitFlowInvalidPlanError)
+
+        // title excede tamanho máximo
+        expect(() => {
+          unitFlow.registerPlan(repoId, session.sessionId, {
+            planId: validPlanId,
+            title: 'a'.repeat(301)
+          })
+        }).toThrow(UnitFlowInvalidPlanError)
+
+        // sourceArtifactId vazio quando fornecido
+        expect(() => {
+          unitFlow.registerPlan(repoId, session.sessionId, {
+            planId: validPlanId,
+            title: 'Válido',
+            sourceArtifactId: '   '
+          })
+        }).toThrow(UnitFlowInvalidPlanError)
+
+        // sessionId inválido
+        expect(() => {
+          unitFlow.registerPlan(repoId, 'invalid-session-id', {
+            planId: validPlanId,
+            title: 'Válido'
+          })
+        }).toThrow(SmcInvalidSessionIdError)
+
+        smc.close()
+      })
+
+      it('isola estritamente repositórios A e B e permite sessões independentes simultâneas', () => {
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+
+        const repoA = 'repo-isolation-a'
+        const repoB = 'repo-isolation-b'
+
+        const sessionA1 = smc.createSession(repoA)
+        const sessionA2 = smc.createSession(repoA)
+        const sessionB = smc.createSession(repoB)
+
+        const planA1Id = '77777777-7777-4777-8777-777777777771'
+        const planA2Id = '77777777-7777-4777-8777-777777777772'
+        const planBId = '77777777-7777-4777-8777-777777777773'
+
+        // Duas sessões independentes no Repo A podem ter planos ativos próprios
+        const planA1 = unitFlow.registerPlan(repoA, sessionA1.sessionId, { planId: planA1Id, title: 'Plano A1' })
+        const planA2 = unitFlow.registerPlan(repoA, sessionA2.sessionId, { planId: planA2Id, title: 'Plano A2' })
+
+        expect(planA1.status).toBe('ACTIVE')
+        expect(planA2.status).toBe('ACTIVE')
+        expect(unitFlow.getActivePlan(repoA, sessionA1.sessionId)?.planId).toBe(planA1Id)
+        expect(unitFlow.getActivePlan(repoA, sessionA2.sessionId)?.planId).toBe(planA2Id)
+
+        // Sessão do Repo B
+        unitFlow.registerPlan(repoB, sessionB.sessionId, { planId: planBId, title: 'Plano B' })
+        expect(unitFlow.getActivePlan(repoB, sessionB.sessionId)?.planId).toBe(planBId)
+
+        // Repo B não enxerga plano de Repo A
+        expect(unitFlow.getActivePlan(repoB, sessionA1.sessionId)).toBeNull()
+
+        // Tentativa de registrar em Repo B com session de Repo A falha
+        expect(() => {
+          unitFlow.registerPlan(repoB, sessionA1.sessionId, {
+            planId: '88888888-8888-4888-8888-888888888888',
+            title: 'Plano Cruzado'
+          })
+        }).toThrow(SmcSessionNotFoundError)
+
+        smc.close()
+      })
+
+      it('falha fechado para repositoryId inválido sem fallback ao host', () => {
+        const unitFlow = new UnitFlowService(tempBaseDir)
+        expect(() => {
+          unitFlow.registerPlan('../bad-path', '11111111-1111-4111-8111-111111111111', {
+            planId: '22222222-2222-4222-8222-222222222222',
+            title: 'Test'
+          })
+        }).toThrow()
+
+        expect(() => {
+          unitFlow.getActivePlan('', '11111111-1111-4111-8111-111111111111')
+        }).toThrow()
+
+        unitFlow.close()
+      })
+    })
+
+    describe('UnitFlow-01 — Prova 4: Consulta compacta, schema futuro e migração repetida', () => {
+      it('getActivePlan retorna apenas metadados compactos sem carregar transcrições, Continuum ou corpo de entradas', () => {
+        const repoId = 'repo-compact-query'
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+        const session = smc.createSession(repoId)
+
+        // Adiciona entradas pesadas no SMC
+        smc.appendEntry(repoId, session.sessionId, {
+          kind: 'DECISION',
+          title: 'Decisão volumosa',
+          body: 'x'.repeat(50000),
+          provenance: { role: 'AGENT' }
+        })
+
+        const planId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+        unitFlow.registerPlan(repoId, session.sessionId, {
+          planId,
+          title: 'Plano Compacto',
+          sourceArtifactId: 'artifact-ref-only'
+        })
+
+        const plan = unitFlow.getActivePlan(repoId, session.sessionId)
+        expect(plan).not.toBeNull()
+
+        // Contrato compacto
+        const keys = Object.keys(plan!).sort()
+        expect(keys).toEqual([
+          'createdAt',
+          'planId',
+          'repositoryId',
+          'revision',
+          'sessionId',
+          'sourceArtifactId',
+          'status',
+          'title',
+          'updatedAt'
+        ].sort())
+
+        // Não contém body ou dados da SMC
+        expect((plan as any).body).toBeUndefined()
+        expect((plan as any).entries).toBeUndefined()
+
+        smc.close()
+      })
+
+      it('retorna null quando sessão não possui plano ativo', () => {
+        const repoId = 'repo-no-active'
+        const smc = new SessionMemoryCentralService(tempBaseDir)
+        const unitFlow = new UnitFlowService(smc)
+        const session = smc.createSession(repoId)
+
+        expect(unitFlow.getActivePlan(repoId, session.sessionId)).toBeNull()
+        expect(unitFlow.getActivePlan(repoId, '00000000-0000-4000-8000-000000000000')).toBeNull()
+
+        smc.close()
+      })
+
+      it('recusa schema futuro (> 3) com SmcUnsupportedSchemaError sem corromper dados', () => {
+        const repoId = 'repo-future-schema'
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        mkdirSync(dirname(dbPath), { recursive: true })
+
+        const dbRaw = new Database(dbPath)
+        dbRaw.exec(`
+          CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          INSERT INTO smc_meta (key, value) VALUES ('repository_id', '${repoId}');
+          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '4');
+        `)
+        dbRaw.close()
+
+        expect(() => {
+          new SessionMemoryCentralStore(dbPath, repoId)
+        }).toThrow(SmcUnsupportedSchemaError)
+
+        // Verifica que o schema_version não foi alterado
+        const checkDb = new Database(dbPath)
+        const row = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
+        expect(row.value).toBe('4')
+        checkDb.close()
+      })
+
+      it('migração repetida é idempotente e preserva dados', () => {
+        const repoId = 'repo-repeat-migration'
+        const unitFlow1 = new UnitFlowService(tempBaseDir)
+        const smc1 = new SessionMemoryCentralService(tempBaseDir)
+        const session = smc1.createSession(repoId)
+        const planId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+
+        unitFlow1.registerPlan(repoId, session.sessionId, {
+          planId,
+          title: 'Plano Repetido'
+        })
+        unitFlow1.close()
+        smc1.close()
+
+        // Abre novamente
+        const unitFlow2 = new UnitFlowService(tempBaseDir)
+        const recovered = unitFlow2.getActivePlan(repoId, session.sessionId)
+        expect(recovered?.planId).toBe(planId)
+        unitFlow2.close()
+      })
+    })
   })
+})
 })
 

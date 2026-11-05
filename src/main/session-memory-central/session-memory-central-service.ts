@@ -7,6 +7,10 @@ import type {
   SmcEntryRecord,
   SmcSessionRecord
 } from '../../shared/types/session-memory-central-types'
+import type {
+  RegisterUnitFlowPlanInput,
+  UnitFlowPlanRecord
+} from '../../shared/types/unitflow-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
 
@@ -54,6 +58,18 @@ export class SessionMemoryCentralService {
 
   listEntries(repositoryId: string, sessionId: string, options?: ListSmcEntriesOptions): SmcEntryPage {
     return this.getStore(repositoryId).listEntries(sessionId, options)
+  }
+
+  registerPlan(repositoryId: string, sessionId: string, input: RegisterUnitFlowPlanInput): UnitFlowPlanRecord {
+    return this.getStore(repositoryId).registerPlan(sessionId, input)
+  }
+
+  getActivePlan(repositoryId: string, sessionId: string): UnitFlowPlanRecord | null {
+    return this.getStore(repositoryId).getActivePlan(sessionId)
+  }
+
+  getPlan(repositoryId: string, planId: string): UnitFlowPlanRecord | null {
+    return this.getStore(repositoryId).getPlan(planId)
   }
 
   closeStore(repositoryId: string): void {

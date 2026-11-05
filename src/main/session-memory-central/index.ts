@@ -1,4 +1,6 @@
 export * from '../../shared/types/session-memory-central-types'
+export * from '../../shared/types/unitflow-types'
+export * from '../unitflow/unitflow-errors'
 export * from './session-memory-central-paths'
 export * from './session-memory-central-store'
 export * from './session-memory-central-service'

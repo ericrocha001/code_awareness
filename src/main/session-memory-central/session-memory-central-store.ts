@@ -17,6 +17,16 @@ import type {
   SmcSessionRecord,
   SmcSessionStatus
 } from '../../shared/types/session-memory-central-types'
+import type {
+  RegisterUnitFlowPlanInput,
+  UnitFlowPlanRecord,
+  UnitFlowPlanStatus
+} from '../../shared/types/unitflow-types'
+import {
+  UnitFlowActivePlanAlreadyExistsError,
+  UnitFlowInvalidPlanError,
+  UnitFlowPlanConflictError
+} from '../unitflow/unitflow-errors'
 import { validateRepositoryId } from './session-memory-central-paths'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -106,7 +116,7 @@ export class SmcInvalidSupersedesError extends Error {
 
 export class SmcUnsupportedSchemaError extends Error {
   constructor(version: number) {
-    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 2`)
+    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 3`)
     this.name = 'SmcUnsupportedSchemaError'
   }
 }
@@ -132,6 +142,18 @@ interface RawEntryRow {
   references_json: string | null
   supersedes_entry_id: string | null
   created_at: string
+}
+
+interface RawPlanRow {
+  plan_id: string
+  session_id: string
+  repository_id: string
+  title: string
+  source_artifact_id: string | null
+  status: string
+  revision: number
+  created_at: string
+  updated_at: string
 }
 
 interface SmcCursorPayload {
@@ -196,60 +218,84 @@ export class SessionMemoryCentralStore {
     const versionRow = this.db.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string } | undefined
     const currentVersion = versionRow ? parseInt(versionRow.value, 10) : 0
 
-    if (currentVersion > 2) {
+    if (currentVersion > 3) {
       this.db.close()
       throw new SmcUnsupportedSchemaError(currentVersion)
     }
 
-    // 4. Migração atômica de v0 ou v1 para v2
-    if (currentVersion < 2) {
+    // 4. Migração atômica de v0/v1/v2 para v3
+    if (currentVersion < 3) {
       this.db.transaction(() => {
-        // Tabelas base v1
+        if (currentVersion < 2) {
+          // Tabelas base v1
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_sessions (
+              session_id TEXT PRIMARY KEY,
+              repository_id TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('OPEN', 'CLOSED')),
+              revision INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_smc_sessions_repo_created
+              ON smc_sessions (repository_id, created_at DESC, session_id ASC);
+          `)
+
+          // Adições v2 (registros cumulativos de engenharia)
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_entries (
+              order_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+              entry_id TEXT UNIQUE NOT NULL,
+              session_id TEXT NOT NULL,
+              kind TEXT NOT NULL CHECK(kind IN ('DECISION', 'EVIDENCE', 'RESULT', 'PENDING', 'INTERVENTION')),
+              title TEXT NOT NULL,
+              body TEXT NOT NULL,
+              emitter_role TEXT NOT NULL CHECK(emitter_role IN ('HUMAN', 'AGENT', 'SYSTEM')),
+              emitter_id TEXT,
+              references_json TEXT,
+              supersedes_entry_id TEXT,
+              created_at TEXT NOT NULL,
+              FOREIGN KEY (session_id) REFERENCES smc_sessions(session_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_smc_entries_session_order
+              ON smc_entries (session_id, order_seq ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_smc_entries_session_kind
+              ON smc_entries (session_id, kind, order_seq ASC);
+
+            CREATE INDEX IF NOT EXISTS idx_smc_entries_supersedes
+              ON smc_entries (supersedes_entry_id) WHERE supersedes_entry_id IS NOT NULL;
+          `)
+        }
+
+        // Adições v3 (UnitFlow-01: Planos de sessão com constraint atômica de plano ativo único)
         this.db.exec(`
-          CREATE TABLE IF NOT EXISTS smc_sessions (
-            session_id TEXT PRIMARY KEY,
+          CREATE TABLE IF NOT EXISTS smc_plans (
+            plan_id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL,
             repository_id TEXT NOT NULL,
-            status TEXT NOT NULL CHECK(status IN ('OPEN', 'CLOSED')),
+            title TEXT NOT NULL,
+            source_artifact_id TEXT,
+            status TEXT NOT NULL CHECK(status IN ('ACTIVE', 'COMPLETED', 'CANCELLED')),
             revision INTEGER NOT NULL DEFAULT 1,
             created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-          );
-
-          CREATE INDEX IF NOT EXISTS idx_smc_sessions_repo_created
-            ON smc_sessions (repository_id, created_at DESC, session_id ASC);
-        `)
-
-        // Adições v2 (registros cumulativos de engenharia)
-        this.db.exec(`
-          CREATE TABLE IF NOT EXISTS smc_entries (
-            order_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-            entry_id TEXT UNIQUE NOT NULL,
-            session_id TEXT NOT NULL,
-            kind TEXT NOT NULL CHECK(kind IN ('DECISION', 'EVIDENCE', 'RESULT', 'PENDING', 'INTERVENTION')),
-            title TEXT NOT NULL,
-            body TEXT NOT NULL,
-            emitter_role TEXT NOT NULL CHECK(emitter_role IN ('HUMAN', 'AGENT', 'SYSTEM')),
-            emitter_id TEXT,
-            references_json TEXT,
-            supersedes_entry_id TEXT,
-            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
             FOREIGN KEY (session_id) REFERENCES smc_sessions(session_id) ON DELETE CASCADE
           );
 
-          CREATE INDEX IF NOT EXISTS idx_smc_entries_session_order
-            ON smc_entries (session_id, order_seq ASC);
+          CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_plans_active_session
+            ON smc_plans (session_id) WHERE status = 'ACTIVE';
 
-          CREATE INDEX IF NOT EXISTS idx_smc_entries_session_kind
-            ON smc_entries (session_id, kind, order_seq ASC);
-
-          CREATE INDEX IF NOT EXISTS idx_smc_entries_supersedes
-            ON smc_entries (supersedes_entry_id) WHERE supersedes_entry_id IS NOT NULL;
+          CREATE INDEX IF NOT EXISTS idx_smc_plans_session_created
+            ON smc_plans (session_id, created_at DESC);
         `)
 
         if (!versionRow) {
-          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '2')
+          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '3')
         } else {
-          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('2', 'schema_version')
+          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('3', 'schema_version')
         }
       })()
     }
@@ -629,6 +675,194 @@ export class SessionMemoryCentralStore {
     return {
       ...this.mapRawToHeader(row),
       body: row.body
+    }
+  }
+
+  registerPlan(sessionId: string, input: RegisterUnitFlowPlanInput): UnitFlowPlanRecord {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      throw new SmcInvalidSessionIdError(String(sessionId))
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    if (!UUID_REGEX.test(cleanSessionId)) {
+      throw new SmcInvalidSessionIdError(cleanSessionId)
+    }
+
+    if (!input || typeof input !== 'object') {
+      throw new UnitFlowInvalidPlanError('Input payload is required')
+    }
+
+    if (typeof input.planId !== 'string' || !input.planId.trim()) {
+      throw new UnitFlowInvalidPlanError('planId is required')
+    }
+    const cleanPlanId = input.planId.trim().toLowerCase()
+    if (!UUID_REGEX.test(cleanPlanId)) {
+      throw new UnitFlowInvalidPlanError(`planId must be a valid UUID format, received: "${input.planId}"`)
+    }
+
+    if (typeof input.title !== 'string' || !input.title.trim()) {
+      throw new UnitFlowInvalidPlanError('Plan title must be a non-empty string')
+    }
+    const cleanTitle = input.title.trim()
+    if (cleanTitle.length > MAX_TITLE_LENGTH) {
+      throw new UnitFlowInvalidPlanError(`Plan title exceeds maximum length of ${MAX_TITLE_LENGTH} characters`)
+    }
+
+    let cleanSourceArtifactId: string | undefined
+    if (input.sourceArtifactId !== undefined) {
+      if (typeof input.sourceArtifactId !== 'string' || !input.sourceArtifactId.trim()) {
+        throw new UnitFlowInvalidPlanError('sourceArtifactId must be a non-empty string when provided')
+      }
+      cleanSourceArtifactId = input.sourceArtifactId.trim()
+      if (cleanSourceArtifactId.length > 200) {
+        throw new UnitFlowInvalidPlanError('sourceArtifactId exceeds maximum length of 200 characters')
+      }
+    }
+
+    return this.db.transaction(() => {
+      // 1. Valida existência e estado da sessão
+      const sessionRow = this.db.prepare(`
+        SELECT status FROM smc_sessions WHERE session_id = ? AND repository_id = ?
+      `).get(cleanSessionId, this.repositoryId) as { status: string } | undefined
+
+      if (!sessionRow) {
+        throw new SmcSessionNotFoundError(cleanSessionId)
+      }
+      if (sessionRow.status === 'CLOSED') {
+        throw new SmcSessionClosedError(cleanSessionId)
+      }
+
+      // 2. Trata replay idempotente e divergência pelo mesmo planId
+      const existingByPlanId = this.db.prepare(`
+        SELECT plan_id, session_id, repository_id, title, source_artifact_id, status, revision, created_at, updated_at
+        FROM smc_plans
+        WHERE plan_id = ?
+      `).get(cleanPlanId) as RawPlanRow | undefined
+
+      if (existingByPlanId) {
+        if (existingByPlanId.session_id !== cleanSessionId) {
+          throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" belongs to another session "${existingByPlanId.session_id}"`)
+        }
+
+        const isIdentical =
+          existingByPlanId.title === cleanTitle &&
+          (existingByPlanId.source_artifact_id || undefined) === cleanSourceArtifactId
+
+        if (isIdentical) {
+          return this.mapRawToPlanRecord(existingByPlanId)
+        } else {
+          throw new UnitFlowPlanConflictError(`Plan with id "${cleanPlanId}" already exists in session "${cleanSessionId}" with divergent content`)
+        }
+      }
+
+      // 3. Verifica se a sessão já possui um plano ACTIVE
+      const existingActive = this.db.prepare(`
+        SELECT plan_id FROM smc_plans WHERE session_id = ? AND status = 'ACTIVE'
+      `).get(cleanSessionId) as { plan_id: string } | undefined
+
+      if (existingActive) {
+        throw new UnitFlowActivePlanAlreadyExistsError(cleanSessionId, existingActive.plan_id)
+      }
+
+      // 4. Insere o novo plano ACTIVE
+      const now = new Date().toISOString()
+      try {
+        this.db.prepare(`
+          INSERT INTO smc_plans (
+            plan_id, session_id, repository_id, title, source_artifact_id, status, revision, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, 'ACTIVE', 1, ?, ?)
+        `).run(
+          cleanPlanId,
+          cleanSessionId,
+          this.repositoryId,
+          cleanTitle,
+          cleanSourceArtifactId ?? null,
+          now,
+          now
+        )
+      } catch (error: any) {
+        if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE' || error?.message?.includes('UNIQUE constraint failed')) {
+          if (error?.message?.includes('idx_smc_plans_active_session') || error?.message?.includes('smc_plans.session_id')) {
+            const active = this.db.prepare('SELECT plan_id FROM smc_plans WHERE session_id = ? AND status = "ACTIVE"').get(cleanSessionId) as { plan_id: string } | undefined
+            throw new UnitFlowActivePlanAlreadyExistsError(cleanSessionId, active?.plan_id ?? 'unknown')
+          }
+          if (error?.message?.includes('smc_plans.plan_id') || error?.message?.includes('PRIMARYKEY')) {
+            throw new UnitFlowPlanConflictError(`Plan with id "${cleanPlanId}" already exists`)
+          }
+          throw new UnitFlowPlanConflictError(`Database constraint violation: ${error.message}`)
+        }
+        throw error
+      }
+
+      const status: UnitFlowPlanStatus = 'ACTIVE'
+      return {
+        planId: cleanPlanId,
+        sessionId: cleanSessionId,
+        repositoryId: this.repositoryId,
+        title: cleanTitle,
+        ...(cleanSourceArtifactId ? { sourceArtifactId: cleanSourceArtifactId } : {}),
+        status,
+        revision: 1,
+        createdAt: now,
+        updatedAt: now
+      }
+    })()
+  }
+
+  getActivePlan(sessionId: string): UnitFlowPlanRecord | null {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) {
+      return null
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    if (!UUID_REGEX.test(cleanSessionId)) {
+      return null
+    }
+
+    const row = this.db.prepare(`
+      SELECT plan_id, session_id, repository_id, title, source_artifact_id, status, revision, created_at, updated_at
+      FROM smc_plans
+      WHERE session_id = ? AND repository_id = ? AND status = 'ACTIVE'
+    `).get(cleanSessionId, this.repositoryId) as RawPlanRow | undefined
+
+    if (!row) {
+      return null
+    }
+
+    return this.mapRawToPlanRecord(row)
+  }
+
+  getPlan(planId: string): UnitFlowPlanRecord | null {
+    if (typeof planId !== 'string' || !planId.trim()) {
+      return null
+    }
+    const cleanPlanId = planId.trim().toLowerCase()
+    if (!UUID_REGEX.test(cleanPlanId)) {
+      return null
+    }
+
+    const row = this.db.prepare(`
+      SELECT plan_id, session_id, repository_id, title, source_artifact_id, status, revision, created_at, updated_at
+      FROM smc_plans
+      WHERE plan_id = ? AND repository_id = ?
+    `).get(cleanPlanId, this.repositoryId) as RawPlanRow | undefined
+
+    if (!row) {
+      return null
+    }
+
+    return this.mapRawToPlanRecord(row)
+  }
+
+  private mapRawToPlanRecord(row: RawPlanRow): UnitFlowPlanRecord {
+    return {
+      planId: row.plan_id,
+      sessionId: row.session_id,
+      repositoryId: row.repository_id || this.repositoryId,
+      title: row.title,
+      ...(row.source_artifact_id ? { sourceArtifactId: row.source_artifact_id } : {}),
+      status: row.status as UnitFlowPlanStatus,
+      revision: Number(row.revision),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
     }
   }
 
