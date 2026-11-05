@@ -10,9 +10,11 @@ import type {
 import type {
   DefineUnitFlowUnitInput,
   RegisterUnitFlowPlanInput,
+  UnitFlowEligibilityResult,
   UnitFlowPlanRecord,
   UnitFlowUnitHeaderRecord,
-  UnitFlowUnitRecord
+  UnitFlowUnitRecord,
+  UnitFlowUnitStateRecord
 } from '../../../shared/types/buildx/unitflow-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
@@ -99,6 +101,23 @@ export class SessionMemoryCentralService {
     unitId: string
   ): UnitFlowUnitRecord | null {
     return this.getStore(repositoryId).getPlanUnit(sessionId, planId, unitId)
+  }
+
+  getUnitState(
+    repositoryId: string,
+    sessionId: string,
+    planId: string,
+    unitId: string
+  ): UnitFlowUnitStateRecord | null {
+    return this.getStore(repositoryId).getUnitState(sessionId, planId, unitId)
+  }
+
+  getNextEligibleUnit(
+    repositoryId: string,
+    sessionId: string,
+    planId: string
+  ): UnitFlowEligibilityResult {
+    return this.getStore(repositoryId).getNextEligibleUnit(sessionId, planId)
   }
 
   closeStore(repositoryId: string): void {

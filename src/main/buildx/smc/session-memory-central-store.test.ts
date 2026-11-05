@@ -28,7 +28,9 @@ import {
   UnitFlowManifestConflictError,
   type DefineUnitFlowUnitInput,
   type UnitFlowUnitRecord,
-  type UnitFlowUnitHeaderRecord
+  type UnitFlowUnitHeaderRecord,
+  type UnitFlowUnitStateRecord,
+  type UnitFlowEligibilityResult
 } from '../unitflow'
 import {
   BUILDX_SMC_TOOLS,
@@ -300,7 +302,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       // Garante que o schema_version foi migrado (pelo menos versão 2, atualmente 4)
       const versionDb = new Database(dbPath)
       const row = versionDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-      expect(['2', '3', '4']).toContain(row.value)
+      expect(['2', '3', '4', '5']).toContain(row.value)
       versionDb.close()
 
       reopened.close()
@@ -1257,7 +1259,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que schema foi promovido (v3 ou superior)
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(['3', '4']).toContain(versionRow.value)
+        expect(['3', '4', '5']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Registra plano ativo
@@ -1655,7 +1657,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         smc.close()
       })
 
-      it('recusa schema futuro (> 4) com SmcUnsupportedSchemaError sem corromper dados', () => {
+      it('recusa schema futuro (> 5) com SmcUnsupportedSchemaError sem corromper dados', () => {
         const repoId = 'repo-future-schema'
         const dbPath = smcDatabasePath(tempBaseDir, repoId)
         mkdirSync(dirname(dbPath), { recursive: true })
@@ -1664,7 +1666,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         dbRaw.exec(`
           CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           INSERT INTO smc_meta (key, value) VALUES ('repository_id', '${repoId}');
-          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '5');
+          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '6');
         `)
         dbRaw.close()
 
@@ -1675,7 +1677,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que o schema_version não foi alterado
         const checkDb = new Database(dbPath)
         const row = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(row.value).toBe('5')
+        expect(row.value).toBe('6')
         checkDb.close()
       })
 
@@ -1780,10 +1782,10 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const store = smc.getStore(v3RepoId)
         expect(store.isOpen()).toBe(true)
 
-        // Verifica que schema foi promovido para v4
+        // Verifica que schema foi promovido para v4 ou superior (atualmente v5)
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(versionRow.value).toBe('4')
+        expect(['4', '5']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Define 3 unidades com dependências estritamente anteriores
@@ -2279,6 +2281,407 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Busca com planId errada retorna null
         const wrongPlan = unitFlow.getPlanUnit(repoId, session.sessionId, '00000000-0000-4000-8000-000000000000', u1)
         expect(wrongPlan).toBeNull()
+      })
+    })
+  })
+
+  describe('BuildX UnitFlow-03 — Estado inicial e elegibilidade sequencial (Provas Mínimas)', () => {
+    const repoId = 'repo-unitflow-03'
+    let smc: SessionMemoryCentralService
+    let unitFlow: UnitFlowService
+
+    beforeEach(() => {
+      smc = new SessionMemoryCentralService(tempBaseDir)
+      unitFlow = new UnitFlowService(smc)
+    })
+
+    afterEach(() => {
+      smc.close()
+    })
+
+    describe('Prova 1 — Migração v4→v5: estado inicial AVAILABLE criado para unidades pré-existentes', () => {
+      it('migra banco v4 para v5, cria smc_unit_states com status AVAILABLE para todas as unidades existentes', () => {
+        const p1 = 'aaaaaaaa-0003-4000-8001-000000000001'
+        const u1 = 'bbbbbbbb-0003-4000-8001-000000000001'
+        const u2 = 'bbbbbbbb-0003-4000-8001-000000000002'
+        const sessId = 'cccccccc-0003-4000-8001-000000000001'
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        mkdirSync(dirname(dbPath), { recursive: true })
+
+        // Constrói banco v4 manualmente
+        const dbRaw = new Database(dbPath)
+        const now = new Date().toISOString()
+        dbRaw.exec(`
+          CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          INSERT INTO smc_meta VALUES ('repository_id', '${repoId}');
+          INSERT INTO smc_meta VALUES ('schema_version', '4');
+          CREATE TABLE smc_sessions (
+            session_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL,
+            status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_sessions VALUES ('${sessId}', '${repoId}', 'OPEN', 1, '${now}', '${now}');
+          CREATE TABLE smc_entries (
+            order_seq INTEGER PRIMARY KEY AUTOINCREMENT, entry_id TEXT UNIQUE NOT NULL,
+            session_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
+            body TEXT NOT NULL, emitter_role TEXT NOT NULL, emitter_id TEXT,
+            references_json TEXT, supersedes_entry_id TEXT, created_at TEXT NOT NULL
+          );
+          CREATE TABLE smc_plans (
+            plan_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, repository_id TEXT NOT NULL,
+            title TEXT NOT NULL, source_artifact_id TEXT,
+            status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_plans VALUES ('${p1}', '${sessId}', '${repoId}', 'Plano Legado', NULL, 'ACTIVE', 1, '${now}', '${now}');
+          CREATE TABLE smc_plan_units (
+            unit_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, position INTEGER NOT NULL,
+            title TEXT NOT NULL, objective TEXT NOT NULL, acceptance_criteria TEXT NOT NULL,
+            depends_on_json TEXT, created_at TEXT NOT NULL
+          );
+          INSERT INTO smc_plan_units VALUES ('${u1}', '${p1}', 1, 'U1', 'Obj1', 'Crit1', NULL, '${now}');
+          INSERT INTO smc_plan_units VALUES ('${u2}', '${p1}', 2, 'U2', 'Obj2', 'Crit2', NULL, '${now}');
+        `)
+        dbRaw.close()
+
+        // Abre com o serviço — deve migrar para v5
+        const smcLocal = new SessionMemoryCentralService(tempBaseDir)
+        const store = smcLocal.getStore(repoId)
+        expect(store.isOpen()).toBe(true)
+
+        const checkDb = new Database(dbPath)
+        const verRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
+        expect(verRow.value).toBe('5')
+
+        const stateRows = checkDb.prepare('SELECT unit_id, status, revision FROM smc_unit_states WHERE plan_id = ? ORDER BY unit_id').all(p1) as { unit_id: string; status: string; revision: number }[]
+        expect(stateRows).toHaveLength(2)
+        expect(stateRows.every(r => r.status === 'AVAILABLE')).toBe(true)
+        expect(stateRows.every(r => r.revision === 1)).toBe(true)
+        checkDb.close()
+
+        // Sessão, plano e unidades preservados
+        const sess = smcLocal.getSession(repoId, sessId)
+        expect(sess).not.toBeNull()
+        expect(sess?.sessionId).toBe(sessId)
+        const plan = smcLocal.getPlan(repoId, p1)
+        expect(plan).not.toBeNull()
+        expect(plan?.status).toBe('ACTIVE')
+
+        // Reabre em nova instância — estados ainda presentes
+        smcLocal.close()
+        const smcLocal2 = new SessionMemoryCentralService(tempBaseDir)
+        const checkDb2 = new Database(dbPath)
+        const stateRows2 = checkDb2.prepare('SELECT count(*) as cnt FROM smc_unit_states WHERE plan_id = ?').get(p1) as { cnt: number }
+        expect(stateRows2.cnt).toBe(2)
+        checkDb2.close()
+        smcLocal2.close()
+      })
+    })
+
+    describe('Prova 2 — Manifesto novo recebe estados AVAILABLE; primeiro é elegível', () => {
+      it('definePlanUnits insere estados AVAILABLE atomicamente; getNextEligibleUnit retorna ELIGIBLE u1', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'dddddddd-0003-4000-8002-000000000001'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Prova 2' })
+
+        const u1 = 'eeeeeeee-0003-4000-8002-000000000001'
+        const u2 = 'eeeeeeee-0003-4000-8002-000000000002'
+        const u3 = 'eeeeeeee-0003-4000-8002-000000000003'
+
+        const records = unitFlow.definePlanUnits(repoId, session.sessionId, planId, [
+          { unitId: u1, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' },
+          { unitId: u2, title: 'U2', objective: 'O2', acceptanceCriteria: 'C2', dependsOnUnitIds: [u1] },
+          { unitId: u3, title: 'U3', objective: 'O3', acceptanceCriteria: 'C3', dependsOnUnitIds: [u2] }
+        ])
+        expect(records).toHaveLength(3)
+
+        // Todos os estados são AVAILABLE imediatamente após definição
+        const s1 = unitFlow.getUnitState(repoId, session.sessionId, planId, u1) as UnitFlowUnitStateRecord
+        const s2 = unitFlow.getUnitState(repoId, session.sessionId, planId, u2) as UnitFlowUnitStateRecord
+        const s3 = unitFlow.getUnitState(repoId, session.sessionId, planId, u3) as UnitFlowUnitStateRecord
+        expect(s1.status).toBe('AVAILABLE')
+        expect(s2.status).toBe('AVAILABLE')
+        expect(s3.status).toBe('AVAILABLE')
+        expect(s1.revision).toBe(1)
+
+        // getNextEligibleUnit retorna u1 como elegível
+        const result = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId) as { kind: 'ELIGIBLE'; unitId: string; position: number; title: string }
+        expect(result.kind).toBe('ELIGIBLE')
+        expect(result.unitId).toBe(u1)
+        expect(result.position).toBe(1)
+        expect(result.title).toBe('U1')
+
+        // Resultado não contém objective nem acceptanceCriteria
+        expect((result as any).objective).toBeUndefined()
+        expect((result as any).acceptanceCriteria).toBeUndefined()
+
+        // Estados não foram modificados pela consulta
+        const s1After = unitFlow.getUnitState(repoId, session.sessionId, planId, u1) as UnitFlowUnitStateRecord
+        expect(s1After.revision).toBe(1)
+        expect(s1After.updatedAt).toBe(s1.updatedAt)
+      })
+    })
+
+    describe('Prova 3 — Elegibilidade sequencial com estados simulados via rawDb UPDATE', () => {
+      it('Cenário A: u1=COMPLETED → u2 é ELIGIBLE', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8003-00000000000a'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Cenário A' })
+        const u1 = '11111111-0003-4000-8003-00000000000a'
+        const u2 = '22222222-0003-4000-8003-00000000000a'
+        unitFlow.definePlanUnits(repoId, session.sessionId, planId, [
+          { unitId: u1, title: 'U1A', objective: 'O', acceptanceCriteria: 'C' },
+          { unitId: u2, title: 'U2A', objective: 'O', acceptanceCriteria: 'C', dependsOnUnitIds: [u1] }
+        ])
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('COMPLETED', new Date().toISOString(), u1)
+        rawDb.close()
+
+        const r = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId) as { kind: string; unitId: string }
+        expect(r.kind).toBe('ELIGIBLE')
+        expect(r.unitId).toBe(u2)
+      })
+
+      it('Cenário B: u1=COMPLETED, u2=RESERVED → WAITING blockingUnitId=u2', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8003-00000000000b'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Cenário B' })
+        const u1 = '11111111-0003-4000-8003-00000000000b'
+        const u2 = '22222222-0003-4000-8003-00000000000b'
+        unitFlow.definePlanUnits(repoId, session.sessionId, planId, [
+          { unitId: u1, title: 'U1B', objective: 'O', acceptanceCriteria: 'C' },
+          { unitId: u2, title: 'U2B', objective: 'O', acceptanceCriteria: 'C', dependsOnUnitIds: [u1] }
+        ])
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        const now = new Date().toISOString()
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('COMPLETED', now, u1)
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('RESERVED', now, u2)
+        rawDb.close()
+
+        const r = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId) as { kind: string; blockingUnitId: string }
+        expect(r.kind).toBe('WAITING')
+        expect(r.blockingUnitId).toBe(u2)
+      })
+
+      it('Cenário C: u1=COMPLETED, u2=EXECUTING → WAITING blockingUnitId=u2', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8003-00000000000c'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Cenário C' })
+        const u1 = '11111111-0003-4000-8003-00000000000c'
+        const u2 = '22222222-0003-4000-8003-00000000000c'
+        unitFlow.definePlanUnits(repoId, session.sessionId, planId, [
+          { unitId: u1, title: 'U1C', objective: 'O', acceptanceCriteria: 'C' },
+          { unitId: u2, title: 'U2C', objective: 'O', acceptanceCriteria: 'C', dependsOnUnitIds: [u1] }
+        ])
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        const now = new Date().toISOString()
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('COMPLETED', now, u1)
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('EXECUTING', now, u2)
+        rawDb.close()
+
+        const r = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId) as { kind: string; blockingUnitId: string }
+        expect(r.kind).toBe('WAITING')
+        expect(r.blockingUnitId).toBe(u2)
+      })
+
+      it('Cenário D: todas COMPLETED → ALL_UNITS_COMPLETED; plano ainda ACTIVE', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8003-00000000000d'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Cenário D' })
+        const u1 = '11111111-0003-4000-8003-00000000000d'
+        const u2 = '22222222-0003-4000-8003-00000000000d'
+        unitFlow.definePlanUnits(repoId, session.sessionId, planId, [
+          { unitId: u1, title: 'U1D', objective: 'O', acceptanceCriteria: 'C' },
+          { unitId: u2, title: 'U2D', objective: 'O', acceptanceCriteria: 'C', dependsOnUnitIds: [u1] }
+        ])
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        const now = new Date().toISOString()
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('COMPLETED', now, u1)
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('COMPLETED', now, u2)
+        rawDb.close()
+
+        const r = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId)
+        expect(r.kind).toBe('ALL_UNITS_COMPLETED')
+
+        const plan = unitFlow.getPlan(repoId, planId)
+        expect(plan?.status).toBe('ACTIVE')
+      })
+
+      it('Cenário E: u2 tem dep em u1; u1 AVAILABLE → apenas u1 elegível; u1 COMPLETED → u2 elegível', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8003-00000000000e'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Cenário E' })
+        const u1 = '11111111-0003-4000-8003-00000000000e'
+        const u2 = '22222222-0003-4000-8003-00000000000e'
+        unitFlow.definePlanUnits(repoId, session.sessionId, planId, [
+          { unitId: u1, title: 'U1E', objective: 'O', acceptanceCriteria: 'C' },
+          { unitId: u2, title: 'U2E', objective: 'O', acceptanceCriteria: 'C', dependsOnUnitIds: [u1] }
+        ])
+
+        // Ambos AVAILABLE: u1 é elegível (u2 depende de u1 não-COMPLETED)
+        const r1 = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId) as { kind: string; unitId: string }
+        expect(r1.kind).toBe('ELIGIBLE')
+        expect(r1.unitId).toBe(u1)
+
+        // Simula u1=COMPLETED → u2 passa a ser elegível
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('COMPLETED', new Date().toISOString(), u1)
+        rawDb.close()
+
+        const r2 = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId) as { kind: string; unitId: string }
+        expect(r2.kind).toBe('ELIGIBLE')
+        expect(r2.unitId).toBe(u2)
+      })
+    })
+
+    describe('Prova 4 — Fail-closed: validações de entrada e estado', () => {
+      it('sem manifesto → MANIFEST_UNDEFINED', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8004-000000000001'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Sem Manifesto' })
+
+        const r = unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId)
+        expect(r.kind).toBe('MANIFEST_UNDEFINED')
+      })
+
+      it('plano não ACTIVE → UnitFlowPlanConflictError', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8004-000000000002'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Cancelado' })
+
+        // Forçar o plano para CANCELLED via rawDb
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_plans SET status = ? WHERE plan_id = ?').run('CANCELLED', planId)
+        rawDb.close()
+
+        expect(() => unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId)).toThrow(UnitFlowPlanConflictError)
+      })
+
+      it('sessão CLOSED → SmcSessionClosedError', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8004-000000000003'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Sessão Fechada' })
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_sessions SET status = ? WHERE session_id = ?').run('CLOSED', session.sessionId)
+        rawDb.close()
+
+        expect(() => unitFlow.getNextEligibleUnit(repoId, session.sessionId, planId)).toThrow(SmcSessionClosedError)
+      })
+
+      it('sessão inexistente → SmcSessionNotFoundError', () => {
+        const fakeSession = '00000000-0003-4000-8004-000000000004'
+        const planId = 'ffffffff-0003-4000-8004-000000000004'
+
+        expect(() => unitFlow.getNextEligibleUnit(repoId, fakeSession, planId)).toThrow(SmcSessionNotFoundError)
+      })
+
+      it('plano pertence a outra sessão → UnitFlowPlanConflictError', () => {
+        const session1 = smc.createSession(repoId)
+        const session2 = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8004-000000000005'
+        unitFlow.registerPlan(repoId, session1.sessionId, { planId, title: 'Plano da Sessão 1' })
+
+        expect(() => unitFlow.getNextEligibleUnit(repoId, session2.sessionId, planId)).toThrow(UnitFlowPlanConflictError)
+      })
+
+      it('plano em repositório diferente → UnitFlowPlanNotFoundError', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8004-000000000006'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Repo A' })
+
+        const session2 = smc.createSession('repo-unitflow-03-alt')
+        expect(() => unitFlow.getNextEligibleUnit('repo-unitflow-03-alt', session2.sessionId, planId)).toThrow(UnitFlowPlanNotFoundError)
+      })
+
+      it('planId inválido (não UUID) → UnitFlowInvalidPlanError', () => {
+        const session = smc.createSession(repoId)
+        expect(() => unitFlow.getNextEligibleUnit(repoId, session.sessionId, 'not-a-uuid')).toThrow(UnitFlowInvalidPlanError)
+      })
+
+      it('getUnitState com sessão errada (plano não pertence à sessão) → null', () => {
+        const session1 = smc.createSession(repoId)
+        const session2 = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8004-000000000007'
+        const u1 = '11111111-0003-4000-8004-000000000007'
+        unitFlow.registerPlan(repoId, session1.sessionId, { planId, title: 'Plano Sessão 1' })
+        unitFlow.definePlanUnits(repoId, session1.sessionId, planId, [
+          { unitId: u1, title: 'U1', objective: 'O', acceptanceCriteria: 'C' }
+        ])
+
+        // Consulta com session2 → null (não erro)
+        const result = unitFlow.getUnitState(repoId, session2.sessionId, planId, u1)
+        expect(result).toBeNull()
+      })
+    })
+
+    describe('Prova 5 — Replay não reseta progresso; migração idempotente', () => {
+      it('replay de definePlanUnits idêntico preserva estado existente', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8005-000000000001'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Replay' })
+
+        const u1 = '11111111-0003-4000-8005-000000000001'
+        const u2 = '22222222-0003-4000-8005-000000000001'
+        const manifest = [
+          { unitId: u1, title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' },
+          { unitId: u2, title: 'U2', objective: 'O2', acceptanceCriteria: 'C2', dependsOnUnitIds: [u1] }
+        ]
+        unitFlow.definePlanUnits(repoId, session.sessionId, planId, manifest)
+
+        // Simula progresso: u1 = COMPLETED
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_unit_states SET status = ?, updated_at = ? WHERE unit_id = ?').run('COMPLETED', new Date().toISOString(), u1)
+        rawDb.close()
+
+        // Replay idêntico — deve retornar registros existentes sem resetar estados
+        const replayed = unitFlow.definePlanUnits(repoId, session.sessionId, planId, manifest)
+        expect(replayed).toHaveLength(2)
+
+        const s1After = unitFlow.getUnitState(repoId, session.sessionId, planId, u1) as UnitFlowUnitStateRecord
+        expect(s1After.status).toBe('COMPLETED')
+      })
+
+      it('reabertura não duplica linhas em smc_unit_states', () => {
+        const session = smc.createSession(repoId)
+        const planId = 'ffffffff-0003-4000-8005-000000000002'
+        unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Idempotente' })
+
+        const u1 = '11111111-0003-4000-8005-000000000002'
+        unitFlow.definePlanUnits(repoId, session.sessionId, planId, [
+          { unitId: u1, title: 'U1', objective: 'O', acceptanceCriteria: 'C' }
+        ])
+
+        // Fecha e reabre duas vezes
+        smc.close()
+        const smc2 = new SessionMemoryCentralService(tempBaseDir)
+        smc2.getStore(repoId)
+        smc2.close()
+
+        const smc3 = new SessionMemoryCentralService(tempBaseDir)
+        smc3.getStore(repoId)
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        const count = rawDb.prepare('SELECT count(*) as cnt FROM smc_unit_states WHERE plan_id = ?').get(planId) as { cnt: number }
+        rawDb.close()
+        expect(count.cnt).toBe(1)
+
+        smc3.close()
+        // Reinicializa smc para afterEach não falhar
+        smc = new SessionMemoryCentralService(tempBaseDir)
       })
     })
   })

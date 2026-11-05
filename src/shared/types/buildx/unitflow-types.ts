@@ -1,5 +1,13 @@
 export type UnitFlowPlanStatus = 'ACTIVE' | 'COMPLETED' | 'CANCELLED'
 
+export type UnitFlowUnitStatus =
+  | 'AVAILABLE'
+  | 'RESERVED'
+  | 'EXECUTING'
+  | 'VALIDATING'
+  | 'COMPLETED'
+  | 'RECONCILING'
+
 export interface UnitFlowPlanRecord {
   readonly planId: string
   readonly sessionId: string
@@ -39,3 +47,19 @@ export interface UnitFlowUnitRecord extends UnitFlowUnitHeaderRecord {
   readonly objective: string
   readonly acceptanceCriteria: string
 }
+
+export interface UnitFlowUnitStateRecord {
+  readonly unitId: string
+  readonly planId: string
+  readonly status: UnitFlowUnitStatus
+  readonly revision: number
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export type UnitFlowEligibilityResult =
+  | { readonly kind: 'ELIGIBLE'; readonly unitId: string; readonly position: number; readonly title: string; readonly status: UnitFlowUnitStatus }
+  | { readonly kind: 'MANIFEST_UNDEFINED' }
+  | { readonly kind: 'WAITING'; readonly blockingUnitId: string }
+  | { readonly kind: 'ALL_UNITS_COMPLETED' }
+

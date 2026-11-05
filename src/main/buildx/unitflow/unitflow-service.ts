@@ -1,9 +1,11 @@
 import type {
   DefineUnitFlowUnitInput,
   RegisterUnitFlowPlanInput,
+  UnitFlowEligibilityResult,
   UnitFlowPlanRecord,
   UnitFlowUnitHeaderRecord,
-  UnitFlowUnitRecord
+  UnitFlowUnitRecord,
+  UnitFlowUnitStateRecord
 } from '../../../shared/types/buildx/unitflow-types'
 import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
@@ -81,6 +83,27 @@ export class UnitFlowService {
     const validRepoId = validateRepositoryId(repositoryId)
     const store = this.smcService.getStore(validRepoId)
     return store.getPlanUnit(sessionId, planId, unitId)
+  }
+
+  getUnitState(
+    repositoryId: string,
+    sessionId: string,
+    planId: string,
+    unitId: string
+  ): UnitFlowUnitStateRecord | null {
+    const validRepoId = validateRepositoryId(repositoryId)
+    const store = this.smcService.getStore(validRepoId)
+    return store.getUnitState(sessionId, planId, unitId)
+  }
+
+  getNextEligibleUnit(
+    repositoryId: string,
+    sessionId: string,
+    planId: string
+  ): UnitFlowEligibilityResult {
+    const validRepoId = validateRepositoryId(repositoryId)
+    const store = this.smcService.getStore(validRepoId)
+    return store.getNextEligibleUnit(sessionId, planId)
   }
 
   close(): void {

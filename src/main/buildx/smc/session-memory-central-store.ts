@@ -20,10 +20,13 @@ import type {
 import type {
   DefineUnitFlowUnitInput,
   RegisterUnitFlowPlanInput,
+  UnitFlowEligibilityResult,
   UnitFlowPlanRecord,
   UnitFlowPlanStatus,
   UnitFlowUnitHeaderRecord,
-  UnitFlowUnitRecord
+  UnitFlowUnitRecord,
+  UnitFlowUnitStateRecord,
+  UnitFlowUnitStatus
 } from '../../../shared/types/buildx/unitflow-types'
 import {
   UnitFlowActivePlanAlreadyExistsError,
@@ -127,7 +130,7 @@ export class SmcInvalidSupersedesError extends Error {
 
 export class SmcUnsupportedSchemaError extends Error {
   constructor(version: number) {
-    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 4`)
+    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 5`)
     this.name = 'SmcUnsupportedSchemaError'
   }
 }
@@ -176,6 +179,15 @@ interface RawUnitRow {
   acceptance_criteria?: string
   depends_on_json: string | null
   created_at: string
+}
+
+interface RawUnitStateRow {
+  unit_id: string
+  plan_id: string
+  status: string
+  revision: number
+  created_at: string
+  updated_at: string
 }
 
 interface SmcCursorPayload {
@@ -240,13 +252,13 @@ export class SessionMemoryCentralStore {
     const versionRow = this.db.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string } | undefined
     const currentVersion = versionRow ? parseInt(versionRow.value, 10) : 0
 
-    if (currentVersion > 4) {
+    if (currentVersion > 5) {
       this.db.close()
       throw new SmcUnsupportedSchemaError(currentVersion)
     }
 
-    // 4. Migração atômica de v0/v1/v2/v3 para v4
-    if (currentVersion < 4) {
+    // 4. Migração atômica de v0/v1/v2/v3/v4 para v5
+    if (currentVersion < 5) {
       this.db.transaction(() => {
         if (currentVersion < 2) {
           // Tabelas base v1
@@ -337,10 +349,45 @@ export class SessionMemoryCentralStore {
           `)
         }
 
+        if (currentVersion < 5) {
+          // Adições v5 (UnitFlow-03: Estado operacional inicial por unidade)
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_unit_states (
+              unit_id TEXT PRIMARY KEY,
+              plan_id TEXT NOT NULL,
+              status TEXT NOT NULL CHECK(status IN ('AVAILABLE', 'RESERVED', 'EXECUTING', 'VALIDATING', 'COMPLETED', 'RECONCILING')),
+              revision INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (unit_id) REFERENCES smc_plan_units(unit_id) ON DELETE CASCADE,
+              FOREIGN KEY (plan_id) REFERENCES smc_plans(plan_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_smc_unit_states_plan
+              ON smc_unit_states (plan_id, unit_id ASC);
+          `)
+
+          // Para unidades já existentes em v4, criar estados iniciais AVAILABLE
+          const existingUnits = this.db.prepare(`
+            SELECT unit_id, plan_id FROM smc_plan_units
+          `).all() as { unit_id: string; plan_id: string }[]
+
+          if (existingUnits.length > 0) {
+            const now = new Date().toISOString()
+            const insertState = this.db.prepare(`
+              INSERT OR IGNORE INTO smc_unit_states (unit_id, plan_id, status, revision, created_at, updated_at)
+              VALUES (?, ?, 'AVAILABLE', 1, ?, ?)
+            `)
+            for (const u of existingUnits) {
+              insertState.run(u.unit_id, u.plan_id, now, now)
+            }
+          }
+        }
+
         if (!versionRow) {
-          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '4')
+          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '5')
         } else {
-          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('4', 'schema_version')
+          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('5', 'schema_version')
         }
       })()
     }
@@ -1056,12 +1103,16 @@ export class SessionMemoryCentralStore {
           throw new UnitFlowManifestConflictError(cleanPlanId, 'manifest already defined with divergent content')
         }
 
-        // 4. Insere o manifesto ordenado em transação atômica única
+        // 4. Insere o manifesto ordenado em transação atômica única, com estados iniciais AVAILABLE
         const now = new Date().toISOString()
         const insertStmt = this.db.prepare(`
           INSERT INTO smc_plan_units (
             unit_id, plan_id, position, title, objective, acceptance_criteria, depends_on_json, created_at
           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `)
+        const insertStateStmt = this.db.prepare(`
+          INSERT INTO smc_unit_states (unit_id, plan_id, status, revision, created_at, updated_at)
+          VALUES (?, ?, 'AVAILABLE', 1, ?, ?)
         `)
 
         const records: UnitFlowUnitRecord[] = []
@@ -1079,6 +1130,7 @@ export class SessionMemoryCentralStore {
             depsJson,
             now
           )
+          insertStateStmt.run(item.unitId, cleanPlanId, now, now)
           records.push({
             unitId: item.unitId,
             planId: cleanPlanId,
@@ -1238,6 +1290,159 @@ export class SessionMemoryCentralStore {
       dependsOnUnitIds: row.depends_on_json ? JSON.parse(row.depends_on_json) : [],
       createdAt: row.created_at
     }
+  }
+
+  private mapRawToUnitStateRecord(row: RawUnitStateRow): UnitFlowUnitStateRecord {
+    return {
+      unitId: row.unit_id,
+      planId: row.plan_id,
+      status: row.status as UnitFlowUnitStatus,
+      revision: Number(row.revision),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }
+  }
+
+  getUnitState(sessionId: string, planId: string, unitId: string): UnitFlowUnitStateRecord | null {
+    if (
+      typeof sessionId !== 'string' || !sessionId.trim() ||
+      typeof planId !== 'string' || !planId.trim() ||
+      typeof unitId !== 'string' || !unitId.trim()
+    ) {
+      return null
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    const cleanPlanId = planId.trim().toLowerCase()
+    const cleanUnitId = unitId.trim().toLowerCase()
+    if (!UUID_REGEX.test(cleanSessionId) || !UUID_REGEX.test(cleanPlanId) || !UUID_REGEX.test(cleanUnitId)) {
+      return null
+    }
+
+    const plan = this.getPlan(cleanPlanId)
+    if (!plan || plan.sessionId !== cleanSessionId) {
+      return null
+    }
+
+    const row = this.db.prepare(`
+      SELECT unit_id, plan_id, status, revision, created_at, updated_at
+      FROM smc_unit_states
+      WHERE unit_id = ? AND plan_id = ?
+    `).get(cleanUnitId, cleanPlanId) as RawUnitStateRow | undefined
+
+    if (!row) return null
+    return this.mapRawToUnitStateRecord(row)
+  }
+
+  getNextEligibleUnit(sessionId: string, planId: string): UnitFlowEligibilityResult {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+
+    if (typeof planId !== 'string' || !planId.trim() || !UUID_REGEX.test(planId.trim())) {
+      throw new UnitFlowInvalidPlanError(`planId must be a valid UUID format, received: "${planId}"`)
+    }
+    const cleanPlanId = planId.trim().toLowerCase()
+
+    // Valida sessão
+    const sessionRow = this.db.prepare(`
+      SELECT status FROM smc_sessions WHERE session_id = ? AND repository_id = ?
+    `).get(cleanSessionId, this.repositoryId) as { status: string } | undefined
+
+    if (!sessionRow) {
+      throw new SmcSessionNotFoundError(cleanSessionId)
+    }
+    if (sessionRow.status === 'CLOSED') {
+      throw new SmcSessionClosedError(cleanSessionId)
+    }
+
+    // Valida plano
+    const planRow = this.db.prepare(`
+      SELECT plan_id, session_id, status FROM smc_plans WHERE plan_id = ? AND repository_id = ?
+    `).get(cleanPlanId, this.repositoryId) as { plan_id: string; session_id: string; status: string } | undefined
+
+    if (!planRow) {
+      throw new UnitFlowPlanNotFoundError(cleanPlanId)
+    }
+    if (planRow.session_id !== cleanSessionId) {
+      throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" belongs to another session "${planRow.session_id}"`)
+    }
+    if (planRow.status !== 'ACTIVE') {
+      throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" is not ACTIVE (status: ${planRow.status})`)
+    }
+
+    // Carrega unidades ordenadas + estados numa única query JOIN
+    type UnitWithState = {
+      unit_id: string
+      position: number
+      title: string
+      depends_on_json: string | null
+      status: string
+    }
+
+    const rows = this.db.prepare(`
+      SELECT u.unit_id, u.position, u.title, u.depends_on_json, s.status
+      FROM smc_plan_units u
+      LEFT JOIN smc_unit_states s ON s.unit_id = u.unit_id AND s.plan_id = u.plan_id
+      WHERE u.plan_id = ?
+      ORDER BY u.position ASC
+    `).all(cleanPlanId) as UnitWithState[]
+
+    if (rows.length === 0) {
+      return { kind: 'MANIFEST_UNDEFINED' }
+    }
+
+    // Verifica se estados estão presentes (pode ser banco v4 não migrado via getNextEligibleUnit)
+    // Neste caso o status pode ser null se a migração ainda não inseriu o estado
+    const completedUnitIds = new Set<string>()
+
+    for (const row of rows) {
+      const status = (row.status ?? 'AVAILABLE') as UnitFlowUnitStatus
+      const deps: string[] = row.depends_on_json ? JSON.parse(row.depends_on_json) : []
+
+      if (status === 'COMPLETED') {
+        completedUnitIds.add(row.unit_id)
+        continue
+      }
+
+      // Primeira não COMPLETED: avaliar elegibilidade
+      // Bloquear se em estado em andamento
+      if (status === 'RESERVED' || status === 'EXECUTING' || status === 'VALIDATING' || status === 'RECONCILING') {
+        return { kind: 'WAITING', blockingUnitId: row.unit_id }
+      }
+
+      // status === 'AVAILABLE': verificar se todas as anteriores por posição estão COMPLETED
+      // (regra estritamente sequencial: todas as unidades anteriores devem estar concluídas)
+      const prevRows = rows.filter(r => r.position < row.position)
+      const allPrevCompleted = prevRows.every(r => (r.status ?? 'AVAILABLE') === 'COMPLETED')
+      if (!allPrevCompleted) {
+        // Encontrar o bloqueador (primeiro anterior não COMPLETED)
+        const blocker = prevRows.find(r => (r.status ?? 'AVAILABLE') !== 'COMPLETED')
+        if (blocker) {
+          const blockerStatus = (blocker.status ?? 'AVAILABLE') as UnitFlowUnitStatus
+          if (blockerStatus === 'RESERVED' || blockerStatus === 'EXECUTING' || blockerStatus === 'VALIDATING' || blockerStatus === 'RECONCILING') {
+            return { kind: 'WAITING', blockingUnitId: blocker.unit_id }
+          }
+          return { kind: 'WAITING', blockingUnitId: blocker.unit_id }
+        }
+      }
+
+      // Verificar dependências declaradas
+      const depsNotCompleted = deps.filter(d => !completedUnitIds.has(d))
+      if (depsNotCompleted.length > 0) {
+        return { kind: 'WAITING', blockingUnitId: depsNotCompleted[0] }
+      }
+
+      return {
+        kind: 'ELIGIBLE',
+        unitId: row.unit_id,
+        position: row.position,
+        title: row.title,
+        status
+      }
+    }
+
+    return { kind: 'ALL_UNITS_COMPLETED' }
   }
 
   close(): void {
