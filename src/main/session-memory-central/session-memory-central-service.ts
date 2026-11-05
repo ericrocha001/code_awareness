@@ -1,6 +1,10 @@
 import type {
+  AppendSmcEntryInput,
   CreateSmcSessionInput,
+  ListSmcEntriesOptions,
   ListSmcSessionsOptions,
+  SmcEntryPage,
+  SmcEntryRecord,
   SmcSessionRecord
 } from '../../shared/types/session-memory-central-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
@@ -38,6 +42,18 @@ export class SessionMemoryCentralService {
 
   listSessions(repositoryId: string, options?: ListSmcSessionsOptions): SmcSessionRecord[] {
     return this.getStore(repositoryId).listSessions(options)
+  }
+
+  appendEntry(repositoryId: string, sessionId: string, input: AppendSmcEntryInput): SmcEntryRecord {
+    return this.getStore(repositoryId).appendEntry(sessionId, input)
+  }
+
+  getEntry(repositoryId: string, sessionId: string, entryId: string): SmcEntryRecord | null {
+    return this.getStore(repositoryId).getEntry(sessionId, entryId)
+  }
+
+  listEntries(repositoryId: string, sessionId: string, options?: ListSmcEntriesOptions): SmcEntryPage {
+    return this.getStore(repositoryId).listEntries(sessionId, options)
   }
 
   closeStore(repositoryId: string): void {
