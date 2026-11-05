@@ -1,4 +1,7 @@
 import { ArtifactTokenCache, TOKEN_CACHE_SCHEMA } from './artifact-token-cache'
+import { PublicationReceipts } from './publication-receipts'
+import { PublicationAssociations } from './publication-associations'
+import type { PublicationAssociation } from '../../shared/types/publication-provenance-types'
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
 import { artifactTags, quickTag, tagDescription, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -46,6 +49,30 @@ interface DiscoveryRow {
 }
 
 export class ArtifactStore {
+  private readonly publicationReceipts: PublicationReceipts
+  private readonly publicationAssociations: PublicationAssociations
+  associatePublication(value: PublicationAssociation) { return this.publicationAssociations.record(value) }
+  invalidatePublication(invocationId: string, state: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS') { this.publicationAssociations.invalidate(invocationId, state) }
+  publicationProvenance(artifactId: string, revision: number) { return this.publicationAssociations.projection(artifactId, revision) }
+  readPublicationReceipt(receiptId: string) { return this.publicationReceipts.read(receiptId) }
+  createPublished(input: CreateArtifactInput, requestDigest: string) {
+    return this.db.transaction(() => {
+      const artifact = this.createInsideTransaction(input)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest) }
+    }).immediate()
+  }
+  updatePublished(input: UpdateArtifactInput, requestDigest: string) {
+    return this.db.transaction(() => {
+      const artifact = this.update(input)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
+    }).immediate()
+  }
+  createVisualPublished(input: CreateArtifactInput, data: Buffer, media: VisualMedia, requestDigest: string) {
+    return this.db.transaction(() => {
+      const artifact = this.createVisual(input, data, media)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest) }
+    }).immediate()
+  }
   private readonly tagIndex: ArtifactTags
   private readonly tokenCache: ArtifactTokenCache
   tags() { return this.tagIndex.list() }
@@ -179,6 +206,8 @@ export class ArtifactStore {
       if (scope && scope.repository_id !== repositoryId) throw new Error('REPOSITORY_SCOPE_MISMATCH: Store belongs to another repository')
       this.db.prepare('INSERT OR IGNORE INTO repository_scope VALUES (1, ?)').run(repositoryId)
       this.ensureSchema()
+      this.publicationReceipts = new PublicationReceipts(this.db, repositoryId)
+      this.publicationAssociations = new PublicationAssociations(this.db, repositoryId, id => this.publicationReceipts.read(id))
       this.tokenCache = new ArtifactTokenCache(this.db)
       this.tagIndex = new ArtifactTags(this.db)
       this.graphIndex = new ArtifactGraph(this.db, repositoryId)

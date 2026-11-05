@@ -145,7 +145,7 @@ describe('Repository Continuum MCP contracts', () => {
   it('publishes open kinds with compact receipts, reads deliberately and updates stable identity with optimistic concurrency', () => {
     const { service } = setup()
     const receipt = data(executePublishArtifact(service, { rawMarkdown: markdown('Local', 'status: BLOCKED\n') }))
-    expect(Object.keys(receipt).sort()).toEqual(['artifactId', 'revision', 'success', 'updatedAt'])
+    expect(Object.keys(receipt).sort()).toEqual(['artifactId', 'publicationReceipt', 'replayed', 'revision', 'success', 'updatedAt'])
     const original = data(executeGetArtifact(service, { artifactId: receipt.artifactId }))
     expect(original.revision).toBe(1); expect(original.rawMarkdown).toBe(markdown('Local', 'status: BLOCKED\n'))
     expect(original).not.toHaveProperty('provenance'); expect(original).not.toHaveProperty('contentHash')

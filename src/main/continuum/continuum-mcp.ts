@@ -81,7 +81,7 @@ export function executeGetArtifact(reader: IArtifactReader, args: unknown): McpT
     const { artifactId, includeTokenUsage } = argsFor(GET_ARTIFACT_TOOL, args); const artifact = reader.get(artifactId as string)
     if (!artifact) throw new Error('ARTIFACT_NOT_FOUND: ' + artifactId)
     const { contentHash, provenance, ...current } = artifact
-    return readingResult(current, includeTokenUsage, current.rawMarkdown)
+    return readingResult({ ...current, ...(provenance.nativeArtifact ? { provenance: { nativeArtifact: provenance.nativeArtifact } } : {}) }, includeTokenUsage, current.rawMarkdown)
   } catch (error) { return failure(error) }
 }
 export function executePublishArtifact(service: IContinuumService, args: unknown): McpToolResult<McpTextContent> {

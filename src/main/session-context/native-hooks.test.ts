@@ -5,6 +5,8 @@ import { join } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
 import { nativeDigest, nativeGitIdentity, nativeHookLimits, normalizeNativeHook, parseNativeEnvelope, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
 import { composeNativeHooks, disableNativeHooks, installNativeHooks } from './native-hook-installation'
+import { publicationRequestDigest, publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
+import { nativeObservationBatch } from './native-hook-ingestion'
 
 const directories: string[] = []
 afterEach(() => { for (const path of directories.splice(0)) rmSync(path, { recursive: true, force: true }) })
@@ -25,6 +27,40 @@ test('keeps only scoped structural evidence and pairs observed pre/post identifi
   expect(JSON.stringify(pre)).not.toContain(f.root)
   expect(parseNativeEnvelope(JSON.stringify(pre))).toEqual(pre)
   expect(normalizeNativeHook(f.payload, { ...f.binding, repositoryId: 'other' }).sessionId).not.toBe(pre.sessionId)
+})
+
+test('captures allowlisted publication receipts with positive structured success and no private payload bytes', () => {
+  const f = fixture(), secret = 'PRIVATE_DOCUMENT_' + 'x'.repeat(20000)
+  const input = { rawMarkdown: secret, kind: 'INVESTIGATION' }
+  const requestDigest = publicationRequestDigest('PUBLISH', input)
+  const body = { schemaVersion: 1 as const, receiptId: 'publication-11111111-1111-4111-8111-111111111111', repositoryId: f.binding.repositoryId,
+    artifactId: 'artifact-11111111-1111-4111-8111-111111111111', revision: 1, contentHash: nativeDigest(secret), requestDigest, action: 'PUBLISH' as const }
+  const receipt = { ...body, digest: publicationReceiptDigest(body) }
+  const response = { success: true, artifactId: body.artifactId, revision: 1, publicationReceipt: receipt, replayed: false }
+  const payload = { ...f.payload, tool_name: 'mcp__code_awareness_local__publish_artifact', tool_input: input }
+  const pre = normalizeNativeHook(payload, f.binding)
+  const post = normalizeNativeHook({ ...payload, hook_event_name: 'PostToolUse', tool_response: { content: [{ type: 'text', text: JSON.stringify(response) }], private: secret } }, f.binding)
+  expect(pre.artifact).toMatchObject({ category: 'ARTIFACT_PUBLISH', requestDigest, outcome: 'UNKNOWN' })
+  expect(post.artifact).toMatchObject({ outcome: 'SUCCESS', receipt: { receiptId: receipt.receiptId, replayed: false } })
+  for (const event of [pre, post]) {
+    expect(parseNativeEnvelope(JSON.stringify(event))).toEqual(event)
+    expect(JSON.stringify(event)).not.toContain('PRIVATE_DOCUMENT')
+    expect(JSON.stringify(event)).not.toContain(f.root)
+    expect(Buffer.byteLength(JSON.stringify(event))).toBeLessThan(nativeHookLimits.envelopeBytes)
+    expect(spoolNativeHook(event, f.spool)).toBe('WRITTEN')
+    const batch = nativeObservationBatch(event)
+    expect(batch.edges.every(edge => edge.evidenceRef.length <= 500)).toBe(true)
+    expect(JSON.stringify(batch)).not.toContain('PRIVATE_DOCUMENT')
+  }
+  for (const tool_response of [{}, { isError: false }, { content: [{ type: 'text', text: JSON.stringify({ artifactId: body.artifactId }) }] },
+    { structuredContent: { ...response, success: undefined } }, { structuredContent: { ...response, publicationReceipt: { ...receipt, digest: '0'.repeat(64) } } }]) {
+    expect(normalizeNativeHook({ ...payload, hook_event_name: 'PostToolUse', tool_response }, f.binding).artifact).toMatchObject({ outcome: 'UNKNOWN' })
+  }
+  expect(normalizeNativeHook({ ...payload, hook_event_name: 'PostToolUse', tool_response: { isError: true } }, f.binding).artifact?.outcome).toBe('FAILURE')
+  expect(normalizeNativeHook({ ...payload, tool_name: 'mcp__untrusted__publish_artifact' }, f.binding).artifact).toBeUndefined()
+  expect(normalizeNativeHook({ ...payload, tool_name: 'Bash' }, f.binding).artifact).toBeUndefined()
+  expect(normalizeNativeHook({ ...payload, session_id: 'another-session' }, f.binding).invocationId).not.toBe(pre.invocationId)
+  expect(normalizeNativeHook({ ...payload, agent_id: 'another-agent' }, f.binding).eventId).not.toBe(pre.eventId)
 })
 test('rejects missing invocation identity, changed checkout and forged envelopes', () => {
   const f = fixture()
@@ -131,6 +167,7 @@ test('requires explicit opt-in, preserves Entire handlers and restores exact con
   const composed = JSON.parse(readFileSync(config, 'utf8'))
   expect(composed.hooks.SessionStart[0]).toEqual(JSON.parse(before).hooks.SessionStart[0])
   expect(composed.hooks.SessionStart).toHaveLength(2)
+  expect(composed.hooks.SessionStart[1].hooks[0].commandWindows).toBe('& ' + [process.execPath, commandPath, join(f.root, '.code-awareness/native-hooks/binding.json')].map(path => "'" + path.replaceAll("'", "''") + "'").join(' '))
   expect(disableNativeHooks(f.root, true)).toEqual({ state: 'DISABLED', restored: true })
   expect(readFileSync(config, 'utf8')).toBe(before)
   expect(composeNativeHooks(composeNativeHooks(before, 'native-command'), 'native-command')).toBe(composeNativeHooks(before, 'native-command'))

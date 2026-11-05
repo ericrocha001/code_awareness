@@ -4,14 +4,14 @@ import { boundedFile, nativeDigest, nativeGitIdentity, nativeHookEvents, prepare
 import type { WorktreeRecord } from '../git-operations/git-worktree-registry'
 
 interface HookSnapshot { schema: 1; path: string; before: string | null; installedDigest: string }
-export function composeNativeHooks(text: string | null, command: string): string {
+export function composeNativeHooks(text: string | null, command: string, commandWindows?: string): string {
   const value = text === null ? {} : JSON.parse(text)
   if (!value || typeof value !== 'object' || Array.isArray(value) || value.hooks && (typeof value.hooks !== 'object' || Array.isArray(value.hooks))) throw new Error('HOOK_CONFIG_UNSUPPORTED')
   value.hooks ??= {}
   for (const event of nativeHookEvents) {
     const groups = value.hooks[event] ?? []
     if (!Array.isArray(groups)) throw new Error('HOOK_CONFIG_UNSUPPORTED')
-    if (!groups.some(group => Array.isArray(group?.hooks) && group.hooks.some((hook: { command?: string }) => hook.command === command))) groups.push({ hooks: [{ type: 'command', command, timeout: 3 }] })
+    if (!groups.some(group => Array.isArray(group?.hooks) && group.hooks.some((hook: { command?: string }) => hook.command === command))) groups.push({ hooks: [{ type: 'command', command, ...(commandWindows ? { commandWindows } : {}), timeout: 3 }] })
     value.hooks[event] = groups
   }
   return JSON.stringify(value, null, 2) + '\n'
@@ -28,7 +28,8 @@ export function installNativeHooks(options: { repositoryId: string; record: Work
     ...nativeGitIdentity(root), spool: join(directory, 'spool'), ...(options.gitCommitTool ? { gitCommitTool: options.gitCommitTool } : {}) }
   const path = join(root, '.codex/hooks.json'), before = existsSync(path) ? boundedFile(path, 65536) : null
   const command = `"${options.nodePath}" "${options.commandPath}" "${bindingPath}"`
-  const after = composeNativeHooks(before, command)
+  const commandWindows = '& ' + [options.nodePath, options.commandPath, bindingPath].map(path => "'" + path.replaceAll("'", "''") + "'").join(' ')
+  const after = composeNativeHooks(before, command, commandWindows)
   if (Buffer.byteLength(after) > 65536) throw new Error('HOOK_CONFIG_LIMIT')
   mkdirSync(dirname(path), { recursive: true })
   if (realpathSync(dirname(path)) !== resolve(dirname(path))) throw new Error('UNSAFE_HOOK_DIRECTORY')

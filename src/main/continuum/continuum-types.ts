@@ -79,7 +79,9 @@ export interface UpdateArtifactInput {
   provenance?: Record<string, MetadataValue>
 }
 export interface ArtifactSemanticFields { name?: string; description?: string; kind?: string }
-export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
+import type { PublicationReceipt } from '../../shared/types/publication-provenance-types'
+export type { PublicationReceipt } from '../../shared/types/publication-provenance-types'
+export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string; publicationReceipt?: PublicationReceipt; replayed?: boolean }
 export interface VisualMedia {
   mimeType: 'image/webp'
   sha256: string
