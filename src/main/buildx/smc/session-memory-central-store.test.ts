@@ -33,6 +33,16 @@ import {
   type UnitFlowEligibilityResult
 } from '../unitflow'
 import {
+  WorkspaceBindingService,
+  BuildXWorkspaceBindingConflictError,
+  BuildXWorkspaceNotFoundError,
+  BuildXWorkspaceInvalidError,
+  BuildXWorkspaceRepositoryMismatchError,
+  type BuildXWorkspaceBindingRecord,
+  type BuildXInspectWorkspaceResult
+} from '../execution'
+import type { BranchInventory, BranchRecord } from '../../../shared/types/branch-orchestration-types'
+import {
   BUILDX_SMC_TOOLS,
   BUILDX_SMC_READ_TOOLS,
   BUILDX_SMC_MUTATION_TOOLS,
@@ -302,7 +312,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       // Garante que o schema_version foi migrado (pelo menos versão 2, atualmente 4)
       const versionDb = new Database(dbPath)
       const row = versionDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-      expect(['2', '3', '4', '5']).toContain(row.value)
+      expect(['2', '3', '4', '5', '6']).toContain(row.value)
       versionDb.close()
 
       reopened.close()
@@ -1259,7 +1269,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que schema foi promovido (v3 ou superior)
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(['3', '4', '5']).toContain(versionRow.value)
+        expect(['3', '4', '5', '6']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Registra plano ativo
@@ -1657,7 +1667,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         smc.close()
       })
 
-      it('recusa schema futuro (> 5) com SmcUnsupportedSchemaError sem corromper dados', () => {
+      it('recusa schema futuro (> 6) com SmcUnsupportedSchemaError sem corromper dados', () => {
         const repoId = 'repo-future-schema'
         const dbPath = smcDatabasePath(tempBaseDir, repoId)
         mkdirSync(dirname(dbPath), { recursive: true })
@@ -1666,7 +1676,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         dbRaw.exec(`
           CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           INSERT INTO smc_meta (key, value) VALUES ('repository_id', '${repoId}');
-          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '6');
+          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '7');
         `)
         dbRaw.close()
 
@@ -1677,7 +1687,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que o schema_version não foi alterado
         const checkDb = new Database(dbPath)
         const row = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(row.value).toBe('6')
+        expect(row.value).toBe('7')
         checkDb.close()
       })
 
@@ -1785,7 +1795,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que schema foi promovido para v4 ou superior (atualmente v5)
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(['4', '5']).toContain(versionRow.value)
+        expect(['4', '5', '6']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Define 3 unidades com dependências estritamente anteriores
@@ -2351,7 +2361,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
 
         const checkDb = new Database(dbPath)
         const verRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(verRow.value).toBe('5')
+        expect(['5', '6']).toContain(verRow.value)
 
         const stateRows = checkDb.prepare('SELECT unit_id, status, revision FROM smc_unit_states WHERE plan_id = ? ORDER BY unit_id').all(p1) as { unit_id: string; status: string; revision: number }[]
         expect(stateRows).toHaveLength(2)
@@ -2686,6 +2696,500 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
     })
   })
 
+  describe('BuildX Workspace-01 — Vínculo durável de sessão à Worktree Git (Provas Mínimas)', () => {
+    const repoId = 'repo-workspace-01'
+    let smc: SessionMemoryCentralService
+
+    function createFixtureInventory(options?: {
+      repositoryId?: string
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      missing?: boolean
+      locked?: boolean
+      prunable?: boolean
+      detached?: boolean
+      reference?: boolean
+    }): BranchInventory {
+      const repositoryId = options?.repositoryId ?? repoId
+      const worktreeId = options?.worktreeId ?? 'wt-workspace-01'
+      const generation = options?.generation ?? 'gen-12345'
+      const branchName = options?.branch ?? 'feature-workspace-01'
+      const head = options?.head ?? 'abcdef1234567890abcdef1234567890abcdef12'
+
+      const worktree: any = {
+        worktreeId,
+        generation,
+        path: `/mock/path/${worktreeId}`,
+        head,
+        branch: branchName,
+        detached: options?.detached ?? false,
+        locked: options?.locked ?? false,
+        missing: options?.missing ?? false,
+        prunable: options?.prunable ?? false,
+        reference: options?.reference ?? false
+      }
+
+      const branchRecord: BranchRecord = {
+        key: `key-${branchName}`,
+        repositoryId,
+        ref: `refs/heads/${branchName}`,
+        name: branchName,
+        namespace: 'LOCAL',
+        head,
+        upstream: null,
+        generation: 'branch-gen-1',
+        revision: 'branch-rev-1',
+        creation: { at: '2026-11-05T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-05T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+
+      return {
+        repositoryId,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-05T00:00:00.000Z',
+        revision: 'inv-rev-1',
+        branches: [branchRecord],
+        worktrees: [worktree],
+        unassignedWorktrees: []
+      }
+    }
+
+    beforeEach(() => {
+      smc = new SessionMemoryCentralService(tempBaseDir)
+    })
+
+    afterEach(() => {
+      smc.close()
+    })
+
+    describe('Prova 1 — Migração v5→v6, vínculo durável e persistência', () => {
+      it('migra banco v5 real para v6, vincula Worktree e recupera identidade após restart', async () => {
+        const legacySessionId = '00000000-0000-4000-9001-000000000001'
+        const legacyEntryId = '00000000-0000-4000-9001-000000000002'
+        const legacyPlanId = '00000000-0000-4000-9001-000000000003'
+        const legacyUnitId = '00000000-0000-4000-9001-000000000004'
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        mkdirSync(dirname(dbPath), { recursive: true })
+
+        // 1. Cria esquema v5 manualmente
+        const v5Db = new Database(dbPath)
+        const now = new Date().toISOString()
+        v5Db.exec(`
+          CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          INSERT INTO smc_meta VALUES ('repository_id', '${repoId}');
+          INSERT INTO smc_meta VALUES ('schema_version', '5');
+
+          CREATE TABLE smc_sessions (
+            session_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('OPEN', 'CLOSED')),
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_sessions VALUES ('${legacySessionId}', '${repoId}', 'OPEN', 1, '${now}', '${now}');
+
+          CREATE TABLE smc_entries (
+            order_seq INTEGER PRIMARY KEY AUTOINCREMENT, entry_id TEXT UNIQUE NOT NULL,
+            session_id TEXT NOT NULL, kind TEXT NOT NULL, title TEXT NOT NULL,
+            body TEXT NOT NULL, emitter_role TEXT NOT NULL, emitter_id TEXT,
+            references_json TEXT, supersedes_entry_id TEXT, created_at TEXT NOT NULL
+          );
+          INSERT INTO smc_entries VALUES (1, '${legacyEntryId}', '${legacySessionId}', 'DECISION', 'Histórico', 'Corpo', 'HUMAN', NULL, NULL, NULL, '${now}');
+
+          CREATE TABLE smc_plans (
+            plan_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, repository_id TEXT NOT NULL,
+            title TEXT NOT NULL, source_artifact_id TEXT,
+            status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_plans VALUES ('${legacyPlanId}', '${legacySessionId}', '${repoId}', 'Plano V5', NULL, 'ACTIVE', 1, '${now}', '${now}');
+
+          CREATE TABLE smc_plan_units (
+            unit_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, position INTEGER NOT NULL,
+            title TEXT NOT NULL, objective TEXT NOT NULL, acceptance_criteria TEXT NOT NULL,
+            depends_on_json TEXT, created_at TEXT NOT NULL
+          );
+          INSERT INTO smc_plan_units VALUES ('${legacyUnitId}', '${legacyPlanId}', 1, 'U1', 'O1', 'C1', NULL, '${now}');
+
+          CREATE TABLE smc_unit_states (
+            unit_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, status TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_unit_states VALUES ('${legacyUnitId}', '${legacyPlanId}', 'AVAILABLE', 1, '${now}', '${now}');
+        `)
+        v5Db.close()
+
+        // 2. Abre com WorkspaceBindingService para disparar migração v5 -> v6
+        const inventory = createFixtureInventory({
+          worktreeId: 'wt-001',
+          generation: 'gen-aaa',
+          branch: 'feature-migrada',
+          head: '1111111111111111111111111111111111111111'
+        })
+        const workspaceService = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => inventory
+        })
+
+        // Vincula a worktree
+        const binding = await workspaceService.bindWorkspace(repoId, legacySessionId, 'wt-001')
+        expect(binding.sessionId).toBe(legacySessionId)
+        expect(binding.repositoryId).toBe(repoId)
+        expect(binding.worktreeId).toBe('wt-001')
+        expect(binding.generation).toBe('gen-aaa')
+        expect(binding.branch).toBe('feature-migrada')
+        expect(binding.headAtBind).toBe('1111111111111111111111111111111111111111')
+        expect((binding as any).path).toBeUndefined()
+
+        // Verifica que schema_version é 6 no banco
+        const checkDb = new Database(dbPath)
+        const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
+        expect(versionRow.value).toBe('6')
+        checkDb.close()
+
+        // 3. Fecha e reabre em nova instância de serviço
+        smc.close()
+        const reopenedSmc = new SessionMemoryCentralService(tempBaseDir)
+        const reopenedService = new WorkspaceBindingService(reopenedSmc, {
+          getBranchInventory: async () => inventory
+        })
+
+        const recovered = reopenedService.getWorkspaceBinding(repoId, legacySessionId)
+        expect(recovered).not.toBeNull()
+        expect(recovered?.sessionId).toBe(legacySessionId)
+        expect(recovered?.worktreeId).toBe('wt-001')
+        expect(recovered?.generation).toBe('gen-aaa')
+        expect(recovered?.branch).toBe('feature-migrada')
+        expect(recovered?.headAtBind).toBe('1111111111111111111111111111111111111111')
+
+        // Entidades legadas permanecem intactas
+        const sess = reopenedSmc.getSession(repoId, legacySessionId)
+        expect(sess?.status).toBe('OPEN')
+        const plan = reopenedSmc.getPlan(repoId, legacyPlanId)
+        expect(plan?.title).toBe('Plano V5')
+        const entry = reopenedSmc.getEntry(repoId, legacySessionId, legacyEntryId)
+        expect(entry?.title).toBe('Histórico')
+        const unit = reopenedSmc.getPlanUnit(repoId, legacySessionId, legacyPlanId, legacyUnitId)
+        expect(unit?.title).toBe('U1')
+
+        reopenedSmc.close()
+      })
+    })
+
+    describe('Prova 2 — Idempotência de replay e conflito de rebind', () => {
+      it('permite replay idêntico sem mutação e rejeita rebind com worktree/generation/branch divergente', async () => {
+        const session = smc.createSession(repoId)
+        const inventory = createFixtureInventory({
+          worktreeId: 'wt-replay',
+          generation: 'gen-replay-1',
+          branch: 'feature-replay',
+          head: '2222222222222222222222222222222222222222'
+        })
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => inventory
+        })
+
+        // Primeiro vínculo
+        const first = await service.bindWorkspace(repoId, session.sessionId, 'wt-replay')
+        expect(first.worktreeId).toBe('wt-replay')
+
+        // Replay idêntico
+        const replay = await service.bindWorkspace(repoId, session.sessionId, 'wt-replay')
+        expect(replay.worktreeId).toBe('wt-replay')
+        expect(replay.generation).toBe('gen-replay-1')
+        expect(replay.createdAt).toBe(first.createdAt)
+        expect(replay.updatedAt).toBe(first.updatedAt)
+
+        // Conflito: tentativa com worktreeId diferente
+        const conflictingInventory1 = createFixtureInventory({
+          worktreeId: 'wt-other',
+          generation: 'gen-other',
+          branch: 'feature-other',
+          head: '3333333333333333333333333333333333333333'
+        })
+        const serviceConflict1 = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => conflictingInventory1
+        })
+        await expect(
+          serviceConflict1.bindWorkspace(repoId, session.sessionId, 'wt-other')
+        ).rejects.toThrow(BuildXWorkspaceBindingConflictError)
+
+        // Conflito: mesma worktreeId mas generation diferente
+        const conflictingInventory2 = createFixtureInventory({
+          worktreeId: 'wt-replay',
+          generation: 'gen-replay-2',
+          branch: 'feature-replay',
+          head: '2222222222222222222222222222222222222222'
+        })
+        const serviceConflict2 = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => conflictingInventory2
+        })
+        await expect(
+          serviceConflict2.bindWorkspace(repoId, session.sessionId, 'wt-replay')
+        ).rejects.toThrow(BuildXWorkspaceBindingConflictError)
+      })
+
+      it('duas instâncias de store concorrentes preservam no máximo um vínculo', async () => {
+        const session = smc.createSession(repoId)
+        const invA = createFixtureInventory({ worktreeId: 'wt-concur-a', branch: 'feat-a' })
+        const invB = createFixtureInventory({ worktreeId: 'wt-concur-b', branch: 'feat-b' })
+
+        const serviceA = new WorkspaceBindingService(smc, { getBranchInventory: async () => invA })
+        const serviceB = new WorkspaceBindingService(smc, { getBranchInventory: async () => invB })
+
+        await serviceA.bindWorkspace(repoId, session.sessionId, 'wt-concur-a')
+
+        await expect(
+          serviceB.bindWorkspace(repoId, session.sessionId, 'wt-concur-b')
+        ).rejects.toThrow(BuildXWorkspaceBindingConflictError)
+
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const checkDb = new Database(dbPath)
+        const count = checkDb.prepare('SELECT count(*) as cnt FROM smc_session_worktrees WHERE session_id = ?').get(session.sessionId) as { cnt: number }
+        expect(count.cnt).toBe(1)
+        checkDb.close()
+      })
+    })
+
+    describe('Prova 3 — Revalidação read-only (CURRENT, STALE, UNAVAILABLE, UNBOUND)', () => {
+      it('revalida estados de observação sem mutações no banco', async () => {
+        const session = smc.createSession(repoId)
+        let currentInv = createFixtureInventory({
+          worktreeId: 'wt-inspect',
+          generation: 'gen-insp-1',
+          branch: 'feat-insp',
+          head: 'aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111'
+        })
+
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => currentInv
+        })
+
+        // 1. UNBOUND antes de vincular
+        const unb = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(unb.status).toBe('UNBOUND')
+
+        // Vincula
+        await service.bindWorkspace(repoId, session.sessionId, 'wt-inspect')
+
+        // 2. CURRENT com HEAD inicial
+        const insp1 = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp1.status).toBe('CURRENT')
+        if (insp1.status === 'CURRENT') {
+          expect(insp1.currentHead).toBe('aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111')
+          expect(insp1.binding.headAtBind).toBe('aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111')
+        }
+
+        // 3. HEAD avançado -> continua CURRENT com novo HEAD
+        currentInv = createFixtureInventory({
+          worktreeId: 'wt-inspect',
+          generation: 'gen-insp-1',
+          branch: 'feat-insp',
+          head: 'bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222'
+        })
+        const insp2 = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp2.status).toBe('CURRENT')
+        if (insp2.status === 'CURRENT') {
+          expect(insp2.currentHead).toBe('bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222')
+          expect(insp2.binding.headAtBind).toBe('aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111')
+        }
+
+        // 4. Worktree removida do inventário -> STALE (WORKTREE_NOT_FOUND)
+        currentInv = createFixtureInventory({
+          worktreeId: 'wt-other',
+          generation: 'gen-other',
+          branch: 'feat-other'
+        })
+        const insp3 = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp3.status).toBe('STALE')
+        if (insp3.status === 'STALE') {
+          expect(insp3.reason).toBe('WORKTREE_NOT_FOUND')
+        }
+
+        // 5. Worktree missing -> STALE (WORKTREE_MISSING)
+        currentInv = createFixtureInventory({
+          worktreeId: 'wt-inspect',
+          generation: 'gen-insp-1',
+          branch: 'feat-insp',
+          missing: true
+        })
+        const insp4 = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp4.status).toBe('STALE')
+        if (insp4.status === 'STALE') {
+          expect(insp4.reason).toBe('WORKTREE_MISSING')
+        }
+
+        // 6. Geração diferente -> STALE (GENERATION_CHANGED)
+        currentInv = createFixtureInventory({
+          worktreeId: 'wt-inspect',
+          generation: 'gen-insp-changed',
+          branch: 'feat-insp'
+        })
+        const insp5 = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp5.status).toBe('STALE')
+        if (insp5.status === 'STALE') {
+          expect(insp5.reason).toBe('GENERATION_CHANGED')
+        }
+
+        // 7. Branch diferente -> STALE (BRANCH_CHANGED)
+        currentInv = createFixtureInventory({
+          worktreeId: 'wt-inspect',
+          generation: 'gen-insp-1',
+          branch: 'feat-altered'
+        })
+        const insp6 = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp6.status).toBe('STALE')
+        if (insp6.status === 'STALE') {
+          expect(insp6.reason).toBe('BRANCH_CHANGED')
+        }
+
+        // 8. Detached HEAD -> STALE (DETACHED_HEAD)
+        currentInv = createFixtureInventory({
+          worktreeId: 'wt-inspect',
+          generation: 'gen-insp-1',
+          branch: 'feat-insp',
+          detached: true
+        })
+        const insp7 = await service.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp7.status).toBe('STALE')
+        if (insp7.status === 'STALE') {
+          expect(insp7.reason).toBe('DETACHED_HEAD')
+        }
+
+        // 9. Git indisponível -> UNAVAILABLE
+        const serviceFailing = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => {
+            throw new Error('Git daemon crashed')
+          }
+        })
+        const insp8 = await serviceFailing.inspectBoundWorkspace(repoId, session.sessionId)
+        expect(insp8.status).toBe('UNAVAILABLE')
+        if (insp8.status === 'UNAVAILABLE') {
+          expect(insp8.reason).toBe('Git daemon crashed')
+          expect(insp8.binding.worktreeId).toBe('wt-inspect')
+        }
+      })
+    })
+
+    describe('Prova 4 — Fail-closed e validações de integridade', () => {
+      it('rejeita sessão CLOSED', async () => {
+        const session = smc.createSession(repoId)
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_sessions SET status = ? WHERE session_id = ?').run('CLOSED', session.sessionId)
+        rawDb.close()
+
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory()
+        })
+        await expect(
+          service.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')
+        ).rejects.toThrow(SmcSessionClosedError)
+      })
+
+      it('rejeita sessão inexistente', async () => {
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory()
+        })
+        await expect(
+          service.bindWorkspace(repoId, '00000000-0000-4000-9004-999999999999', 'wt-workspace-01')
+        ).rejects.toThrow(SmcSessionNotFoundError)
+      })
+
+      it('rejeita divergência de repositório entre sessão e inventário Git', async () => {
+        const session = smc.createSession(repoId)
+        const mismatchInventory = createFixtureInventory({ repositoryId: 'repo-different' })
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => mismatchInventory
+        })
+        await expect(
+          service.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')
+        ).rejects.toThrow(BuildXWorkspaceRepositoryMismatchError)
+      })
+
+      it('rejeita worktreeId não encontrada no inventário', async () => {
+        const session = smc.createSession(repoId)
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory({ worktreeId: 'wt-real' })
+        })
+        await expect(
+          service.bindWorkspace(repoId, session.sessionId, 'wt-unknown')
+        ).rejects.toThrow(BuildXWorkspaceNotFoundError)
+      })
+
+      it('rejeita checkout de referência principal (reference: true)', async () => {
+        const session = smc.createSession(repoId)
+        const refInventory = createFixtureInventory({ reference: true })
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => refInventory
+        })
+        await expect(
+          service.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')
+        ).rejects.toThrow(BuildXWorkspaceInvalidError)
+      })
+
+      it('rejeita worktree missing, locked, prunable ou detached', async () => {
+        const session = smc.createSession(repoId)
+
+        // Missing
+        const serviceMissing = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory({ missing: true })
+        })
+        await expect(serviceMissing.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')).rejects.toThrow(BuildXWorkspaceInvalidError)
+
+        // Locked
+        const serviceLocked = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory({ locked: true })
+        })
+        await expect(serviceLocked.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')).rejects.toThrow(BuildXWorkspaceInvalidError)
+
+        // Prunable
+        const servicePrunable = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory({ prunable: true })
+        })
+        await expect(servicePrunable.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')).rejects.toThrow(BuildXWorkspaceInvalidError)
+
+        // Detached
+        const serviceDetached = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory({ detached: true })
+        })
+        await expect(serviceDetached.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')).rejects.toThrow(BuildXWorkspaceInvalidError)
+      })
+
+      it('rejeita geração UNKNOWN ou ausente e worktree sem HEAD confirmado', async () => {
+        const session = smc.createSession(repoId)
+
+        // UNKNOWN generation
+        const serviceUnknownGen = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory({ generation: 'UNKNOWN' })
+        })
+        await expect(serviceUnknownGen.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')).rejects.toThrow(BuildXWorkspaceInvalidError)
+
+        // No HEAD
+        const serviceNoHead = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => createFixtureInventory({ head: '' })
+        })
+        await expect(serviceNoHead.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')).rejects.toThrow(BuildXWorkspaceInvalidError)
+      })
+
+      it('rejeita branch não vinculado no inventário local', async () => {
+        const session = smc.createSession(repoId)
+        const unlinkedInv = createFixtureInventory()
+        // Remove worktree do branch local
+        unlinkedInv.branches[0].worktrees = []
+        const service = new WorkspaceBindingService(smc, {
+          getBranchInventory: async () => unlinkedInv
+        })
+        await expect(
+          service.bindWorkspace(repoId, session.sessionId, 'wt-workspace-01')
+        ).rejects.toThrow(BuildXWorkspaceInvalidError)
+      })
+    })
+  })
+
 })
 })
+
 

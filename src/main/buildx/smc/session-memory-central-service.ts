@@ -16,6 +16,10 @@ import type {
   UnitFlowUnitRecord,
   UnitFlowUnitStateRecord
 } from '../../../shared/types/buildx/unitflow-types'
+import type {
+  BuildXWorkspaceBindingRecord,
+  SaveWorkspaceBindingInput
+} from '../../../shared/types/buildx/workspace-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
 
@@ -118,6 +122,21 @@ export class SessionMemoryCentralService {
     planId: string
   ): UnitFlowEligibilityResult {
     return this.getStore(repositoryId).getNextEligibleUnit(sessionId, planId)
+  }
+
+  saveWorkspaceBinding(
+    repositoryId: string,
+    sessionId: string,
+    input: SaveWorkspaceBindingInput
+  ): BuildXWorkspaceBindingRecord {
+    return this.getStore(repositoryId).saveWorkspaceBinding(sessionId, input)
+  }
+
+  getWorkspaceBinding(
+    repositoryId: string,
+    sessionId: string
+  ): BuildXWorkspaceBindingRecord | null {
+    return this.getStore(repositoryId).getWorkspaceBinding(sessionId)
   }
 
   closeStore(repositoryId: string): void {

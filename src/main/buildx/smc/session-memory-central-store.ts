@@ -28,6 +28,13 @@ import type {
   UnitFlowUnitStateRecord,
   UnitFlowUnitStatus
 } from '../../../shared/types/buildx/unitflow-types'
+import type {
+  BuildXWorkspaceBindingRecord,
+  SaveWorkspaceBindingInput
+} from '../../../shared/types/buildx/workspace-types'
+import {
+  BuildXWorkspaceBindingConflictError
+} from '../execution/workspace-binding-errors'
 import {
   UnitFlowActivePlanAlreadyExistsError,
   UnitFlowInvalidPlanError,
@@ -130,7 +137,7 @@ export class SmcInvalidSupersedesError extends Error {
 
 export class SmcUnsupportedSchemaError extends Error {
   constructor(version: number) {
-    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 5`)
+    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 6`)
     this.name = 'SmcUnsupportedSchemaError'
   }
 }
@@ -186,6 +193,17 @@ interface RawUnitStateRow {
   plan_id: string
   status: string
   revision: number
+  created_at: string
+  updated_at: string
+}
+
+interface RawWorkspaceBindingRow {
+  session_id: string
+  repository_id: string
+  worktree_id: string
+  generation: string
+  branch: string
+  head_at_bind: string
   created_at: string
   updated_at: string
 }
@@ -252,13 +270,13 @@ export class SessionMemoryCentralStore {
     const versionRow = this.db.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string } | undefined
     const currentVersion = versionRow ? parseInt(versionRow.value, 10) : 0
 
-    if (currentVersion > 5) {
+    if (currentVersion > 6) {
       this.db.close()
       throw new SmcUnsupportedSchemaError(currentVersion)
     }
 
-    // 4. Migração atômica de v0/v1/v2/v3/v4 para v5
-    if (currentVersion < 5) {
+    // 4. Migração atômica de v0..v5 para v6
+    if (currentVersion < 6) {
       this.db.transaction(() => {
         if (currentVersion < 2) {
           // Tabelas base v1
@@ -384,10 +402,30 @@ export class SessionMemoryCentralStore {
           }
         }
 
+        if (currentVersion < 6) {
+          // Adições v6 (Workspace-01: Vínculo durável de sessão à Worktree Git)
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_session_worktrees (
+              session_id TEXT PRIMARY KEY,
+              repository_id TEXT NOT NULL,
+              worktree_id TEXT NOT NULL,
+              generation TEXT NOT NULL,
+              branch TEXT NOT NULL,
+              head_at_bind TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (session_id) REFERENCES smc_sessions(session_id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_smc_session_worktrees_repo_tree
+              ON smc_session_worktrees (repository_id, worktree_id);
+          `)
+        }
+
         if (!versionRow) {
-          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '5')
+          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '6')
         } else {
-          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('5', 'schema_version')
+          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('6', 'schema_version')
         }
       })()
     }
@@ -1443,6 +1481,109 @@ export class SessionMemoryCentralStore {
     }
 
     return { kind: 'ALL_UNITS_COMPLETED' }
+  }
+
+  private mapRawToWorkspaceBinding(row: RawWorkspaceBindingRow): BuildXWorkspaceBindingRecord {
+    return {
+      sessionId: row.session_id,
+      repositoryId: row.repository_id,
+      worktreeId: row.worktree_id,
+      generation: row.generation,
+      branch: row.branch,
+      headAtBind: row.head_at_bind,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }
+  }
+
+  saveWorkspaceBinding(sessionId: string, input: SaveWorkspaceBindingInput): BuildXWorkspaceBindingRecord {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+
+    return this.db.transaction(() => {
+      // 1. Valida existência e estado da sessão (OPEN)
+      const sessionRow = this.db.prepare(`
+        SELECT status FROM smc_sessions WHERE session_id = ? AND repository_id = ?
+      `).get(cleanSessionId, this.repositoryId) as { status: string } | undefined
+
+      if (!sessionRow) {
+        throw new SmcSessionNotFoundError(cleanSessionId)
+      }
+      if (sessionRow.status === 'CLOSED') {
+        throw new SmcSessionClosedError(cleanSessionId)
+      }
+
+      // 2. Valida se já existe vínculo para esta sessão
+      const existing = this.db.prepare(`
+        SELECT session_id, repository_id, worktree_id, generation, branch, head_at_bind, created_at, updated_at
+        FROM smc_session_worktrees
+        WHERE session_id = ?
+      `).get(cleanSessionId) as RawWorkspaceBindingRow | undefined
+
+      if (existing) {
+        const isIdentical =
+          existing.worktree_id === input.worktreeId &&
+          existing.generation === input.generation &&
+          existing.branch === input.branch
+
+        if (isIdentical) {
+          // Replay idêntico
+          return this.mapRawToWorkspaceBinding(existing)
+        }
+        throw new BuildXWorkspaceBindingConflictError(
+          `Session "${cleanSessionId}" is already bound to worktree "${existing.worktree_id}" (${existing.branch}, generation ${existing.generation})`
+        )
+      }
+
+      // 3. Insere novo vínculo
+      const now = new Date().toISOString()
+      this.db.prepare(`
+        INSERT INTO smc_session_worktrees (
+          session_id, repository_id, worktree_id, generation, branch, head_at_bind, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        cleanSessionId,
+        this.repositoryId,
+        input.worktreeId,
+        input.generation,
+        input.branch,
+        input.headAtBind,
+        now,
+        now
+      )
+
+      return {
+        sessionId: cleanSessionId,
+        repositoryId: this.repositoryId,
+        worktreeId: input.worktreeId,
+        generation: input.generation,
+        branch: input.branch,
+        headAtBind: input.headAtBind,
+        createdAt: now,
+        updatedAt: now
+      }
+    })()
+  }
+
+  getWorkspaceBinding(sessionId: string): BuildXWorkspaceBindingRecord | null {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      return null
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+
+    const row = this.db.prepare(`
+      SELECT session_id, repository_id, worktree_id, generation, branch, head_at_bind, created_at, updated_at
+      FROM smc_session_worktrees
+      WHERE session_id = ? AND repository_id = ?
+    `).get(cleanSessionId, this.repositoryId) as RawWorkspaceBindingRow | undefined
+
+    if (!row) {
+      return null
+    }
+
+    return this.mapRawToWorkspaceBinding(row)
   }
 
   close(): void {
