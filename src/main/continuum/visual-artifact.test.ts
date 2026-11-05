@@ -4,6 +4,7 @@ import { ArtifactStore } from './artifact-store'
 import { ContinuumService } from './continuum-service'
 import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
 import { inspectWebP, validateVisualMedia, VISUAL_MAX_BYTES } from './visual-media'
+import { parseArtifactMarkdown } from './artifact-metadata'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.reverse().forEach(close => close()); cleanup.length = 0 })
@@ -14,6 +15,21 @@ async function image(lossless = true) {
   return { pixels, data: await sharp(pixels, { raw: { width: 2, height: 2, channels: 4 } }).webp({ lossless }).toBuffer() }
 }
 describe('Visual Continuum persistence and validation', () => {
+  it('uses the visual flow kind for economic context and preserves immutable media during economic updates', async () => {
+    const f = setup(), { data } = await image()
+    const body = '# Referência visual\r\n\r\nContexto explícito para compreender a referência visual preservada.\r\n'
+    const receipt = await f.service.publishVisual(body, data)
+    const first = f.service.getVisual(receipt.artifactId)
+    expect(first.artifact.metadata.kind).toBe('VISUAL_REFERENCE')
+    expect(first.artifact.provenance.publication).toMatchObject({ repositoryId: 'catalog-A', sessionEvidence: 'UNAVAILABLE' })
+    expect(parseArtifactMarkdown(first.artifact.rawMarkdown).body).toBe(body)
+    f.service.update(receipt.artifactId, 1, '# Novo contexto\r\n\r\nCorpo revisado literal.\r\n')
+    const next = f.service.getVisual(receipt.artifactId)
+    expect(next.artifact.metadata).toEqual(first.artifact.metadata)
+    expect(next.media).toEqual(first.media)
+    expect(next.data).toEqual(data)
+    expect(parseArtifactMarkdown(next.artifact.rawMarkdown).metadata.media).toBeUndefined()
+  })
   it('projects references from visual text and removes them after a textual update without changing media', async () => {
     const f = setup(), { data } = await image()
     const target = f.service.publish(markdown('Target'))

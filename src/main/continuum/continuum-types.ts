@@ -76,7 +76,9 @@ export interface UpdateArtifactInput {
   expectedRevision: number
   metadata: ArtifactMetadata
   rawMarkdown: string
+  provenance?: Record<string, MetadataValue>
 }
+export interface ArtifactSemanticFields { name?: string; description?: string; kind?: string }
 export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
 export interface VisualMedia {
   mimeType: 'image/webp'
@@ -102,6 +104,6 @@ export interface IArtifactStructureReader {
   readSection(query: import('./artifact-structure').SectionQuery): import('./artifact-structure').SectionPage
 }
 export interface IContinuumService extends IArtifactReader {
-  publish(rawMarkdown: string): ArtifactReceipt
-  update(artifactId: string, expectedRevision: number, rawMarkdown: string): ArtifactReceipt
+  publish(rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt
+  update(artifactId: string, expectedRevision: number, rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt
 }

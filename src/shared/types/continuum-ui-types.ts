@@ -21,7 +21,7 @@ export interface ContinuumSelection { repositoryId: string | null; artifact: Con
 export interface ContinuumChange { repositoryId: string | null }
 export interface ContinuumExportRequest { repositoryId: string; artifactId: string; intent: 'copy' | 'save' }
 export interface ContinuumExportReceipt { repositoryId: string; artifactId: string; outcome: 'copied' | 'saved' | 'cancelled' }
-export interface ContinuumPublishRequest { repositoryId: string; fileName: string; rawMarkdown: string; confirmedTags?: boolean }
+export interface ContinuumPublishRequest { repositoryId: string; fileName: string; rawMarkdown: string; confirmedTags?: boolean; kind?: string; name?: string; description?: string }
 export interface ContinuumPublishReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
 export interface ContinuumVisualPublishRequest {
   repositoryId: string

@@ -7,6 +7,8 @@ import type { Artifact, ArtifactReceipt, CreateArtifactInput, IContinuumService,
 import type { TransportEnvelope } from './artifact-envelope'
 import { ArtifactStore } from './artifact-store'
 import { parseArtifactMarkdown } from './artifact-metadata'
+import { canonicalizePublication } from './artifact-publication'
+import type { ArtifactSemanticFields } from './continuum-types'
 import { legacyInput } from './legacy-artifact-migrator'
 import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
@@ -125,11 +127,12 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   }
   publishHuman(rawMarkdown: string, confirmedTags = false): ArtifactReceipt {
     this.assertActive(); this.reconcile?.(); this.assertActive()
-    const { metadata } = parseArtifactMarkdown(rawMarkdown)
+    const publication = canonicalizePublication(rawMarkdown)
+    const { metadata } = publication
     const tags = artifactTags(metadata.tags)
     tags.forEach(slug => this.store.requireTag(slug))
     if (tags.length && !confirmedTags) throw new Error('TAGS_CONFIRMATION_REQUIRED: ' + tags.join(', '))
-    const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), metadata, rawMarkdown }))
+    const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }))
     this.changed(); return receipt
   }
   inspectStructure(query: import('./artifact-structure').StructureQuery) {
@@ -167,13 +170,14 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   async publishVisual(rawMarkdown: string, input: Uint8Array): Promise<VisualArtifactReceipt> {
     this.assertActive()
     this.reconcile?.()
-    const { metadata } = parseArtifactMarkdown(rawMarkdown)
+    const publication = canonicalizePublication(rawMarkdown, /^(?:\uFEFF)?---(?:\r?\n|$)/.test(rawMarkdown) ? {} : { kind: 'VISUAL_REFERENCE' })
+    const { metadata } = publication
     this.assertAgentTags(metadata)
     if (metadata.kind !== 'VISUAL_REFERENCE' || metadata.media !== undefined) throw new Error('RESERVED_VISUAL_METADATA')
     const data = Buffer.from(input)
     const media = await validateVisualMedia(data)
     this.assertActive()
-    const artifact = this.store.createVisual({ artifactId: 'artifact-' + randomUUID(), rawMarkdown, metadata }, data, media)
+    const artifact = this.store.createVisual({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, data, media)
     this.changed()
     return { ...this.receipt(artifact), media }
   }
@@ -218,19 +222,25 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     this.changed()
     return { ...this.receipt(artifact), state: 'PERSISTED' as const, executionId, branchRef: artifact.metadata.branchRef, branchGeneration: artifact.metadata.branchGeneration }
   }
-  publish(rawMarkdown: string): ArtifactReceipt {
-    this.reconcile?.()
-    const { metadata } = parseArtifactMarkdown(rawMarkdown)
+  private publicationProvenance() {
+    return { publication: { schemaVersion: 1, publisher: 'CONTINUUM_SERVICE', repositoryId: this.store.repositoryId, sessionEvidence: 'UNAVAILABLE' } }
+  }
+  publish(rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const publication = canonicalizePublication(rawMarkdown, fields)
+    const { metadata } = publication
     this.assertAgentTags(metadata)
-    const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), metadata, rawMarkdown }))
+    const receipt = this.receipt(this.store.create({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }))
     this.changed()
     return receipt
   }
-  update(artifactId: string, expectedRevision: number, rawMarkdown: string): ArtifactReceipt {
-    this.reconcile?.()
-    const { metadata } = parseArtifactMarkdown(rawMarkdown)
-    this.assertAgentTags(metadata, this.store.get(artifactId)?.metadata)
-    const receipt = this.receipt(this.store.update({ artifactId, expectedRevision, rawMarkdown, metadata }))
+  update(artifactId: string, expectedRevision: number, rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const prior = this.store.get(artifactId)
+    if (!prior) throw new Error('ARTIFACT_NOT_FOUND: ' + artifactId)
+    const publication = canonicalizePublication(rawMarkdown, fields, prior.metadata)
+    this.assertAgentTags(publication.metadata, prior.metadata)
+    const receipt = this.receipt(this.store.update({ artifactId, expectedRevision, ...publication, provenance: this.publicationProvenance() }))
     this.changed()
     return receipt
   }

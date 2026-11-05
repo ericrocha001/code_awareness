@@ -11,7 +11,7 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
   if (!['status', 'list', 'get', 'publish', 'update', 'publish_visual', 'get_visual', 'suggestions', 'bind_execution', 'inspect_artifact_structure', 'read_artifact_section', 'list_continuum_tags', 'create_continuum_tag', 'assign_continuum_tag', 'create_context_bundle'].includes(operation)) fail('INVALID_ARGUMENT')
   const options = {}
   for (let i = 0; i < args.length; i += 2) {
-    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output', '--execution'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
+    if (!['--profile', '--repository', '--id', '--file', '--revision', '--filter', '--format', '--media', '--output', '--execution', '--name', '--description', '--kind'].includes(args[i]) || !args[i + 1] || options[args[i]] !== undefined) fail('INVALID_ARGUMENT')
     options[args[i]] = args[i + 1]
   }
   const descriptor = readDescriptor(options['--profile'], channel)
@@ -28,6 +28,10 @@ async function main(args = process.argv.slice(2), channel = { directory: 'contin
   const worktree = status.worktrees.find(w => normalize(fs.realpathSync(w.path)) === normalize(root))
   if (!worktree) fail('WORKTREE_UNLINKED')
   const request = { operation, repositoryId: options['--repository'], worktreeId: worktree.worktreeId }
+  for (const field of ['name', 'description', 'kind']) if (options['--' + field] !== undefined) {
+    if (!['publish', 'update'].includes(operation)) fail('INVALID_ARGUMENT')
+    request[field] = options['--' + field]
+  }
   if (['list_continuum_tags', 'create_continuum_tag', 'assign_continuum_tag', 'create_context_bundle'].includes(operation)) {
     let input
     try { input = options['--filter'] ? JSON.parse(options['--filter']) : {} } catch { fail('INVALID_ARGUMENT') }
