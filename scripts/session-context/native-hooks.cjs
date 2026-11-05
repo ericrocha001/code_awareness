@@ -3,7 +3,7 @@ const { resolve, join } = require('node:path')
 const { buildSync } = require('esbuild')
 const root = process.cwd()
 const action = process.argv[2]
-if (!['install', 'disable', 'status'].includes(action)) throw new Error('Use install|disable|status; writes require --authorized')
+if (!['install', 'disable', 'status', 'acknowledge-gap'].includes(action)) throw new Error('Use install|disable|status|acknowledge-gap; writes require --authorized')
 const authorized = process.argv.includes('--authorized')
 if (action !== 'status' && !authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED: obtain explicit operator approval for this checkout before --authorized')
 const status = JSON.parse(execFileSync(process.execPath, [resolve(__dirname, '../continuum/local.cjs'), 'status'], { cwd: root, encoding: 'utf8', windowsHide: true }))
@@ -22,6 +22,19 @@ if (action === 'install') {
   console.log(JSON.stringify(installNativeHooks({ repositoryId: status.repository.repositoryId, record: { ...record, branch, head, detached: false, missing: false, prunable: false, locked: false },
     commandPath: resolve(__dirname, '../../out/session-context/native-hook.cjs'), nodePath: process.execPath, gitCommitTool: tool, authorized })))
 } else if (action === 'disable') console.log(JSON.stringify(disableNativeHooks(root, authorized)))
+else if (action === 'acknowledge-gap') {
+  const compiled = resolve(__dirname, '../../out/session-context/native-hook-diagnostics.cjs')
+  buildSync({ entryPoints: [resolve(__dirname, '../../src/main/session-context/native-hook-diagnostics.ts')], outfile: compiled, bundle: true, platform: 'node', format: 'cjs' })
+  const { acknowledgeCheckoutGaps } = require(compiled)
+  const option = name => process.argv.find(value => value.startsWith(`--${name}=`))?.slice(name.length + 3)
+  try {
+    console.log(JSON.stringify(acknowledgeCheckoutGaps(root, { repositoryId: status.repository.repositoryId, ...record }, option('revision'), option('reason'), resolve(option('proof')), authorized)))
+  } catch (error) {
+    const codes = ['HOOK_AUTHORIZATION_REQUIRED', 'WORKTREE_STALE', 'UNSAFE_SPOOL', 'UNSAFE_FILE', 'REVISION_CONFLICT', 'RECOVERY_PROOF_REQUIRED']
+    console.error(JSON.stringify({ code: codes.includes(error.message) ? error.message : 'ACK_UNAVAILABLE' }))
+    process.exitCode = 1
+  }
+}
 else {
   const { existsSync, readFileSync } = require('node:fs')
   const path = join(root, '.code-awareness/native-hooks/binding.json')

@@ -12,9 +12,30 @@ import { digest } from './privacy'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
 import { executeSessionTool } from './mcp'
+import { nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding } from './native-hooks'
+import { ingestNativeHooks } from './native-hook-ingestion'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
+it('get_system_health separates current native capture from historical gaps and Entire health', async () => {
+  const f = fixture(), spool = join(f.root, '.code-awareness/native-hooks/spool')
+  prepareNativeSpool(spool)
+  const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'A', ...f.target, ...nativeGitIdentity(f.root), spool }
+  writeFileSync(join(f.root, '.code-awareness/native-hooks/binding.json'), JSON.stringify(binding))
+  recordNativeGap(spool, 'INVOCATION_ID_MISSING', 'NORMALIZE', 'PreToolUse')
+  spoolNativeHook(normalizeNativeHook({ session_id: 'private-native-session', cwd: f.root, hook_event_name: 'Stop' }, binding), spool)
+  await ingestNativeHooks(f.store().registry, binding, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+  const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'],
+    sessionContext: { call: (name, args) => executeSessionTool(f.store(), new EntireProvider(f.store(), f.root, () => {}, f.run), name, args, () => {}, f.target, [], f.run, f.root) } })
+  const result = await adapter.callTool('get_system_health', { feature: 'session_context', refresh: true })
+  expect(result.isError).toBeFalsy()
+  const text = (result.content[0] as { text: string }).text
+  expect(JSON.parse(text)).toMatchObject({ feature: 'session_context', nativeCapture: { independentOfEntire: true, state: 'PARTIAL',
+    currentOperationalCapture: { state: 'OBSERVED' }, historicalCoverage: { state: 'PARTIAL', count: 1,
+      diagnostics: [expect.objectContaining({ phase: 'NORMALIZE', eventType: 'PreToolUse', reasonCode: 'INVOCATION_ID_MISSING' })] } } })
+  expect(text.length).toBeLessThan(8192)
+  expect(text).not.toContain('private-native-session'); expect(text).not.toContain(f.root)
+}, 20000)
 function fixture(repositoryId = 'A') {
   const base = mkdtempSync(join(tmpdir(), 'capture-health-')), root = join(base, 'repo'), disabled = join(base, 'disabled'), hooks = join(base, 'hooks')
   mkdirSync(root); mkdirSync(disabled); mkdirSync(hooks)

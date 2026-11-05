@@ -12,6 +12,7 @@ import { declaredAssociation, historicalSelectors } from './associations'
 import { sourceTimestamp } from './source-time'
 import type { SessionFilter } from './associations'
 import { captureHealthQuery, inspectCaptureHealth } from './capture-health'
+import { nativeCaptureDiagnostics } from './native-hook-diagnostics'
 import { reconcileRegistry, registrySelector } from './registry-reconciliation'
 import type { RegistryReader } from './checkpoint-registry'
 import type { CaptureHealthObservation } from './capture-health-types'
@@ -184,7 +185,7 @@ export async function executeSessionTool(
       data = await inspectCaptureHealth(store as SessionStore, { inspectCapture: () => provider.inspectCapture!() }, runner, root, selectedTarget, q as ReturnType<typeof parseCaptureHealth>, assertActive)
       const observation = data as CaptureHealthObservation
       await reconcileRegistry(store as SessionStore, runner, root, observation.checkpoint.commitSha ? { kind: 'COMMIT', id: observation.checkpoint.commitSha } : undefined, assertActive, undefined, observation)
-      data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: (store as SessionStore).registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true } }
+      data = { ...data, nativeCapture: { source: 'CODEX_NATIVE_HOOK', state: (store as SessionStore).registry.source('NATIVE_HOOK')?.status ?? 'UNOBSERVED', independentOfEntire: true, ...nativeCaptureDiagnostics((store as SessionStore).registry, root) } }
     } else if (name === 'inspect_code_provenance') {
       const request = q as z.infer<typeof schemas.inspect_code_provenance>
       if (request.worktreeId && (request.worktreeId !== selectedTarget?.worktreeId || request.generation !== selectedTarget?.generation)) throw new Error('WORKTREE_NOT_DISCOVERED')
@@ -245,7 +246,7 @@ export async function executeSessionTool(
         const scope = { name, source: 'NATIVE_HOOK', revision: source?.revision ?? 'empty', limit: nativeQuery.limit }
         const offset = actualStore.offset(nativeQuery.cursor, scope)
         const rows = actualStore.registry.nativeSessions(offset, nativeQuery.limit + 1)
-        return wrap(page(actualStore, scope, offset, rows, nativeQuery.limit, budget, { repositoryId: actualStore.repositoryId, source: 'NATIVE_HOOK', captureState: source?.status ?? 'UNOBSERVED', transcriptImported: false, authorship: 'NOT_INFERRED' }, row => row, 'sessions'))
+        return wrap(page(actualStore, scope, offset, rows, nativeQuery.limit, budget, { repositoryId: actualStore.repositoryId, source: 'NATIVE_HOOK', captureState: source?.status ?? 'UNOBSERVED', ...nativeCaptureDiagnostics(actualStore.registry, root), transcriptImported: false, authorship: 'NOT_INFERRED' }, row => row, 'sessions'))
       }
       const selector = registrySelector(q as z.infer<typeof schemas.list_agent_sessions>)
       if (selector && !('cursor' in q && q.cursor)) await reconcileRegistry(actualStore, runner, root!, selector, assertActive, registryReader)
