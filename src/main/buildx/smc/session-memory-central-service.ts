@@ -6,11 +6,11 @@ import type {
   SmcEntryPage,
   SmcEntryRecord,
   SmcSessionRecord
-} from '../../shared/types/session-memory-central-types'
+} from '../../../shared/types/buildx/session-memory-central-types'
 import type {
   RegisterUnitFlowPlanInput,
   UnitFlowPlanRecord
-} from '../../shared/types/unitflow-types'
+} from '../../../shared/types/unitflow-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
 

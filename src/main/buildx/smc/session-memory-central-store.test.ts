@@ -22,7 +22,7 @@ import {
   UnitFlowInvalidPlanError,
   UnitFlowPlanConflictError,
   UnitFlowActivePlanAlreadyExistsError
-} from '../unitflow'
+} from '../../unitflow'
 import {
   BUILDX_SMC_TOOLS,
   BUILDX_SMC_READ_TOOLS,
@@ -34,10 +34,10 @@ import {
   APPEND_BUILDX_SESSION_ENTRY_TOOL,
   executeBuildxSmcTool
 } from './session-memory-central-mcp'
-import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
-import { bindProjectNavigation } from '../core/context/project-context-navigation'
-import type { ContextNavigationPort } from '../core/context/context-navigation-port'
-import { textContent } from '../mcp/mcp-test-content'
+import { ChannelMcpAdapter } from '../../mcp/channel-mcp-adapter'
+import { bindProjectNavigation } from '../../core/context/project-context-navigation'
+import type { ContextNavigationPort } from '../../core/context/context-navigation-port'
+import { textContent } from '../../mcp/mcp-test-content'
 
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

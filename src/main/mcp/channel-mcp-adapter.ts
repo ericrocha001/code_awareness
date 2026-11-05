@@ -57,8 +57,8 @@ import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orches
 import { SESSION_CONTEXT_TOOLS, type SessionToolName } from '../session-context/mcp'
 import { CLI_EXECUTION_TOOLS, executeCliTool } from '../cli-execution/cli-execution-mcp'
 import type { CliExecutionService } from '../cli-execution/cli-execution-service'
-import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../session-memory-central/session-memory-central-mcp'
-import type { SessionMemoryCentralService } from '../session-memory-central/session-memory-central-service'
+import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../buildx/smc/session-memory-central-mcp'
+import type { SessionMemoryCentralService } from '../buildx/smc/session-memory-central-service'
 
 const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file', 'read_agent_session_event'])
 const literalReadOutputSchema = {

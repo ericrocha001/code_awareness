@@ -16,17 +16,17 @@ import type {
   SmcReferenceKind,
   SmcSessionRecord,
   SmcSessionStatus
-} from '../../shared/types/session-memory-central-types'
+} from '../../../shared/types/buildx/session-memory-central-types'
 import type {
   RegisterUnitFlowPlanInput,
   UnitFlowPlanRecord,
   UnitFlowPlanStatus
-} from '../../shared/types/unitflow-types'
+} from '../../../shared/types/unitflow-types'
 import {
   UnitFlowActivePlanAlreadyExistsError,
   UnitFlowInvalidPlanError,
   UnitFlowPlanConflictError
-} from '../unitflow/unitflow-errors'
+} from '../../unitflow/unitflow-errors'
 import { validateRepositoryId } from './session-memory-central-paths'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i

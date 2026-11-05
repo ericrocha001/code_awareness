@@ -1,6 +1,6 @@
-import type { McpTextContent, McpToolDefinition, McpToolResult } from '../mcp/mcp-types'
+import type { McpTextContent, McpToolDefinition, McpToolResult } from '../../mcp/mcp-types'
 import type { SessionMemoryCentralService } from './session-memory-central-service'
-import type { SmcEntryKind, SmcReferenceKind } from '../../shared/types/session-memory-central-types'
+import type { SmcEntryKind, SmcReferenceKind } from '../../../shared/types/buildx/session-memory-central-types'
 import {
   SmcSessionAlreadyExistsError,
   SmcSessionNotFoundError,

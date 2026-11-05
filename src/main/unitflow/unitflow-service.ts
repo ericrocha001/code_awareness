@@ -2,9 +2,9 @@ import type {
   RegisterUnitFlowPlanInput,
   UnitFlowPlanRecord
 } from '../../shared/types/unitflow-types'
-import { validateRepositoryId } from '../session-memory-central/session-memory-central-paths'
-import type { SessionMemoryCentralService } from '../session-memory-central/session-memory-central-service'
-import { SessionMemoryCentralService as SmcServiceImpl } from '../session-memory-central/session-memory-central-service'
+import { validateRepositoryId } from '../buildx/smc/session-memory-central-paths'
+import type { SessionMemoryCentralService } from '../buildx/smc/session-memory-central-service'
+import { SessionMemoryCentralService as SmcServiceImpl } from '../buildx/smc/session-memory-central-service'
 
 export class UnitFlowService {
   private readonly smcService: SessionMemoryCentralService
