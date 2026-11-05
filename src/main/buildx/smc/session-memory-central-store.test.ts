@@ -22,7 +22,7 @@ import {
   UnitFlowInvalidPlanError,
   UnitFlowPlanConflictError,
   UnitFlowActivePlanAlreadyExistsError
-} from '../../unitflow'
+} from '../unitflow'
 import {
   BUILDX_SMC_TOOLS,
   BUILDX_SMC_READ_TOOLS,

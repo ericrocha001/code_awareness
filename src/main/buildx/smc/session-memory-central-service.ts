@@ -10,7 +10,7 @@ import type {
 import type {
   RegisterUnitFlowPlanInput,
   UnitFlowPlanRecord
-} from '../../../shared/types/unitflow-types'
+} from '../../../shared/types/buildx/unitflow-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
 

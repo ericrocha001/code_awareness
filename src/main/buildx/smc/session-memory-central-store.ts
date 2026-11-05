@@ -21,12 +21,12 @@ import type {
   RegisterUnitFlowPlanInput,
   UnitFlowPlanRecord,
   UnitFlowPlanStatus
-} from '../../../shared/types/unitflow-types'
+} from '../../../shared/types/buildx/unitflow-types'
 import {
   UnitFlowActivePlanAlreadyExistsError,
   UnitFlowInvalidPlanError,
   UnitFlowPlanConflictError
-} from '../../unitflow/unitflow-errors'
+} from '../unitflow/unitflow-errors'
 import { validateRepositoryId } from './session-memory-central-paths'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
