@@ -87,3 +87,20 @@ test('response framing, legacy errors and authentication outcomes remain compati
     else assert.deepEqual(await result, expected)
   }
 })
+
+test('semantic errors carry only an allowlisted field and generated guidance, never server text', async () => {
+  for (const field of ['name', 'description', 'kind', 'private-secret']) {
+    const socket = socketFixture()
+    const result = connect(descriptor, {}, { createConnection: () => socket })
+    socket.emit('connect')
+    socket.emit('data', JSON.stringify({ error: { code: 'MISSING_SEMANTIC_FIELD', field, guidance: 'private-secret', message: 'private-secret' } }) + '\n')
+    await assert.rejects(result, error => {
+      const projected = publicError(error)
+      assert.equal(projected.code, 'MISSING_SEMANTIC_FIELD')
+      if (field === 'private-secret') assert.deepEqual(projected, { code: 'MISSING_SEMANTIC_FIELD' })
+      else assert.deepEqual(projected, { code: 'MISSING_SEMANTIC_FIELD', field, guidance: `Provide an explicit semantic ${field}` })
+      assert.equal(JSON.stringify(projected).includes('private-secret'), false)
+      return true
+    })
+  }
+})

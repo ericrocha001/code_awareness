@@ -40,7 +40,9 @@ function readDescriptor(profileOverride, channel, { platform = process.platform,
 }
 
 function publicError(error) {
-  return { code: error.code || 'INVALID_ARGUMENT', ...(error.stage ? { stage: error.stage } : {}), ...(error.reason ? { reason: error.reason } : {}) }
+  const semantic = error.code === 'MISSING_SEMANTIC_FIELD' && ['name', 'description', 'kind'].includes(error.field)
+    ? { field: error.field, guidance: `Provide an explicit semantic ${error.field}` } : {}
+  return { code: error.code || 'INVALID_ARGUMENT', ...(error.stage ? { stage: error.stage } : {}), ...(error.reason ? { reason: error.reason } : {}), ...semantic }
 }
 
 module.exports = { readDescriptor, unavailable, publicError }

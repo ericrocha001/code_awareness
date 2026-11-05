@@ -90,7 +90,10 @@ export class LocalChannelHost {
           const message = error instanceof Error ? error.message : ''
           const explicit = (error as { code?: string })?.code
           const code = /^[A-Z][A-Z0-9_]{2,64}$/.test(explicit ?? '') ? explicit : /^([A-Z][A-Z0-9_]{2,64})(?::|$)/.exec(message)?.[1] ?? (error instanceof SyntaxError ? 'INVALID_ARGUMENT' : 'INTERNAL_ERROR')
-          socket.end(JSON.stringify({ error: { code } }) + '\n')
+          const field = (error as { field?: unknown })?.field
+          const semantic = code === 'MISSING_SEMANTIC_FIELD' && typeof field === 'string' && ['name', 'description', 'kind'].includes(field)
+            ? { field, guidance: `Provide an explicit semantic ${field}` } : {}
+          socket.end(JSON.stringify({ error: { code, ...semantic } }) + '\n')
         }
       })()
     })

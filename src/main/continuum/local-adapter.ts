@@ -13,6 +13,7 @@ import { VISUAL_MAX_BYTES } from './visual-media'
 import { executeGetVisualArtifact } from './continuum-mcp'
 import { navigationQuery } from './artifact-navigation'
 import type { Artifact } from './continuum-types'
+import { publicationFields } from './artifact-publication'
 
 export class ContinuumLocalAdapter implements LocalChannelAdapter {
   readonly domain = 'continuum'
@@ -98,9 +99,9 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         if (!artifact) throw new Error('ARTIFACT_NOT_FOUND')
         return artifact
       }),
-      publish: operation(input => { const request = selection(input, ['rawMarkdown']); return { ...request, rawMarkdown: text(request.value.rawMarkdown) } }, async (request, context) => {
+      publish: operation(input => { const request = selection(input, ['rawMarkdown', 'name', 'description', 'kind']); const { rawMarkdown, repositoryId: _repository, worktreeId: _worktree, ...fields } = request.value; return { ...request, rawMarkdown: text(rawMarkdown), fields: publicationFields(fields) } }, async (request, context) => {
         const service = await this.service(request, context)
-        const receipt = service.publish(request.rawMarkdown)
+        const receipt = service.publish(request.rawMarkdown, request.fields)
         const artifact = service.get(receipt.artifactId)!
         let sessionCoverage: object | undefined
         if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF' && this.handoffCoverage) {
@@ -112,7 +113,7 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         }
         return { ...receipt, state: 'PERSISTED', ...(sessionCoverage ? { sessionCoverage } : {}) }
       }),
-      update: operation(input => { const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown']); return { ...request, artifactId: text(request.value.artifactId), expectedRevision: integer(request.value.expectedRevision), rawMarkdown: text(request.value.rawMarkdown) } }, async (request, context) => ({ ...(await this.service(request, context)).update(request.artifactId, request.expectedRevision, request.rawMarkdown), state: 'PERSISTED' }))
+      update: operation(input => { const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown', 'name', 'description', 'kind']); const { artifactId, expectedRevision, rawMarkdown, repositoryId: _repository, worktreeId: _worktree, ...fields } = request.value; return { ...request, artifactId: text(artifactId), expectedRevision: integer(expectedRevision), rawMarkdown: text(rawMarkdown), fields: publicationFields(fields) } }, async (request, context) => ({ ...(await this.service(request, context)).update(request.artifactId, request.expectedRevision, request.rawMarkdown, request.fields), state: 'PERSISTED' }))
     }
   }
   private getRegistry(active: NonNullable<ReturnType<RepositoryContinuumSession['getActiveSession']>>): GitWorktreeRegistry {

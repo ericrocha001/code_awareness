@@ -9,11 +9,11 @@ import { dirname, extname, join, posix, win32 } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { renameSync, rmSync, writeFileSync } from 'node:fs'
 import sharp from 'sharp'
-import { dump } from 'js-yaml'
 import type { ContinuumListRequest, ContinuumPublishRequest, ContinuumPublishReceipt, ContinuumVisualPublishRequest } from '../../shared/types/continuum-ui-types'
 import type { ContinuumExportRequest, ContinuumExportReceipt } from '../../shared/types/continuum-ui-types'
 import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
 import { parseArtifactMarkdown, validateMarkdown, visualMarkdown } from '../continuum/artifact-metadata'
+import { canonicalizePublication } from '../continuum/artifact-publication'
 import { VISUAL_MAX_BYTES, VISUAL_MAX_PIXELS } from '../continuum/visual-media'
 
 function exportName(name: unknown, extension: string): string {
@@ -23,23 +23,14 @@ function exportName(name: unknown, extension: string): string {
   return `${stem}${extension}`
 }
 
-function publicationMarkdown(fileName: unknown, rawMarkdown: string): string {
+function publicationMarkdown(fileName: unknown, rawMarkdown: string, fields: { kind?: string; name?: string; description?: string }): string {
   if (typeof fileName !== 'string' || !/\.md$/i.test(fileName) ||
     posix.basename(fileName) !== fileName || win32.basename(fileName) !== fileName ||
     /[\x00-\x1F\x7F]/.test(fileName) || !fileName.slice(0, -3).trim()) {
     throw new Error('INVALID_ARGUMENT: nome simples de arquivo .md obrigatório, sem diretórios')
   }
   validateMarkdown(rawMarkdown)
-  if (/^(?:\uFEFF)?---(?:\r?\n|$)/.test(rawMarkdown)) return rawMarkdown
-  const bom = rawMarkdown.startsWith('\uFEFF') ? '\uFEFF' : ''
-  const body = rawMarkdown.slice(bom.length)
-  const yaml = dump({
-    name: fileName.slice(0, -3),
-    description: 'Documento Markdown publicado manualmente pela interface do Continuum. Abra para consultar seu conteúdo.',
-    kind: 'DOCUMENT',
-    date: new Date().toISOString()
-  }, { lineWidth: -1, quotingType: '"', forceQuotes: true })
-  return `${bom}---\n${yaml}---\n${body}`
+  return canonicalizePublication(rawMarkdown, fields).rawMarkdown
 }
 
 function validateListRequest(request: ContinuumListRequest) {
@@ -173,7 +164,8 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
     if (!request || typeof request !== 'object' || typeof request.rawMarkdown !== 'string') throw new Error('INVALID_ARGUMENT: conteúdo Markdown obrigatório')
     const service = active(request.repositoryId)
     if (!service) throw new Error('REPOSITORY_UNAVAILABLE: o repositório ativo mudou ou o Continuum está indisponível. Selecione o arquivo novamente.')
-    return service.publishHuman(publicationMarkdown(request.fileName, request.rawMarkdown), request.confirmedTags === true)
+    const fields = Object.fromEntries((['kind', 'name', 'description'] as const).filter(key => request[key] !== undefined).map(key => [key, request[key]]))
+    return service.publishHuman(publicationMarkdown(request.fileName, request.rawMarkdown, fields), request.confirmedTags === true)
   })
   ipcMain.handle('continuum:list', (_event, request: ContinuumListRequest) => {
     if (!request || typeof request !== 'object') throw new Error('INVALID_ARGUMENT: list request required')

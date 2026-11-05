@@ -70,6 +70,16 @@ describe('Agent-first acceptance over real MCP HTTP and repository lifecycle', (
       expect((await read('list_artifacts', {})).count).toBe(2)
       expect((await read('get_artifact', { artifactId: related.artifactId })).revision).toBe(2)
       expect((await call('get_artifact', { artifactId: b.artifactId })).isError).toBe(true)
+      const economicBody = '# Native HTTP publication\n\nPreserves semantic content while deriving trustworthy discovery fields.\n'
+      const economic = await read('publish_artifact', { rawMarkdown: economicBody, kind: 'INVESTIGATION' })
+      const economicRead = await read('get_artifact', { artifactId: economic.artifactId })
+      expect(economicRead.rawMarkdown.endsWith(economicBody)).toBe(true)
+      expect(economicRead.metadata).toEqual({ name: 'Native HTTP publication', description: 'Preserves semantic content while deriving trustworthy discovery fields.', kind: 'INVESTIGATION' })
+      await read('update_artifact', { artifactId: economic.artifactId, expectedRevision: 1, rawMarkdown: 'Changed literal body.' })
+      expect((await read('get_artifact', { artifactId: economic.artifactId })).metadata).toEqual(economicRead.metadata)
+      expect((await call('publish_artifact', { rawMarkdown: economicBody })).content[0].text).toContain('MISSING_SEMANTIC_FIELD: kind')
+      await switchTo(rootB)
+      expect((await call('get_artifact', { artifactId: economic.artifactId })).isError).toBe(true)
     } finally { await lifecycle.dispose() }
   })
 })

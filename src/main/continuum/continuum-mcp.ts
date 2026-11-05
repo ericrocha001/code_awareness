@@ -5,6 +5,7 @@ import type { McpTextContent, McpMultimodalToolResult } from '../mcp/mcp-types'
 import { acquireHostFile, type HostFileDescriptor } from '../local-agent-channel/host-file-acquisition'
 import { VISUAL_MAX_BYTES } from './visual-media'
 import { visualMarkdown } from './artifact-metadata'
+import { publicationFields } from './artifact-publication'
 import { navigationQuery } from './artifact-navigation'
 import { countCanonicalTokens } from '../core/tokenizer'
 import type { IArtifactStructureReader } from './continuum-types'
@@ -35,8 +36,9 @@ export function executeArtifactNavigation(service: IArtifactStructureReader, nam
   try { return ok(name === 'inspect_artifact_structure' ? service.inspectStructure(navigationQuery(args, false)) : service.readSection(navigationQuery(args, true))) }
   catch (error) { return failure(error) }
 }
-export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown with YAML frontmatter name, description and open kind to the active repository Continuum. Returns a compact receipt without content. After an implementation Handoff is persisted, use assess_execution_closure for its explicit planArtifactId when available; diagnosis never revokes persistence. Another repository requires switching the active context.', { rawMarkdown: string }, ['rawMarkdown'])
-export const UPDATE_ARTIFACT_TOOL = tool('update_artifact', 'Replace an Artifact within the active repository atomically while preserving artifactId and history. Requires expectedRevision from get_artifact; revision conflict requires rereading. Replaces Markdown, metadata and relations together.', { artifactId: string, expectedRevision: { type: 'integer', minimum: 1 }, rawMarkdown: string }, ['artifactId', 'expectedRevision', 'rawMarkdown'])
+const semanticFields = { kind: { ...string, description: 'Explicit semantic kind; open vocabulary. Required for body-only generic publication, never inferred from words.' }, name: { ...string, description: 'Only needed when a unique document title cannot supply the name.' }, description: { ...string, description: 'Only needed when an explicit introductory sentence cannot supply the description.' } }
+export const PUBLISH_ARTIFACT_TOOL = tool('publish_artifact', 'Publish durable Markdown to the active repository Continuum. Legacy YAML is preserved literally. Body-only publication derives name from a unique document title and description from a plain introductory sentence (24–512 characters); select kind explicitly. Missing or ambiguous semantics return MISSING_SEMANTIC_FIELD. Returns a compact receipt. After an implementation Handoff is persisted, use assess_execution_closure for its explicit planArtifactId when available; diagnosis never revokes persistence. Another repository requires switching the active context.', { rawMarkdown: string, ...semanticFields }, ['rawMarkdown'])
+export const UPDATE_ARTIFACT_TOOL = tool('update_artifact', 'Update one Artifact atomically at expectedRevision, preserving identity and history. Legacy YAML replaces authored metadata literally. Body-only updates preserve previous semantic metadata unless name, description or kind is explicitly selected. Revision conflict requires rereading.', { artifactId: string, expectedRevision: { type: 'integer', minimum: 1 }, rawMarkdown: string, ...semanticFields }, ['artifactId', 'expectedRevision', 'rawMarkdown'])
 
 function ok(value: unknown): McpToolResult<McpTextContent> { return { content: [{ type: 'text', text: JSON.stringify(value) }] } }
 function readingResult(payload: object, includeUsage: unknown, rawMarkdown?: string): McpToolResult<McpTextContent> {
@@ -83,12 +85,12 @@ export function executeGetArtifact(reader: IArtifactReader, args: unknown): McpT
   } catch (error) { return failure(error) }
 }
 export function executePublishArtifact(service: IContinuumService, args: unknown): McpToolResult<McpTextContent> {
-  try { const { rawMarkdown } = argsFor(PUBLISH_ARTIFACT_TOOL, args); return ok(service.publish(rawMarkdown as string)) } catch (error) { return failure(error) }
+  try { const { rawMarkdown, ...fields } = argsFor(PUBLISH_ARTIFACT_TOOL, args); return ok(service.publish(rawMarkdown as string, publicationFields(fields))) } catch (error) { return failure(error) }
 }
 export function executeUpdateArtifact(service: IContinuumService, args: unknown): McpToolResult<McpTextContent> {
   try {
-    const values = argsFor(UPDATE_ARTIFACT_TOOL, args)
-    return ok(service.update(values.artifactId as string, values.expectedRevision as number, values.rawMarkdown as string))
+    const { artifactId, expectedRevision, rawMarkdown, ...fields } = argsFor(UPDATE_ARTIFACT_TOOL, args)
+    return ok(service.update(artifactId as string, expectedRevision as number, rawMarkdown as string, publicationFields(fields)))
   } catch (error) { return failure(error) }
 }
 

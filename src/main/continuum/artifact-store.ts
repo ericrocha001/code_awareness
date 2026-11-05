@@ -378,13 +378,14 @@ export class ArtifactStore {
       const checked = this.validate(input, false, visual)
       if (visual) checked.metadata = { ...checked.metadata, media: current.metadata.media }
       const artifact: Artifact = { ...current, metadata: checked.metadata, rawMarkdown: checked.rawMarkdown,
+        provenance: { ...current.provenance, ...input.provenance },
         revision: current.revision + 1, updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString(),
         contentHash: computeContentHash(checked.rawMarkdown) }
       this.db.prepare(`UPDATE artifacts SET revision = ?, metadata_json = ?, name = ?, description = ?, kind = ?, status = ?,
-        updated_at = ?, raw_markdown = ?, content_hash = ? WHERE artifact_id = ? AND revision = ?`)
+        updated_at = ?, raw_markdown = ?, content_hash = ?, provenance_json = ? WHERE artifact_id = ? AND revision = ?`)
         .run(artifact.revision, JSON.stringify(artifact.metadata), artifact.metadata.name, artifact.metadata.description ?? null,
           artifact.metadata.kind, artifact.metadata.status ?? null, artifact.updatedAt, artifact.rawMarkdown,
-          artifact.contentHash, artifact.artifactId, input.expectedRevision)
+          artifact.contentHash, JSON.stringify(artifact.provenance), artifact.artifactId, input.expectedRevision)
       this.writeIndexes(artifact)
       return artifact
     }).immediate()

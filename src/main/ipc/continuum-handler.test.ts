@@ -122,24 +122,24 @@ it('publishes exact text once and rejects invalid documents or stale/unavailable
   current = null
   expect(() => invoke('A', text)).toThrow(/REPOSITORY_UNAVAILABLE/)
   expect(writes).toEqual([text])
-  expect(publish).toHaveBeenCalledTimes(6)
+  expect(publish).toHaveBeenCalledTimes(1)
 })
 
-it('adds only default metadata to body-only files, preserving BOM, whitespace and CRLF with safe YAML values', () => {
+it('uses the shared canonicalizer for body-only files, preserving literals without fabricated summaries or dates', () => {
   const texts: string[] = []
   registerContinuumHandlers({ getActiveSession: () => ({ repositoryId: 'A' }),
     getActiveService: () => ({ publishHuman: (text: string) => { parseArtifactMarkdown(text); texts.push(text); return { success: true, artifactId: 'new', revision: 1, updatedAt: 'now' } } }),
     onChanged: () => () => {} } as unknown as RepositoryContinuumSession)
-  const invoke = (fileName: unknown, rawMarkdown: string) => handlers.get('continuum:publish')!({}, { repositoryId: 'A', fileName, rawMarkdown })
-  const original = '\uFEFF\r\n# Obsidian\r\n\r\n  ç 日本語 🚀 `${literal}` $(command)  \r\n\r\n'
+  const invoke = (fileName: unknown, rawMarkdown: string, kind?: string) => handlers.get('continuum:publish')!({}, { repositoryId: 'A', fileName, rawMarkdown, kind })
+  const original = '\uFEFF\r\n# Obsidian\r\n\r\nResumo explícito para compreender o conteúdo publicado.\r\n\r\n  ç 日本語 🚀 `${literal}` $(command)  \r\n\r\n'
   const name = 'Nota: "kind: EXECUTABLE_PLAN" & [ç 日本語]'
-  expect(invoke(name + '.MD', original)).toMatchObject({ success: true, revision: 1 })
+  expect(() => invoke(name + '.MD', original)).toThrow('MISSING_SEMANTIC_FIELD: kind')
+  expect(invoke(name + '.MD', original, 'DOCUMENT')).toMatchObject({ success: true, revision: 1 })
   const parsed = parseArtifactMarkdown(texts[0])
   expect(parsed.body).toBe(original.slice(1))
   expect(texts[0].startsWith('\uFEFF---\n')).toBe(true)
-  expect(parsed.metadata).toEqual({ name, description: 'Documento Markdown publicado manualmente pela interface do Continuum. Abra para consultar seu conteúdo.', kind: 'DOCUMENT', date: expect.stringMatching(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/) })
-  const date = Date.parse(parsed.metadata.date as string)
-  expect(Math.abs(Date.now() - date)).toBeLessThan(5000)
+  expect(parsed.metadata).toEqual({ name: 'Obsidian', description: 'Resumo explícito para compreender o conteúdo publicado.', kind: 'DOCUMENT' })
+  expect(() => invoke('valid.md', '# Title\n\nTODO', 'DOCUMENT')).toThrow('MISSING_SEMANTIC_FIELD: description')
   for (const fileName of [undefined, null, 1, '', '.md', '  .md', 'file.txt', '/dir/file.md', 'dir/file.md', 'dir\\file.md', 'C:file.md', 'C:\\file.md', 'bad\nkind: X.md', 'bad\0.md']) {
     expect(() => invoke(fileName, '# body')).toThrow(/arquivo/)
   }

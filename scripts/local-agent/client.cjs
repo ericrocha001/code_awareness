@@ -22,7 +22,13 @@ function connect(descriptor, payload, { createConnection = net.createConnection,
       if (bytes > MAX_BYTES * 2) return finish('RESPONSE_TOO_LARGE')
       data += chunk
       if (!data.endsWith('\n')) return
-      try { const response = JSON.parse(data); finish(response.error?.code, response.result) } catch { finish('IPC_PROTOCOL_ERROR') }
+      try {
+        const response = JSON.parse(data)
+        const error = response.error
+        const semantic = error?.code === 'MISSING_SEMANTIC_FIELD' && ['name', 'description', 'kind'].includes(error.field)
+          ? Object.assign(new Error(`MISSING_SEMANTIC_FIELD: ${error.field}: provide an explicit semantic ${error.field}`), { code: error.code, field: error.field }) : error?.code
+        finish(semantic, response.result)
+      } catch { finish('IPC_PROTOCOL_ERROR') }
     })
     socket.on('close', () => { if (!done) finish(Object.assign(new Error('IPC_CLOSED'), { code: 'IPC_CLOSED', stage: connected ? 'response' : 'connect', reason: 'PREMATURE_CLOSE' })) })
   })

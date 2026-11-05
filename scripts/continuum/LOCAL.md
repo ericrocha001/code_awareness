@@ -1,5 +1,13 @@
 # Continuum no terminal
 
+## Publicação sem cadastro mecânico
+
+`publish` aceita Markdown com YAML literal ou corpo sem YAML. No formato econômico, use `--kind <kind>` como seleção semântica; o servidor deriva o nome de um título H1 único e a descrição do parágrafo introdutório em texto simples (uma frase de 24–512 caracteres, com pontuação final). Sem fonte suficiente, retorna `MISSING_SEMANTIC_FIELD`, `field` e orientação; forneça somente o campo necessário via `--name` ou `--description`. Não há kind, descrição ou status genéricos como fallback.
+
+`update` com corpo sem YAML preserva os metadados semânticos anteriores; as mesmas opções permitem alterações explícitas. YAML completo continua literal e substitui os metadados como antes. Datas documentais permanecem autorais; timestamps técnicos, identidade, hash e revisão pertencem ao servidor. A proveniência do serviço é persistida separadamente do Markdown, sem presumir sessão. Os argumentos opcionais equivalentes do MCP são `kind`, `name` e `description`; clientes legados continuam compatíveis.
+
+A publicação manual usa a mesma canonização e deixa de classificar qualquer `.md` como `DOCUMENT`. O IPC aceita as mesmas seleções semânticas opcionais. O seletor de arquivo atual pode usar YAML autoral quando faltar essa seleção; erros não são preenchidos com descrição genérica ou tipo presumido.
+
 ## Navegação estrutural
 
 Após `list`, selecione um Artifact e use `inspect_artifact_structure` antes de adquirir conteúdo. O outline contém títulos, hierarquia, offsets UTF-16 e linhas (base 1), revisão e hash; nunca corpo ou mídia. Intervalos são `[start, end)`. Títulos longos são limitados a 512 caracteres. Preâmbulos e documentos sem headings têm seção sintética. Frontmatter validado continua na metadata.
