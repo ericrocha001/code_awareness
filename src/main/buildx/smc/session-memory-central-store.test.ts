@@ -57,7 +57,10 @@ import {
   type GitOperationsPort,
   type ExecutionAttemptRecord,
   type ExecutionAttemptStatus,
-  type PrepareExecutionAttemptOptions
+  type PrepareExecutionAttemptOptions,
+  BuildXGrokCliBridge,
+  type CliExecutionPort,
+  type GrokCliPreAdmissionResult
 } from '../execution'
 import type { BranchInventory, BranchRecord } from '../../../shared/types/branch-orchestration-types'
 import {
@@ -4725,6 +4728,557 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
 
         // Pureza: sessão continua OPEN
         const sessionAfter = smc.getSession(repoId, session.sessionId)
+        expect(sessionAfter?.status).toBe('OPEN')
+        expect(sessionAfter?.revision).toBe(sessionBefore?.revision)
+      })
+    })
+  })
+
+  describe('BuildX Execution-02 — Ponte de pré-admissão ao CLI Execution para Grok Build (Provas Dirigidas)', () => {
+    const repoId = 'repo-execution-02'
+    let smc: SessionMemoryCentralService
+
+    function createFixtureInventory(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      detached?: boolean
+    }): BranchInventory {
+      const worktreeId = options?.worktreeId ?? 'wt-ex02-01'
+      const generation = options?.generation ?? 'gen-ex02-1'
+      const branchName = options?.branch ?? 'feature-ex02'
+      const head = options?.head ?? '2222222222222222222222222222222222222222'
+      const detached = options?.detached ?? false
+
+      const worktree: any = {
+        worktreeId,
+        generation,
+        path: `/mock/path/${worktreeId}`,
+        head,
+        branch: branchName,
+        detached,
+        locked: false,
+        missing: false,
+        prunable: false
+      }
+
+      const branchRecord: BranchRecord = {
+        key: `key-${branchName}`,
+        repositoryId: repoId,
+        ref: `refs/heads/${branchName}`,
+        name: branchName,
+        namespace: 'LOCAL',
+        head,
+        upstream: null,
+        generation: 'branch-gen-1',
+        revision: 'branch-rev-1',
+        creation: { at: '2026-11-06T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-06T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+
+      return {
+        repositoryId: repoId,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-06T00:00:00.000Z',
+        revision: 'inv-ex02-1',
+        worktrees: [worktree],
+        branches: [branchRecord],
+        unassignedWorktrees: []
+      }
+    }
+
+    function createFixturePort(inventory: BranchInventory): GitOperationsPort {
+      return {
+        getBranchInventory: async () => inventory,
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+    }
+
+    beforeEach(() => {
+      smc = new SessionMemoryCentralService(tempBaseDir)
+    })
+
+    afterEach(() => {
+      smc.close()
+    })
+
+    async function setupPreparedScenario(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      planId?: string
+      unitId?: string
+      reservationId?: string
+      attemptId?: string
+    }) {
+      const worktreeId = options?.worktreeId ?? 'wt-ex02-01'
+      const generation = options?.generation ?? 'gen-ex02-1'
+      const branch = options?.branch ?? 'feature-ex02'
+      const head = options?.head ?? '2222222222222222222222222222222222222222'
+      const planId = options?.planId ?? '00000000-0000-4000-9007-000000000001'
+      const unitId = options?.unitId ?? '00000000-0000-4000-9007-000000000002'
+      const reservationId = options?.reservationId ?? '00000000-0000-4000-9007-000000000003'
+      const attemptId = options?.attemptId ?? '00000000-0000-4000-9007-000000000004'
+
+      const inv = createFixtureInventory({ worktreeId, generation, branch, head })
+      const gitPort = createFixturePort(inv)
+
+      const session = smc.createSession(repoId)
+
+      const wsService = new WorkspaceBindingService(smc, gitPort)
+      await wsService.bindWorkspace(repoId, session.sessionId, worktreeId)
+
+      const unitFlow = new UnitFlowService(smc)
+      const plan = unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Grok' })
+      unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+        { unitId, title: 'Unidade Grok', objective: 'Obj', acceptanceCriteria: 'Crit' }
+      ])
+
+      const resService = new UnitFlowReservationService(smc, gitPort)
+      await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, { reservationId })
+
+      const attemptService = new ExecutionAttemptService(smc, gitPort)
+      const attempt = await attemptService.prepareExecutionAttempt(repoId, session.sessionId, reservationId, { attemptId })
+
+      return {
+        session,
+        plan,
+        unitId,
+        reservationId,
+        attempt,
+        wsService,
+        gitPort,
+        inv,
+        worktreeId,
+        generation,
+        branch,
+        head
+      }
+    }
+
+    describe('Prova 1 — Fixture BuildX com tentativa PREPARED e Workspace CURRENT + mock CliExecutionService', () => {
+      it('recebe exatamente 1 preparação literal de "grok version" na worktree correta, sem start, devolvendo PROPOSAL_PREPARED sem escrita no SQLite', async () => {
+        const scenario = await setupPreparedScenario()
+
+        const cliCalls: any[] = []
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async (input) => {
+            cliCalls.push(input)
+            return {
+              proposalId: 'proposal-grok-uuid-001',
+              worktree: input.worktree
+            } as any
+          }
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('PROPOSAL_PREPARED')
+        if (result.status === 'PROPOSAL_PREPARED') {
+          expect(result.proposalId).toBe('proposal-grok-uuid-001')
+          expect(result.attemptId).toBe(scenario.attempt.attemptId)
+          expect(result.sessionId).toBe(scenario.session.sessionId)
+          expect(result.repositoryId).toBe(repoId)
+          expect(result.executable).toBe('grok')
+          expect(result.args).toEqual(['version'])
+          expect(result.worktree).toEqual({
+            worktreeId: scenario.worktreeId,
+            generation: scenario.generation,
+            branch: scenario.branch,
+            head: scenario.head
+          })
+        }
+
+        // Verifica que CliExecutionService recebeu exatamente uma preparação literal de "grok version"
+        expect(cliCalls).toHaveLength(1)
+        expect(cliCalls[0]).toEqual({
+          worktree: {
+            worktreeId: scenario.worktreeId,
+            generation: scenario.generation
+          },
+          executable: 'grok',
+          args: ['version']
+        })
+
+        // Pureza: zero mutações no SQLite
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(scenario.attempt.attemptId)
+        expect(attemptAfter?.status).toBe('PREPARED')
+        expect(attemptAfter?.revision).toBe(scenario.attempt.revision)
+        expect(attemptAfter?.updatedAt).toBe(scenario.attempt.updatedAt)
+
+        const unitAfter = store.getUnitState(scenario.session.sessionId, scenario.plan.planId, scenario.unitId)
+        expect(unitAfter?.status).toBe('RESERVED')
+        expect(unitAfter?.revision).toBe(2)
+
+        const resAfter = store.getReservation(scenario.reservationId)
+        expect(resAfter?.status).toBe('ACTIVE')
+
+        const sessionAfter = smc.getSession(repoId, scenario.session.sessionId)
+        expect(sessionAfter?.status).toBe('OPEN')
+      })
+    })
+
+    describe('Prova 2 — Falhas de CLI desabilitada, ausente, contexto divergente e binário não resolvido', () => {
+      it('rejeita com CLI_DISABLED quando o serviço CLI estiver desabilitado, sem mutação', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000010',
+          planId: '00000000-0000-4000-9007-000000000011',
+          unitId: '00000000-0000-4000-9007-000000000012',
+          reservationId: '00000000-0000-4000-9007-000000000013'
+        })
+
+        const cliCalls: any[] = []
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => false,
+          getRepositoryId: () => repoId,
+          prepare: async (input) => {
+            cliCalls.push(input)
+            return { proposalId: 'p-1' } as any
+          }
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('CLI_DISABLED')
+        if (result.status === 'CLI_DISABLED') {
+          expect(result.reason).toBe('CLI_EXECUTION_DISABLED')
+        }
+        expect(cliCalls).toHaveLength(0)
+
+        // SQLite sem mutação
+        const attempt = smc.getStore(repoId).getExecutionAttempt(scenario.attempt.attemptId)
+        expect(attempt?.status).toBe('PREPARED')
+      })
+
+      it('rejeita com CLI_NOT_AVAILABLE quando o serviço CLI não estiver disponível', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000020',
+          planId: '00000000-0000-4000-9007-000000000021',
+          unitId: '00000000-0000-4000-9007-000000000022',
+          reservationId: '00000000-0000-4000-9007-000000000023'
+        })
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, null)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('CLI_NOT_AVAILABLE')
+        if (result.status === 'CLI_NOT_AVAILABLE') {
+          expect(result.reason).toBe('CLI_EXECUTION_SERVICE_NOT_AVAILABLE')
+        }
+      })
+
+      it('rejeita com PROJECT_CONTEXT_CHANGED quando o repositório do serviço CLI for divergente', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000030',
+          planId: '00000000-0000-4000-9007-000000000031',
+          unitId: '00000000-0000-4000-9007-000000000032',
+          reservationId: '00000000-0000-4000-9007-000000000033'
+        })
+
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => 'other-divergent-repo',
+          prepare: async () => ({ proposalId: 'p-1' } as any)
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('PROJECT_CONTEXT_CHANGED')
+        if (result.status === 'PROJECT_CONTEXT_CHANGED') {
+          expect(result.reason).toBe('CLI_SERVICE_REPOSITORY_MISMATCH')
+        }
+      })
+
+      it('declara CLI_INSTALLATION_UNVERIFIED quando o binário grok não for resolvido', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000040',
+          planId: '00000000-0000-4000-9007-000000000041',
+          unitId: '00000000-0000-4000-9007-000000000042',
+          reservationId: '00000000-0000-4000-9007-000000000043'
+        })
+
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async () => {
+            const err = new Error("EXECUTABLE_NOT_FOUND: Could not resolve executable 'grok'")
+            ;(err as any).code = 'EXECUTABLE_NOT_FOUND'
+            throw err
+          }
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('CLI_INSTALLATION_UNVERIFIED')
+        if (result.status === 'CLI_INSTALLATION_UNVERIFIED') {
+          expect(result.reason).toContain('EXECUTABLE_NOT_FOUND')
+        }
+      })
+    })
+
+    describe('Prova 3 — Falhas fail-closed da cadeia SMC e Workspace', () => {
+      it('rejeita com ATTEMPT_INVALID quando a sessão estiver fechada', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000050',
+          planId: '00000000-0000-4000-9007-000000000051',
+          unitId: '00000000-0000-4000-9007-000000000052',
+          reservationId: '00000000-0000-4000-9007-000000000053'
+        })
+
+        const rawDb = new Database(smcDatabasePath(tempBaseDir, repoId))
+        rawDb.prepare("UPDATE smc_sessions SET status = 'CLOSED' WHERE session_id = ?").run(scenario.session.sessionId)
+        rawDb.close()
+
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async () => ({ proposalId: 'p-1' } as any)
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('ATTEMPT_INVALID')
+        if (result.status === 'ATTEMPT_INVALID') {
+          expect(result.reason).toBe('SESSION_NOT_OPEN')
+        }
+      })
+
+      it('rejeita com ATTEMPT_INVALID quando a tentativa não existir ou não for PREPARED', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000060',
+          planId: '00000000-0000-4000-9007-000000000061',
+          unitId: '00000000-0000-4000-9007-000000000062',
+          reservationId: '00000000-0000-4000-9007-000000000063'
+        })
+
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async () => ({ proposalId: 'p-1' } as any)
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          '00000000-0000-4000-9007-999999999999'
+        )
+
+        expect(result.status).toBe('ATTEMPT_INVALID')
+        if (result.status === 'ATTEMPT_INVALID') {
+          expect(result.reason).toBe('ATTEMPT_NOT_FOUND')
+        }
+      })
+
+      it('rejeita com WORKSPACE_INVALID quando o workspace for STALE (detached HEAD)', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000070',
+          planId: '00000000-0000-4000-9007-000000000071',
+          unitId: '00000000-0000-4000-9007-000000000072',
+          reservationId: '00000000-0000-4000-9007-000000000073'
+        })
+
+        const staleInv = createFixtureInventory({ detached: true })
+        const stalePort = createFixturePort(staleInv)
+        const staleWsService = new WorkspaceBindingService(smc, stalePort)
+
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async () => ({ proposalId: 'p-1' } as any)
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, staleWsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('WORKSPACE_INVALID')
+        if (result.status === 'WORKSPACE_INVALID') {
+          expect(result.reason).toBe('DETACHED_HEAD')
+        }
+      })
+
+      it('rejeita com WORKSPACE_INVALID quando houver drift de worktree/generation', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000080',
+          planId: '00000000-0000-4000-9007-000000000081',
+          unitId: '00000000-0000-4000-9007-000000000082',
+          reservationId: '00000000-0000-4000-9007-000000000083'
+        })
+
+        const driftInv = createFixtureInventory({ generation: 'gen-drifted-999' })
+        const driftPort = createFixturePort(driftInv)
+        const driftWsService = new WorkspaceBindingService(smc, driftPort)
+
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async () => ({ proposalId: 'p-1' } as any)
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, driftWsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('WORKSPACE_INVALID')
+      })
+    })
+
+    describe('Prova 4 — HEAD legítimo avançado aceito, pureza e privacidade', () => {
+      it('aceita HEAD avançado na mesma branch/generation e reflete novo HEAD no resultado', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000090',
+          planId: '00000000-0000-4000-9007-000000000091',
+          unitId: '00000000-0000-4000-9007-000000000092',
+          reservationId: '00000000-0000-4000-9007-000000000093',
+          head: '2222222222222222222222222222222222222222'
+        })
+
+        const advancedHead = '3333333333333333333333333333333333333333'
+        const advancedInv = createFixtureInventory({ head: advancedHead })
+        const advancedPort = createFixturePort(advancedInv)
+        const advancedWsService = new WorkspaceBindingService(smc, advancedPort)
+
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async (input) => ({
+            proposalId: 'proposal-grok-uuid-002',
+            worktree: input.worktree
+          } as any)
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, advancedWsService, mockCli)
+        const result = await bridge.prepareGrokBuildProposal(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId
+        )
+
+        expect(result.status).toBe('PROPOSAL_PREPARED')
+        if (result.status === 'PROPOSAL_PREPARED') {
+          expect(result.proposalId).toBe('proposal-grok-uuid-002')
+          expect(result.worktree.head).toBe(advancedHead)
+          expect(result.worktree.worktreeId).toBe(scenario.worktreeId)
+          expect(result.worktree.generation).toBe(scenario.generation)
+          expect(result.worktree.branch).toBe(scenario.branch)
+        }
+      })
+
+      it('preserva privacidade (sem host paths, prompts ou tokens) e pureza estrita do SQLite após repetições', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9007-000000000100',
+          planId: '00000000-0000-4000-9007-000000000101',
+          unitId: '00000000-0000-4000-9007-000000000102',
+          reservationId: '00000000-0000-4000-9007-000000000103'
+        })
+
+        let callCount = 0
+        const mockCli: CliExecutionPort = {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async (input) => {
+            callCount++
+            return {
+              proposalId: `proposal-grok-call-${callCount}`,
+              worktree: input.worktree
+            } as any
+          }
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockCli)
+
+        // Snapshot inicial das contagens e revisões SQLite
+        const store = smc.getStore(repoId)
+        const attemptBefore = store.getExecutionAttempt(scenario.attempt.attemptId)
+        const unitBefore = store.getUnitState(scenario.session.sessionId, scenario.plan.planId, scenario.unitId)
+        const resBefore = store.getReservation(scenario.reservationId)
+        const planBefore = store.getPlan(scenario.plan.planId)
+        const sessionBefore = smc.getSession(repoId, scenario.session.sessionId)
+
+        // Execução 1
+        const r1 = await bridge.prepareGrokBuildProposal(repoId, scenario.session.sessionId, scenario.attempt.attemptId)
+        expect(r1.status).toBe('PROPOSAL_PREPARED')
+
+        // Execução 2 (repetição)
+        const r2 = await bridge.prepareGrokBuildProposal(repoId, scenario.session.sessionId, scenario.attempt.attemptId)
+        expect(r2.status).toBe('PROPOSAL_PREPARED')
+
+        // Propostas efêmeras distintas
+        if (r1.status === 'PROPOSAL_PREPARED' && r2.status === 'PROPOSAL_PREPARED') {
+          expect(r1.proposalId).toBe('proposal-grok-call-1')
+          expect(r2.proposalId).toBe('proposal-grok-call-2')
+        }
+
+        // Privacidade: nenhum caminho físico, prompt ou token vazado
+        const jsonR1 = JSON.stringify(r1)
+        expect(jsonR1).not.toContain('/mock/path/')
+        expect(jsonR1).not.toContain('prompt')
+        expect(jsonR1).not.toContain('token')
+        expect(jsonR1).not.toContain('credential')
+
+        // Pureza: zero mutações em todas as tabelas SMC
+        const attemptAfter = store.getExecutionAttempt(scenario.attempt.attemptId)
+        expect(attemptAfter?.status).toBe('PREPARED')
+        expect(attemptAfter?.revision).toBe(attemptBefore?.revision)
+        expect(attemptAfter?.updatedAt).toBe(attemptBefore?.updatedAt)
+
+        const unitAfter = store.getUnitState(scenario.session.sessionId, scenario.plan.planId, scenario.unitId)
+        expect(unitAfter?.status).toBe('RESERVED')
+        expect(unitAfter?.revision).toBe(unitBefore?.revision)
+        expect(unitAfter?.updatedAt).toBe(unitBefore?.updatedAt)
+
+        const resAfter = store.getReservation(scenario.reservationId)
+        expect(resAfter?.status).toBe('ACTIVE')
+        expect(resAfter?.updatedAt).toBe(resBefore?.updatedAt)
+
+        const planAfter = store.getPlan(scenario.plan.planId)
+        expect(planAfter?.status).toBe('ACTIVE')
+        expect(planAfter?.revision).toBe(planBefore?.revision)
+
+        const sessionAfter = smc.getSession(repoId, scenario.session.sessionId)
         expect(sessionAfter?.status).toBe('OPEN')
         expect(sessionAfter?.revision).toBe(sessionBefore?.revision)
       })
