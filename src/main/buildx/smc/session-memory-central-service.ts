@@ -12,6 +12,7 @@ import type {
   RegisterUnitFlowPlanInput,
   UnitFlowEligibilityResult,
   UnitFlowPlanRecord,
+  UnitFlowReservationRecord,
   UnitFlowUnitHeaderRecord,
   UnitFlowUnitRecord,
   UnitFlowUnitStateRecord
@@ -137,6 +138,20 @@ export class SessionMemoryCentralService {
     sessionId: string
   ): BuildXWorkspaceBindingRecord | null {
     return this.getStore(repositoryId).getWorkspaceBinding(sessionId)
+  }
+
+  getReservation(
+    repositoryId: string,
+    reservationId: string
+  ): UnitFlowReservationRecord | null {
+    return this.getStore(repositoryId).getReservation(reservationId)
+  }
+
+  getActiveReservation(
+    repositoryId: string,
+    sessionId: string
+  ): UnitFlowReservationRecord | null {
+    return this.getStore(repositoryId).getActiveReservation(sessionId)
   }
 
   closeStore(repositoryId: string): void {

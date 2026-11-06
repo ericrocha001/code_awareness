@@ -63,3 +63,32 @@ export type UnitFlowEligibilityResult =
   | { readonly kind: 'WAITING'; readonly blockingUnitId: string }
   | { readonly kind: 'ALL_UNITS_COMPLETED' }
 
+export type UnitFlowReservationStatus = 'ACTIVE' | 'CONSUMED' | 'CANCELLED'
+
+export interface UnitFlowReservationRecord {
+  readonly reservationId: string
+  readonly repositoryId: string
+  readonly sessionId: string
+  readonly planId: string
+  readonly unitId: string
+  readonly worktreeId: string
+  readonly generation: string
+  readonly branch: string
+  readonly headObservedAtReservation: string
+  readonly unitStateRevision: number
+  readonly status: UnitFlowReservationStatus
+  readonly createdAt: string
+  readonly updatedAt: string
+}
+
+export interface ReserveUnitFlowUnitOptions {
+  readonly reservationId: string
+}
+
+export type UnitFlowReservationResult =
+  | { readonly kind: 'RESERVED'; readonly reservation: UnitFlowReservationRecord }
+  | { readonly kind: 'MANIFEST_UNDEFINED' }
+  | { readonly kind: 'WAITING'; readonly blockingUnitId: string }
+  | { readonly kind: 'ALL_UNITS_COMPLETED' }
+
+

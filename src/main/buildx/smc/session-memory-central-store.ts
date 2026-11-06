@@ -23,6 +23,9 @@ import type {
   UnitFlowEligibilityResult,
   UnitFlowPlanRecord,
   UnitFlowPlanStatus,
+  UnitFlowReservationRecord,
+  UnitFlowReservationResult,
+  UnitFlowReservationStatus,
   UnitFlowUnitHeaderRecord,
   UnitFlowUnitRecord,
   UnitFlowUnitStateRecord,
@@ -38,10 +41,14 @@ import {
 import {
   UnitFlowActivePlanAlreadyExistsError,
   UnitFlowInvalidPlanError,
+  UnitFlowInvalidReservationIdError,
   UnitFlowInvalidUnitError,
   UnitFlowManifestConflictError,
   UnitFlowPlanConflictError,
   UnitFlowPlanNotFoundError,
+  UnitFlowReservationConflictError,
+  UnitFlowReservationIdConflictError,
+  UnitFlowReservationNotFoundError,
   UnitFlowUnitConflictError
 } from '../unitflow/unitflow-errors'
 import { validateRepositoryId } from './session-memory-central-paths'
@@ -137,7 +144,7 @@ export class SmcInvalidSupersedesError extends Error {
 
 export class SmcUnsupportedSchemaError extends Error {
   constructor(version: number) {
-    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 6`)
+    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 7`)
     this.name = 'SmcUnsupportedSchemaError'
   }
 }
@@ -208,6 +215,34 @@ interface RawWorkspaceBindingRow {
   updated_at: string
 }
 
+interface RawReservationRow {
+  reservation_id: string
+  repository_id: string
+  session_id: string
+  plan_id: string
+  unit_id: string
+  worktree_id: string
+  generation: string
+  branch: string
+  head_observed_at_reservation: string
+  unit_state_revision: number
+  status: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ReserveEligibleUnitInput {
+  readonly reservationId: string
+  readonly sessionId: string
+  readonly planId: string
+  readonly expectedBinding: {
+    readonly worktreeId: string
+    readonly generation: string
+    readonly branch: string
+  }
+  readonly headObserved: string
+}
+
 interface SmcCursorPayload {
   orderSeq: number
   direction: 'ASC' | 'DESC'
@@ -270,13 +305,13 @@ export class SessionMemoryCentralStore {
     const versionRow = this.db.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string } | undefined
     const currentVersion = versionRow ? parseInt(versionRow.value, 10) : 0
 
-    if (currentVersion > 6) {
+    if (currentVersion > 7) {
       this.db.close()
       throw new SmcUnsupportedSchemaError(currentVersion)
     }
 
-    // 4. Migração atômica de v0..v5 para v6
-    if (currentVersion < 6) {
+    // 4. Migração atômica de v0..v6 para v7
+    if (currentVersion < 7) {
       this.db.transaction(() => {
         if (currentVersion < 2) {
           // Tabelas base v1
@@ -422,10 +457,46 @@ export class SessionMemoryCentralStore {
           `)
         }
 
+        if (currentVersion < 7) {
+          // Adições v7 (UnitFlow-04: Recibos duráveis de reserva atômica de unidades)
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_unit_reservations (
+              reservation_id TEXT PRIMARY KEY,
+              repository_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              plan_id TEXT NOT NULL,
+              unit_id TEXT NOT NULL,
+              worktree_id TEXT NOT NULL,
+              generation TEXT NOT NULL,
+              branch TEXT NOT NULL,
+              head_observed_at_reservation TEXT NOT NULL,
+              unit_state_revision INTEGER NOT NULL,
+              status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE', 'CONSUMED', 'CANCELLED')),
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (session_id) REFERENCES smc_sessions(session_id) ON DELETE CASCADE,
+              FOREIGN KEY (plan_id) REFERENCES smc_plans(plan_id) ON DELETE CASCADE,
+              FOREIGN KEY (unit_id) REFERENCES smc_plan_units(unit_id) ON DELETE CASCADE
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_unit_reservations_active_session
+              ON smc_unit_reservations (session_id) WHERE status = 'ACTIVE';
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_unit_reservations_active_unit
+              ON smc_unit_reservations (unit_id) WHERE status = 'ACTIVE';
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_unit_reservations_active_worktree
+              ON smc_unit_reservations (repository_id, worktree_id, generation) WHERE status = 'ACTIVE';
+
+            CREATE INDEX IF NOT EXISTS idx_smc_unit_reservations_repo_session
+              ON smc_unit_reservations (repository_id, session_id);
+          `)
+        }
+
         if (!versionRow) {
-          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '6')
+          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '7')
         } else {
-          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('6', 'schema_version')
+          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('7', 'schema_version')
         }
       })()
     }
@@ -1430,12 +1501,14 @@ export class SessionMemoryCentralStore {
       return { kind: 'MANIFEST_UNDEFINED' }
     }
 
-    // Verifica se estados estão presentes (pode ser banco v4 não migrado via getNextEligibleUnit)
-    // Neste caso o status pode ser null se a migração ainda não inseriu o estado
+    // Verifica se estados estão presentes e consistentes (falha fechado)
     const completedUnitIds = new Set<string>()
 
     for (const row of rows) {
-      const status = (row.status ?? 'AVAILABLE') as UnitFlowUnitStatus
+      if (!row.status) {
+        throw new UnitFlowInvalidUnitError(`Unit "${row.unit_id}" has no persisted state in smc_unit_states`)
+      }
+      const status = row.status as UnitFlowUnitStatus
       const deps: string[] = row.depends_on_json ? JSON.parse(row.depends_on_json) : []
 
       if (status === 'COMPLETED') {
@@ -1452,15 +1525,11 @@ export class SessionMemoryCentralStore {
       // status === 'AVAILABLE': verificar se todas as anteriores por posição estão COMPLETED
       // (regra estritamente sequencial: todas as unidades anteriores devem estar concluídas)
       const prevRows = rows.filter(r => r.position < row.position)
-      const allPrevCompleted = prevRows.every(r => (r.status ?? 'AVAILABLE') === 'COMPLETED')
+      const allPrevCompleted = prevRows.every(r => r.status === 'COMPLETED')
       if (!allPrevCompleted) {
         // Encontrar o bloqueador (primeiro anterior não COMPLETED)
-        const blocker = prevRows.find(r => (r.status ?? 'AVAILABLE') !== 'COMPLETED')
+        const blocker = prevRows.find(r => r.status !== 'COMPLETED')
         if (blocker) {
-          const blockerStatus = (blocker.status ?? 'AVAILABLE') as UnitFlowUnitStatus
-          if (blockerStatus === 'RESERVED' || blockerStatus === 'EXECUTING' || blockerStatus === 'VALIDATING' || blockerStatus === 'RECONCILING') {
-            return { kind: 'WAITING', blockingUnitId: blocker.unit_id }
-          }
           return { kind: 'WAITING', blockingUnitId: blocker.unit_id }
         }
       }
@@ -1584,6 +1653,293 @@ export class SessionMemoryCentralStore {
     }
 
     return this.mapRawToWorkspaceBinding(row)
+  }
+
+  private mapRawToReservationRecord(row: RawReservationRow): UnitFlowReservationRecord {
+    return {
+      reservationId: row.reservation_id,
+      repositoryId: row.repository_id,
+      sessionId: row.session_id,
+      planId: row.plan_id,
+      unitId: row.unit_id,
+      worktreeId: row.worktree_id,
+      generation: row.generation,
+      branch: row.branch,
+      headObservedAtReservation: row.head_observed_at_reservation,
+      unitStateRevision: row.unit_state_revision,
+      status: row.status as UnitFlowReservationStatus,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }
+  }
+
+  reserveEligibleUnit(input: ReserveEligibleUnitInput): UnitFlowReservationResult {
+    if (typeof input.sessionId !== 'string' || !input.sessionId.trim() || !UUID_REGEX.test(input.sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(input.sessionId ?? '')
+    }
+    const cleanSessionId = input.sessionId.trim().toLowerCase()
+
+    if (typeof input.planId !== 'string' || !input.planId.trim() || !UUID_REGEX.test(input.planId.trim())) {
+      throw new UnitFlowInvalidPlanError(`planId must be a valid UUID format, received: "${input.planId}"`)
+    }
+    const cleanPlanId = input.planId.trim().toLowerCase()
+
+    if (typeof input.reservationId !== 'string' || !input.reservationId.trim() || !UUID_REGEX.test(input.reservationId.trim())) {
+      throw new UnitFlowInvalidReservationIdError(input.reservationId ?? '')
+    }
+    const cleanReservationId = input.reservationId.trim().toLowerCase()
+
+    if (!input.headObserved || typeof input.headObserved !== 'string' || !input.headObserved.trim()) {
+      throw new BuildXWorkspaceBindingConflictError('headObserved must be non-empty')
+    }
+
+    return this.db.transaction((): UnitFlowReservationResult => {
+      // 1. Replay check dentro da transação (para concorrência)
+      const existing = this.db.prepare(`
+        SELECT * FROM smc_unit_reservations WHERE reservation_id = ?
+      `).get(cleanReservationId) as RawReservationRow | undefined
+
+      if (existing) {
+        if (
+          existing.repository_id === this.repositoryId &&
+          existing.session_id === cleanSessionId &&
+          existing.plan_id === cleanPlanId
+        ) {
+          return { kind: 'RESERVED', reservation: this.mapRawToReservationRecord(existing) }
+        }
+        throw new UnitFlowReservationIdConflictError(
+          cleanReservationId,
+          `already exists with divergent scope (repo=${existing.repository_id}, session=${existing.session_id}, plan=${existing.plan_id})`
+        )
+      }
+
+      // 2. Valida sessão
+      const sessionRow = this.db.prepare(`
+        SELECT status FROM smc_sessions WHERE session_id = ? AND repository_id = ?
+      `).get(cleanSessionId, this.repositoryId) as { status: string } | undefined
+
+      if (!sessionRow) {
+        throw new SmcSessionNotFoundError(cleanSessionId)
+      }
+      if (sessionRow.status === 'CLOSED') {
+        throw new SmcSessionClosedError(cleanSessionId)
+      }
+
+      // 3. Valida plano
+      const planRow = this.db.prepare(`
+        SELECT plan_id, session_id, status FROM smc_plans WHERE plan_id = ? AND repository_id = ?
+      `).get(cleanPlanId, this.repositoryId) as { plan_id: string; session_id: string; status: string } | undefined
+
+      if (!planRow) {
+        throw new UnitFlowPlanNotFoundError(cleanPlanId)
+      }
+      if (planRow.session_id !== cleanSessionId) {
+        throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" belongs to another session "${planRow.session_id}"`)
+      }
+      if (planRow.status !== 'ACTIVE') {
+        throw new UnitFlowPlanConflictError(`Plan "${cleanPlanId}" is not ACTIVE (status: ${planRow.status})`)
+      }
+
+      // 5. Valida workspace binding e confronta com o observado
+      const bindingRow = this.db.prepare(`
+        SELECT worktree_id, generation, branch, head_at_bind FROM smc_session_worktrees
+        WHERE session_id = ? AND repository_id = ?
+      `).get(cleanSessionId, this.repositoryId) as { worktree_id: string; generation: string; branch: string; head_at_bind: string } | undefined
+
+      if (!bindingRow) {
+        throw new BuildXWorkspaceBindingConflictError(`Session "${cleanSessionId}" is not bound to a worktree`)
+      }
+      if (
+        bindingRow.worktree_id !== input.expectedBinding.worktreeId ||
+        bindingRow.generation !== input.expectedBinding.generation ||
+        bindingRow.branch !== input.expectedBinding.branch
+      ) {
+        throw new BuildXWorkspaceBindingConflictError(
+          `Workspace binding drifted between observation and reservation transaction (expected wt=${input.expectedBinding.worktreeId}, gen=${input.expectedBinding.generation}, br=${input.expectedBinding.branch}; found wt=${bindingRow.worktree_id}, gen=${bindingRow.generation}, br=${bindingRow.branch})`
+        )
+      }
+
+      // 6. Seleciona a próxima unidade elegível no snapshot da transação
+      type UnitWithState = {
+        unit_id: string
+        position: number
+        title: string
+        depends_on_json: string | null
+        status: string | null
+        revision: number | null
+      }
+
+      const rows = this.db.prepare(`
+        SELECT u.unit_id, u.position, u.title, u.depends_on_json, s.status, s.revision
+        FROM smc_plan_units u
+        LEFT JOIN smc_unit_states s ON s.unit_id = u.unit_id AND s.plan_id = u.plan_id
+        WHERE u.plan_id = ?
+        ORDER BY u.position ASC
+      `).all(cleanPlanId) as UnitWithState[]
+
+      if (rows.length === 0) {
+        return { kind: 'MANIFEST_UNDEFINED' }
+      }
+
+      for (const row of rows) {
+        if (!row.status || typeof row.revision !== 'number') {
+          throw new UnitFlowInvalidUnitError(`Unit "${row.unit_id}" has no persisted state in smc_unit_states`)
+        }
+      }
+
+      let eligibleUnit: { unit_id: string; revision: number } | null = null
+      let waitingBlockerId: string | null = null
+      const completedUnitIds = new Set<string>()
+
+      for (const row of rows) {
+        const status = row.status as UnitFlowUnitStatus
+        const deps: string[] = row.depends_on_json ? JSON.parse(row.depends_on_json) : []
+
+        if (status === 'COMPLETED') {
+          completedUnitIds.add(row.unit_id)
+          continue
+        }
+
+        if (status === 'RESERVED' || status === 'EXECUTING' || status === 'VALIDATING' || status === 'RECONCILING') {
+          waitingBlockerId = row.unit_id
+          break
+        }
+
+        const prevRows = rows.filter(r => r.position < row.position)
+        const allPrevCompleted = prevRows.every(r => r.status === 'COMPLETED')
+        if (!allPrevCompleted) {
+          const blocker = prevRows.find(r => r.status !== 'COMPLETED')
+          waitingBlockerId = blocker ? blocker.unit_id : row.unit_id
+          break
+        }
+
+        const depsNotCompleted = deps.filter(d => !completedUnitIds.has(d))
+        if (depsNotCompleted.length > 0) {
+          waitingBlockerId = depsNotCompleted[0]
+          break
+        }
+
+        if (status === 'AVAILABLE') {
+          eligibleUnit = { unit_id: row.unit_id, revision: row.revision! }
+          break
+        }
+      }
+
+      if (waitingBlockerId) {
+        return { kind: 'WAITING', blockingUnitId: waitingBlockerId }
+      }
+
+      if (!eligibleUnit) {
+        return { kind: 'ALL_UNITS_COMPLETED' }
+      }
+
+      // 7. Atualização atômica: CAS de smc_unit_states + INSERT de smc_unit_reservations
+      const now = new Date().toISOString()
+      const newRevision = eligibleUnit.revision + 1
+
+      const casResult = this.db.prepare(`
+        UPDATE smc_unit_states
+        SET status = 'RESERVED', revision = ?, updated_at = ?
+        WHERE unit_id = ? AND plan_id = ? AND status = 'AVAILABLE' AND revision = ?
+      `).run(newRevision, now, eligibleUnit.unit_id, cleanPlanId, eligibleUnit.revision)
+
+      if (casResult.changes !== 1) {
+        throw new UnitFlowReservationConflictError(
+          `Concurrent modification detected on unit "${eligibleUnit.unit_id}" during reservation`
+        )
+      }
+
+      try {
+        this.db.prepare(`
+          INSERT INTO smc_unit_reservations (
+            reservation_id, repository_id, session_id, plan_id, unit_id,
+            worktree_id, generation, branch, head_observed_at_reservation,
+            unit_state_revision, status, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)
+        `).run(
+          cleanReservationId,
+          this.repositoryId,
+          cleanSessionId,
+          cleanPlanId,
+          eligibleUnit.unit_id,
+          input.expectedBinding.worktreeId,
+          input.expectedBinding.generation,
+          input.expectedBinding.branch,
+          input.headObserved,
+          newRevision,
+          now,
+          now
+        )
+      } catch (insertError: any) {
+        const msg = String(insertError?.message || '')
+        if (msg.includes('idx_smc_unit_reservations_active_session')) {
+          throw new UnitFlowReservationConflictError(
+            `Session "${cleanSessionId}" already has an active unit reservation`
+          )
+        }
+        if (msg.includes('idx_smc_unit_reservations_active_unit')) {
+          throw new UnitFlowReservationConflictError(
+            `Unit "${eligibleUnit.unit_id}" already has an active reservation`
+          )
+        }
+        if (msg.includes('idx_smc_unit_reservations_active_worktree')) {
+          throw new UnitFlowReservationConflictError(
+            `Worktree "${input.expectedBinding.worktreeId}" already has an active unit reservation in repository "${this.repositoryId}"`
+          )
+        }
+        if (insertError?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || msg.includes('smc_unit_reservations.reservation_id') || msg.includes('PRIMARY KEY')) {
+          throw new UnitFlowReservationIdConflictError(
+            cleanReservationId,
+            `already exists with conflicting record`
+          )
+        }
+        throw new UnitFlowReservationConflictError(`Failed to persist reservation receipt: ${msg}`)
+      }
+
+      const receipt: UnitFlowReservationRecord = {
+        reservationId: cleanReservationId,
+        repositoryId: this.repositoryId,
+        sessionId: cleanSessionId,
+        planId: cleanPlanId,
+        unitId: eligibleUnit.unit_id,
+        worktreeId: input.expectedBinding.worktreeId,
+        generation: input.expectedBinding.generation,
+        branch: input.expectedBinding.branch,
+        headObservedAtReservation: input.headObserved,
+        unitStateRevision: newRevision,
+        status: 'ACTIVE',
+        createdAt: now,
+        updatedAt: now
+      }
+
+      return { kind: 'RESERVED', reservation: receipt }
+    })()
+  }
+
+  getReservation(reservationId: string): UnitFlowReservationRecord | null {
+    if (typeof reservationId !== 'string' || !reservationId.trim() || !UUID_REGEX.test(reservationId.trim())) {
+      throw new UnitFlowInvalidReservationIdError(reservationId ?? '')
+    }
+    const cleanId = reservationId.trim().toLowerCase()
+    const row = this.db.prepare(`
+      SELECT * FROM smc_unit_reservations
+      WHERE reservation_id = ? AND repository_id = ?
+    `).get(cleanId, this.repositoryId) as RawReservationRow | undefined
+    if (!row) return null
+    return this.mapRawToReservationRecord(row)
+  }
+
+  getActiveReservation(sessionId: string): UnitFlowReservationRecord | null {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    const row = this.db.prepare(`
+      SELECT * FROM smc_unit_reservations
+      WHERE session_id = ? AND repository_id = ? AND status = 'ACTIVE'
+    `).get(cleanSessionId, this.repositoryId) as RawReservationRow | undefined
+    if (!row) return null
+    return this.mapRawToReservationRecord(row)
   }
 
   close(): void {

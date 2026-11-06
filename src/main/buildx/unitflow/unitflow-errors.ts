@@ -50,3 +50,32 @@ export class UnitFlowManifestConflictError extends UnitFlowUnitConflictError {
     this.name = 'UnitFlowManifestConflictError'
   }
 }
+
+export class UnitFlowInvalidReservationIdError extends Error {
+  constructor(id: string) {
+    super(`INVALID_RESERVATION_ID: reservationId must be a valid UUID format, received: "${id}"`)
+    this.name = 'UnitFlowInvalidReservationIdError'
+  }
+}
+
+export class UnitFlowReservationConflictError extends Error {
+  constructor(reason: string) {
+    super(reason.startsWith('RESERVATION_') ? reason : `RESERVATION_CONFLICT: ${reason}`)
+    this.name = 'UnitFlowReservationConflictError'
+  }
+}
+
+export class UnitFlowReservationIdConflictError extends UnitFlowReservationConflictError {
+  constructor(reservationId: string, reason: string) {
+    super(`RESERVATION_ID_CONFLICT: Reservation "${reservationId}" ${reason}`)
+    this.name = 'UnitFlowReservationIdConflictError'
+  }
+}
+
+export class UnitFlowReservationNotFoundError extends Error {
+  constructor(reservationId: string) {
+    super(`RESERVATION_NOT_FOUND: Reservation "${reservationId}" not found`)
+    this.name = 'UnitFlowReservationNotFoundError'
+  }
+}
+

@@ -3,6 +3,7 @@ import type {
   RegisterUnitFlowPlanInput,
   UnitFlowEligibilityResult,
   UnitFlowPlanRecord,
+  UnitFlowReservationRecord,
   UnitFlowUnitHeaderRecord,
   UnitFlowUnitRecord,
   UnitFlowUnitStateRecord
@@ -104,6 +105,24 @@ export class UnitFlowService {
     const validRepoId = validateRepositoryId(repositoryId)
     const store = this.smcService.getStore(validRepoId)
     return store.getNextEligibleUnit(sessionId, planId)
+  }
+
+  getReservation(
+    repositoryId: string,
+    reservationId: string
+  ): UnitFlowReservationRecord | null {
+    const validRepoId = validateRepositoryId(repositoryId)
+    const store = this.smcService.getStore(validRepoId)
+    return store.getReservation(reservationId)
+  }
+
+  getActiveReservation(
+    repositoryId: string,
+    sessionId: string
+  ): UnitFlowReservationRecord | null {
+    const validRepoId = validateRepositoryId(repositoryId)
+    const store = this.smcService.getStore(validRepoId)
+    return store.getActiveReservation(sessionId)
   }
 
   close(): void {
