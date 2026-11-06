@@ -134,10 +134,10 @@ export async function transitionLifecycle(store: ArtifactStore, dependencies: Li
 export async function assessLifecycleEvidence(artifact: Artifact, dependencies: LifecycleDependencies, store: ArtifactStore) {
   const receipt = lifecycleReceipt(artifact)
   if (!receipt) return { freshness: artifact.provenance.lifecycle ? 'SOURCE_STALE' : 'NOT_RECHECKED', evidenceRefs: [] as string[] }
+  const proofs = await Promise.all(receipt.review.evidence.map(p => dependencies.proof?.(p.proofId)))
   if (receipt.review.supporting) {
     const supporting = store.get(receipt.review.supporting.artifactId)
     if (!supporting || supporting.revision !== receipt.review.supporting.revision || supporting.contentHash !== receipt.review.supporting.contentHash) return { freshness: 'SOURCE_STALE', evidenceRefs: receipt.review.evidence.map(p => p.proofId) }
   }
-  const proofs = await Promise.all(receipt.review.evidence.map(p => dependencies.proof?.(p.proofId)))
   return { evidenceRefs: receipt.review.evidence.map(p => p.proofId), freshness: proofs.every((p, i) => p?.status === 'PASSED' && p.freshness === 'CURRENT' && p.commandProfile?.source?.repositoryId === store.repositoryId && lifecycleDigest(p) === receipt.review.evidence[i].digest) ? 'CURRENT' : 'REVIEW_REQUIRED' }
 }

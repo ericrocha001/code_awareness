@@ -138,6 +138,17 @@ it('closes an opt-in WORK kind through the same contract without a core kind syn
   expect(await f.service.transitionLifecycle({ ...f.request, artifactId: f.plan.artifactId, expectedRevision: 2, toState: 'COMPLETED', reasonCode: 'CLOSURE_ACCEPTED', evidenceRefs: [] })).toMatchObject({ state: 'PERSISTED', revision: 3 })
 })
 
+it('reports a supporting revision changed while historical evidence was being read', async () => {
+  const f = setup()
+  await f.service.transitionLifecycle(f.request)
+  f.dependencies.proof = async () => {
+    f.service.update(f.plan.artifactId, 1, f.store.get(f.plan.artifactId)!.rawMarkdown + '\nChanged during proof read')
+    return structuredClone(f.proof)
+  }
+  expect(await f.service.transitionLifecycle({ ...f.request, action: 'ASSESS', expectedRevision: 2 })).toMatchObject({ evidence: { freshness: 'SOURCE_STALE' } })
+  expect(f.store.get(f.handoff.artifactId)!.metadata.status).toBe('VALIDATED')
+})
+
 it('uses persisted Ledger evidence with real checkout freshness for the domain transition', async () => {
   const f = setup(), root = join(f.dir, 'repo'); mkdirSync(root)
   const git = (...args: string[]) => execFileSync('git', args, { cwd: root, windowsHide: true, stdio: 'pipe' })
