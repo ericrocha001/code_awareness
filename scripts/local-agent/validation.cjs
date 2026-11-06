@@ -6,7 +6,7 @@ const { readDescriptor } = require('./discovery.cjs')
 
 async function validationConnection(cwd, profile) {
   const descriptor = readDescriptor(profile, { directory: 'local-agent-channel', protocol: 'code-awareness-local/v1' })
-  const send = (domain, action, args) => connect(descriptor, { domain, action, args }, { timeoutMs: action === 'snapshot' ? 12000 : 2000 })
+  const send = (domain, action, args) => connect(descriptor, { domain, action, args }, { timeoutMs: action === 'snapshot' || action === 'register' ? 12000 : 2000 })
   const status = await send('continuum', 'status', {})
   const normalize = value => process.platform === 'win32' ? value.toLowerCase() : value
   const root = fs.realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd, encoding: 'utf8', windowsHide: true, timeout: 2000 }).trim())
