@@ -162,10 +162,10 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     this.assertActive()
     return result
   }
-  graph(query: ContinuumGraphQuery = {}) {
+  graph(query: ContinuumGraphQuery = {}, options: { indexOnly?: boolean } = {}) {
     this.assertActive()
     this.reconcile?.()
-    const result = this.store.graph(query)
+    const result = this.store.graph(query, options)
     this.assertActive()
     return result
   }
@@ -264,6 +264,15 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const artifact = this.store.get(artifactId)
     if (!artifact) return null
     const nativeArtifact = this.store.publicationProvenance(artifactId, artifact.revision)
+    return nativeArtifact ? { ...artifact, provenance: { ...artifact.provenance, nativeArtifact } } : artifact
+  }
+  provenanceSnapshot(artifactId: string, revision?: number): Artifact | null {
+    this.assertActive(); this.reconcile?.(); this.assertActive()
+    const artifact = revision === undefined ? this.store.get(artifactId) : this.store.getRevision(artifactId, revision)
+    if (!artifact) return null
+    if (createHash('sha256').update(artifact.rawMarkdown).digest('hex') !== artifact.contentHash) throw new Error('ARTIFACT_REVISION_INTEGRITY')
+    const nativeArtifact = this.store.publicationProvenance(artifactId, artifact.revision)
+    this.assertActive()
     return nativeArtifact ? { ...artifact, provenance: { ...artifact.provenance, nativeArtifact } } : artifact
   }
   list(filter: ListArtifactsFilter = {}): ArtifactPage { this.reconcile?.(); return this.store.list(filter) }

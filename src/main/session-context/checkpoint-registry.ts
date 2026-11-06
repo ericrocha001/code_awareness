@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import { digest } from './privacy'
 import { sessionIdentity, sessionSelector } from './session-identity'
 import { parseNativeEnvelope, type NativeHookEnvelope } from './native-hooks'
+import { provenanceClass, type ProvenanceClass } from './provenance-evidence'
 
 export type EntityKind = 'COMMIT' | 'CHECKPOINT' | 'SESSION' | 'PR' | 'ARTIFACT' | 'PROOF' | 'WORKTREE' | 'EXECUTION'
 export interface RegistryEntity { kind: EntityKind; id: string }
@@ -13,7 +14,7 @@ export interface RegistryBatch {
   repositoryId: string; source: string; revision: string; status: string
   cursor?: string; edges: RegistryEdge[]; entities?: RegistryEntity[]
 }
-export type RegistryReader = (request: { selector?: RegistryEntity; cursors: Record<string, string> }) => Promise<RegistryBatch[]>
+export type RegistryReader = (request: { selector?: RegistryEntity; neighbors?: RegistryEntity[]; cursors: Record<string, string> }) => Promise<RegistryBatch[]>
 type ObservedEdge = RegistryEdge & { sourceSystem: string; sourceRevision: string; observedAt: string; state: string }
 export const REGISTRY_SCHEMA = `
  CREATE TABLE IF NOT EXISTS registry_entities(id TEXT PRIMARY KEY, kind TEXT NOT NULL, externalId TEXT NOT NULL, localSessionId TEXT, UNIQUE(kind,externalId));
@@ -78,6 +79,9 @@ export class CheckpointRegistry {
   sources(): { source: string; revision: string; cursor?: string; status: string; observedAt: string }[] {
     return this.db.prepare('SELECT * FROM registry_sources ORDER BY observedAt DESC,source LIMIT 20').all() as ReturnType<CheckpointRegistry['sources']>
   }
+  coverageSources(): ReturnType<CheckpointRegistry['sources']> {
+    return this.db.prepare("SELECT * FROM registry_sources WHERE source IN ('CONTINUUM','LEDGER','GITHUB','NATIVE_HOOK','IMPORTED_SESSIONS','ENTIRE_COMMITS','ENTIRE_REFS','LEGACY') ORDER BY source").all() as ReturnType<CheckpointRegistry['sources']>
+  }
   source(source: string): ReturnType<CheckpointRegistry['sources']>[number] | undefined { return this.db.prepare('SELECT * FROM registry_sources WHERE source=?').get(source) as ReturnType<CheckpointRegistry['source']> }
   cursors(): Record<string, string> { return Object.fromEntries((this.db.prepare('SELECT source,cursor FROM registry_sources WHERE cursor IS NOT NULL ORDER BY observedAt DESC LIMIT 100').all() as { source: string; cursor: string }[]).map(s => [s.source, s.cursor])) }
   applyAll(batches: RegistryBatch[], assertCurrent: () => void): void {
@@ -115,6 +119,7 @@ export class CheckpointRegistry {
       }
       if (batch.status === 'CHECKPOINT_NOT_OBSERVED') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('STALE', batch.source, 'OBSERVED')
       if (batch.status === 'CONFLICT') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('CONFLICT', batch.source, 'OBSERVED')
+      if (batch.status === 'REPLACED') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('SUPERSEDED', batch.source, 'OBSERVED')
       if (/^GITHUB:PR:[0-9]+$/.test(batch.source) && ['PARTIAL', 'COMPLETE'].includes(batch.status)) this.db.prepare("UPDATE registry_edges SET state='STALE' WHERE source LIKE ? AND sourceRevision<>? AND state='OBSERVED'").run(batch.source + ':%', batch.revision)
       this.db.prepare(`INSERT INTO registry_sources VALUES(?,?,?,?,?) ON CONFLICT(source) DO UPDATE SET revision=excluded.revision,cursor=excluded.cursor,status=excluded.status,observedAt=excluded.observedAt`).run(batch.source, batch.revision, batch.cursor ?? null, batch.status, observedAt)
       assertCurrent()
@@ -155,11 +160,28 @@ export class CheckpointRegistry {
     if (row && (digest(row.payload) !== row.integrity || JSON.parse(row.payload).repositoryId !== this.repositoryId)) throw new Error('ASSOCIATION_INTEGRITY_ERROR')
     return !!row
   }
-  contextGraph(selector: RegistryEntity, accountHash?: string) {
-    type Node = { key: string; type: EntityKind; id: string; revision?: number; provider?: string; agent?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
-    type Edge = { id: string; from: string; to: string; relation: string; evidenceKind: string; source: string; state: string; freshness: string; observedAt: string; sourceRevision: string; evidenceRef: string; digest: string }
+  contextGraph(selector: RegistryEntity, accountHash?: string, depthLimit = 4) {
+    type Node = { key: string; type: EntityKind; id: string; revision?: number; generation?: string; provider?: string; agent?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
+    type Edge = { id: string; from: string; to: string; relation: string; evidenceKind: string; source: string; state: string; freshness: string; observedAt: string; sourceRevision: string; revision: string; evidenceRef: string; digest: string; confidenceClass: ProvenanceClass; coverage: string; revisionScope: string }
     const nodes = new Map<string, Node>(), edges = new Map<string, Edge>(), paths: { target: string; edges: string[] }[] = []
     let bounded = false
+    const authority = new Map<string, boolean>()
+    const nativeAuthority = (source: string, receiptId: string) => {
+      if (authority.has(source)) return authority.get(source)!
+      const rows = this.db.prepare("SELECT payload,integrity FROM registry_edges WHERE source=? AND state='OBSERVED' LIMIT 4").all(source) as { payload: string; integrity: string }[]
+      let valid = true
+      for (const row of rows) {
+        if (digest(row.payload) !== row.integrity) throw new Error('REGISTRY_INTEGRITY_FAILED')
+        const edge = JSON.parse(row.payload) as RegistryEdge
+        if (edge.to.kind !== 'ARTIFACT' || !/:\d+$/.test(edge.to.id)) continue
+        const snapshot = this.source('CONTINUUM:' + edge.to.id)
+        if (snapshot) {
+          const proof = JSON.parse(snapshot.cursor ?? '{}')
+          valid &&= proof.nativeState === 'VERIFIED' && proof.receiptId === receiptId
+        }
+      }
+      authority.set(source, valid); return valid
+    }
     const add = (entity: RegistryEntity) => {
       const key = this.key(entity)
       if (nodes.has(key)) return key
@@ -172,16 +194,17 @@ export class CheckpointRegistry {
       } else if (entity.kind === 'ARTIFACT') {
         const version = /^(artifact-[a-f0-9-]{36}):([1-9][0-9]*)$/.exec(entity.id)
         if (version) { node.id = version[1]; node.revision = Number(version[2]) }
-        node.deepen = { tool: 'get_artifact', arguments: { artifactId: node.id } }
+        if (!version) node.deepen = { tool: 'get_artifact', arguments: { artifactId: node.id } }
       }
+      else if (entity.kind === 'WORKTREE') { const scope = /^([a-f0-9]{64}):([a-f0-9]{64})$/.exec(entity.id); if (scope) { node.id = scope[1]; node.generation = scope[2] } }
       else if (entity.kind === 'PROOF') node.deepen = { tool: 'get_validation_proof', arguments: { proofId: entity.id } }
       else if (entity.kind === 'CHECKPOINT') node.deepen = { tool: 'inspect_entire_checkpoint', arguments: { checkpointId: entity.id } }
-      if (entity.kind !== 'WORKTREE') node.selector = { type: node.type, id: node.id, ...(node.revision ? { revision: node.revision } : {}), ...(node.provider ? { provider: node.provider } : {}), ...(node.agent ? { agent: node.agent } : {}) }
+      node.selector = { type: node.type, id: node.id, ...(node.generation ? { generation: node.generation } : {}), ...(node.revision ? { revision: node.revision } : {}), ...(node.provider ? { provider: node.provider } : {}), ...(node.agent ? { agent: node.agent } : {}) }
       nodes.set(key, node); return key
     }
     if (!this.visible(selector, accountHash) || !this.db.prepare('SELECT 1 FROM registry_entities WHERE id=?').get(this.key(selector))) return { nodes: [], edges: [], paths, bounded }
     const initial = add(selector), visited = new Set([initial]), pending = [{ entity: selector, path: [] as string[] }]
-    for (let depth = 0; depth < 4 && pending.length; depth++) {
+    for (let depth = 0; depth < depthLimit && pending.length; depth++) {
       const level = pending.splice(0)
       for (const item of level) {
         const key = this.key(item.entity)
@@ -192,20 +215,25 @@ export class CheckpointRegistry {
           const value = JSON.parse(row.payload) as RegistryEdge
           if (digest(row.payload) !== row.integrity || this.key(value.from) !== row.fromId || this.key(value.to) !== row.toId) throw new Error('REGISTRY_INTEGRITY_FAILED')
           if (!this.visible(value.from, accountHash) || !this.visible(value.to, accountHash)) continue
-          if (value.from.kind === 'ARTIFACT' && value.to.kind === 'ARTIFACT' && !['implements', 'resolved-by', 'revision'].includes(value.relation)) continue
-          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST', 'NATIVE_ARTIFACT_CAUSAL', 'NATIVE_ARTIFACT_SCOPE', 'NATIVE_ARTIFACT_REQUEST'].includes(value.evidenceKind)) continue
+          const selectedVersion = selector.kind === 'ARTIFACT' ? /^(.*):([1-9][0-9]*)$/.exec(selector.id) : null
+          if (selectedVersion && value.relation === 'revision' && value.from.kind === 'ARTIFACT' && value.from.id === selectedVersion[1] && value.to.id !== selector.id) continue
+          if (depthLimit > 1 && value.from.kind === 'ARTIFACT' && value.to.kind === 'ARTIFACT' && !['implements', 'resolved-by', 'revision', 'references', 'depends-on', 'validates', 'derived-from', 'builds-on'].includes(value.relation)) continue
+          if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'CONTINUUM_REFERENCE', 'CONTINUUM_REVISION', 'EXECUTION_MEMBERSHIP', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST', 'NATIVE_ARTIFACT_CAUSAL', 'NATIVE_ARTIFACT_SCOPE', 'NATIVE_ARTIFACT_REQUEST'].includes(value.evidenceKind)) continue
           const from = add(value.from), to = add(value.to)
-          const state = row.state === 'CONFLICT' ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : value.evidenceKind === 'HANDOFF_DECLARED' ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE','NATIVE_ARTIFACT_REQUEST','NATIVE_ARTIFACT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
-          edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest })
+          const invalidAuthority = value.evidenceKind === 'NATIVE_ARTIFACT_CAUSAL' && !nativeAuthority(row.source, value.evidenceRef)
+          const state = row.state === 'CONFLICT' || invalidAuthority ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : ['HANDOFF_DECLARED', 'CONTINUUM_TYPED_RELATION'].includes(value.evidenceKind) ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE','NATIVE_ARTIFACT_REQUEST','NATIVE_ARTIFACT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
+          const source = this.source(row.source)
+          edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: invalidAuthority ? 'SOURCE_STALE' : value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, revision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest,
+            confidenceClass: provenanceClass(value.evidenceKind, state), coverage: state === 'UNKNOWN' || state === 'STALE' || source?.status === 'PARTIAL' ? 'PARTIAL' : 'OBSERVED_INDEX', revisionScope: value.evidenceKind === 'LEDGER_EVIDENCE_FOR' ? 'ARTIFACT_IDENTITY_ONLY' : 'EXACT_SOURCE' })
           const next = from === key ? value.to : value.from, target = this.key(next)
           if (!visited.has(target)) {
             visited.add(target); const path = [...item.path, row.id]; paths.push({ target, edges: path })
-            if (row.state === 'OBSERVED') pending.push({ entity: next, path })
+            if (row.state === 'OBSERVED' && !invalidAuthority) pending.push({ entity: next, path })
           }
         }
       }
     }
-    if (pending.length) bounded = true
+    if (pending.length && depthLimit > 1) bounded = true
     return { nodes: [...nodes.values()], edges: [...edges.values()], paths, bounded }
   }
   map(selector: RegistryEntity, maxEdges = 24) {

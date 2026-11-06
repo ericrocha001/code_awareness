@@ -168,7 +168,7 @@ export class ArtifactStore {
   private readonly db: Database.Database
   private readonly graphIndex: ArtifactGraph
   suggestions(query: ContinuumSuggestionQuery) { return new ArtifactSuggestions(this.db, this.repositoryId).query(query) }
-  graph(query: ContinuumGraphQuery = {}) { return this.graphIndex.query(query, filter => this.list(filter)) }
+  graph(query: ContinuumGraphQuery = {}, options: { indexOnly?: boolean } = {}) { return this.graphIndex.query(query, filter => this.list(filter), options) }
   backfillReferences(limit = 100) { return this.graphIndex.backfill(limit) }
   facets(): ContinuumFacet[] {
     const rows = this.db.prepare(`SELECT key, CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END AS value_json,
@@ -422,6 +422,14 @@ export class ArtifactStore {
   get(artifactId: string): Artifact | null {
     const row = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(artifactId) as ArtifactRow | undefined
     return row ? this.decode(row) : null
+  }
+  getRevision(artifactId: string, revision: number): Artifact | null {
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('INVALID_ARTIFACT_REVISION')
+    const row = this.db.prepare('SELECT snapshot_json FROM artifact_revisions WHERE artifact_id=? AND revision=?').get(artifactId, revision) as { snapshot_json: string } | undefined
+    if (!row) return null
+    const artifact = JSON.parse(row.snapshot_json) as Artifact
+    if (artifact.artifactId !== artifactId || artifact.revision !== revision || computeContentHash(artifact.rawMarkdown) !== artifact.contentHash) throw new Error('ARTIFACT_REVISION_INTEGRITY')
+    return artifact
   }
 
   list(filter: ListArtifactsFilter = {}): ArtifactPage {
