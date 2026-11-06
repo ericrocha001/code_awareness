@@ -10,7 +10,7 @@ export function nativeObservationBatch(event: NativeHookEnvelope): RegistryBatch
   const observation: RegistryEntity = { kind: 'EXECUTION', id: `native-observation:${event.eventId}` }
   const invocation: RegistryEntity | undefined = event.invocationId ? { kind: 'EXECUTION', id: `native-invocation:${event.invocationId}` } : undefined
   const evidence = { evidenceKind: 'NATIVE_HOOK_OBSERVED', evidenceRef: event.eventId, digest: event.digest, freshness: 'OBSERVED_SNAPSHOT' }
-  return { repositoryId: event.repositoryId, source: `NATIVE_HOOK:${event.eventId}`, revision: event.digest, status: 'COMPLETE', entities: [session, observation], edges: [
+  return { repositoryId: event.repositoryId, source: `NATIVE_HOOK:${event.eventId}`, revision: event.digest, status: 'COMPLETE', cursor: JSON.stringify(event), entities: [session, observation], edges: [
     { from: observation, relation: event.event, to: session, ...evidence },
     { from: observation, relation: 'observed-in', to: { kind: 'WORKTREE', id: `${event.worktreeId}:${event.generation}` }, ...evidence },
     ...(invocation ? [{ from: observation, relation: 'invocation', to: invocation, ...evidence }] : []),

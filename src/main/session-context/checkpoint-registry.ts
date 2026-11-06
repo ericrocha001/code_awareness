@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { digest } from './privacy'
 import { sessionIdentity, sessionSelector } from './session-identity'
+import { parseNativeEnvelope, type NativeHookEnvelope } from './native-hooks'
 
 export type EntityKind = 'COMMIT' | 'CHECKPOINT' | 'SESSION' | 'PR' | 'ARTIFACT' | 'PROOF' | 'WORKTREE' | 'EXECUTION'
 export interface RegistryEntity { kind: EntityKind; id: string }
@@ -30,6 +31,19 @@ export const REGISTRY_SCHEMA = `
 const kinds: EntityKind[] = ['COMMIT', 'CHECKPOINT', 'SESSION', 'PR', 'ARTIFACT', 'PROOF', 'WORKTREE', 'EXECUTION']
 export class CheckpointRegistry {
   constructor(private readonly db: Database.Database, readonly repositoryId: string) {}
+  nativeHookEvidence(worktreeId: string, generation: string, sessionId?: string): NativeHookEnvelope[] {
+    const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
+    const rows = this.db.prepare(`SELECT DISTINCT s.cursor FROM registry_edges e JOIN registry_sources s ON e.source=s.source
+      WHERE e.toId=? AND e.state='OBSERVED' AND e.source LIKE 'NATIVE_HOOK:%'
+      AND (? IS NULL OR CASE WHEN json_valid(s.cursor) THEN json_extract(s.cursor,'$.sessionId') ELSE NULL END=?)
+      ORDER BY s.observedAt DESC LIMIT 8`).all(scope, sessionId ?? null, sessionId ?? null) as { cursor: string | null }[]
+    return rows.flatMap(row => {
+      try {
+        const event = parseNativeEnvelope(row.cursor ?? '')
+        return event.repositoryId === this.repositoryId && event.worktreeId === worktreeId && event.generation === generation ? [event] : []
+      } catch { return [] }
+    })
+  }
   nativeArtifactCandidates(worktreeId: string, generation: string, after = '', limit = 32): string[] {
     const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
     const rows = this.db.prepare(`SELECT DISTINCT e.fromId FROM registry_edges e

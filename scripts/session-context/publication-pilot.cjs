@@ -4,6 +4,7 @@ const { join, resolve } = require('node:path')
 const { randomUUID } = require('node:crypto')
 const { buildSync } = require('esbuild')
 const assert = require('node:assert/strict')
+const { summarizeHookList } = require('../../src/shared/native-hook-preflight.cjs')
 const { Client } = require('@modelcontextprotocol/sdk/client/index.js')
 const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js')
 
@@ -40,7 +41,7 @@ async function main() {
   const exitCode = await new Promise((resolveExit, reject) => {
     const child = spawn(codex, args, { cwd: root, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] })
     const send = value => child.stdin.write(JSON.stringify(value) + '\n')
-    let threadId
+    let threadId, expectedHandlers
     let pending = '', completed = false
     const timer = setTimeout(() => { diagnostics.add('CODEX_TIMEOUT'); child.kill() }, 180000)
     child.stdout.on('data', chunk => {
@@ -61,7 +62,9 @@ async function main() {
           send({ id: 2, method: 'hooks/list', params: { cwds: [root] } })
         } else if (event.id === 2) {
           const hooks = event.result.data.flatMap(entry => entry.hooks)
-          if (hooks.length !== 7 || hooks.some(hook => hook.source !== 'sessionFlags' || !hook.enabled)) {
+          expectedHandlers = hooks.map(hook => ({ key: hook.key, event: hook.eventName[0].toUpperCase() + hook.eventName.slice(1) }))
+          const preflight = summarizeHookList(event.result, expectedHandlers)
+          if (preflight.matched !== 7 || preflight.state === 'UNKNOWN' || hooks.some(hook => hook.source !== 'sessionFlags' || !hook.enabled)) {
             diagnostics.add('HOOK_PREFLIGHT_FAILED'); child.kill(); continue
           }
           const state = Object.fromEntries(hooks.map(hook => [hook.key, { trusted_hash: hook.currentHash, enabled: true }]))
@@ -70,8 +73,8 @@ async function main() {
           threadId = event.result.thread.id
           send({ id: 4, method: 'hooks/list', params: { threadId } })
         } else if (event.id === 4) {
-          const hooks = event.result.data.flatMap(entry => entry.hooks)
-          if (hooks.length !== 7 || hooks.some(hook => hook.trustStatus !== 'trusted')) {
+          const preflight = summarizeHookList(event.result, expectedHandlers)
+          if (preflight.state !== 'TRUSTED') {
             diagnostics.add('HOOK_TRUST_NOT_APPLIED'); child.kill(); continue
           }
           send({ id: 5, method: 'turn/start', params: { threadId, input: [{ type: 'text', text: prompt }] } })

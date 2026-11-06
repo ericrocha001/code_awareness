@@ -3,6 +3,54 @@ import { dirname, join, resolve } from 'node:path'
 import { boundedFile, nativeDigest, nativeGitIdentity, nativeHookEvents, prepareNativeSpool, readNativeBinding, type NativeHookBinding } from './native-hooks'
 import type { WorktreeRecord } from '../git-operations/git-worktree-registry'
 
+export interface NativeInstallationInspection {
+  state: 'CONFIGURED' | 'MISSING' | 'INCOMPATIBLE' | 'UNKNOWN'
+  reasonCode: string
+  digest?: string
+  installed: number
+  expected: 7
+  handlers: { key: string; event: typeof nativeHookEvents[number] }[]
+}
+export function inspectNativeInstallation(root: string, target: { repositoryId: string; worktreeId: string; generation: string }, platform = process.platform): NativeInstallationInspection {
+  const result = (state: NativeInstallationInspection['state'], reasonCode: string, installed = 0): NativeInstallationInspection => ({ state, reasonCode, installed, expected: 7, handlers: [] })
+  const directory = join(root, '.code-awareness/native-hooks'), configPath = join(root, '.codex/hooks.json')
+  try {
+    if (!existsSync(join(directory, 'binding.json')) || !existsSync(configPath)) return result('MISSING', 'NATIVE_CONFIG_MISSING')
+    const binding = readNativeBinding(join(directory, 'binding.json')), identity = nativeGitIdentity(root)
+    if (binding.repositoryId !== target.repositoryId || binding.worktreeId !== target.worktreeId || binding.generation !== target.generation ||
+      binding.root !== identity.root || binding.directoryIdentity !== identity.directoryIdentity || binding.commonDirectory !== identity.commonDirectory || binding.spool !== join(directory, 'spool')) return result('INCOMPATIBLE', 'WORKTREE_STALE')
+    if ([directory, dirname(configPath), binding.spool].some(path => realpathSync(path) !== resolve(path))) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE')
+    if (!binding.enabled) return result('INCOMPATIBLE', 'NATIVE_CAPTURE_DISABLED')
+    if (!existsSync(join(directory, 'installation.json'))) return result('UNKNOWN', 'INSTALLATION_SNAPSHOT_MISSING')
+    const snapshot: HookSnapshot = JSON.parse(boundedFile(join(directory, 'installation.json'), 131072)), text = boundedFile(configPath, 65536)
+    if (snapshot.schema !== 1 || snapshot.path !== configPath || snapshot.installedDigest !== nativeDigest(text)) return result('INCOMPATIBLE', 'HOOK_CONFIG_DRIFT')
+    const config = JSON.parse(text), handlers: NativeInstallationInspection['handlers'] = []
+    const bindingPath = join(directory, 'binding.json')
+    for (const event of nativeHookEvents) {
+      const matches: NativeInstallationInspection['handlers'] = []
+      if (!Array.isArray(config.hooks?.[event])) continue
+      for (const [groupIndex, group] of config.hooks[event].entries()) {
+        if (!Array.isArray(group?.hooks)) continue
+        for (const [handlerIndex, hook] of group.hooks.entries()) {
+          if (hook?.type !== 'command' || typeof hook.command !== 'string') continue
+          const paths = /^"([^"\r\n]+)" "([^"\r\n]+)" "([^"\r\n]+)"$/.exec(hook.command)
+          if (!paths || paths[3] !== bindingPath) continue
+          if (group.matcher !== undefined || hook.async === true || hook.timeout !== 3) return result('INCOMPATIBLE', 'NATIVE_HANDLER_INCOMPATIBLE', handlers.length)
+          if (paths.slice(1).some(path => resolve(path) !== path || !existsSync(path) || realpathSync(path) !== path)) return result('INCOMPATIBLE', 'HOOK_PATH_UNAVAILABLE', handlers.length)
+          const windows = '& ' + paths.slice(1).map(path => "'" + path.replaceAll("'", "''") + "'").join(' ')
+          if (platform === 'win32' && hook.commandWindows !== windows) return result('INCOMPATIBLE', 'WINDOWS_COMMAND_INCOMPATIBLE', handlers.length)
+          const name = event.replace(/[A-Z]/g, (letter, offset) => (offset ? '_' : '') + letter.toLowerCase())
+          matches.push({ key: `${configPath}:${name}:${groupIndex}:${handlerIndex}`, event })
+        }
+      }
+      if (matches.length > 1) return result('INCOMPATIBLE', 'NATIVE_HANDLER_AMBIGUOUS', handlers.length)
+      handlers.push(...matches)
+    }
+    if (handlers.length !== 7) return result('INCOMPATIBLE', 'NATIVE_HANDLERS_MISSING', handlers.length)
+    return { state: 'CONFIGURED', reasonCode: 'INSTALLATION_VERIFIED', digest: snapshot.installedDigest, installed: 7, expected: 7, handlers }
+  } catch { return result('UNKNOWN', 'INSTALLATION_UNVERIFIABLE') }
+}
+
 interface HookSnapshot { schema: 1; path: string; before: string | null; installedDigest: string }
 export function composeNativeHooks(text: string | null, command: string, commandWindows?: string): string {
   const value = text === null ? {} : JSON.parse(text)
