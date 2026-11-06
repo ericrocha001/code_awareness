@@ -35,6 +35,11 @@ it('get_system_health separates current native capture from historical gaps and 
       diagnostics: [expect.objectContaining({ phase: 'NORMALIZE', eventType: 'PreToolUse', reasonCode: 'INVOCATION_ID_MISSING' })] } } })
   expect(text.length).toBeLessThan(8192)
   expect(text).not.toContain('private-native-session'); expect(text).not.toContain(f.root)
+  const readiness = JSON.parse(text).nativeCapture.readiness
+  expect(readiness).toMatchObject({ schemaVersion: 1, trust: { state: 'UNKNOWN', reasonCode: 'TRUST_NOT_INSPECTED' }, execution: { state: 'OBSERVED', freshness: 'HISTORICAL' } })
+  const explicit = await adapter.callTool('get_system_health', { feature: 'session_context', inspectNativeTrust: true })
+  expect(explicit.isError).toBeFalsy()
+  expect(JSON.parse((explicit.content[0] as { text: string }).text).nativeCapture.readiness.trust).toMatchObject({ state: 'UNKNOWN', reasonCode: 'SESSION_SCOPE_UNAVAILABLE' })
 }, 20000)
 function fixture(repositoryId = 'A') {
   const base = mkdtempSync(join(tmpdir(), 'capture-health-')), root = join(base, 'repo'), disabled = join(base, 'disabled'), hooks = join(base, 'hooks')

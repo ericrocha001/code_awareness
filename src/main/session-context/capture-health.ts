@@ -10,6 +10,7 @@ import { observeCheckpoint } from './checkpoint-observation'
 import type { CaptureHealthObservation } from './capture-health-types'
 
 export const captureHealthQuery = z.object({ worktreeId: z.string().regex(/^[a-f0-9]{64}$/).optional(), generation: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  inspectNativeTrust: z.boolean().default(false),
   cycleId: z.string().min(1).max(200).default('worktree'), trigger: z.enum(['INSPECT', 'RECHECK', 'BEGIN', 'LOCAL_COMMIT']).default('INSPECT'),
   agent: z.string().regex(/^[a-z][a-z0-9-]{0,79}$/).optional(),
   commitSha: z.string().regex(/^[a-f0-9]{40}$/).optional() }).strict().refine(q => !q.worktreeId === !q.generation)
