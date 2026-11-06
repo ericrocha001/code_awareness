@@ -42,14 +42,22 @@ import {
 } from '../unitflow'
 import {
   WorkspaceBindingService,
+  ExecutionAttemptService,
   BuildXWorkspaceBindingConflictError,
   BuildXWorkspaceNotFoundError,
   BuildXWorkspaceInvalidError,
   BuildXWorkspaceEvidenceUnavailableError,
   BuildXWorkspaceRepositoryMismatchError,
+  ExecutionInvalidAttemptIdError,
+  ExecutionAttemptConflictError,
+  ExecutionAttemptIdConflictError,
+  ExecutionAttemptNotFoundError,
   type BuildXWorkspaceBindingRecord,
   type BuildXInspectWorkspaceResult,
-  type GitOperationsPort
+  type GitOperationsPort,
+  type ExecutionAttemptRecord,
+  type ExecutionAttemptStatus,
+  type PrepareExecutionAttemptOptions
 } from '../execution'
 import type { BranchInventory, BranchRecord } from '../../../shared/types/branch-orchestration-types'
 import {
@@ -322,7 +330,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       // Garante que o schema_version foi migrado (pelo menos versão 2, atualmente 4)
       const versionDb = new Database(dbPath)
       const row = versionDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-      expect(['2', '3', '4', '5', '6', '7']).toContain(row.value)
+      expect(['2', '3', '4', '5', '6', '7', '8']).toContain(row.value)
       versionDb.close()
 
       reopened.close()
@@ -1279,7 +1287,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que schema foi promovido (v3 ou superior)
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(['3', '4', '5', '6', '7']).toContain(versionRow.value)
+        expect(['3', '4', '5', '6', '7', '8']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Registra plano ativo
@@ -1686,7 +1694,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         dbRaw.exec(`
           CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           INSERT INTO smc_meta (key, value) VALUES ('repository_id', '${repoId}');
-          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '8');
+          INSERT INTO smc_meta (key, value) VALUES ('schema_version', '9');
         `)
         dbRaw.close()
 
@@ -1697,7 +1705,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que o schema_version não foi alterado
         const checkDb = new Database(dbPath)
         const row = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(row.value).toBe('8')
+        expect(row.value).toBe('9')
         checkDb.close()
       })
 
@@ -1805,7 +1813,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que schema foi promovido para v4 ou superior (atualmente v5)
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(['4', '5', '6', '7']).toContain(versionRow.value)
+        expect(['4', '5', '6', '7', '8']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Define 3 unidades com dependências estritamente anteriores
@@ -2371,7 +2379,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
 
         const checkDb = new Database(dbPath)
         const verRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(['5', '6', '7']).toContain(verRow.value)
+        expect(['5', '6', '7', '8']).toContain(verRow.value)
 
         const stateRows = checkDb.prepare('SELECT unit_id, status, revision FROM smc_unit_states WHERE plan_id = ? ORDER BY unit_id').all(p1) as { unit_id: string; status: string; revision: number }[]
         expect(stateRows).toHaveLength(2)
@@ -2873,7 +2881,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         // Verifica que schema_version é 6 ou superior no banco
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(['6', '7']).toContain(versionRow.value)
+        expect(['6', '7', '8']).toContain(versionRow.value)
         checkDb.close()
 
         // 3. Fecha e reabre em nova instância de serviço
@@ -3658,10 +3666,10 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
           { reservationId }
         )
 
-        // Verifica schema_version = 7 após migração lazy
+        // Verifica schema_version >= 7 após migração lazy
         const checkDb = new Database(dbPath)
         const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(versionRow.value).toBe('7')
+        expect(['7', '8']).toContain(versionRow.value)
         checkDb.close()
 
         expect(result.kind).toBe('RESERVED')
@@ -3718,7 +3726,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         reopenedSmc.close()
       })
 
-      it('recusa esquema futuro (> 7) com SmcUnsupportedSchemaError sem alterar banco', () => {
+      it('recusa esquema futuro (> 8) com SmcUnsupportedSchemaError sem alterar banco', () => {
         const repoFuture = 'repo-future-schema'
         const dbPath = smcDatabasePath(tempBaseDir, repoFuture)
         mkdirSync(dirname(dbPath), { recursive: true })
@@ -3727,7 +3735,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         rawDb.exec(`
           CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
           INSERT INTO smc_meta VALUES ('repository_id', '${repoFuture}');
-          INSERT INTO smc_meta VALUES ('schema_version', '8');
+          INSERT INTO smc_meta VALUES ('schema_version', '9');
         `)
         rawDb.close()
 
@@ -3737,7 +3745,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
 
         const checkDb = new Database(dbPath)
         const version = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
-        expect(version.value).toBe('8')
+        expect(version.value).toBe('9')
         checkDb.close()
       })
     })
@@ -4160,6 +4168,565 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
           expect(serialized).not.toContain('Obj1')
           expect(serialized).not.toContain('Crit1')
         }
+      })
+    })
+  })
+
+  describe('BuildX Execution-01 — Preparação durável de tentativa vinculada à reserva (Provas Dirigidas)', () => {
+    const repoId = 'repo-execution-01'
+    let smc: SessionMemoryCentralService
+
+    function createFixtureInventory(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+    }): BranchInventory {
+      const worktreeId = options?.worktreeId ?? 'wt-ex01-01'
+      const generation = options?.generation ?? 'gen-ex01-1'
+      const branchName = options?.branch ?? 'feature-ex01'
+      const head = options?.head ?? '1111111111111111111111111111111111111111'
+
+      const worktree: any = {
+        worktreeId,
+        generation,
+        path: `/mock/path/${worktreeId}`,
+        head,
+        branch: branchName,
+        detached: false,
+        locked: false,
+        missing: false,
+        prunable: false
+      }
+
+      const branchRecord: BranchRecord = {
+        key: `key-${branchName}`,
+        repositoryId: repoId,
+        ref: `refs/heads/${branchName}`,
+        name: branchName,
+        namespace: 'LOCAL',
+        head,
+        upstream: null,
+        generation: 'branch-gen-1',
+        revision: 'branch-rev-1',
+        creation: { at: '2026-11-05T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-05T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+
+      return {
+        repositoryId: repoId,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-05T00:00:00.000Z',
+        revision: 'inv-ex01-1',
+        worktrees: [worktree],
+        branches: [branchRecord],
+        unassignedWorktrees: []
+      }
+    }
+
+    function createFixturePort(inventory: BranchInventory): GitOperationsPort {
+      return {
+        getBranchInventory: async () => inventory,
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+    }
+
+    beforeEach(() => {
+      smc = new SessionMemoryCentralService(tempBaseDir)
+    })
+
+    afterEach(() => {
+      smc.close()
+    })
+
+    describe('Prova 1 — Migração v7→v8, preparação durável da tentativa e recuperação pós-restart', () => {
+      it('migra banco v7 real para v8, prepara tentativa PREPARED, fecha/reabre e recupera registro intacto', async () => {
+        const legacySessionId = '00000000-0000-4000-9006-000000000001'
+        const legacyPlanId = '00000000-0000-4000-9006-000000000002'
+        const legacyUnit1Id = '00000000-0000-4000-9006-000000000003'
+        const legacyReservationId = '00000000-0000-4000-9006-000000000004'
+        const attemptId = '00000000-0000-4000-9006-000000000005'
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        mkdirSync(dirname(dbPath), { recursive: true })
+
+        // 1. Cria esquema v7 manualmente
+        const v7Db = new Database(dbPath)
+        const now = new Date().toISOString()
+        v7Db.exec(`
+          CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          INSERT INTO smc_meta VALUES ('repository_id', '${repoId}');
+          INSERT INTO smc_meta VALUES ('schema_version', '7');
+
+          CREATE TABLE smc_sessions (
+            session_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('OPEN', 'CLOSED')),
+            revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_sessions VALUES ('${legacySessionId}', '${repoId}', 'OPEN', 1, '${now}', '${now}');
+
+          CREATE TABLE smc_plans (
+            plan_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, repository_id TEXT NOT NULL,
+            title TEXT NOT NULL, source_artifact_id TEXT,
+            status TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_plans VALUES ('${legacyPlanId}', '${legacySessionId}', '${repoId}', 'Plano V7', NULL, 'ACTIVE', 1, '${now}', '${now}');
+
+          CREATE TABLE smc_plan_units (
+            unit_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, position INTEGER NOT NULL,
+            title TEXT NOT NULL, objective TEXT NOT NULL, acceptance_criteria TEXT NOT NULL,
+            depends_on_json TEXT, created_at TEXT NOT NULL
+          );
+          INSERT INTO smc_plan_units VALUES ('${legacyUnit1Id}', '${legacyPlanId}', 1, 'U1', 'Obj1', 'Crit1', NULL, '${now}');
+
+          CREATE TABLE smc_unit_states (
+            unit_id TEXT PRIMARY KEY, plan_id TEXT NOT NULL, status TEXT NOT NULL,
+            revision INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_unit_states VALUES ('${legacyUnit1Id}', '${legacyPlanId}', 'RESERVED', 2, '${now}', '${now}');
+
+          CREATE TABLE smc_session_worktrees (
+            session_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL,
+            worktree_id TEXT NOT NULL, generation TEXT NOT NULL, branch TEXT NOT NULL,
+            head_at_bind TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_session_worktrees VALUES (
+            '${legacySessionId}', '${repoId}', 'wt-ex01-01', 'gen-ex01-1', 'feature-ex01',
+            '1111111111111111111111111111111111111111', '${now}', '${now}'
+          );
+
+          CREATE TABLE smc_unit_reservations (
+            reservation_id TEXT PRIMARY KEY, repository_id TEXT NOT NULL,
+            session_id TEXT NOT NULL, plan_id TEXT NOT NULL, unit_id TEXT NOT NULL,
+            worktree_id TEXT NOT NULL, generation TEXT NOT NULL, branch TEXT NOT NULL,
+            head_observed_at_reservation TEXT NOT NULL, unit_state_revision INTEGER NOT NULL,
+            status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          );
+          INSERT INTO smc_unit_reservations VALUES (
+            '${legacyReservationId}', '${repoId}', '${legacySessionId}', '${legacyPlanId}', '${legacyUnit1Id}',
+            'wt-ex01-01', 'gen-ex01-1', 'feature-ex01',
+            '1111111111111111111111111111111111111111', 2, 'ACTIVE', '${now}', '${now}'
+          );
+        `)
+        v7Db.close()
+
+        // 2. Abre com ExecutionAttemptService para disparar migração v7 -> v8 lazy
+        const inventory = createFixtureInventory({
+          worktreeId: 'wt-ex01-01',
+          generation: 'gen-ex01-1',
+          branch: 'feature-ex01',
+          head: '1111111111111111111111111111111111111111'
+        })
+        const port = createFixturePort(inventory)
+        const attemptService = new ExecutionAttemptService(smc, port)
+
+        // 3. Prepara tentativa
+        const attempt = await attemptService.prepareExecutionAttempt(
+          repoId,
+          legacySessionId,
+          legacyReservationId,
+          { attemptId }
+        )
+
+        // Verifica schema_version = 8 após migração lazy
+        const checkDb = new Database(dbPath)
+        const versionRow = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
+        expect(versionRow.value).toBe('8')
+        checkDb.close()
+
+        expect(attempt.attemptId).toBe(attemptId)
+        expect(attempt.repositoryId).toBe(repoId)
+        expect(attempt.sessionId).toBe(legacySessionId)
+        expect(attempt.planId).toBe(legacyPlanId)
+        expect(attempt.unitId).toBe(legacyUnit1Id)
+        expect(attempt.reservationId).toBe(legacyReservationId)
+        expect(attempt.worktreeId).toBe('wt-ex01-01')
+        expect(attempt.generation).toBe('gen-ex01-1')
+        expect(attempt.branch).toBe('feature-ex01')
+        expect(attempt.headObservedAtPreparation).toBe('1111111111111111111111111111111111111111')
+        expect(attempt.status).toBe('PREPARED')
+        expect(attempt.revision).toBe(1)
+        expect((attempt as any).path).toBeUndefined()
+
+        // 4. Fecha e reabre em nova instância de serviço
+        smc.close()
+        const reopenedSmc = new SessionMemoryCentralService(tempBaseDir)
+        const reopenedService = new ExecutionAttemptService(reopenedSmc, port)
+
+        const recovered = reopenedService.getExecutionAttempt(repoId, attemptId)
+        expect(recovered).not.toBeNull()
+        expect(recovered?.attemptId).toBe(attemptId)
+        expect(recovered?.status).toBe('PREPARED')
+        expect(recovered?.revision).toBe(1)
+        expect(recovered?.reservationId).toBe(legacyReservationId)
+
+        const prepared = reopenedService.getPreparedExecutionAttempt(repoId, legacySessionId)
+        expect(prepared?.attemptId).toBe(attemptId)
+
+        // Reserva e unidade permanecem inalteradas
+        const res = reopenedSmc.getStore(repoId).getReservation(legacyReservationId)
+        expect(res?.status).toBe('ACTIVE')
+        const unitState = reopenedSmc.getUnitState(repoId, legacySessionId, legacyPlanId, legacyUnit1Id)
+        expect(unitState?.status).toBe('RESERVED')
+        expect(unitState?.revision).toBe(2)
+
+        reopenedSmc.close()
+      })
+
+      it('recusa esquema futuro (> 8) com SmcUnsupportedSchemaError sem alterar banco', () => {
+        const repoFuture = 'repo-future-schema-v9'
+        const dbPath = smcDatabasePath(tempBaseDir, repoFuture)
+        mkdirSync(dirname(dbPath), { recursive: true })
+
+        const rawDb = new Database(dbPath)
+        rawDb.exec(`
+          CREATE TABLE smc_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+          INSERT INTO smc_meta VALUES ('repository_id', '${repoFuture}');
+          INSERT INTO smc_meta VALUES ('schema_version', '9');
+        `)
+        rawDb.close()
+
+        expect(() => {
+          new SessionMemoryCentralStore(dbPath, repoFuture)
+        }).toThrow(SmcUnsupportedSchemaError)
+
+        const checkDb = new Database(dbPath)
+        const version = checkDb.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string }
+        expect(version.value).toBe('9')
+        checkDb.close()
+      })
+    })
+
+    describe('Prova 2 — Idempotência de replay e conflitos de attemptId', () => {
+      it('replay do mesmo attemptId devolve o mesmo registro sem mutações e sem consultar Git', async () => {
+        const session = smc.createSession(repoId)
+        const unitFlow = new UnitFlowService(smc)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '00000000-0000-4000-9006-000000000010',
+          title: 'Plano Replay Execution'
+        })
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+          { unitId: '00000000-0000-4000-9006-000000000011', title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+        ])
+
+        const inv = createFixtureInventory()
+        const wsService = new WorkspaceBindingService(smc, createFixturePort(inv))
+        await wsService.bindWorkspace(repoId, session.sessionId, 'wt-ex01-01')
+
+        const resService = new UnitFlowReservationService(smc, createFixturePort(inv))
+        const reservationId = '00000000-0000-4000-9006-000000000012'
+        const resResult = await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, { reservationId })
+        expect(resResult.kind).toBe('RESERVED')
+
+        let gitCalled = false
+        const customPort: GitOperationsPort = {
+          getBranchInventory: async () => {
+            gitCalled = true
+            return inv
+          },
+          getCoordinationSnapshot: async () => ({ reference: false })
+        }
+
+        const attemptService = new ExecutionAttemptService(smc, customPort)
+        const attemptId = '00000000-0000-4000-9006-000000000013'
+
+        // Primeira preparação
+        const first = await attemptService.prepareExecutionAttempt(repoId, session.sessionId, reservationId, { attemptId })
+        expect(first.status).toBe('PREPARED')
+        expect(gitCalled).toBe(true)
+
+        // Configura port para falhar caso chamado
+        gitCalled = false
+        const failingPort: GitOperationsPort = {
+          getBranchInventory: async () => {
+            throw new Error('Git network down')
+          },
+          getCoordinationSnapshot: async () => {
+            throw new Error('Coordination down')
+          }
+        }
+        const replayService = new ExecutionAttemptService(smc, failingPort)
+
+        // Replay com mesmo attemptId
+        const replay = await replayService.prepareExecutionAttempt(repoId, session.sessionId, reservationId, { attemptId })
+        expect(replay.status).toBe('PREPARED')
+        expect(replay.attemptId).toBe(first.attemptId)
+        expect(replay.createdAt).toBe(first.createdAt)
+        expect(replay.updatedAt).toBe(first.updatedAt)
+        expect(replay.revision).toBe(first.revision)
+        expect(gitCalled).toBe(false) // Git não foi chamado no replay
+
+        // Conflito: reuso do mesmo attemptId com reservationId diferente
+        await expect(
+          attemptService.prepareExecutionAttempt(
+            repoId,
+            session.sessionId,
+            '00000000-0000-4000-9006-999999999999',
+            { attemptId }
+          )
+        ).rejects.toThrow(ExecutionAttemptIdConflictError)
+
+        // Tentativa de outra tentativa PREPARED na mesma sessão enquanto a primeira está PREPARED
+        const secondAttemptId = '00000000-0000-4000-9006-000000000014'
+        await expect(
+          attemptService.prepareExecutionAttempt(repoId, session.sessionId, reservationId, { attemptId: secondAttemptId })
+        ).rejects.toThrow(ExecutionAttemptConflictError)
+      })
+
+      it('duas stores concorrentes competindo pela mesma sessão/reserva com attemptIds distintos admitem apenas um vencedor', async () => {
+        const session = smc.createSession(repoId)
+        const unitFlow = new UnitFlowService(smc)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '00000000-0000-4000-9006-000000000020',
+          title: 'Plano Concorrência Execution'
+        })
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+          { unitId: '00000000-0000-4000-9006-000000000021', title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+        ])
+
+        const inv = createFixtureInventory()
+        const wsService = new WorkspaceBindingService(smc, createFixturePort(inv))
+        await wsService.bindWorkspace(repoId, session.sessionId, 'wt-ex01-01')
+
+        const resService = new UnitFlowReservationService(smc, createFixturePort(inv))
+        const reservationId = '00000000-0000-4000-9006-000000000022'
+        await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, { reservationId })
+
+        const store1 = smc.getStore(repoId)
+        const store2 = new SessionMemoryCentralStore(smcDatabasePath(tempBaseDir, repoId), repoId)
+
+        const attemptId1 = '00000000-0000-4000-9006-000000000023'
+        const attemptId2 = '00000000-0000-4000-9006-000000000024'
+
+        const r1 = store1.prepareExecutionAttempt({
+          attemptId: attemptId1,
+          sessionId: session.sessionId,
+          reservationId,
+          expectedBinding: {
+            worktreeId: 'wt-ex01-01',
+            generation: 'gen-ex01-1',
+            branch: 'feature-ex01'
+          },
+          headObserved: '1111111111111111111111111111111111111111'
+        })
+        expect(r1.status).toBe('PREPARED')
+
+        // Segunda store tenta preparar para a mesma sessão/reserva
+        expect(() => {
+          store2.prepareExecutionAttempt({
+            attemptId: attemptId2,
+            sessionId: session.sessionId,
+            reservationId,
+            expectedBinding: {
+              worktreeId: 'wt-ex01-01',
+              generation: 'gen-ex01-1',
+              branch: 'feature-ex01'
+            },
+            headObserved: '1111111111111111111111111111111111111111'
+          })
+        }).toThrow(ExecutionAttemptConflictError)
+
+        store2.close()
+      })
+    })
+
+    describe('Prova 3 — Admissão fail-closed (sessão, plano, reserva, unidade e workspace)', () => {
+      it('rejeita admissão se sessão estiver CLOSED, reserva não for ACTIVE, ou workspace não for CURRENT', async () => {
+        const session = smc.createSession(repoId)
+        const unitFlow = new UnitFlowService(smc)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '00000000-0000-4000-9006-000000000030',
+          title: 'Plano Fail-Closed'
+        })
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+          { unitId: '00000000-0000-4000-9006-000000000031', title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+        ])
+
+        const inv = createFixtureInventory()
+        const wsService = new WorkspaceBindingService(smc, createFixturePort(inv))
+        await wsService.bindWorkspace(repoId, session.sessionId, 'wt-ex01-01')
+
+        const resService = new UnitFlowReservationService(smc, createFixturePort(inv))
+        const reservationId = '00000000-0000-4000-9006-000000000032'
+        await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, { reservationId })
+
+        const port = createFixturePort(inv)
+        const attemptService = new ExecutionAttemptService(smc, port)
+
+        // 1. Reserva inexistente
+        await expect(
+          attemptService.prepareExecutionAttempt(
+            repoId,
+            session.sessionId,
+            '00000000-0000-4000-9006-999999999999',
+            { attemptId: '00000000-0000-4000-9006-000000000033' }
+          )
+        ).rejects.toThrow(UnitFlowReservationNotFoundError)
+
+        // 2. Workspace STALE
+        const staleInv = createFixtureInventory({ head: 'different-head' })
+        // worktree head diverged from local branch head -> STALE
+        const stalePort: GitOperationsPort = {
+          getBranchInventory: async () => ({
+            ...staleInv,
+            worktrees: [{ ...staleInv.worktrees[0], head: 'diverged-head' }]
+          }),
+          getCoordinationSnapshot: async () => ({ reference: false })
+        }
+        const staleAttemptService = new ExecutionAttemptService(smc, stalePort)
+        await expect(
+          staleAttemptService.prepareExecutionAttempt(
+            repoId,
+            session.sessionId,
+            reservationId,
+            { attemptId: '00000000-0000-4000-9006-000000000034' }
+          )
+        ).rejects.toThrow(BuildXWorkspaceInvalidError)
+
+        // 3. Sessão CLOSED
+        const session2 = smc.createSession(repoId)
+        const rawDb = new Database(smcDatabasePath(tempBaseDir, repoId))
+        rawDb.prepare('UPDATE smc_sessions SET status = ? WHERE session_id = ?').run('CLOSED', session2.sessionId)
+        rawDb.close()
+
+        await expect(
+          attemptService.prepareExecutionAttempt(
+            repoId,
+            session2.sessionId,
+            reservationId,
+            { attemptId: '00000000-0000-4000-9006-000000000035' }
+          )
+        ).rejects.toThrow(SmcSessionClosedError)
+
+        // 4. Drift de binding entre observação e transação
+        const store = smc.getStore(repoId)
+        expect(() => {
+          store.prepareExecutionAttempt({
+            attemptId: '00000000-0000-4000-9006-000000000036',
+            sessionId: session.sessionId,
+            reservationId,
+            expectedBinding: {
+              worktreeId: 'wt-ex01-01',
+              generation: 'gen-drifted-diff',
+              branch: 'feature-ex01'
+            },
+            headObserved: '1111111111111111111111111111111111111111'
+          })
+        }).toThrow(BuildXWorkspaceBindingConflictError)
+      })
+    })
+
+    describe('Prova 4 — HEAD legítimo avançado e conformidade de privacidade', () => {
+      it('admite HEAD legítimo avançado em branch/worktree correspondente e preserva privacidade', async () => {
+        const session = smc.createSession(repoId)
+        const unitFlow = new UnitFlowService(smc)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '00000000-0000-4000-9006-000000000040',
+          title: 'Plano Head Avancado'
+        })
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+          { unitId: '00000000-0000-4000-9006-000000000041', title: 'U1', objective: 'Obj1', acceptanceCriteria: 'Crit1' }
+        ])
+
+        const initialInv = createFixtureInventory({
+          head: '1111111111111111111111111111111111111111'
+        })
+        const wsService = new WorkspaceBindingService(smc, createFixturePort(initialInv))
+        await wsService.bindWorkspace(repoId, session.sessionId, 'wt-ex01-01')
+
+        const resService = new UnitFlowReservationService(smc, createFixturePort(initialInv))
+        const reservationId = '00000000-0000-4000-9006-000000000042'
+        const res = await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, { reservationId })
+        expect(res.kind).toBe('RESERVED')
+
+        // HEAD avança legitimamente na branch e na worktree
+        const advancedHead = '2222222222222222222222222222222222222222'
+        const advancedInv = createFixtureInventory({
+          head: advancedHead
+        })
+        const attemptService = new ExecutionAttemptService(smc, createFixturePort(advancedInv))
+
+        const attemptId = '00000000-0000-4000-9006-000000000043'
+        const attempt = await attemptService.prepareExecutionAttempt(
+          repoId,
+          session.sessionId,
+          reservationId,
+          { attemptId }
+        )
+
+        expect(attempt.status).toBe('PREPARED')
+        expect(attempt.headObservedAtPreparation).toBe(advancedHead)
+        expect(attempt.worktreeId).toBe('wt-ex01-01')
+        expect(attempt.generation).toBe('gen-ex01-1')
+
+        // Conformidade de privacidade
+        const serialized = JSON.stringify(attempt)
+        expect(serialized).not.toContain('/mock/')
+        expect(serialized).not.toContain('Obj1')
+        expect(serialized).not.toContain('Crit1')
+        expect((attempt as any).path).toBeUndefined()
+      })
+    })
+
+    describe('Prova 5 — Pureza da unidade, reserva e plano, e não-regressão global', () => {
+      it('não altera status da unidade, da reserva nem do plano, e não inicia processos', async () => {
+        const session = smc.createSession(repoId)
+        const unitFlow = new UnitFlowService(smc)
+        const plan = unitFlow.registerPlan(repoId, session.sessionId, {
+          planId: '00000000-0000-4000-9006-000000000050',
+          title: 'Plano Pureza'
+        })
+        unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+          { unitId: '00000000-0000-4000-9006-000000000051', title: 'U1', objective: 'O1', acceptanceCriteria: 'C1' }
+        ])
+
+        const inv = createFixtureInventory()
+        const wsService = new WorkspaceBindingService(smc, createFixturePort(inv))
+        await wsService.bindWorkspace(repoId, session.sessionId, 'wt-ex01-01')
+
+        const resService = new UnitFlowReservationService(smc, createFixturePort(inv))
+        const reservationId = '00000000-0000-4000-9006-000000000052'
+        await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, { reservationId })
+
+        const unitStateBefore = smc.getUnitState(repoId, session.sessionId, plan.planId, '00000000-0000-4000-9006-000000000051')
+        const reservationBefore = smc.getStore(repoId).getReservation(reservationId)
+        const planBefore = smc.getStore(repoId).getPlan(plan.planId)
+        const sessionBefore = smc.getSession(repoId, session.sessionId)
+
+        const attemptService = new ExecutionAttemptService(smc, createFixturePort(inv))
+        const attemptId = '00000000-0000-4000-9006-000000000053'
+        const attempt = await attemptService.prepareExecutionAttempt(
+          repoId,
+          session.sessionId,
+          reservationId,
+          { attemptId }
+        )
+
+        expect(attempt.status).toBe('PREPARED')
+
+        // Pureza: unidade continua RESERVED com a mesma revision
+        const unitStateAfter = smc.getUnitState(repoId, session.sessionId, plan.planId, '00000000-0000-4000-9006-000000000051')
+        expect(unitStateAfter?.status).toBe('RESERVED')
+        expect(unitStateAfter?.revision).toBe(unitStateBefore?.revision)
+        expect(unitStateAfter?.updatedAt).toBe(unitStateBefore?.updatedAt)
+
+        // Pureza: reserva continua ACTIVE com mesmo timestamp
+        const reservationAfter = smc.getStore(repoId).getReservation(reservationId)
+        expect(reservationAfter?.status).toBe('ACTIVE')
+        expect(reservationAfter?.updatedAt).toBe(reservationBefore?.updatedAt)
+
+        // Pureza: plano continua ACTIVE
+        const planAfter = smc.getStore(repoId).getPlan(plan.planId)
+        expect(planAfter?.status).toBe('ACTIVE')
+        expect(planAfter?.revision).toBe(planBefore?.revision)
+
+        // Pureza: sessão continua OPEN
+        const sessionAfter = smc.getSession(repoId, session.sessionId)
+        expect(sessionAfter?.status).toBe('OPEN')
+        expect(sessionAfter?.revision).toBe(sessionBefore?.revision)
       })
     })
   })

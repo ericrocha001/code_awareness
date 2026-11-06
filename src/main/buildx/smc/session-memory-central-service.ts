@@ -21,6 +21,7 @@ import type {
   BuildXWorkspaceBindingRecord,
   SaveWorkspaceBindingInput
 } from '../../../shared/types/buildx/workspace-types'
+import type { ExecutionAttemptRecord } from '../../../shared/types/buildx/execution-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
 
@@ -152,6 +153,20 @@ export class SessionMemoryCentralService {
     sessionId: string
   ): UnitFlowReservationRecord | null {
     return this.getStore(repositoryId).getActiveReservation(sessionId)
+  }
+
+  getExecutionAttempt(
+    repositoryId: string,
+    attemptId: string
+  ): ExecutionAttemptRecord | null {
+    return this.getStore(repositoryId).getExecutionAttempt(attemptId)
+  }
+
+  getPreparedExecutionAttempt(
+    repositoryId: string,
+    sessionId: string
+  ): ExecutionAttemptRecord | null {
+    return this.getStore(repositoryId).getPreparedExecutionAttempt(sessionId)
   }
 
   closeStore(repositoryId: string): void {

@@ -35,9 +35,19 @@ import type {
   BuildXWorkspaceBindingRecord,
   SaveWorkspaceBindingInput
 } from '../../../shared/types/buildx/workspace-types'
+import type {
+  ExecutionAttemptRecord,
+  ExecutionAttemptStatus
+} from '../../../shared/types/buildx/execution-types'
 import {
   BuildXWorkspaceBindingConflictError
 } from '../execution/workspace-binding-errors'
+import {
+  ExecutionAttemptConflictError,
+  ExecutionAttemptIdConflictError,
+  ExecutionInvalidAttemptIdError,
+  ExecutionAttemptNotFoundError
+} from '../execution/execution-errors'
 import {
   UnitFlowActivePlanAlreadyExistsError,
   UnitFlowInvalidPlanError,
@@ -144,7 +154,7 @@ export class SmcInvalidSupersedesError extends Error {
 
 export class SmcUnsupportedSchemaError extends Error {
   constructor(version: number) {
-    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 7`)
+    super(`SCHEMA_UNSUPPORTED: Database schema version ${version} is newer than supported version 8`)
     this.name = 'SmcUnsupportedSchemaError'
   }
 }
@@ -243,6 +253,35 @@ export interface ReserveEligibleUnitInput {
   readonly headObserved: string
 }
 
+interface RawExecutionAttemptRow {
+  attempt_id: string
+  repository_id: string
+  session_id: string
+  plan_id: string
+  unit_id: string
+  reservation_id: string
+  worktree_id: string
+  generation: string
+  branch: string
+  head_observed_at_preparation: string
+  status: string
+  revision: number
+  created_at: string
+  updated_at: string
+}
+
+export interface PrepareExecutionAttemptInput {
+  readonly attemptId: string
+  readonly sessionId: string
+  readonly reservationId: string
+  readonly expectedBinding: {
+    readonly worktreeId: string
+    readonly generation: string
+    readonly branch: string
+  }
+  readonly headObserved: string
+}
+
 interface SmcCursorPayload {
   orderSeq: number
   direction: 'ASC' | 'DESC'
@@ -305,13 +344,13 @@ export class SessionMemoryCentralStore {
     const versionRow = this.db.prepare('SELECT value FROM smc_meta WHERE key = ?').get('schema_version') as { value: string } | undefined
     const currentVersion = versionRow ? parseInt(versionRow.value, 10) : 0
 
-    if (currentVersion > 7) {
+    if (currentVersion > 8) {
       this.db.close()
       throw new SmcUnsupportedSchemaError(currentVersion)
     }
 
-    // 4. Migração atômica de v0..v6 para v7
-    if (currentVersion < 7) {
+    // 4. Migração atômica de v0..v7 para v8
+    if (currentVersion < 8) {
       this.db.transaction(() => {
         if (currentVersion < 2) {
           // Tabelas base v1
@@ -493,10 +532,48 @@ export class SessionMemoryCentralStore {
           `)
         }
 
+        if (currentVersion < 8) {
+          // Adições v8 (Execution-01: Preparação durável de tentativa vinculada à reserva)
+          this.db.exec(`
+            CREATE TABLE IF NOT EXISTS smc_execution_attempts (
+              attempt_id TEXT PRIMARY KEY,
+              repository_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              plan_id TEXT NOT NULL,
+              unit_id TEXT NOT NULL,
+              reservation_id TEXT NOT NULL,
+              worktree_id TEXT NOT NULL,
+              generation TEXT NOT NULL,
+              branch TEXT NOT NULL,
+              head_observed_at_preparation TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'PREPARED' CHECK(status IN ('PREPARED', 'STARTING', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')),
+              revision INTEGER NOT NULL DEFAULT 1,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              FOREIGN KEY (session_id) REFERENCES smc_sessions(session_id) ON DELETE CASCADE,
+              FOREIGN KEY (plan_id) REFERENCES smc_plans(plan_id) ON DELETE CASCADE,
+              FOREIGN KEY (unit_id) REFERENCES smc_plan_units(unit_id) ON DELETE CASCADE,
+              FOREIGN KEY (reservation_id) REFERENCES smc_unit_reservations(reservation_id) ON DELETE CASCADE
+            );
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_execution_attempts_prepared_session
+              ON smc_execution_attempts (session_id) WHERE status = 'PREPARED';
+
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_smc_execution_attempts_prepared_reservation
+              ON smc_execution_attempts (reservation_id) WHERE status = 'PREPARED';
+
+            CREATE INDEX IF NOT EXISTS idx_smc_execution_attempts_repo_session
+              ON smc_execution_attempts (repository_id, session_id);
+
+            CREATE INDEX IF NOT EXISTS idx_smc_execution_attempts_reservation
+              ON smc_execution_attempts (reservation_id);
+          `)
+        }
+
         if (!versionRow) {
-          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '7')
+          this.db.prepare('INSERT INTO smc_meta (key, value) VALUES (?, ?)').run('schema_version', '8')
         } else {
-          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('7', 'schema_version')
+          this.db.prepare('UPDATE smc_meta SET value = ? WHERE key = ?').run('8', 'schema_version')
         }
       })()
     }
@@ -1940,6 +2017,268 @@ export class SessionMemoryCentralStore {
     `).get(cleanSessionId, this.repositoryId) as RawReservationRow | undefined
     if (!row) return null
     return this.mapRawToReservationRecord(row)
+  }
+
+  private mapRawToExecutionAttemptRecord(row: RawExecutionAttemptRow): ExecutionAttemptRecord {
+    return {
+      attemptId: row.attempt_id,
+      repositoryId: row.repository_id,
+      sessionId: row.session_id,
+      planId: row.plan_id,
+      unitId: row.unit_id,
+      reservationId: row.reservation_id,
+      worktreeId: row.worktree_id,
+      generation: row.generation,
+      branch: row.branch,
+      headObservedAtPreparation: row.head_observed_at_preparation,
+      status: row.status as ExecutionAttemptStatus,
+      revision: row.revision,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }
+  }
+
+  prepareExecutionAttempt(input: PrepareExecutionAttemptInput): ExecutionAttemptRecord {
+    if (typeof input.sessionId !== 'string' || !input.sessionId.trim() || !UUID_REGEX.test(input.sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(input.sessionId ?? '')
+    }
+    const cleanSessionId = input.sessionId.trim().toLowerCase()
+
+    if (typeof input.reservationId !== 'string' || !input.reservationId.trim() || !UUID_REGEX.test(input.reservationId.trim())) {
+      throw new UnitFlowInvalidReservationIdError(input.reservationId ?? '')
+    }
+    const cleanReservationId = input.reservationId.trim().toLowerCase()
+
+    if (typeof input.attemptId !== 'string' || !input.attemptId.trim() || !UUID_REGEX.test(input.attemptId.trim())) {
+      throw new ExecutionInvalidAttemptIdError(input.attemptId ?? '')
+    }
+    const cleanAttemptId = input.attemptId.trim().toLowerCase()
+
+    if (!input.headObserved || typeof input.headObserved !== 'string' || !input.headObserved.trim()) {
+      throw new BuildXWorkspaceBindingConflictError('headObserved must be non-empty')
+    }
+
+    return this.db.transaction((): ExecutionAttemptRecord => {
+      // 1. Replay check dentro da transação
+      const existing = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts WHERE attempt_id = ?
+      `).get(cleanAttemptId) as RawExecutionAttemptRow | undefined
+
+      if (existing) {
+        if (
+          existing.repository_id === this.repositoryId &&
+          existing.session_id === cleanSessionId &&
+          existing.reservation_id === cleanReservationId
+        ) {
+          return this.mapRawToExecutionAttemptRecord(existing)
+        }
+        throw new ExecutionAttemptIdConflictError(
+          cleanAttemptId,
+          `already exists with divergent scope (repo=${existing.repository_id}, session=${existing.session_id}, reservation=${existing.reservation_id})`
+        )
+      }
+
+      // 2. Valida sessão (OPEN)
+      const sessionRow = this.db.prepare(`
+        SELECT status FROM smc_sessions WHERE session_id = ? AND repository_id = ?
+      `).get(cleanSessionId, this.repositoryId) as { status: string } | undefined
+
+      if (!sessionRow) {
+        throw new SmcSessionNotFoundError(cleanSessionId)
+      }
+      if (sessionRow.status === 'CLOSED') {
+        throw new SmcSessionClosedError(cleanSessionId)
+      }
+
+      // 3. Valida reserva (ACTIVE) pertencente à sessão e repositório
+      const resRow = this.db.prepare(`
+        SELECT * FROM smc_unit_reservations
+        WHERE reservation_id = ? AND repository_id = ?
+      `).get(cleanReservationId, this.repositoryId) as RawReservationRow | undefined
+
+      if (!resRow) {
+        throw new UnitFlowReservationNotFoundError(cleanReservationId)
+      }
+      if (resRow.session_id !== cleanSessionId) {
+        throw new ExecutionAttemptConflictError(
+          `Reservation "${cleanReservationId}" belongs to another session "${resRow.session_id}"`
+        )
+      }
+      if (resRow.status !== 'ACTIVE') {
+        throw new ExecutionAttemptConflictError(
+          `Reservation "${cleanReservationId}" is not ACTIVE (status: ${resRow.status})`
+        )
+      }
+
+      // 4. Valida plano (ACTIVE)
+      const planRow = this.db.prepare(`
+        SELECT plan_id, session_id, status FROM smc_plans WHERE plan_id = ? AND repository_id = ?
+      `).get(resRow.plan_id, this.repositoryId) as { plan_id: string; session_id: string; status: string } | undefined
+
+      if (!planRow) {
+        throw new UnitFlowPlanNotFoundError(resRow.plan_id)
+      }
+      if (planRow.session_id !== cleanSessionId) {
+        throw new UnitFlowPlanConflictError(`Plan "${resRow.plan_id}" belongs to another session "${planRow.session_id}"`)
+      }
+      if (planRow.status !== 'ACTIVE') {
+        throw new UnitFlowPlanConflictError(`Plan "${resRow.plan_id}" is not ACTIVE (status: ${planRow.status})`)
+      }
+
+      // 5. Valida unidade (RESERVED) e revision == reservation.unit_state_revision
+      const unitStateRow = this.db.prepare(`
+        SELECT status, revision FROM smc_unit_states
+        WHERE unit_id = ? AND plan_id = ?
+      `).get(resRow.unit_id, resRow.plan_id) as { status: string; revision: number } | undefined
+
+      if (!unitStateRow) {
+        throw new ExecutionAttemptConflictError(`Unit "${resRow.unit_id}" has no persisted state in smc_unit_states`)
+      }
+      if (unitStateRow.status !== 'RESERVED') {
+        throw new ExecutionAttemptConflictError(
+          `Unit "${resRow.unit_id}" is not in RESERVED state (status: ${unitStateRow.status})`
+        )
+      }
+      if (unitStateRow.revision !== resRow.unit_state_revision) {
+        throw new ExecutionAttemptConflictError(
+          `Unit "${resRow.unit_id}" state revision (${unitStateRow.revision}) diverges from reservation unitStateRevision (${resRow.unit_state_revision})`
+        )
+      }
+
+      // 6. Valida workspace binding e confronta com o observado e com a reserva
+      const bindingRow = this.db.prepare(`
+        SELECT worktree_id, generation, branch, head_at_bind FROM smc_session_worktrees
+        WHERE session_id = ? AND repository_id = ?
+      `).get(cleanSessionId, this.repositoryId) as { worktree_id: string; generation: string; branch: string; head_at_bind: string } | undefined
+
+      if (!bindingRow) {
+        throw new BuildXWorkspaceBindingConflictError(`Session "${cleanSessionId}" is not bound to a worktree`)
+      }
+      if (
+        bindingRow.worktree_id !== input.expectedBinding.worktreeId ||
+        bindingRow.generation !== input.expectedBinding.generation ||
+        bindingRow.branch !== input.expectedBinding.branch
+      ) {
+        throw new BuildXWorkspaceBindingConflictError(
+          `Workspace binding drifted between observation and attempt preparation (expected wt=${input.expectedBinding.worktreeId}, gen=${input.expectedBinding.generation}, br=${input.expectedBinding.branch}; found wt=${bindingRow.worktree_id}, gen=${bindingRow.generation}, br=${bindingRow.branch})`
+        )
+      }
+      if (
+        bindingRow.worktree_id !== resRow.worktree_id ||
+        bindingRow.generation !== resRow.generation ||
+        bindingRow.branch !== resRow.branch
+      ) {
+        throw new BuildXWorkspaceBindingConflictError(
+          `Workspace binding diverges from reservation (reservation wt=${resRow.worktree_id}, gen=${resRow.generation}, br=${resRow.branch}; found wt=${bindingRow.worktree_id}, gen=${bindingRow.generation}, br=${bindingRow.branch})`
+        )
+      }
+
+      // 7. Valida se a sessão ou reserva já possui uma tentativa PREPARED
+      const activeSessionAttempt = this.db.prepare(`
+        SELECT attempt_id FROM smc_execution_attempts
+        WHERE session_id = ? AND status = 'PREPARED'
+      `).get(cleanSessionId) as { attempt_id: string } | undefined
+
+      if (activeSessionAttempt) {
+        throw new ExecutionAttemptConflictError(
+          `Session "${cleanSessionId}" already has a prepared execution attempt "${activeSessionAttempt.attempt_id}"`
+        )
+      }
+
+      const activeResAttempt = this.db.prepare(`
+        SELECT attempt_id FROM smc_execution_attempts
+        WHERE reservation_id = ? AND status = 'PREPARED'
+      `).get(cleanReservationId) as { attempt_id: string } | undefined
+
+      if (activeResAttempt) {
+        throw new ExecutionAttemptConflictError(
+          `Reservation "${cleanReservationId}" already has a prepared execution attempt "${activeResAttempt.attempt_id}"`
+        )
+      }
+
+      // 8. Insere a tentativa PREPARED
+      const now = new Date().toISOString()
+      try {
+        this.db.prepare(`
+          INSERT INTO smc_execution_attempts (
+            attempt_id, repository_id, session_id, plan_id, unit_id, reservation_id,
+            worktree_id, generation, branch, head_observed_at_preparation,
+            status, revision, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'PREPARED', 1, ?, ?)
+        `).run(
+          cleanAttemptId,
+          this.repositoryId,
+          cleanSessionId,
+          resRow.plan_id,
+          resRow.unit_id,
+          cleanReservationId,
+          input.expectedBinding.worktreeId,
+          input.expectedBinding.generation,
+          input.expectedBinding.branch,
+          input.headObserved,
+          now,
+          now
+        )
+      } catch (insertError: any) {
+        const msg = String(insertError?.message || '')
+        if (msg.includes('idx_smc_execution_attempts_prepared_session')) {
+          throw new ExecutionAttemptConflictError(`Session "${cleanSessionId}" already has a prepared execution attempt`)
+        }
+        if (msg.includes('idx_smc_execution_attempts_prepared_reservation')) {
+          throw new ExecutionAttemptConflictError(`Reservation "${cleanReservationId}" already has a prepared execution attempt`)
+        }
+        if (insertError?.code === 'SQLITE_CONSTRAINT_PRIMARYKEY' || msg.includes('smc_execution_attempts.attempt_id') || msg.includes('PRIMARY KEY')) {
+          throw new ExecutionAttemptIdConflictError(
+            cleanAttemptId,
+            `already exists with conflicting record`
+          )
+        }
+        throw new ExecutionAttemptConflictError(`Failed to persist execution attempt: ${msg}`)
+      }
+
+      return {
+        attemptId: cleanAttemptId,
+        repositoryId: this.repositoryId,
+        sessionId: cleanSessionId,
+        planId: resRow.plan_id,
+        unitId: resRow.unit_id,
+        reservationId: cleanReservationId,
+        worktreeId: input.expectedBinding.worktreeId,
+        generation: input.expectedBinding.generation,
+        branch: input.expectedBinding.branch,
+        headObservedAtPreparation: input.headObserved,
+        status: 'PREPARED',
+        revision: 1,
+        createdAt: now,
+        updatedAt: now
+      }
+    })()
+  }
+
+  getExecutionAttempt(attemptId: string): ExecutionAttemptRecord | null {
+    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
+      throw new ExecutionInvalidAttemptIdError(attemptId ?? '')
+    }
+    const cleanId = attemptId.trim().toLowerCase()
+    const row = this.db.prepare(`
+      SELECT * FROM smc_execution_attempts
+      WHERE attempt_id = ? AND repository_id = ?
+    `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow | undefined
+    if (!row) return null
+    return this.mapRawToExecutionAttemptRecord(row)
+  }
+
+  getPreparedExecutionAttempt(sessionId: string): ExecutionAttemptRecord | null {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    const row = this.db.prepare(`
+      SELECT * FROM smc_execution_attempts
+      WHERE session_id = ? AND repository_id = ? AND status = 'PREPARED'
+    `).get(cleanSessionId, this.repositoryId) as RawExecutionAttemptRow | undefined
+    if (!row) return null
+    return this.mapRawToExecutionAttemptRecord(row)
   }
 
   close(): void {

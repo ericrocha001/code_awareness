@@ -1,3 +1,6 @@
 export * from '../../../shared/types/buildx/workspace-types'
+export * from '../../../shared/types/buildx/execution-types'
 export * from './workspace-binding-errors'
 export * from './workspace-binding-service'
+export * from './execution-errors'
+export * from './execution-attempt-service'
