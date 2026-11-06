@@ -8,6 +8,20 @@
 
 A publicação manual usa a mesma canonização e deixa de classificar qualquer `.md` como `DOCUMENT`. O IPC aceita as mesmas seleções semânticas opcionais. O seletor de arquivo atual pode usar YAML autoral quando faltar essa seleção; erros não são preenchidos com descrição genérica ou tipo presumido.
 
+## Lifecycle governado
+
+Planos e Work Items novos recebem `PENDING` quando omitido; outros kinds não recebem estado inventado. `get` separa `metadata.status` editorial de atividade operacional observada e da projeção `lifecycle`. Declarações autorais legadas não constituem aprovação verificada. Uma edição genérica não muda status de lifecycle formal: use a operação única abaixo.
+
+```powershell
+node scripts/continuum/local.cjs transition_artifact_lifecycle --repository <repositoryId> --filter '{"action":"ASSESS","artifactId":"<handoffId>","expectedRevision":1,"toState":"VALIDATED","reasonCode":"CRITERIA_ACCEPTED"}'
+```
+
+Use a revisão observada, não a ilustrativa. `ASSESS` diagnostica sem aprovar ou escrever. Omitir `evidenceRefs` permite seleção limitada de provas Ledger CURRENT via `evidenceFor`; seleção e testes aprovados não comprovam cobertura integral. Declare `supportingArtifactId` somente para desambiguar uma relação `implements` conhecida. Não envie identidade ou aprovação do cliente.
+
+Depois de revisar conteúdo e critérios da revisão indicada, `action: TRANSITION` solicita confirmação editorial independente no desktop visível/focado. Ausência/recusa da autoridade ou prova insuficiente retorna `REVIEW_REQUIRED`; a identidade individual indisponível não é inventada. A CLI mantém seu deadline de 15 segundos: confirme somente após revisar os Artifacts; timeout/desconexão não autoriza escrita tardia. Consulte o estado antes de repetir uma operação de resultado desconhecido.
+
+`COMPLETED`/`CLOSURE_ACCEPTED` exige Handoff `implements` governadamente VALIDATED para a exata revisão do Plano/Work Item e aprovação independente de fechamento. Outras razões: `CANCELLED`/`EXPLICIT_CANCELLATION`, `BLOCKED`/`BLOCKAGE_CONFIRMED`, `ACTIVE`/`NORMATIVE_ACTIVATION`, `IMPLEMENTED|NOT_IMPLEMENTED`/`IMPLEMENTATION_REVIEWED`. O backend verifica política, repositório e frescor, altera só o status com CAS e grava recibo e histórico atômicos. Repetição exata aceita não duplica revisão. Atualização documental ou mudança de prova exige reavaliação, sem apagar a aprovação histórica. PR integrado, proveniência causal e `READY_FOR_REVIEW` não concedem aceite editorial.
+
 ## Navegação estrutural
 
 Após `list`, selecione um Artifact e use `inspect_artifact_structure` antes de adquirir conteúdo. O outline contém títulos, hierarquia, offsets UTF-16 e linhas (base 1), revisão e hash; nunca corpo ou mídia. Intervalos são `[start, end)`. Títulos longos são limitados a 512 caracteres. Preâmbulos e documentos sem headings têm seção sintética. Frontmatter validado continua na metadata.

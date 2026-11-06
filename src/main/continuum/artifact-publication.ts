@@ -4,6 +4,7 @@ import { toString } from 'mdast-util-to-string'
 import { parseArtifactMarkdown, validateMarkdown, validateMetadata } from './artifact-metadata'
 import { parseStructure } from './artifact-structure'
 import type { ArtifactMetadata, ArtifactSemanticFields } from './continuum-types'
+import { lifecyclePolicy, editArtifactStatus } from './artifact-lifecycle-policy'
 
 export class MissingSemanticFieldError extends Error {
   readonly code = 'MISSING_SEMANTIC_FIELD'
@@ -28,6 +29,8 @@ export function canonicalizePublication(rawMarkdown: string, input: ArtifactSema
   if (/^(?:\uFEFF)?---(?:\r?\n|$)/.test(rawMarkdown)) {
     const { metadata } = parseArtifactMarkdown(rawMarkdown)
     for (const [key, value] of Object.entries(fields)) if (metadata[key] !== value) throw new Error(`INVALID_ARGUMENT: ${key} conflicts with authored frontmatter`)
+    const initial = !prior && metadata.status === undefined ? lifecyclePolicy(metadata)?.initialState : undefined
+    if (initial) return { rawMarkdown: editArtifactStatus(rawMarkdown, initial), metadata: { ...metadata, status: initial } }
     return { rawMarkdown, metadata }
   }
   const semanticPrior: Partial<ArtifactMetadata> = { ...prior }
@@ -51,6 +54,10 @@ export function canonicalizePublication(rawMarkdown: string, input: ArtifactSema
     }
   }
   const checked = validateMetadata(metadata)
+  if (!prior && checked.status === undefined) {
+    const initial = lifecyclePolicy(checked)?.initialState
+    if (initial) checked.status = initial
+  }
   const bom = rawMarkdown.startsWith('\uFEFF') ? '\uFEFF' : ''
   const canonical = `${bom}---\n${dump(checked, { lineWidth: -1 })}---\n${rawMarkdown.slice(bom.length)}`
   return { rawMarkdown: canonical, metadata: checked }

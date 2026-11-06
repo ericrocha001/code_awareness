@@ -15,6 +15,8 @@ export interface ArtifactMetadata {
   [key: string]: MetadataValue | ArtifactRelation[] | undefined
 }
 export interface Artifact {
+  lifecycle?: import('./artifact-lifecycle-policy').ReturnLifecycleProjection
+  operationalActivity?: import('./artifact-lifecycle-policy').LifecycleActivity
   artifactId: string
   revision: number
   metadata: ArtifactMetadata

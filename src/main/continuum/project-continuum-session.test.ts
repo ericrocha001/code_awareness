@@ -51,7 +51,8 @@ describe('Repository coordination, isolation and migration', () => {
     expect(original.provenance).toMatchObject({ gitHead: 'legacy-head', sourceFingerprint: 'legacy-fingerprint', ingestedAt: '2026-09-02T00:00:00.000Z' })
     expect(existsSync(legacyPath)).toBe(true); expect(service.get('legacy-B')).toBeNull()
     expect(() => service.publish(markdown('Invalid new content', '', rawMarkdown))).toThrow(/INVALID_ARGUMENT/)
-    service.update(envelope.artifactId, 1, markdown('Enriched', 'status: VALIDATED\n'))
+    expect(() => service.update(envelope.artifactId, 1, markdown('Enriched', 'status: VALIDATED\n'))).toThrow('LIFECYCLE_TRANSITION_REQUIRED')
+    service.update(envelope.artifactId, 1, markdown('Enriched').replace('kind: DECISION', 'kind: IMPLEMENTATION_HANDOFF'))
     session.dispose(); session.activate(rootA)
     expect(session.getActiveService()!.get(envelope.artifactId)!.revision).toBe(2)
     expect(session.getActiveService()!.list().artifacts).toHaveLength(1)
@@ -66,7 +67,7 @@ describe('Repository coordination, isolation and migration', () => {
     const pathA = session.getActiveSession()!.dbPath
     session.activate(rootB); const second = session.getActiveService()!
     expect(second).not.toBe(first); expect(session.getActiveSession()!.dbPath).not.toBe(pathA)
-    expect(() => first.get(a.artifactId)).toThrow(/not open/)
+    expect(() => first.get(a.artifactId)).toThrow(/REPOSITORY_CONTEXT_CHANGED/)
     expect(second.get(a.artifactId)).toBeNull(); expect(second.list().artifacts).toHaveLength(0)
     expect(() => second.update(a.artifactId, 1, markdown('Changed'))).toThrow(/ARTIFACT_NOT_FOUND/)
     expect(() => second.publish(markdown('Invalid', `relations:\n  - artifactId: ${a.artifactId}\n    kind: related-to\n`))).toThrow(/INVALID_RELATION/)

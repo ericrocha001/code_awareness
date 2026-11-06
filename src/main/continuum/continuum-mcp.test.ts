@@ -18,7 +18,7 @@ describe('Repository Continuum MCP contracts', () => {
     for (const kind of kinds) {
       const receipt = data(executePublishArtifact(service, { rawMarkdown, kind }))
       const artifact = service.get(receipt.artifactId)!
-      expect(artifact.metadata).toEqual({ name: 'Metadados automáticos', description: 'Publica conteúdo literal com identidade e integridade verificáveis.', kind })
+      expect(artifact.metadata).toEqual({ name: 'Metadados automáticos', description: 'Publica conteúdo literal com identidade e integridade verificáveis.', kind, ...(['EXECUTABLE_PLAN', 'WORK_ITEM'].includes(kind) ? { status: 'PENDING' } : {}) })
       expect(parseArtifactMarkdown(artifact.rawMarkdown).body).toBe(rawMarkdown)
       expect(artifact.contentHash).toBe(computeContentHash(artifact.rawMarkdown))
       expect(artifact.provenance).toEqual({ publication: { schemaVersion: 1, publisher: 'CONTINUUM_SERVICE', repositoryId: 'catalog-A', sessionEvidence: 'UNAVAILABLE' } })
@@ -36,7 +36,7 @@ describe('Repository Continuum MCP contracts', () => {
       try { expect(new ContinuumService(reopened).get(receipt.artifactId)).toEqual(next) } finally { reopened.close() }
       withFixtureDatabase(path, db => {
         const snapshots = db.prepare('SELECT snapshot_json FROM artifact_revisions WHERE artifact_id = ? ORDER BY revision').all(receipt.artifactId) as { snapshot_json: string }[]
-        expect(snapshots.map(row => JSON.parse(row.snapshot_json))).toEqual([artifact, next])
+        expect(snapshots.map(row => JSON.parse(row.snapshot_json))).toEqual([artifact, next].map(({ lifecycle: _lifecycle, operationalActivity: _activity, ...snapshot }) => snapshot))
       })
     }
     expect(service.list({ limit: 100 }).artifacts).toHaveLength(kinds.length)

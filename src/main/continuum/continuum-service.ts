@@ -16,10 +16,19 @@ import { validateVisualMedia } from './visual-media'
 import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum-types'
 import { artifactTags, type ContinuumTagMutation, type ContinuumTagAssignment } from '../../shared/types/continuum-tag-types'
 import { ContextBundle } from './context-bundle'
+import { lifecyclePolicy, lifecycleProjection, type LifecycleDependencies } from './artifact-lifecycle-policy'
+import { lifecycleReceipt, transitionLifecycle, type LifecycleRequest } from './artifact-lifecycle'
 import { getCanonicalTokenizer } from '../core/tokenizer'
 import type { ContinuumTagTokens } from '../../shared/types/continuum-ui-types'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
+  async transitionLifecycle(request: LifecycleRequest, connected: () => boolean = () => true) {
+    const assertContext = () => { this.assertActive(); if (!connected()) throw new Error('IPC_CLOSED') }
+    assertContext(); this.reconcile?.(); assertContext()
+    const result = await transitionLifecycle(this.store, this.lifecycleDependencies, request, assertContext)
+    if (result.state === 'PERSISTED' && !result.replayed) this.changed()
+    return result
+  }
   createTag(request: { name: string; description?: string; selected?: ContinuumTagAssignment[] }) {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     if (request.selected && request.selected.length !== 1) throw new Error('TAG_SELECTION_LIMIT: one explicitly requested Artifact per call')
@@ -152,7 +161,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private changed(): void { for (const listener of this.listeners) { try { listener() } catch (error) { console.error('[Continuum] Change notification failed:', error) } } }
   facets() { this.reconcile?.(); return this.store.facets() }
-  constructor(private readonly store: ArtifactStore, private readonly reconcile?: () => void, private readonly isActive: () => boolean = () => true) {}
+  constructor(private readonly store: ArtifactStore, private readonly reconcile?: () => void, private readonly isActive: () => boolean = () => true, private readonly lifecycleDependencies: LifecycleDependencies = {}) {}
   assertActive(): void { if (!this.isActive()) throw new Error('REPOSITORY_CONTEXT_CHANGED') }
   suggestions(query: ContinuumSuggestionQuery) {
     this.assertActive()
@@ -254,6 +263,7 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const prior = this.store.get(artifactId)
     if (!prior) throw new Error('ARTIFACT_NOT_FOUND: ' + artifactId)
     const publication = canonicalizePublication(rawMarkdown, fields, prior.metadata)
+    if (publication.metadata.status !== prior.metadata.status && (lifecyclePolicy(prior.metadata) || lifecyclePolicy(publication.metadata))) throw new Error('LIFECYCLE_TRANSITION_REQUIRED')
     this.assertAgentTags(publication.metadata, prior.metadata)
     const receipt = this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('UPDATE', { rawMarkdown, artifactId, expectedRevision, ...fields })))
     this.changed()
@@ -264,7 +274,8 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const artifact = this.store.get(artifactId)
     if (!artifact) return null
     const nativeArtifact = this.store.publicationProvenance(artifactId, artifact.revision)
-    return nativeArtifact ? { ...artifact, provenance: { ...artifact.provenance, nativeArtifact } } : artifact
+    return { ...artifact, ...(nativeArtifact ? { provenance: { ...artifact.provenance, nativeArtifact } } : {}), lifecycle: lifecycleProjection(artifact, lifecycleReceipt(artifact)),
+      operationalActivity: this.lifecycleDependencies.activity?.(this.store.repositoryId, artifactId) ?? { state: 'UNKNOWN', source: 'NO_ACTIVE_OPERATION_OBSERVED' } }
   }
   provenanceSnapshot(artifactId: string, revision?: number): Artifact | null {
     this.assertActive(); this.reconcile?.(); this.assertActive()

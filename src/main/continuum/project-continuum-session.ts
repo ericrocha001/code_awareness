@@ -5,6 +5,7 @@ import { ArtifactIngestor, type IngestionReport } from './artifact-ingestor'
 import { deriveRepositoryKey } from './repository-key'
 import { ContinuumService } from './continuum-service'
 import { migrateLegacyStore } from './legacy-artifact-migrator'
+import type { LifecycleDependencies } from './artifact-lifecycle-policy'
 
 export interface ContinuumRepository { id: string; localCheckout: { path: string } | null }
 export interface RepositoryContinuumCatalog { findByPath(path: string): ContinuumRepository | null }
@@ -24,7 +25,7 @@ export class RepositoryContinuumSession {
   private unsubscribeService?: () => void
   onChanged(listener: () => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   private changed(): void { for (const listener of this.listeners) { try { listener() } catch (error) { console.error('[Continuum] Session notification failed:', error) } } }
-  constructor(private readonly storageBaseDir: string, private readonly catalog: RepositoryContinuumCatalog, private readonly options: { ingestCheckout?: boolean } = {}) {}
+  constructor(private readonly storageBaseDir: string, private readonly catalog: RepositoryContinuumCatalog, private readonly options: { ingestCheckout?: boolean; lifecycle?: LifecycleDependencies } = {}) {}
 
   activate(repositoryPath: string): IngestionReport {
     const repository = this.catalog.findByPath(repositoryPath)
@@ -38,7 +39,7 @@ export class RepositoryContinuumSession {
     try {
       store.registerLocator(locator)
       let ingestor: ArtifactIngestor | undefined
-      const service = new ContinuumService(store, () => ingestor?.ingestPending(), () => this.currentSession?.store === store)
+      const service = new ContinuumService(store, () => ingestor?.ingestPending(), () => this.currentSession?.store === store, this.options.lifecycle)
       if (this.options.ingestCheckout !== false) {
         migrateLegacyStore(join(this.storageBaseDir, locator, 'continuum.db'), locator, store, service)
         ingestor = new ArtifactIngestor(new ArtifactInbox(repositoryPath), service, locator)
