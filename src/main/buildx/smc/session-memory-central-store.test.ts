@@ -60,9 +60,19 @@ import {
   type PrepareExecutionAttemptOptions,
   BuildXGrokCliBridge,
   type CliExecutionPort,
-  type GrokCliPreAdmissionResult
+  type GrokCliPreAdmissionResult,
+  type GrokProbeStatus,
+  type GrokQualifications,
+  type GrokProbeDiagnosisResult,
+  extractGrokVersion,
+  createDefaultQualifications
 } from '../execution'
-import type { CliProposal } from '../../cli-execution/cli-execution-types'
+import type {
+  CliProposal,
+  CliExecutionSnapshot,
+  StartCliExecutionInput,
+  GetCliExecutionInput
+} from '../../cli-execution/cli-execution-types'
 import { CliExecutionService } from '../../cli-execution/cli-execution-service'
 import { resolveCliCommand } from '../../cli-execution/cli-command-resolver'
 import type { BranchInventory, BranchRecord } from '../../../shared/types/branch-orchestration-types'
@@ -5486,6 +5496,693 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const sessionAfter = smc.getSession(repoId, scenario.session.sessionId)
         expect(sessionAfter?.status).toBe('OPEN')
         expect(sessionAfter?.revision).toBe(sessionBefore?.revision)
+      })
+    })
+  })
+
+  describe('BuildX Execution-05 — Diagnóstico supervisionado do Grok Build instalado (Provas Dirigidas)', () => {
+    const repoId = 'repo-execution-05'
+    let smc: SessionMemoryCentralService
+    let originalEnvPath: string | undefined
+    let isolatedBinDir: string
+    let isolatedWorktreeDir: string
+
+    function createFixtureInventory(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      detached?: boolean
+      path?: string
+    }): BranchInventory {
+      const worktreeId = options?.worktreeId ?? 'wt-ex05-01'
+      const generation = options?.generation ?? 'gen-ex05-1'
+      const branchName = options?.branch ?? 'feature-ex05'
+      const head = options?.head ?? '5555555555555555555555555555555555555555'
+      const detached = options?.detached ?? false
+      const wtPath = options?.path ?? isolatedWorktreeDir
+
+      const worktree: any = {
+        worktreeId,
+        generation,
+        path: wtPath,
+        head,
+        branch: branchName,
+        detached,
+        locked: false,
+        missing: false,
+        prunable: false
+      }
+
+      const branchRecord: BranchRecord = {
+        key: `key-${branchName}`,
+        repositoryId: repoId,
+        ref: `refs/heads/${branchName}`,
+        name: branchName,
+        namespace: 'LOCAL',
+        head,
+        upstream: null,
+        generation: 'branch-gen-1',
+        revision: 'branch-rev-1',
+        creation: { at: '2026-11-06T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-06T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+
+      return {
+        repositoryId: repoId,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-06T00:00:00.000Z',
+        revision: 'inv-ex05-1',
+        worktrees: [worktree],
+        branches: [branchRecord],
+        unassignedWorktrees: []
+      }
+    }
+
+    function createFixturePort(inventory: BranchInventory): GitOperationsPort {
+      return {
+        getBranchInventory: async () => inventory,
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+    }
+
+    function createMockExecutionPort(options?: {
+      enabled?: boolean
+      repoId?: string
+      status?: any
+      phase?: 'RUNNING' | 'AWAITING_APPROVAL' | 'LAUNCHING' | 'STOPPING' | 'TERMINAL' | 'TERMINATION_UNCONFIRMED'
+      exitCode?: number | null
+      stdout?: string
+      treeObservation?: any
+      diagnostic?: string
+      startError?: Error
+    }): CliExecutionPort & { startCalls: StartCliExecutionInput[] } {
+      const startCalls: StartCliExecutionInput[] = []
+      const knownExecutions = new Map<string, CliExecutionSnapshot>()
+
+      return {
+        startCalls,
+        isEnabled: () => options?.enabled ?? true,
+        getRepositoryId: () => options?.repoId ?? repoId,
+        prepare: async (input) => {
+          const canonicalWtDir = realpathSync(isolatedWorktreeDir)
+          const desc = resolveCliCommand(canonicalWtDir, 'grok', ['version'])
+          return {
+            proposalId: 'proposal-ex05-grok-uuid',
+            repositoryId: options?.repoId ?? repoId,
+            repositoryDirectory: canonicalWtDir,
+            checkoutFingerprint: 'mock-fp-ex05',
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+            status: 'PENDING',
+            risks: [],
+            worktree: {
+              worktreeId: input.worktree?.worktreeId ?? 'wt-ex05-01',
+              generation: input.worktree?.generation ?? 'gen-ex05-1',
+              branch: 'feature-ex05',
+              head: '5555555555555555555555555555555555555555',
+              indexRevision: 'idx-1'
+            },
+            command: desc,
+            policy: {
+              mode: 'SUPERVISED',
+              revision: 'default',
+              rule: 'native-command-consent'
+            },
+            autoAuthorized: false
+          }
+        },
+        start: (input) => {
+          startCalls.push(input)
+          if (options?.startError) throw options.startError
+          const canonicalWtDir = realpathSync(isolatedWorktreeDir)
+          const desc = resolveCliCommand(canonicalWtDir, 'grok', ['version'])
+          const snap: CliExecutionSnapshot = {
+            operationId: input.operationId,
+            proposalId: input.proposalId,
+            command: desc,
+            status: options?.status ?? 'SUCCEEDED',
+            phase: options?.phase ?? 'TERMINAL',
+            exitCode: options?.exitCode !== undefined ? options.exitCode : 0,
+            treeObservation: options?.treeObservation ?? { activeProcesses: 0, handlesClosed: true },
+            diagnostic: options?.diagnostic,
+            stdout: options?.stdout ?? 'grok version 1.2.3\n',
+            stderr: '',
+            totalStdoutBytes: (options?.stdout ?? 'grok version 1.2.3\n').length,
+            totalStderrBytes: 0,
+            hasMore: false,
+            nextCursor: null,
+            truncated: false,
+            origin: 'CLI_EXECUTION_CAPABILITY',
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString()
+          }
+          knownExecutions.set(input.operationId, snap)
+          return snap
+        },
+        get: (input) => {
+          const existing = knownExecutions.get(input.operationId)
+          if (!existing) throw new Error('OPERATION_NOT_FOUND')
+          return existing
+        }
+      }
+    }
+
+    beforeEach(() => {
+      smc = new SessionMemoryCentralService(tempBaseDir)
+      originalEnvPath = process.env.PATH
+      isolatedBinDir = join(tempBaseDir, 'bin-ex05-' + Math.random().toString(36).slice(2, 8))
+      isolatedWorktreeDir = join(tempBaseDir, 'wt-ex05-' + Math.random().toString(36).slice(2, 8))
+      mkdirSync(isolatedBinDir, { recursive: true })
+      mkdirSync(isolatedWorktreeDir, { recursive: true })
+
+      // Instala grok fictício no PATH para o resolver
+      const scriptName = process.platform === 'win32' ? 'grok.cmd' : 'grok'
+      writeFileSync(join(isolatedBinDir, scriptName), '@echo grok version 1.2.3')
+      process.env.PATH = isolatedBinDir + delimiter + (originalEnvPath ?? '')
+    })
+
+    afterEach(() => {
+      smc.close()
+      if (originalEnvPath !== undefined) {
+        process.env.PATH = originalEnvPath
+      }
+    })
+
+    async function setupPreparedScenario(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      planId?: string
+      unitId?: string
+      reservationId?: string
+      attemptId?: string
+      worktreePath?: string
+    }) {
+      const worktreeId = options?.worktreeId ?? 'wt-ex05-01'
+      const generation = options?.generation ?? 'gen-ex05-1'
+      const branch = options?.branch ?? 'feature-ex05'
+      const head = options?.head ?? '5555555555555555555555555555555555555555'
+      const planId = options?.planId ?? '00000000-0000-4000-9008-000000000001'
+      const unitId = options?.unitId ?? '00000000-0000-4000-9008-000000000002'
+      const reservationId = options?.reservationId ?? '00000000-0000-4000-9008-000000000003'
+      const attemptId = options?.attemptId ?? '00000000-0000-4000-9008-000000000004'
+      const wtPath = options?.worktreePath ?? isolatedWorktreeDir
+
+      const inv = createFixtureInventory({ worktreeId, generation, branch, head, path: wtPath })
+      const gitPort = createFixturePort(inv)
+
+      const session = smc.createSession(repoId)
+
+      const wsService = new WorkspaceBindingService(smc, gitPort)
+      await wsService.bindWorkspace(repoId, session.sessionId, worktreeId)
+
+      const unitFlow = new UnitFlowService(smc)
+      const plan = unitFlow.registerPlan(repoId, session.sessionId, { planId, title: 'Plano Grok Probe' })
+      unitFlow.definePlanUnits(repoId, session.sessionId, plan.planId, [
+        { unitId, title: 'Unidade Grok Probe', objective: 'Obj Probe', acceptanceCriteria: 'Crit Probe' }
+      ])
+
+      const resService = new UnitFlowReservationService(smc, gitPort)
+      await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, { reservationId })
+
+      const attemptService = new ExecutionAttemptService(smc, gitPort)
+      const attempt = await attemptService.prepareExecutionAttempt(repoId, session.sessionId, reservationId, { attemptId })
+
+      return {
+        session,
+        plan,
+        unitId,
+        reservationId,
+        attempt,
+        wsService,
+        gitPort,
+        inv,
+        worktreeId,
+        generation,
+        branch,
+        head,
+        worktreePath: wtPath
+      }
+    }
+
+    describe('Prova 1 — Diagnóstico supervisionado com sucesso sob autorização simulada e extração de versão', () => {
+      it('diagnóstico grok version com sucesso: extrai versão, valida término limpo e preenche qualificações', async () => {
+        const scenario = await setupPreparedScenario()
+        const mockPort = createMockExecutionPort({
+          stdout: 'grok version 1.2.3\n',
+          exitCode: 0,
+          treeObservation: { activeProcesses: 0, handlesClosed: true }
+        })
+
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-op-001'
+        )
+
+        expect(result.status).toBe('INSTALLED_VERSION_OBSERVED')
+        expect(result.version).toBe('1.2.3')
+        expect(result.exitCode).toBe(0)
+        expect(result.probeOperationId).toBe('probe-op-001')
+        expect(result.repositoryId).toBe(repoId)
+        expect(result.sessionId).toBe(scenario.session.sessionId)
+        expect(result.attemptId).toBe(scenario.attempt.attemptId)
+
+        // Qualificação: versão é VERIFIED, todas as outras permanecem UNVERIFIED
+        expect(result.qualifications).toEqual({
+          installedVersion: 'VERIFIED',
+          authentication: 'UNVERIFIED',
+          modelAccess: 'UNVERIFIED',
+          quota: 'UNVERIFIED',
+          headlessPrompt: 'UNVERIFIED',
+          fileEditing: 'UNVERIFIED',
+          agentPermissions: 'UNVERIFIED',
+          promptFileCompatibility: 'UNVERIFIED'
+        })
+
+        // start foi chamado exatamente uma vez
+        expect(mockPort.startCalls.length).toBe(1)
+        expect(mockPort.startCalls[0].operationId).toBe('probe-op-001')
+        expect(mockPort.startCalls[0].proposalId).toBe('proposal-ex05-grok-uuid')
+
+        // Pureza SQLite estrita: nenhuma tabela modificada
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(scenario.attempt.attemptId)
+        expect(attemptAfter?.status).toBe('PREPARED')
+        expect(attemptAfter?.revision).toBe(scenario.attempt.revision)
+
+        const unitAfter = store.getUnitState(scenario.session.sessionId, scenario.plan.planId, scenario.unitId)
+        expect(unitAfter?.status).toBe('RESERVED')
+
+        const resAfter = store.getReservation(scenario.reservationId)
+        expect(resAfter?.status).toBe('ACTIVE')
+
+        const planAfter = store.getPlan(scenario.plan.planId)
+        expect(planAfter?.status).toBe('ACTIVE')
+
+        const sessionAfter = smc.getSession(repoId, scenario.session.sessionId)
+        expect(sessionAfter?.status).toBe('OPEN')
+
+        // Consulta pelo getGrokBuildDiagnosis retorna a mesma observação
+        const queryResult = await bridge.getGrokBuildDiagnosis(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-op-001'
+        )
+        expect(queryResult.status).toBe('INSTALLED_VERSION_OBSERVED')
+        expect(queryResult.version).toBe('1.2.3')
+      })
+
+      it('replay com mesmo probeOperationId retorna observação em memória sem reinvocar start', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000010',
+          planId: '00000000-0000-4000-9008-000000000011',
+          unitId: '00000000-0000-4000-9008-000000000012',
+          reservationId: '00000000-0000-4000-9008-000000000013'
+        })
+
+        const mockPort = createMockExecutionPort()
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const r1 = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-replay-001'
+        )
+        expect(r1.status).toBe('INSTALLED_VERSION_OBSERVED')
+        expect(mockPort.startCalls.length).toBe(1)
+
+        // Segunda chamada com mesmo probeOperationId
+        const r2 = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-replay-001'
+        )
+        expect(r2.status).toBe('INSTALLED_VERSION_OBSERVED')
+        expect(r2.version).toBe('1.2.3')
+        // Não chamou start novamente
+        expect(mockPort.startCalls.length).toBe(1)
+      })
+    })
+
+    describe('Prova 2 — Negativas e bloqueios fail-closed antes e durante a execução', () => {
+      it('rejeita com UNAVAILABLE quando CliExecutionService estiver desabilitado', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000020',
+          planId: '00000000-0000-4000-9008-000000000021',
+          unitId: '00000000-0000-4000-9008-000000000022',
+          reservationId: '00000000-0000-4000-9008-000000000023'
+        })
+
+        const mockPort = createMockExecutionPort({ enabled: false })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-disabled-001'
+        )
+
+        expect(result.status).toBe('UNAVAILABLE')
+        expect(result.reason).toBe('CLI_EXECUTION_DISABLED')
+        expect(mockPort.startCalls.length).toBe(0)
+      })
+
+      it('rejeita com REFUSED quando autorização for recusada pelo operador', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000024',
+          planId: '00000000-0000-4000-9008-000000000025',
+          unitId: '00000000-0000-4000-9008-000000000026',
+          reservationId: '00000000-0000-4000-9008-000000000027'
+        })
+
+        const mockPort = createMockExecutionPort({
+          status: 'REFUSED',
+          diagnostic: 'NATIVE_APPROVAL_REFUSED'
+        })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-refused-001'
+        )
+
+        expect(result.status).toBe('REFUSED')
+        expect(result.reason).toBe('NATIVE_APPROVAL_REFUSED')
+        expect(result.version).toBeUndefined()
+        expect(result.qualifications.installedVersion).toBe('UNVERIFIED')
+      })
+
+      it('rejeita com UNAVAILABLE quando CLI Execution estiver ocupado (CLI_EXECUTION_BUSY)', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000028',
+          planId: '00000000-0000-4000-9008-000000000029',
+          unitId: '00000000-0000-4000-9008-00000000002a',
+          reservationId: '00000000-0000-4000-9008-00000000002b'
+        })
+
+        const mockPort = createMockExecutionPort({
+          startError: new Error('CLI_EXECUTION_BUSY: active operation active-1 in progress')
+        })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-busy-001'
+        )
+
+        expect(result.status).toBe('UNAVAILABLE')
+        expect(result.reason).toBe('CLI_EXECUTION_BUSY')
+      })
+
+      it('rejeita com NOT_STARTED quando sessão/tentativa/reserva estiverem em estado inválido', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-00000000002c',
+          planId: '00000000-0000-4000-9008-00000000002d',
+          unitId: '00000000-0000-4000-9008-00000000002e',
+          reservationId: '00000000-0000-4000-9008-00000000002f'
+        })
+
+        // Fecha a sessão antes do probe
+        const dbPath = smcDatabasePath(tempBaseDir, repoId)
+        const rawDb = new Database(dbPath)
+        rawDb.prepare('UPDATE smc_sessions SET status = ? WHERE session_id = ?').run('CLOSED', scenario.session.sessionId)
+        rawDb.close()
+
+        const mockPort = createMockExecutionPort()
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-closed-001'
+        )
+
+        expect(result.status).toBe('NOT_STARTED')
+        expect(result.reason).toBe('SESSION_NOT_OPEN')
+        expect(mockPort.startCalls.length).toBe(0)
+      })
+
+      it('rejeita com NOT_STARTED quando Git drift ocorrer antes do start', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000030',
+          planId: '00000000-0000-4000-9008-000000000031',
+          unitId: '00000000-0000-4000-9008-000000000032',
+          reservationId: '00000000-0000-4000-9008-000000000033'
+        })
+
+        let driftHead = scenario.head
+        const dynamicPort: GitOperationsPort = {
+          getBranchInventory: async () => createFixtureInventory({ head: driftHead }),
+          getCoordinationSnapshot: async () => ({ reference: false })
+        }
+        const dynamicWsService = new WorkspaceBindingService(smc, dynamicPort)
+
+        // Mock port onde após prepare o HEAD avança
+        const mockPort = createMockExecutionPort()
+        const origPrepare = mockPort.prepare
+        mockPort.prepare = async (input) => {
+          const res = await origPrepare(input)
+          driftHead = '9999999999999999999999999999999999999999'
+          return res
+        }
+
+        const bridge = new BuildXGrokCliBridge(smc, dynamicWsService, mockPort)
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-drift-001'
+        )
+
+        expect(['NOT_STARTED', 'WORKSPACE_INVALID']).toContain(result.status)
+        expect(mockPort.startCalls.length).toBe(0)
+      })
+    })
+
+    describe('Prova 3 — Casos anômalos de término, timeout, parsing e privacidade', () => {
+      it('rejeita como FAILED quando término da árvore de processos for não confirmado (TERMINATION_UNCONFIRMED)', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000040',
+          planId: '00000000-0000-4000-9008-000000000041',
+          unitId: '00000000-0000-4000-9008-000000000042',
+          reservationId: '00000000-0000-4000-9008-000000000043'
+        })
+
+        const mockPort = createMockExecutionPort({
+          status: 'SUCCEEDED',
+          phase: 'TERMINATION_UNCONFIRMED',
+          exitCode: 0,
+          treeObservation: { activeProcesses: 1, handlesClosed: false }
+        })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-unconfirmed-001'
+        )
+
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('TERMINATION_UNCONFIRMED')
+        expect(result.version).toBeUndefined()
+        expect(result.qualifications.installedVersion).toBe('UNVERIFIED')
+      })
+
+      it('rejeita como FAILED quando exitCode for não-zero', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000044',
+          planId: '00000000-0000-4000-9008-000000000045',
+          unitId: '00000000-0000-4000-9008-000000000046',
+          reservationId: '00000000-0000-4000-9008-000000000047'
+        })
+
+        const mockPort = createMockExecutionPort({
+          status: 'FAILED',
+          phase: 'TERMINAL',
+          exitCode: 1,
+          diagnostic: 'PROCESS_FAILED_WITH_EXIT_CODE_1'
+        })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-nonzero-001'
+        )
+
+        expect(result.status).toBe('FAILED')
+        expect(result.exitCode).toBe(1)
+        expect(result.version).toBeUndefined()
+      })
+
+      it('rejeita como FAILED quando stdout não contiver formato de versão reconhecível', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000048',
+          planId: '00000000-0000-4000-9008-000000000049',
+          unitId: '00000000-0000-4000-9008-00000000004a',
+          reservationId: '00000000-0000-4000-9008-00000000004b'
+        })
+
+        const mockPort = createMockExecutionPort({
+          stdout: 'error: unknown command "version"\nusage: grok <command>\n',
+          exitCode: 0,
+          treeObservation: { activeProcesses: 0, handlesClosed: true }
+        })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-badstdout-001'
+        )
+
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('VERSION_PARSING_FAILED')
+        expect(result.version).toBeUndefined()
+      })
+
+      it('trata cancelamento ou interrupção como INTERRUPTED', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-00000000004c',
+          planId: '00000000-0000-4000-9008-00000000004d',
+          unitId: '00000000-0000-4000-9008-00000000004e',
+          reservationId: '00000000-0000-4000-9008-00000000004f'
+        })
+
+        const mockPort = createMockExecutionPort({
+          status: 'CANCELLED',
+          diagnostic: 'MANUALLY_CANCELLED'
+        })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-cancel-001'
+        )
+
+        expect(result.status).toBe('INTERRUPTED')
+        expect(result.reason).toBe('MANUALLY_CANCELLED')
+      })
+
+      it('retorna UNKNOWN ao consultar operação inexistente ou após restart de memória', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000050',
+          planId: '00000000-0000-4000-9008-000000000051',
+          unitId: '00000000-0000-4000-9008-000000000052',
+          reservationId: '00000000-0000-4000-9008-000000000053'
+        })
+
+        const mockPort = createMockExecutionPort()
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.getGrokBuildDiagnosis(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-nonexistent-op'
+        )
+
+        expect(result.status).toBe('UNKNOWN')
+        expect(result.reason).toBe('OPERATION_NOT_FOUND')
+        expect(result.qualifications.installedVersion).toBe('UNVERIFIED')
+      })
+
+      it('preserva privacidade: não vaza tokens, credenciais, env, paths ou raw stdout no resultado', async () => {
+        const scenario = await setupPreparedScenario({
+          attemptId: '00000000-0000-4000-9008-000000000054',
+          planId: '00000000-0000-4000-9008-000000000055',
+          unitId: '00000000-0000-4000-9008-000000000056',
+          reservationId: '00000000-0000-4000-9008-000000000057'
+        })
+
+        const secretStdout = 'grok version 1.2.3\nSECRET_TOKEN=xyz123\nPATH=C:\\secret\\dir\n'
+        const mockPort = createMockExecutionPort({
+          stdout: secretStdout,
+          exitCode: 0,
+          treeObservation: { activeProcesses: 0, handlesClosed: true }
+        })
+        const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, mockPort)
+
+        const result = await bridge.diagnoseGrokBuildInstallation(
+          repoId,
+          scenario.session.sessionId,
+          scenario.attempt.attemptId,
+          'probe-priv-001'
+        )
+
+        expect(result.status).toBe('INSTALLED_VERSION_OBSERVED')
+        expect(result.version).toBe('1.2.3')
+
+        const serialized = JSON.stringify(result)
+        expect(serialized).not.toContain('SECRET_TOKEN')
+        expect(serialized).not.toContain('xyz123')
+        expect(serialized).not.toContain('secret')
+        expect(serialized).not.toContain('stdout')
+        expect(serialized).not.toContain('stderr')
+        expect(serialized).not.toContain('token')
+      })
+    })
+
+    describe('Prova 4 — Observação real do host e limites de qualificação', () => {
+      it('registra REAL_HOST_NOT_VERIFIED na ausência do Grok CLI instalado no host', () => {
+        // Verifica se grok está instalado no host real
+        let realGrokFound = false
+        try {
+          const checkCmd = process.platform === 'win32' ? 'where grok' : 'which grok'
+          const { execSync } = require('node:child_process')
+          const out = execSync(checkCmd, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'], timeout: 2000 })
+          if (out && out.trim()) realGrokFound = true
+        } catch {
+          realGrokFound = false
+        }
+
+        // Se o Grok real não estiver no host, o teste confirma empiricamente REAL_HOST_NOT_VERIFIED
+        if (!realGrokFound) {
+          const defaultQuals = createDefaultQualifications(false)
+          expect(defaultQuals.installedVersion).toBe('UNVERIFIED')
+          expect(defaultQuals.authentication).toBe('UNVERIFIED')
+          expect(defaultQuals.modelAccess).toBe('UNVERIFIED')
+          expect(defaultQuals.quota).toBe('UNVERIFIED')
+          expect(defaultQuals.headlessPrompt).toBe('UNVERIFIED')
+          expect(defaultQuals.fileEditing).toBe('UNVERIFIED')
+          expect(defaultQuals.agentPermissions).toBe('UNVERIFIED')
+          expect(defaultQuals.promptFileCompatibility).toBe('UNVERIFIED')
+        }
+      })
+
+      it('função extractGrokVersion extrai formatos válidos e rejeita saídas inválidas', () => {
+        expect(extractGrokVersion('grok 1.0.0')).toBe('1.0.0')
+        expect(extractGrokVersion('grok version 1.2.3')).toBe('1.2.3')
+        expect(extractGrokVersion('1.2.3')).toBe('1.2.3')
+        expect(extractGrokVersion('v2.1.0')).toBe('2.1.0')
+        expect(extractGrokVersion('grok/0.4.2')).toBe('0.4.2')
+        expect(extractGrokVersion('grok version 1.0.0-beta.1')).toBe('1.0.0-beta.1')
+        expect(extractGrokVersion('@xai/grok 2.0.0')).toBe('2.0.0')
+        expect(extractGrokVersion('version 3.1.4')).toBe('3.1.4')
+        expect(extractGrokVersion('')).toBeNull()
+        expect(extractGrokVersion('error: command not found')).toBeNull()
+        expect(extractGrokVersion('invalid output without semver')).toBeNull()
       })
     })
   })

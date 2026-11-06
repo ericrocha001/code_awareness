@@ -1,10 +1,20 @@
 import type {
-  GrokCliPreAdmissionResult
+  GrokCliPreAdmissionResult,
+  GrokProbeStatus,
+  GrokQualifications,
+  GrokProbeDiagnosisResult
 } from '../../../shared/types/buildx/execution-types'
 import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import type { WorkspaceBindingService } from './workspace-binding-service'
-import type { PrepareCliExecutionInput, CliProposal, CliCommandDescriptor } from '../../cli-execution/cli-execution-types'
+import type {
+  PrepareCliExecutionInput,
+  CliProposal,
+  CliCommandDescriptor,
+  StartCliExecutionInput,
+  GetCliExecutionInput,
+  CliExecutionSnapshot
+} from '../../cli-execution/cli-execution-types'
 import { resolveCliCommand } from '../../cli-execution/cli-command-resolver'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -13,6 +23,38 @@ export interface CliExecutionPort {
   isEnabled(): boolean
   getRepositoryId(): string | null
   prepare(input: PrepareCliExecutionInput): Promise<CliProposal>
+  start?(input: StartCliExecutionInput): CliExecutionSnapshot | Promise<CliExecutionSnapshot>
+  get?(input: GetCliExecutionInput): CliExecutionSnapshot | Promise<CliExecutionSnapshot>
+}
+
+export function extractGrokVersion(stdout: string): string | null {
+  if (!stdout || typeof stdout !== 'string') return null
+  const trimmed = stdout.trim()
+  const lines = trimmed.split(/\r?\n/)
+  for (const line of lines) {
+    const cleanLine = line.trim()
+    const match =
+      cleanLine.match(/^(?:@xai\/)?grok(?:[/\s]+(?:version|build)?)?[\s/]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?)\b/i) ||
+      cleanLine.match(/^version[\s/]+v?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?)\b/i) ||
+      cleanLine.match(/^v?([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?)$/)
+    if (match && match[1]) {
+      return match[1]
+    }
+  }
+  return null
+}
+
+export function createDefaultQualifications(installed: boolean = false): GrokQualifications {
+  return {
+    installedVersion: installed ? 'VERIFIED' : 'UNVERIFIED',
+    authentication: 'UNVERIFIED',
+    modelAccess: 'UNVERIFIED',
+    quota: 'UNVERIFIED',
+    headlessPrompt: 'UNVERIFIED',
+    fileEditing: 'UNVERIFIED',
+    agentPermissions: 'UNVERIFIED',
+    promptFileCompatibility: 'UNVERIFIED'
+  }
 }
 
 export type CliExecutionResolver = (repositoryId: string) => Promise<CliExecutionPort | null> | CliExecutionPort | null
@@ -686,6 +728,538 @@ export class BuildXGrokCliBridge {
       },
       executable: 'grok',
       args: ['version'],
+    }
+  }
+
+  async diagnoseGrokBuildInstallation(
+    repositoryId: string,
+    sessionId: string,
+    attemptId: string,
+    probeOperationId: string,
+    options?: { timeoutMs?: number; pollIntervalMs?: number }
+  ): Promise<GrokProbeDiagnosisResult> {
+    let validRepoId: string
+    try {
+      validRepoId = validateRepositoryId(repositoryId)
+    } catch {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: probeOperationId ?? '',
+        repositoryId: repositoryId ?? '',
+        sessionId: sessionId ?? '',
+        attemptId: attemptId ?? '',
+        reason: 'INVALID_REPOSITORY_ID',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: probeOperationId ?? '',
+        repositoryId: validRepoId,
+        sessionId: sessionId ?? '',
+        attemptId: attemptId ?? '',
+        reason: 'INVALID_SESSION_ID',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+
+    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: probeOperationId ?? '',
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: attemptId ?? '',
+        reason: 'INVALID_ATTEMPT_ID',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+    const cleanAttemptId = attemptId.trim().toLowerCase()
+
+    if (typeof probeOperationId !== 'string' || !probeOperationId.trim() || probeOperationId.trim().length > 128) {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: probeOperationId ?? '',
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'INVALID_OPERATION_ID',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+    const cleanOperationId = probeOperationId.trim()
+
+    let cliService: CliExecutionPort | null = null
+    try {
+      cliService = await this.cliResolver(validRepoId)
+    } catch {
+      cliService = null
+    }
+
+    if (!cliService) {
+      return {
+        status: 'UNAVAILABLE',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'CLI_EXECUTION_SERVICE_NOT_AVAILABLE',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (!cliService.isEnabled()) {
+      return {
+        status: 'UNAVAILABLE',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'CLI_EXECUTION_DISABLED',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    let cliRepoId: string | null = null
+    try {
+      cliRepoId = typeof cliService.getRepositoryId === 'function' ? cliService.getRepositoryId() : null
+    } catch {
+      cliRepoId = null
+    }
+
+    if (cliRepoId !== validRepoId) {
+      return {
+        status: 'UNAVAILABLE',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'CLI_SERVICE_REPOSITORY_MISMATCH',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (typeof cliService.start !== 'function' || typeof cliService.get !== 'function') {
+      return {
+        status: 'UNAVAILABLE',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'CLI_PORT_EXECUTION_UNSUPPORTED',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    let existingSnapshot: CliExecutionSnapshot | null = null
+    try {
+      existingSnapshot = await cliService.get({ operationId: cleanOperationId })
+    } catch {
+      existingSnapshot = null
+    }
+
+    if (existingSnapshot) {
+      return this.mapSnapshotToDiagnosis(cleanOperationId, validRepoId, cleanSessionId, cleanAttemptId, existingSnapshot)
+    }
+
+    const prepareResult = await this.prepareGrokBuildProposal(validRepoId, cleanSessionId, cleanAttemptId)
+    if (prepareResult.status !== 'PROPOSAL_PREPARED') {
+      const isUnavailable = ['CLI_NOT_AVAILABLE', 'CLI_DISABLED', 'CLI_INSTALLATION_UNVERIFIED'].includes(prepareResult.status)
+      return {
+        status: isUnavailable ? 'UNAVAILABLE' : 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: prepareResult.reason,
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    const store = this.smcService.getStore(validRepoId)
+    const session = store.getSession(cleanSessionId)
+    if (!session || session.status !== 'OPEN') {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: !session ? 'SESSION_NOT_FOUND' : 'SESSION_NOT_OPEN',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    const attempt = store.getExecutionAttempt(cleanAttemptId)
+    if (!attempt || attempt.status !== 'PREPARED') {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: !attempt ? 'ATTEMPT_NOT_FOUND' : 'ATTEMPT_NOT_PREPARED',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    const reservation = store.getReservation(attempt.reservationId)
+    if (!reservation || reservation.status !== 'ACTIVE') {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: !reservation ? 'RESERVATION_NOT_FOUND' : 'RESERVATION_NOT_ACTIVE',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    const plan = store.getPlan(attempt.planId)
+    if (!plan || plan.status !== 'ACTIVE') {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: !plan ? 'PLAN_NOT_FOUND' : 'PLAN_NOT_ACTIVE',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    const unitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+    if (!unitState || unitState.status !== 'RESERVED' || unitState.revision !== reservation.unitStateRevision) {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: !unitState ? 'UNIT_STATE_NOT_FOUND' : unitState.status !== 'RESERVED' ? 'UNIT_NOT_RESERVED' : 'UNIT_REVISION_MISMATCH',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    let wsCheck
+    try {
+      wsCheck = await this.workspaceService.inspectBoundWorkspace(validRepoId, cleanSessionId)
+    } catch {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'WORKSPACE_INSPECTION_FAILED',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (wsCheck.status !== 'CURRENT') {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: wsCheck.status === 'UNBOUND' ? 'WORKSPACE_UNBOUND' : ('reason' in wsCheck ? wsCheck.reason : 'WORKSPACE_NOT_CURRENT'),
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (
+      wsCheck.binding.worktreeId !== prepareResult.worktree.worktreeId ||
+      wsCheck.binding.generation !== prepareResult.worktree.generation ||
+      wsCheck.binding.branch !== prepareResult.worktree.branch ||
+      wsCheck.currentHead !== prepareResult.worktree.head
+    ) {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'WORKTREE_IDENTITY_DRIFT',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    let initialSnapshot: CliExecutionSnapshot
+    try {
+      initialSnapshot = await cliService.start({
+        proposalId: prepareResult.proposalId,
+        operationId: cleanOperationId
+      })
+    } catch (err: any) {
+      const errMsg = err?.message ?? String(err)
+      if (errMsg.includes('CLI_EXECUTION_BUSY')) {
+        return {
+          status: 'UNAVAILABLE',
+          probeOperationId: cleanOperationId,
+          repositoryId: validRepoId,
+          sessionId: cleanSessionId,
+          attemptId: cleanAttemptId,
+          reason: 'CLI_EXECUTION_BUSY',
+          qualifications: createDefaultQualifications(false)
+        }
+      }
+      if (errMsg.includes('NOT_AUTO_AUTHORIZED') || errMsg.includes('REFUSED')) {
+        return {
+          status: 'REFUSED',
+          probeOperationId: cleanOperationId,
+          repositoryId: validRepoId,
+          sessionId: cleanSessionId,
+          attemptId: cleanAttemptId,
+          reason: errMsg,
+          qualifications: createDefaultQualifications(false)
+        }
+      }
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: errMsg,
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    const timeout = options?.timeoutMs ?? 5000
+    const interval = options?.pollIntervalMs ?? 50
+    const deadline = Date.now() + timeout
+
+    let currentSnapshot = initialSnapshot
+    while (Date.now() < deadline) {
+      if (
+        currentSnapshot.phase === 'TERMINAL' ||
+        currentSnapshot.phase === 'TERMINATION_UNCONFIRMED' ||
+        currentSnapshot.status === 'REFUSED'
+      ) {
+        break
+      }
+      await new Promise(r => setTimeout(r, interval))
+      try {
+        currentSnapshot = await cliService.get({ operationId: cleanOperationId })
+      } catch {
+        break
+      }
+    }
+
+    return this.mapSnapshotToDiagnosis(cleanOperationId, validRepoId, cleanSessionId, cleanAttemptId, currentSnapshot)
+  }
+
+  async getGrokBuildDiagnosis(
+    repositoryId: string,
+    sessionId: string,
+    attemptId: string,
+    probeOperationId: string
+  ): Promise<GrokProbeDiagnosisResult> {
+    let validRepoId: string
+    try {
+      validRepoId = validateRepositoryId(repositoryId)
+    } catch {
+      return {
+        status: 'NOT_STARTED',
+        probeOperationId: probeOperationId ?? '',
+        repositoryId: repositoryId ?? '',
+        sessionId: sessionId ?? '',
+        attemptId: attemptId ?? '',
+        reason: 'INVALID_REPOSITORY_ID',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    const cleanSessionId = typeof sessionId === 'string' ? sessionId.trim().toLowerCase() : ''
+    const cleanAttemptId = typeof attemptId === 'string' ? attemptId.trim().toLowerCase() : ''
+    const cleanOperationId = typeof probeOperationId === 'string' ? probeOperationId.trim() : ''
+
+    const cliService = await this.cliResolver(validRepoId)
+    if (!cliService || typeof cliService.get !== 'function') {
+      return {
+        status: 'UNAVAILABLE',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'CLI_EXECUTION_SERVICE_NOT_AVAILABLE',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    try {
+      const snapshot = await cliService.get({ operationId: cleanOperationId })
+      return this.mapSnapshotToDiagnosis(cleanOperationId, validRepoId, cleanSessionId, cleanAttemptId, snapshot)
+    } catch {
+      return {
+        status: 'UNKNOWN',
+        probeOperationId: cleanOperationId,
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'OPERATION_NOT_FOUND',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+  }
+
+  private mapSnapshotToDiagnosis(
+    probeOperationId: string,
+    repositoryId: string,
+    sessionId: string,
+    attemptId: string,
+    snapshot: CliExecutionSnapshot
+  ): GrokProbeDiagnosisResult {
+    if (snapshot.phase === 'TERMINATION_UNCONFIRMED') {
+      return {
+        status: 'FAILED',
+        probeOperationId,
+        repositoryId,
+        sessionId,
+        attemptId,
+        phase: snapshot.phase,
+        exitCode: snapshot.exitCode ?? null,
+        reason: 'TERMINATION_UNCONFIRMED',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (snapshot.status === 'AWAITING_APPROVAL') {
+      return {
+        status: 'AWAITING_APPROVAL',
+        probeOperationId,
+        repositoryId,
+        sessionId,
+        attemptId,
+        phase: snapshot.phase,
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (snapshot.status === 'RUNNING' || snapshot.phase === 'LAUNCHING' || snapshot.phase === 'RUNNING') {
+      return {
+        status: 'RUNNING',
+        probeOperationId,
+        repositoryId,
+        sessionId,
+        attemptId,
+        phase: snapshot.phase,
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (snapshot.status === 'REFUSED' || snapshot.diagnostic === 'NATIVE_APPROVAL_REFUSED') {
+      return {
+        status: 'REFUSED',
+        probeOperationId,
+        repositoryId,
+        sessionId,
+        attemptId,
+        phase: snapshot.phase,
+        reason: snapshot.diagnostic ?? 'NATIVE_APPROVAL_REFUSED',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (snapshot.status === 'CANCELLED' || snapshot.status === 'INTERRUPTED') {
+      return {
+        status: 'INTERRUPTED',
+        probeOperationId,
+        repositoryId,
+        sessionId,
+        attemptId,
+        phase: snapshot.phase,
+        reason: snapshot.diagnostic ?? 'INTERRUPTED',
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    if (snapshot.status === 'SUCCEEDED') {
+      const cleanTree = snapshot.treeObservation?.activeProcesses === 0 && snapshot.treeObservation?.handlesClosed === true
+      if (!cleanTree) {
+        return {
+          status: 'FAILED',
+          probeOperationId,
+          repositoryId,
+          sessionId,
+          attemptId,
+          phase: snapshot.phase,
+          exitCode: snapshot.exitCode ?? null,
+          reason: 'TREE_TERMINATION_INVALID',
+          qualifications: createDefaultQualifications(false)
+        }
+      }
+
+      if (snapshot.exitCode !== 0) {
+        return {
+          status: 'FAILED',
+          probeOperationId,
+          repositoryId,
+          sessionId,
+          attemptId,
+          phase: snapshot.phase,
+          exitCode: snapshot.exitCode ?? null,
+          reason: `NON_ZERO_EXIT_CODE_${snapshot.exitCode}`,
+          qualifications: createDefaultQualifications(false)
+        }
+      }
+
+      const version = extractGrokVersion(snapshot.stdout ?? '')
+      if (!version) {
+        return {
+          status: 'FAILED',
+          probeOperationId,
+          repositoryId,
+          sessionId,
+          attemptId,
+          phase: snapshot.phase,
+          exitCode: snapshot.exitCode ?? 0,
+          reason: 'VERSION_PARSING_FAILED',
+          qualifications: createDefaultQualifications(false)
+        }
+      }
+
+      return {
+        status: 'INSTALLED_VERSION_OBSERVED',
+        probeOperationId,
+        repositoryId,
+        sessionId,
+        attemptId,
+        phase: snapshot.phase,
+        exitCode: 0,
+        version,
+        qualifications: createDefaultQualifications(true)
+      }
+    }
+
+    if (snapshot.status === 'FAILED' || snapshot.status === 'TIMED_OUT') {
+      return {
+        status: 'FAILED',
+        probeOperationId,
+        repositoryId,
+        sessionId,
+        attemptId,
+        phase: snapshot.phase,
+        exitCode: snapshot.exitCode ?? null,
+        reason: snapshot.diagnostic ?? snapshot.status,
+        qualifications: createDefaultQualifications(false)
+      }
+    }
+
+    return {
+      status: 'UNKNOWN',
+      probeOperationId,
+      repositoryId,
+      sessionId,
+      attemptId,
+      phase: snapshot.phase,
+      reason: snapshot.diagnostic,
+      qualifications: createDefaultQualifications(false)
     }
   }
 }

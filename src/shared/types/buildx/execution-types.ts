@@ -63,3 +63,39 @@ export interface GrokCliPreAdmissionRejectedResult {
 export type GrokCliPreAdmissionResult =
   | GrokCliPreAdmissionPreparedResult
   | GrokCliPreAdmissionRejectedResult
+
+export type GrokProbeStatus =
+  | 'NOT_STARTED'
+  | 'AWAITING_APPROVAL'
+  | 'RUNNING'
+  | 'INSTALLED_VERSION_OBSERVED'
+  | 'UNAVAILABLE'
+  | 'REFUSED'
+  | 'FAILED'
+  | 'INTERRUPTED'
+  | 'UNKNOWN'
+
+export interface GrokQualifications {
+  readonly installedVersion: 'VERIFIED' | 'UNVERIFIED'
+  readonly authentication: 'UNVERIFIED'
+  readonly modelAccess: 'UNVERIFIED'
+  readonly quota: 'UNVERIFIED'
+  readonly headlessPrompt: 'UNVERIFIED'
+  readonly fileEditing: 'UNVERIFIED'
+  readonly agentPermissions: 'UNVERIFIED'
+  readonly promptFileCompatibility: 'UNVERIFIED'
+}
+
+export interface GrokProbeDiagnosisResult {
+  readonly status: GrokProbeStatus
+  readonly probeOperationId: string
+  readonly repositoryId: string
+  readonly sessionId: string
+  readonly attemptId: string
+  readonly phase?: string
+  readonly exitCode?: number | null
+  readonly version?: string
+  readonly reason?: string
+  readonly qualifications: GrokQualifications
+}
+
