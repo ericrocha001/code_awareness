@@ -10,7 +10,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 export interface CliExecutionPort {
   isEnabled(): boolean
-  getRepositoryId?(): string | null
+  getRepositoryId(): string | null
   prepare(input: PrepareCliExecutionInput): Promise<CliProposal>
 }
 
@@ -106,16 +106,26 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    if (typeof cliService.getRepositoryId === 'function') {
-      const cliRepoId = cliService.getRepositoryId()
-      if (cliRepoId !== null && cliRepoId !== validRepoId) {
-        return {
-          status: 'PROJECT_CONTEXT_CHANGED',
-          reason: 'CLI_SERVICE_REPOSITORY_MISMATCH',
-          attemptId: cleanAttemptId,
-          sessionId: cleanSessionId,
-          repositoryId: validRepoId,
-        }
+    let cliRepoId: string | null = null
+    try {
+      cliRepoId = typeof cliService.getRepositoryId === 'function' ? cliService.getRepositoryId() : null
+    } catch {
+      return {
+        status: 'CLI_NOT_AVAILABLE',
+        reason: 'CLI_SERVICE_REPOSITORY_CHECK_FAILED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (typeof cliRepoId !== 'string' || !cliRepoId.trim() || cliRepoId !== validRepoId) {
+      return {
+        status: 'PROJECT_CONTEXT_CHANGED',
+        reason: 'CLI_SERVICE_REPOSITORY_MISMATCH',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
       }
     }
 
@@ -241,14 +251,14 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    // 4. Re-observe Bound Workspace
+    // 4. Pre-observation of Bound Workspace
     let workspaceResult
     try {
       workspaceResult = await this.workspaceService.inspectBoundWorkspace(validRepoId, cleanSessionId)
-    } catch (err: any) {
+    } catch {
       return {
         status: 'WORKSPACE_INVALID',
-        reason: err?.message ?? 'WORKSPACE_INSPECTION_FAILED',
+        reason: 'WORKSPACE_INSPECTION_FAILED',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
@@ -308,14 +318,15 @@ export class BuildXGrokCliBridge {
       })
     } catch (err: any) {
       const errMsg = err?.message ?? String(err)
+      const errCode = err?.code
       if (
         errMsg.includes('EXECUTABLE_NOT_FOUND') ||
         errMsg.includes('Could not resolve executable') ||
-        err?.code === 'EXECUTABLE_NOT_FOUND'
+        errCode === 'EXECUTABLE_NOT_FOUND'
       ) {
         return {
           status: 'CLI_INSTALLATION_UNVERIFIED',
-          reason: errMsg,
+          reason: 'EXECUTABLE_NOT_FOUND',
           attemptId: cleanAttemptId,
           sessionId: cleanSessionId,
           repositoryId: validRepoId,
@@ -328,7 +339,7 @@ export class BuildXGrokCliBridge {
       ) {
         return {
           status: 'WORKSPACE_INVALID',
-          reason: errMsg,
+          reason: 'WORKTREE_NOT_FOUND',
           attemptId: cleanAttemptId,
           sessionId: cleanSessionId,
           repositoryId: validRepoId,
@@ -336,14 +347,15 @@ export class BuildXGrokCliBridge {
       }
       return {
         status: 'CLI_INSTALLATION_UNVERIFIED',
-        reason: errMsg,
+        reason: 'CLI_PREPARATION_FAILED',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
       }
     }
 
-    if (!proposal || typeof proposal.proposalId !== 'string' || !proposal.proposalId) {
+    // 6. Strict validation of returned proposal
+    if (!proposal || typeof proposal.proposalId !== 'string' || !proposal.proposalId.trim()) {
       return {
         status: 'CLI_INSTALLATION_UNVERIFIED',
         reason: 'PROPOSAL_ID_MISSING',
@@ -353,18 +365,237 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    if (proposal.worktree) {
-      if (
-        proposal.worktree.worktreeId !== attempt.worktreeId ||
-        proposal.worktree.generation !== attempt.generation
-      ) {
+    if (proposal.repositoryId !== validRepoId) {
+      return {
+        status: 'PROJECT_CONTEXT_CHANGED',
+        reason: 'PROPOSAL_REPOSITORY_MISMATCH',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (!proposal.worktree) {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'PROPOSAL_WORKTREE_MISSING',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (
+      proposal.worktree.worktreeId !== attempt.worktreeId ||
+      proposal.worktree.generation !== attempt.generation
+    ) {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'PROPOSAL_WORKTREE_MISMATCH',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (proposal.worktree.branch !== attempt.branch) {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'PROPOSAL_BRANCH_MISMATCH',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (proposal.worktree.head !== workspaceResult.currentHead) {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'PROPOSAL_HEAD_MISMATCH',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    // Validate command consistency with literal probe `grok version`
+    if (!proposal.command || proposal.command.executable !== 'grok') {
+      return {
+        status: 'CLI_INSTALLATION_UNVERIFIED',
+        reason: 'PROPOSAL_COMMAND_MISMATCH',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (!Array.isArray(proposal.command.args) || proposal.command.args.length !== 1 || proposal.command.args[0] !== 'version') {
+      return {
+        status: 'CLI_INSTALLATION_UNVERIFIED',
+        reason: 'PROPOSAL_ARGS_MISMATCH',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    // Validate policy is SUPERVISED and not auto-authorized
+    if (!proposal.policy || proposal.policy.mode !== 'SUPERVISED') {
+      return {
+        status: 'CLI_DISABLED',
+        reason: 'PROPOSAL_POLICY_UNSUPERVISED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (proposal.autoAuthorized === true) {
+      return {
+        status: 'CLI_DISABLED',
+        reason: 'PROPOSAL_AUTO_AUTHORIZATION_DISALLOWED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    // 7. Post-await revalidation (fail-closed against concurrent mutations / drift during preparation)
+    if (!cliService.isEnabled()) {
+      return {
+        status: 'CLI_DISABLED',
+        reason: 'CLI_EXECUTION_DISABLED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    try {
+      if (cliService.getRepositoryId() !== validRepoId) {
         return {
-          status: 'WORKSPACE_INVALID',
-          reason: 'PROPOSAL_WORKTREE_MISMATCH',
+          status: 'PROJECT_CONTEXT_CHANGED',
+          reason: 'CLI_SERVICE_REPOSITORY_MISMATCH',
           attemptId: cleanAttemptId,
           sessionId: cleanSessionId,
           repositoryId: validRepoId,
         }
+      }
+    } catch {
+      return {
+        status: 'CLI_NOT_AVAILABLE',
+        reason: 'CLI_SERVICE_REPOSITORY_CHECK_FAILED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    const postSession = store.getSession(cleanSessionId)
+    if (!postSession || postSession.status !== 'OPEN' || postSession.revision !== session.revision) {
+      return {
+        status: 'ATTEMPT_INVALID',
+        reason: !postSession ? 'SESSION_NOT_FOUND' : 'SESSION_STATE_CHANGED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    const postAttempt = store.getExecutionAttempt(cleanAttemptId)
+    if (!postAttempt || postAttempt.status !== 'PREPARED' || postAttempt.revision !== attempt.revision) {
+      return {
+        status: 'ATTEMPT_INVALID',
+        reason: !postAttempt ? 'ATTEMPT_NOT_FOUND' : 'ATTEMPT_STATE_CHANGED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    const postReservation = store.getReservation(attempt.reservationId)
+    if (!postReservation || postReservation.status !== 'ACTIVE' || postReservation.updatedAt !== reservation.updatedAt) {
+      return {
+        status: 'ATTEMPT_INVALID',
+        reason: !postReservation ? 'RESERVATION_NOT_FOUND' : 'RESERVATION_STATE_CHANGED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    const postPlan = store.getPlan(attempt.planId)
+    if (!postPlan || postPlan.status !== 'ACTIVE' || postPlan.revision !== plan.revision) {
+      return {
+        status: 'ATTEMPT_INVALID',
+        reason: !postPlan ? 'PLAN_NOT_FOUND' : 'PLAN_STATE_CHANGED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    const postUnitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+    if (!postUnitState || postUnitState.status !== 'RESERVED' || postUnitState.revision !== unitState.revision) {
+      return {
+        status: 'ATTEMPT_INVALID',
+        reason: !postUnitState ? 'UNIT_STATE_NOT_FOUND' : 'UNIT_STATE_CHANGED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    let postWorkspaceResult
+    try {
+      postWorkspaceResult = await this.workspaceService.inspectBoundWorkspace(validRepoId, cleanSessionId)
+    } catch {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'WORKSPACE_INSPECTION_FAILED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (postWorkspaceResult.status !== 'CURRENT') {
+      const reason =
+        postWorkspaceResult.status === 'UNBOUND'
+          ? 'WORKSPACE_UNBOUND'
+          : 'reason' in postWorkspaceResult
+            ? postWorkspaceResult.reason
+            : 'WORKSPACE_NOT_CURRENT'
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason,
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (
+      postWorkspaceResult.binding.worktreeId !== attempt.worktreeId ||
+      postWorkspaceResult.binding.generation !== attempt.generation ||
+      postWorkspaceResult.binding.branch !== attempt.branch
+    ) {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'WORKTREE_IDENTITY_DRIFT',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (postWorkspaceResult.currentHead !== workspaceResult.currentHead) {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'HEAD_DIVERGED_DURING_PREPARATION',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
       }
     }
 
@@ -378,7 +609,7 @@ export class BuildXGrokCliBridge {
         worktreeId: attempt.worktreeId,
         generation: attempt.generation,
         branch: attempt.branch,
-        head: workspaceResult.currentHead,
+        head: postWorkspaceResult.currentHead,
       },
       executable: 'grok',
       args: ['version'],
