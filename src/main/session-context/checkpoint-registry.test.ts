@@ -137,7 +137,7 @@ function sources(f: ReturnType<typeof fixture>, allowed = true) {
     handoff: { artifactId: 'handoff', revision: 1, contentHash: digest('handoff'), metadata: { kind: 'IMPLEMENTATION_HANDOFF', pullRequest: 90, relations: [{ artifactId: 'plan', kind: 'implements' }] }, updatedAt: now },
     plan: { artifactId: 'plan', revision: 1, contentHash: digest('plan'), metadata: { kind: 'EXECUTABLE_PLAN' }, updatedAt: now }
   }
-  const continuum = { get: (id: string) => artifacts[id] ?? null, list: () => ({ artifacts: Object.values(artifacts) }) }
+  const continuum = { assertRepository: () => {}, get: (id: string) => artifacts[id] ?? null, provenanceSnapshot: (id: string, revision?: number) => artifacts[id] && (revision === undefined || artifacts[id].revision === revision) ? artifacts[id] : null, list: () => ({ artifacts: Object.values(artifacts) }) }
   const github = { commitPullRequests: vi.fn(async () => [90]), getPullRequest: vi.fn(async () => ({ pullRequest: { head: { sha: 'd'.repeat(40) } } })), pullRequestCommits: vi.fn(async () => ({ repositoryId: 'repo', commits: [{ sha: commit }], nextPage: null })) }
   const read = registrySources({ repositoryId: 'repo', root: '/fixture', continuum: () => continuum as any, ledger, github: github as any, networkAllowed: () => allowed, assertCurrent: () => {} })
   return { ledger, read, github, artifacts }
@@ -147,7 +147,7 @@ it('automatically composes PR → real member → checkpoint → two sessions an
   source.ledger.recordProof({ kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED', startedAt: '2026-11-03T22:00:00Z', finishedAt: '2026-11-03T22:00:01Z', durationMs: 1000, scope: ['fixture'], summary: 'fixture', evidenceFor: ['plan'] })
   const map = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'PR', id: '90' }, () => {}, source.read) as any
   expect(map.edges.some((e: any) => e.to.kind === 'PROOF' && e.freshness === 'UNVERIFIABLE')).toBe(true)
-  expect(map.edges.some((e: any) => e.from.id === 'handoff' && e.evidenceKind === 'HANDOFF_DECLARED')).toBe(true)
+  expect(map.edges.some((e: any) => e.from.id === 'handoff:1' && e.evidenceKind === 'HANDOFF_DECLARED')).toBe(true)
   expect(map.edges.filter((e: any) => e.to.kind === 'SESSION')).toHaveLength(2)
   expect(map.edges.some((e: any) => e.from.kind === 'COMMIT' && e.from.id === 'd'.repeat(40))).toBe(false)
   f.restart()
@@ -220,7 +220,7 @@ it('advances durable Ledger cursors and excludes a foreign checkout even when it
   const second = await source.ledger.projectionPage(first.cursor)
   expect(second.proofs).toHaveLength(2)
   expect(second.more).toBe(false)
-  const batches = await source.read({ selector: { kind: 'ARTIFACT', id: 'plan' }, cursors: {} })
+  const batches = await source.read({ cursors: {} })
   expect(batches.some(b => b.source === 'LEDGER:' + foreign.proofId)).toBe(false)
   expect(batches.find(b => b.source === 'LEDGER')?.status).toBe('PARTIAL')
 })

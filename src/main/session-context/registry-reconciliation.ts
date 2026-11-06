@@ -28,7 +28,10 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
         digest: digest(JSON.stringify(capture.capture)), freshness: 'OBSERVED_SNAPSHOT' }] })
   }
   let batches: RegistryBatch[] = []
-  if (read) batches = await read({ selector, cursors: registry.cursors() })
+  if (read) {
+    const neighbors: RegistryEntity[] = selector ? registry.contextGraph(selector, undefined, 2).nodes.filter(node => node.type === 'ARTIFACT').slice(0, 20).map(node => ({ kind: 'ARTIFACT', id: node.id + (node.revision ? ':' + node.revision : '') })) : []
+    batches = await read({ selector, neighbors, cursors: registry.cursors() })
+  }
   assertCurrent()
   registry.applyAll(batches, assertCurrent)
   const commits = new Set<string>()

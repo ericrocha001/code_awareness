@@ -4,6 +4,7 @@ import type { ValidationLedger } from '../validation-ledger/validation-ledger'
 import type { GitHubIntegrationService } from '../github/github-integration-service'
 import type { RegistryBatch, RegistryEdge, RegistryEntity, RegistryReader } from './checkpoint-registry'
 import { digest } from './privacy'
+import { extractArtifactReferences } from '../continuum/artifact-references'
 
 export function registrySources(options: {
   repositoryId: string; root: string; continuum: () => ContinuumService | null; ledger: ValidationLedger
@@ -11,19 +12,22 @@ export function registrySources(options: {
   networkAllowed: () => boolean; assertCurrent: () => void
 }): RegistryReader {
   const { repositoryId, assertCurrent } = options
-  return async ({ selector, cursors }) => {
+  return async ({ selector, neighbors = [], cursors }) => {
     assertCurrent()
     const batches: RegistryBatch[] = [], artifacts = new Map<string, Artifact>(), prs = new Set<number>()
+    let selectedPartial = false
     const service = options.continuum()
+    service?.assertRepository(repositoryId)
     const addArtifact = (id: string) => {
       if (artifacts.size >= 20 || !service || artifacts.has(id)) return
-      const artifact = service.get(id)
+      const version = /^(.*):([1-9][0-9]*)$/.exec(id)
+      const artifact = version ? service.provenanceSnapshot(version[1], Number(version[2])) : service.provenanceSnapshot ? service.provenanceSnapshot(id) : service.get(id)
       if (artifact) artifacts.set(id, artifact)
     }
     const addBatch = (batch: Omit<RegistryBatch, 'repositoryId'>) => batches.push({ repositoryId, ...batch })
     const unavailable = (source: string, status = 'UNAVAILABLE') => addBatch({ source, revision: digest(status), cursor: cursors[source], status, edges: [] })
     if (service) {
-      try {
+      if (!selector) try {
         const saved = JSON.parse(cursors.CONTINUUM ?? '{}')
         const until = saved.until ?? new Date().toISOString()
         const page = service.list({ limit: 10, sortBy: 'updatedAt', updatedAfter: saved.after, updatedBefore: until, cursor: saved.cursor })
@@ -33,8 +37,18 @@ export function registrySources(options: {
       } catch { unavailable('CONTINUUM') }
       if (selector?.kind === 'ARTIFACT') {
         addArtifact(selector.id)
-        for (const row of service.list({ relatedToArtifactId: selector.id, direction: 'both', limit: 10 }).artifacts) addArtifact(row.artifactId)
+        const id = selector.id.replace(/:([1-9][0-9]*)$/, '')
+        const related = service.list({ relatedToArtifactId: id, direction: 'both', limit: 10 })
+        selectedPartial ||= !!related.nextCursor
+        for (const row of related.artifacts) addArtifact(row.artifactId)
+        if (service.graph) {
+          const graph = service.graph({ artifactIds: [id], expand: true, nodeLimit: 20, edgeLimit: 40 }, { indexOnly: true })
+          if (graph.repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
+          selectedPartial ||= graph.truncated.nodes || graph.truncated.edges
+          for (const node of graph.nodes) addArtifact(node.artifactId)
+        }
       }
+      for (const neighbor of neighbors.slice(0, 20)) if (neighbor.kind === 'ARTIFACT') addArtifact(neighbor.id)
       const metadataKey = selector?.kind === 'PR' ? 'pullRequest' : selector?.kind === 'COMMIT' ? 'commitSha' : selector?.kind === 'EXECUTION' ? 'executionId' : undefined
       if (metadataKey && selector) for (const row of service.list({ metadata: { [metadataKey]: selector.kind === 'PR' ? Number(selector.id) : selector.id }, limit: 10 }).artifacts) addArtifact(row.artifactId)
     } else unavailable('CONTINUUM')
@@ -66,12 +80,34 @@ export function registrySources(options: {
       for (const number of [...prs].slice(0, 2)) for (const row of service.list({ metadata: { pullRequest: number }, limit: 5 }).artifacts) addArtifact(row.artifactId)
       for (const artifact of [...artifacts.values()]) for (const relation of artifact.metadata.relations ?? []) addArtifact(relation.artifactId)
     }
+    const projectProof = (proof: Awaited<ReturnType<ValidationLedger['getProofWithFreshness']>>) => {
+      if (!proof) return
+      const sourceRepo = proof.commandProfile?.source?.repositoryId ?? proof.commandProfile?.checkout?.repositoryId
+      if (sourceRepo && sourceRepo !== repositoryId) return
+      const targets = proof.evidenceFor.filter(id => !!service?.get(id)).slice(0, 20)
+      if (!sourceRepo && !targets.length) return
+      for (const id of targets) addArtifact(id)
+      const edges: RegistryEdge[] = targets.map(id => ({ from: { kind: 'ARTIFACT', id }, relation: 'evidence', to: { kind: 'PROOF', id: proof.proofId }, evidenceKind: 'LEDGER_EVIDENCE_FOR', evidenceRef: proof.proofId,
+        digest: digest(JSON.stringify([proof.proofId, proof.evidenceFor, proof.sourceFingerprint])), freshness: proof.freshness }))
+      addBatch({ source: 'LEDGER:' + proof.proofId, revision: digest(JSON.stringify([proof.recordedAt, proof.freshness])), status: 'COMPLETE', entities: [{ kind: 'PROOF', id: proof.proofId }], edges })
+    }
+    try {
+      if (selector?.kind === 'PROOF') projectProof(await options.ledger.getProofWithFreshness(selector.id))
+      const page = !selector ? await options.ledger.projectionPage(cursors.LEDGER) : undefined
+      for (const proof of page?.proofs ?? []) projectProof(proof)
+      for (const artifact of [...artifacts.values()].slice(0, 3)) for (const proof of await options.ledger.listProofs({ requirementId: artifact.artifactId, limit: 10 })) projectProof(proof)
+      addBatch({ source: 'LEDGER', revision: digest(page?.cursor ?? selector?.id ?? ''), cursor: page?.cursor ?? cursors.LEDGER, status: page?.more ? 'PARTIAL' : selector ? 'SELECTED_SCOPE' : 'COMPLETE', edges: [] })
+    } catch { unavailable('LEDGER') }
     for (const artifact of artifacts.values()) {
-      const from: RegistryEntity = { kind: 'ARTIFACT', id: artifact.artifactId }
-      const evidence = { evidenceRef: artifact.artifactId, digest: artifact.contentHash, freshness: 'OBSERVED_SNAPSHOT' }
+      const identity: RegistryEntity = { kind: 'ARTIFACT', id: artifact.artifactId }
+      const from: RegistryEntity = { kind: 'ARTIFACT', id: artifact.artifactId + ':' + artifact.revision }
+      const evidence = { evidenceRef: artifact.artifactId + ':' + artifact.revision, digest: artifact.contentHash, freshness: 'EXACT_REVISION' }
       const edges: RegistryEdge[] = (artifact.metadata.relations ?? []).slice(0, 40).map(r => ({ from, relation: r.kind, to: { kind: 'ARTIFACT', id: r.artifactId }, evidenceKind: 'CONTINUUM_TYPED_RELATION', ...evidence }))
+      selectedPartial ||= (artifact.metadata.relations?.length ?? 0) > 40
+      for (const id of extractArtifactReferences(artifact.rawMarkdown ?? '').slice(0, 20)) if (id !== artifact.artifactId && service?.get(id)) edges.push({ from, relation: 'references', to: { kind: 'ARTIFACT', id }, evidenceKind: 'CONTINUUM_REFERENCE', ...evidence })
       const nested = artifact.metadata.metadata
       const metadata = nested && typeof nested === 'object' && !Array.isArray(nested) ? { ...nested, ...artifact.metadata } : artifact.metadata
+      if (typeof metadata.executionId === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(metadata.executionId)) edges.push({ from, relation: 'member-of', to: { kind: 'EXECUTION', id: metadata.executionId }, evidenceKind: 'EXECUTION_MEMBERSHIP', ...evidence })
       if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF') {
         const targets: [RegistryEntity['kind'], unknown][] = [['PR', metadata.pullRequest], ['COMMIT', metadata.commitSha ?? metadata.headCommit], ['EXECUTION', metadata.executionId]]
         for (const [kind, id] of targets) if ((kind === 'PR' && Number.isSafeInteger(id) && Number(id) > 0) || (kind === 'COMMIT' && typeof id === 'string' && /^[a-f0-9]{40}$/.test(id)) || (kind === 'EXECUTION' && typeof id === 'string' && /^[A-Za-z0-9._:-]{1,200}$/.test(id))) {
@@ -79,25 +115,19 @@ export function registrySources(options: {
           if (kind === 'PR') prs.add(Number(id))
         }
       }
-      addBatch({ source: 'CONTINUUM:' + artifact.artifactId, revision: String(artifact.revision) + ':' + artifact.contentHash, status: 'COMPLETE', entities: [from], edges })
+      const native = artifact.provenance?.nativeArtifact as { state?: string; receiptId?: string } | undefined
+      const authority = { nativeState: native?.state ?? 'UNAVAILABLE', receiptId: native?.receiptId }
+      addBatch({ source: 'CONTINUUM:' + from.id, revision: String(artifact.revision) + ':' + artifact.contentHash + ':' + digest(JSON.stringify(authority)), cursor: JSON.stringify(authority), status: 'COMPLETE', entities: [from], edges })
+      const current = service?.get(artifact.artifactId)
+      if (current?.revision === artifact.revision) {
+        addBatch({ source: 'CONTINUUM:' + artifact.artifactId, revision: 'REVISIONED_PROJECTION', status: 'REPLACED', edges: [] })
+        addBatch({ source: 'CONTINUUM_CURRENT:' + artifact.artifactId, revision: String(artifact.revision) + ':' + artifact.contentHash, status: 'COMPLETE', entities: [identity], edges: [
+        { from: identity, relation: 'revision', to: from, evidenceKind: 'CONTINUUM_REVISION', ...evidence }
+        ] })
+      }
     }
-    const projectProof = (proof: Awaited<ReturnType<ValidationLedger['getProofWithFreshness']>>) => {
-      if (!proof) return
-      const sourceRepo = proof.commandProfile?.source?.repositoryId ?? proof.commandProfile?.checkout?.repositoryId
-      if (sourceRepo && sourceRepo !== repositoryId) return
-      const targets = proof.evidenceFor.filter(id => !!service?.get(id)).slice(0, 20)
-      if (!sourceRepo && !targets.length) return
-      const edges: RegistryEdge[] = targets.map(id => ({ from: { kind: 'ARTIFACT', id }, relation: 'evidence', to: { kind: 'PROOF', id: proof.proofId }, evidenceKind: 'LEDGER_EVIDENCE_FOR', evidenceRef: proof.proofId,
-        digest: digest(JSON.stringify([proof.proofId, proof.evidenceFor, proof.sourceFingerprint])), freshness: proof.freshness }))
-      addBatch({ source: 'LEDGER:' + proof.proofId, revision: digest(JSON.stringify([proof.recordedAt, proof.freshness])), status: 'COMPLETE', entities: [{ kind: 'PROOF', id: proof.proofId }], edges })
-    }
-    try {
-      if (selector?.kind === 'PROOF') projectProof(await options.ledger.getProofWithFreshness(selector.id))
-      const page = await options.ledger.projectionPage(cursors.LEDGER)
-      for (const proof of page.proofs) projectProof(proof)
-      for (const artifact of [...artifacts.values()].slice(0, 3)) for (const proof of await options.ledger.listProofs({ requirementId: artifact.artifactId, limit: 10 })) projectProof(proof)
-      addBatch({ source: 'LEDGER', revision: digest(page.cursor), cursor: page.cursor, status: page.more ? 'PARTIAL' : 'COMPLETE', edges: [] })
-    } catch { unavailable('LEDGER') }
+    if (selector && service) addBatch({ source: 'CONTINUUM', revision: digest(JSON.stringify([...artifacts.values()].map(artifact => [artifact.artifactId, artifact.revision, artifact.contentHash]))), cursor: cursors.CONTINUUM,
+      status: selectedPartial || artifacts.size >= 20 ? 'PARTIAL' : 'SELECTED_SCOPE', edges: [] })
     assertCurrent()
     return batches
   }

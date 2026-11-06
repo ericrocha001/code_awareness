@@ -62,7 +62,7 @@ export class ArtifactGraph {
     }).immediate()
   }
 
-  query(query: ContinuumGraphQuery, list: (filter: ListArtifactsFilter) => ArtifactPage): ContinuumGraph {
+  query(query: ContinuumGraphQuery, list: (filter: ListArtifactsFilter) => ArtifactPage, options: { indexOnly?: boolean } = {}): ContinuumGraph {
     if (!query || typeof query !== 'object' || Array.isArray(query)) throw new Error('INVALID_ARGUMENT: graph query required')
     const nodeLimit = query.nodeLimit ?? 50
     const edgeLimit = query.edgeLimit ?? 200
@@ -72,7 +72,7 @@ export class ArtifactGraph {
     if (query.direction !== undefined && !['inbound', 'outbound', 'both'].includes(query.direction)) throw new Error('INVALID_ARGUMENT: invalid direction')
     for (const key of ['query', 'kind', 'status', 'tag', 'relationKind'] as const) if (query[key] !== undefined && typeof query[key] !== 'string') throw new Error('INVALID_ARGUMENT: invalid ' + key)
     if (query.expectedRevision !== undefined && (!Number.isSafeInteger(query.expectedRevision) || query.expectedRevision < 0)) throw new Error('INVALID_ARGUMENT: invalid graph revision')
-    const backfill = this.backfill()
+    const backfill = options.indexOnly ? { pending: false } : this.backfill()
     return this.db.transaction((): ContinuumGraph => {
       const revision = (this.db.prepare('SELECT revision FROM artifact_graph_state WHERE id = 1').get() as { revision: number }).revision
       if (query.expectedRevision !== undefined && query.expectedRevision !== revision) throw new Error('GRAPH_REVISION_CONFLICT')
