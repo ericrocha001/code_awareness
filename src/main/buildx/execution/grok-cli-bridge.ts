@@ -4,7 +4,8 @@ import type {
 import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import type { WorkspaceBindingService } from './workspace-binding-service'
-import type { PrepareCliExecutionInput, CliProposal } from '../../cli-execution/cli-execution-types'
+import type { PrepareCliExecutionInput, CliProposal, CliCommandDescriptor } from '../../cli-execution/cli-execution-types'
+import { resolveCliCommand } from '../../cli-execution/cli-command-resolver'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -16,18 +17,28 @@ export interface CliExecutionPort {
 
 export type CliExecutionResolver = (repositoryId: string) => Promise<CliExecutionPort | null> | CliExecutionPort | null
 
+export type CliCommandResolverFn = (
+  repoRoot: string,
+  rawExecutable: string,
+  rawArgs?: string[],
+  rawRelativeCwd?: string
+) => CliCommandDescriptor
+
 export class BuildXGrokCliBridge {
   private readonly smcService: SessionMemoryCentralService
   private readonly workspaceService: WorkspaceBindingService
   private readonly cliResolver: CliExecutionResolver
+  private readonly commandResolver: CliCommandResolverFn
 
   constructor(
     smcService: SessionMemoryCentralService,
     workspaceService: WorkspaceBindingService,
-    cliServiceOrResolver?: CliExecutionPort | CliExecutionResolver | null
+    cliServiceOrResolver?: CliExecutionPort | CliExecutionResolver | null,
+    commandResolver?: CliCommandResolverFn
   ) {
     this.smcService = smcService
     this.workspaceService = workspaceService
+    this.commandResolver = commandResolver ?? resolveCliCommand
     if (typeof cliServiceOrResolver === 'function') {
       this.cliResolver = cliServiceOrResolver
     } else if (cliServiceOrResolver) {
@@ -418,8 +429,19 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    // Validate command consistency with literal probe `grok version`
-    if (!proposal.command || proposal.command.executable !== 'grok') {
+    // Validate command presence
+    if (!proposal.command) {
+      return {
+        status: 'CLI_INSTALLATION_UNVERIFIED',
+        reason: 'PROPOSAL_COMMAND_MISSING',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    // 1. Validate literal intention: originalExecutable === 'grok' and originalArgs === ['version']
+    if (proposal.command.originalExecutable !== 'grok') {
       return {
         status: 'CLI_INSTALLATION_UNVERIFIED',
         reason: 'PROPOSAL_COMMAND_MISMATCH',
@@ -429,7 +451,11 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    if (!Array.isArray(proposal.command.args) || proposal.command.args.length !== 1 || proposal.command.args[0] !== 'version') {
+    if (
+      !Array.isArray(proposal.command.originalArgs) ||
+      proposal.command.originalArgs.length !== 1 ||
+      proposal.command.originalArgs[0] !== 'version'
+    ) {
       return {
         status: 'CLI_INSTALLATION_UNVERIFIED',
         reason: 'PROPOSAL_ARGS_MISMATCH',
@@ -439,7 +465,7 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    // Validate policy is SUPERVISED and not auto-authorized
+    // Validate policy is SUPERVISED and not auto-authorized before descriptor integrity check
     if (!proposal.policy || proposal.policy.mode !== 'SUPERVISED') {
       return {
         status: 'CLI_DISABLED',
@@ -454,6 +480,53 @@ export class BuildXGrokCliBridge {
       return {
         status: 'CLI_DISABLED',
         reason: 'PROPOSAL_AUTO_AUTHORIZATION_DISALLOWED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    // 2. Validate absence of arbitrary subdirectory: CWD must be the root of the selected worktree
+    if (proposal.command.relativeCwd !== '.' && proposal.command.relativeCwd !== '') {
+      return {
+        status: 'WORKSPACE_INVALID',
+        reason: 'PROPOSAL_CWD_NOT_ROOT',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    // 3. Verify integrity of the effective descriptor against authoritative resolveCliCommand
+    let expectedDescriptor: CliCommandDescriptor
+    try {
+      expectedDescriptor = this.commandResolver(proposal.command.cwd, 'grok', ['version'])
+    } catch {
+      return {
+        status: 'CLI_INSTALLATION_UNVERIFIED',
+        reason: 'CLI_COMMAND_RESOLUTION_FAILED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+      }
+    }
+
+    if (
+      proposal.command.originalExecutable !== expectedDescriptor.originalExecutable ||
+      !Array.isArray(proposal.command.originalArgs) ||
+      proposal.command.originalArgs.length !== (expectedDescriptor.originalArgs?.length ?? 0) ||
+      !proposal.command.originalArgs.every((arg, idx) => arg === expectedDescriptor.originalArgs?.[idx]) ||
+      proposal.command.executable !== expectedDescriptor.executable ||
+      proposal.command.cwd !== expectedDescriptor.cwd ||
+      proposal.command.relativeCwd !== expectedDescriptor.relativeCwd ||
+      proposal.command.windowsCommandLine !== expectedDescriptor.windowsCommandLine ||
+      !Array.isArray(proposal.command.args) ||
+      proposal.command.args.length !== expectedDescriptor.args.length ||
+      !proposal.command.args.every((arg, idx) => arg === expectedDescriptor.args[idx])
+    ) {
+      return {
+        status: 'CLI_INSTALLATION_UNVERIFIED',
+        reason: 'PROPOSAL_DESCRIPTOR_MISMATCH',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
