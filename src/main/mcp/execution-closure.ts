@@ -18,7 +18,7 @@ export interface ClosureDependencies extends ClosureContext {
 }
 export const ASSESS_EXECUTION_CLOSURE_TOOL: McpToolDefinition = {
   name: 'assess_execution_closure',
-  description: 'Read-only on-demand closure diagnosis after publishing an implementation Handoff and before proposing a PR. Select one planArtifactId; optional explicit prNumber checks only this repository. Independent documentation, proof and Git dimensions; READY_FOR_REVIEW covers inspected consistency only, never contract acceptance or merge authorization. Corrections belong to the author using update_artifact with expectedRevision. No Markdown inference, corpus scan, mutation or automatic suites.',
+  description: 'Read-only on-demand closure diagnosis after publishing an implementation Handoff and before proposing a PR. Select one planArtifactId; optional explicit prNumber checks only this repository. Independent documentation, proof and Git dimensions; READY_FOR_REVIEW covers inspected consistency only, never contract acceptance or merge authorization. Content corrections use update_artifact with expectedRevision; formal editorial decisions use transition_artifact_lifecycle with independent approval and verified evidence. No Markdown inference, corpus scan, mutation or automatic suites.',
   securitySchemes: [{ type: 'oauth2', scopes: [] }],
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
   inputSchema: { type: 'object', properties: { planArtifactId: { type: 'string', minLength: 1, maxLength: 200 }, prNumber: { type: 'integer', minimum: 1 } }, required: ['planArtifactId'], additionalProperties: false }

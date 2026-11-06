@@ -43,6 +43,13 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     for (const tool of CONTINUUM_AGENT_TOOLS) expect(advertised.tools.find((item: { name: string }) => item.name === tool.name)?.inputSchema.additionalProperties).toBe(false)
     const status = await local('status'), worktreeId = status.result.worktrees.find((item: { path: string }) => item.path.replace(/\\/g, '/').toLowerCase() === root.replace(/\\/g, '/').toLowerCase()).worktreeId
     const selected = [{ artifactId: one.artifactId, expectedRevision: 1 }], scope = { repositoryId: 'A', worktreeId }
+    const plan = service.publish('# Plan\n\nExplicit semantic criteria to review.', { kind: 'EXECUTABLE_PLAN' })
+    const transition = { action: 'TRANSITION', artifactId: plan.artifactId, expectedRevision: 1, toState: 'CANCELLED', reasonCode: 'EXPLICIT_CANCELLATION', evidenceRefs: [] }
+    expect(await read('transition_artifact_lifecycle', transition)).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'AUTHORITY_APPROVAL_REQUIRED' })
+    expect((await local('transition_artifact_lifecycle', { ...scope, ...transition })).result).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'AUTHORITY_APPROVAL_REQUIRED' })
+    expect((await local('transition_artifact_lifecycle', { ...scope, ...transition, repositoryId: 'B' })).error.code).toBe('REPOSITORY_MISMATCH')
+    expect((await call('transition_artifact_lifecycle', { ...transition, approved: true })).isError).toBe(true)
+    expect(service.get(plan.artifactId)!.metadata.status).toBe('PENDING')
     expect((await local('list_continuum_tags', scope, 'forged')).error.code).toBe('UNAUTHORIZED')
     expect((await local('list_continuum_tags', { ...scope, repositoryId: 'B' })).error.code).toBe('REPOSITORY_MISMATCH')
     expect((await local('list_continuum_tags', { ...scope, worktreeId: 'forged' })).error.code).toBe('WORKTREE_UNLINKED')

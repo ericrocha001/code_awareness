@@ -157,7 +157,12 @@ const validationLedger = new ValidationLedger(
 )
 const continuumSession = new RepositoryContinuumSession(join(app.getPath('userData'), 'continuum'), {
   findByPath: path => repositoryCatalog?.findByPath(path) ?? null
-}, { ingestCheckout: !isRuntimePreview() })
+}, { ingestCheckout: !isRuntimePreview(), lifecycle: {
+  activity: (repositoryId, artifactId) => activeValidationExecution?.lifecycleActivity(repositoryId, artifactId) ?? { state: 'UNKNOWN', source: 'NO_ACTIVE_OPERATION_OBSERVED' },
+  proof: id => validationLedger.getProofWithFreshness(id),
+  proofsFor: id => validationLedger.listProofs({ requirementId: id, limit: 10 }),
+  approve: async review => (await import('./continuum/lifecycle-approval.js')).approveLifecycleInDesktop(review)
+} })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const localAgentChannel = new LocalChannelHost(
   [new ContinuumLocalAdapter(continuumSession, (artifact, target) => handoffSessionCoverage(activeSessionContext, artifact, target)), new AcademyLocalAdapter(academyService), new TestOutputLocalAdapter(continuumSession, validationLedger)],
