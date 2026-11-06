@@ -12,6 +12,7 @@ import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import { SessionMemoryCentralService as SmcServiceImpl } from '../smc/session-memory-central-service'
 import {
+  BuildXWorkspaceEvidenceUnavailableError,
   BuildXWorkspaceInvalidError,
   BuildXWorkspaceNotFoundError,
   BuildXWorkspaceRepositoryMismatchError
@@ -21,7 +22,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 export interface GitOperationsPort {
   getBranchInventory(): Promise<BranchInventory>
-  isReference?(worktreeId: string): boolean
+  getCoordinationSnapshot?(worktreeId: string): Promise<{ reference: boolean }>
 }
 
 export type GitOperationsResolver =
@@ -100,16 +101,6 @@ export class WorkspaceBindingService {
       throw new BuildXWorkspaceNotFoundError(cleanWorktreeId)
     }
 
-    // Checkout de referência principal
-    const isRef =
-      (worktree as any).reference === true ||
-      (worktree as any).isReference === true ||
-      (gitPort.isReference && gitPort.isReference(cleanWorktreeId)) === true
-
-    if (isRef) {
-      throw new BuildXWorkspaceInvalidError('Cannot bind primary or reference worktree checkout')
-    }
-
     if (worktree.missing === true) {
       throw new BuildXWorkspaceInvalidError(`Worktree "${cleanWorktreeId}" is missing on disk`)
     }
@@ -147,6 +138,35 @@ export class WorkspaceBindingService {
         `Branch "${worktree.branch}" is not linked to worktree "${cleanWorktreeId}" with generation "${worktree.generation}"`
       )
     }
+    if (!localBranch.head || worktree.head !== localBranch.head) {
+      throw new BuildXWorkspaceInvalidError('Worktree HEAD does not match local branch HEAD')
+    }
+
+    // Evidência autoritativa de checkout de referência/principal via getCoordinationSnapshot
+    if (typeof gitPort.getCoordinationSnapshot !== 'function') {
+      throw new BuildXWorkspaceEvidenceUnavailableError(
+        'Reference evidence is unavailable: gitPort does not provide getCoordinationSnapshot'
+      )
+    }
+
+    let snapshot: { reference: boolean }
+    try {
+      snapshot = await gitPort.getCoordinationSnapshot(cleanWorktreeId)
+    } catch {
+      throw new BuildXWorkspaceEvidenceUnavailableError(
+        'Failed to acquire reference evidence for worktree'
+      )
+    }
+
+    if (!snapshot || typeof snapshot.reference !== 'boolean') {
+      throw new BuildXWorkspaceEvidenceUnavailableError(
+        'Invalid reference evidence returned for worktree'
+      )
+    }
+
+    if (snapshot.reference === true) {
+      throw new BuildXWorkspaceInvalidError('Cannot bind primary or reference worktree checkout')
+    }
 
     // 5. Persiste vínculo durável no SMC
     return this.smcService.saveWorkspaceBinding(validRepoId, cleanSessionId, {
@@ -178,15 +198,25 @@ export class WorkspaceBindingService {
       return { status: 'UNBOUND' }
     }
 
-    let inventory: BranchInventory
+    let gitPort: GitOperationsPort
     try {
-      const gitPort = await this.resolveGitPort(validRepoId)
-      inventory = await gitPort.getBranchInventory()
-    } catch (error: any) {
+      gitPort = await this.resolveGitPort(validRepoId)
+    } catch {
       return {
         status: 'UNAVAILABLE',
         binding,
-        reason: error?.message || 'GIT_INVENTORY_UNAVAILABLE'
+        reason: 'GIT_PORT_UNAVAILABLE'
+      }
+    }
+
+    let inventory: BranchInventory
+    try {
+      inventory = await gitPort.getBranchInventory()
+    } catch {
+      return {
+        status: 'UNAVAILABLE',
+        binding,
+        reason: 'GIT_INVENTORY_UNAVAILABLE'
       }
     }
 
@@ -213,6 +243,27 @@ export class WorkspaceBindingService {
         reason: 'WORKTREE_MISSING'
       }
     }
+    if (worktree.locked === true) {
+      return {
+        status: 'STALE',
+        binding,
+        reason: 'WORKTREE_LOCKED'
+      }
+    }
+    if (worktree.prunable === true) {
+      return {
+        status: 'STALE',
+        binding,
+        reason: 'WORKTREE_PRUNABLE'
+      }
+    }
+    if (worktree.detached === true) {
+      return {
+        status: 'STALE',
+        binding,
+        reason: 'DETACHED_HEAD'
+      }
+    }
     if (worktree.generation !== binding.generation) {
       return {
         status: 'STALE',
@@ -227,18 +278,83 @@ export class WorkspaceBindingService {
         reason: 'BRANCH_CHANGED'
       }
     }
-    if (worktree.detached === true) {
+    if (!worktree.head || typeof worktree.head !== 'string' || !worktree.head.trim()) {
       return {
         status: 'STALE',
         binding,
-        reason: 'DETACHED_HEAD'
+        reason: 'HEAD_UNAVAILABLE'
+      }
+    }
+
+    // Branch local no inventário
+    const localBranch = inventory.branches.find(
+      b => b.namespace === 'LOCAL' && (b.name === worktree.branch || b.ref === `refs/heads/${worktree.branch}`)
+    )
+    if (!localBranch) {
+      return {
+        status: 'STALE',
+        binding,
+        reason: 'BRANCH_NOT_IN_INVENTORY'
+      }
+    }
+    const isLinked = localBranch.worktrees.some(
+      bw => bw.worktreeId === binding.worktreeId && bw.generation === binding.generation
+    )
+    if (!isLinked) {
+      return {
+        status: 'STALE',
+        binding,
+        reason: 'BRANCH_NOT_LINKED'
+      }
+    }
+    if (!localBranch.head || worktree.head !== localBranch.head) {
+      return {
+        status: 'STALE',
+        binding,
+        reason: 'HEAD_DIVERGED'
+      }
+    }
+
+    // Evidência de referência via getCoordinationSnapshot
+    if (typeof gitPort.getCoordinationSnapshot !== 'function') {
+      return {
+        status: 'UNAVAILABLE',
+        binding,
+        reason: 'EVIDENCE_UNAVAILABLE'
+      }
+    }
+
+    let snapshot: { reference: boolean }
+    try {
+      snapshot = await gitPort.getCoordinationSnapshot(binding.worktreeId)
+    } catch {
+      return {
+        status: 'UNAVAILABLE',
+        binding,
+        reason: 'COORDINATION_SNAPSHOT_FAILED'
+      }
+    }
+
+    if (!snapshot || typeof snapshot.reference !== 'boolean') {
+      return {
+        status: 'UNAVAILABLE',
+        binding,
+        reason: 'EVIDENCE_UNAVAILABLE'
+      }
+    }
+
+    if (snapshot.reference === true) {
+      return {
+        status: 'STALE',
+        binding,
+        reason: 'PRIMARY_CHECKOUT'
       }
     }
 
     return {
       status: 'CURRENT',
       binding,
-      currentHead: worktree.head ?? binding.headAtBind
+      currentHead: worktree.head
     }
   }
 

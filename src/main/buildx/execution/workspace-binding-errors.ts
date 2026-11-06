@@ -19,6 +19,13 @@ export class BuildXWorkspaceInvalidError extends Error {
   }
 }
 
+export class BuildXWorkspaceEvidenceUnavailableError extends BuildXWorkspaceInvalidError {
+  constructor(reason: string) {
+    super(`EVIDENCE_UNAVAILABLE: ${reason}`)
+    this.name = 'BuildXWorkspaceEvidenceUnavailableError'
+  }
+}
+
 export class BuildXWorkspaceRepositoryMismatchError extends Error {
   constructor(expected: string, actual: string) {
     super(`REPOSITORY_MISMATCH: Expected repository "${expected}" but Git inventory reported "${actual}"`)

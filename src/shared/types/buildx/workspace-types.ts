@@ -19,6 +19,27 @@ export interface SaveWorkspaceBindingInput {
 
 export type BuildXBoundWorkspaceStatus = 'CURRENT' | 'STALE' | 'UNAVAILABLE' | 'UNBOUND'
 
+export type BuildXWorkspaceStaleReason =
+  | 'WORKTREE_NOT_FOUND'
+  | 'WORKTREE_MISSING'
+  | 'WORKTREE_LOCKED'
+  | 'WORKTREE_PRUNABLE'
+  | 'DETACHED_HEAD'
+  | 'GENERATION_CHANGED'
+  | 'BRANCH_CHANGED'
+  | 'HEAD_UNAVAILABLE'
+  | 'BRANCH_NOT_IN_INVENTORY'
+  | 'BRANCH_NOT_LINKED'
+  | 'HEAD_DIVERGED'
+  | 'PRIMARY_CHECKOUT'
+
+export type BuildXWorkspaceUnavailableReason =
+  | 'GIT_PORT_UNAVAILABLE'
+  | 'GIT_INVENTORY_UNAVAILABLE'
+  | 'REPOSITORY_CONTEXT_CHANGED'
+  | 'EVIDENCE_UNAVAILABLE'
+  | 'COORDINATION_SNAPSHOT_FAILED'
+
 export type BuildXInspectWorkspaceResult =
   | { readonly status: 'UNBOUND' }
   | {
@@ -29,10 +50,10 @@ export type BuildXInspectWorkspaceResult =
   | {
       readonly status: 'STALE'
       readonly binding: BuildXWorkspaceBindingRecord
-      readonly reason: string
+      readonly reason: BuildXWorkspaceStaleReason | string
     }
   | {
       readonly status: 'UNAVAILABLE'
       readonly binding: BuildXWorkspaceBindingRecord
-      readonly reason: string
+      readonly reason: BuildXWorkspaceUnavailableReason | string
     }
