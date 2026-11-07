@@ -32,6 +32,37 @@ export const REGISTRY_SCHEMA = `
 const kinds: EntityKind[] = ['COMMIT', 'CHECKPOINT', 'SESSION', 'PR', 'ARTIFACT', 'PROOF', 'WORKTREE', 'EXECUTION']
 export class CheckpointRegistry {
   constructor(private readonly db: Database.Database, readonly repositoryId: string) {}
+  nativeCaptureWindows(worktreeId: string, generation: string) {
+    const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
+    const boundaries = this.db.prepare(`SELECT e.payload,e.integrity FROM registry_edges e WHERE e.toId=? AND e.state='OBSERVED'
+      AND json_extract(e.payload,'$.evidenceKind')='NATIVE_CAPTURE_BOUNDARY' ORDER BY e.observedAt DESC,e.id LIMIT 4`).all(scope) as { payload: string; integrity: string }[]
+    return boundaries.map(row => {
+      if (digest(row.payload) !== row.integrity) throw new Error('REGISTRY_INTEGRITY_FAILED')
+      const boundary = JSON.parse(row.payload) as RegistryEdge
+      const capture = JSON.parse(boundary.evidenceRef) as NonNullable<NativeHookEnvelope['capture']>
+      const window = this.key(boundary.from)
+      const events = this.db.prepare(`SELECT count(*) AS accepted FROM registry_edges WHERE toId=? AND state='OBSERVED'
+        AND json_extract(payload,'$.evidenceKind')='NATIVE_CAPTURE_MEMBERSHIP'`).get(window) as { accepted: number }
+      const counts = this.db.prepare(`WITH pairs AS (
+        SELECT e.fromId,count(DISTINCT json_extract(e.payload,'$.relation')) AS halves FROM registry_edges e
+        WHERE e.toId=? AND e.state='OBSERVED' AND json_extract(e.payload,'$.evidenceKind')='NATIVE_CAPTURE_WINDOW' GROUP BY e.fromId
+      ), outcomes AS (
+        SELECT p.halves,CASE WHEN a.status='COMPLETE' OR g.status='COMPLETE' THEN 'verified'
+          WHEN a.cursor LIKE '%AMBIGUOUS%' OR g.cursor LIKE '%AMBIGUOUS%' THEN 'ambiguous'
+          WHEN a.source IS NOT NULL OR g.source IS NOT NULL OR p.halves<>2 THEN 'partial' ELSE 'pending' END AS outcome
+        FROM pairs p JOIN registry_entities i ON i.id=p.fromId
+        LEFT JOIN registry_sources a ON a.source='NATIVE_ARTIFACT:'||substr(i.externalId,19)
+        LEFT JOIN registry_sources g ON g.source='NATIVE_GIT:'||substr(i.externalId,19)
+      ) SELECT count(*) AS invocations,coalesce(sum(halves=2),0) AS pairs,
+        coalesce(sum(outcome='verified'),0) AS verified,coalesce(sum(outcome='partial'),0) AS partial,
+        coalesce(sum(outcome='ambiguous'),0) AS ambiguous,coalesce(sum(outcome='pending'),0) AS pending FROM outcomes`).get(window) as Record<string, number>
+      const metrics = JSON.parse(this.source('NATIVE_WINDOW_METRICS:' + capture.epoch)?.cursor ?? 'null') as Record<string, number> | null
+      return { ...capture, accepted: events.accepted, ingress: metrics?.ingress ?? null, deduplicated: metrics?.deduplicated ?? null,
+        rejected: metrics?.rejected ?? null, expired: metrics?.expired ?? null, pairs: counts.pairs, incompletePairs: counts.invocations - counts.pairs,
+        correlations: { verified: counts.verified, partial: counts.partial, ambiguous: counts.ambiguous, pending: counts.pending },
+        denominator: null, coverage: 'COVERAGE_UNKNOWN' }
+    })
+  }
   nativeHookEvidence(worktreeId: string, generation: string, sessionId?: string): NativeHookEnvelope[] {
     const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
     const rows = this.db.prepare(`SELECT DISTINCT s.cursor FROM registry_edges e JOIN registry_sources s ON e.source=s.source
@@ -45,11 +76,11 @@ export class CheckpointRegistry {
       } catch { return [] }
     })
   }
-  nativeArtifactCandidates(worktreeId: string, generation: string, after = '', limit = 32): string[] {
+  nativeCorrelationCandidates(kind: 'ARTIFACT' | 'GIT', worktreeId: string, generation: string, after = '', limit = 32): string[] {
     const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
     const rows = this.db.prepare(`SELECT DISTINCT e.fromId FROM registry_edges e
-      WHERE e.toId=? AND e.state='OBSERVED' AND e.fromId>? AND json_extract(e.payload,'$.evidenceKind')='NATIVE_ARTIFACT_SCOPE'
-      ORDER BY e.fromId LIMIT ?`).all(scope, after, limit) as { fromId: string }[]
+      WHERE e.toId=? AND e.state='OBSERVED' AND e.fromId>? AND json_extract(e.payload,'$.evidenceKind')=?
+      ORDER BY e.fromId LIMIT ?`).all(scope, after, 'NATIVE_' + kind + '_SCOPE', limit) as { fromId: string }[]
     return rows.map(row => row.fromId)
   }
   invocationFromKey(key: string): string {
@@ -59,7 +90,7 @@ export class CheckpointRegistry {
   }
   directEvidence(entity: RegistryEntity, evidenceKind: string): RegistryEdge[] {
     const key = this.key(entity)
-    const rows = this.db.prepare("SELECT payload,integrity FROM registry_edges WHERE (fromId=? OR toId=?) AND state='OBSERVED' ORDER BY id LIMIT 65").all(key, key) as { payload: string; integrity: string }[]
+    const rows = this.db.prepare("SELECT payload,integrity FROM registry_edges WHERE (fromId=? OR toId=?) AND state='OBSERVED' AND json_extract(payload,'$.evidenceKind')=? ORDER BY id LIMIT 65").all(key, key, evidenceKind) as { payload: string; integrity: string }[]
     if (rows.length > 64) throw new Error('REGISTRY_EVIDENCE_LIMIT')
     return rows.map(row => {
       if (digest(row.payload) !== row.integrity) throw new Error('REGISTRY_INTEGRITY_FAILED')

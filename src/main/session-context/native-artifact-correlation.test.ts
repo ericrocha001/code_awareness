@@ -2,6 +2,7 @@ import { afterEach, expect, it } from 'vitest'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { buildSync } from 'esbuild'
+import Database from 'better-sqlite3'
 import { fixture, markdown, withFixtureDatabase } from '../continuum/continuum-test-fixtures'
 import { executeGetArtifact } from '../continuum/continuum-mcp'
 import { SessionStore, sessionStorePath } from './store'
@@ -10,6 +11,8 @@ import { SessionContextClient } from './client'
 import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { correlateNativeArtifact } from './native-artifact-correlation'
+import { stampNativeCapture } from './native-capture-window'
+import { persistNativeCapture, readNativeGapHistory } from './native-hook-diagnostics'
 import type { PublicationProvenancePort } from '../../shared/types/publication-provenance-types'
 import type { ArtifactReceipt } from '../continuum/continuum-types'
 const closes: (() => void)[] = []
@@ -22,6 +25,7 @@ function setup() {
   prepareNativeSpool(spool)
   const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'catalog-A', worktreeId: '1'.repeat(64), generation: '2'.repeat(64), ...nativeGitIdentity(f.dir), spool }
   writeFileSync(join(directory, 'binding.json'), JSON.stringify(binding))
+  mkdirSync(join(f.dir, '.codex')); writeFileSync(join(f.dir, '.codex/hooks.json'), '{}')
   const path = sessionStorePath(f.dir, 'catalog-A')
   let sessions = new SessionStore(path, 'catalog-A')
   closes.push(() => sessions.close())
@@ -30,11 +34,19 @@ function setup() {
     associate: async value => f.service.associatePublication(value),
     invalidate: async (id, state) => { f.service.invalidatePublication(id, state) }
   }
-  const events = (receipt: ArtifactReceipt, input = { rawMarkdown: markdown() }, call = 'call-1', changes: Record<string, unknown> = {}) => {
+  const start = () => {
+    const event = stampNativeCapture(normalizeNativeHook({ session_id: 'session-1', cwd: f.dir, hook_event_name: 'SessionStart' }, binding), binding)
+    const batch = nativeObservationBatch(event)
+    sessions.registry.apply(batch, sessions.registry.source(batch.source)?.revision)
+    return event
+  }
+  start()
+  const events = (receipt: ArtifactReceipt, input = { rawMarkdown: markdown() }, call = 'call-1', changes: Record<string, unknown> = {}, captured = true) => {
     const payload = { session_id: 'session-1', cwd: f.dir, tool_use_id: call, turn_id: 'turn-1', tool_name: 'mcp__code_awareness_local__publish_artifact', tool_input: input, ...changes }
+    const normalize = (value: unknown) => { const event = normalizeNativeHook(value, binding); return captured ? stampNativeCapture(event, binding) : event }
     return [
-      normalizeNativeHook({ ...payload, hook_event_name: 'PreToolUse' }, binding),
-      normalizeNativeHook({ ...payload, hook_event_name: 'PostToolUse', tool_response: { content: [{ type: 'text', text: JSON.stringify(receipt) }] } }, binding)
+      normalize({ ...payload, hook_event_name: 'PreToolUse' }),
+      normalize({ ...payload, hook_event_name: 'PostToolUse', tool_response: { content: [{ type: 'text', text: JSON.stringify(receipt) }] } })
     ] as const
   }
   const observe = (event: NativeHookEnvelope) => {
@@ -42,8 +54,62 @@ function setup() {
     if (!sessions.registry.source(batch.source)) sessions.registry.apply(batch, undefined)
   }
   const correlate = (event: NativeHookEnvelope, selectedPort = port) => correlateNativeArtifact(sessions.registry, binding, event.invocationId!, selectedPort, () => {})
-  return { ...f, path, binding, port, sessions: () => sessions, events, observe, correlate, restart: () => { sessions.close(); sessions = new SessionStore(path, 'catalog-A') } }
+  return { ...f, path, binding, port, start, sessions: () => sessions, events, observe, correlate, restart: () => { sessions.close(); sessions = new SessionStore(path, 'catalog-A') } }
 }
+it('bounds a new invocation by a persisted start after legacy loss without acknowledging or repairing history', async () => {
+  const f = setup()
+  writeFileSync(join(f.binding.spool, 'gap.json'), JSON.stringify({ schema: 1, observedAt: '2020-01-01T00:00:00.000Z' }))
+  const history = readNativeGapHistory(f.binding.spool)
+  f.start()
+  const receipt = f.service.publish(markdown()), pair = f.events(receipt)
+  pair.forEach(f.observe)
+  f.restart()
+  expect(await f.correlate(pair[1])).toBe('VERIFIED')
+  pair.forEach(f.observe)
+  expect(await f.correlate(pair[1])).toBe('VERIFIED')
+  expect(readNativeGapHistory(f.binding.spool)).toEqual(history)
+  expect(f.sessions().registry.nativeCaptureWindows(f.binding.worktreeId, f.binding.generation).find(window => window.epoch === pair[0].capture!.epoch)).toMatchObject({
+    accepted: 3, pairs: 1, incompletePairs: 0, correlations: { verified: 1, partial: 0, ambiguous: 0, pending: 0 }, denominator: null, coverage: 'COVERAGE_UNKNOWN'
+  })
+  expect(persistNativeCapture(f.sessions().registry, f.binding, { ingested: 0, rejected: 0, expired: 0, pending: false }, () => {}).historicalCoverage).toMatchObject({ state: 'PARTIAL', acknowledgedCount: 0 })
+  const db = new Database(f.path, { readonly: true })
+  try {
+    expect(db.pragma('foreign_key_check')).toEqual([])
+    expect(db.prepare('SELECT id FROM registry_edges GROUP BY id HAVING count(*)>1').all()).toEqual([])
+    expect(db.prepare("SELECT count(*) AS count FROM registry_edges WHERE source=? AND state='OBSERVED'").get('NATIVE_ARTIFACT:' + pair[0].invocationId)).toEqual({ count: 3 })
+  } finally { db.close() }
+})
+it('refuses missing boundaries, generation/configuration drift, unordered loss and loss during readback', async () => {
+  for (const mode of ['boundary', 'orphan', 'generation', 'configuration', 'unordered', 'readback', 'associate']) {
+    const f = setup(), receipt = f.service.publish(markdown())
+    if (mode === 'orphan') stampNativeCapture(normalizeNativeHook({ session_id: 'session-1', cwd: f.dir, hook_event_name: 'SessionStart' }, f.binding), f.binding)
+    const pair = f.events(receipt, undefined, 'call-1', {}, mode !== 'boundary')
+    pair.forEach(f.observe)
+    if (mode === 'generation') writeFileSync(join(f.binding.root, '.code-awareness/native-hooks/binding.json'), JSON.stringify({ ...f.binding, generation: '9'.repeat(64) }))
+    if (mode === 'configuration') writeFileSync(join(f.binding.root, '.codex/hooks.json'), '{"changed":true}')
+    if (mode === 'unordered') writeFileSync(join(f.binding.spool, 'gap-0.json'), '{')
+    const port = mode === 'readback' ? { ...f.port, readReceipt: async (id: string) => { recordNativeGap(f.binding.spool, 'SPOOL_FULL'); return f.port.readReceipt(id) } }
+      : mode === 'associate' ? { ...f.port, associate: async (value: Parameters<PublicationProvenancePort['associate']>[0]) => { const result = await f.port.associate(value); recordNativeGap(f.binding.spool, 'SPOOL_FULL'); return result } } : f.port
+    expect(await f.correlate(pair[1], port)).not.toBe('VERIFIED')
+    if (mode === 'associate') expect(f.service.get(receipt.artifactId)!.provenance.nativeArtifact).toMatchObject({ state: 'PARTIAL' })
+    else expect(f.service.get(receipt.artifactId)!.provenance.nativeArtifact).toBeUndefined()
+    expect(f.sessions().registry.contextGraph({ kind: 'ARTIFACT', id: receipt.artifactId + ':1' }).edges.some(edge => edge.evidenceKind === 'NATIVE_ARTIFACT_CAUSAL' && edge.state === 'VERIFIED')).toBe(false)
+  }
+})
+it('requires a new boundary after session end and does not promote the incomplete earlier invocation', async () => {
+  const f = setup(), receipt = f.service.publish(markdown()), pair = f.events(receipt)
+  f.observe(pair[0])
+  const ended = stampNativeCapture(normalizeNativeHook({ session_id: 'session-1', cwd: f.dir, hook_event_name: 'SessionEnd' }, f.binding), f.binding)
+  f.observe(ended)
+  const afterEnd = f.events(receipt)[1]
+  f.observe(afterEnd)
+  expect(await f.correlate(afterEnd)).not.toBe('VERIFIED')
+  f.start()
+  const next = f.events(receipt, undefined, 'new-call')
+  next.forEach(f.observe)
+  expect(await f.correlate(next[1])).toBe('VERIFIED')
+  expect(await f.correlate(pair[0])).not.toBe('VERIFIED')
+})
 it('requires both observations and canonical readback; keeps the exact chain, content and historical revision after restart', async () => {
   const f = setup(), receipt = f.service.publish(markdown()), original = f.service.get(receipt.artifactId)!
   const [pre, post] = f.events(receipt)
@@ -117,7 +183,8 @@ it('retries persisted native evidence incrementally through worker ports when ca
     expect(result.isError).toBeFalsy()
     const graph = JSON.parse((result.content[0] as { text: string }).text)
     expect(graph.nodes.some((node: { revision?: number }) => node.revision === 1)).toBe(true)
-    expect(graph.edges.some((edge: { evidenceKind: string; state: string }) => edge.evidenceKind === 'NATIVE_ARTIFACT_CAUSAL' && edge.state === 'VERIFIED')).toBe(true)
+    expect(graph.edges.some((edge: { evidenceKind: string; state: string }) => edge.evidenceKind === 'NATIVE_ARTIFACT_CAUSAL' && edge.state === 'VERIFIED'),
+      JSON.stringify(f.sessions().registry.source('NATIVE_ARTIFACT:' + pair[0].invocationId))).toBe(true)
     expect(f.service.get(receipt.artifactId)!.provenance.nativeArtifact).toMatchObject({ state: 'VERIFIED' })
   } finally { await client.dispose() }
 }, 30000)

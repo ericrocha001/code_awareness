@@ -98,9 +98,9 @@ export function acknowledgeCheckoutGaps(root: string, target: { repositoryId: st
 }
 
 export function persistNativeCapture(registry: CheckpointRegistry, binding: NativeHookBinding,
-  receipt: { ingested: number; rejected: number; expired: number; pending: boolean }, assertCurrent: () => void) {
+  receipt: { ingested: number; rejected: number; expired: number; pending: boolean; deduplicated?: number }, assertCurrent: () => void) {
   const history = readNativeGapHistory(binding.spool), source = nativeDiagnosticSource(binding), previous = registry.source(source)
-  let prior: { gapRevision?: string; currentOperationalCapture?: { state: string; observedAt?: string } } = {}
+  let prior: { gapRevision?: string; currentOperationalCapture?: { state: string; observedAt?: string }; pipeline?: { ingress: number; accepted: number; rejected: number; expired: number; deduplicated: number } } = {}
   try { prior = JSON.parse(previous?.cursor ?? '{}') } catch {}
   const currentOperationalCapture = receipt.rejected || receipt.expired || receipt.pending ? { state: 'DEGRADED' } : receipt.ingested ? { state: 'OBSERVED', observedAt: new Date().toISOString() } :
     prior.gapRevision === history.revision && prior.currentOperationalCapture ? prior.currentOperationalCapture : { state: history.entries.length ? 'DEGRADED' : 'UNOBSERVED' }
@@ -109,7 +109,11 @@ export function persistNativeCapture(registry: CheckpointRegistry, binding: Nati
     resolution: history.entries.length && history.acknowledgements.length === history.entries.length ? 'ACKNOWLEDGED' : history.entries.length ? 'UNACKNOWLEDGED' : 'NOT_APPLICABLE',
     recoveredEvents: false, diagnostics: history.entries.slice(-8).map(entry => ({ ...entry, acknowledged: history.acknowledgements.some(ack => ack.revision === entry.revision) })),
     omittedDiagnostics: Math.max(0, history.entries.length - 8) }
-  const cursor = JSON.stringify({ version: 1, gapRevision: history.revision, currentOperationalCapture, historicalCoverage })
+  const previousCounts = prior.pipeline ?? { ingress: 0, accepted: 0, rejected: 0, expired: 0, deduplicated: 0 }
+  const pipeline = { ingress: previousCounts.ingress + receipt.ingested + receipt.rejected + receipt.expired,
+    accepted: previousCounts.accepted + receipt.ingested - (receipt.deduplicated ?? 0), rejected: previousCounts.rejected + receipt.rejected,
+    expired: previousCounts.expired + receipt.expired, deduplicated: previousCounts.deduplicated + (receipt.deduplicated ?? 0), pending: receipt.pending }
+  const cursor = JSON.stringify({ version: 1, gapRevision: history.revision, currentOperationalCapture, historicalCoverage, pipeline })
   if (previous?.cursor !== cursor) registry.apply({ repositoryId: registry.repositoryId, source, revision: nativeDigest(cursor), status: currentOperationalCapture.state, cursor, edges: [] }, previous?.revision, assertCurrent)
   return { currentOperationalCapture, historicalCoverage }
 }
@@ -123,6 +127,10 @@ export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: st
     const identity = nativeGitIdentity(root)
     if (identity.directoryIdentity !== binding.directoryIdentity || identity.root !== binding.root || identity.commonDirectory !== binding.commonDirectory) return { currentOperationalCapture: { state: 'UNAVAILABLE', reasonCode: 'WORKTREE_STALE' } }
     const value = JSON.parse(registry.source(nativeDiagnosticSource(binding))?.cursor ?? '{}')
-    return value.version === 1 ? { currentOperationalCapture: value.currentOperationalCapture, historicalCoverage: value.historicalCoverage } : {}
+    return value.version === 1 ? { currentOperationalCapture: value.currentOperationalCapture, historicalCoverage: value.historicalCoverage,
+      pipeline: { ...value.pipeline, expected: null, coverage: 'COVERAGE_UNKNOWN', scope: 'INGEST_ATTEMPTS', countCoverage: 'COMPLETED_ROUNDS', lostBeforeIngest: 'UNKNOWN' },
+      windows: registry.nativeCaptureWindows(binding.worktreeId, binding.generation).map(window => ({ ...window,
+        integrity: window.gapRevision === value.gapRevision ? 'NO_NEW_GAPS_OBSERVED' : 'PARTIAL',
+        unresolvedGaps: window.gapRevision === value.gapRevision ? 0 : null, lossAttribution: 'UNASSIGNED_LOSSES_REMAIN_UNKNOWN' })) } : {}
   } catch { return {} }
 }

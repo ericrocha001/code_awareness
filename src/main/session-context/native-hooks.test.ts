@@ -103,6 +103,25 @@ test('command fails open without output for malformed, oversized or disabled inp
   expect(nativeDigest(readFileSync(join(f.spool, eventFile), 'utf8'))).toBe(hash)
 })
 
+test('command persists one scoped window across start/pre/post and closes it without changing legacy loss', () => {
+  const f = fixture(), directory = join(f.root, '.code-awareness/native-hooks'), file = join(directory, 'binding.json')
+  mkdirSync(directory, { recursive: true }); mkdirSync(join(f.root, '.codex'))
+  writeFileSync(file, JSON.stringify(f.binding)); writeFileSync(join(f.root, '.codex/hooks.json'), '{}')
+  const legacy = JSON.stringify({ schema: 1, observedAt: '2020-01-01T00:00:00.000Z' })
+  writeFileSync(join(f.spool, 'gap.json'), legacy)
+  const command = join(process.cwd(), 'out/session-context/native-hook.cjs')
+  for (const hook_event_name of ['SessionStart', 'PreToolUse', 'PostToolUse', 'SessionEnd']) {
+    expect(execFileSync(process.execPath, [command, file], { input: JSON.stringify({ ...f.payload, hook_event_name,
+      ...(hook_event_name === 'SessionStart' || hook_event_name === 'SessionEnd' ? { tool_use_id: undefined } : {}) }), encoding: 'utf8', timeout: 3000 })).toBe('')
+  }
+  const events = readdirSync(f.spool).filter(name => /^\d+\.json$/.test(name)).map(name => parseNativeEnvelope(readFileSync(join(f.spool, name), 'utf8')))
+  expect(events).toHaveLength(4)
+  expect(events.every(event => event.capture?.epoch === events[0].capture?.epoch && event.capture?.configuration === events[0].capture?.configuration)).toBe(true)
+  expect(events[0].capture).toBeDefined()
+  expect(readdirSync(f.spool).some(name => name.startsWith('window-'))).toBe(false)
+  expect(readFileSync(join(f.spool, 'gap.json'), 'utf8')).toBe(legacy)
+})
+
 test('command emits bounded typed diagnostics without payloads at each failing boundary', () => {
   const cases = [
     { input: '{PRIVATE_SECRET', reasonCode: 'JSON_SYNTAX', phase: 'PARSE', eventType: 'UNKNOWN' },

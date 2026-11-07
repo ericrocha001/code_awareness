@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { closeSync, constants, fstatSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync, utimesSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { gitReceiptFingerprint } from '../git-operations/git-operation-receipts'
@@ -8,6 +8,8 @@ export const nativeHookEvents = ['SessionStart', 'PreToolUse', 'PostToolUse', 'S
 export type NativeHookEvent = typeof nativeHookEvents[number]
 export const nativeHookLimits = { inputBytes: 65536, envelopeBytes: 4096, slots: 1024, retentionMs: 86400000, timeoutMs: 750 }
 export const nativeDigest = (value: string): string => createHash('sha256').update(value).digest('hex')
+export const nativeCaptureRuntimeId = nativeDigest(randomUUID())
+export const nativeCaptureRuntimeStartedAt = Date.now()
 export const nativeGapReasons = ['JSON_SYNTAX', 'JSON_STRUCTURE', 'EVENT_UNSUPPORTED', 'REQUIRED_ID_MISSING', 'INVALID_ID', 'CWD_MISSING', 'INVOCATION_ID_MISSING',
   'WORKTREE_MISMATCH', 'WORKTREE_STALE', 'INVALID_ENVELOPE', 'ENVELOPE_INTEGRITY', 'ENVELOPE_LIMIT', 'UNSAFE_SPOOL', 'IO_FAILURE', 'INPUT_LIMIT', 'SPOOL_FULL', 'READ_FAILURE', 'TIMEOUT', 'EVENT_EXPIRED', 'EVENT_TIME_INVALID', 'LEGACY_UNTYPED', 'DIAGNOSTIC_LIMIT', 'DIAGNOSTIC_INVALID'] as const
 export type NativeGapReason = typeof nativeGapReasons[number]
@@ -52,6 +54,7 @@ export interface NativeHookEnvelope {
   tool?: 'SHELL' | 'MCP' | 'OTHER'
   git?: { operationId: string; fingerprint: string; expectedHead: string | null; sha?: string; parent?: string | null; replayed?: boolean }
   artifact?: NativeArtifactFact
+  capture?: { epoch: string; configuration: string; gapRevision: string }
   observedAt: string
   eventId: string
   digest: string
@@ -150,7 +153,7 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
   if (Buffer.byteLength(text) > nativeHookLimits.envelopeBytes) throw new Error('ENVELOPE_LIMIT')
   const value: unknown = JSON.parse(text)
   if (!object(value)) throw new Error('INVALID_ENVELOPE')
-  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'artifact', 'observedAt', 'eventId', 'digest']
+  const keys = ['schema', 'source', 'repositoryId', 'worktreeId', 'generation', 'sessionId', 'event', 'turnId', 'invocationId', 'subagentId', 'tool', 'git', 'artifact', 'capture', 'observedAt', 'eventId', 'digest']
   if (Object.keys(value).some(k => !keys.includes(k)) || value.schema !== 1 || value.source !== 'CODEX_NATIVE_HOOK' ||
     typeof value.repositoryId !== 'string' || !idPattern.test(value.repositoryId) || !nativeHookEvents.includes(value.event as NativeHookEvent) ||
     !['worktreeId','generation','sessionId','eventId','digest'].every(k => typeof value[k] === 'string' && hashPattern.test(value[k] as string)) ||
@@ -167,6 +170,8 @@ export function parseNativeEnvelope(text: string): NativeHookEnvelope {
       (git.parent !== undefined && git.parent !== git.expectedHead) || (git.replayed !== undefined && typeof git.replayed !== 'boolean')) throw new Error('INVALID_ENVELOPE')
   }
   if (value.artifact !== undefined && (!['PreToolUse','PostToolUse'].includes(String(value.event)) || !value.invocationId || !validNativeArtifactFact(value.artifact))) throw new Error('INVALID_ENVELOPE')
+  if (value.capture !== undefined && (!object(value.capture) || Object.keys(value.capture).length !== 3 ||
+    !['epoch', 'configuration', 'gapRevision'].every(key => typeof (value.capture as Record<string, unknown>)[key] === 'string' && hashPattern.test((value.capture as Record<string, string>)[key])))) throw new Error('INVALID_ENVELOPE')
   const { digest, ...body } = value
   const { eventId, observedAt, ...facts } = body
   if (digest !== nativeDigest(JSON.stringify(body)) || eventId !== nativeDigest(JSON.stringify(facts))) throw new Error('ENVELOPE_INTEGRITY')

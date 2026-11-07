@@ -2,6 +2,7 @@ import type { GitService } from '../core/git-service'
 import type { CheckpointRegistry, RegistryBatch, RegistryEntity } from './checkpoint-registry'
 import { decodeGitReceiptResult } from '../git-operations/git-operation-receipts'
 import { nativeDigest, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { nativeInvocationWindow } from './native-capture-window'
 
 export async function correlateNativeGit(registry: CheckpointRegistry, binding: NativeHookBinding, invocationId: string,
   git: Pick<GitService, 'readOperationReceipt' | 'getCommitOperationObjects'>, assertCurrent: () => void): Promise<string> {
@@ -18,10 +19,15 @@ export async function correlateNativeGit(registry: CheckpointRegistry, binding: 
   if (pre.length > 1 || post.length > 1) return unverified('INVOCATION_AMBIGUOUS')
   if (pre.length !== 1 || post.length !== 1) return unverified('INVOCATION_INCOMPLETE')
   if (pre[0].to.kind !== 'SESSION' || pre[0].to.id !== post[0].to.id || scopes.length !== 2 || scopes.some(edge => edge.to.id !== `${binding.worktreeId}:${binding.generation}`)) return unverified('INVOCATION_AMBIGUOUS')
+  const contexts = registry.directEvidence(invocation, 'NATIVE_GIT_CONTEXT')
+  if (contexts.length !== 2 || contexts[0].evidenceRef !== contexts[1].evidenceRef) return unverified('INVOCATION_AMBIGUOUS')
   const request = JSON.parse(pre[0].evidenceRef) as NonNullable<NativeHookEnvelope['git']>
   const result = JSON.parse(post[0].evidenceRef) as NonNullable<NativeHookEnvelope['git']>
   if (request.operationId !== result.operationId || request.fingerprint !== result.fingerprint || request.expectedHead !== result.expectedHead || !result.sha || result.parent !== result.expectedHead) return unverified('RESULT_UNCONFIRMED')
   if (result.replayed !== false) return unverified('REPLAY_NOT_AUTHORSHIP')
+  const window = () => nativeInvocationWindow(registry, binding, invocation, pre[0].to)
+  let integrity = window()
+  if (integrity !== 'VERIFIED') return unverified(integrity)
   let observed: Awaited<ReturnType<GitService['readOperationReceipt']>>
   try { observed = await git.readOperationReceipt(binding.root, request.operationId) } catch { return unverified('RECEIPT_UNAVAILABLE') }
   assertCurrent()
@@ -32,6 +38,8 @@ export async function correlateNativeGit(registry: CheckpointRegistry, binding: 
   assertCurrent()
   const commit = commits.find(commit => commit.sha === result.sha)
   if (!commit || (request.expectedHead === null ? commit.parents.length !== 0 : commit.parents.length !== 1 || commit.parents[0] !== request.expectedHead)) return unverified('GIT_OBJECT_UNVERIFIED')
+  integrity = window()
+  if (integrity !== 'VERIFIED') return unverified(integrity)
   const source = `NATIVE_GIT:${invocationId}`, revision = nativeDigest(JSON.stringify([pre[0].digest, post[0].digest, observed.sha, result.sha]))
   const batch: RegistryBatch = { repositoryId: binding.repositoryId, source, revision, status: 'COMPLETE', edges: [
     { from: pre[0].to, relation: 'invoked', to: invocation, evidenceKind: 'NATIVE_GIT_CAUSAL', evidenceRef: observed.sha, digest: revision, freshness: 'OBSERVED_SNAPSHOT' },

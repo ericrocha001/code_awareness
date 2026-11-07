@@ -2,7 +2,7 @@ import type { PublicationProvenancePort } from '../../shared/types/publication-p
 import { publicationReceiptDigest } from '../../shared/types/publication-provenance-types'
 import type { CheckpointRegistry, RegistryEntity } from './checkpoint-registry'
 import { nativeDigest, type NativeHookBinding } from './native-hooks'
-import { readNativeGapHistory } from './native-hook-diagnostics'
+import { nativeInvocationWindow } from './native-capture-window'
 import type { NativeArtifactFact } from './native-artifact-facts'
 
 interface RequestFact { action: 'PUBLISH' | 'UPDATE'; requestDigest: string; context: string; outcome: NativeArtifactFact['outcome']; receipt?: NativeArtifactFact['receipt'] }
@@ -26,8 +26,9 @@ export async function correlateNativeArtifact(registry: CheckpointRegistry, bind
   if (request.action !== result.action || request.requestDigest !== result.requestDigest || request.context !== result.context) return reject('INVOCATION_AMBIGUOUS', 'AMBIGUOUS')
   if (result.outcome !== 'SUCCESS' || !result.receipt) return reject('RESULT_UNCONFIRMED')
   if (result.receipt.replayed !== false) return reject('REPLAY_NOT_CAUSAL')
-  const gaps = readNativeGapHistory(binding.spool)
-  if (gaps.entries.some(entry => !gaps.acknowledgements.some(ack => ack.revision === entry.revision))) return reject('CAPTURE_PARTIAL', 'PARTIAL')
+  const window = () => nativeInvocationWindow(registry, binding, invocation, pre[0].to)
+  let integrity = window()
+  if (integrity !== 'VERIFIED') return reject(integrity, 'PARTIAL')
   let receipt
   try { receipt = await port.readReceipt(result.receipt.receiptId) } catch { return reject('RECEIPT_UNAVAILABLE') }
   assertCurrent()
@@ -36,10 +37,14 @@ export async function correlateNativeArtifact(registry: CheckpointRegistry, bind
   if (receiptDigest !== publicationReceiptDigest(receiptBody)) return reject('RECEIPT_MISMATCH')
   if (receipt.repositoryId !== registry.repositoryId || receipt.artifactId !== result.receipt.artifactId || receipt.revision !== result.receipt.revision || receipt.digest !== result.receipt.digest ||
     receipt.action !== request.action || receipt.requestDigest !== request.requestDigest) return reject('RECEIPT_MISMATCH')
+  integrity = window()
+  if (integrity !== 'VERIFIED') return reject(integrity, 'PARTIAL')
   const revision = nativeDigest(JSON.stringify([pre[0].digest, post[0].digest, receipt.digest]))
   const sessionId = pre[0].to.id.slice('codex-native:'.length)
   const recorded = await port.associate({ repositoryId: registry.repositoryId, receiptId: receipt.receiptId, sessionId, invocationId, worktreeId: binding.worktreeId, generation: binding.generation, evidenceDigest: revision })
   assertCurrent()
+  integrity = window()
+  if (integrity !== 'VERIFIED') return reject(integrity, 'PARTIAL')
   if (recorded.state !== 'VERIFIED') {
     for (const prior of recorded.conflictingInvocationIds) {
       const oldSource = 'NATIVE_ARTIFACT:' + prior

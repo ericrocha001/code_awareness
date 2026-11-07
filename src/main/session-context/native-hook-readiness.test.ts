@@ -3,12 +3,14 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'nod
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { installNativeHooks, inspectNativeInstallation } from './native-hook-installation'
-import { nativeDigest, normalizeNativeHook, readNativeBinding } from './native-hooks'
+import { nativeCaptureRuntimeId, nativeDigest, normalizeNativeHook, readNativeBinding, spoolNativeHook, recordNativeGap } from './native-hooks'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { SessionStore, sessionStorePath } from './store'
 import { nativeHookReadiness } from './native-hook-readiness'
 import { inspectNativeTrust, type NativeHookClient, type NativeClientScope } from './native-hook-preflight'
 import { summarizeHookList } from '../../shared/native-hook-preflight.cjs'
+import { stampNativeCapture } from './native-capture-window'
+import { ingestNativeHooks } from './native-hook-ingestion'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
@@ -71,6 +73,26 @@ function clientFixture(f: ReturnType<typeof fixture>) {
   const client: NativeHookClient = { authorized: true, scope: () => scope, request: async (method, params) => { calls.push({ method, params }); return { data: [{ hooks, errors: [], warnings: [] }] } } }
   return { client, hooks, calls, scope: () => scope!, changeScope: (value: NativeClientScope | undefined) => { scope = value } }
 }
+it('F1 requires an ingested current window, scoped trust and the current runtime instead of historical completion', async () => {
+  const f = fixture(); f.install(); const c = clientFixture(f)
+  const binding = readNativeBinding(f.bindingPath)
+  const event = stampNativeCapture(normalizeNativeHook({ session_id: c.scope().sessionId, hook_event_name: 'SessionStart', cwd: f.root }, binding), binding)
+  spoolNativeHook(event, binding.spool)
+  const trust = await inspectNativeTrust(f.root, f.target, true, c.client)
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust).captureReadiness.state).toBe('NOT_VERIFIED')
+  await ingestNativeHooks(f.store().registry, binding, async () => ({ root: f.root, fingerprint: '', validate: async () => {} }), () => {})
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target).captureReadiness.state).toBe('NOT_VERIFIED')
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust).captureReadiness).toEqual({ state: 'OBSERVED', reasonCode: 'CURRENT_WINDOW_INGESTED' })
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target, { ...trust, sessionId: '4'.repeat(64) }).captureReadiness.state).toBe('NOT_VERIFIED')
+  const source = `NATIVE_CURRENT:${binding.worktreeId}:${binding.generation}`, previous = f.store().registry.source(source)!
+  const current = JSON.parse(previous.cursor!)
+  expect(current.runtimeId).toBe(nativeCaptureRuntimeId)
+  f.store().registry.apply({ repositoryId: 'repo', source, revision: 'restarted', status: 'OBSERVED', cursor: JSON.stringify({ ...current, runtimeId: 'previous-runtime' }), edges: [] }, previous.revision)
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust)).toMatchObject({ execution: { freshness: 'HISTORICAL' }, captureReadiness: { state: 'NOT_VERIFIED' } })
+  f.store().registry.apply({ repositoryId: 'repo', source, revision: 'current', status: 'OBSERVED', cursor: JSON.stringify(current), edges: [] }, 'restarted')
+  recordNativeGap(binding.spool, 'SPOOL_FULL')
+  expect(nativeHookReadiness(f.store().registry, f.root, f.target, trust).captureReadiness).toMatchObject({ state: 'PARTIAL' })
+})
 it('U2 inspects only an authorized same-context client on demand and emits a compact hash-scoped snapshot', async () => {
   const f = fixture(); f.install(); const c = clientFixture(f)
   const before = readFileSync(f.configPath, 'utf8')

@@ -1,4 +1,5 @@
 import { nativeEventType, nativeGapReason, nativeHookLimits, normalizeNativeHook, readNativeBinding, recordNativeGap, spoolNativeHook, type NativeHookBinding, type NativeGapPhase, type NativeGap } from './native-hooks'
+import { stampNativeCapture } from './native-capture-window'
 
 const timer = setTimeout(() => { if (binding?.enabled) recordNativeGap(binding.spool, 'TIMEOUT', 'READ'); process.exit(0) }, nativeHookLimits.timeoutMs)
 let bytes = 0
@@ -21,7 +22,7 @@ process.stdin.on('end', () => {
     const payload: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     eventType = nativeEventType(payload)
     phase = 'NORMALIZE'
-    const envelope = normalizeNativeHook(payload, binding)
+    const envelope = stampNativeCapture(normalizeNativeHook(payload, binding), binding)
     phase = 'WRITE'
     if (spoolNativeHook(envelope, binding.spool) === 'FULL') recordNativeGap(binding.spool, 'SPOOL_FULL', phase, eventType)
   } catch (error) { if (binding?.enabled) recordNativeGap(binding.spool, phase === 'PARSE' ? 'JSON_SYNTAX' : nativeGapReason(error), phase, eventType) }
