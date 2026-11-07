@@ -1049,7 +1049,7 @@ describe('Units C1, C2, C3 Addendum Contracts', () => {
   }, { timeout: 60000 })
 
   it('C3: validates MCP tool registration, budgets, and read-only annotations without client catalog drift', () => {
-    expect(SESSION_CONTEXT_TOOLS).toHaveLength(10)
+    expect(SESSION_CONTEXT_TOOLS).toHaveLength(11)
     expect(SESSION_RESPONSE_BUDGETS.inspect_code_provenance).toBe(12288)
     expect(SESSION_RESPONSE_BUDGETS.inspect_entire_checkpoint).toBe(16384)
 

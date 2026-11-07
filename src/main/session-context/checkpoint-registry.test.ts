@@ -20,7 +20,8 @@ import { handoffSessionCoverage } from './handoff'
 import { GitHubIntegrationService } from '../github/github-integration-service'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { correlateNativeGit } from './native-git-correlation'
-import type { NativeHookBinding, NativeHookEnvelope } from './native-hooks'
+import { recordNativeGap, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { startCaptureFixture } from './fixtures/native-capture-fixture'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const f of cleanup.reverse()) f(); cleanup.length = 0 })
@@ -40,11 +41,12 @@ it('requires matching native invocation, fresh Git receipt and exact object befo
   const f = fixture(), registry = f.store().registry
   const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'repo', worktreeId: '1'.repeat(64), generation: '2'.repeat(64), root: f.base, commonDirectory: f.base, directoryIdentity: '3'.repeat(64), spool: f.base }
   const invocationId = '4'.repeat(64), fingerprint = '5'.repeat(64), parent = '6'.repeat(40), sessionId = '7'.repeat(64)
+  const stamp = startCaptureFixture(registry, binding, sessionId)
   const observe = (event: 'PreToolUse' | 'PostToolUse', replayed = false) => {
     const envelope: NativeHookEnvelope = { schema: 1, source: 'CODEX_NATIVE_HOOK', repositoryId: 'repo', worktreeId: binding.worktreeId, generation: binding.generation,
       sessionId, event, invocationId, observedAt: new Date().toISOString(), eventId: digest(event + replayed), digest: digest('payload' + event + replayed),
       git: { operationId: 'commit-proof', fingerprint, expectedHead: parent, ...(event === 'PostToolUse' ? { sha: commit, parent, replayed } : {}) } }
-    const batch = nativeObservationBatch(envelope); registry.apply(batch, undefined)
+    const batch = nativeObservationBatch(stamp(envelope)); registry.apply(batch, undefined)
   }
   let receiptFingerprint = fingerprint
   const git = { readOperationReceipt: async () => ({ sha: '8'.repeat(40), receipt: { operationId: 'commit-proof', operation: 'commit_git_changes', argumentFingerprint: receiptFingerprint,
@@ -64,6 +66,10 @@ it('requires matching native invocation, fresh Git receipt and exact object befo
   expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL').every(edge => edge.state === 'CONFLICT')).toBe(true)
   const otherBinding = { ...binding, worktreeId: '9'.repeat(64) }
   expect(await correlateNativeGit(f.store().registry, otherBinding, invocationId, git, () => {})).toBe('INVOCATION_AMBIGUOUS')
+  receiptFingerprint = fingerprint
+  recordNativeGap(binding.spool, 'SPOOL_FULL')
+  expect(await correlateNativeGit(f.store().registry, binding, invocationId, git, () => {})).toBe('CAPTURE_PARTIAL')
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL').every(edge => edge.state !== 'VERIFIED')).toBe(true)
 })
 const runner: CommandRunner = async (_exe, args) => {
   const text = args.includes('log') ? 'Subject\nEntire-Checkpoint: ' + checkpoint : args.includes('rev-parse') ? 'a'.repeat(40) : args.some(a => a.endsWith(':metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, cli_version: '0.12.2', sessions: [{}, {}] }) : args.some(a => a.endsWith(':0/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'codex', session_id: 'session-one' }) : args.some(a => a.endsWith(':1/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'antigravity', session_id: 'session-two' }) : ''

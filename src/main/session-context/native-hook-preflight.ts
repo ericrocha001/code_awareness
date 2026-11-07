@@ -19,6 +19,7 @@ export interface NativeTrustObservation {
   reasonCode: string; freshness: string
   clientId?: string; threadId?: string; sessionId?: string; protocolVersion?: string; clientVersion?: string
   observedAt?: string; expiresAt?: string; hashDigest?: string; installationDigest?: string
+  connectedAt?: string
   expected?: number; matched?: number; trusted?: number; issues?: { eventType: string; reasonCode: string }[]
   execution?: NativeExecutionObservation
 }
@@ -76,6 +77,7 @@ export async function inspectNativeTrust(root: string, target: { repositoryId: s
     return { ...safe, freshness: stale ? 'STALE' : 'OBSERVED_SNAPSHOT', observedAt: observedAt.toISOString(), expiresAt: expiresAt.toISOString(),
       clientId: nativeDigest(JSON.stringify([target.repositoryId, 'codex-client', scope.clientId])), threadId: nativeDigest(JSON.stringify([target.repositoryId, 'codex-thread', scope.threadId])),
       sessionId: nativeDigest(JSON.stringify([target.repositoryId, 'codex', scope.sessionId])), protocolVersion: scope.protocolVersion, clientVersion: scope.clientVersion, installationDigest: installation.digest,
+      connectedAt: scope.connectedAt,
       ...(execution ? { execution } : {}) }
   } catch (error) {
     assertCurrent()

@@ -11,6 +11,7 @@ import { acknowledgeCheckoutGaps, acknowledgeNativeGaps, nativeCaptureDiagnostic
 import { correlateNativeGit } from './native-git-correlation'
 import { GitService } from '../core/git-service'
 import type { RegistryEdge } from './checkpoint-registry'
+import { stampNativeCapture } from './native-capture-window'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.splice(0).reverse()) close() })
@@ -28,6 +29,29 @@ function fixture() {
   const ingest = () => ingestNativeHooks(store.registry, binding, async () => ({ root, fingerprint: '', validate: async () => {} }), () => {})
   return { base, root, spool, binding, payload, ingest, store: () => store, restart: () => { store.close(); store = new SessionStore(path, binding.repositoryId) } }
 }
+
+test('conserves scoped ingress counts, deduplication, expired events and incomplete pairs without inventing a denominator', async () => {
+  const f = fixture()
+  mkdirSync(join(f.root, '.codex')); writeFileSync(join(f.root, '.codex/hooks.json'), '{}')
+  const stamp = (event: ReturnType<typeof normalizeNativeHook>) => stampNativeCapture(event, f.binding)
+  const start = stamp(normalizeNativeHook({ ...f.payload, hook_event_name: 'SessionStart', tool_use_id: undefined }, f.binding))
+  spoolNativeHook(start, f.spool); await f.ingest()
+  const pre = stamp(normalizeNativeHook(f.payload, f.binding))
+  spoolNativeHook(pre, f.spool)
+  expect(await f.ingest()).toMatchObject({ ingested: 1, deduplicated: 0 })
+  spoolNativeHook(pre, f.spool)
+  expect(await f.ingest()).toMatchObject({ ingested: 1, deduplicated: 1 })
+  const expired = stamp(normalizeNativeHook({ ...f.payload, tool_use_id: 'expired' }, f.binding, new Date(Date.now() - 2 * 86400000)))
+  spoolNativeHook(expired, f.spool)
+  expect(await f.ingest()).toMatchObject({ expired: 1 })
+  const before = f.store().registry.nativeCaptureWindows(f.binding.worktreeId, f.binding.generation)
+  expect(before).toEqual([expect.objectContaining({ accepted: 2, ingress: 4, deduplicated: 1, expired: 1, rejected: 0,
+    incompletePairs: 1, correlations: { verified: 0, partial: 1, ambiguous: 0, pending: 0 }, coverage: 'COVERAGE_UNKNOWN', denominator: null })])
+  expect(before[0].ingress).toBe(before[0].accepted + before[0].deduplicated! + before[0].expired! + before[0].rejected!)
+  f.restart()
+  expect(f.store().registry.nativeCaptureWindows(f.binding.worktreeId, f.binding.generation)).toEqual(before)
+  expect(f.store().registry.nativeCaptureWindows('3'.repeat(64), f.binding.generation)).toEqual([])
+})
 
 function proof(reason: string, startedAt = new Date(Date.now() + 1000).toISOString()) {
   const value = { version: 1, state: 'PASS', exitCode: 0, startedAt, finishedAt: startedAt,

@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import { readNativeBinding } from './native-hooks'
 import { ingestNativeHooks } from './native-hook-ingestion'
 import { correlateNativeGit } from './native-git-correlation'
+import { nativeInvocationWindow } from './native-capture-window'
 import { correlateNativeArtifact } from './native-artifact-correlation'
 import type { PublicationProvenancePort, PublicationReceipt, PublicationAssociationResult } from '../../shared/types/publication-provenance-types'
 import { GitService } from '../core/git-service'
@@ -98,22 +99,34 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
         try {
           const binding = readNativeBinding(join(nativeTarget.root, '.code-awareness/native-hooks/binding.json'))
           if (binding.repositoryId !== repositoryId || binding.worktreeId !== nativeTarget.worktreeId || binding.generation !== nativeTarget.generation) throw new Error('WORKTREE_STALE')
+          const observed = new Map<string, { git: boolean; artifact: boolean }>()
           await ingestNativeHooks(store.registry, binding, async selection => {
             const resolved = await validateTarget(message.id, selection)
             if (!resolved) throw new Error('WORKTREE_STALE')
             return { ...resolved, validate: async () => { await validateTarget(message.id, selection); assertRequest() } }
           }, assertRequest, Date.now(), async event => {
-            if (event.git && event.invocationId) await correlateNativeGit(store!.registry, binding, event.invocationId, new GitService(), assertRequest)
-            if (event.artifact && event.invocationId) await correlateNativeArtifact(store!.registry, binding, event.invocationId, publicationPort, assertRequest)
+            if (event.invocationId && (event.git || event.artifact)) observed.set(event.invocationId, { git: !!event.git, artifact: !!event.artifact })
           })
-          const scan = 'NATIVE_ARTIFACT_SCAN:' + binding.worktreeId
-          const previous = store.registry.source(scan)
-          const candidates = store.registry.nativeArtifactCandidates(binding.worktreeId, binding.generation, previous?.cursor)
-          for (const key of candidates) {
-            const invocationId = store.registry.invocationFromKey(key)
-            if (store.registry.source('NATIVE_ARTIFACT:' + invocationId)?.status !== 'COMPLETE') await correlateNativeArtifact(store.registry, binding, invocationId, publicationPort, assertRequest)
+          for (const [invocation, kinds] of observed) {
+            if (kinds.git) await correlateNativeGit(store.registry, binding, invocation, new GitService(), assertRequest)
+            if (kinds.artifact) await correlateNativeArtifact(store.registry, binding, invocation, publicationPort, assertRequest)
           }
-          store.registry.apply({ repositoryId, source: scan, revision: String(Date.now()), status: candidates.length === 32 ? 'PARTIAL' : 'COMPLETE', cursor: candidates.length === 32 ? candidates.at(-1) : '', edges: [] }, previous?.revision, assertRequest)
+          for (const kind of ['ARTIFACT', 'GIT'] as const) {
+            const scan = `NATIVE_${kind}_SCAN:${binding.worktreeId}:${binding.generation}`
+            const previous = store.registry.source(scan)
+            const candidates = store.registry.nativeCorrelationCandidates(kind, binding.worktreeId, binding.generation, previous?.cursor)
+            for (const key of candidates) {
+              const invocationId = store.registry.invocationFromKey(key)
+              if (observed.has(invocationId)) continue
+              const session = store.registry.directEvidence({ kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, `NATIVE_${kind}_REQUEST`).find(edge => edge.relation === 'PreToolUse')?.to
+              const current = session && nativeInvocationWindow(store.registry, binding, { kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, session) === 'VERIFIED'
+              if (store.registry.source(`NATIVE_${kind}:` + invocationId)?.status !== 'COMPLETE' || !current) {
+                if (kind === 'ARTIFACT') await correlateNativeArtifact(store.registry, binding, invocationId, publicationPort, assertRequest)
+                else await correlateNativeGit(store.registry, binding, invocationId, new GitService(), assertRequest)
+              }
+            }
+            store.registry.apply({ repositoryId, source: scan, revision: String(Date.now()), status: candidates.length === 32 ? 'PARTIAL' : 'COMPLETE', cursor: candidates.length === 32 ? candidates.at(-1) : '', edges: [] }, previous?.revision, assertRequest)
+          }
         } catch {
           assertRequest()
           const previous = store.registry.source('NATIVE_HOOK')

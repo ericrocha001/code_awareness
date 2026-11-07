@@ -13,6 +13,7 @@ import { correlateNativeGit } from './native-git-correlation'
 import { nativeDigest, type NativeHookEnvelope } from './native-hooks'
 import { recordNativeGap } from './native-hooks'
 import { persistNativeCapture } from './native-hook-diagnostics'
+import { startCaptureFixture } from './fixtures/native-capture-fixture'
 const closes: (() => void)[] = []
 afterEach(() => { closes.splice(0).reverse().forEach(close => close()) })
 function setup(repositoryId = 'repo') {
@@ -27,10 +28,11 @@ function setup(repositoryId = 'repo') {
   const refresh = async (id: string) => sessions.registry.applyAll(await read({ selector: { kind: 'ARTIFACT', id }, cursors: sessions.registry.cursors() }), () => {})
   const publish = async (rawMarkdown: string, call = 'call', session = 'session', selectedBinding = binding) => {
     const receipt = f.service.publish(rawMarkdown)
+    const stamp = startCaptureFixture(sessions.registry, selectedBinding, nativeDigest(JSON.stringify([repositoryId, 'codex', session])))
     for (const hook_event_name of ['PreToolUse','PostToolUse']) {
       const event = normalizeNativeHook({ hook_event_name, session_id: session, tool_use_id: call, tool_name: 'mcp__code_awareness_local__publish_artifact', cwd: selectedBinding.root, tool_input: { rawMarkdown },
         ...(hook_event_name === 'PostToolUse' ? { tool_response: { content: [{ type: 'text', text: JSON.stringify(receipt) }] } } : {}) }, selectedBinding)
-      sessions.registry.apply(nativeObservationBatch(event), undefined)
+      sessions.registry.apply(nativeObservationBatch(stamp(event)), undefined)
       await correlateNativeArtifact(sessions.registry, selectedBinding, event.invocationId!, {
         readReceipt: async id => f.service.readPublicationReceipt(id), associate: async value => f.service.associatePublication(value), invalidate: async (id, state) => { f.service.invalidatePublication(id, state) }
       }, () => {})
@@ -60,11 +62,12 @@ it('U1 composes exact publication, declared and derived relationships without co
 })
 async function commit(f: ReturnType<typeof setup>, session = 'session', sha = 'a'.repeat(40), binding = f.binding) {
   const invocationId = nativeDigest(sha), fingerprint = nativeDigest('args'), parent = 'b'.repeat(40)
+  const stamp = startCaptureFixture(f.sessions.registry, binding, nativeDigest(JSON.stringify(['repo', 'codex', session])))
   for (const event of ['PreToolUse','PostToolUse'] as const) {
     const envelope: NativeHookEnvelope = { schema: 1, source: 'CODEX_NATIVE_HOOK', repositoryId: 'repo', worktreeId: binding.worktreeId, generation: binding.generation,
       sessionId: nativeDigest(JSON.stringify(['repo','codex',session])), event, invocationId, observedAt: new Date().toISOString(), eventId: nativeDigest(event + sha), digest: nativeDigest(event + sha + 'safe'),
       git: { operationId: 'git-proof-' + sha, fingerprint, expectedHead: parent, ...(event === 'PostToolUse' ? { sha, parent, replayed: false } : {}) } }
-    f.sessions.registry.apply(nativeObservationBatch(envelope), undefined)
+    f.sessions.registry.apply(nativeObservationBatch(stamp(envelope)), undefined)
   }
   const git = { readOperationReceipt: async () => ({ sha: 'c'.repeat(40), receipt: { operationId: 'git-proof-' + sha, operation: 'commit_git_changes', argumentFingerprint: fingerprint, status: 'COMPLETED' as const,
     createdAt: new Date().toISOString(), result: { content: [{ type: 'text' as const, text: JSON.stringify({ sha, parent }) }] } } }), getCommitOperationObjects: async () => [{ sha, parents: [parent], title: 'PRIVATE_TITLE' }] }
