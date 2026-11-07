@@ -411,9 +411,12 @@ it('keeps switches pending and refreshes the persisted state after a CAS conflic
 it('lists, opens in VIEW and updates a canonical skill with expectedVersion', async () => {
   render(<AcademyView />)
   await selectAlpha()
+  expect(within(screen.getByLabelText('Resumo derivado da Skill')).getByText('alpha')).toBeTruthy()
+  expect(document.querySelector('.academy-source-disclosure')?.hasAttribute('open')).toBe(false)
   expect(await screen.findByText(/name: alpha/)).toBeTruthy()
   expect(screen.queryByLabelText('Editar SKILL.md')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+  expect(document.querySelector('.academy-source-disclosure')?.hasAttribute('open')).toBe(true)
   const editor = screen.getByLabelText('Editar SKILL.md')
   fireEvent.change(editor, { target: { value: `${detail.current.package.skillMd}\nUpdated` } })
   fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))

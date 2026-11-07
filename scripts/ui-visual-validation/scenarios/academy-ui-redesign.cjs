@@ -22,7 +22,8 @@ exports.run = async ctx => {
   try {
     const pkg = (name, description) => ({ skillMd: `---\nname: ${name}\ndescription: ${description}\nx-fixture: preservado\n---\n\n# ${name}\n\nConteúdo sintético de validação. Ação, unicode e autoria integral.\n${'Orientação procedural com contexto verificável.\n'.repeat(50)}`, artifacts: { 'references/guide.md': '# Orientações\nTexto sintético.', 'scripts/example.ts': 'export const example = true\n' } })
     const selected = await service.create({ package: pkg('architecture-map', 'Consulte o Architecture Map canônico de um repositório para compreender topologia, subsistemas, ownership, dependências e fronteiras de runtime.'), scope: 'GLOBAL', origin: 'UI' })
-    for (let i = 0; i < 54; i++) await service.create({ package: pkg(`skill-${String(i).padStart(2, '0')}${i === 4 ? '-with-a-very-long-name-that-must-stay-inside-the-catalog' : ''}`, 'Orientações sintéticas para uma tarefa com contratos preservados.'), scope: 'GLOBAL', origin: 'UI' })
+    const names = ['agent-context-interface-engineering', 'agent-session-context', 'apresentacao-visual-de-ui', 'architecture-challenge', 'architecture-map-authoring', 'blockage-handoff', 'capability-opportunity', 'capability-readiness-design', 'cli-execution']
+    for (let i = 0; i < 54; i++) await service.create({ package: pkg(names[i] ?? `skill-${String(i).padStart(2, '0')}${i === 14 ? '-with-a-very-long-name-that-must-stay-inside-the-catalog' : ''}`, 'Orientações sintéticas para uma tarefa com contratos preservados.'), scope: 'GLOBAL', origin: 'UI' })
     const snapshot = { schema: 1, repositoryId: 'isolated-fixture', remoteUrl: 'fixture://academy', branch: 'main', sourceCommitSha: 'a'.repeat(40), firstParentSha: null, managedTreeHash: 'fixture-tree', authoredFiles: {}, observedAt: new Date().toISOString(), skills: [{ path: 'skills/architecture-map', name: selected.name, package: selected.current.package, packageHash: selected.current.packageHash }] }
     service.store.acceptGitSnapshots([snapshot], null, service.store.gitMigrationHash(snapshot))
     service.store.enableLocalAuthority(snapshot.sourceCommitSha)
@@ -41,11 +42,13 @@ exports.run = async ctx => {
     await ctx.viewport(1672, 941)
     await ctx.waitFor(() => document.querySelectorAll('.academy-skill-item').length === 55)
     await ctx.capture('empty-wide-dark')
-    await ctx.click('.academy-skill-item')
+    await ctx.click('.academy-skill-item:has(strong[title="architecture-map"])')
     await ctx.waitFor(() => !!document.querySelector('.academy-code-surface pre'))
     await ctx.overflow()
+    await ctx.click('.academy-source-disclosure > summary')
     ctx.check('Catalog and full source have independent scroll with 55 synthetic Skills', await ctx.evaluate(() => { const list = document.querySelector('.academy-skill-list'), code = document.querySelector('.academy-code-surface pre'); return list.scrollHeight > list.clientHeight && code.scrollHeight > code.clientHeight }))
     ctx.check('Default screen has a single New action, collapsed Advanced and honest Git freshness', await ctx.evaluate(() => document.querySelectorAll('.academy-primary-button').length === 1 && !document.querySelector('.academy-advanced').open && document.querySelector('.academy-health').textContent.includes('verificação pendente')))
+    await ctx.click('.academy-source-disclosure > summary')
     await ctx.capture('academy-wide-dark')
     await ctx.click('.academy-skill-actions button')
     await ctx.waitFor(() => !!document.querySelector('textarea[aria-label="Editar SKILL.md"]'))
@@ -71,6 +74,7 @@ exports.run = async ctx => {
     ctx.check('Save uses real renderer, preload, IPC, Service and SQLite and retains unknown YAML and files', service.get(selected.id).currentVersion === 2 && service.get(selected.id).current.package.skillMd.includes('x-fixture: preservado') && service.get(selected.id).current.package.artifacts['references/guide.md'].includes('Arquivo editado'))
     await ctx.click('.academy-tabs button:nth-child(3)')
     await ctx.evaluate(() => [...document.querySelectorAll('.academy-overview button')].find(button => button.textContent === 'Histórico').click())
+    await ctx.waitFor(() => document.querySelectorAll('.academy-history li').length === 2)
     ctx.check('Immutable history remains accessible in Context', await ctx.evaluate(() => document.querySelectorAll('.academy-history li').length === 2))
     await ctx.click('.academy-advanced > summary')
     ctx.check('Rare global operations remain reachable without changing persisted preferences', await ctx.evaluate(() => !!document.querySelector('.academy-advanced-content button[aria-label="Reconciliar distribuição"]') && [...document.querySelectorAll('.academy-git-option input')].every(input => !input.checked)))
