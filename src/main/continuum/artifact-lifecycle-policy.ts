@@ -47,6 +47,8 @@ export function lifecycleProjection(artifact: Artifact, receipt?: import('./arti
     basis: receipt ? 'AUTHORIZED_TRANSITION' : !policy ? 'NO_LIFECYCLE_POLICY' : artifact.metadata.status === policy.initialState && policy.initialState ? 'INITIAL_STATE' : artifact.metadata.status ? 'AUTHOR_DECLARED' : 'NO_EDITORIAL_STATE',
     assessment: receipt ? 'APPROVED_AT_REVISION' : policy && artifact.metadata.status && artifact.metadata.status !== policy.initialState ? 'REVIEW_REQUIRED' : 'NOT_ASSESSED',
     evidenceRefs: receipt?.review.evidence.map(p => p.proofId) ?? [], assessedAt: receipt?.approval.approvedAt ?? null,
+    evidenceMode: receipt ? receipt.review.evidenceMode ?? 'AUTO_VERIFIED' : null,
+    attestation: receipt?.review.attestation ?? null,
     transitionId: receipt?.transitionId ?? null, reasonCode: receipt?.review.reasonCode ?? null, approval: receipt?.approval ?? null,
     revision: artifact.revision, freshness: artifact.provenance.lifecycle && !receipt ? 'SOURCE_STALE' : 'NOT_RECHECKED' }
 }
