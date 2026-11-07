@@ -4,6 +4,7 @@ import { ArtifactRevisionConflictError, type ArtifactStore } from './artifact-st
 import { editArtifactStatus, lifecyclePolicy, type LifecycleDependencies } from './artifact-lifecycle-policy'
 import type { Artifact } from './continuum-types'
 import type { ProofWithFreshness } from '../validation-ledger/validation-ledger-types'
+import { assertArtifactAgent, type AgentAuthority } from './agent-authority'
 
 export const lifecycleReasons = ['CRITERIA_ACCEPTED', 'CLOSURE_ACCEPTED', 'NORMATIVE_ACTIVATION', 'EXPLICIT_CANCELLATION', 'BLOCKAGE_CONFIRMED', 'IMPLEMENTATION_REVIEWED'] as const
 export interface LifecycleRequest {
@@ -46,6 +47,7 @@ export interface LifecycleReview {
   evidence: Array<{ proofId: string; digest: string; freshness: 'CURRENT' }>
   evidenceMode?: 'AUTO_VERIFIED' | 'REVIEWED_ATTESTATION'
   attestation?: ReviewedAttestation
+  proposedContentHash?: string
   reviewDigest: string
 }
 export interface LifecycleReceipt {
@@ -71,7 +73,7 @@ export function lifecycleReceipt(artifact: Artifact): LifecycleReceipt | null {
     return value
   } catch { return null }
 }
-const reasons: Record<string, LifecycleRequest['reasonCode']> = { VALIDATED: 'CRITERIA_ACCEPTED', COMPLETED: 'CLOSURE_ACCEPTED', ACTIVE: 'NORMATIVE_ACTIVATION', CANCELLED: 'EXPLICIT_CANCELLATION', BLOCKED: 'BLOCKAGE_CONFIRMED', IMPLEMENTED: 'IMPLEMENTATION_REVIEWED', NOT_IMPLEMENTED: 'IMPLEMENTATION_REVIEWED' }
+export const lifecycleReasonFor: Record<string, LifecycleRequest['reasonCode']> = { PENDING: 'IMPLEMENTATION_REVIEWED', VALIDATED: 'CRITERIA_ACCEPTED', COMPLETED: 'CLOSURE_ACCEPTED', ACTIVE: 'NORMATIVE_ACTIVATION', CANCELLED: 'EXPLICIT_CANCELLATION', BLOCKED: 'BLOCKAGE_CONFIRMED', IMPLEMENTED: 'IMPLEMENTATION_REVIEWED', NOT_IMPLEMENTED: 'IMPLEMENTATION_REVIEWED' }
 const needsProof = new Set(['VALIDATED', 'COMPLETED', 'IMPLEMENTED'])
 
 async function attestationSourcesCurrent(receipt: LifecycleReceipt, dependencies: LifecycleDependencies, store: ArtifactStore) {
@@ -97,12 +99,14 @@ async function attestationSourcesCurrent(receipt: LifecycleReceipt, dependencies
   })
 }
 
-export async function transitionLifecycle(store: ArtifactStore, dependencies: LifecycleDependencies, request: LifecycleRequest, assertContext: () => void) {
+export async function transitionLifecycle(store: ArtifactStore, dependencies: LifecycleDependencies, request: LifecycleRequest, assertContext: () => void,
+  authority?: AgentAuthority, publication?: { rawMarkdown: string; provenance: Artifact['provenance'] }) {
   assertContext()
+  if (authority) assertArtifactAgent(authority, store.repositoryId)
   const current = store.get(request.artifactId)
   if (!current) throw new Error('ARTIFACT_NOT_FOUND')
   const { action: _action, ...intent } = request
-  const requestDigest = lifecycleDigest(Object.fromEntries(Object.entries(intent).filter(([, value]) => value !== undefined)))
+  const requestDigest = lifecycleDigest({ ...Object.fromEntries(Object.entries(intent).filter(([, value]) => value !== undefined)), ...(publication ? { proposedContentHash: lifecycleDigest(publication.rawMarkdown) } : {}) })
   const priorReceipt = lifecycleReceipt(current)
   if (request.action === 'TRANSITION' && priorReceipt?.requestDigest === requestDigest) return { state: 'PERSISTED' as const, replayed: true, artifactId: current.artifactId, revision: current.revision, lifecycleReceipt: priorReceipt }
   if (current.revision !== request.expectedRevision) throw new ArtifactRevisionConflictError(current.artifactId, current.revision)
@@ -114,11 +118,18 @@ export async function transitionLifecycle(store: ArtifactStore, dependencies: Li
     if (store.get(current.artifactId)?.revision !== current.revision) throw new Error('REVISION_CONFLICT')
     return { state: 'REVIEW_REQUIRED' as const, reason: 'HISTORICAL_APPROVAL_RECHECKED', artifactId: current.artifactId, revision: current.revision, evidence, lifecycleReceipt: priorReceipt }
   }
-  const policy = lifecyclePolicy(current.metadata)
+  const policy = authority && publication && request.evidenceMode === 'REVIEWED_ATTESTATION'
+    ? lifecyclePolicy(parseArtifactMarkdown(publication.rawMarkdown, true).metadata) ?? lifecyclePolicy(current.metadata)
+    : lifecyclePolicy(current.metadata)
   const reviewRequired = (reason: string) => ({ state: 'REVIEW_REQUIRED' as const, reason, artifactId: current.artifactId, revision: current.revision })
-  if (!policy || !(policy.transitions as readonly string[]).includes(request.toState) || reasons[request.toState] !== request.reasonCode) return reviewRequired('POLICY_OR_REASON_MISMATCH')
+  if (!policy || (!(policy.transitions as readonly string[]).includes(request.toState) && !(authority && request.toState === policy.initialState)) || lifecycleReasonFor[request.toState] !== request.reasonCode) return reviewRequired('POLICY_OR_REASON_MISMATCH')
   let supporting: Artifact | null = null
-  if (request.toState === 'COMPLETED') {
+  if (authority && request.evidenceMode === 'REVIEWED_ATTESTATION') {
+    if (request.supportingArtifactId) {
+      supporting = store.get(request.supportingArtifactId)
+      if (!supporting || ![...(current.metadata.relations ?? []), ...(supporting.metadata.relations ?? [])].some(r => r.artifactId === current.artifactId || r.artifactId === supporting!.artifactId)) return reviewRequired('SUPPORT_CONTEXT_REQUIRED')
+    }
+  } else if (request.toState === 'COMPLETED') {
     const candidates = store.list({ relatedToArtifactId: current.artifactId, direction: 'inbound', relationKind: 'implements', kind: 'IMPLEMENTATION_HANDOFF', limit: 20 })
     const selected = request.supportingArtifactId ?? (candidates.artifacts.length === 1 && !candidates.nextCursor ? candidates.artifacts[0].artifactId : undefined)
     supporting = selected ? store.get(selected) : null
@@ -154,10 +165,10 @@ export async function transitionLifecycle(store: ArtifactStore, dependencies: Li
   const attestation = manual ? await readAttestation() : null
   assertContext()
   if (manual && (!attestation || request.evidenceRefs.length)) return reviewRequired('CONTEXTUAL_ATTESTATION_REQUIRED')
-  const acceptedClosure = supporting && request.toState === 'COMPLETED' ? lifecycleReceipt(supporting)! : null
+  const acceptedClosure = supporting && request.toState === 'COMPLETED' && !(authority && manual) ? lifecycleReceipt(supporting) : null
   if (!manual && acceptedClosure?.review.evidenceMode === 'REVIEWED_ATTESTATION') return reviewRequired('REVIEWED_CLOSURE_REQUIRES_ATTESTATION')
   if (acceptedClosure && !await attestationSourcesCurrent(acceptedClosure, dependencies, store)) return reviewRequired('CLOSURE_ATTESTATION_CHANGED')
-  const inherited = supporting && request.toState === 'COMPLETED' ? lifecycleReceipt(supporting)!.review.evidence.map(p => p.proofId) : []
+  const inherited = !manual && acceptedClosure ? acceptedClosure.review.evidence.map(p => p.proofId) : []
   let discovered: string[] = []
   if (!manual && !request.evidenceRefs.length && !inherited.length && needsProof.has(request.toState) && dependencies.proofsFor) {
     const candidates = (await Promise.all([current.artifactId, ...(supporting ? [supporting.artifactId] : [])].map(id => dependencies.proofsFor!(id)))).flat()
@@ -180,11 +191,15 @@ export async function transitionLifecycle(store: ArtifactStore, dependencies: Li
   if (!manual && supporting && request.toState === 'COMPLETED' && lifecycleReceipt(supporting)!.review.evidence.some(ref => !proofs.some(p => p.proofId === ref.proofId && lifecycleDigest(p) === ref.digest))) return reviewRequired('CLOSURE_EVIDENCE_CHANGED')
   const snapshot = (artifact: Artifact) => ({ artifactId: artifact.artifactId, revision: artifact.revision, contentHash: artifact.contentHash })
   const reviewBody = { repositoryId: store.repositoryId, target: { ...snapshot(current), kind: current.metadata.kind }, supporting: supporting ? snapshot(supporting) : null, toState: request.toState, reasonCode: request.reasonCode,
+    ...(publication ? { proposedContentHash: createHash('sha256').update(publication.rawMarkdown).digest('hex') } : {}),
     evidence: proofs.map(p => ({ proofId: p.proofId, digest: lifecycleDigest(p), freshness: 'CURRENT' as const })),
     ...(manual ? { evidenceMode: 'REVIEWED_ATTESTATION' as const, attestation: attestation! } : {}) }
   const review: LifecycleReview = { ...reviewBody, reviewDigest: lifecycleDigest(reviewBody) }
   if (request.action === 'ASSESS') return { ...reviewRequired('EXPLICIT_CRITERIA_APPROVAL_REQUIRED'), review }
-  const approval = await dependencies.approve?.(structuredClone(review))
+  if (authority) assertArtifactAgent(authority, store.repositoryId)
+  const approval: LifecycleApproval | null | undefined = authority
+    ? { reviewDigest: review.reviewDigest, source: 'AUTHENTICATED_AUTHORITY', principalId: authority.principal.principalId, approvedAt: new Date().toISOString() }
+    : await dependencies.approve?.(structuredClone(review))
   assertContext()
   if (!approval || approval.reviewDigest !== review.reviewDigest || !['NATIVE_DESKTOP_CONFIRMATION', 'AUTHENTICATED_AUTHORITY'].includes(approval.source) ||
     (approval.source === 'AUTHENTICATED_AUTHORITY' && !approval.principalId) || (approval.source === 'NATIVE_DESKTOP_CONFIRMATION' && approval.principalId !== null) || !Number.isFinite(Date.parse(approval.approvedAt))) return reviewRequired('AUTHORITY_APPROVAL_REQUIRED')
@@ -198,12 +213,14 @@ export async function transitionLifecycle(store: ArtifactStore, dependencies: Li
   if (!freshProofs || lifecycleDigest(freshProofs) !== lifecycleDigest(proofs)) return reviewRequired('EVIDENCE_CHANGED_DURING_APPROVAL')
   if (manual && (!freshAttestation || lifecycleDigest(freshAttestation) !== lifecycleDigest(attestation))) return reviewRequired('ATTESTATION_CHANGED_DURING_APPROVAL')
   if (!closureCurrent) return reviewRequired('CLOSURE_ATTESTATION_CHANGED')
-  const rawMarkdown = current.metadata.status === request.toState ? current.rawMarkdown : editArtifactStatus(current.rawMarkdown, request.toState)
+  if (authority) assertArtifactAgent(authority, store.repositoryId)
+  const rawMarkdown = publication?.rawMarkdown ?? (current.metadata.status === request.toState ? current.rawMarkdown : editArtifactStatus(current.rawMarkdown, request.toState))
+  if (parseArtifactMarkdown(rawMarkdown, true).metadata.status !== request.toState) throw new Error('LIFECYCLE_PUBLICATION_MISMATCH')
   const receiptBody = { schemaVersion: 1 as const, transitionId: 'lifecycle-' + randomUUID(), requestDigest, review, approval, fromState: current.metadata.status ?? null,
     revision: current.revision + 1, contentHash: createHash('sha256').update(rawMarkdown).digest('hex') }
   const receipt: LifecycleReceipt = { ...receiptBody, digest: lifecycleDigest(receiptBody) }
   const published = store.updatePublished({ artifactId: current.artifactId, expectedRevision: current.revision, rawMarkdown, metadata: parseArtifactMarkdown(rawMarkdown, true).metadata,
-    provenance: { lifecycle: normalizeMetadataValue(receipt) } }, requestDigest)
+    provenance: { ...publication?.provenance, lifecycle: normalizeMetadataValue(receipt) } }, requestDigest)
   if (!lifecycleReceipt(published.artifact)) throw new Error('LIFECYCLE_READBACK_INTEGRITY')
   return { state: 'PERSISTED' as const, replayed: false, artifactId: current.artifactId, revision: published.artifact.revision, lifecycleReceipt: receipt, publicationReceipt: published.publicationReceipt }
 }

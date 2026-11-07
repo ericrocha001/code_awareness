@@ -67,6 +67,29 @@ export class ArtifactStore {
       return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
     }).immediate()
   }
+  repairPublished(artifactId: string, expectedRevision: number, requestDigest: string, principalId: string) {
+    return this.db.transaction(() => {
+      const current = this.db.prepare('SELECT revision FROM artifacts WHERE artifact_id=?').get(artifactId) as { revision: number } | undefined
+      if (!current) throw new Error('ARTIFACT_NOT_FOUND')
+      if (current.revision !== expectedRevision) throw new ArtifactRevisionConflictError(artifactId, current.revision)
+      const latest = this.db.prepare('SELECT revision FROM artifact_revisions WHERE artifact_id=? ORDER BY revision DESC LIMIT 1').get(artifactId) as { revision: number } | undefined
+      if (!latest) throw new Error('CANONICAL_SOURCE_UNAVAILABLE')
+      const canonical = this.getRevision(artifactId, latest.revision)!, initial = this.getRevision(artifactId, 1)!
+      if (!initial) throw new Error('CANONICAL_SOURCE_UNAVAILABLE')
+      const metadata = /^(?:\uFEFF)?---\r?\n/.test(canonical.rawMarkdown) ? parseArtifactMarkdown(canonical.rawMarkdown, true).metadata : canonical.metadata
+      if (canonical.metadata.kind === 'VISUAL_REFERENCE') metadata.media = canonical.metadata.media
+      this.db.prepare(`UPDATE artifacts SET revision=?, metadata_json=?, name=?, description=?, kind=?, status=?, created_at=?, updated_at=?, raw_markdown=?, content_hash=?, provenance_json=? WHERE artifact_id=? AND revision=?`)
+        .run(canonical.revision, JSON.stringify(metadata), metadata.name, metadata.description ?? null, metadata.kind, metadata.status ?? null, initial.createdAt, canonical.updatedAt,
+          canonical.rawMarkdown, computeContentHash(canonical.rawMarkdown), JSON.stringify(canonical.provenance), artifactId, expectedRevision)
+      if (canonical.metadata.kind === 'VISUAL_REFERENCE') this.getVisual(artifactId)
+      const provenance = { ...canonical.provenance, technicalRepair: { principalId, requestDigest, source: 'IMMUTABLE_REVISION', sourceRevision: canonical.revision, sourceContentHash: canonical.contentHash } }
+      const artifact: Artifact = { ...canonical, metadata, createdAt: initial.createdAt, revision: canonical.revision + 1,
+        updatedAt: new Date(Math.max(Date.now(), Date.parse(canonical.updatedAt) + 1)).toISOString(), contentHash: computeContentHash(canonical.rawMarkdown), provenance }
+      this.db.prepare('UPDATE artifacts SET revision=?, updated_at=?, provenance_json=? WHERE artifact_id=?').run(artifact.revision, artifact.updatedAt, JSON.stringify(provenance), artifactId)
+      this.writeIndexes(artifact)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
+    }).immediate()
+  }
   createVisualPublished(input: CreateArtifactInput, data: Buffer, media: VisualMedia, requestDigest: string) {
     return this.db.transaction(() => {
       const artifact = this.createVisual(input, data, media)

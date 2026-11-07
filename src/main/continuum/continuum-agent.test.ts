@@ -10,6 +10,8 @@ import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { ProjectContextNavigation } from '../core/context/project-context-navigation'
 import { CONTINUUM_AGENT_TOOLS } from './continuum-agent'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from './agent-authority'
+import { randomUUID } from 'node:crypto'
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.reverse().forEach(close => close()); cleanup.length = 0 })
 
@@ -21,11 +23,13 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
   const session = new RepositoryContinuumSession(join(f.dir, 'storage'), { findByPath: () => ({ id: 'A', localCheckout: { path: root } }) }, { ingestCheckout: false }); session.activate(root); cleanup.push(() => session.dispose())
   const service = session.getActiveService()!, one = service.publish(markdown('Literal'))
   const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: root, navigation: {} as ProjectContextNavigation, continuum: service })
-  const server = createMcpHttpServer(adapter, () => {})
+  const binding = randomUUID()
+  const server = createMcpHttpServer(adapter, () => {}, undefined, undefined, (headers, connected) => headers['x-fixture-binding'] === binding
+    ? authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', connected), 'A', () => session.getActiveService() === service && connected()) : undefined)
   await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
   const address = server.address() as { port: number }
   const rpc = async (method: string, params: unknown) => {
-    const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
+    const response = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-fixture-binding': binding }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) })
     expect(response.status).toBe(200); return ((await response.json()) as { result: any }).result
   }
   const call = (name: string, args: unknown) => rpc('tools/call', { name, arguments: args })
@@ -44,9 +48,9 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     const status = await local('status'), worktreeId = status.result.worktrees.find((item: { path: string }) => item.path.replace(/\\/g, '/').toLowerCase() === root.replace(/\\/g, '/').toLowerCase()).worktreeId
     const selected = [{ artifactId: one.artifactId, expectedRevision: 1 }], scope = { repositoryId: 'A', worktreeId }
     const plan = service.publish('# Plan\n\nExplicit semantic criteria to review.', { kind: 'EXECUTABLE_PLAN' })
-    const transition = { action: 'TRANSITION', artifactId: plan.artifactId, expectedRevision: 1, toState: 'CANCELLED', reasonCode: 'EXPLICIT_CANCELLATION', evidenceRefs: [] }
-    expect(await read('transition_artifact_lifecycle', transition)).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'AUTHORITY_APPROVAL_REQUIRED' })
-    expect((await local('transition_artifact_lifecycle', { ...scope, ...transition })).result).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'AUTHORITY_APPROVAL_REQUIRED' })
+    const transition = { action: 'ASSESS', artifactId: plan.artifactId, expectedRevision: 1, toState: 'CANCELLED', reasonCode: 'EXPLICIT_CANCELLATION', evidenceRefs: [] }
+    expect(await read('transition_artifact_lifecycle', transition)).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'EXPLICIT_CRITERIA_APPROVAL_REQUIRED' })
+    expect((await local('transition_artifact_lifecycle', { ...scope, ...transition })).result).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'EXPLICIT_CRITERIA_APPROVAL_REQUIRED' })
     expect((await local('transition_artifact_lifecycle', { ...scope, ...transition, repositoryId: 'B' })).error.code).toBe('REPOSITORY_MISMATCH')
     expect((await call('transition_artifact_lifecycle', { ...transition, approved: true })).isError).toBe(true)
     const manual = { ...transition, action: 'ASSESS', evidenceMode: 'REVIEWED_ATTESTATION', attestation: { rationale: 'Deliberate operator review of the selected plan.', limitations: 'Semantic criteria require human inspection; no automatic verification.', references: [{ type: 'ARTIFACT', repositoryId: 'A', artifactId: plan.artifactId, expectedRevision: 1 }] } }
@@ -55,6 +59,14 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     expect((await local('transition_artifact_lifecycle', { ...scope, ...manual })).result).toMatchObject({ state: 'REVIEW_REQUIRED', review: { evidenceMode: 'REVIEWED_ATTESTATION' } })
     expect(service.get(plan.artifactId)).toEqual(beforeAssessment)
     expect(service.get(plan.artifactId)!.metadata.status).toBe('PENDING')
+    const evidence = service.publish(markdown('Existing delivery evidence', `relations:\n  - artifactId: ${plan.artifactId}\n    kind: validates\n`, '# Delivery\n\nThe scoped implementation and required tests are completed in this fixture.'))
+    const before = service.get(plan.artifactId)!
+    const combined = before.rawMarkdown.replace('status: PENDING', `status: COMPLETED\ntags: [agent-completed]\nrelations:\n  - artifactId: ${evidence.artifactId}\n    kind: derived-from`).replace(before.metadata.description!, 'Completed scoped implementation with report')
+    const lifecycle = { attestation: { rationale: 'Reviewed all required criteria and the existing report.', limitations: 'Fixture evidence is contextual and not an independent production acceptance.', references: [{ type: 'ARTIFACT', repositoryId: 'A', artifactId: evidence.artifactId, expectedRevision: 1 }] } }
+    const anonymous = await fetch(`http://127.0.0.1:${address.port}/mcp`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-code-awareness-principal': 'forged' }, body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'update_artifact', arguments: { artifactId: plan.artifactId, expectedRevision: 1, rawMarkdown: combined, lifecycle } } }) }).then(r => r.json()) as any
+    expect(anonymous.result).toMatchObject({ isError: true }); expect(JSON.stringify(anonymous)).toContain('AGENT_UNAUTHORIZED')
+    expect((await local('update', { ...scope, artifactId: plan.artifactId, expectedRevision: 1, rawMarkdown: combined, lifecycle })).result).toMatchObject({ state: 'PERSISTED', revision: 2, lifecycleReceipt: { approval: { source: 'AUTHENTICATED_AUTHORITY' } } })
+    expect(await read('get_artifact', { artifactId: plan.artifactId })).toMatchObject({ revision: 2, metadata: { status: 'COMPLETED', tags: ['agent-completed'], description: 'Completed scoped implementation with report' } })
     expect((await local('list_continuum_tags', scope, 'forged')).error.code).toBe('UNAUTHORIZED')
     expect((await local('list_continuum_tags', { ...scope, repositoryId: 'B' })).error.code).toBe('REPOSITORY_MISMATCH')
     expect((await local('list_continuum_tags', { ...scope, worktreeId: 'forged' })).error.code).toBe('WORKTREE_UNLINKED')
@@ -90,8 +102,9 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     expect((await local('assign_continuum_tag', { ...scope, slug: 'contexto-rapido', action: 'add', selected })).error.code).toBe('REVISION_CONFLICT')
     for (const args of [{ slug: 'contexto-rapido', action: 'add', selected: [...selected, ...selected] }, { slug: 'contexto-rapido', action: 'add', selected, confirmed: true }, { slug: 'contexto-rapido', action: 'add', selected: [{ ...selected[0], expectedRevision: '2' }] }]) expect((await call('assign_continuum_tag', args)).isError).toBe(true)
     const current = service.get(one.artifactId)!
-    expect((await call('update_artifact', { artifactId: one.artifactId, expectedRevision: 2, rawMarkdown: markdown('Removed') })).isError).toBe(true)
-    expect((await local('update', { ...scope, artifactId: one.artifactId, expectedRevision: 2, rawMarkdown: markdown('Removed') })).error.code).toBe('HUMAN_TAG_AUTHORSHIP_REQUIRED')
+    const editable = service.publish(markdown('Editable'))
+    expect(await read('update_artifact', { artifactId: editable.artifactId, expectedRevision: 1, rawMarkdown: markdown('Edited', 'tags: [agent-tag]\n') })).toMatchObject({ state: 'PERSISTED', revision: 2 })
+    expect((await local('update', { ...scope, artifactId: editable.artifactId, expectedRevision: 2, rawMarkdown: markdown('Edited again') })).result).toMatchObject({ state: 'PERSISTED', revision: 3 })
     const preview = await read('create_context_bundle', { tag: 'contexto-rapido' })
     expect(preview).toMatchObject({ outcome: 'preview', count: 1, hasVisuals: false }); expect(preview).not.toHaveProperty('markdown'); expect(preview).not.toHaveProperty('objective')
     expect((await local('create_context_bundle', { ...scope, tag: 'contexto-rapido', action: 'preview' })).result).toMatchObject({ count: 1, outcome: 'preview' })

@@ -212,7 +212,8 @@ const selectedTransport = new SelectedTransport(
       new InstallationIdentityService(installPath, safeStorage),
       30_000,
       25_000,
-      traceSink
+      traceSink,
+      () => mcpLifecycle.getAgentBindingHeaders()
     )
   }
 )

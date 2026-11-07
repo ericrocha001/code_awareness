@@ -1,4 +1,5 @@
-import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, parseContinuumAgentRequest } from './continuum-agent'
+import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, parseContinuumAgentRequest, parseAgentArtifactUpdate } from './continuum-agent'
+import { authorizeArtifactAgent } from './agent-authority'
 import { GitService } from '../core/git-service'
 import { GitWorktreeRegistry } from '../git-operations/git-worktree-registry'
 import { GitBranchInventory } from '../git-operations/git-branch-inventory'
@@ -31,7 +32,10 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         const { repositoryId: _repository, worktreeId: _worktree, ...args } = request.value
         parseContinuumAgentRequest(tool.name, args)
         return { ...request, args }
-      }, async (request, context) => executeContinuumAgent(await this.service(request, context), tool.name, request.args, () => context.connected()))])),
+      }, async (request, context) => {
+        const service = await this.service(request, context)
+        return executeContinuumAgent(service, tool.name, request.args, () => context.connected(), this.authority(request, context))
+      })])),
       inspect_artifact_structure: operation(input => {
         const request = selection(input, ['artifactId', 'sectionId', 'includeBlocks', 'limit', 'cursor'])
         const { repositoryId: _repository, worktreeId: _worktree, ...query } = request.value
@@ -101,7 +105,7 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
       }),
       publish: operation(input => { const request = selection(input, ['rawMarkdown', 'name', 'description', 'kind']); const { rawMarkdown, repositoryId: _repository, worktreeId: _worktree, ...fields } = request.value; return { ...request, rawMarkdown: text(rawMarkdown), fields: publicationFields(fields) } }, async (request, context) => {
         const service = await this.service(request, context)
-        const receipt = service.publish(request.rawMarkdown, request.fields)
+        const receipt = service.publish(request.rawMarkdown, request.fields, this.authority(request, context))
         const artifact = service.get(receipt.artifactId)!
         let sessionCoverage: object | undefined
         if (artifact.metadata.kind === 'IMPLEMENTATION_HANDOFF' && this.handoffCoverage) {
@@ -113,12 +117,25 @@ export class ContinuumLocalAdapter implements LocalChannelAdapter {
         }
         return { ...receipt, state: 'PERSISTED', ...(sessionCoverage ? { sessionCoverage } : {}) }
       }),
-      update: operation(input => { const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown', 'name', 'description', 'kind']); const { artifactId, expectedRevision, rawMarkdown, repositoryId: _repository, worktreeId: _worktree, ...fields } = request.value; return { ...request, artifactId: text(artifactId), expectedRevision: integer(expectedRevision), rawMarkdown: text(rawMarkdown), fields: publicationFields(fields) } }, async (request, context) => ({ ...(await this.service(request, context)).update(request.artifactId, request.expectedRevision, request.rawMarkdown, request.fields), state: 'PERSISTED' }))
+      update: operation(input => {
+        const request = selection(input, ['artifactId', 'expectedRevision', 'rawMarkdown', 'name', 'description', 'kind', 'lifecycle'])
+        const { repositoryId: _repository, worktreeId: _worktree, ...args } = request.value
+        return { ...request, args: parseAgentArtifactUpdate(args) }
+      }, async (request, context) => {
+        const service = await this.service(request, context)
+        const { artifactId, expectedRevision, rawMarkdown, lifecycle, ...fields } = request.args
+        return service.updateAgent(this.authority(request, context), artifactId, expectedRevision, rawMarkdown, fields, lifecycle)
+      })
     }
   }
   private getRegistry(active: NonNullable<ReturnType<RepositoryContinuumSession['getActiveSession']>>): GitWorktreeRegistry {
     if (this.registry?.session !== active) this.registry = { session: active, value: new GitWorktreeRegistry(active.repositoryPath, new GitService(), { repositoryId: active.repositoryId, isActive: () => this.session.getActiveSession() === active }) }
     return this.registry.value
+  }
+  private authority(request: { repositoryId: unknown; worktreeId: unknown }, context: LocalRequestContext) {
+    const active = this.session.getActiveSession()
+    if (!active || !context.principal || request.repositoryId !== active.repositoryId) throw new Error('AGENT_UNAUTHORIZED')
+    return authorizeArtifactAgent(context.principal, active.repositoryId, () => this.session.getActiveSession() === active && context.connected(), String(request.worktreeId))
   }
   private async service(request: { repositoryId: unknown; worktreeId: unknown }, context: LocalRequestContext, discover = true) {
     const active = this.session.getActiveSession()

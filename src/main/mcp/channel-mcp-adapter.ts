@@ -1,4 +1,6 @@
 import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, supportsContinuumAgent } from '../continuum/continuum-agent'
+import { executeAgentUpdateArtifact } from '../continuum/continuum-mcp'
+import { assertArtifactAgent } from '../continuum/agent-authority'
 import { ASSESS_EXECUTION_CLOSURE_TOOL, executeAssessExecutionClosure, type ClosureContext } from './execution-closure'
 import { createHash, randomUUID } from 'node:crypto'
 import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
@@ -231,7 +233,7 @@ export class ChannelMcpAdapter {
     return hasher.digest('hex')
   }
 
-  async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+  async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     const requestId = invocationContext?.requestId ?? randomUUID()
     const startedAt = performance.now()
     const channelCapability = this.capabilityForTool(name)
@@ -244,7 +246,7 @@ export class ChannelMcpAdapter {
     record('started')
     let result: McpToolResult
     try {
-      result = await this.governor.run(name, args, requestId, invocationContext?.deadlineAtMs, () => this.dispatchTool(name, args, invocationContext))
+      result = await this.governor.run(name, args, requestId, invocationContext?.deadlineAtMs, () => this.dispatchTool(name, args, invocationContext, authority))
     } catch (error) {
       record('error', error instanceof Error ? error.name : 'EXECUTION_FAILED')
       throw error
@@ -289,7 +291,7 @@ export class ChannelMcpAdapter {
     return undefined
   }
 
-  private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+  private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return this.cliExecution ? executeCliTool(this.cliExecution, name, args) : { content: [{ type: 'text', text: JSON.stringify({ code: 'CLI_EXECUTION_UNAVAILABLE' }) }], isError: true }
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return this.sessionContext ? this.sessionContext.call(name as SessionToolName, args) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
     if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {
@@ -348,7 +350,7 @@ export class ChannelMcpAdapter {
 
     if (CONTINUUM_AGENT_TOOLS.some(tool => tool.name === name)) {
       if (!supportsContinuumAgent(this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
-      try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args)) }] } }
+      try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args, undefined, authority)) }] } }
       catch (error) { return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true } }
     }
     if (name === 'inspect_artifact_structure' || name === 'read_artifact_section') {
@@ -371,7 +373,11 @@ export class ChannelMcpAdapter {
 
     if (name === 'publish_artifact' || name === 'update_artifact') {
       if (!this.continuum) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: repository service is not configured' }], isError: true }
-      return name === 'publish_artifact' ? executePublishArtifact(this.continuum, args) : executeUpdateArtifact(this.continuum, args)
+      if (name === 'publish_artifact') {
+        try { assertArtifactAgent(authority, this.continuum.repositoryId ?? ''); return executePublishArtifact(this.continuum, args, authority) }
+        catch (error) { return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] } }
+      }
+      return executeAgentUpdateArtifact(this.continuum, args, authority)
     }
 
     if (name === 'get_runtime_identity') {

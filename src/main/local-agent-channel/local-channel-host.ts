@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { object, text } from './request-validation'
 import type { LocalChannelAdapter, LocalRequestContext } from './local-channel-types'
+import { authenticatedAgentPrincipal } from '../continuum/agent-authority'
 
 export const LOCAL_MAX_BYTES = 8 * 1024 * 1024
 export const LOCAL_TIMEOUT_MS = 15_000
@@ -123,7 +124,7 @@ export class LocalChannelHost {
     }
     const adapter = this.adapters.find(adapter => adapter.domain === domain)
     if (!adapter || !Object.hasOwn(adapter.operations, action)) fail('METHOD_NOT_FOUND')
-    const context: LocalRequestContext = { connected }
+    const context: LocalRequestContext = { connected, principal: authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => !!this.server && connected()) }
     if (!connected()) fail('IPC_CLOSED')
     return adapter.operations[action].execute(args, context)
   }
