@@ -6,6 +6,8 @@ import { AcademyStore } from './academy-store'
 import Database from 'better-sqlite3'
 import type { AcademyGitSourceSnapshot } from '../../shared/types/academy-git-source-types'
 import { hashAcademyPackage } from './academy-package'
+import { buildOpenAiManifest } from './publication/openai-plugin-model'
+import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
 
 const roots: string[] = []
 const pkg = (name = 'alpha', body = '# Alpha') => ({ skillMd: `---\nname: ${name}\ndescription: Skill ${name}\n---\n\n${body}\n`, artifacts: { 'references/guide.md': 'Olá β' } })
@@ -18,6 +20,133 @@ const open = () => {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('AcademyStore', () => {
+  it('converges authored Git metadata independently of plugin setup and refuses a different repository checkpoint', () => {
+    const store = open()
+    try {
+      store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      const source = gitSnapshot('a', null)
+      source.authoredFiles['plugin.json'] = Buffer.from(JSON.stringify({ name: 'academy-skills', version: '1.0.0', description: 'Academy', author: { name: 'Academy' }, extensions: { 'com.openai': { interface: { displayName: 'Academy' } } } })).toString('base64')
+      store.acceptGitSnapshots([source], null)
+      store.enableLocalAuthority('a')
+      source.identities = store.localIdentityCatalog()
+      expect(store.getOpenAiPluginProfile()).toBeNull()
+      expect(store.localAuthoredMetadata()?.manifest.name).toBe('academy-skills')
+      expect(store.confirmConvergence({ ...source, repositoryId: 'another-repository' })).toBe(false)
+      expect(store.confirmConvergence(source)).toBe(true)
+    } finally { store.close() }
+  })
+  it('preserves authored metadata conflicts and fingerprints every logo byte independently of plugin version', () => {
+    const store = open()
+    try {
+      store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      const profile = store.createOpenAiPluginProfile({ name: 'academy-skills', displayName: 'Academy', description: 'Academy skills', author: { name: 'Academy' },
+        openAiInterface: { displayName: 'Academy', logo: './assets/logo.png', composerIcon: './assets/logo.png' }, logoPath: null, publishedVersion: '1.0.0', deletionSemantics: 'UNKNOWN', deletionSemanticsEvidence: null })
+      const logo = Buffer.alloc(25)
+      Buffer.from('89504e470d0a1a0a', 'hex').copy(logo); logo.writeUInt32BE(512, 16); logo.writeUInt32BE(512, 20)
+      const first = gitSnapshot('a', null)
+      const manifest = buildOpenAiManifest(profile, '1.0.0') as any
+      first.authoredFiles = { 'plugin.json': Buffer.from(JSON.stringify(manifest)).toString('base64'), 'assets/logo.png': logo.toString('base64') }
+      store.acceptGitSnapshots([first], null)
+      store.enableLocalAuthority('a')
+      const revisions = new AcademyPluginPackageRevisionService(store)
+      const original = revisions.resolveCurrent()
+      const revision = store.catalogRevision()
+      store.setOpenAiInterface({ ...profile.openAiInterface, longDescription: 'local authored change' })
+      expect(store.catalogRevision()).toBe(revision + 1)
+      const remote = gitSnapshot('b', 'a', [pkg('alpha', 'independent remote skill edit')])
+      manifest.extensions['com.openai'].interface.longDescription = 'remote authored change'
+      remote.authoredFiles = { ...first.authoredFiles, 'plugin.json': Buffer.from(JSON.stringify(manifest)).toString('base64') }
+      remote.identities = store.localIdentityCatalog()
+      store.acceptGitSnapshots([remote], 'a')
+      expect(store.hasManifestConflict()).toBe(true)
+      expect(store.getOpenAiPluginProfile()?.openAiInterface.longDescription).toBe('local authored change')
+      expect(store.findByName('alpha')?.current.package.skillMd).toContain('independent remote skill edit')
+      const review = store.reviewManifestConflict()
+      expect(() => store.resolveManifestConflict('stale', 'REMOTE', true)).toThrow('CONFLICT_STATE_CHANGED')
+      store.resolveManifestConflict(review.token, 'REMOTE', true)
+      expect(store.getOpenAiPluginProfile()?.openAiInterface.longDescription).toBe('remote authored change')
+      const beforeLogo = revisions.resolveCurrent()
+      const next = { ...remote, sourceCommitSha: 'c', firstParentSha: 'b', authoredFiles: { ...remote.authoredFiles } }
+      const differentLogo = Buffer.from(logo); differentLogo[24] = 1
+      next.authoredFiles['assets/logo.png'] = differentLogo.toString('base64')
+      store.acceptGitSnapshots([next], 'b')
+      const afterLogo = revisions.resolveCurrent()
+      expect(afterLogo.assetHash).not.toBe(beforeLogo.assetHash)
+      expect(afterLogo.profileFingerprint).toBe(beforeLogo.profileFingerprint)
+      expect(afterLogo.skillSnapshotHash).toBe(beforeLogo.skillSnapshotHash)
+      expect(afterLogo.contentFingerprint).not.toBe(beforeLogo.contentFingerprint)
+      expect(original.contentFingerprint).not.toBe(afterLogo.contentFingerprint)
+      const input = { buildFingerprint: 'a'.repeat(64), entries: [{ path: 'assets/logo.png', data: differentLogo.toString('base64') }] }
+      expect(store.reserveLocalReleaseInput(afterLogo.version, afterLogo.contentFingerprint, input)).toEqual(input)
+      expect(() => store.reserveLocalReleaseInput(afterLogo.version, afterLogo.contentFingerprint, { ...input, buildFingerprint: 'b'.repeat(64) })).toThrow('VERSION_REUSE_FOR_DIFFERENT_CONTENT')
+    } finally { store.close() }
+  })
+  it('merges independent remote changes and preserves concurrent deletion conflicts until CAS resolution', () => {
+    const store = open()
+    try {
+      const alpha = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      const beta = store.create({ package: pkg('beta'), scope: 'GLOBAL', origin: 'UI' })
+      store.acceptGitSnapshots([gitSnapshot('a', null, [pkg(), pkg('beta')])], null)
+      store.enableLocalAuthority('a')
+      store.update({ skillId: alpha.id, expectedVersion: 1, package: pkg('alpha', 'local'), origin: 'UI' })
+      const remote = gitSnapshot('b', 'a', [pkg(), pkg('beta', 'remote')])
+      remote.identities = store.localIdentityCatalog()
+      store.acceptGitSnapshots([remote], 'a')
+      expect(store.get(alpha.id).current.package.skillMd).toContain('local')
+      expect(store.get(beta.id).currentVersion).toBe(2)
+      expect(store.listConflicts()).toEqual([])
+      store.deleteGlobalSkill(alpha.id, 2)
+      const next = gitSnapshot('c', 'b', [pkg('alpha', 'remote concurrent'), pkg('beta', 'remote')])
+      next.identities = remote.identities
+      store.acceptGitSnapshots([next], 'b')
+      const conflict = store.listConflicts()[0]
+      expect(store.isDeleted(alpha.id)).toBe(true)
+      expect(store.confirmConvergence(next)).toBe(false)
+      const review = store.reviewLocalGitConflict(conflict.id)
+      expect(review.context.localDeleted).toBe(true)
+      expect(review.context.base.skillMd).toContain('# Alpha')
+      expect(review.context.remote.skillMd).toContain('remote concurrent')
+      expect(() => store.resolveLocalGitConflict(conflict.id, 'stale', 'REMOTE', true)).toThrow('CONFLICT_STATE_CHANGED')
+      store.resolveLocalGitConflict(conflict.id, review.token, 'REMOTE', true)
+      expect(store.isDeleted(alpha.id)).toBe(false)
+      expect(store.get(alpha.id).currentVersion).toBe(4)
+      expect(store.history(alpha.id, { version: 3 }).contentState).toBe('DELETED')
+      expect(store.get(alpha.id).current.package.skillMd).toContain('remote concurrent')
+      expect(store.listConflicts()).toEqual([])
+    } finally { store.close() }
+  })
+  it('persists local content and revision atomically across restart without exposing private skills', () => {
+    let store = open()
+    const path = store.databasePath
+    const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+    const legacy = store.history(skill.id)
+    store.acceptGitSnapshots([gitSnapshot('a', null)], null)
+    store.enableLocalAuthority('a')
+    const before = store.catalogRevision()
+    store.setEnabled(skill.id, false, 1)
+    expect(store.catalogRevision()).toBe(before)
+    const edited = store.update({ skillId: skill.id, expectedVersion: 1, package: pkg('alpha', 'offline edit'), origin: 'UI' })
+    expect(edited.catalogRevision).toBe(before + 1)
+    expect(() => store.update({ skillId: skill.id, expectedVersion: 1, package: pkg(), origin: 'UI' })).toThrow(expect.objectContaining({ code: 'VERSION_CONFLICT' }))
+    expect(store.catalogRevision()).toBe(before + 1)
+    const privateSkill = store.create({ package: pkg('private'), scope: 'GLOBAL', origin: 'UI' })
+    const project = store.create({ package: pkg('project'), scope: 'PROJECT', origin: 'UI' })
+    expect(() => store.approvePublicSkill(project.id, 1)).toThrow('GLOBAL_SKILL_REQUIRED')
+    store.close()
+    store = new AcademyStore(path)
+    try {
+      expect(store.usesLocalAuthority()).toBe(true)
+      expect(store.get(skill.id).current).toEqual(edited.current)
+      expect(store.history(skill.id).slice(1)).toEqual(legacy)
+      expect(store.publicationEligibility(skill.id)).toBe('APPROVED')
+      expect(store.publicationEligibility(privateSkill.id)).toBe('PRIVATE')
+      expect(store.getGitAuthority()?.processedCommitSha).toBe('a')
+      const revision = store.catalogRevision()
+      store.update({ skillId: skill.id, expectedVersion: 2, package: edited.current.package, origin: 'UI' })
+      expect(store.catalogRevision()).toBe(revision)
+      expect(store.get(skill.id).currentVersion).toBe(2)
+    } finally { store.close() }
+  })
   const gitSnapshot = (sha: string, parent: string | null, packages = [pkg()]): AcademyGitSourceSnapshot => ({
     schema: 1, repositoryId: 'academy', remoteUrl: 'https://example.com/academy.git', branch: 'main',
     sourceCommitSha: sha, firstParentSha: parent, managedTreeHash: `tree-${sha}`, authoredFiles: {}, observedAt: '2026-11-01T00:00:00Z',
@@ -46,7 +175,7 @@ describe('AcademyStore', () => {
       expect(store.get(skill.id).currentVersion).toBe(18)
       expect(store.history(skill.id).slice(1)).toEqual(legacy)
       expect(store.history(skill.id, { version: 18 }).gitSource?.sourceCommitSha).toBe('next')
-      expect(() => store.update({ skillId: skill.id, expectedVersion: 18, package: pkg(), origin: 'UI' })).toThrow('GIT_DRAFT_REQUIRED')
+      expect(() => store.update({ skillId: skill.id, expectedVersion: 18, package: pkg(), origin: 'UI' })).toThrow('ACADEMY_CUTOVER_PENDING')
     } finally { store.close() }
   })
 

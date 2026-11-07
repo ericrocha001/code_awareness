@@ -8,6 +8,7 @@ export interface AcademyGitSourceSkill {
 }
 
 export interface AcademyGitSourceSnapshot {
+  identities?: import('../academy-identity.cjs').AcademyIdentityCatalog
   canonicalVersions?: Record<string, { skillId: string; version: number }>
   schema: 1
   repositoryId: string

@@ -106,6 +106,9 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>): Promise<AcademySkillDetail | AcademyDraftReceipt> => ipcRenderer.invoke('academy:create', input),
   updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>): Promise<AcademySkillDetail | AcademyDraftReceipt> => ipcRenderer.invoke('academy:update', input),
   getAcademyDraft: (name: string): Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }> => ipcRenderer.invoke('academy:git-draft', name),
+  completeAcademyLocalCutover: (confirmed: boolean): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:local-cutover', confirmed),
+  approveAcademyPublicSkill: (id: string, version: number, confirmed: boolean): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:approve-public', id, version, confirmed),
+  deleteAcademyGlobalSkill: (id: string, version: number, confirmed: boolean): Promise<unknown> => ipcRenderer.invoke('academy:delete-global', id, version, confirmed),
   onAcademyChanged: (callback: (event?: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => callback(payload)
     ipcRenderer.on('academy:changed', listener)

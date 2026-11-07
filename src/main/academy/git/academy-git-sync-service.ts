@@ -20,6 +20,7 @@ import type { AcademyRemoteCheckState } from '../../../shared/types/academy-boot
 import { compareSemver } from '../publication/academy-plugin-package-revision-service'
 import { withPublicationLock } from './academy-publication-lock'
 import { ACADEMY_AUTHORED_PATHS, assertSourcePath, readAcademyGitSnapshot, verifyStagedAcademyPackage } from './academy-git-snapshot'
+import { IDENTITY_PATH } from '../../../shared/academy-identity.cjs'
 
 export type { GitRemoteTransport } from '../../core/git-remote-transport'
 export interface AcademyGitRepositoryPort {
@@ -31,7 +32,7 @@ export interface AcademyDestinationExcluder { excludeDestination(checkoutPath: s
 
 export function projectAcademyGitStatus(status: AcademyGitStatusProjection) {
   return { state: status.syncState, repositoryId: status.profile?.githubRepositoryId ?? null, branch: status.profile?.branch ?? null,
-    lastKnown: status.lastKnown, remoteCheck: status.remoteCheck, provenance: status.provenance, lastKnownAgeMs: status.lastKnownAgeMs,
+    lastKnown: status.lastKnown, remoteCheck: status.remoteCheck, provenance: status.provenance, lastKnownAgeMs: status.lastKnownAgeMs, convergence: status.convergence,
     sourceCommitSha: status.lastCommitSha, observedRemoteHead: status.publication?.remoteHead ?? null, remoteObservedAt: status.lastSyncAt,
     workspaceCommitSha: status.publication?.localHead ?? null, migrationComplete: status.publication?.migrationComplete ?? false,
     candidateBranch: status.publication?.candidateBranch ?? null, candidateCommitSha: status.publication?.candidateCommitSha ?? null,
@@ -51,6 +52,23 @@ export class AcademyGitSyncService {
   private readonly publicationRoot: string
   private accepted: (ids: string[]) => void = () => {}
   private statusChanged: () => void = () => {}
+  private localChange: Promise<unknown> | null = null
+  private localChangePending = false
+
+  scheduleLocalChange(): void {
+    if (this.closing || !this.store.getGitProfile() || !this.state().autoPublish) return
+    this.localChangePending = true
+    if (this.localChange) return
+    this.localChange = Promise.resolve().then(async () => {
+      while (this.localChangePending && !this.closing) {
+        this.localChangePending = false
+        const before = this.store.getGitAuthority()?.processedCommitSha
+        const status = await this.publish()
+        if (status.lastError || ['CONFLICT', 'PR_PENDING', 'OFFLINE'].includes(status.syncState)) break
+        if (status.convergence?.pending && this.store.getGitAuthority()?.processedCommitSha !== before) this.localChangePending = true
+      }
+    }).catch(() => {}).finally(() => { this.localChange = null })
+  }
 
   constructor(
     private readonly store: AcademyStore,
@@ -106,9 +124,13 @@ export class AcademyGitSyncService {
     const lastKnown = profile ? { repositoryId: profile.githubRepositoryId, branch: profile.branch, remoteHead: publication?.remoteHead ?? null,
       confirmedAt: publication?.verifiedAt ?? null, result: publication?.businessState ?? 'UNKNOWN' as const,
       autoPublish: publication?.autoPublish ?? false, autoUpdate: publication?.autoUpdate ?? false, localHead: publication?.localHead ?? null } : null
-    return { profile, publication, repository: record && profile ? { id: record.id, name: record.name, fullName: record.github?.fullName ?? record.name,
+    const checkpoint = this.store.getConvergenceCheckpoint()
+    const pending = this.store.usesLocalAuthority() && (!checkpoint || checkpoint.fingerprint !== this.store.replicatedFingerprint())
+    const freshness = this.check.state !== 'OK' ? 'UNVERIFIED' : !this.observation || Date.now() - this.observation.at > 30000 ? 'STALE_OBSERVATION' : 'OBSERVED'
+    return { profile, publication, convergence: { localRevision: this.store.catalogRevision(), lastConvergedRevision: checkpoint?.revision ?? null,
+      pending, freshness, cutover: this.store.usesLocalAuthority() ? 'LOCAL' : 'PENDING' }, repository: record && profile ? { id: record.id, name: record.name, fullName: record.github?.fullName ?? record.name,
       visibility: record.github?.visibility ?? 'PUBLIC', checkoutPath: publication?.migrationComplete ? publication.workspacePath! : publication?.migrationCandidatePath ?? '', branch: profile.branch } : null,
-      syncState: this.check.state === 'FAILED' ? 'OFFLINE' : publication?.businessState ?? (profile ? 'UNKNOWN' : 'UNCONFIGURED'), lastSyncAt: publication?.verifiedAt ?? null,
+      syncState: this.check.state === 'FAILED' ? 'OFFLINE' : publication?.businessState === 'CONFLICT' || publication?.businessState === 'PR_PENDING' ? publication.businessState : pending ? 'LOCAL_CHANGES' : publication?.businessState === 'SYNCED' && freshness !== 'OBSERVED' ? 'UNKNOWN' : publication?.businessState ?? (profile ? 'UNKNOWN' : 'UNCONFIGURED'), lastSyncAt: publication?.verifiedAt ?? null,
       lastCommitSha: this.store.getGitAuthority()?.repositoryId === profile?.githubRepositoryId ? this.store.getGitAuthority()?.processedCommitSha ?? null : null,
       lastError: this.operationError ?? this.check.error ?? profile?.lastError ?? null,
       lastKnown, remoteCheck: { ...this.check }, provenance: 'ACADEMY_SQLITE',
@@ -279,7 +301,10 @@ export class AcademyGitSyncService {
     }
     if (await this.git.getOperationsStatus(root)) { this.save(state, 'LOCAL_CHANGES', 'WORKSPACE_UNCOMMITTED_RECOVERY_REQUIRED'); return }
     state.localHead = await this.git.resolveCommit(root, 'HEAD')
-    if (state.localHead === snapshot.sourceCommitSha) { state.pendingCommit = null; this.save(state, 'SYNCED'); return }
+    if (state.localHead === snapshot.sourceCommitSha) {
+      state.pendingCommit = null
+      this.save(state, this.store.usesLocalAuthority() && !this.store.confirmConvergence(snapshot) ? this.store.hasManifestConflict() || this.store.listConflicts().some(conflict => conflict.origin === 'GIT') ? 'CONFLICT' : 'LOCAL_CHANGES' : 'SYNCED'); return
+    }
     if (await this.git.isAncestor(root, snapshot.sourceCommitSha, state.localHead)) { state.pendingCommit = state.localHead; this.save(state, state.candidateCommitSha === state.localHead ? 'PR_PENDING' : 'LOCAL_CHANGES'); return }
     if (await this.git.isAncestor(root, state.localHead, snapshot.sourceCommitSha)) { this.save(state, 'REMOTE_CHANGES'); return }
     state.conflictPaths = await this.git.previewPublicationMerge(root, state.localHead, snapshot.sourceCommitSha)
@@ -301,6 +326,67 @@ export class AcademyGitSyncService {
         await this.git.mergeBranch(state.workspacePath!, snapshot.sourceCommitSha, 'FF_ONLY')
         await this.classify(state, snapshot)
       } else if (state.businessState === 'MERGEABLE_BOTH') await this.mergeWorkspace(state, snapshot)
+      await this.prepareLocalCommit(state, snapshot)
+    })
+  }
+
+  private async prepareLocalCommit(state: AcademyGitPublicationState, snapshot: AcademyGitSourceSnapshot): Promise<void> {
+    if (!state.migrationComplete) return
+    const root = state.workspacePath!
+    if (!this.store.usesLocalAuthority()) return
+    if (state.localHead !== snapshot.sourceCommitSha || await this.git.getOperationsStatus(root)) return
+    const catalog = this.store.localIdentityCatalog()
+    const conflicts = new Set(this.store.listConflicts().filter(conflict => conflict.origin === 'GIT').map(conflict => conflict.skillId))
+    if (conflicts.size) {
+      catalog.skills = catalog.skills.filter(entry => !conflicts.has(entry.skillId))
+      for (const entry of snapshot.identities?.skills ?? []) if (conflicts.has(entry.skillId)) catalog.skills.push(entry)
+      catalog.skills.sort((a, b) => a.skillId.localeCompare(b.skillId))
+    }
+    const revision = this.store.catalogRevision()
+    const entries = catalog.skills.filter(entry => entry.state === 'PRESENT').map(entry => {
+      const skill = this.store.get(entry.skillId)
+      if (conflicts.has(entry.skillId)) {
+        const remote = snapshot.skills.find(skill => skill.path === entry.path)
+        if (!remote) throw new AcademyError('GIT_CONFLICT_REMOTE_MISSING')
+        return { skillId: skill.id, name: remote.name, version: skill.currentVersion, packageHash: remote.packageHash, package: remote.package }
+      }
+      return { skillId: skill.id, name: skill.name, version: skill.currentVersion, packageHash: skill.current.packageHash, package: skill.current.package }
+    })
+    validateGitSnapshot(entries)
+    const metadata = this.store.localAuthoredMetadata()
+    const paths = [...new Set([...snapshot.skills.map(skill => skill.path), ...entries.map(skill => `skills/${skill.name}`), IDENTITY_PATH,
+      ...(metadata && !this.store.hasManifestConflict() ? ['plugin.json', ...(metadata.logo || snapshot.authoredFiles['assets/logo.png'] ? ['assets/logo.png'] : [])] : [])])]
+    assertPublicationPaths(root, [...paths, '.git'])
+    await new AcademyGitMaterializer().materialize(root, entries)
+    await mkdir(join(root, '.academy'), { recursive: true })
+    writeFileSync(join(root, IDENTITY_PATH), canonicalJson(catalog) + '\n')
+    if (metadata && !this.store.hasManifestConflict()) {
+      const version = this.store.getCurrentPluginPackageRevision()?.version ?? this.store.getOpenAiPluginProfile()?.publishedVersion ?? JSON.parse(Buffer.from(snapshot.authoredFiles['plugin.json'], 'base64').toString('utf8')).version
+      writeFileSync(join(root, 'plugin.json'), canonicalJson({ ...metadata.manifest, version }) + '\n')
+      if (metadata.logo) {
+        await mkdir(join(root, 'assets'), { recursive: true })
+        writeFileSync(join(root, 'assets/logo.png'), Buffer.from(metadata.logo, 'base64'))
+      } else if (existsSync(join(root, 'assets/logo.png'))) await import('node:fs/promises').then(fs => fs.unlink(join(root, 'assets/logo.png')))
+    }
+    await this.git.stagePaths(root, paths)
+    const indexRevision = await this.git.getIndexRevision(root)
+    const tree = await this.git.writeIndexTree(root)
+    for (const entry of entries) await verifyStagedAcademyPackage(this.git, root, tree, entry.name, entry.package)
+    if (this.store.catalogRevision() !== revision) throw new AcademyError('ACADEMY_LOCAL_REVISION_CHANGED')
+    const staged = await this.git.readManagedTree(root, tree, ACADEMY_AUTHORED_PATHS)
+    if (sha256(staged) === snapshot.managedTreeHash) { this.store.confirmConvergence(snapshot); await this.classify(state, snapshot); return }
+    state.localHead = await this.git.commitInspectedIndex(root, 'Academy: reconcile local catalog', snapshot.sourceCommitSha, indexRevision)
+    state.pendingCommit = state.localHead; this.save(state, 'LOCAL_CHANGES')
+  }
+
+  async completeLocalCutover(confirmed: boolean): Promise<AcademyGitStatusProjection> {
+    if (confirmed !== true) throw new AcademyError('MIGRATION_REVIEW_REQUIRED')
+    return this.exclusive(async state => {
+      const snapshot = await this.observe(state)
+      await this.applyRemote(state, snapshot)
+      if (!state.migrationComplete || state.candidateCommitSha || state.pendingCommit || state.localHead !== snapshot.sourceCommitSha || await this.git.getOperationsStatus(state.workspacePath!)) throw new AcademyError('ACADEMY_CUTOVER_PENDING')
+      this.store.enableLocalAuthority(snapshot.sourceCommitSha)
+      await this.prepareLocalCommit(state, snapshot)
     })
   }
   async sync(): Promise<AcademyGitStatusProjection> { return this.syncNow() }
@@ -436,6 +522,7 @@ export class AcademyGitSyncService {
       if (expected && await this.git.resolveCommit(state.workspacePath!, 'HEAD') !== expected.localHead) throw new AcademyError('WORKSPACE_REVISION_CHANGED')
       const snapshot = await this.observe(state)
       await this.applyRemote(state, snapshot)
+      await this.prepareLocalCommit(state, snapshot)
       if (expected && snapshot.sourceCommitSha !== expected.remoteHead) throw new AcademyError('REMOTE_CHANGED_REVIEW_REQUIRED')
       if (state.businessState === 'SYNCED') return
       if (state.businessState !== 'LOCAL_CHANGES' || await this.git.getOperationsStatus(state.workspacePath!)) throw new AcademyError('GIT_PUBLICATION_REQUIRES_RECONCILIATION')
@@ -444,7 +531,8 @@ export class AcademyGitSyncService {
       const { profile, repositoryId, remoteUrl } = this.identity()
       if (state.autoPublish && (!this.transport.authorizationIdentity?.() || state.policyIdentity !== this.policyIdentity())) throw new AcademyError('AUTOMATION_AUTHORIZATION_STALE')
       const head = state.localHead!
-      await readAcademyGitSnapshot(this.git, state.workspacePath!, { repositoryId, remoteUrl, branch: profile.branch, sourceCommitSha: head, observedAt: snapshot.observedAt })
+      const outgoing = await readAcademyGitSnapshot(this.git, state.workspacePath!, { repositoryId, remoteUrl, branch: profile.branch, sourceCommitSha: head, observedAt: snapshot.observedAt })
+      if (state.autoPublish && outgoing.skills.some(skill => !this.store.getGitSkillSources().some(source => source.path === skill.path) && this.store.findByName(skill.name)?.publicationEligibility !== 'APPROVED')) throw new AcademyError('PUBLICATION_ELIGIBILITY_APPROVAL_REQUIRED')
       state.phase = 'PUSH_PENDING'; state.pendingCommit = head
       this.save(state, 'LOCAL_CHANGES')
       try { await this.transport.push(state.workspacePath!, profile.branch, 'origin', head) }
@@ -459,7 +547,7 @@ export class AcademyGitSyncService {
       const observed = await this.observe(state)
       if (!await this.git.isAncestor(state.checkoutPath, head, observed.sourceCommitSha)) throw new AcademyError('PUSH_CONFIRMATION_PENDING')
       await this.applyRemote(state, observed)
-      this.store.updateGitSyncState({ syncState: 'SYNCED', lastPushedCommitSha: head })
+      this.store.updateGitSyncState({ syncState: this.store.getGitProfile()!.syncState, lastPushedCommitSha: head })
     })
   }
 
@@ -603,5 +691,5 @@ export class AcademyGitSyncService {
     return result
   }
   async refreshAutomatically(): Promise<void> { if (!this.closing && !this.active && this.store.getGitProfile() && this.state().autoUpdate) await this.syncNow() }
-  async close(): Promise<void> { this.closing = true; if (this.active) await this.active }
+  async close(): Promise<void> { this.closing = true; if (this.active) await this.active; if (this.localChange) await this.localChange }
 }

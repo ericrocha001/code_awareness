@@ -3,10 +3,11 @@ import type { AcademyGitSourceSnapshot } from '../../../shared/types/academy-git
 import type { AcademyPackage } from '../../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage } from '../academy-package'
 import { sha256 } from '../publication/openai-plugin-model'
+import { IDENTITY_PATH, validateAcademyIdentities } from '../../../shared/academy-identity.cjs'
 import { assertNoAcademySecrets, assertSourcePath, validateGitSnapshot } from './academy-git-materializer'
 export { assertSourcePath } from './academy-git-materializer'
 
-export const ACADEMY_AUTHORED_PATHS = ['skills', 'plugin.json', 'assets']
+export const ACADEMY_AUTHORED_PATHS = ['skills', 'plugin.json', 'assets', IDENTITY_PATH]
 
 export async function verifyStagedAcademyPackage(git: GitService, root: string, tree: string, name: string, pkg: AcademyPackage): Promise<void> {
   const expected = new Map(Object.entries({ 'SKILL.md': pkg.skillMd, ...pkg.artifacts }).map(([path, text]) => [`skills/${name}/${path}`, text]))
@@ -61,5 +62,6 @@ export async function readAcademyGitSnapshot(git: GitService, root: string, iden
     return { path: `skills/${name}`, name, package: pkg, packageHash: hashAcademyPackage(pkg) }
   })
   validateGitSnapshot(skills.map(skill => ({ ...skill, skillId: skill.path, version: 0 })))
-  return { schema: 1, ...identity, firstParentSha: await git.firstParent(root, identity.sourceCommitSha), managedTreeHash: sha256(tree), skills, authoredFiles: files }
+  const identities = files[IDENTITY_PATH] ? validateAcademyIdentities(JSON.parse(Buffer.from(files[IDENTITY_PATH], 'base64').toString('utf8')), skills.map(skill => skill.path)) : undefined
+  return { schema: 1, ...identity, firstParentSha: await git.firstParent(root, identity.sourceCommitSha), managedTreeHash: sha256(tree), skills, authoredFiles: files, ...(identities ? { identities } : {}) }
 }

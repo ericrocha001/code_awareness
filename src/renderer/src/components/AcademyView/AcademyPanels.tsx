@@ -159,9 +159,10 @@ interface SkillWorkspaceProps {
   activationPending: boolean
   onSetEnabled: () => void
   onRemoveFromGit?: () => void
+  onApprovePublic?: () => void
 }
 
-export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEditing, activeTab, skillMd, scope, projectIds, destinations, history, distribution, onTabChange, onSkillMdChange, onScopeChange, onProjectIdsChange, onEdit, onSave, onCancel, activationPending, onSetEnabled, onRemoveFromGit }) => {
+export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEditing, activeTab, skillMd, scope, projectIds, destinations, history, distribution, onTabChange, onSkillMdChange, onScopeChange, onProjectIdsChange, onEdit, onSave, onCancel, activationPending, onSetEnabled, onRemoveFromGit, onApprovePublic }) => {
   if (!selected && !isEditing) {
     return <main className="academy-skill-workspace academy-workspace-empty">
       <span className="academy-empty-icon"><FileCode2 size={30} /></span>
@@ -209,8 +210,11 @@ export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEdit
       </section>}
 
       {activeTab === 'overview' && <section className="academy-overview" aria-label="Visão geral da Skill">
+        {selected?.publicationEligibility && <p>Publicação: {selected.publicationEligibility === 'PRIVATE' ? 'Privada — requer aprovação explícita para Git e plugin.' : 'Elegível para Git e plugin; sincronização e upload são independentes.'}</p>}
+        {selected?.publicationEligibility === 'PRIVATE' && !isEditing && <button className="academy-secondary-button" onClick={onApprovePublic}>Aprovar publicação pública</button>}
+        {selected?.current.contentState === 'DELETED' && <p>Skill excluída. Identidade e histórico preservados; a ativação não restaura o conteúdo.</p>}
         {selected?.source && <p>Fonte: {selected.source.state} · {selected.source.sourceCommitSha?.slice(0, 8) ?? 'legado privado'}</p>}
-        {selected?.source?.state === 'CONFIRMED' && !isEditing && <button className="academy-danger-button" onClick={onRemoveFromGit}>Preparar remoção do Git</button>}
+        {selected?.source?.state === 'CONFIRMED' && !isEditing && selected.current.contentState !== 'DELETED' && <button className="academy-danger-button" onClick={onRemoveFromGit}>{selected.catalogRevision !== undefined ? 'Excluir Skill' : 'Preparar remoção do Git'}</button>}
         <div className="academy-metadata-grid">
           <div><span>Versão</span><strong>{selected ? `v${selected.currentVersion}` : 'Novo draft'}</strong></div>
           <div><span>Status</span><strong>{selected?.status ?? 'Não persistida'}</strong></div>
@@ -270,6 +274,7 @@ interface OperationsRailProps {
   onBindRepository: () => void
   onSyncGit: () => void
   onPublishCandidate?: () => void
+  onLocalCutover?: () => void
   onGitAutomation?: (autoPublish: boolean, autoUpdate: boolean) => void
   onResolveGitConflict: () => void
   onOpenGit: () => void
@@ -277,7 +282,7 @@ interface OperationsRailProps {
   onPreviewConflictBatch: () => void
 }
 
-export const OperationsRail: React.FC<OperationsRailProps> = ({ hydration = 'READY', knownPublication, open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, packagePending, onRevalidateRelease, onRebuildRelease, onPrepareManifestVersion, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch }) => {
+export const OperationsRail: React.FC<OperationsRailProps> = ({ hydration = 'READY', knownPublication, open, destinations, artifacts, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onOpenArtifact, onAddArtifact, onReconcile, onPrepareRelease, packagePending, onRevalidateRelease, onRebuildRelease, onPrepareManifestVersion, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch, onLocalCutover }) => {
   const release = openAiPublication?.selectedRelease
   const loading = hydration !== 'READY'
   const configured = Boolean(gitStatus?.profile || gitStatus?.repository)
@@ -314,6 +319,8 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ hydration = 'REA
     </RailCard>
 
     <RailCard icon={<GitBranch size={18} />} title="GitHub Sync">
+      {gitStatus?.convergence && <p className="academy-muted">Revisão local {gitStatus.convergence.localRevision} · convergida {gitStatus.convergence.lastConvergedRevision ?? 'ainda não confirmada'} · {gitStatus.convergence.freshness}</p>}
+      {gitStatus?.convergence?.cutover === 'PENDING' && gitStatus.publication?.migrationComplete && <button className="academy-secondary-button" onClick={onLocalCutover}>Migrar para edição local</button>}
       <div className="academy-git-summary"><div><strong>{gitName}</strong><small>{configured ? `${gitStatus?.profile?.branch ?? gitStatus?.repository?.branch} · ${gitStatus?.lastCommitSha?.slice(0, 8) ?? 'sem commit confirmado'}` : loading ? 'Lendo o estado persistido' : 'Vincule um repository elegível'}</small></div><StatusBadge tone={check?.state === 'OK' && gitStatus?.syncState === 'SYNCED' ? 'success' : 'warning'}>{gitLabel}</StatusBadge></div>
       {configured && check && <p className="academy-muted">{check.state === 'CHECKING' ? 'Verificando atualização · exibindo última sincronização conhecida.' : check.state === 'FAILED' ? 'Falha ao verificar GitHub; exibindo último estado conhecido, sem revalidação atual.' : check.state === 'IDLE' ? 'Última sincronização conhecida · ainda não verificada nesta sessão.' : 'Verificação remota concluída.'}</p>}
       {gitStatus?.lastError && <p className="academy-inline-error">{gitStatus.lastError}</p>}

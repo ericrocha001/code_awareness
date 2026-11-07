@@ -16,7 +16,7 @@ describe.skipIf(!enabled)('Academy real OpenAI plugin release', () => {
     try {
       if (!service.store.getOpenAiPluginProfile() || !service.listOpenAiReleases().some((release) => release.baseline)) await service.bootstrapOpenAiPlugin()
       let release = service.listOpenAiReleases().find((item) => !item.baseline && item.status === 'READY_TO_UPLOAD')
-      if (!release || service.getOpenAiPublicationState().drifted) release = service.prepareOpenAiRelease()
+      if (!release || service.getOpenAiPublicationState().drifted) release = await service.prepareOpenAiRelease()
       expect(release.status).toBe('READY_TO_UPLOAD')
       expect(release.snapshot.length).toBeGreaterThan(0)
       expect(release.artifactPath && existsSync(release.artifactPath)).toBe(true)

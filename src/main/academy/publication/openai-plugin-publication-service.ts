@@ -20,6 +20,7 @@ export class OpenAiPluginPublicationService {
   private readonly inventoryFlights = new Map<string, Promise<AcademyBuildProjection>>()
   private readonly physicalFlights = new Map<string, Promise<AcademyPluginTaskResult>>()
   private operation: AcademyPublicationOperation | null = null
+  private readonly localFlights = new Map<string, Promise<AcademyOpenAiRelease>>()
   private changed: () => void = () => {}
 
   constructor(
@@ -36,7 +37,7 @@ export class OpenAiPluginPublicationService {
   onOperationChange(listener: () => void): void { this.changed = listener }
 
   async drain(): Promise<void> {
-    while (this.inventoryFlights.size || this.physicalFlights.size) await Promise.allSettled([...this.inventoryFlights.values(), ...this.physicalFlights.values()])
+    while (this.inventoryFlights.size || this.physicalFlights.size || this.localFlights.size) await Promise.allSettled([...this.inventoryFlights.values(), ...this.physicalFlights.values(), ...this.localFlights.values()])
   }
 
   beginSourceCheck(): string {
@@ -133,6 +134,7 @@ export class OpenAiPluginPublicationService {
   listReleases(): AcademyOpenAiRelease[] { this.refreshDrift(); return this.store.listOpenAiReleases() }
 
   prepareRelease(): AcademyOpenAiRelease {
+    if (this.store.usesLocalAuthority()) throw new AcademyError('ASYNC_LOCAL_BUILD_REQUIRED')
     if (this.store.usesGitFirst()) throw new AcademyError('GIT_SOURCE_SNAPSHOT_REQUIRED')
     const profile = this.store.getOpenAiPluginProfile()
     if (!profile) throw new AcademyError('OPENAI_PLUGIN_PROFILE_MISSING')
@@ -182,6 +184,77 @@ export class OpenAiPluginPublicationService {
       status: currentHash === snapshotHash ? 'READY_TO_UPLOAD' : 'STALE', blockedReason: null,
       baseline: false, uploadConfirmation: null, verificationEvidence: null
     })
+  }
+
+  prepareLocalRelease(): Promise<AcademyOpenAiRelease> {
+    if (!this.store.usesLocalAuthority()) return Promise.reject(new AcademyError('ACADEMY_CUTOVER_PENDING'))
+    const captured = this.store.readLocalSnapshot(() => {
+      const profile = this.store.getOpenAiPluginProfile()
+      if (!profile) throw new AcademyError('OPENAI_PLUGIN_PROFILE_MISSING')
+      const revision = this.packageRevisions.resolveCurrent()
+      const snapshot = buildCanonicalOpenAiSnapshot(this.store)
+      const manifest = { ...this.store.localAuthoredMetadata()?.manifest, ...buildOpenAiManifest(profile, revision.version) }
+      const entries = this.buildPackageEntries(profile, snapshot, manifest)
+      const logo = entries.find(entry => entry.path === 'academy-skills/assets/logo.png')
+      if (sha256(logo?.data ?? 'NO_ASSET') !== revision.assetHash) throw new AcademyError('OPENAI_SNAPSHOT_CHANGED_DURING_PACKAGING')
+      return { profile, revision, snapshot, manifest, entries, catalogRevision: this.store.catalogRevision(), checkpoint: this.store.getConvergenceCheckpoint() }
+    })
+    const { profile, revision, snapshot, manifest, entries } = captured
+    const materials = entries.map(entry => ({ path: entry.path, sha256: sha256(entry.data) })).sort((a, b) => a.path.localeCompare(b.path))
+    const entriesFingerprint = sha256(canonicalJson(materials))
+    const buildFingerprint = sha256(canonicalJson({ entriesFingerprint, pluginVersion: revision.version, buildSchema: 1, zipSchema: 1, profile: 'academy-skills' }))
+    const reserved = this.store.reserveLocalReleaseInput(revision.version, revision.contentFingerprint, {
+      buildFingerprint, profile, manifest, snapshot, materials, entries: entries.map(entry => ({ path: entry.path, data: entry.data.toString('base64') })),
+      catalogRevision: captured.catalogRevision, checkpoint: captured.checkpoint, buildSchema: 1
+    })
+    const pending = this.localFlights.get(buildFingerprint)
+    if (pending) return pending
+    const flight = (async () => {
+      const reference = this.store.listOpenAiReleases().find(release => release.baseline || ['UPLOADED_UNVERIFIED', 'VERIFIED', 'SUPERSEDED'].includes(release.status))
+      if (!reference) throw new AcademyError('OPENAI_PLUGIN_BASELINE_MISSING')
+      const delta = calculateOpenAiDelta(reference.snapshot, snapshot)
+      if (delta.destructive && profile.deletionSemantics !== 'PROVEN_REPLACE') throw new AcademyError('OPENAI_DESTRUCTIVE_DELTA_BLOCKED')
+      const existing = this.store.findOpenAiReleaseVersion(revision.version)
+      if (existing && existing.snapshotHash !== revision.contentFingerprint) throw new AcademyError('VERSION_REUSE_FOR_DIFFERENT_CONTENT')
+      const id = existing?.id ?? sha256('LOCAL_RELEASE_V1:' + buildFingerprint)
+      const artifactPath = existing?.artifactPath ?? join(this.storageRoot, 'releases', id, `academy-skills-${revision.version}.zip`)
+      if (!existing) this.store.insertOpenAiRelease({ id, pluginVersion: revision.version, createdAt: new Date().toISOString(),
+        referenceReleaseId: reference.id, snapshot, snapshotHash: revision.contentFingerprint, delta, manifest,
+        artifactPath: null, artifactHash: null, status: 'BLOCKED', blockedReason: 'LOCAL_BUILD_PENDING', baseline: false, uploadConfirmation: null, verificationEvidence: null })
+      const projection: AcademyBuildProjection = { schema: 1, normalizationSchema: 1, sourceRepositoryId: 'LOCAL', sourceCommitSha: buildFingerprint,
+        managedTreeHash: revision.contentFingerprint, manifest, pluginVersion: revision.version, manifestFingerprint: sha256(canonicalJson(manifest)),
+        assetFingerprint: revision.assetHash, entriesFingerprint, snapshot, entryCount: entries.length }
+      const requestId = this.beginSourceCheck()
+      this.operation = { requestId, phase: 'PREPARING_PACKAGE', phases: {} }; this.changed()
+      try {
+        const result = await this.executor.run({ kind: existing?.artifactHash ? 'verify' : 'build', profile, projection,
+          sealed: { entries: reserved.entries, fingerprint: entriesFingerprint },
+          storageRoot: this.storageRoot, artifactPath, expectedZipSha: existing?.artifactHash ?? undefined })
+        const statement = {
+          _type: 'https://in-toto.io/Statement/v1',
+          subject: [{ name: `academy-skills-${revision.version}.zip`, digest: { sha256: result.artifactHash } }],
+          predicateType: 'https://code-awareness.dev/attestations/academy-release/v1',
+          predicate: { schema: 1, builder: 'code-awareness/academy-plugin-worker', buildSchema: 1, snapshotId: buildFingerprint,
+            catalogRevision: reserved.catalogRevision, contentFingerprint: revision.contentFingerprint, buildFingerprint, version: revision.version,
+            materials, git: { confirmation: 'UNVERIFIED', lastKnown: reserved.checkpoint }, signed: false }
+        }
+        const statementPath = join(dirname(artifactPath), 'statement.intoto.json')
+        if (existsSync(statementPath)) {
+          const old = JSON.parse(readFileSync(statementPath, 'utf8'))
+          if (canonicalJson(old.subject) !== canonicalJson(statement.subject) || old.predicate.snapshotId !== buildFingerprint) throw new AcademyError('OPENAI_RELEASE_RECEIPT_DRIFT')
+        } else writeFileSync(statementPath, canonicalJson(statement) + '\n', { flag: 'wx' })
+        const current = this.packageRevisions.resolveCurrent().contentFingerprint === revision.contentFingerprint
+        const release = existing?.artifactHash ? this.store.getOpenAiRelease(id) : this.store.materializeBlockedOpenAiRelease(id, {
+          manifest, artifactPath: result.artifactPath!, artifactHash: result.artifactHash!, status: current ? 'READY_TO_UPLOAD' : 'STALE' })
+        if (current) this.copyToDownloads(artifactPath, revision.version, result.artifactHash!)
+        this.refreshDrift()
+        this.operation = { requestId, phase: 'READY', phases: result.phases }; this.changed()
+        return this.store.getOpenAiRelease(release.id)
+      } catch (error) { this.sourceCheckFailed(requestId, error); throw error }
+    })()
+    this.localFlights.set(buildFingerprint, flight)
+    void flight.then(() => this.localFlights.delete(buildFingerprint), () => this.localFlights.delete(buildFingerprint))
+    return flight
   }
 
   async prepareGitRelease(source: AcademyGitBuildSource, requestId = this.beginSourceCheck(), gitMs = 0): Promise<AcademyOpenAiRelease> {
@@ -301,19 +374,19 @@ export class OpenAiPluginPublicationService {
 
   private currentContentHash(): string {
     const authority = this.store.getGitAuthority()
-    if (authority) {
+    if (authority && !this.store.usesLocalAuthority()) {
       const header = this.store.getGitSnapshotHeader(authority.repositoryId, authority.processedCommitSha)
       const projection = header ? this.cachedProjection(header) : null
       if (!projection) throw new AcademyError('GIT_BUILD_PROJECTION_PENDING')
       return projection.entriesFingerprint
     }
     if (this.store.usesGitFirst()) throw new AcademyError('GIT_MIGRATION_REQUIRED')
-    return hashOpenAiSnapshot(buildCanonicalOpenAiSnapshot(this.store))
+    return this.store.usesLocalAuthority() ? this.packageRevisions.resolveCurrent().contentFingerprint : hashOpenAiSnapshot(buildCanonicalOpenAiSnapshot(this.store))
   }
 
   private currentHeader(): AcademyGitSnapshotHeader | null {
     const authority = this.store.getGitAuthority()
-    return authority ? this.store.getGitSnapshotHeader(authority.repositoryId, authority.processedCommitSha) : null
+    return authority && !this.store.usesLocalAuthority() ? this.store.getGitSnapshotHeader(authority.repositoryId, authority.processedCommitSha) : null
   }
 
   private cachedProjection(header: AcademyGitSnapshotHeader): AcademyBuildProjection | null {
@@ -340,7 +413,11 @@ export class OpenAiPluginPublicationService {
         entries.push({ path: `${profile.name}/skills/${item.name}/${path}`, data: Buffer.from(content) })
       }
     }
-    if (profile.logoPath) {
+    if (profile.logoPath === 'sqlite:assets/logo.png') {
+      const logo = this.store.getAuthoredLogo()
+      if (!logo) throw new AcademyError('OPENAI_PLUGIN_LOGO_INVALID')
+      entries.push({ path: `${profile.name}/assets/logo.png`, data: logo })
+    } else if (profile.logoPath) {
       const stat = lstatSync(profile.logoPath)
       if (!stat.isFile() || stat.isSymbolicLink()) throw new AcademyError('OPENAI_PLUGIN_LOGO_INVALID')
       entries.push({ path: `${profile.name}/assets/logo.png`, data: readFileSync(profile.logoPath) })

@@ -52,6 +52,8 @@ export interface AcademyImpactFreshnessInput {
 }
 
 export interface AcademySkillSummary {
+  catalogRevision?: number
+  publicationEligibility?: 'PRIVATE' | 'APPROVED'
   source?: { state: 'CONFIRMED' | 'REMOVED' | 'LEGACY_PRIVATE'; sourceCommitSha: string | null; path: string | null }
   id: string
   name: string
@@ -66,6 +68,7 @@ export interface AcademySkillSummary {
 }
 
 export interface AcademySkillVersion {
+  contentState?: 'DELETED'
   skillId: string
   version: number
   package: AcademyPackage
@@ -153,6 +156,8 @@ export interface AcademyCreateInput {
 }
 
 export interface AcademyMutationReceipt {
+  catalogRevision?: number
+  publicationEligibility?: 'PRIVATE' | 'APPROVED'
   state: 'PERSISTED'
   skillId: string
   name: string
@@ -314,6 +319,7 @@ export interface AcademyOpenAiUploadConfirmation {
 }
 
 export interface AcademyOpenAiRelease {
+  localSource?: { snapshotId: string; contentFingerprint: string; statementPath: string | null; gitConfirmation: 'UNVERIFIED' }
   source?: import('./academy-git-source-types').AcademyGitBuildReceipt
   id: string
   pluginVersion: string
@@ -383,6 +389,7 @@ export interface AcademyGitProfile {
 }
 
 export interface AcademyGitStatusProjection {
+  convergence?: { localRevision: number; lastConvergedRevision: number | null; pending: boolean; freshness: 'OBSERVED' | 'UNVERIFIED' | 'STALE_OBSERVATION'; cutover: 'LOCAL' | 'PENDING' }
   lastKnown?: import('./academy-bootstrap-types').AcademyLastKnownSyncSnapshot | null
   remoteCheck?: import('./academy-bootstrap-types').AcademyRemoteCheckState
   lastKnownAgeMs?: number | null
