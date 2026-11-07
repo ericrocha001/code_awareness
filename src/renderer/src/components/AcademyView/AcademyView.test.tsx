@@ -3,6 +3,7 @@ import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { AcademyView } from './AcademyView'
+import { gitPresentation, releasePresentation } from './academy-presentation'
 
 const detail = {
   id: 'skill-1', name: 'alpha', description: 'Alpha skill', status: 'ACTIVE' as const, scope: 'GLOBAL' as const,
@@ -49,6 +50,139 @@ beforeEach(() => {
   } as unknown as Window['codeAwareness']
 })
 afterEach(cleanup)
+
+it('keeps the full package across tabs and refuses to save unchanged content', async () => {
+  render(<AcademyView />)
+  await selectAlpha()
+  fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+  expect(screen.getAllByRole('button', { name: 'Salvar' })).toHaveLength(1)
+  expect(screen.getByRole('button', { name: 'Salvar' }).hasAttribute('disabled')).toBe(true)
+  const full = '---\nname: alpha\ndescription: Unicode ação\nunknown-field: preserve-me\n---\n' + '長い linha '.repeat(150)
+  fireEvent.change(screen.getByLabelText('Editar SKILL.md'), { target: { value: full } })
+  fireEvent.click(screen.getByRole('button', { name: 'Contexto' }))
+  fireEvent.change(screen.getByLabelText('Escopo'), { target: { value: 'PROJECT' } })
+  fireEvent.click(screen.getByRole('checkbox', { name: 'repo' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Arquivos' }))
+  expect(screen.getByRole('button', { name: /README.md/ })).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Definição' }))
+  expect((screen.getByLabelText('Editar SKILL.md') as HTMLTextAreaElement).value).toBe(full)
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
+  await waitFor(() => expect(window.codeAwareness.updateAcademySkill).toHaveBeenCalledWith(expect.objectContaining({ expectedVersion: 1, scope: 'PROJECT', projectIds: ['repo'], package: { skillMd: full, artifacts: detail.current.package.artifacts } })))
+})
+
+it('preserves drafts on selection, cancel and external navigation until discard is confirmed', async () => {
+  let guard: ((proceed: () => void) => void) | null = null
+  const navigate = vi.fn()
+  render(<AcademyView onNavigationGuardChange={value => { guard = value }} />)
+  await selectAlpha()
+  fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+  fireEvent.change(screen.getByLabelText('Editar SKILL.md'), { target: { value: 'draft to keep' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Nova Skill' }))
+  expect(screen.getByRole('alertdialog')).toBeTruthy()
+  fireEvent.keyDown(document, { key: 'Escape' })
+  expect((screen.getByLabelText('Editar SKILL.md') as HTMLTextAreaElement).value).toBe('draft to keep')
+  act(() => guard!(navigate))
+  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Cancelar' }))
+  expect(navigate).not.toHaveBeenCalled()
+  const unload = new Event('beforeunload', { cancelable: true })
+  window.dispatchEvent(unload)
+  expect(unload.defaultPrevented).toBe(true)
+  act(() => guard!(navigate))
+  fireEvent.click(screen.getByRole('button', { name: 'Descartar alterações' }))
+  expect(navigate).toHaveBeenCalledTimes(1)
+  expect(window.codeAwareness.updateAcademySkill).not.toHaveBeenCalled()
+})
+
+it('keeps a failed CAS draft and blocks duplicate saves while pending', async () => {
+  let reject!: (error: Error) => void
+  vi.mocked(window.codeAwareness.updateAcademySkill).mockImplementation(() => new Promise((_resolve, fail) => { reject = fail }))
+  render(<AcademyView />)
+  await selectAlpha()
+  fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+  fireEvent.change(screen.getByLabelText('Editar SKILL.md'), { target: { value: 'CAS draft' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
+  expect(screen.getByRole('button', { name: 'Salvar' }).hasAttribute('disabled')).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
+  expect(window.codeAwareness.updateAcademySkill).toHaveBeenCalledTimes(1)
+  await act(async () => reject(new Error('VERSION_CONFLICT')))
+  expect((screen.getByLabelText('Editar SKILL.md') as HTMLTextAreaElement).value).toBe('CAS draft')
+  expect(screen.getByText('VERSION_CONFLICT')).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Salvar' }).hasAttribute('disabled')).toBe(false)
+})
+
+it('guards the file drawer with Escape and restores focus without losing its draft', async () => {
+  render(<AcademyView />)
+  await selectAlpha()
+  fireEvent.click(screen.getByRole('button', { name: 'Arquivos' }))
+  const trigger = screen.getByRole('button', { name: /README.md/ })
+  trigger.focus()
+  fireEvent.click(trigger)
+  fireEvent.change(screen.getByLabelText('Conteúdo do artefato'), { target: { value: 'keep file text' } })
+  fireEvent.keyDown(document, { key: 'Escape' })
+  expect(screen.getByRole('alertdialog', { name: 'Descartar alterações do arquivo?' })).toBeTruthy()
+  fireEvent.keyDown(document, { key: 'Escape' })
+  expect((screen.getByLabelText('Conteúdo do artefato') as HTMLTextAreaElement).value).toBe('keep file text')
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar no draft' }))
+  expect(document.activeElement).toBe(trigger)
+  expect(window.codeAwareness.updateAcademySkill).not.toHaveBeenCalled()
+})
+
+it('keeps public approval and local tombstone deletion behind explicit confirmation', async () => {
+  const local = { ...detail, catalogRevision: 4, publicationEligibility: 'PRIVATE' as const }
+  vi.mocked(window.codeAwareness.getAcademySkill).mockResolvedValue(local)
+  const git = await window.codeAwareness.getAcademyGitStatus()
+  vi.mocked(window.codeAwareness.getAcademyGitStatus).mockResolvedValue({ ...git, convergence: { cutover: 'LOCAL', localRevision: 4, lastConvergedRevision: null, pending: true, freshness: 'UNVERIFIED' } })
+  window.codeAwareness.approveAcademyPublicSkill = vi.fn(async () => local)
+  window.codeAwareness.deleteAcademyGlobalSkill = vi.fn(async () => local)
+  render(<AcademyView />)
+  await selectAlpha()
+  fireEvent.click(screen.getByRole('button', { name: 'Contexto' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Aprovar publicação pública' }))
+  expect(window.codeAwareness.approveAcademyPublicSkill).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Aprovar publicação' }))
+  await waitFor(() => expect(window.codeAwareness.approveAcademyPublicSkill).toHaveBeenCalledWith(detail.id, 1, true))
+  fireEvent.click(screen.getByRole('button', { name: 'Excluir Skill' }))
+  expect(window.codeAwareness.deleteAcademyGlobalSkill).not.toHaveBeenCalled()
+  fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Excluir Skill' }))
+  await waitFor(() => expect(window.codeAwareness.deleteAcademyGlobalSkill).toHaveBeenCalledWith(detail.id, 1, true))
+})
+
+it('does not cut over, change automation, prepare a release or upload on mount', async () => {
+  const git = await window.codeAwareness.getAcademyGitStatus()
+  const pending = { ...git, profile: { githubRepositoryId: 'repo', branch: 'main' }, publication: { autoPublish: false, autoUpdate: false, conflictPaths: [] }, convergence: { cutover: 'PENDING', freshness: 'UNVERIFIED', localRevision: 0, lastConvergedRevision: null, pending: true } } as any
+  vi.mocked(window.codeAwareness.getAcademyGitStatus).mockResolvedValue(pending)
+  window.codeAwareness.completeAcademyLocalCutover = vi.fn(async () => pending)
+  window.codeAwareness.configureAcademyGitAutomation = vi.fn(async () => pending)
+  render(<AcademyView />)
+  await screen.findByRole('button', { name: 'Migrar para edição local' })
+  expect(window.codeAwareness.completeAcademyLocalCutover).not.toHaveBeenCalled()
+  expect(window.codeAwareness.prepareAcademyOpenAiRelease).not.toHaveBeenCalled()
+  expect(window.codeAwareness.confirmAcademyOpenAiUpload).not.toHaveBeenCalled()
+  expect(window.codeAwareness.configureAcademyGitAutomation).not.toHaveBeenCalled()
+  const toggle = screen.getByRole('checkbox', { name: 'Publicação automática de edições locais' }) as HTMLInputElement
+  expect(toggle.checked).toBe(false)
+  fireEvent.click(toggle)
+  expect(window.codeAwareness.configureAcademyGitAutomation).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Salvar preferência' }))
+  await waitFor(() => expect(window.codeAwareness.configureAcademyGitAutomation).toHaveBeenCalledWith({ autoPublish: true, autoUpdate: false, confirmed: true, expectedRepositoryId: 'repo', expectedBranch: 'main' }))
+})
+
+it.each(['IDLE', 'FAILED', 'CHECKING', undefined])('never calls old SYNCED evidence current when remote check is %s', async state => {
+  const git = await window.codeAwareness.getAcademyGitStatus()
+  expect(gitPresentation({ ...git, remoteCheck: state ? { state, generation: 1 } as any : undefined }, 'READY')).toEqual({ label: 'Última sincronização conhecida; verificação pendente', tone: 'neutral' })
+})
+
+it('distinguishes remote observation, local pending changes, PR, conflict and unverified upload', async () => {
+  const git = await window.codeAwareness.getAcademyGitStatus()
+  const observed = { ...git, remoteCheck: { state: 'OK', generation: 1 } as any }
+  expect(gitPresentation(observed, 'READY').tone).toBe('success')
+  expect(gitPresentation({ ...observed, convergence: { cutover: 'LOCAL', localRevision: 2, lastConvergedRevision: 1, pending: true, freshness: 'UNVERIFIED' } }, 'READY').tone).toBe('neutral')
+  expect(gitPresentation({ ...git, syncState: 'PR_PENDING' }, 'READY').label).toContain('revisão de PR')
+  expect(gitPresentation({ ...git, syncState: 'CONFLICT' }, 'READY').tone).toBe('danger')
+  expect(gitPresentation({ ...git, syncState: 'REMOTE_CHANGES' }, 'READY').label).toContain('remota')
+  expect(releasePresentation({ status: 'UPLOADED_UNVERIFIED' }, false).tone).toBe('neutral')
+  expect(releasePresentation({ status: 'VERIFIED' }, true).tone).toBe('warning')
+})
 
 it('keeps a new unsaved draft when an earlier skill selection completes late', async () => {
   let finish!: (value: typeof detail) => void
@@ -210,6 +344,7 @@ it('reports a Git draft without claiming a canonical version or scheduling deliv
   await selectAlpha()
   fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
   await screen.findByLabelText('Editar SKILL.md')
+  fireEvent.change(screen.getByLabelText('Editar SKILL.md'), { target: { value: detail.current.package.skillMd + '\nDraft edit' } })
   fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
   await waitFor(() => expect(window.codeAwareness.updateAcademySkill).toHaveBeenCalledWith(expect.objectContaining({ expectedVersion: 1, expectedDraftCommitSha: 'draft-base' })))
   expect(await screen.findByText('Rascunho salvo em commit local. Publicação pendente.')).toBeTruthy()
@@ -231,7 +366,7 @@ const selectAlpha = async () => {
   await screen.findByRole('button', { name: 'Editar' })
 }
 
-it('toggles from the catalog without opening the editor and preserves selection, filters and disabled history', async () => {
+it('activates only in context and preserves selection, filters and disabled history', async () => {
   let current: any = { ...detail }
   vi.mocked(window.codeAwareness.getAcademySnapshot).mockImplementation(async () => ({ skills: [current], destinations: [destination], conflicts: [] }))
   vi.mocked(window.codeAwareness.getAcademySkill).mockImplementation(async () => current)
@@ -241,17 +376,17 @@ it('toggles from the catalog without opening the editor and preserves selection,
     return current
   })
   render(<AcademyView />)
-  fireEvent.click(await screen.findByRole('switch', { name: 'Ativação de alpha' }))
-  await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).getAttribute('aria-checked')).toBe('false'))
-  expect(screen.queryByLabelText('Editar SKILL.md')).toBeNull()
-  expect(screen.queryByRole('switch', { name: 'Ativação da Skill selecionada' })).toBeNull()
-  fireEvent.change(screen.getByLabelText('Filtrar por status'), { target: { value: 'ACTIVE' } })
-  expect(screen.queryByRole('switch', { name: 'Ativação de alpha' })).toBeNull()
-  fireEvent.change(screen.getByLabelText('Filtrar por status'), { target: { value: 'DISABLED' } })
   await selectAlpha()
-  expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).getAttribute('aria-checked')).toBe('false')
+  expect(screen.queryByRole('switch', { name: 'Ativação de alpha' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Contexto' }))
+  fireEvent.click(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }))
+  await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).getAttribute('aria-checked')).toBe('false'))
+  fireEvent.change(screen.getByLabelText('Filtrar por status'), { target: { value: 'ACTIVE' } })
+  expect(screen.queryByRole('button', { name: /alpha.*Alpha skill/ })).toBeNull()
+  fireEvent.change(screen.getByLabelText('Filtrar por status'), { target: { value: 'DISABLED' } })
   fireEvent.click(screen.getByRole('button', { name: 'Histórico' }))
   expect(await screen.findByText('Import')).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: 'Voltar ao contexto' }))
   fireEvent.click(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }))
   await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).getAttribute('aria-checked')).toBe('true'))
   expect(window.codeAwareness.setAcademySkillEnabled).toHaveBeenLastCalledWith(detail.id, true, 2)
@@ -263,11 +398,12 @@ it('keeps switches pending and refreshes the persisted state after a CAS conflic
   vi.mocked(window.codeAwareness.setAcademySkillEnabled).mockImplementation(() => new Promise((_resolve, rejectPromise) => { reject = rejectPromise }))
   render(<AcademyView />)
   await selectAlpha()
-  fireEvent.click(screen.getByRole('switch', { name: 'Ativação de alpha' }))
-  expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).hasAttribute('disabled')).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Contexto' }))
+  fireEvent.click(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }))
+  expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).hasAttribute('disabled')).toBe(true)
   reject(new Error('STATE_REVISION_CONFLICT'))
-  await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).hasAttribute('disabled')).toBe(false))
-  expect(screen.getByRole('switch', { name: 'Ativação de alpha' }).getAttribute('aria-checked')).toBe('true')
+  await waitFor(() => expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).hasAttribute('disabled')).toBe(false))
+  expect(screen.getByRole('switch', { name: 'Ativação da Skill selecionada' }).getAttribute('aria-checked')).toBe('true')
   expect(screen.getByRole('status').textContent).toContain('STATE_REVISION_CONFLICT')
   expect(window.codeAwareness.getAcademySkill).toHaveBeenCalledTimes(2)
 })
@@ -275,9 +411,12 @@ it('keeps switches pending and refreshes the persisted state after a CAS conflic
 it('lists, opens in VIEW and updates a canonical skill with expectedVersion', async () => {
   render(<AcademyView />)
   await selectAlpha()
+  expect(within(screen.getByLabelText('Resumo derivado da Skill')).getByText('alpha')).toBeTruthy()
+  expect(document.querySelector('.academy-source-disclosure')?.hasAttribute('open')).toBe(false)
   expect(await screen.findByText(/name: alpha/)).toBeTruthy()
   expect(screen.queryByLabelText('Editar SKILL.md')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Editar' }))
+  expect(document.querySelector('.academy-source-disclosure')?.hasAttribute('open')).toBe(true)
   const editor = screen.getByLabelText('Editar SKILL.md')
   fireEvent.change(editor, { target: { value: `${detail.current.package.skillMd}\nUpdated` } })
   fireEvent.click(screen.getByRole('button', { name: 'Salvar' }))
@@ -292,6 +431,7 @@ it('cancels an edit without persistence and creates a new skill only on save', a
   fireEvent.change(screen.getByLabelText('Editar SKILL.md'), { target: { value: 'discard me' } })
   fireEvent.click(screen.getByRole('button', { name: 'Cancelar' }))
   expect(window.codeAwareness.updateAcademySkill).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Descartar alterações' }))
   expect(screen.getByText(/name: alpha/)).toBeTruthy()
 
   fireEvent.click(screen.getByRole('button', { name: 'Nova Skill' }))
@@ -304,7 +444,7 @@ it('cancels an edit without persistence and creates a new skill only on save', a
 it('switches overview and history without changing the selected skill', async () => {
   render(<AcademyView />)
   await selectAlpha()
-  fireEvent.click(screen.getByRole('button', { name: 'Visão Geral' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Contexto' }))
   expect(screen.getByLabelText('Visão geral da Skill')).toBeTruthy()
   expect(screen.getByText('Sem destino aplicável')).toBeTruthy()
   fireEvent.click(screen.getByRole('button', { name: 'Histórico' }))
@@ -317,6 +457,7 @@ it('switches overview and history without changing the selected skill', async ()
 it('edits artifacts in a secondary surface and confirms removal inside the app', async () => {
   render(<AcademyView />)
   await selectAlpha()
+  fireEvent.click(screen.getByRole('button', { name: 'Arquivos' }))
   fireEvent.click(screen.getByRole('button', { name: /README.md/i }))
   expect(screen.getByRole('dialog', { name: 'README.md' })).toBeTruthy()
   fireEvent.change(screen.getByLabelText('Conteúdo do artefato'), { target: { value: '# Updated usage' } })
