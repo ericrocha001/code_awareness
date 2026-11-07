@@ -239,7 +239,12 @@ describe('Academy Git-first source', () => {
     expect((await f.sync.publish()).syncState).toBe('SYNCED')
     expect(f.store.get(f.skill.id).source?.state).toBe('REMOVED')
     expect(f.store.history(f.skill.id)).toHaveLength(2)
-  }, 60000)
+    const cutover = await f.sync.completeLocalCutover(true)
+    expect(cutover.lastError).toBeNull()
+    expect(f.store.usesLocalAuthority()).toBe(true)
+    expect(cutover.publication?.candidateCommitSha).toBe(draft.workspaceCommitSha)
+    expect(f.store.history(f.skill.id, { version: 2 }).package.skillMd).toContain('candidate')
+  }, 120000)
 
   it('automatically publishes consecutive saves only under the bound credential authorization', async () => {
     const f = await fixture()

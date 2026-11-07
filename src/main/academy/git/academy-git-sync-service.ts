@@ -393,7 +393,8 @@ export class AcademyGitSyncService {
     return this.exclusive(async state => {
       const snapshot = await this.observe(state)
       await this.applyRemote(state, snapshot)
-      if (!state.migrationComplete || state.candidateCommitSha || state.pendingCommit || state.localHead !== snapshot.sourceCommitSha || await this.git.getOperationsStatus(state.workspacePath!)) throw new AcademyError('ACADEMY_CUTOVER_PENDING')
+      const candidatePending = state.candidateCommitSha && !await this.git.isAncestor(state.checkoutPath, state.candidateCommitSha, snapshot.sourceCommitSha)
+      if (!state.migrationComplete || candidatePending || state.pendingCommit || state.localHead !== snapshot.sourceCommitSha || await this.git.getOperationsStatus(state.workspacePath!)) throw new AcademyError('ACADEMY_CUTOVER_PENDING')
       this.store.enableLocalAuthority(snapshot.sourceCommitSha)
       await this.prepareLocalCommit(state, snapshot)
     })

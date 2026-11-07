@@ -20,6 +20,36 @@ const open = () => {
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 
 describe('AcademyStore', () => {
+  it('keeps identity through local rename and concurrent remote edit, preserving both packages until explicit resolution', () => {
+    const store = open()
+    try {
+      const skill = store.create({ package: pkg(), scope: 'GLOBAL', origin: 'UI' })
+      store.acceptGitSnapshots([gitSnapshot('a', null)], null)
+      store.enableLocalAuthority('a')
+      const publishedCatalog = store.localIdentityCatalog()
+      const renamed = pkg('renamed', '# Alpha')
+      store.update({ skillId: skill.id, expectedVersion: 1, package: renamed, origin: 'UI' })
+      const remote = gitSnapshot('b', 'a', [pkg('alpha', 'concurrent remote content')])
+      remote.identities = publishedCatalog
+      store.acceptGitSnapshots([remote], 'a')
+      expect(store.list()).toHaveLength(1)
+      expect(store.get(skill.id).name).toBe('renamed')
+      const conflict = store.listConflicts()[0]
+      expect(conflict.skillId).toBe(skill.id)
+      expect(conflict.divergentPackage?.skillMd).toContain('concurrent remote content')
+      const review = store.reviewLocalGitConflict(conflict.id)
+      expect(review.context.local.skillMd).toContain('name: renamed')
+      store.resolveLocalGitConflict(conflict.id, review.token, 'LOCAL', true)
+      const confirmed = gitSnapshot('c', 'b', [renamed])
+      confirmed.identities = store.localIdentityCatalog()
+      store.acceptGitSnapshots([confirmed], 'b')
+      expect(store.getGitSkillSources()[0]).toMatchObject({ skillId: skill.id, path: 'skills/renamed' })
+      expect(store.get(skill.id).currentVersion).toBe(2)
+      expect(store.history(skill.id, { version: 1 }).package).toEqual(pkg())
+      expect(store.getConflict(conflict.id).divergentPackage).toEqual(remote.skills[0].package)
+      expect(store.confirmConvergence(confirmed)).toBe(true)
+    } finally { store.close() }
+  })
   it('converges authored Git metadata independently of plugin setup and refuses a different repository checkpoint', () => {
     const store = open()
     try {
