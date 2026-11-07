@@ -9,6 +9,11 @@ export { assertSourcePath } from './academy-git-materializer'
 
 export const ACADEMY_AUTHORED_PATHS = ['skills', 'plugin.json', 'assets', IDENTITY_PATH]
 
+export async function verifyStagedAcademyFile(git: GitService, root: string, tree: string, path: string, expected: Buffer | null): Promise<void> {
+  const staged = await git.readCommitFile(root, tree, path, 8 * 1024 * 1024)
+  if (expected === null ? staged !== null : !staged?.equals(expected)) throw new AcademyError('GIT_DRAFT_CONTENT_CHANGED_BY_FILTER', path)
+}
+
 export async function verifyStagedAcademyPackage(git: GitService, root: string, tree: string, name: string, pkg: AcademyPackage): Promise<void> {
   const expected = new Map(Object.entries({ 'SKILL.md': pkg.skillMd, ...pkg.artifacts }).map(([path, text]) => [`skills/${name}/${path}`, text]))
   const entries = (await git.readManagedTree(root, tree, [`skills/${name}`])).split('\0').filter(Boolean)
@@ -16,8 +21,8 @@ export async function verifyStagedAcademyPackage(git: GitService, root: string, 
   for (const entry of entries) {
     const path = entry.slice(entry.indexOf('\t') + 1)
     const content = expected.get(path)
-    const staged = await git.readCommitFile(root, tree, path, 8 * 1024 * 1024)
-    if (content === undefined || !staged?.equals(Buffer.from(content, 'utf8'))) throw new AcademyError('GIT_DRAFT_CONTENT_CHANGED_BY_FILTER', path)
+    if (content === undefined) throw new AcademyError('GIT_DRAFT_CONTENT_CHANGED_BY_FILTER', path)
+    await verifyStagedAcademyFile(git, root, tree, path, Buffer.from(content, 'utf8'))
   }
 }
 

@@ -4,6 +4,18 @@ import { validateAcademyIdentities } from '../../../shared/academy-identity.cjs'
 import { AcademyGitSyncService } from './academy-git-sync-service'
 import * as snapshots from './academy-git-snapshot'
 
+it('rejects transformed identity, manifest and asset bytes in the exact staged tree', async () => {
+  for (const path of ['.academy/identities.json', 'plugin.json', 'assets/logo.png']) {
+    const readCommitFile = vi.fn().mockResolvedValue(Buffer.from('transformed'))
+    const git = { readCommitFile } as any
+    await expect(snapshots.verifyStagedAcademyFile(git, 'fixture', 'immutable-tree', path, Buffer.from('accepted'))).rejects.toMatchObject({ code: 'GIT_DRAFT_CONTENT_CHANGED_BY_FILTER' })
+    expect(readCommitFile).toHaveBeenCalledWith('fixture', 'immutable-tree', path, 8 * 1024 * 1024)
+    readCommitFile.mockResolvedValue(Buffer.from('accepted'))
+    await expect(snapshots.verifyStagedAcademyFile(git, 'fixture', 'immutable-tree', path, Buffer.from('accepted'))).resolves.toBeUndefined()
+    await expect(snapshots.verifyStagedAcademyFile(git, 'fixture', 'immutable-tree', path, null)).rejects.toMatchObject({ code: 'GIT_DRAFT_CONTENT_CHANGED_BY_FILTER' })
+  }
+})
+
 it('preserves unresolved convergence state after publishing an independent safe commit', async () => {
   const read = vi.spyOn(snapshots, 'readAcademyGitSnapshot').mockResolvedValue({ skills: [] } as any)
   try {

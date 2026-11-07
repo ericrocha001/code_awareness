@@ -19,7 +19,7 @@ import { randomUUID } from 'node:crypto'
 import type { AcademyRemoteCheckState } from '../../../shared/types/academy-bootstrap-types'
 import { compareSemver } from '../publication/academy-plugin-package-revision-service'
 import { withPublicationLock } from './academy-publication-lock'
-import { ACADEMY_AUTHORED_PATHS, assertSourcePath, readAcademyGitSnapshot, verifyStagedAcademyPackage } from './academy-git-snapshot'
+import { ACADEMY_AUTHORED_PATHS, assertSourcePath, readAcademyGitSnapshot, verifyStagedAcademyFile, verifyStagedAcademyPackage } from './academy-git-snapshot'
 import { IDENTITY_PATH } from '../../../shared/academy-identity.cjs'
 
 export type { GitRemoteTransport } from '../../core/git-remote-transport'
@@ -359,19 +359,28 @@ export class AcademyGitSyncService {
     assertPublicationPaths(root, [...paths, '.git'])
     await new AcademyGitMaterializer().materialize(root, entries)
     await mkdir(join(root, '.academy'), { recursive: true })
-    writeFileSync(join(root, IDENTITY_PATH), canonicalJson(catalog) + '\n')
+    const sealedFiles = new Map<string, Buffer | null>([[IDENTITY_PATH, Buffer.from(canonicalJson(catalog) + '\n')]])
+    writeFileSync(join(root, IDENTITY_PATH), sealedFiles.get(IDENTITY_PATH)!)
     if (metadata && !this.store.hasManifestConflict()) {
       const version = this.store.getCurrentPluginPackageRevision()?.version ?? this.store.getOpenAiPluginProfile()?.publishedVersion ?? JSON.parse(Buffer.from(snapshot.authoredFiles['plugin.json'], 'base64').toString('utf8')).version
-      writeFileSync(join(root, 'plugin.json'), canonicalJson({ ...metadata.manifest, version }) + '\n')
+      const manifestBytes = Buffer.from(canonicalJson({ ...metadata.manifest, version }) + '\n')
+      sealedFiles.set('plugin.json', manifestBytes)
+      writeFileSync(join(root, 'plugin.json'), manifestBytes)
       if (metadata.logo) {
         await mkdir(join(root, 'assets'), { recursive: true })
-        writeFileSync(join(root, 'assets/logo.png'), Buffer.from(metadata.logo, 'base64'))
-      } else if (existsSync(join(root, 'assets/logo.png'))) await import('node:fs/promises').then(fs => fs.unlink(join(root, 'assets/logo.png')))
+        const logoBytes = Buffer.from(metadata.logo, 'base64')
+        sealedFiles.set('assets/logo.png', logoBytes)
+        writeFileSync(join(root, 'assets/logo.png'), logoBytes)
+      } else if (snapshot.authoredFiles['assets/logo.png']) {
+        sealedFiles.set('assets/logo.png', null)
+        if (existsSync(join(root, 'assets/logo.png'))) await import('node:fs/promises').then(fs => fs.unlink(join(root, 'assets/logo.png')))
+      }
     }
     await this.git.stagePaths(root, paths)
     const indexRevision = await this.git.getIndexRevision(root)
     const tree = await this.git.writeIndexTree(root)
     for (const entry of entries) await verifyStagedAcademyPackage(this.git, root, tree, entry.name, entry.package)
+    for (const [path, bytes] of sealedFiles) await verifyStagedAcademyFile(this.git, root, tree, path, bytes)
     if (this.store.catalogRevision() !== revision) throw new AcademyError('ACADEMY_LOCAL_REVISION_CHANGED')
     const staged = await this.git.readManagedTree(root, tree, ACADEMY_AUTHORED_PATHS)
     if (sha256(staged) === snapshot.managedTreeHash) { this.store.confirmConvergence(snapshot); await this.classify(state, snapshot); return }
