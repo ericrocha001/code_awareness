@@ -366,6 +366,21 @@ export class WorkspaceBindingService {
     return this.smcService.getWorkspaceBinding(validRepoId, sessionId)
   }
 
+  async getWorktreePath(
+    repositoryId: string,
+    worktreeId: string
+  ): Promise<string | null> {
+    const validRepoId = validateRepositoryId(repositoryId)
+    try {
+      const gitPort = await this.resolveGitPort(validRepoId)
+      const inventory = await gitPort.getBranchInventory()
+      const wt = inventory.worktrees.find(w => w.worktreeId === worktreeId)
+      return wt?.path ?? null
+    } catch {
+      return null
+    }
+  }
+
   close(): void {
     if (this.ownsService) {
       this.smcService.close()

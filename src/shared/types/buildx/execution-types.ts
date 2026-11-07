@@ -99,3 +99,54 @@ export interface GrokProbeDiagnosisResult {
   readonly qualifications: GrokQualifications
 }
 
+export type UnitPromptStageStatus =
+  | 'READY'
+  | 'FAILED'
+  | 'EXPIRED'
+  | 'RELEASED'
+  | 'UNKNOWN'
+
+export interface StageUnitPromptOptions {
+  readonly stageOperationId: string
+}
+
+export interface UnitPromptStageResult {
+  readonly success: boolean
+  readonly status: UnitPromptStageStatus
+  readonly stageOperationId: string
+  readonly repositoryId: string
+  readonly sessionId: string
+  readonly attemptId: string
+  readonly promptHash?: string
+  readonly promptBytes?: number
+  readonly headObserved?: string
+  readonly createdAt?: string
+  readonly expiresAt?: string
+  readonly reason?: string
+}
+
+export interface UnitPromptStageInspection {
+  readonly status: UnitPromptStageStatus
+  readonly stageOperationId: string
+  readonly repositoryId: string
+  readonly sessionId: string
+  readonly attemptId: string
+  readonly promptHash?: string
+  readonly promptBytes?: number
+  readonly headObserved?: string
+  readonly createdAt?: string
+  readonly expiresAt?: string
+  readonly reason?: string
+}
+
+export interface UnitPromptReleaseResult {
+  readonly success: boolean
+  readonly status: 'RELEASED' | 'UNKNOWN'
+  readonly stageOperationId: string
+  readonly repositoryId: string
+  readonly sessionId: string
+  readonly attemptId: string
+  readonly reason?: string
+}
+
+

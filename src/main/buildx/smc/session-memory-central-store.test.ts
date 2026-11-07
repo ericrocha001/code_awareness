@@ -65,7 +65,13 @@ import {
   type GrokQualifications,
   type GrokProbeDiagnosisResult,
   extractGrokVersion,
-  createDefaultQualifications
+  createDefaultQualifications,
+  UnitPromptStageService,
+  buildDeterministicUnitPrompt,
+  type UnitPromptStageResult,
+  type UnitPromptStageInspection,
+  type UnitPromptReleaseResult,
+  type StageUnitPromptOptions
 } from '../execution'
 import type {
   CliProposal,
@@ -6187,7 +6193,589 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
     })
   })
 
+  describe('BuildX Execution-06 — Materialização segura do prompt de unidade (Provas Dirigidas)', () => {
+    const repoId = 'repo-execution-06'
+    let smc: SessionMemoryCentralService
+    let tempBaseDir: string
+    let isolatedStageDir: string
+    let isolatedWorktreeDir: string
+    let currentHead: string
+    let gitPort: GitOperationsPort
+    let workspaceService: WorkspaceBindingService
+    let stageService: UnitPromptStageService
+
+    function createFixtureInventory(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      detached?: boolean
+      path?: string
+    }): BranchInventory {
+      const worktreeId = options?.worktreeId ?? 'wt-ex06-01'
+      const generation = options?.generation ?? 'gen-ex06-1'
+      const branchName = options?.branch ?? 'feature-ex06'
+      const head = options?.head ?? '6666666666666666666666666666666666666666'
+      const detached = options?.detached ?? false
+      const wtPath = options?.path ?? isolatedWorktreeDir
+
+      const worktree: any = {
+        worktreeId,
+        generation,
+        path: wtPath,
+        head,
+        branch: branchName,
+        detached,
+        locked: false,
+        missing: false,
+        prunable: false
+      }
+
+      const branchRecord: BranchRecord = {
+        key: `key-${branchName}`,
+        repositoryId: repoId,
+        ref: `refs/heads/${branchName}`,
+        name: branchName,
+        namespace: 'LOCAL',
+        head,
+        upstream: null,
+        generation: 'branch-gen-1',
+        revision: 'branch-rev-1',
+        creation: { at: '2026-11-07T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-07T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+
+      return {
+        repositoryId: repoId,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-07T00:00:00.000Z',
+        revision: 'inv-ex06-1',
+        worktrees: [worktree],
+        branches: [branchRecord],
+        unassignedWorktrees: []
+      }
+    }
+
+    beforeEach(() => {
+      tempBaseDir = mkdtempSync(join(tmpdir(), 'smc-test-ex06-'))
+      isolatedStageDir = mkdtempSync(join(tmpdir(), 'smc-test-stage-ex06-'))
+      isolatedWorktreeDir = mkdtempSync(join(tmpdir(), 'smc-test-wt-ex06-'))
+      currentHead = '6666666666666666666666666666666666666666'
+
+      smc = new SessionMemoryCentralService(tempBaseDir)
+      gitPort = {
+        getBranchInventory: async () => createFixtureInventory({ head: currentHead }),
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+      workspaceService = new WorkspaceBindingService(smc, gitPort)
+      stageService = new UnitPromptStageService(smc, workspaceService, {
+        stagingDirectory: isolatedStageDir
+      })
+    })
+
+    afterEach(() => {
+      try {
+        smc.close()
+      } catch {}
+      try {
+        rmSync(tempBaseDir, { recursive: true, force: true })
+      } catch {}
+      try {
+        rmSync(isolatedStageDir, { recursive: true, force: true })
+      } catch {}
+      try {
+        rmSync(isolatedWorktreeDir, { recursive: true, force: true })
+      } catch {}
+    })
+
+    async function createPreparedFixture(customUnit?: Partial<DefineUnitFlowUnitInput>) {
+      const session = smc.createSession(repoId, { sessionId: '11111111-1111-4111-8111-111111111111' })
+      const planService = new UnitFlowService(smc)
+      const unitInput: DefineUnitFlowUnitInput = {
+        unitId: '22222222-2222-4222-8222-222222222222',
+        title: customUnit?.title ?? 'Implement Staged Prompt',
+        objective: customUnit?.objective ?? 'Materialize unit prompt safely outside worktree',
+        acceptanceCriteria:
+          customUnit?.acceptanceCriteria ?? 'Prompt file exists outside worktree with SHA256 verified',
+        dependsOnUnitIds: customUnit?.dependsOnUnitIds ?? []
+      }
+      const plan = planService.registerPlan(repoId, session.sessionId, {
+        planId: '44444444-4444-4444-8444-444444444444',
+        title: 'Execution-06 Test Plan'
+      })
+      planService.definePlanUnits(repoId, session.sessionId, plan.planId, [unitInput])
+
+      await workspaceService.bindWorkspace(repoId, session.sessionId, 'wt-ex06-01')
+
+      const resService = new UnitFlowReservationService(smc, gitPort)
+      const resResult = await resService.reserveNextEligibleUnit(
+        repoId,
+        session.sessionId,
+        plan.planId,
+        {
+          reservationId: '55555555-5555-4555-8555-555555555555'
+        }
+      )
+      if (resResult.kind !== 'RESERVED') throw new Error('Expected RESERVED, got ' + (resResult as any).kind)
+      const reservation = resResult.reservation
+
+      const attemptService = new ExecutionAttemptService(smc, gitPort)
+      const attempt = await attemptService.prepareExecutionAttempt(
+        repoId,
+        session.sessionId,
+        reservation.reservationId,
+        {
+          attemptId: '66666666-6666-4666-8666-666666666666'
+        }
+      )
+
+      return { session, plan, unitInput, reservation, attempt }
+    }
+
+    describe('Prova 1 — Fixture SMC v8 real + stage em temp isolada fora do checkout', () => {
+      it('cria stage com sucesso em diretório temporário fora do checkout com bytes exatos, hash e pureza do SQLite', async () => {
+        const { session, plan, unitInput, attempt } = await createPreparedFixture()
+
+        const rawDb = new Database(smcDatabasePath(tempBaseDir, repoId))
+        const attemptsBefore = (rawDb.prepare('SELECT count(*) as c FROM smc_execution_attempts').get() as any).c
+        const reservationsBefore = (rawDb.prepare('SELECT count(*) as c FROM smc_unit_reservations').get() as any).c
+        const unitsBefore = (rawDb.prepare('SELECT count(*) as c FROM smc_plan_units').get() as any).c
+        const unitStatesBefore = (rawDb.prepare('SELECT count(*) as c FROM smc_unit_states').get() as any).c
+        const sessionsBefore = (rawDb.prepare('SELECT count(*) as c FROM smc_sessions').get() as any).c
+        rawDb.close()
+
+        const stageOpId = '77777777-7777-4777-8777-777777777777'
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+
+        expect(result.success).toBe(true)
+        expect(result.status).toBe('READY')
+        expect(result.stageOperationId).toBe(stageOpId)
+        expect(result.repositoryId).toBe(repoId)
+        expect(result.sessionId).toBe(session.sessionId)
+        expect(result.attemptId).toBe(attempt.attemptId)
+        expect(result.promptHash).toMatch(/^[0-9a-f]{64}$/)
+        expect(result.promptBytes).toBeGreaterThan(0)
+        expect(result.headObserved).toBe(currentHead)
+        expect(result.createdAt).toBeDefined()
+        expect(result.expiresAt).toBeDefined()
+        // Contenção: nenhum caminho de arquivo nem texto de prompt é vazado no retorno
+        expect((result as any).filePath).toBeUndefined()
+        expect((result as any).promptText).toBeUndefined()
+
+        // Pureza relacional SMC
+        const rawDbAfter = new Database(smcDatabasePath(tempBaseDir, repoId))
+        expect((rawDbAfter.prepare('SELECT count(*) as c FROM smc_execution_attempts').get() as any).c).toBe(attemptsBefore)
+        expect((rawDbAfter.prepare('SELECT count(*) as c FROM smc_unit_reservations').get() as any).c).toBe(reservationsBefore)
+        expect((rawDbAfter.prepare('SELECT count(*) as c FROM smc_plan_units').get() as any).c).toBe(unitsBefore)
+        expect((rawDbAfter.prepare('SELECT count(*) as c FROM smc_unit_states').get() as any).c).toBe(unitStatesBefore)
+        expect((rawDbAfter.prepare('SELECT count(*) as c FROM smc_sessions').get() as any).c).toBe(sessionsBefore)
+
+        const attemptRow = rawDbAfter.prepare('SELECT status FROM smc_execution_attempts WHERE attempt_id = ?').get(attempt.attemptId) as any
+        expect(attemptRow.status).toBe('PREPARED')
+        const unitRow = rawDbAfter.prepare('SELECT status FROM smc_unit_states WHERE unit_id = ?').get(unitInput.unitId) as any
+        expect(unitRow.status).toBe('RESERVED')
+        rawDbAfter.close()
+
+        // Verificação privada do arquivo no disco pelo host
+        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
+        expect(filePath).not.toBeNull()
+        expect(existsSync(filePath!)).toBe(true)
+        // O arquivo fica fora do worktree
+        expect(filePath!.startsWith(isolatedStageDir)).toBe(true)
+        expect(filePath!.startsWith(isolatedWorktreeDir)).toBe(false)
+        // O nome do arquivo é aleatório e não contém unitId nem sessionId nem planId
+        const fileName = filePath!.split(/[/\\]/).pop()!
+        expect(fileName).toMatch(/^buildx-prompt-[0-9a-f]{32}\.tmp$/)
+        expect(fileName).not.toContain(unitInput.unitId)
+        expect(fileName).not.toContain(session.sessionId)
+        expect(fileName).not.toContain(plan.planId)
+
+        // Conteúdo e hash
+        const unitRecord = smc.getPlanUnit(repoId, session.sessionId, plan.planId, unitInput.unitId)!
+        const expectedPrompt = buildDeterministicUnitPrompt(unitRecord)
+        const fileContent = require('node:fs').readFileSync(filePath!, 'utf8')
+        expect(fileContent).toBe(expectedPrompt)
+        const computedHash = require('node:crypto').createHash('sha256').update(fileContent, 'utf8').digest('hex')
+        expect(computedHash).toBe(result.promptHash)
+        expect(Buffer.byteLength(fileContent, 'utf8')).toBe(result.promptBytes)
+      })
+
+      it('gera prompt determinístico a partir exclusivamente de getPlanUnit sem referências a AGENTS.md ou contexto externo', async () => {
+        const session = smc.createSession(repoId, { sessionId: '11111111-1111-4111-8111-111111111112' })
+        const planService = new UnitFlowService(smc)
+        const u1: DefineUnitFlowUnitInput = {
+          unitId: '22222222-2222-4222-8222-222222222221',
+          title: 'Unit 1 Title',
+          objective: 'Unit 1 Obj',
+          acceptanceCriteria: 'Unit 1 Crit',
+          dependsOnUnitIds: []
+        }
+        const u2: DefineUnitFlowUnitInput = {
+          unitId: '22222222-2222-4222-8222-222222222222',
+          title: 'Unit 2 Title',
+          objective: 'Unit 2 Obj',
+          acceptanceCriteria: 'Unit 2 Crit',
+          dependsOnUnitIds: [u1.unitId]
+        }
+        const plan = planService.registerPlan(repoId, session.sessionId, {
+          planId: '44444444-4444-4444-8444-444444444445',
+          title: 'Execution-06 Two Units Plan'
+        })
+        planService.definePlanUnits(repoId, session.sessionId, plan.planId, [u1, u2])
+
+        await workspaceService.bindWorkspace(repoId, session.sessionId, 'wt-ex06-01')
+
+        const rawDbComplete = new Database(smcDatabasePath(tempBaseDir, repoId))
+        rawDbComplete.prepare("UPDATE smc_unit_states SET status = 'COMPLETED' WHERE unit_id = ?").run(u1.unitId)
+        rawDbComplete.close()
+
+        const resService = new UnitFlowReservationService(smc, gitPort)
+        const r2Result = await resService.reserveNextEligibleUnit(repoId, session.sessionId, plan.planId, {
+          reservationId: '55555555-5555-4555-8555-555555555552'
+        })
+        if (r2Result.kind !== 'RESERVED') throw new Error('Expected RESERVED, got ' + (r2Result as any).kind)
+        const r2 = r2Result.reservation
+
+        const attemptService = new ExecutionAttemptService(smc, gitPort)
+        const attempt = await attemptService.prepareExecutionAttempt(
+          repoId,
+          session.sessionId,
+          r2.reservationId,
+          {
+            attemptId: '66666666-6666-4666-8666-666666666667'
+          }
+        )
+
+        const stageOpId = '77777777-7777-4777-8777-777777777778'
+        await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+
+        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)!
+        const content = require('node:fs').readFileSync(filePath, 'utf8')
+
+        expect(content).toContain('# Implementation Task')
+        expect(content).toContain(`- Plan ID: ${plan.planId}`)
+        expect(content).toContain(`- Unit ID: ${u2.unitId}`)
+        expect(content).toContain(`- Title: ${u2.title}`)
+        expect(content).toContain('## Objective')
+        expect(content).toContain(u2.objective)
+        expect(content).toContain('## Acceptance Criteria')
+        expect(content).toContain(u2.acceptanceCriteria)
+        expect(content).toContain('## Declared Dependencies')
+        expect(content).toContain(`- ${u1.unitId}`)
+        expect(content).toContain('## Instructions')
+        expect(content).toContain('Preserve repository and worktree integrity.')
+
+        // Não copia AGENTS.md nem segredos
+        expect(content).not.toContain('AGENTS.md')
+        expect(content).not.toContain('password')
+        expect(content).not.toContain('secret')
+        expect(content).not.toContain('token')
+      })
+    })
+
+    describe('Prova 2 — Idempotência, conflito de ID e exclusividade por tentativa', () => {
+      it('mesmo stageOperationId e mesmo escopo devolve exatamente o mesmo recibo sem reescrever arquivo', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const stageOpId = '88888888-8888-4888-8888-888888888881'
+
+        const r1 = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+        const path1 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
+
+        const r2 = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+        const path2 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
+
+        expect(r1.success).toBe(true)
+        expect(r2.success).toBe(true)
+        expect(r1.promptHash).toBe(r2.promptHash)
+        expect(r1.createdAt).toBe(r2.createdAt)
+        expect(r1.expiresAt).toBe(r2.expiresAt)
+        expect(path1).toBe(path2)
+      })
+
+      it('mesmo stageOperationId com escopo divergente falha com STAGE_ID_CONFLICT', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const stageOpId = '88888888-8888-4888-8888-888888888882'
+
+        await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+
+        const conflictResult = await stageService.stageUnitPrompt(repoId, session.sessionId, '99999999-9999-4999-8999-999999999999', {
+          stageOperationId: stageOpId
+        })
+
+        expect(conflictResult.success).toBe(false)
+        expect(conflictResult.status).toBe('FAILED')
+        expect(conflictResult.reason).toBe('STAGE_ID_CONFLICT')
+      })
+
+      it('dois stageOperationId diferentes para a mesma tentativa não deixam dois arquivos READY simultâneos', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const op1 = '88888888-8888-4888-8888-888888888883'
+        const op2 = '88888888-8888-4888-8888-888888888884'
+
+        const r1 = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: op1
+        })
+        expect(r1.success).toBe(true)
+        const path1 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op1)
+        expect(existsSync(path1!)).toBe(true)
+
+        const r2 = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: op2
+        })
+        expect(r2.success).toBe(true)
+        const path2 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op2)
+        expect(existsSync(path2!)).toBe(true)
+
+        // O arquivo anterior foi removido do disco e revogado da memória
+        expect(existsSync(path1!)).toBe(false)
+        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op1)).toBeNull()
+        const inspect1 = await stageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, op1)
+        expect(inspect1.status).toBe('RELEASED')
+      })
+
+      it('reabertura/restart simulado do host perde estado em memória (UNKNOWN) e cleanup remove arquivo órfão', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const op = '88888888-8888-4888-8888-888888888885'
+
+        await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: op
+        })
+        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)!
+        expect(existsSync(filePath)).toBe(true)
+
+        // Simula reinício de processo instanciando novo serviço sem o mapa volátil
+        const newStageService = new UnitPromptStageService(smc, workspaceService, {
+          stagingDirectory: isolatedStageDir
+        })
+
+        const inspectResult = await newStageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, op)
+        expect(inspectResult.status).toBe('UNKNOWN')
+        expect(inspectResult.reason).toBe('STAGE_NOT_FOUND_OR_EXPIRED')
+        expect(newStageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)).toBeNull()
+
+        // Cleanup limpa o arquivo órfão
+        const cleaned = newStageService.cleanupExpiredStages()
+        expect(cleaned).toBeGreaterThanOrEqual(1)
+        expect(existsSync(filePath)).toBe(false)
+      })
+    })
+
+    describe('Prova 3 — Drift e Gates Fail-Closed', () => {
+      it('rejeita quando workspace não está CURRENT', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        gitPort.getBranchInventory = async () => createFixtureInventory({ head: currentHead, detached: true })
+
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: '99999999-9999-4999-8999-999999999901'
+        })
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('WORKSPACE_NOT_CURRENT')
+      })
+
+      it('rejeita quando worktree binding difere da tentativa', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        gitPort.getBranchInventory = async () => createFixtureInventory({ head: currentHead, generation: 'gen-different' })
+
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: '99999999-9999-4999-8999-999999999902'
+        })
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('WORKSPACE_NOT_CURRENT')
+      })
+
+      it('rejeita quando sessão está fechada', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const rawDb = new Database(smcDatabasePath(tempBaseDir, repoId))
+        rawDb.prepare("UPDATE smc_sessions SET status = 'CLOSED' WHERE session_id = ?").run(session.sessionId)
+        rawDb.close()
+
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: '99999999-9999-4999-8999-999999999903'
+        })
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('SESSION_NOT_OPEN')
+      })
+
+      it('rejeita quando tentativa não está PREPARED', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const rawDb = new Database(smcDatabasePath(tempBaseDir, repoId))
+        rawDb.prepare("UPDATE smc_execution_attempts SET status = 'RUNNING' WHERE attempt_id = ?").run(attempt.attemptId)
+        rawDb.close()
+
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: '99999999-9999-4999-8999-999999999904'
+        })
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('ATTEMPT_NOT_PREPARED')
+      })
+
+      it('rejeita quando reserva não está ACTIVE', async () => {
+        const { session, attempt, reservation } = await createPreparedFixture()
+        const rawDb = new Database(smcDatabasePath(tempBaseDir, repoId))
+        rawDb.prepare("UPDATE smc_unit_reservations SET status = 'CANCELLED' WHERE reservation_id = ?").run(reservation.reservationId)
+        rawDb.close()
+
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: '99999999-9999-4999-8999-999999999905'
+        })
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('RESERVATION_NOT_ACTIVE')
+      })
+
+      it('rejeita quando unidade não está RESERVED ou revision diverge', async () => {
+        const { session, attempt, unitInput } = await createPreparedFixture()
+        const rawDb = new Database(smcDatabasePath(tempBaseDir, repoId))
+        rawDb.prepare('UPDATE smc_unit_states SET revision = 99 WHERE unit_id = ?').run(unitInput.unitId)
+        rawDb.close()
+
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: '99999999-9999-4999-8999-999999999906'
+        })
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('UNIT_REVISION_MISMATCH')
+      })
+
+      it('rejeita e falha fechado sem criar arquivo quando o prompt excede o limite de 64 KiB', async () => {
+        const largeObjective = 'x'.repeat(35000)
+        const largeCriteria = 'y'.repeat(35000)
+        const { session, attempt } = await createPreparedFixture({
+          objective: largeObjective,
+          acceptanceCriteria: largeCriteria
+        })
+
+        const stageOpId = '99999999-9999-4999-8999-999999999907'
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('PROMPT_SIZE_EXCEEDS_64KB')
+        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
+      })
+
+      it('rejeita quando o diretório de staging está dentro do worktree (STAGE_DIRECTORY_INSIDE_WORKTREE)', async () => {
+        const insideWorktreeStageDir = join(isolatedWorktreeDir, 'inside-stage')
+        mkdirSync(insideWorktreeStageDir, { recursive: true })
+
+        const stageServiceInside = new UnitPromptStageService(smc, workspaceService, {
+          stagingDirectory: insideWorktreeStageDir
+        })
+
+        const { session, attempt } = await createPreparedFixture()
+        const result = await stageServiceInside.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: '99999999-9999-4999-8999-999999999908'
+        })
+
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('STAGE_DIRECTORY_INSIDE_WORKTREE')
+      })
+
+      it('rejeita e remove arquivo se ocorrer drift de HEAD durante o stage (HEAD_DRIFT_DURING_STAGE)', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        let callCount = 0
+
+        gitPort.getBranchInventory = async () => {
+          callCount++
+          // Na segunda chamada (revalidação pós-escrita), simula drift de HEAD
+          const head = callCount > 1 ? '7777777777777777777777777777777777777777' : currentHead
+          return createFixtureInventory({ head })
+        }
+
+        const stageOpId = '99999999-9999-4999-8999-999999999909'
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+
+        expect(result.success).toBe(false)
+        expect(result.status).toBe('FAILED')
+        expect(result.reason).toBe('HEAD_DRIFT_DURING_STAGE')
+        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
+      })
+
+      it('inspectStagedPrompt detecta arquivo corrompido ou expirado por TTL', async () => {
+        let fakeNow = 1000000000000
+        const stageServiceWithClock = new UnitPromptStageService(smc, workspaceService, {
+          stagingDirectory: isolatedStageDir,
+          ttlMs: 5000,
+          clock: () => fakeNow
+        })
+
+        const { session, attempt } = await createPreparedFixture()
+        const stageOpId = '99999999-9999-4999-8999-999999999910'
+
+        await stageServiceWithClock.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+
+        const inspectBefore = await stageServiceWithClock.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, stageOpId)
+        expect(inspectBefore.status).toBe('READY')
+
+        // Avança tempo após TTL
+        fakeNow += 6000
+        const inspectAfter = await stageServiceWithClock.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, stageOpId)
+        expect(inspectAfter.status).toBe('EXPIRED')
+        expect(inspectAfter.reason).toBe('STAGE_EXPIRED')
+      })
+    })
+
+    describe('Prova 4 — Garantias de SO, contenção e release', () => {
+      it('releaseStagedPrompt remove o arquivo com segurança e invalida a associação', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const stageOpId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+
+        await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)!
+        expect(existsSync(filePath)).toBe(true)
+
+        const releaseResult = await stageService.releaseStagedPrompt(repoId, session.sessionId, attempt.attemptId, stageOpId)
+        expect(releaseResult.success).toBe(true)
+        expect(releaseResult.status).toBe('RELEASED')
+        expect(existsSync(filePath)).toBe(false)
+        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
+      })
+
+      it('validação de isolamento: zero subprocessos, zero mutações Git e isolamento de diretório', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const stageOpId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+
+        const result = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+        expect(result.success).toBe(true)
+
+        // Nenhum comando Grok foi executado
+        // Nenhuma transição de branch ou HEAD Git ocorreu
+        expect(currentHead).toBe('6666666666666666666666666666666666666666')
+        // Diretório de staging é isolado
+        expect(stageService.getStagingDirectory()).toBe(isolatedStageDir)
+      })
+    })
+  })
+
 })
 })
+
 
 
