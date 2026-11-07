@@ -3,6 +3,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/continuum/publication-receipts.test.ts',
   'src/main/continuum/artifact-lifecycle.test.ts',
   'src/main/continuum/lifecycle-transition.test.ts',
+  'src/main/continuum/agent-metadata.test.ts',
     'src/main/session-context/reference-reading.test.ts',
     'src/main/session-context/reference-index-integrity.test.ts',
     'src/main/session-context/session-namespace-migration.test.ts',

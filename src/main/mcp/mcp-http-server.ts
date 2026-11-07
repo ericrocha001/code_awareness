@@ -55,7 +55,8 @@ export function createMcpHttpServer(
   adapter: ChannelMcpAdapter,
   log: (entry: McpOperationalLogEntry) => void = console.log,
   trace?: ChannelTraceSink,
-  acceptsBinding?: (headers: import('node:http').IncomingHttpHeaders) => boolean
+  acceptsBinding?: (headers: import('node:http').IncomingHttpHeaders) => boolean,
+  authorizeAgent?: (headers: import('node:http').IncomingHttpHeaders, connected: () => boolean) => import('../continuum/agent-authority').AgentAuthority | undefined
 ): Server {
   return createServer(async (request, response) => {
     const startedAt = performance.now()
@@ -149,7 +150,8 @@ export function createMcpHttpServer(
         }
         emit('codescope-request-started', 'started')
         emit('codescope-handler-started', 'started')
-        const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs })
+        const authority = authorizeAgent?.(request.headers, () => !response.destroyed && Date.now() < deadlineAtMs)
+        const toolResult = await adapter.callTool(params.name, params.arguments, { requestId: correlationId, sessionId: relaySessionId, trace, deadlineAtMs }, authority)
         const { postResponse, ...publicResult } = toolResult
         rpcResult = publicResult
         const sessionBudget = SESSION_RESPONSE_BUDGETS[params.name as SessionToolName]

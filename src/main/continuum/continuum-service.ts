@@ -17,15 +17,17 @@ import type { IVisualContinuumService, VisualArtifactReceipt } from './continuum
 import { artifactTags, type ContinuumTagMutation, type ContinuumTagAssignment } from '../../shared/types/continuum-tag-types'
 import { ContextBundle } from './context-bundle'
 import { lifecyclePolicy, lifecycleProjection, type LifecycleDependencies } from './artifact-lifecycle-policy'
-import { lifecycleReceipt, transitionLifecycle, type LifecycleRequest } from './artifact-lifecycle'
+import { lifecycleDigest, lifecycleReasonFor, lifecycleReceipt, transitionLifecycle, type LifecycleRequest } from './artifact-lifecycle'
+import { assertArtifactAgent, authenticatedAgentPrincipal, authorizeArtifactAgent, type AgentAuthority } from './agent-authority'
 import { getCanonicalTokenizer } from '../core/tokenizer'
 import type { ContinuumTagTokens } from '../../shared/types/continuum-ui-types'
 
 export class ContinuumService implements IContinuumService, IVisualContinuumService, IArtifactGraphReader, IArtifactSuggestionReader {
-  async transitionLifecycle(request: LifecycleRequest, connected: () => boolean = () => true) {
-    const assertContext = () => { this.assertActive(); if (!connected()) throw new Error('IPC_CLOSED') }
+  get repositoryId() { return this.store.repositoryId }
+  async transitionLifecycle(request: LifecycleRequest, connected: () => boolean = () => true, authority?: AgentAuthority) {
+    const assertContext = () => { this.assertActive(); if (!connected()) throw new Error('IPC_CLOSED'); if (authority) assertArtifactAgent(authority, this.store.repositoryId) }
     assertContext(); this.reconcile?.(); assertContext()
-    const result = await transitionLifecycle(this.store, this.lifecycleDependencies, request, assertContext)
+    const result = await transitionLifecycle(this.store, this.lifecycleDependencies, request, assertContext, authority)
     if (result.state === 'PERSISTED' && !result.replayed) this.changed()
     return result
   }
@@ -251,15 +253,16 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   }
   private assertDocumentaryMetadata(metadata: Artifact['metadata'], prior?: Artifact['metadata']) {
     for (const key of ['artifactId', 'repositoryId', 'revision', 'createdAt', 'updatedAt', 'contentHash', 'provenance', 'nativeArtifact', 'publication', 'lifecycle']) {
-      if (canonicalJson(normalizeMetadataValue(metadata[key] ?? null)) !== canonicalJson(normalizeMetadataValue(prior?.[key] ?? null))) throw new Error('AUTHORITATIVE_METADATA_RESERVED: ' + key)
+      if (Object.hasOwn(metadata, key) !== Object.hasOwn(prior ?? {}, key) || canonicalJson(normalizeMetadataValue(metadata[key] ?? null)) !== canonicalJson(normalizeMetadataValue(prior?.[key] ?? null))) throw new Error('AUTHORITATIVE_METADATA_RESERVED: ' + key)
     }
   }
-  publish(rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt {
+  publish(rawMarkdown: string, fields?: ArtifactSemanticFields, authority?: AgentAuthority): ArtifactReceipt {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     const publication = canonicalizePublication(rawMarkdown, fields)
     const { metadata } = publication
     this.assertDocumentaryMetadata(metadata)
-    this.assertAgentTags(metadata)
+    if (authority) assertArtifactAgent(authority, this.store.repositoryId)
+    else this.assertAgentTags(metadata)
     const receipt = this.publishedReceipt(this.store.createPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('PUBLISH', { rawMarkdown, ...fields })))
     this.changed()
     return receipt
@@ -276,6 +279,92 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const receipt = this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('UPDATE', { rawMarkdown, artifactId, expectedRevision, ...fields })))
     this.changed()
     return receipt
+  }
+  async updateAgent(authority: AgentAuthority, artifactId: string, expectedRevision: number, rawMarkdown: string, fields: ArtifactSemanticFields = {},
+    lifecycle: Pick<LifecycleRequest, 'evidenceMode' | 'attestation' | 'evidenceRefs' | 'supportingArtifactId'> = { evidenceRefs: [] }) {
+    const assertContext = () => { this.assertActive(); assertArtifactAgent(authority, this.store.repositoryId) }
+    assertContext(); this.reconcile?.(); assertContext()
+    const prior = this.store.get(artifactId)
+    if (!prior) throw new Error('ARTIFACT_NOT_FOUND')
+    const requestDigest = lifecycleDigest({ artifactId, expectedRevision, rawMarkdown, fields, lifecycle })
+    const correction = prior.provenance.editorialCorrection as { requestDigest?: string } | undefined
+    if (correction?.requestDigest === requestDigest) return { ...this.receipt(prior), state: 'PERSISTED' as const, replayed: true, lifecycleReceipt: lifecycleReceipt(prior) }
+    if (prior.revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
+    const publication = canonicalizePublication(rawMarkdown, fields, prior.metadata)
+    this.assertDocumentaryMetadata(publication.metadata, prior.metadata)
+    const policy = lifecyclePolicy(prior.metadata), nextPolicy = lifecyclePolicy(publication.metadata)
+    const policyChanged = policy?.key !== nextPolicy?.key
+    if (policy && policyChanged && !lifecycle.attestation) throw new Error('LIFECYCLE_POLICY_CHANGE_REQUIRES_REVIEW')
+    const changedFields = [...new Set([...Object.keys(prior.metadata), ...Object.keys(publication.metadata)])].filter(key => Object.hasOwn(prior.metadata, key) !== Object.hasOwn(publication.metadata, key) || lifecycleDigest(prior.metadata[key] ?? null) !== lifecycleDigest(publication.metadata[key] ?? null))
+    const correctedAt = new Date().toISOString()
+    const provenance = { ...this.publicationProvenance(), editorialCorrection: { principalId: authority.principal.principalId, transport: authority.principal.transport,
+      baseRevision: expectedRevision, changedFields, requestDigest, correctedAt }, fieldCorrections: {
+        ...(prior.provenance.fieldCorrections as Record<string, import('./continuum-types').MetadataValue> ?? {}),
+        ...Object.fromEntries(changedFields.map(key => [key, { origin: 'AGENT_ATTESTED', principalId: authority.principal.principalId, correctedAt, revision: expectedRevision + 1 }]))
+      } }
+    if ((policy || nextPolicy) && (publication.metadata.status !== prior.metadata.status || (lifecycle.attestation && publication.metadata.status && (policyChanged || !lifecycleReceipt(prior))))) {
+      const toState = publication.metadata.status
+      if (!toState || !lifecycleReasonFor[toState]) throw new Error('POLICY_OR_REASON_MISMATCH')
+      const request: LifecycleRequest = { action: 'TRANSITION', artifactId, expectedRevision, toState, reasonCode: lifecycleReasonFor[toState], evidenceRefs: lifecycle.evidenceRefs ?? [],
+        ...(lifecycle.supportingArtifactId ? { supportingArtifactId: lifecycle.supportingArtifactId } : {}) }
+      const automatic = await transitionLifecycle(this.store, this.lifecycleDependencies, { ...request, action: 'ASSESS' }, assertContext, authority)
+      if (!('review' in automatic) || !automatic.review) {
+        if (!lifecycle.attestation) return automatic
+        Object.assign(request, { evidenceMode: 'REVIEWED_ATTESTATION', evidenceRefs: [], attestation: lifecycle.attestation })
+      }
+      const result = await transitionLifecycle(this.store, this.lifecycleDependencies, request, assertContext, authority, { rawMarkdown: publication.rawMarkdown, provenance })
+      if (result.state === 'PERSISTED' && !result.replayed) this.changed()
+      return result
+    }
+    assertContext()
+    const receipt = this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, ...publication, provenance }, requestDigest))
+    this.changed()
+    return { ...receipt, state: 'PERSISTED' as const }
+  }
+  repairMetadata(authority: AgentAuthority, artifactId: string, expectedRevision: number) {
+    this.assertActive(); assertArtifactAgent(authority, this.store.repositoryId)
+    const requestDigest = lifecycleDigest({ action: 'REPAIR', artifactId, expectedRevision })
+    let current: Artifact | null = null
+    try { current = this.store.get(artifactId) } catch { /* Canonical repair reads the immutable source even when the live projection cannot decode. */ }
+    if ((current?.provenance.technicalRepair as { requestDigest?: string } | undefined)?.requestDigest === requestDigest) return { ...this.receipt(current!), state: 'PERSISTED' as const, replayed: true }
+    const receipt = this.publishedReceipt(this.store.repairPublished(artifactId, expectedRevision, requestDigest, authority.principal.principalId))
+    this.changed()
+    return { ...receipt, state: 'PERSISTED' as const }
+  }
+  async reconcileAutomaticMetadata(artifactId: string, expectedRevision: number, proofId: string, fields: Record<string, import('./continuum-types').MetadataValue>) {
+    this.assertActive()
+    const prior = this.store.get(artifactId)
+    if (!prior) throw new Error('ARTIFACT_NOT_FOUND')
+    const proof = await this.lifecycleDependencies.proof?.(proofId)
+    this.assertActive()
+    if (!proof || proof.status !== 'PASSED' || proof.freshness !== 'CURRENT' || proof.commandProfile?.source?.repositoryId !== this.store.repositoryId || !proof.evidenceFor.includes(artifactId) || !Number.isFinite(Date.parse(proof.finishedAt)) || Date.parse(proof.finishedAt) > Date.now()) throw new Error('AUTOMATION_SOURCE_UNVERIFIED')
+    if (this.store.get(artifactId)?.revision !== prior.revision) throw new Error('REVISION_CONFLICT')
+    const requestDigest = lifecycleDigest({ artifactId, proofId, fields, proof: lifecycleDigest(proof) })
+    if ((prior.provenance.metadataAutomation as { requestDigest?: string } | undefined)?.requestDigest === requestDigest) return { ...this.receipt(prior), state: 'PERSISTED' as const, replayed: true }
+    if (prior.revision !== expectedRevision || this.store.get(artifactId)?.revision !== expectedRevision) throw new Error('REVISION_CONFLICT')
+    const corrections = prior.provenance.fieldCorrections as Record<string, { correctedAt: string }> | undefined
+    const observations = prior.provenance.fieldObservations as Record<string, { observedAt: string }> | undefined
+    const conflicts = Object.keys(fields).filter(key => (corrections?.[key] && Date.parse(proof.finishedAt) <= Date.parse(corrections[key].correctedAt)) || (observations?.[key] && Date.parse(proof.finishedAt) <= Date.parse(observations[key].observedAt)))
+    const applicable = Object.fromEntries(Object.entries(fields).filter(([key]) => !conflicts.includes(key)))
+    const metadata = { ...prior.metadata, ...applicable }
+    this.assertDocumentaryMetadata(metadata, prior.metadata)
+    if (lifecyclePolicy(prior.metadata)?.key !== lifecyclePolicy(metadata)?.key) throw new Error('LIFECYCLE_POLICY_CHANGE_REQUIRES_REVIEW')
+    const { dump } = await import('js-yaml')
+    const body = parseArtifactMarkdown(prior.rawMarkdown, true).body
+    const rawMarkdown = `---\n${dump(metadata, { lineWidth: -1 })}---\n${body}`
+    const provenance = { metadataAutomation: { origin: 'AUTO_VERIFIED', proofId, observedAt: proof.finishedAt, requestDigest, conflicts, appliedFields: Object.keys(applicable) },
+      fieldObservations: { ...(prior.provenance.fieldObservations as Record<string, import('./continuum-types').MetadataValue> ?? {}), ...Object.fromEntries(Object.keys(applicable).map(key => [key, { observedAt: proof.finishedAt, proofId }])) } }
+    const fresh = await this.lifecycleDependencies.proof?.(proofId)
+    this.assertActive()
+    if (!fresh || lifecycleDigest(fresh) !== lifecycleDigest(proof)) throw new Error('AUTOMATION_SOURCE_CHANGED')
+    let result
+    if (metadata.status !== prior.metadata.status && lifecyclePolicy(metadata)) {
+      const isActive = () => this.isActive()
+      const authority = authorizeArtifactAgent(authenticatedAgentPrincipal('AUTOMATION', isActive), this.store.repositoryId, isActive)
+      result = await transitionLifecycle(this.store, this.lifecycleDependencies, { action: 'TRANSITION', artifactId, expectedRevision, toState: metadata.status!, reasonCode: lifecycleReasonFor[metadata.status!], evidenceRefs: [proofId] }, () => this.assertActive(), authority, { rawMarkdown, provenance })
+    } else result = { ...this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, rawMarkdown, metadata, provenance }, requestDigest)), state: 'PERSISTED' as const }
+    if (result.state === 'PERSISTED') this.changed()
+    return { ...result, conflicts }
   }
   get(artifactId: string): Artifact | null {
     this.assertActive(); this.reconcile?.(); this.assertActive()
