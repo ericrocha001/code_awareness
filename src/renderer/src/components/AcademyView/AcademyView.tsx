@@ -285,7 +285,7 @@ export const AcademyView: React.FC = () => {
         : delivery?.status === 'CONVERGED'
         ? 'distribuída'
         : 'distribuição pendente'
-      showMessage(`Versão ${detail.currentVersion} salva (${deliveryText}).`)
+      showMessage(`Versão ${detail.currentVersion} salva (${deliveryText}).${detail.publicationEligibility === 'PRIVATE' ? ' Publicação pública requer aprovação explícita.' : ''}`)
       await refresh(detail.id)
     } catch (error) { reportError(error) }
   }
@@ -294,7 +294,7 @@ export const AcademyView: React.FC = () => {
     const request = sequences.current.edit = (sequences.current.edit ?? 0) + 1
     const selectedId = selected?.id
     try {
-      if (selected?.scope === 'GLOBAL' && window.codeAwareness.getAcademyDraft) {
+      if (selected?.scope === 'GLOBAL' && selected.catalogRevision === undefined && window.codeAwareness.getAcademyDraft) {
         const draft = await window.codeAwareness.getAcademyDraft(selected.name)
         if (!mounted.current || request !== sequences.current.edit || selectedId !== latestSelection.current.id) return
         setDraftCommit(draft.workspaceCommitSha)
@@ -304,9 +304,21 @@ export const AcademyView: React.FC = () => {
     } catch (error) { reportError(error) }
   }
 
+  const requestPublicApproval = () => selected && setConfirmation({ title: `Aprovar publicação de ${selected.name}?`, description: 'Esta autorização permite incluir o conteúdo atual e suas próximas edições no repositório Git e no plugin públicos. Salvar e ativar continuam independentes desta autorização.', confirmLabel: 'Aprovar publicação', action: async () => {
+    await window.codeAwareness.approveAcademyPublicSkill(selected.id, selected.currentVersion, true)
+    await refresh(selected.id)
+  } })
+
   const requestGitRemoval = async () => {
     if (!selected) return
     try {
+      if (gitStatus?.convergence?.cutover === 'LOCAL') {
+        setConfirmation({ title: `Excluir ${selected.name}?`, description: 'A exclusão será persistida localmente com tombstone. Identidade e todas as versões serão preservadas. A sincronização Git é separada.', confirmLabel: 'Excluir Skill', destructive: true, action: async () => {
+          await window.codeAwareness.deleteAcademyGlobalSkill(selected.id, selected.currentVersion, true)
+          await refresh(selected.id)
+        } })
+        return
+      }
       const draft = await window.codeAwareness.getAcademyDraft(selected.name)
       setConfirmation({ title: `Preparar remoção de ${selected.name}?`, description: 'A remoção será salva como commit privado. O conteúdo oficial e o histórico permanecem até a publicação na main. A preferência de ativação local é independente.', confirmLabel: 'Salvar remoção no workspace', destructive: true, action: async () => {
         const result = await window.codeAwareness.deleteAcademyGitDraft({ skillId: selected.id, expectedVersion: selected.currentVersion, expectedDraftCommitSha: draft.workspaceCommitSha, confirmed: true })
@@ -442,7 +454,7 @@ export const AcademyView: React.FC = () => {
     <AcademyHeader query={query} status={status} conflictCount={snapshot.conflicts.length} onQueryChange={setQuery} onStatusChange={setStatus} onCreate={createNew} onOpenCatalog={() => setCatalogOpen(true)} onOpenOperations={() => setOperationsOpen(true)} />
     <div className="academy-layout">
       <SkillCatalog skills={visible} selectedId={selected?.id ?? null} open={catalogOpen} onClose={() => setCatalogOpen(false)} onSelect={(id) => void choose(id)} activationPending={activationPending !== null || isEditing} onSetEnabled={(skill) => void setEnabled(skill)} />
-      <SkillWorkspace selected={selected} isEditing={isEditing} activeTab={activeTab} skillMd={skillMd} scope={scope} projectIds={projectIds} destinations={snapshot.destinations} history={history} distribution={skillDistribution} onTabChange={setActiveTab} onSkillMdChange={setSkillMd} onScopeChange={setScope} onProjectIdsChange={setProjectIds} onEdit={() => void editSkill()} onSave={() => void save()} onCancel={cancelEditing} activationPending={activationPending !== null} onSetEnabled={() => selected && void setEnabled(selected)} onRemoveFromGit={() => void requestGitRemoval()} />
+      <SkillWorkspace selected={selected} isEditing={isEditing} activeTab={activeTab} skillMd={skillMd} scope={scope} projectIds={projectIds} destinations={snapshot.destinations} history={history} distribution={skillDistribution} onTabChange={setActiveTab} onSkillMdChange={setSkillMd} onScopeChange={setScope} onProjectIdsChange={setProjectIds} onEdit={() => void editSkill()} onSave={() => void save()} onCancel={cancelEditing} activationPending={activationPending !== null} onSetEnabled={() => selected && void setEnabled(selected)} onRemoveFromGit={() => void requestGitRemoval()} onApprovePublic={requestPublicApproval} />
       <OperationsRail
         hydration={hydration}
         knownPublication={knownPublication}
@@ -463,6 +475,12 @@ export const AcademyView: React.FC = () => {
           if (profile) applyGit(await window.codeAwareness.configureAcademyGitAutomation({ autoPublish, autoUpdate, confirmed: true, expectedRepositoryId: profile.githubRepositoryId, expectedBranch: profile.branch }))
         } })}
         onOpenGit={() => void window.codeAwareness.openAcademyGitRepository()}
+        onLocalCutover={() => setConfirmation({ title: 'Migrar para edição local?', description: 'O cutover exige main confirmada e workspace sem drafts ou candidatas pendentes. Skills privadas, versões e releases serão preservadas.', confirmLabel: 'Verificar e migrar', action: async () => {
+          const result = await window.codeAwareness.completeAcademyLocalCutover(true)
+          applyGit(result)
+          await refresh(selected?.id)
+          if (result.lastError) reportError(new Error(result.lastError))
+        } })}
         onPublishCandidate={() => {
           const head = gitStatus?.publication?.localHead
           if (!head) return

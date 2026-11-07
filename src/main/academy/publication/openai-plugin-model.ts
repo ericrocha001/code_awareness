@@ -20,15 +20,15 @@ export function canonicalJson(value: unknown): string {
 export function sha256(value: Buffer | string): string { return createHash('sha256').update(value).digest('hex') }
 
 export function buildCanonicalOpenAiSnapshot(store: AcademyStore | null, source?: AcademyGitSourceSnapshot): AcademyOpenAiSnapshotEntry[] {
-  const authority = source ? null : store?.getGitAuthority()
+  const authority = source || store?.usesLocalAuthority() ? null : store?.getGitAuthority()
   const git = source ?? (authority ? store!.getGitSnapshot(authority.repositoryId, authority.processedCommitSha) : null)
   if (git) return git.skills.map(skill => {
     const binding = git.canonicalVersions?.[skill.path]
-    if (!binding || hashAcademyPackage(skill.package) !== skill.packageHash) throw new AcademyError('GIT_SOURCE_VERSION_BINDING_REQUIRED')
+    if (!binding || binding.version < 1 || hashAcademyPackage(skill.package) !== skill.packageHash) throw new AcademyError('GIT_SOURCE_VERSION_BINDING_REQUIRED')
     return { skillId: binding.skillId, name: skill.name, academyVersion: binding.version, packageHash: skill.packageHash }
   }).sort((left, right) => left.skillId.localeCompare(right.skillId))
   if (!store || store.usesGitFirst()) return []
-  return store.list('ACTIVE').filter((skill) => skill.scope === 'GLOBAL').map((skill) => {
+  return store.list(store.usesLocalAuthority() ? undefined : 'ACTIVE').filter((skill) => skill.scope === 'GLOBAL' && (!store.usesLocalAuthority() || store.publicationEligibility(skill.id) === 'APPROVED' && !store.isDeleted(skill.id))).map((skill) => {
     const detail = store.get(skill.id)
     return { skillId: skill.id, name: skill.name, academyVersion: skill.currentVersion, packageHash: detail.current.packageHash }
   }).sort((left, right) => left.skillId.localeCompare(right.skillId))
@@ -49,7 +49,7 @@ export function buildGitOpenAiInput(store: AcademyStore | null, source: AcademyG
     for (const [path, text] of Object.entries({ 'SKILL.md': skill.package.skillMd, ...skill.package.artifacts })) expected.set(`${skill.path}/${path}`, Buffer.from(text))
   }
   if (source.authoredFiles['assets/logo.png']) expected.set('assets/logo.png', Buffer.from(source.authoredFiles['assets/logo.png'], 'base64'))
-  if (Object.keys(source.authoredFiles).length !== expected.size) throw new AcademyError('GIT_SOURCE_INVENTORY_MISMATCH')
+  if (Object.keys(source.authoredFiles).filter(path => path !== '.academy/identities.json').length !== expected.size) throw new AcademyError('GIT_SOURCE_INVENTORY_MISMATCH')
   const entries: ZipEntry[] = []
   const folded = new Set<string>()
   for (const [path, data] of expected) {

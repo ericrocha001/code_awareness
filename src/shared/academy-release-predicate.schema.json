@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://code-awareness.dev/attestations/academy-release/v1",
+  "title": "Unsigned Academy local release predicate v1",
+  "type": "object",
+  "required": ["schema", "builder", "buildSchema", "snapshotId", "catalogRevision", "contentFingerprint", "buildFingerprint", "version", "materials", "git", "signed"],
+  "properties": {
+    "schema": { "const": 1 },
+    "builder": { "const": "code-awareness/academy-plugin-worker" },
+    "buildSchema": { "const": 1 },
+    "snapshotId": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "catalogRevision": { "type": "integer", "minimum": 0 },
+    "contentFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "buildFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "version": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$" },
+    "materials": { "type": "array", "items": { "type": "object", "required": ["path", "sha256"], "properties": { "path": { "type": "string", "minLength": 1 }, "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" } }, "additionalProperties": false } },
+    "git": { "type": "object", "required": ["confirmation", "lastKnown"], "properties": { "confirmation": { "const": "UNVERIFIED" }, "lastKnown": { "type": ["object", "null"] } }, "additionalProperties": false },
+    "signed": { "const": false }
+  },
+  "additionalProperties": false
+}

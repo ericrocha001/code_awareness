@@ -12,6 +12,7 @@ import { observeStableSkillDirectory, readSkillDirectory, removeSkillDirectory, 
 import { AcademyDistributionService } from './distribution/academy-distribution-service'
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
+import { canonicalJson } from './publication/openai-plugin-model'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
 import type { AcademyGitBuildRequest } from '../../shared/types/academy-git-source-types'
 import type { AcademyOpenAiRelease } from '../../shared/types/academy-types'
@@ -218,6 +219,8 @@ export class AcademyService {
       version: value.currentVersion,
       packageHash: value.current.packageHash,
       scope: value.scope,
+      catalogRevision: value.catalogRevision,
+      publicationEligibility: value.publicationEligibility,
       projectIds: value.projectIds,
       distribution: { status: distributionStatus }
     }
@@ -227,7 +230,7 @@ export class AcademyService {
   async saveNewSkill(input: AcademyCreateInput, mode: 'RECEIPT'): Promise<AcademyMutationReceipt | AcademyDraftReceipt>
   async saveNewSkill(input: AcademyCreateInput, mode?: 'RECEIPT') {
     this.assertNotClosed()
-    if (input.scope === 'GLOBAL' && this.gitSync) return this.gitSync.saveDraft(input)
+    if (input.scope === 'GLOBAL' && this.gitSync && !this.store.usesLocalAuthority()) return this.gitSync.saveDraft(input)
     return mode ? this.create(input, mode) : this.create(input)
   }
 
@@ -236,6 +239,7 @@ export class AcademyService {
   async create(input: AcademyCreateInput, mode?: 'RECEIPT') {
     this.assertNotClosed()
     const value = this.store.create(input)
+    this.gitSync?.scheduleLocalChange()
     this.emitCanonicalChange()
     this.scheduleReconciliationForSkill(value.id)
     if (mode === 'RECEIPT') return this.immediateReceipt(value)
@@ -246,7 +250,7 @@ export class AcademyService {
   async saveSkill(input: AcademyUpdateInput, mode: 'RECEIPT'): Promise<AcademyMutationReceipt | AcademyDraftReceipt>
   async saveSkill(input: AcademyUpdateInput, mode?: 'RECEIPT') {
     this.assertNotClosed()
-    if ((input.scope === 'GLOBAL' || this.store.get(input.skillId).scope === 'GLOBAL') && this.gitSync) return this.gitSync.saveDraft(input)
+    if ((input.scope === 'GLOBAL' || this.store.get(input.skillId).scope === 'GLOBAL') && this.gitSync && !this.store.usesLocalAuthority()) return this.gitSync.saveDraft(input)
     return mode ? this.update(input, mode) : this.update(input)
   }
 
@@ -255,6 +259,7 @@ export class AcademyService {
   async update(input: AcademyUpdateInput, mode?: 'RECEIPT') {
     this.assertNotClosed()
     const value = this.store.update(input)
+    this.gitSync?.scheduleLocalChange()
     this.emitCanonicalChange()
     this.scheduleReconciliationForSkill(value.id)
     if (mode === 'RECEIPT') return this.immediateReceipt(value)
@@ -267,6 +272,35 @@ export class AcademyService {
     this.emitCanonicalChange()
     this.scheduleReconciliationForSkill(value.id)
     return value
+  }
+
+  approvePublicSkill(skillId: string, expectedVersion: number, confirmed: boolean) {
+    this.assertNotClosed()
+    if (confirmed !== true) throw new AcademyError('PUBLICATION_ELIGIBILITY_APPROVAL_REQUIRED')
+    const skill = this.store.approvePublicSkill(skillId, expectedVersion)
+    this.emitCanonicalChange()
+    this.gitSync?.scheduleLocalChange()
+    return skill
+  }
+
+  deleteGlobalSkill(skillId: string, expectedVersion: number, confirmed: boolean) {
+    this.assertNotClosed()
+    if (confirmed !== true) throw new AcademyError('GIT_DELETION_REVIEW_REQUIRED')
+    this.store.deleteGlobalSkill(skillId, expectedVersion)
+    this.emitCanonicalChange()
+    this.scheduleReconciliationForSkill(skillId)
+    this.gitSync?.scheduleLocalChange()
+    return { state: 'PERSISTED' as const, skillId, catalogRevision: this.store.catalogRevision() }
+  }
+
+  restoreDeletedGlobalSkill(skillId: string, expectedVersion: number, confirmed: boolean) {
+    this.assertNotClosed()
+    if (confirmed !== true) throw new AcademyError('GIT_REINTRODUCTION_REVIEW_REQUIRED')
+    const skill = this.store.restoreDeletedGlobalSkill(skillId, expectedVersion)
+    this.emitCanonicalChange()
+    this.scheduleReconciliationForSkill(skillId)
+    this.gitSync?.scheduleLocalChange()
+    return skill
   }
 
   async archive(id: string, expectedVersion: number) {
@@ -316,6 +350,16 @@ export class AcademyService {
   }
   async reviewConflict(id: string, reconciledPackage?: AcademyPackage): Promise<AcademyConflictReview> {
     const conflict = this.store.getConflict(id)
+    if (conflict.origin === 'GIT' && this.store.usesLocalAuthority()) {
+      const review = this.store.reviewLocalGitConflict(id)
+      if (reconciledPackage) throw new AcademyError('GIT_CONFLICT_CHOOSE_LOCAL_OR_REMOTE')
+      const value: AcademyConflictReview = { conflict, candidateHash: conflict.divergentPackage ? hashAcademyPackage(conflict.divergentPackage) : null,
+        historicalVersion: null, cause: conflict.divergentPackage ? 'DIVERGENT' : 'MISSING', canonicalHash: review.current.current.packageHash,
+        currentVersion: review.current.currentVersion, diskHash: 'NOT_APPLICABLE', diff: canonicalJson(review.context), token: review.token,
+        safeCanonical: false, reason: 'Conflito Git persistido: revisar base, local e remoto antes de resolver.' }
+      this.conflictReviews.set(value.token, value)
+      return value
+    }
     if (conflict.status !== 'OPEN') throw new Error('CONFLICT_NOT_FOUND')
     const current = this.store.get(conflict.skillId)
     const destination = this.store.listDestinations().find((item) => item.id === conflict.projectId)
@@ -403,6 +447,13 @@ export class AcademyService {
   }
 
   private async resolveConflictMutation(id: string, resolution: 'CANONICAL' | 'DIVERGENT', reconciledPackage?: AcademyPackage, approval?: { token: string; confirmed: boolean }) {
+    const gitConflict = this.store.getConflict(id)
+    if (gitConflict.origin === 'GIT' && this.store.usesLocalAuthority()) {
+      if (!approval || reconciledPackage) throw new AcademyError('CONFIRMED_CONFLICT_REVIEW_REQUIRED')
+      const result = this.store.resolveLocalGitConflict(id, approval.token, resolution === 'CANONICAL' ? 'LOCAL' : 'REMOTE', approval.confirmed)
+      this.gitSync?.scheduleLocalChange()
+      return result.id
+    }
     if (!approval?.confirmed || !this.conflictReviews.has(approval.token)) throw new Error('CONFIRMED_CONFLICT_REVIEW_REQUIRED')
     const reviewed = this.conflictReviews.get(approval.token)!
     if (reviewed.conflict.id !== id) throw new Error('CONFLICT_STATE_CHANGED')
@@ -662,7 +713,7 @@ export class AcademyService {
     this.packageRevisions.bootstrapBaseline()
     const profile = this.store.getOpenAiPluginProfile()
     if (!profile) throw new Error('OPENAI_PLUGIN_PROFILE_MISSING')
-    if (profile.openAiInterface.shortDescription !== 'Academy procedural skills') {
+    if (!this.store.usesLocalAuthority() && profile.openAiInterface.shortDescription !== 'Academy procedural skills') {
       this.store.setOpenAiInterface({ ...profile.openAiInterface, shortDescription: 'Academy procedural skills' })
     }
     return this.packageRevisions.resolveCurrent()
@@ -701,9 +752,10 @@ export class AcademyService {
   }
   listOpenAiReleases() { return this.openAiPublication.listReleases() }
   getOpenAiRelease(id: string) { return this.openAiPublication.getRelease(id) }
-  prepareOpenAiRelease(): AcademyOpenAiRelease
+  prepareOpenAiRelease(): AcademyOpenAiRelease | Promise<AcademyOpenAiRelease>
   prepareOpenAiRelease(input: AcademyGitBuildRequest): Promise<AcademyOpenAiRelease>
   prepareOpenAiRelease(input?: AcademyGitBuildRequest): AcademyOpenAiRelease | Promise<AcademyOpenAiRelease> {
+    if (this.store.usesLocalAuthority() && input?.mode !== 'REBUILD') return this.openAiPublication.prepareLocalRelease()
     if (input) {
       if (!this.gitSync) throw new AcademyError('GIT_SYNC_NOT_CONFIGURED')
       const requestId = this.openAiPublication.beginSourceCheck(), started = performance.now()

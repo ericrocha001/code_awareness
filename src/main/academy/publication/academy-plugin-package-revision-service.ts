@@ -43,6 +43,7 @@ export class AcademyPluginPackageRevisionService {
     if (!existing) return this.persistRevision(input)
     if (compareSemver(existing.version, input.version) > 0) return existing
     if (existing.version === input.version && existing.contentFingerprint === fingerprints.contentFingerprint) return existing
+    if (this.store.usesLocalAuthority()) return existing
 
     const repaired: AcademyPluginPackageRevision = {
       id: randomUUID(),
@@ -56,7 +57,7 @@ export class AcademyPluginPackageRevisionService {
 
   resolveCurrent(): AcademyPluginPackageRevision {
     const authority = this.store.getGitAuthority()
-    if (authority) {
+    if (authority && !this.store.usesLocalAuthority()) {
       const header = this.store.getGitSnapshotHeader(authority.repositoryId, authority.processedCommitSha)
       const projection = this.store.getGitBuildProjection(authority.repositoryId, authority.processedCommitSha)
       const preflight = this.preflight(header, projection)
@@ -68,7 +69,7 @@ export class AcademyPluginPackageRevisionService {
     const profile = this.requireProfile()
     if (!this.store.getCurrentPluginPackageRevision()) this.bootstrapBaseline()
     const snapshot = buildCanonicalOpenAiSnapshot(this.store)
-    const manifest = buildOpenAiManifest(profile, '0.0.0')
+    const manifest = { ...this.store.localAuthoredMetadata()?.manifest, ...buildOpenAiManifest(profile, '0.0.0') }
     const fingerprints = this.fingerprints(profile, snapshot, manifest)
     const existing = this.store.getPluginPackageRevisionByFingerprint(fingerprints.contentFingerprint)
     if (existing) return existing
@@ -162,7 +163,7 @@ export class AcademyPluginPackageRevisionService {
     const portableManifest = structuredClone(manifest) as Record<string, any>
     delete portableManifest.version
     const profileFingerprint = sha256(canonicalJson(portableManifest))
-    const assetHash = readAssetHash(profile)
+    const assetHash = profile.logoPath === 'sqlite:assets/logo.png' ? sha256(this.store.getAuthoredLogo() ?? 'NO_ASSET') : readAssetHash(profile)
     const skillSnapshotHash = hashOpenAiSnapshot(snapshot)
     const contentFingerprint = sha256(canonicalJson({
       skills: snapshot.map((item) => ({

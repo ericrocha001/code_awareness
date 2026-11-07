@@ -23,6 +23,7 @@ export interface AcademyPluginTask {
   artifactPath?: string
   expectedZipSha?: string
   downloadsPath?: string
+  sealed?: { entries: Array<{ path: string; data: string }>; fingerprint: string }
 }
 
 function safeArtifact(root: string, file: string): void {
@@ -78,14 +79,20 @@ async function execute(task: AcademyPluginTask) {
     archive = await readFile(artifactPath)
     if (sha256(archive) !== task.expectedZipSha) throw new AcademyError('OPENAI_RELEASE_ARTIFACT_DRIFT')
   } else {
-    const source = JSON.parse(task.snapshotJson!) as AcademyGitSourceSnapshot
-    if (source.repositoryId !== projection.sourceRepositoryId || source.sourceCommitSha !== projection.sourceCommitSha || source.managedTreeHash !== projection.managedTreeHash) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
-    const manifest = JSON.parse(Buffer.from(source.authoredFiles['plugin.json'], 'base64').toString('utf8'))
-    if (manifest.version !== projection.pluginVersion || sha256(canonicalJson(manifest)) !== projection.manifestFingerprint) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
-    const entries = Object.entries(source.authoredFiles).map(([path, encoded]) => {
-      assertSourcePath(path)
-      return { path: `academy-skills/${path}`, data: path === 'plugin.json' ? Buffer.from(`${canonicalJson(manifest)}\n`) : Buffer.from(encoded, 'base64') }
-    })
+    let entries: ZipEntry[]
+    if (task.sealed) {
+      entries = task.sealed.entries.map(entry => ({ path: entry.path, data: Buffer.from(entry.data, 'base64') }))
+      if (entriesFingerprint(entries) !== task.sealed.fingerprint || task.sealed.fingerprint !== projection.entriesFingerprint) throw new AcademyError('OPENAI_SEALED_SNAPSHOT_MISMATCH')
+    } else {
+      const source = JSON.parse(task.snapshotJson!) as AcademyGitSourceSnapshot
+      if (source.repositoryId !== projection.sourceRepositoryId || source.sourceCommitSha !== projection.sourceCommitSha || source.managedTreeHash !== projection.managedTreeHash) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
+      const manifest = JSON.parse(Buffer.from(source.authoredFiles['plugin.json'], 'base64').toString('utf8'))
+      if (manifest.version !== projection.pluginVersion || sha256(canonicalJson(manifest)) !== projection.manifestFingerprint) throw new AcademyError('GIT_SOURCE_SNAPSHOT_NOT_VERIFIED')
+      entries = Object.entries(source.authoredFiles).filter(([path]) => path !== '.academy/identities.json').map(([path, encoded]) => {
+        assertSourcePath(path)
+        return { path: `academy-skills/${path}`, data: path === 'plugin.json' ? Buffer.from(`${canonicalJson(manifest)}\n`) : Buffer.from(encoded, 'base64') }
+      })
+    }
     if (entries.length !== projection.entryCount) throw new AcademyError('GIT_SOURCE_INVENTORY_MISMATCH')
     validateOpenAiPluginPackage(entries, profile, projection.snapshot)
     archive = createDeterministicZip(entries)

@@ -82,6 +82,9 @@ declare global {
       createAcademySkill: (input: Omit<AcademyCreateInput, 'origin'>) => Promise<AcademySkillDetail | AcademyDraftReceipt>
       updateAcademySkill: (input: Omit<AcademyUpdateInput, 'origin'>) => Promise<AcademySkillDetail | AcademyDraftReceipt>
       getAcademyDraft: (name: string) => Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }>
+      completeAcademyLocalCutover: (confirmed: boolean) => Promise<AcademyGitStatusProjection>
+      approveAcademyPublicSkill: (id: string, version: number, confirmed: boolean) => Promise<AcademySkillDetail>
+      deleteAcademyGlobalSkill: (id: string, version: number, confirmed: boolean) => Promise<unknown>
       onAcademyChanged: (callback: (event?: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => void) => (() => void)
       publishAcademyGit: (expected: { localHead: string; remoteHead: string | null }) => Promise<AcademyGitStatusProjection>
       publishAcademyGitCandidate: (input: { branch: string; expectedHead: string; confirmed: boolean }) => Promise<AcademyGitStatusProjection>

@@ -91,7 +91,7 @@ function assertValidFrontmatter(value: string): void {
   }
 }
 
-function validatePngLogo(value: Buffer, errors: string[]): void {
+export function validatePngLogo(value: Buffer, errors: string[]): void {
   if (value.length > 5 * 1024 * 1024) errors.push('LOGO_TOO_LARGE')
   if (value.length < 24 || value.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') { errors.push('LOGO_UNSUPPORTED_FORMAT'); return }
   const width = value.readUInt32BE(16); const height = value.readUInt32BE(20)
