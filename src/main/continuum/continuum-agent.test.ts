@@ -49,6 +49,11 @@ it('registers dedicated tools and enforces strict atomic CAS via real MCP HTTP a
     expect((await local('transition_artifact_lifecycle', { ...scope, ...transition })).result).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'AUTHORITY_APPROVAL_REQUIRED' })
     expect((await local('transition_artifact_lifecycle', { ...scope, ...transition, repositoryId: 'B' })).error.code).toBe('REPOSITORY_MISMATCH')
     expect((await call('transition_artifact_lifecycle', { ...transition, approved: true })).isError).toBe(true)
+    const manual = { ...transition, action: 'ASSESS', evidenceMode: 'REVIEWED_ATTESTATION', attestation: { rationale: 'Deliberate operator review of the selected plan.', limitations: 'Semantic criteria require human inspection; no automatic verification.', references: [{ type: 'ARTIFACT', repositoryId: 'A', artifactId: plan.artifactId, expectedRevision: 1 }] } }
+    const beforeAssessment = service.get(plan.artifactId)
+    expect(await read('transition_artifact_lifecycle', manual)).toMatchObject({ state: 'REVIEW_REQUIRED', review: { evidenceMode: 'REVIEWED_ATTESTATION', attestation: { origin: 'AGENT_ATTESTED' } } })
+    expect((await local('transition_artifact_lifecycle', { ...scope, ...manual })).result).toMatchObject({ state: 'REVIEW_REQUIRED', review: { evidenceMode: 'REVIEWED_ATTESTATION' } })
+    expect(service.get(plan.artifactId)).toEqual(beforeAssessment)
     expect(service.get(plan.artifactId)!.metadata.status).toBe('PENDING')
     expect((await local('list_continuum_tags', scope, 'forged')).error.code).toBe('UNAUTHORIZED')
     expect((await local('list_continuum_tags', { ...scope, repositoryId: 'B' })).error.code).toBe('REPOSITORY_MISMATCH')

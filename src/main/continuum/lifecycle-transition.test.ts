@@ -31,6 +31,87 @@ function setup(approve: LifecycleDependencies['approve'] = allow) {
   return { ...f, service, dependencies, proofs, proof, plan, handoff, request }
 }
 
+function manualRequest(f: ReturnType<typeof setup>): LifecycleRequest {
+  f.proof.freshness = 'UNVERIFIABLE'
+  return { ...f.request, evidenceMode: 'REVIEWED_ATTESTATION', evidenceRefs: [], attestation: {
+    rationale: 'Reviewed delivery report and existing executor-reported test evidence.',
+    limitations: 'Executor report has no independently verified checkout freshness; human criteria review required.',
+    references: [
+      { type: 'ARTIFACT', repositoryId: f.store.repositoryId, artifactId: f.handoff.artifactId, expectedRevision: 1 },
+      { type: 'LEDGER_PROOF', repositoryId: f.store.repositoryId, proofId: f.proof.proofId }
+    ]
+  } }
+}
+
+it('ratifies legacy semantics without changing text, preserves UNVERIFIABLE, and closes only the accepted plan revision', async () => {
+  const f = setup()
+  const old = f.store.get(f.handoff.artifactId)!
+  const raw = old.rawMarkdown.replace('kind: IMPLEMENTATION_HANDOFF', 'kind: IMPLEMENTATION_HANDOFF\nstatus: VALIDATED')
+  const legacy = f.store.createPublished({ artifactId: 'legacy-ratification', rawMarkdown: raw, metadata: { ...old.metadata, status: 'VALIDATED' } }, 'a'.repeat(64)).artifact
+  const request = manualRequest(f)
+  request.artifactId = legacy.artifactId
+  request.attestation!.references[0] = { type: 'ARTIFACT', repositoryId: f.store.repositoryId, artifactId: legacy.artifactId, expectedRevision: 1 }
+  const before = f.store.get(legacy.artifactId)
+  expect(await f.service.transitionLifecycle({ ...request, action: 'ASSESS' })).toMatchObject({ state: 'REVIEW_REQUIRED', review: { evidenceMode: 'REVIEWED_ATTESTATION', evidence: [], attestation: { origin: 'AGENT_ATTESTED', references: [expect.anything(), expect.objectContaining({ classification: 'PASSED/UNVERIFIABLE' })] } } })
+  expect(f.store.get(legacy.artifactId)).toEqual(before)
+  expect(await f.service.transitionLifecycle(request)).toMatchObject({ state: 'PERSISTED', revision: 2 })
+  expect(f.store.get(legacy.artifactId)!.rawMarkdown).toBe(raw)
+  expect(f.proof.freshness).toBe('UNVERIFIABLE')
+  expect(await f.service.transitionLifecycle(request)).toMatchObject({ replayed: true, revision: 2 })
+  const closure: LifecycleRequest = { ...request, artifactId: f.plan.artifactId, toState: 'COMPLETED', reasonCode: 'CLOSURE_ACCEPTED', supportingArtifactId: legacy.artifactId,
+    attestation: { ...request.attestation!, references: [{ type: 'ARTIFACT', repositoryId: f.store.repositoryId, artifactId: legacy.artifactId, expectedRevision: 2 }] } }
+  expect(await f.service.transitionLifecycle({ ...closure, evidenceMode: 'AUTO_VERIFIED', attestation: undefined })).toMatchObject({ reason: 'REVIEWED_CLOSURE_REQUIRES_ATTESTATION' })
+  expect(await f.service.transitionLifecycle(closure)).toMatchObject({ state: 'PERSISTED', revision: 2 })
+  const reopened = new ArtifactStore(f.path, f.store.repositoryId)
+  try { expect(lifecycleReceipt(reopened.get(legacy.artifactId)!)?.review.evidenceMode).toBe('REVIEWED_ATTESTATION'); expect(reopened.get(f.plan.artifactId)!.metadata.status).toBe('COMPLETED') } finally { reopened.close() }
+})
+
+it('requires contextual scoped sources and independent approval, and rejects forged client authority', async () => {
+  const f = setup(async () => null), request = manualRequest(f)
+  const cases: LifecycleRequest[] = [
+    { ...request, attestation: undefined },
+    { ...request, attestation: { ...request.attestation!, references: [] } },
+    { ...request, attestation: { ...request.attestation!, references: [{ type: 'ARTIFACT', repositoryId: 'other-repo', artifactId: f.handoff.artifactId, expectedRevision: 1 }] } },
+    { ...request, attestation: { ...request.attestation!, references: [{ type: 'ARTIFACT', repositoryId: f.store.repositoryId, artifactId: 'missing', expectedRevision: 1 }] } },
+    { ...request, attestation: { ...request.attestation!, references: [{ type: 'ARTIFACT', repositoryId: f.store.repositoryId, artifactId: f.handoff.artifactId, expectedRevision: 9 }] } },
+    { ...request, attestation: { ...request.attestation!, references: [{ type: 'LEDGER_PROOF', repositoryId: f.store.repositoryId, proofId: 'missing' }] } }
+  ]
+  for (const invalid of cases) expect(await f.service.transitionLifecycle(invalid)).toMatchObject({ state: 'REVIEW_REQUIRED', reason: 'CONTEXTUAL_ATTESTATION_REQUIRED' })
+  expect(await f.service.transitionLifecycle(request)).toMatchObject({ reason: 'AUTHORITY_APPROVAL_REQUIRED' })
+  expect(() => parseContinuumAgentRequest('transition_artifact_lifecycle', { ...request, approved: true })).toThrow('INVALID_ARGUMENT')
+  expect(() => parseContinuumAgentRequest('transition_artifact_lifecycle', { ...request, evidenceMode: 'AUTO_VERIFIED' })).toThrow('INVALID_ARGUMENT')
+  expect(parseContinuumAgentRequest('transition_artifact_lifecycle', request)).toEqual(request)
+  expect(f.store.get(f.handoff.artifactId)!.revision).toBe(1)
+  f.proof.commandProfile!.source!.repositoryId = 'other-repo'
+  expect(await f.service.transitionLifecycle(request)).toMatchObject({ reason: 'CONTEXTUAL_ATTESTATION_REQUIRED' })
+})
+
+it('rejects stale target, changed support and changed referenced proof during manual approval', async () => {
+  for (const change of ['target', 'support', 'proof'] as const) {
+    const f = setup(), request = manualRequest(f)
+    f.dependencies.approve = async review => {
+      if (change === 'proof') f.proof.summary = 'Changed after operator inspection'
+      else { const id = change === 'target' ? f.handoff.artifactId : f.plan.artifactId; f.service.update(id, 1, f.store.get(id)!.rawMarkdown + '\nChanged') }
+      return allow(review)
+    }
+    if (change === 'target') await expect(f.service.transitionLifecycle(request)).rejects.toThrow('REVISION_CONFLICT')
+    else expect(await f.service.transitionLifecycle(request)).toMatchObject({ reason: change === 'support' ? 'ARTIFACT_CONTEXT_CHANGED' : 'ATTESTATION_CHANGED_DURING_APPROVAL' })
+    expect(lifecycleReceipt(f.store.get(f.handoff.artifactId)!)).toBeNull()
+  }
+})
+
+it('requires the approved Handoff and rechecks its attested evidence before plan closure', async () => {
+  const f = setup(), request = manualRequest(f)
+  const closure: LifecycleRequest = { ...request, artifactId: f.plan.artifactId, toState: 'COMPLETED', reasonCode: 'CLOSURE_ACCEPTED' }
+  expect(await f.service.transitionLifecycle(closure)).toMatchObject({ reason: 'VALIDATED_CLOSURE_REQUIRED' })
+  await f.service.transitionLifecycle(request)
+  f.proof.summary = 'Changed after ratification'
+  expect(await f.service.transitionLifecycle(closure)).toMatchObject({ reason: 'CONTEXTUAL_ATTESTATION_REQUIRED' })
+  closure.attestation = { ...request.attestation!, references: [{ type: 'ARTIFACT', repositoryId: f.store.repositoryId, artifactId: f.handoff.artifactId, expectedRevision: 2 }] }
+  expect(await f.service.transitionLifecycle(closure)).toMatchObject({ reason: 'CLOSURE_ATTESTATION_CHANGED' })
+  expect(f.store.get(f.plan.artifactId)!.metadata.status).toBe('PENDING')
+})
+
 it('persists an authorized Handoff and real closure once, with MCP readback and restart-safe receipts', async () => {
   const f = setup(), raw = f.service.get(f.handoff.artifactId)!.rawMarkdown
   const accepted = await executeContinuumAgent(f.service, 'transition_artifact_lifecycle', f.request)

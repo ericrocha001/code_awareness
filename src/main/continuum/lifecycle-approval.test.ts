@@ -21,3 +21,12 @@ it('requires explicit criteria review and defaults to cancellation; records nati
   expect(options).toMatchObject({ defaultId: 0, cancelId: 0, checkboxChecked: false })
   expect(options.detail).toContain('artifact-fixture@4'); expect(options.detail).toContain(review.target.contentHash)
 })
+it('shows attestation limitations and real source classifications without exposing proof payloads', async () => {
+  native.dialog.mockResolvedValue({ response: 1, checkboxChecked: true })
+  await approveLifecycleInDesktop({ ...review, evidenceMode: 'REVIEWED_ATTESTATION', attestation: { origin: 'AGENT_ATTESTED', rationale: 'Operator should review report', limitations: 'Checkout cannot be verified', references: [{ type: 'LEDGER_PROOF', repositoryId: 'repo-A', proofId: 'proof-id', digest: 'c'.repeat(64), classification: 'PASSED/UNVERIFIABLE' }] } })
+  const detail = native.dialog.mock.calls[0][1].detail
+  expect(detail).toContain('NÃO É VERIFICAÇÃO AUTOMÁTICA')
+  expect(detail).toContain('Checkout cannot be verified')
+  expect(detail).toContain('PASSED/UNVERIFIABLE')
+  expect(detail).toContain('AGENT_ATTESTED')
+})

@@ -75,6 +75,16 @@ Prova de integração isolada em Electron Main, SQLite e named pipe reais:
 node scripts/continuum/local-e2e.cjs
 ```
 
+## Reconciliação P5
+
+`transition_artifact_lifecycle` conserva `ASSESS` read-only, CAS e aprovação independente. O modo omitido ou `AUTO_VERIFIED` preserva os gates P4. Quando o runtime anunciar `evidenceMode`, o fallback explícito `REVIEWED_ATTESTATION` aceita `attestation: {rationale, limitations, references}`. São aceitas até dez referências tipadas do mesmo repositório: `{type: "ARTIFACT", repositoryId, artifactId, expectedRevision}` ou `{type: "LEDGER_PROOF", repositoryId, proofId}`. Artifacts devem ser o alvo/suporte ou estar relacionados a eles. Logs, commits e relatórios precisam estar preservados em um Artifact revisionado, sem paths arbitrários.
+
+Comece por ASSESS. TRANSITION solicita confirmação editorial independente, apresenta as limitações declaradas e as classificações reais das fontes, e revalida tudo antes da escrita. Uma prova UNVERIFIABLE não vira CURRENT. Sem autoridade ou referência contextual válida, o retorno permanece REVIEW_REQUIRED. Nunca forneça approved/principal nem altere status por update. Handoff autoral legado VALIDATED pode ser ratificado sem mudar texto/status; COMPLETED exige o receipt desse Handoff contra a revisão exata do Plano e aprovação separada. Um Handoff ratificado não concede fechamento AUTO_VERIFIED.
+
+Metadata comum continua editável por update com CAS. Preserve tags/status e campos autorais. Registre fatos manuais como AGENT_ATTESTED com atribuição declarada, escopo, referência e limitações, distinguindo-os das observações nativas; divergências devem ficar explícitas. IDs, repositoryId, revisões, timestamps operacionais, hash e proveniência nativa são reservados ao servidor.
+
+Se o endpoint já anunciar a operação e um consumidor não a receber, renove sua conexão/snapshot e verifique tools/list e ASSESS. Não duplique o contrato backend. Source, runtime carregado, distribuição da Skill e recarga do cliente são evidências distintas.
+
 ## Diagnóstico compartilhado
 
 A entrada legada preserva `APP_UNAVAILABLE` e exit code não zero, acrescentando `stage` e `reason` ao erro. Perfil, descriptor e conexão são diagnosticados pela mesma implementação da CLI nova. Consulte `scripts/local-agent/LOCAL.md` para remediação e autorização pontual no Codex Windows; `--profile` permanece um override explícito e não concede permissão ao pipe.

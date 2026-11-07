@@ -6,7 +6,7 @@ import sharp from 'sharp'
 import type { Artifact, ArtifactReceipt, CreateArtifactInput, IContinuumService, ListArtifactsFilter, ArtifactPage, IArtifactGraphReader, IArtifactSuggestionReader } from './continuum-types'
 import type { TransportEnvelope } from './artifact-envelope'
 import { ArtifactStore } from './artifact-store'
-import { parseArtifactMarkdown } from './artifact-metadata'
+import { canonicalJson, normalizeMetadataValue, parseArtifactMarkdown } from './artifact-metadata'
 import { canonicalizePublication } from './artifact-publication'
 import type { ArtifactSemanticFields, PublicationReceipt } from './continuum-types'
 import { publicationRequestDigest } from '../../shared/types/publication-provenance-types'
@@ -249,10 +249,16 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
   private publicationProvenance() {
     return { publication: { schemaVersion: 1, publisher: 'CONTINUUM_SERVICE', repositoryId: this.store.repositoryId, sessionEvidence: 'UNAVAILABLE' } }
   }
+  private assertDocumentaryMetadata(metadata: Artifact['metadata'], prior?: Artifact['metadata']) {
+    for (const key of ['artifactId', 'repositoryId', 'revision', 'createdAt', 'updatedAt', 'contentHash', 'provenance', 'nativeArtifact', 'publication', 'lifecycle']) {
+      if (canonicalJson(normalizeMetadataValue(metadata[key] ?? null)) !== canonicalJson(normalizeMetadataValue(prior?.[key] ?? null))) throw new Error('AUTHORITATIVE_METADATA_RESERVED: ' + key)
+    }
+  }
   publish(rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt {
     this.assertActive(); this.reconcile?.(); this.assertActive()
     const publication = canonicalizePublication(rawMarkdown, fields)
     const { metadata } = publication
+    this.assertDocumentaryMetadata(metadata)
     this.assertAgentTags(metadata)
     const receipt = this.publishedReceipt(this.store.createPublished({ artifactId: 'artifact-' + randomUUID(), ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('PUBLISH', { rawMarkdown, ...fields })))
     this.changed()
@@ -263,7 +269,9 @@ export class ContinuumService implements IContinuumService, IVisualContinuumServ
     const prior = this.store.get(artifactId)
     if (!prior) throw new Error('ARTIFACT_NOT_FOUND: ' + artifactId)
     const publication = canonicalizePublication(rawMarkdown, fields, prior.metadata)
+    this.assertDocumentaryMetadata(publication.metadata, prior.metadata)
     if (publication.metadata.status !== prior.metadata.status && (lifecyclePolicy(prior.metadata) || lifecyclePolicy(publication.metadata))) throw new Error('LIFECYCLE_TRANSITION_REQUIRED')
+    if (lifecyclePolicy(prior.metadata) && lifecyclePolicy(prior.metadata)?.key !== lifecyclePolicy(publication.metadata)?.key) throw new Error('LIFECYCLE_POLICY_CHANGE_REQUIRES_REVIEW')
     this.assertAgentTags(publication.metadata, prior.metadata)
     const receipt = this.publishedReceipt(this.store.updatePublished({ artifactId, expectedRevision, ...publication, provenance: this.publicationProvenance() }, publicationRequestDigest('UPDATE', { rawMarkdown, artifactId, expectedRevision, ...fields })))
     this.changed()

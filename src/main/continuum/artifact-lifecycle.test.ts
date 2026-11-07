@@ -1,7 +1,7 @@
 import { afterEach, expect, it } from 'vitest'
 import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
 import { ContinuumService } from './continuum-service'
-import { executeGetArtifact, executePublishArtifact } from './continuum-mcp'
+import { executeGetArtifact, executePublishArtifact, executeUpdateArtifact } from './continuum-mcp'
 import { editArtifactStatus } from './artifact-lifecycle-policy'
 const closes: (() => void)[] = []
 afterEach(() => { closes.splice(0).reverse().forEach(close => close()) })
@@ -62,4 +62,25 @@ it('U3 publication rehearsal keeps agent input semantic across Plan, Handoff, Wo
     expect(artifact.revision).toBe(1); expect(artifact.createdAt).toBeTruthy(); expect(artifact.contentHash).toMatch(/^[a-f0-9]{64}$/)
     expect(Object.keys(input)).toEqual(['rawMarkdown', 'kind'])
   }
+})
+
+it('preserves native observations alongside scoped agent declarations through ordinary MCP CAS edits', () => {
+  const f = setup(), published = f.service.publish(body, { kind: 'EXECUTABLE_PLAN' })
+  const initial = f.store.get(published.artifactId)!
+  const observation = { origin: 'HOOK_OBSERVED', checkpoint: 'checkpoint-fixture' }
+  f.store.updatePublished({ artifactId: initial.artifactId, expectedRevision: 1, rawMarkdown: initial.rawMarkdown, metadata: initial.metadata, provenance: { hookObservation: observation } }, 'a'.repeat(64))
+  const current = f.store.get(initial.artifactId)!
+  const declaration = '\nagentAttestations:\n  - origin: AGENT_ATTESTED\n    reference: report-fixture\n    scope: missing-hook-observation\n    limitations: Not independently verified\n'
+  const raw = current.rawMarkdown.replace('status: PENDING', 'status: PENDING' + declaration)
+  const updated = executeUpdateArtifact(f.service, { artifactId: initial.artifactId, expectedRevision: 2, rawMarkdown: raw })
+  expect(updated.isError).not.toBe(true)
+  expect(f.store.get(initial.artifactId)).toMatchObject({ revision: 3, metadata: { status: 'PENDING', agentAttestations: [{ origin: 'AGENT_ATTESTED' }] }, provenance: { hookObservation: observation } })
+  expect(executeUpdateArtifact(f.service, { artifactId: initial.artifactId, expectedRevision: 2, rawMarkdown: raw }).isError).toBe(true)
+  const revised = f.store.get(initial.artifactId)!
+  f.store.updatePublished({ artifactId: revised.artifactId, expectedRevision: 3, rawMarkdown: revised.rawMarkdown, metadata: revised.metadata, provenance: { hookObservation: { ...observation, checkpoint: 'next-checkpoint' } } }, 'b'.repeat(64))
+  expect(f.store.get(initial.artifactId)!.metadata.agentAttestations).toEqual(revised.metadata.agentAttestations)
+  expect(() => f.service.update(initial.artifactId, 4, raw.replace('status: PENDING', 'status: COMPLETED'))).toThrow('LIFECYCLE_TRANSITION_REQUIRED')
+  expect(() => f.service.update(initial.artifactId, 4, raw.replace('kind: EXECUTABLE_PLAN', 'kind: DOCUMENT'))).toThrow('LIFECYCLE_POLICY_CHANGE_REQUIRES_REVIEW')
+  expect(() => f.service.update(initial.artifactId, 4, raw.replace('status: PENDING', 'status: PENDING\nrepositoryId: forged'))).toThrow('AUTHORITATIVE_METADATA_RESERVED')
+  expect(f.store.get(initial.artifactId)!.createdAt).toBe(initial.createdAt)
 })
