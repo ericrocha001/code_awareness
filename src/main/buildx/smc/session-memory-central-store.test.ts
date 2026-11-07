@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, realpathSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, realpathSync, unlinkSync, symlinkSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname, delimiter } from 'node:path'
 import Database from 'better-sqlite3'
@@ -6381,7 +6381,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         rawDbAfter.close()
 
         // Verificação privada do arquivo no disco pelo host
-        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
+        const filePath = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
         expect(filePath).not.toBeNull()
         expect(existsSync(filePath!)).toBe(true)
         // O arquivo fica fora do worktree
@@ -6455,7 +6455,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
           stageOperationId: stageOpId
         })
 
-        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)!
+        const filePath = (await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId))!
         const content = require('node:fs').readFileSync(filePath, 'utf8')
 
         expect(content).toContain('# Implementation Task')
@@ -6487,12 +6487,12 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const r1 = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
           stageOperationId: stageOpId
         })
-        const path1 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
+        const path1 = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
 
         const r2 = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
           stageOperationId: stageOpId
         })
-        const path2 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
+        const path2 = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)
 
         expect(r1.success).toBe(true)
         expect(r2.success).toBe(true)
@@ -6528,19 +6528,19 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
           stageOperationId: op1
         })
         expect(r1.success).toBe(true)
-        const path1 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op1)
+        const path1 = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op1)
         expect(existsSync(path1!)).toBe(true)
 
         const r2 = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
           stageOperationId: op2
         })
         expect(r2.success).toBe(true)
-        const path2 = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op2)
+        const path2 = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op2)
         expect(existsSync(path2!)).toBe(true)
 
         // O arquivo anterior foi removido do disco e revogado da memória
         expect(existsSync(path1!)).toBe(false)
-        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op1)).toBeNull()
+        expect(await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op1)).toBeNull()
         const inspect1 = await stageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, op1)
         expect(inspect1.status).toBe('RELEASED')
       })
@@ -6552,7 +6552,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
           stageOperationId: op
         })
-        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)!
+        const filePath = (await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op))!
         expect(existsSync(filePath)).toBe(true)
 
         // Simula reinício de processo instanciando novo serviço sem o mapa volátil
@@ -6563,7 +6563,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const inspectResult = await newStageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, op)
         expect(inspectResult.status).toBe('UNKNOWN')
         expect(inspectResult.reason).toBe('STAGE_NOT_FOUND_OR_EXPIRED')
-        expect(newStageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)).toBeNull()
+        expect(await newStageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)).toBeNull()
 
         // Cleanup limpa o arquivo órfão
         const cleaned = newStageService.cleanupExpiredStages()
@@ -6669,7 +6669,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         expect(result.success).toBe(false)
         expect(result.status).toBe('FAILED')
         expect(result.reason).toBe('PROMPT_SIZE_EXCEEDS_64KB')
-        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
+        expect(await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
       })
 
       it('rejeita quando o diretório de staging está dentro do worktree (STAGE_DIRECTORY_INSIDE_WORKTREE)', async () => {
@@ -6709,7 +6709,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         expect(result.success).toBe(false)
         expect(result.status).toBe('FAILED')
         expect(result.reason).toBe('HEAD_DRIFT_DURING_STAGE')
-        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
+        expect(await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
       })
 
       it('inspectStagedPrompt detecta arquivo corrompido ou expirado por TTL', async () => {
@@ -6746,14 +6746,14 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
           stageOperationId: stageOpId
         })
-        const filePath = stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)!
+        const filePath = (await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId))!
         expect(existsSync(filePath)).toBe(true)
 
         const releaseResult = await stageService.releaseStagedPrompt(repoId, session.sessionId, attempt.attemptId, stageOpId)
         expect(releaseResult.success).toBe(true)
         expect(releaseResult.status).toBe('RELEASED')
         expect(existsSync(filePath)).toBe(false)
-        expect(stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
+        expect(await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, stageOpId)).toBeNull()
       })
 
       it('validação de isolamento: zero subprocessos, zero mutações Git e isolamento de diretório', async () => {
@@ -6770,6 +6770,208 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         expect(currentHead).toBe('6666666666666666666666666666666666666666')
         // Diretório de staging é isolado
         expect(stageService.getStagingDirectory()).toBe(isolatedStageDir)
+      })
+    })
+
+    describe('Prova 5 — Contratos de Segurança da Revisão 4 (Fechamento do Aceite)', () => {
+      it('Contrato 1: falha com WORKTREE_PATH_UNAVAILABLE se o caminho da worktree for nulo ou vazio', async () => {
+        const stageServiceNoWt = new UnitPromptStageService(smc, workspaceService, {
+          stagingDirectory: isolatedStageDir,
+          worktreePathResolver: async () => null
+        })
+        const { session, attempt } = await createPreparedFixture()
+        const stageOpId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+        const res = await stageServiceNoWt.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: stageOpId
+        })
+        expect(res.success).toBe(false)
+        expect(res.status).toBe('FAILED')
+        expect(res.reason).toBe('WORKTREE_PATH_UNAVAILABLE')
+      })
+
+      it('Contrato 1: rejeita staging directory quando for symlink (STAGE_DIRECTORY_IS_SYMLINK)', async () => {
+        const symlinkTarget = mkdtempSync(join(tmpdir(), 'smc-test-symlink-target-'))
+        const symlinkPath = join(tmpdir(), `smc-test-symlink-${Date.now()}`)
+        try {
+          symlinkSync(symlinkTarget, symlinkPath, 'junction')
+          const stageServiceSymlink = new UnitPromptStageService(smc, workspaceService, {
+            stagingDirectory: symlinkPath
+          })
+          const { session, attempt } = await createPreparedFixture()
+          const res = await stageServiceSymlink.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+            stageOperationId: 'cccccccc-cccc-4ccc-8ccc-ccccccccccc2'
+          })
+          expect(res.success).toBe(false)
+          expect(res.status).toBe('FAILED')
+          expect(res.reason).toBe('STAGE_DIRECTORY_IS_SYMLINK')
+        } finally {
+          try { unlinkSync(symlinkPath) } catch {}
+          try { rmSync(symlinkTarget, { recursive: true, force: true }) } catch {}
+        }
+      })
+
+      it('Contrato 2: rejeita com WINDOWS_UNVERIFIED_ACL_BOUNDARY se o staging directory estiver fora das raízes privadas do usuário no Windows', async () => {
+        if (process.platform !== 'win32') return
+        const outsideDir = mkdtempSync(join(tmpdir(), 'smc-test-outside-profile-'))
+        const origUserProfile = process.env.USERPROFILE
+        const origLocalAppData = process.env.LOCALAPPDATA
+        const origAppData = process.env.APPDATA
+        try {
+          process.env.USERPROFILE = 'C:\\FakeUserProfileBoundary1'
+          process.env.LOCALAPPDATA = 'C:\\FakeUserProfileBoundary2'
+          process.env.APPDATA = 'C:\\FakeUserProfileBoundary3'
+
+          const stageServiceOutside = new UnitPromptStageService(smc, workspaceService, {
+            stagingDirectory: outsideDir
+          })
+          const { session, attempt } = await createPreparedFixture()
+          const res = await stageServiceOutside.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+            stageOperationId: 'cccccccc-cccc-4ccc-8ccc-ccccccccccc3'
+          })
+          expect(res.success).toBe(false)
+          expect(res.status).toBe('FAILED')
+          expect(res.reason).toBe('WINDOWS_UNVERIFIED_ACL_BOUNDARY')
+        } finally {
+          process.env.USERPROFILE = origUserProfile
+          process.env.LOCALAPPDATA = origLocalAppData
+          process.env.APPDATA = origAppData
+          try { rmSync(outsideDir, { recursive: true, force: true }) } catch {}
+        }
+      })
+
+      it('Contrato 3: chamadas concorrentes para a mesma tentativa são serializadas e resultam em apenas um estágio READY ativo', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const opA = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc4'
+        const opB = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc5'
+
+        const [resA, resB] = await Promise.all([
+          stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, { stageOperationId: opA }),
+          stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, { stageOperationId: opB })
+        ])
+
+        expect(resA.success).toBe(true)
+        expect(resB.success).toBe(true)
+
+        const inspectA = await stageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, opA)
+        const inspectB = await stageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, opB)
+
+        const readyCount = (inspectA.status === 'READY' ? 1 : 0) + (inspectB.status === 'READY' ? 1 : 0)
+        const releasedCount = (inspectA.status === 'RELEASED' ? 1 : 0) + (inspectB.status === 'RELEASED' ? 1 : 0)
+        expect(readyCount).toBe(1)
+        expect(releasedCount).toBe(1)
+
+        const pathA = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, opA)
+        const pathB = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, opB)
+        if (inspectA.status === 'READY') {
+          expect(pathA).not.toBeNull()
+          expect(pathB).toBeNull()
+        } else {
+          expect(pathA).toBeNull()
+          expect(pathB).not.toBeNull()
+        }
+      })
+
+      it('Contrato 3: falha na preparação de um novo estágio preserva o estágio válido anterior intacto (promoção atômica)', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const validOp = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc6'
+        const validRes = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: validOp
+        })
+        expect(validRes.success).toBe(true)
+        const validPath = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, validOp)
+        expect(validPath).not.toBeNull()
+        expect(existsSync(validPath!)).toBe(true)
+
+        // Simula falha na substituição induzindo drift de HEAD entre pré e pós-observação da escrita
+        let callCount = 0
+        const origGetBranchInventory = gitPort.getBranchInventory
+        gitPort.getBranchInventory = async () => {
+          callCount++
+          const head = callCount > 1 ? 'drifted-head-000000000000000000000000000000' : currentHead
+          return createFixtureInventory({ head })
+        }
+
+        const failingOp = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc7'
+        const failRes = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: failingOp
+        })
+        expect(failRes.success).toBe(false)
+        expect(failRes.reason).toBe('HEAD_DRIFT_DURING_STAGE')
+
+        gitPort.getBranchInventory = origGetBranchInventory
+
+        // O estágio anterior continua íntegro e READY
+        const inspectValid = await stageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, validOp)
+        expect(inspectValid.status).toBe('READY')
+        const preservedPath = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, validOp)
+        expect(preservedPath).toBe(validPath)
+        expect(existsSync(preservedPath!)).toBe(true)
+      })
+
+      it('Contrato 4: inspectStagedPrompt detecta adulteração de mesmo tamanho via hash SHA-256 e transiciona para FAILED (FILE_CORRUPTED)', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const op = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc8'
+        const res = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: op
+        })
+        expect(res.success).toBe(true)
+        const filePath = (await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op))!
+        expect(existsSync(filePath)).toBe(true)
+
+        // Adultera um caractere no final mantendo exatamente o mesmo número de bytes
+        const originalContent = readFileSync(filePath, 'utf8')
+        const tamperedContent = originalContent.slice(0, -1) + (originalContent.endsWith('X') ? 'Y' : 'X')
+        expect(Buffer.byteLength(tamperedContent, 'utf8')).toBe(Buffer.byteLength(originalContent, 'utf8'))
+        writeFileSync(filePath, tamperedContent, 'utf8')
+
+        const inspect = await stageService.inspectStagedPrompt(repoId, session.sessionId, attempt.attemptId, op)
+        expect(inspect.status).toBe('FAILED')
+        expect(inspect.reason).toBe('FILE_CORRUPTED')
+        expect(existsSync(filePath)).toBe(false)
+        expect(await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)).toBeNull()
+      })
+
+      it('Contrato 4: resolveStagedPromptPath rejeita quando Git HEAD sofre drift e replay falha fechado', async () => {
+        const { session, attempt } = await createPreparedFixture()
+        const op = 'cccccccc-cccc-4ccc-8ccc-ccccccccccc9'
+        const res = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: op
+        })
+        expect(res.success).toBe(true)
+
+        const pathOk = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)
+        expect(pathOk).not.toBeNull()
+
+        gitPort.getBranchInventory = async () => createFixtureInventory({ head: 'newhead9999999999999999999999999999999999' })
+
+        const pathDrifted = await stageService.resolveStagedPromptPath(repoId, session.sessionId, attempt.attemptId, op)
+        expect(pathDrifted).toBeNull()
+
+        const replayRes = await stageService.stageUnitPrompt(repoId, session.sessionId, attempt.attemptId, {
+          stageOperationId: op
+        })
+        expect(replayRes.success).toBe(false)
+        expect(replayRes.status).toBe('FAILED')
+        expect(replayRes.reason).toBe('REPLAY_STATE_STALE')
+      })
+
+      it('Limpeza de estágios expirados remove apenas arquivos de prompt do buildx e preserva outros subsistemas', async () => {
+        const otherSubsystemFile = join(isolatedStageDir, 'other-subsystem.data')
+        const unrelatedTmpFile = join(isolatedStageDir, 'custom-tool.tmp')
+        const promptFileLike = join(isolatedStageDir, 'buildx-prompt-nonhexname.tmp')
+        writeFileSync(otherSubsystemFile, 'important data', 'utf8')
+        writeFileSync(unrelatedTmpFile, 'temp data', 'utf8')
+        writeFileSync(promptFileLike, 'not a valid uuid hex', 'utf8')
+
+        stageService.cleanupExpiredStages()
+
+        expect(existsSync(otherSubsystemFile)).toBe(true)
+        expect(existsSync(unrelatedTmpFile)).toBe(true)
+        expect(existsSync(promptFileLike)).toBe(true)
+
+        unlinkSync(otherSubsystemFile)
+        unlinkSync(unrelatedTmpFile)
+        unlinkSync(promptFileLike)
       })
     })
   })

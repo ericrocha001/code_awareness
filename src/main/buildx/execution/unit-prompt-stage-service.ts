@@ -16,6 +16,7 @@ import type { WorkspaceBindingService } from './workspace-binding-service'
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const MAX_PROMPT_BYTES = 64 * 1024 // 64 KiB
 const DEFAULT_TTL_MS = 10 * 60 * 1000 // 10 minutes
+const PROMPT_FILE_NAME_PATTERN = /^buildx-prompt-[0-9a-f]{32}\.tmp$/
 
 interface InternalStageRecord {
   status: 'READY' | 'RELEASED' | 'EXPIRED' | 'FAILED'
@@ -98,6 +99,7 @@ export class UnitPromptStageService {
     worktreeId: string
   ) => Promise<string | null> | string | null
   private readonly stages = new Map<string, InternalStageRecord>()
+  private readonly attemptLocks = new Map<string, Promise<void>>()
 
   constructor(
     smcService: SessionMemoryCentralService,
@@ -183,7 +185,40 @@ export class UnitPromptStageService {
     }
     const cleanStageOpId = options.stageOperationId.trim().toLowerCase()
 
-    // 2. Idempotency check on same stageOperationId
+    // 2. Exclusão / serialização leve por attemptKey ANTES do primeiro await (Contrato 3)
+    const attemptKey = `${cleanRepoId}:${cleanSessionId}:${cleanAttemptId}`
+    const prevLock = this.attemptLocks.get(attemptKey) ?? Promise.resolve()
+    let releaseLock!: () => void
+    const currentLock = new Promise<void>(resolve => {
+      releaseLock = resolve
+    })
+    this.attemptLocks.set(attemptKey, currentLock)
+
+    try {
+      await prevLock
+      return await this.executeStageUnitPrompt(
+        cleanRepoId,
+        cleanSessionId,
+        cleanAttemptId,
+        cleanStageOpId
+      )
+    } finally {
+      releaseLock()
+      if (this.attemptLocks.get(attemptKey) === currentLock) {
+        this.attemptLocks.delete(attemptKey)
+      }
+    }
+  }
+
+  private async executeStageUnitPrompt(
+    cleanRepoId: string,
+    cleanSessionId: string,
+    cleanAttemptId: string,
+    cleanStageOpId: string
+  ): Promise<UnitPromptStageResult> {
+    const store = this.smcService.getStore(cleanRepoId)
+
+    // 1. Idempotência / Replay com verificação de frescor e integridade
     const existing = this.stages.get(cleanStageOpId)
     if (existing) {
       if (
@@ -205,8 +240,31 @@ export class UnitPromptStageService {
       const now = this.clock()
       const isExpired = now >= new Date(existing.expiresAt).getTime()
       if (!isExpired && existing.status === 'READY') {
+        // Revalidação do estado do SMC e Git para replay
         try {
-          if (fs.existsSync(existing.filePath)) {
+          const session = store.getSession(cleanSessionId)
+          const attempt = store.getExecutionAttempt(cleanAttemptId)
+          const reservation = attempt ? store.getReservation(attempt.reservationId) : null
+          const plan = attempt ? store.getPlan(attempt.planId) : null
+          const unitState = attempt ? store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) : null
+          const ws = await this.workspaceService.inspectBoundWorkspace(cleanRepoId, cleanSessionId)
+
+          if (
+            session &&
+            session.status === 'OPEN' &&
+            attempt &&
+            attempt.status === 'PREPARED' &&
+            reservation &&
+            reservation.status === 'ACTIVE' &&
+            plan &&
+            plan.status === 'ACTIVE' &&
+            unitState &&
+            unitState.status === 'RESERVED' &&
+            unitState.revision === reservation.unitStateRevision &&
+            ws.status === 'CURRENT' &&
+            ws.currentHead === existing.headObserved &&
+            fs.existsSync(existing.filePath)
+          ) {
             const stat = fs.statSync(existing.filePath)
             if (stat.size === existing.promptBytes) {
               const content = fs.readFileSync(existing.filePath, 'utf8')
@@ -229,26 +287,25 @@ export class UnitPromptStageService {
             }
           }
         } catch {
-          // Fall through to cleanup
+          // Replay inválido por estado stale
         }
       }
 
+      // Replay inválido por drift, expiração ou arquivo ausente: remove e falha fechado
       this.cleanupStageRecord(existing)
       this.stages.delete(cleanStageOpId)
-    }
-
-    // 3. Ensure single active READY stage file per attempt
-    for (const [id, rec] of this.stages.entries()) {
-      if (id !== cleanStageOpId && rec.attemptId === cleanAttemptId && rec.status === 'READY') {
-        this.cleanupStageRecord(rec)
-        rec.status = 'RELEASED'
-        rec.reason = 'SUPERSEDED_BY_NEW_STAGE'
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: isExpired ? 'STAGE_EXPIRED' : 'REPLAY_STATE_STALE'
       }
     }
 
-    // 4. Pre-observation SMC checks (fail-closed, read-only)
-    const store = this.smcService.getStore(cleanRepoId)
-
+    // 2. Pre-observation SMC checks (fail-closed, read-only)
     const session = store.getSession(cleanSessionId)
     if (!session || session.status !== 'OPEN') {
       return {
@@ -439,7 +496,7 @@ export class UnitPromptStageService {
       }
     }
 
-    // 5. Pre-observation of Bound Workspace
+    // 3. Pre-observation of Bound Workspace
     let wsPre
     try {
       wsPre = await this.workspaceService.inspectBoundWorkspace(cleanRepoId, cleanSessionId)
@@ -496,6 +553,186 @@ export class UnitPromptStageService {
     }
     const observedHeadPre = wsPre.currentHead
 
+    // 4. Contrato 1: Isolamento físico fail-closed
+    let worktreePath: string | null = null
+    if (this.worktreePathResolver) {
+      try {
+        worktreePath = await this.worktreePathResolver(cleanRepoId, attempt.worktreeId)
+      } catch {
+        worktreePath = null
+      }
+    } else if (typeof this.workspaceService.getWorktreePath === 'function') {
+      try {
+        worktreePath = await this.workspaceService.getWorktreePath(cleanRepoId, attempt.worktreeId)
+      } catch {
+        worktreePath = null
+      }
+    }
+
+    if (!worktreePath || typeof worktreePath !== 'string' || !worktreePath.trim()) {
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'WORKTREE_PATH_UNAVAILABLE'
+      }
+    }
+
+    let canonicalWorktree: string
+    try {
+      canonicalWorktree = fs.realpathSync(worktreePath)
+    } catch {
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'WORKTREE_PATH_UNRESOLVABLE'
+      }
+    }
+
+    const resolvedStageDir = path.resolve(this.stagingDirectory)
+    try {
+      if (!fs.existsSync(resolvedStageDir)) {
+        fs.mkdirSync(resolvedStageDir, { recursive: true, mode: 0o700 })
+      }
+    } catch {
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'STAGE_DIRECTORY_CREATE_FAILED'
+      }
+    }
+
+    let canonicalStageDir: string
+    try {
+      canonicalStageDir = fs.realpathSync(resolvedStageDir)
+    } catch {
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'STAGE_DIRECTORY_UNRESOLVABLE'
+      }
+    }
+
+    const stageLstat = fs.lstatSync(resolvedStageDir)
+    if (stageLstat.isSymbolicLink()) {
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'STAGE_DIRECTORY_IS_SYMLINK'
+      }
+    }
+    if (!stageLstat.isDirectory()) {
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'STAGE_DIRECTORY_NOT_A_DIRECTORY'
+      }
+    }
+
+    // Confronto com realpath da Worktree
+    if (
+      isInsideOrEqual(canonicalStageDir, canonicalWorktree) ||
+      isInsideOrEqual(canonicalWorktree, canonicalStageDir)
+    ) {
+      return {
+        success: false,
+        status: 'FAILED',
+        stageOperationId: cleanStageOpId,
+        repositoryId: cleanRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        reason: 'STAGE_DIRECTORY_INSIDE_WORKTREE'
+      }
+    }
+
+    // Confronto com o checkout root / cwd
+    try {
+      const cwdReal = fs.realpathSync(process.cwd())
+      if (
+        isInsideOrEqual(canonicalStageDir, cwdReal) ||
+        isInsideOrEqual(cwdReal, canonicalStageDir)
+      ) {
+        return {
+          success: false,
+          status: 'FAILED',
+          stageOperationId: cleanStageOpId,
+          repositoryId: cleanRepoId,
+          sessionId: cleanSessionId,
+          attemptId: cleanAttemptId,
+          reason: 'STAGE_DIRECTORY_INSIDE_WORKTREE'
+        }
+      }
+    } catch {}
+
+    // 5. Contrato 2: Permissões reais no Windows / fronteira do SO
+    if (process.platform === 'win32') {
+      const resolveEnvRoot = (rawPath: string | undefined): string | null => {
+        if (!rawPath || typeof rawPath !== 'string' || !rawPath.trim()) return null
+        try {
+          if (!fs.existsSync(rawPath)) return null
+          return normalizePathForComparison(fs.realpathSync(rawPath))
+        } catch {
+          return null
+        }
+      }
+
+      const userProfile = resolveEnvRoot(process.env.USERPROFILE)
+      const localAppData = resolveEnvRoot(process.env.LOCALAPPDATA)
+      const appData = resolveEnvRoot(process.env.APPDATA)
+
+      const isInsidePrivateHostArea =
+        (localAppData && isInsideOrEqual(canonicalStageDir, localAppData)) ||
+        (appData && isInsideOrEqual(canonicalStageDir, appData)) ||
+        (userProfile && isInsideOrEqual(canonicalStageDir, userProfile))
+
+      if (!isInsidePrivateHostArea) {
+        return {
+          success: false,
+          status: 'FAILED',
+          stageOperationId: cleanStageOpId,
+          repositoryId: cleanRepoId,
+          sessionId: cleanSessionId,
+          attemptId: cleanAttemptId,
+          reason: 'WINDOWS_UNVERIFIED_ACL_BOUNDARY'
+        }
+      }
+    } else {
+      if ((stageLstat.mode & 0o077) !== 0) {
+        return {
+          success: false,
+          status: 'FAILED',
+          stageOperationId: cleanStageOpId,
+          repositoryId: cleanRepoId,
+          sessionId: cleanSessionId,
+          attemptId: cleanAttemptId,
+          reason: 'POSIX_INSECURE_PERMISSIONS'
+        }
+      }
+    }
+
     // 6. Build prompt & verify byte length limit
     const promptText = buildDeterministicUnitPrompt(unit)
     const promptBytes = Buffer.byteLength(promptText, 'utf8')
@@ -512,87 +749,21 @@ export class UnitPromptStageService {
     }
     const promptHash = crypto.createHash('sha256').update(promptText, 'utf8').digest('hex')
 
-    // 7. Validate staging directory boundary
-    const resolvedStageDir = path.resolve(this.stagingDirectory)
-    let worktreePath: string | null = null
-    if (this.worktreePathResolver) {
-      try {
-        worktreePath = await this.worktreePathResolver(cleanRepoId, attempt.worktreeId)
-      } catch {
-        worktreePath = null
-      }
-    } else if (typeof this.workspaceService.getWorktreePath === 'function') {
-      try {
-        worktreePath = await this.workspaceService.getWorktreePath(cleanRepoId, attempt.worktreeId)
-      } catch {
-        worktreePath = null
-      }
-    }
-
-    if (worktreePath) {
-      const resolvedWorktree = path.resolve(worktreePath)
-      if (
-        isInsideOrEqual(resolvedStageDir, resolvedWorktree) ||
-        isInsideOrEqual(resolvedWorktree, resolvedStageDir)
-      ) {
-        return {
-          success: false,
-          status: 'FAILED',
-          stageOperationId: cleanStageOpId,
-          repositoryId: cleanRepoId,
-          sessionId: cleanSessionId,
-          attemptId: cleanAttemptId,
-          reason: 'STAGE_DIRECTORY_INSIDE_WORKTREE'
-        }
-      }
-    }
-
-    try {
-      if (!fs.existsSync(resolvedStageDir)) {
-        fs.mkdirSync(resolvedStageDir, { recursive: true, mode: 0o700 })
-      }
-      const lstat = fs.lstatSync(resolvedStageDir)
-      if (lstat.isSymbolicLink()) {
-        return {
-          success: false,
-          status: 'FAILED',
-          stageOperationId: cleanStageOpId,
-          repositoryId: cleanRepoId,
-          sessionId: cleanSessionId,
-          attemptId: cleanAttemptId,
-          reason: 'STAGE_DIRECTORY_IS_SYMLINK'
-        }
-      }
-      if (!lstat.isDirectory()) {
-        return {
-          success: false,
-          status: 'FAILED',
-          stageOperationId: cleanStageOpId,
-          repositoryId: cleanRepoId,
-          sessionId: cleanSessionId,
-          attemptId: cleanAttemptId,
-          reason: 'STAGE_DIRECTORY_NOT_A_DIRECTORY'
-        }
-      }
-    } catch {
-      return {
-        success: false,
-        status: 'FAILED',
-        stageOperationId: cleanStageOpId,
-        repositoryId: cleanRepoId,
-        sessionId: cleanSessionId,
-        attemptId: cleanAttemptId,
-        reason: 'STAGE_DIRECTORY_ERROR'
-      }
-    }
-
-    // 8. Exclusive file write with randomized name without unitId
+    // 7. Contrato 4: Escrita exclusiva atômica com flags anti-symlink (O_CREAT | O_EXCL | O_NOFOLLOW)
     const randomHex = crypto.randomBytes(16).toString('hex')
     const fileName = `buildx-prompt-${randomHex}.tmp`
-    const filePath = path.join(resolvedStageDir, fileName)
+    const filePath = path.join(canonicalStageDir, fileName)
 
     try {
-      fs.writeFileSync(filePath, promptText, { flag: 'wx', mode: 0o600, encoding: 'utf8' })
+      const openFlags =
+        fs.constants.O_CREAT |
+        fs.constants.O_EXCL |
+        fs.constants.O_WRONLY |
+        (fs.constants.O_NOFOLLOW ?? 0)
+      const fd = fs.openSync(filePath, openFlags, 0o600)
+      fs.writeFileSync(fd, promptText, { encoding: 'utf8' })
+      fs.fsyncSync(fd)
+      fs.closeSync(fd)
     } catch {
       return {
         success: false,
@@ -605,10 +776,10 @@ export class UnitPromptStageService {
       }
     }
 
-    // 9. Post-creation revalidation gate
+    // 8. Revalidação pós-escrita imediata
     try {
-      const stat = fs.statSync(filePath)
-      if (stat.size !== promptBytes) {
+      const stat = fs.lstatSync(filePath)
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== promptBytes) {
         this.safeUnlink(filePath)
         return {
           success: false,
@@ -770,7 +941,15 @@ export class UnitPromptStageService {
       }
     }
 
-    // 10. Record in memory and return compact receipt (NO filePath, NO prompt content)
+    // 9. Contrato 3: Promoção atômica — só descarta o estágio antigo após o novo estar 100% gravado e validado
+    for (const [id, rec] of this.stages.entries()) {
+      if (id !== cleanStageOpId && rec.attemptId === cleanAttemptId && rec.status === 'READY') {
+        this.cleanupStageRecord(rec)
+        rec.status = 'RELEASED'
+        rec.reason = 'SUPERSEDED_BY_NEW_STAGE'
+      }
+    }
+
     const now = this.clock()
     const createdAt = new Date(now).toISOString()
     const expiresAt = new Date(now + this.ttlMs).toISOString()
@@ -920,6 +1099,7 @@ export class UnitPromptStageService {
       }
     }
 
+    // Contrato 4: Verificação de SHA-256 no disco, além do tamanho
     try {
       if (!fs.existsSync(record.filePath)) {
         record.status = 'FAILED'
@@ -933,8 +1113,23 @@ export class UnitPromptStageService {
           reason: 'FILE_MISSING'
         }
       }
-      const stat = fs.statSync(record.filePath)
-      if (stat.size !== record.promptBytes) {
+      const stat = fs.lstatSync(record.filePath)
+      if (stat.isSymbolicLink() || !stat.isFile() || stat.size !== record.promptBytes) {
+        this.safeUnlink(record.filePath)
+        record.status = 'FAILED'
+        record.reason = 'FILE_CORRUPTED'
+        return {
+          status: 'FAILED',
+          stageOperationId: cleanStageOpId,
+          repositoryId: cleanRepoId,
+          sessionId: cleanSessionId,
+          attemptId: cleanAttemptId,
+          reason: 'FILE_CORRUPTED'
+        }
+      }
+      const content = fs.readFileSync(record.filePath, 'utf8')
+      const hash = crypto.createHash('sha256').update(content, 'utf8').digest('hex')
+      if (hash !== record.promptHash) {
         this.safeUnlink(record.filePath)
         record.status = 'FAILED'
         record.reason = 'FILE_CORRUPTED'
@@ -1027,12 +1222,12 @@ export class UnitPromptStageService {
     }
   }
 
-  resolveStagedPromptPath(
+  async resolveStagedPromptPath(
     repositoryId: string,
     sessionId: string,
     attemptId: string,
     stageOperationId: string
-  ): string | null {
+  ): Promise<string | null> {
     const cleanRepoId = repositoryId?.trim().toLowerCase() ?? ''
     const cleanSessionId = sessionId?.trim().toLowerCase() ?? ''
     const cleanAttemptId = attemptId?.trim().toLowerCase() ?? ''
@@ -1052,16 +1247,59 @@ export class UnitPromptStageService {
     const now = this.clock()
     if (now >= new Date(record.expiresAt).getTime()) {
       this.cleanupStageRecord(record)
+      record.status = 'EXPIRED'
       return null
     }
 
+    // Contrato 4: Revalidação estrita de SMC e Git HEAD antes de entregar caminho físico
     try {
+      const store = this.smcService.getStore(cleanRepoId)
+      const session = store.getSession(cleanSessionId)
+      if (!session || session.status !== 'OPEN') return null
+
+      const attempt = store.getExecutionAttempt(cleanAttemptId)
+      if (!attempt || attempt.status !== 'PREPARED') return null
+
+      const reservation = store.getReservation(attempt.reservationId)
+      if (!reservation || reservation.status !== 'ACTIVE') return null
+
+      const plan = store.getPlan(attempt.planId)
+      if (!plan || plan.status !== 'ACTIVE') return null
+
+      const unitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      if (
+        !unitState ||
+        unitState.status !== 'RESERVED' ||
+        unitState.revision !== reservation.unitStateRevision
+      ) {
+        return null
+      }
+
+      const ws = await this.workspaceService.inspectBoundWorkspace(cleanRepoId, cleanSessionId)
+      if (
+        ws.status !== 'CURRENT' ||
+        ws.currentHead !== record.headObserved ||
+        ws.binding.worktreeId !== attempt.worktreeId ||
+        ws.binding.generation !== attempt.generation ||
+        ws.binding.branch !== attempt.branch
+      ) {
+        return null
+      }
+
       if (!fs.existsSync(record.filePath)) return null
-      const stat = fs.statSync(record.filePath)
-      if (stat.size !== record.promptBytes) return null
+      const lstat = fs.lstatSync(record.filePath)
+      if (lstat.isSymbolicLink() || !lstat.isFile() || lstat.size !== record.promptBytes) {
+        this.safeUnlink(record.filePath)
+        record.status = 'FAILED'
+        return null
+      }
       const content = fs.readFileSync(record.filePath, 'utf8')
       const hash = crypto.createHash('sha256').update(content, 'utf8').digest('hex')
-      if (hash !== record.promptHash) return null
+      if (hash !== record.promptHash) {
+        this.safeUnlink(record.filePath)
+        record.status = 'FAILED'
+        return null
+      }
     } catch {
       return null
     }
@@ -1092,7 +1330,8 @@ export class UnitPromptStageService {
         )
 
         for (const file of files) {
-          if (file.startsWith('buildx-prompt-') && file.endsWith('.tmp')) {
+          // Limpeza restrita exclusivamente a arquivos de prompt do BuildX, sem tocar em arquivos de outros subsistemas
+          if (PROMPT_FILE_NAME_PATTERN.test(file)) {
             const fullPath = path.join(resolvedStageDir, file)
             const norm = normalizePathForComparison(fullPath)
             if (!activePaths.has(norm)) {
@@ -1116,7 +1355,7 @@ export class UnitPromptStageService {
     try {
       if (fs.existsSync(filePath)) {
         const lstat = fs.lstatSync(filePath)
-        if (!lstat.isSymbolicLink() && lstat.isFile()) {
+        if (!lstat.isSymbolicLink()) {
           fs.unlinkSync(filePath)
         }
       }
