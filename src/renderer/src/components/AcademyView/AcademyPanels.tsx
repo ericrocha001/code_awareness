@@ -6,14 +6,12 @@ import {
   Check,
   ChevronRight,
   CircleAlert,
-  CircleCheck,
   Cloud,
   Code2,
   FileCode2,
   FolderGit2,
   GitBranch,
   History,
-  MoreVertical,
   Package,
   PanelRightOpen,
   Pencil,
@@ -119,7 +117,7 @@ export const SkillCatalog: React.FC<SkillCatalogProps> = ({ query, status, onQue
             <span className="academy-skill-copy">
               <span className="academy-skill-name-row">
                 <strong title={skill.name}>{skill.name}</strong>
-                <span className={`academy-catalog-state ${skill.status === 'ACTIVE' ? '' : 'is-disabled'}`}>{skill.status === 'ACTIVE' ? 'Ativa' : 'Desativada'}</span>
+                <span className={`academy-catalog-state ${skill.status === 'ACTIVE' ? '' : 'is-disabled'}`} title={skill.status === 'ACTIVE' ? 'Ativa' : 'Desativada'}><span aria-hidden="true">●</span><span className="sr-only">{skill.status === 'ACTIVE' ? 'Ativa' : 'Desativada'}</span></span>
               </span>
               <small>{skill.description}</small>
             </span>
@@ -182,32 +180,26 @@ export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEdit
         <p>{selected ? `v${selected.currentVersion} · ${scope === 'GLOBAL' ? 'Global' : 'Projetos'}` : 'Nova Skill · ainda não persistida'}</p>
       </div>
       <div className="academy-skill-actions">
-        {!isEditing && <button className="academy-icon-button" aria-label="Editar" title="Editar SKILL.md integral" onClick={onEdit}><MoreVertical size={20} /></button>}
+        {!isEditing && <button className="academy-secondary-button" onClick={onEdit}><Pencil size={16} />Editar</button>}
       </div>
     </header>
 
     <nav className="academy-tabs" aria-label="Conteúdo da Skill">
       <button aria-current={activeTab === 'skill' ? 'page' : undefined} className={activeTab === 'skill' ? 'active' : ''} onClick={() => onTabChange('skill')}><FileCode2 size={16} />Definição</button>
-      <button aria-label="Arquivos" aria-current={activeTab === 'files' ? 'page' : undefined} className={activeTab === 'files' ? 'active' : ''} onClick={() => onTabChange('files')}><Code2 size={16} />Orientações</button>
+      <button aria-current={activeTab === 'files' ? 'page' : undefined} className={activeTab === 'files' ? 'active' : ''} onClick={() => onTabChange('files')}><Code2 size={16} />Arquivos</button>
       <button aria-current={['overview', 'history'].includes(activeTab) ? 'page' : undefined} className={['overview', 'history'].includes(activeTab) ? 'active' : ''} onClick={() => onTabChange('overview')}><ShieldCheck size={16} />Contexto</button>
     </nav>
 
     <fieldset disabled={saving} className="academy-skill-content">
       {activeTab === 'skill' && <>
-      {!isEditing && <section className="academy-definition-summary" aria-label="Resumo derivado da Skill">
-        <div className="academy-summary-field"><span>Nome da Skill</span><div>{title}</div></div>
-        <div className="academy-summary-field"><span>Descrição</span><div className="academy-summary-description">{description}</div></div>
-        <div className="academy-definition-metadata"><div><span>Versão</span><strong>{selected ? `v${selected.currentVersion}` : 'Novo draft'}</strong></div><div><span>Escopo</span><strong>{scope === 'GLOBAL' ? 'Global' : 'Projetos'}</strong></div><div><span>Status</span><strong><i className={selected?.status === 'ACTIVE' ? 'is-active' : ''} />{selected ? selected.status === 'ACTIVE' ? 'Ativa' : 'Desativada' : 'Rascunho'}</strong></div></div>
-      </section>}
-      <details className="academy-source-disclosure" open={isEditing}>
-      <summary>SKILL.md integral</summary>
+      {!isEditing && <div className="academy-definition-summary"><span>Descrição</span><p>{description}</p></div>}
       <section className="academy-code-surface" aria-label="Conteúdo de SKILL.md">
         <header><FileCode2 size={15} /><span>SKILL.md</span>{selected && <small>v{selected.currentVersion}</small>}</header>
         {isEditing
           ? <textarea aria-label="Editar SKILL.md" autoFocus value={skillMd} onChange={(event) => onSkillMdChange(event.target.value)} />
           : <pre tabIndex={0} aria-label="Ler SKILL.md" onDoubleClick={onEdit} onKeyDown={event => { if (event.key === 'Enter') onEdit() }}>{skillMd}</pre>}
         <footer><span>Markdown</span><span>{skillMd.split(/\r?\n/).length} linhas</span></footer>
-      </section></details></>}
+      </section></>}
 
       {activeTab === 'files' && <section className="academy-files" aria-label="Arquivos da Skill">
         <div className="academy-section-heading"><h3>Artefatos textuais</h3><button className="academy-secondary-button" onClick={onAddArtifact}><Plus size={16} />Adicionar artefato</button></div>
@@ -323,18 +315,18 @@ export const OperationsRail: React.FC<OperationsRailProps> = ({ hydration = 'REA
       <AcademyConflicts conflicts={conflicts} destinations={destinations} onReview={onReviewConflict} onPreviewBatch={onPreviewConflictBatch} />
     </RailCard>}
 
-    <RailCard icon={<Package size={18} />} title="Distribuição" count="Global">
+    <RailCard icon={<Package size={18} />} title="Distribuição global">
       <div className="academy-distribution-summary">
         <div><span className="academy-summary-icon"><Box size={17} /></span><span><strong>Academy Skills</strong><small>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version} · ${packageDistribution.skillCount} Skills` : 'Pacote não disponível'}</small></span><StatusBadge tone="neutral">{packageDistribution?.packageRevision ? 'Local' : 'Não disponível'}</StatusBadge></div>
         {distribution.targets.map((target) => <div key={target.target}><span className="academy-summary-icon"><Cloud size={17} /></span><span><strong>{friendlyState(target.target)}</strong><small>{target.current} current · {target.error} error</small></span><StatusBadge tone={target.current + target.pending + target.drifted + target.missing + target.error === 0 ? 'neutral' : target.error ? 'danger' : target.convergence === 'CONVERGED' ? 'success' : 'warning'}>{target.current + target.pending + target.drifted + target.missing + target.error === 0 ? 'Sem destinos aplicáveis' : target.convergence}</StatusBadge></div>)}
+        <div><span className="academy-summary-icon"><Package size={17} /></span><span><strong>Marketplace</strong><small>{packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'Git Managed' : packageDistribution?.marketplace.mode === 'SOURCE_AVAILABLE' ? 'Source Available' : 'Pending Evidence'}</small></span><StatusBadge tone={packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'info' : 'neutral'}>{packageDistribution?.marketplace.mode ?? 'Não verificado'}</StatusBadge></div>
       </div>
     </RailCard>
 
-    {gitStatus?.profile && gitStatus.publication && <RailCard icon={<RefreshCw size={18} />} title="Automação">        <label className="academy-git-option"><input aria-label="Publicação automática de edições locais" type="checkbox" checked={gitStatus.publication?.autoPublish ?? false} onChange={event => onGitAutomation?.(event.target.checked, gitStatus.publication?.autoUpdate ?? false)} />Publicação automática</label>
-        <label className="academy-git-option"><input aria-label="Atualização automática do remoto" type="checkbox" checked={gitStatus.publication?.autoUpdate ?? false} onChange={event => onGitAutomation?.(gitStatus.publication?.autoPublish ?? false, event.target.checked)} />Atualização automática</label>
+    {gitStatus?.profile && gitStatus.publication && <RailCard icon={<RefreshCw size={18} />} title="Automação">        <label className="academy-git-option"><input type="checkbox" checked={gitStatus.publication?.autoPublish ?? false} onChange={event => onGitAutomation?.(event.target.checked, gitStatus.publication?.autoUpdate ?? false)} />Publicação automática de edições locais</label>
+        <label className="academy-git-option"><input type="checkbox" checked={gitStatus.publication?.autoUpdate ?? false} onChange={event => onGitAutomation?.(gitStatus.publication?.autoPublish ?? false, event.target.checked)} />Atualização automática do remoto</label>
 </RailCard>}
-    {gitStatus?.convergence?.cutover === 'LOCAL' && <section className="academy-profile-status"><Cloud size={25} /><div><strong>Perfil em edição local</strong><small>Autoria local confirmada</small></div><CircleCheck size={20} /></section>}
-    <details className="academy-advanced"><summary><Settings2 size={17} />Avançado</summary><div className="academy-advanced-content"><div className="academy-marketplace-state">        <div><span className="academy-summary-icon"><Package size={17} /></span><span><strong>Marketplace</strong><small>{packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'Git Managed' : packageDistribution?.marketplace.mode === 'SOURCE_AVAILABLE' ? 'Source Available' : 'Pending Evidence'}</small></span><StatusBadge tone={packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'info' : 'neutral'}>{packageDistribution?.marketplace.mode ?? 'Não verificado'}</StatusBadge></div></div>    <RailCard icon={<FolderGit2 size={18} />} title="Destinos de Distribuição" count={`${destinations.length}`} action={<button className="academy-card-action" onClick={onOpenDestinations}><Settings2 size={15} />Gerenciar</button>}>
+    <details className="academy-advanced"><summary><Settings2 size={17} />Avançado</summary><div className="academy-advanced-content">    <RailCard icon={<FolderGit2 size={18} />} title="Destinos de Distribuição" count={`${destinations.length}`} action={<button className="academy-card-action" onClick={onOpenDestinations}><Settings2 size={15} />Gerenciar</button>}>
       <div className="academy-compact-list">
         {destinations.slice(0, 4).map((destination) => <div key={destination.id}><span><FolderGit2 size={15} />{destination.name}</span><StatusBadge tone={destination.reconciliationStatus === 'SYNCED' ? 'success' : destination.reconciliationStatus === 'ERROR' ? 'danger' : 'warning'}>{destination.reconciliationStatus}</StatusBadge></div>)}
       </div>
