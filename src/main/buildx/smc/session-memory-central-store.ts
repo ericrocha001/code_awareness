@@ -29,7 +29,9 @@ import type {
   UnitFlowUnitHeaderRecord,
   UnitFlowUnitRecord,
   UnitFlowUnitStateRecord,
-  UnitFlowUnitStatus
+  UnitFlowUnitStatus,
+  AcceptUnitFlowUnitStoreInput,
+  AcceptUnitFlowUnitStoreResult
 } from '../../../shared/types/buildx/unitflow-types'
 import type {
   BuildXWorkspaceBindingRecord,
@@ -60,7 +62,8 @@ import {
   UnitFlowReservationConflictError,
   UnitFlowReservationIdConflictError,
   UnitFlowReservationNotFoundError,
-  UnitFlowUnitConflictError
+  UnitFlowUnitConflictError,
+  UnitFlowAcceptanceConflictError
 } from '../unitflow/unitflow-errors'
 import { validateRepositoryId } from './session-memory-central-paths'
 
@@ -2492,6 +2495,154 @@ export class SessionMemoryCentralStore {
         SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
       `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow
       return this.mapRawToExecutionAttemptRecord(updated)
+    })()
+  }
+
+  transitionUnitToAccepted(input: AcceptUnitFlowUnitStoreInput): AcceptUnitFlowUnitStoreResult {
+    if (typeof input.unitId !== 'string' || !input.unitId.trim() || !UUID_REGEX.test(input.unitId.trim())) {
+      throw new UnitFlowInvalidUnitError(input.unitId ?? '')
+    }
+    if (typeof input.acceptanceOperationId !== 'string' || !input.acceptanceOperationId.trim() || !UUID_REGEX.test(input.acceptanceOperationId.trim())) {
+      throw new UnitFlowAcceptanceConflictError(`Invalid acceptanceOperationId: "${input.acceptanceOperationId}"`)
+    }
+    const cleanSessionId = input.sessionId.trim().toLowerCase()
+    const cleanPlanId = input.planId.trim().toLowerCase()
+    const cleanUnitId = input.unitId.trim().toLowerCase()
+    const cleanReservationId = input.reservationId.trim().toLowerCase()
+    const cleanAttemptId = input.attemptId.trim().toLowerCase()
+    const cleanAcceptanceOpId = input.acceptanceOperationId.trim().toLowerCase()
+    const now = new Date().toISOString()
+
+    return this.db.transaction((): AcceptUnitFlowUnitStoreResult => {
+      // 1. Replay check
+      const entryId = deterministicEntryId('accept', cleanAcceptanceOpId)
+      const existingEntry = this.db.prepare(`
+        SELECT entry_id, body FROM smc_entries WHERE entry_id = ? AND session_id = ?
+      `).get(entryId, cleanSessionId) as { entry_id: string; body: string } | undefined
+
+      if (existingEntry) {
+        try {
+          const parsed = JSON.parse(existingEntry.body)
+          if (parsed.attemptId === cleanAttemptId && parsed.unitId === cleanUnitId) {
+            const curUnit = this.db.prepare(`SELECT status, revision FROM smc_unit_states WHERE unit_id = ?`).get(cleanUnitId) as any
+            const curRes = this.db.prepare(`SELECT status FROM smc_unit_reservations WHERE reservation_id = ?`).get(cleanReservationId) as any
+            const curPlan = this.db.prepare(`SELECT status, revision FROM smc_plans WHERE plan_id = ?`).get(cleanPlanId) as any
+            return {
+              unitId: cleanUnitId,
+              planId: cleanPlanId,
+              unitStatus: curUnit?.status ?? 'COMPLETED',
+              unitRevision: curUnit?.revision ?? 0,
+              reservationStatus: curRes?.status ?? 'CONSUMED',
+              planStatus: curPlan?.status ?? 'ACTIVE',
+              planRevision: curPlan?.revision ?? 0,
+              allUnitsCompleted: curPlan?.status === 'COMPLETED'
+            }
+          }
+        } catch {}
+        throw new UnitFlowAcceptanceConflictError(`acceptanceOperationId "${cleanAcceptanceOpId}" already exists with divergent payload`)
+      }
+
+      // 2. Validate unit state
+      const currentUnit = this.db.prepare(`
+        SELECT unit_id, plan_id, status, revision FROM smc_unit_states WHERE unit_id = ?
+      `).get(cleanUnitId) as RawUnitStateRow | undefined
+
+      if (!currentUnit) {
+        throw new UnitFlowInvalidUnitError(`Unit "${cleanUnitId}" not found`)
+      }
+      if (currentUnit.status !== 'VALIDATING') {
+        throw new UnitFlowAcceptanceConflictError(`Unit "${cleanUnitId}" is in status "${currentUnit.status}", expected VALIDATING`)
+      }
+
+      // 3. CAS on smc_unit_states (VALIDATING -> COMPLETED)
+      const unitResult = this.db.prepare(`
+        UPDATE smc_unit_states
+        SET status = 'COMPLETED', revision = revision + 1, updated_at = ?
+        WHERE unit_id = ? AND revision = ? AND status = 'VALIDATING'
+      `).run(now, cleanUnitId, input.expectedUnitRevision)
+
+      if (unitResult.changes === 0) {
+        const recheck = this.db.prepare(`
+          SELECT status, revision FROM smc_unit_states WHERE unit_id = ?
+        `).get(cleanUnitId) as { status: string; revision: number } | undefined
+        throw new UnitFlowAcceptanceConflictError(
+          `CAS conflict on unit "${cleanUnitId}": status="${recheck?.status}" revision=${recheck?.revision}, expected VALIDATING@${input.expectedUnitRevision}`
+        )
+      }
+
+      // 4. CAS on smc_unit_reservations (ACTIVE -> CONSUMED)
+      const reservationResult = this.db.prepare(`
+        UPDATE smc_unit_reservations
+        SET status = 'CONSUMED', updated_at = ?
+        WHERE reservation_id = ? AND repository_id = ? AND status = 'ACTIVE'
+      `).run(now, cleanReservationId, this.repositoryId)
+
+      if (reservationResult.changes === 0) {
+        const recheckRes = this.db.prepare(`
+          SELECT status FROM smc_unit_reservations WHERE reservation_id = ? AND repository_id = ?
+        `).get(cleanReservationId, this.repositoryId) as { status: string } | undefined
+        throw new UnitFlowAcceptanceConflictError(
+          `CAS conflict on reservation "${cleanReservationId}": status="${recheckRes?.status}", expected ACTIVE`
+        )
+      }
+
+      // 5. Append smc_entries (RESULT)
+      const title = `Unit accepted: ${cleanUnitId}`
+      const body = JSON.stringify({
+        acceptanceOperationId: cleanAcceptanceOpId,
+        attemptId: cleanAttemptId,
+        unitId: cleanUnitId,
+        planId: cleanPlanId,
+        proofIds: input.proofIds,
+        summary: input.acceptanceSummary,
+        gitIdentity: input.gitIdentity
+      })
+      const referencesJson = JSON.stringify(input.proofIds.map(pid => ({ kind: 'PROOF', target: pid })))
+
+      this.db.prepare(`
+        INSERT INTO smc_entries (
+          entry_id, session_id, kind, title, body,
+          emitter_role, emitter_id, references_json, supersedes_entry_id, created_at
+        ) VALUES (?, ?, 'RESULT', ?, ?, 'AGENT', ?, ?, NULL, ?)
+      `).run(
+        entryId,
+        cleanSessionId,
+        title,
+        body,
+        input.emitterId ?? 'buildx-agent',
+        referencesJson,
+        now
+      )
+
+      // 6. Check if all units of plan are now COMPLETED
+      const pendingUnits = this.db.prepare(`
+        SELECT count(*) as c FROM smc_unit_states WHERE plan_id = ? AND status != 'COMPLETED'
+      `).get(cleanPlanId) as { c: number }
+
+      let allUnitsCompleted = false
+      if (pendingUnits.c === 0) {
+        this.db.prepare(`
+          UPDATE smc_plans
+          SET status = 'COMPLETED', revision = revision + 1, updated_at = ?
+          WHERE plan_id = ? AND repository_id = ? AND status = 'ACTIVE'
+        `).run(now, cleanPlanId, this.repositoryId)
+        allUnitsCompleted = true
+      }
+
+      const finalUnit = this.db.prepare(`SELECT status, revision FROM smc_unit_states WHERE unit_id = ?`).get(cleanUnitId) as any
+      const finalRes = this.db.prepare(`SELECT status FROM smc_unit_reservations WHERE reservation_id = ?`).get(cleanReservationId) as any
+      const finalPlan = this.db.prepare(`SELECT status, revision FROM smc_plans WHERE plan_id = ?`).get(cleanPlanId) as any
+
+      return {
+        unitId: cleanUnitId,
+        planId: cleanPlanId,
+        unitStatus: finalUnit.status,
+        unitRevision: finalUnit.revision,
+        reservationStatus: finalRes.status,
+        planStatus: finalPlan.status,
+        planRevision: finalPlan.revision,
+        allUnitsCompleted
+      }
     })()
   }
 

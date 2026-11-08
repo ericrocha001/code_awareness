@@ -15,7 +15,8 @@ import {
   SmcInvalidEntryError,
   SmcEntryConflictError,
   SmcInvalidSupersedesError,
-  SmcUnsupportedSchemaError
+  SmcUnsupportedSchemaError,
+  deterministicEntryId
 } from './index'
 import {
   UnitFlowService,
@@ -38,7 +39,9 @@ import {
   type UnitFlowEligibilityResult,
   type UnitFlowReservationRecord,
   type UnitFlowReservationResult,
-  type ReserveUnitFlowUnitOptions
+  type ReserveUnitFlowUnitOptions,
+  UnitFlowAcceptanceService,
+  UnitFlowAcceptanceConflictError
 } from '../unitflow'
 import {
   WorkspaceBindingService,
@@ -8377,7 +8380,425 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
     })
   })
 
+  // ─── Execution-09: Aceite da unidade e avanço sequencial do UnitFlow ─────────
+
+  describe('BuildX Execution-09 — Aceite da unidade e avanço sequencial do UnitFlow (Provas Dirigidas)', () => {
+    const repoId09 = 'repo-execution-09'
+    let tempBaseDir09: string
+    let isolatedWorktreeDir09: string
+    let smc09: SessionMemoryCentralService
+    let gitPort09: any
+    let workspaceService09: WorkspaceBindingService
+
+    const DEFAULT_HEAD_09 = '9999999999999999999999999999999999999999'
+    const DEFAULT_WT_ID_09 = 'wt-ex09-01'
+    const DEFAULT_GEN_09 = 'gen-ex09-1'
+    const DEFAULT_BRANCH_09 = 'feature-ex09'
+
+    function createFixtureInventory09(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      path?: string
+    }): any {
+      const worktreeId = options?.worktreeId ?? DEFAULT_WT_ID_09
+      const generation = options?.generation ?? DEFAULT_GEN_09
+      const branchName = options?.branch ?? DEFAULT_BRANCH_09
+      const head = options?.head ?? DEFAULT_HEAD_09
+      const wtPath = options?.path ?? isolatedWorktreeDir09
+      const worktree: any = {
+        worktreeId, generation, path: wtPath, head, branch: branchName,
+        detached: false, locked: false, missing: false, prunable: false
+      }
+      const branchRecord: any = {
+        key: 'key-' + branchName, repositoryId: repoId09, ref: 'refs/heads/' + branchName,
+        name: branchName, namespace: 'LOCAL', head, upstream: null,
+        generation: 'branch-gen-ex09', revision: 'branch-rev-ex09',
+        creation: { at: '2026-11-08T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-08T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+      return {
+        repositoryId: repoId09, source: 'GIT_LOCAL', coverage: 'COMPLETE',
+        observedAt: '2026-11-08T00:00:00.000Z', revision: 'inv-ex09-1',
+        worktrees: [worktree], branches: [branchRecord], unassignedWorktrees: []
+      }
+    }
+
+    function makeMockLedger09(proofs: Map<string, any>) {
+      return { getProof: (proofId: string) => proofs.get(proofId) ?? null }
+    }
+
+    function goodProof09(overrides?: {
+      status?: string
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      freshness?: string
+      commandProfile?: any
+    }) {
+      return {
+        status: overrides?.status ?? 'PASSED',
+        commandProfile: overrides?.commandProfile ?? {
+          checkout: {
+            worktreeId: overrides?.worktreeId ?? DEFAULT_WT_ID_09,
+            generation: overrides?.generation ?? DEFAULT_GEN_09,
+            branch: overrides?.branch ?? DEFAULT_BRANCH_09,
+            head: overrides?.head ?? DEFAULT_HEAD_09
+          }
+        },
+        freshness: overrides?.freshness
+      }
+    }
+
+    async function createEx09Fixture(opts?: {
+      sessionId?: string; planId?: string; unitId?: string
+      unitId2?: string; reservationId?: string; attemptId?: string; singleUnit?: boolean
+      attemptStatus?: 'STARTING' | 'RUNNING' | 'COMPLETED'
+    }) {
+      const sessionId = opts?.sessionId ?? 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1'
+      const planId = opts?.planId ?? 'b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2'
+      const unitId = opts?.unitId ?? 'c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3'
+      const reservationId = opts?.reservationId ?? 'd4d4d4d4-d4d4-4d4d-8d4d-d4d4d4d4d4d4'
+      const attemptId = opts?.attemptId ?? 'e5e5e5e5-e5e5-4e5e-8e5e-e5e5e5e5e5e5'
+      const unitId2 = opts?.unitId2 ?? 'f6f6f6f6-f6f6-4f6f-8f6f-f6f6f6f6f6f6'
+
+      smc09.createSession(repoId09, { sessionId })
+      await workspaceService09.bindWorkspace(repoId09, sessionId, DEFAULT_WT_ID_09)
+
+      const planSvc = new UnitFlowService(smc09)
+      planSvc.registerPlan(repoId09, sessionId, { planId, title: 'Ex09 Plan' })
+
+      const units: any[] = [{ unitId, title: 'Unit A', objective: 'Obj A', acceptanceCriteria: 'AC A' }]
+      if (!opts?.singleUnit) {
+        units.push({ unitId: unitId2, title: 'Unit B', objective: 'Obj B', acceptanceCriteria: 'AC B' })
+      }
+      planSvc.definePlanUnits(repoId09, sessionId, planId, units)
+
+      const resSvc = new UnitFlowReservationService(smc09, gitPort09)
+      const resRes = await resSvc.reserveNextEligibleUnit(repoId09, sessionId, planId, { reservationId })
+      if (resRes.kind !== 'RESERVED') throw new Error('Expected RESERVED, got: ' + resRes.kind)
+
+      const attemptSvc = new ExecutionAttemptService(smc09, gitPort09)
+      const attempt = await attemptSvc.prepareExecutionAttempt(repoId09, sessionId, reservationId, { attemptId })
+
+      const store = smc09.getStore(repoId09)
+      const startingAttempt = store.transitionAttemptToStarting(attemptId, attempt.revision)
+
+      const targetAttemptStatus = opts?.attemptStatus ?? 'COMPLETED'
+      if (targetAttemptStatus === 'COMPLETED') {
+        const unitState = store.getUnitState(sessionId, planId, unitId)!
+        store.transitionAttemptToSettled({
+          attemptId,
+          expectedAttemptRevision: startingAttempt.revision,
+          unitId,
+          expectedUnitRevision: unitState.revision,
+          terminalOutcome: 'SUCCEEDED'
+        })
+      }
+
+      return { sessionId, planId, unitId, unitId2, reservationId, attemptId }
+    }
+
+    beforeEach(() => {
+      tempBaseDir09 = mkdtempSync(join(tmpdir(), 'smc-test-ex09-'))
+      isolatedWorktreeDir09 = mkdtempSync(join(tmpdir(), 'smc-wt-ex09-'))
+      smc09 = new SessionMemoryCentralService(tempBaseDir09)
+      gitPort09 = {
+        getBranchInventory: async () => createFixtureInventory09(),
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+      workspaceService09 = new WorkspaceBindingService(smc09, gitPort09)
+    })
+
+    afterEach(() => {
+      try { smc09.close() } catch {}
+      try { rmSync(tempBaseDir09, { recursive: true, force: true }) } catch {}
+      try { rmSync(isolatedWorktreeDir09, { recursive: true, force: true }) } catch {}
+    })
+
+    describe('Prova 1 — Aceite completo retorna ACCEPTED, unit COMPLETED, reserva CONSUMED', () => {
+      it('deve aceitar unidade VALIDATING com prova PASSED vinculada à worktree', async () => {
+        const { sessionId, planId, unitId, unitId2, reservationId, attemptId } = await createEx09Fixture({ singleUnit: false })
+        const proofId = 'aaaa0001-0000-4000-8000-000000000001'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09()]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000001-0000-4000-8000-000000000001',
+          proofIds: [proofId],
+          acceptanceSummary: 'Unit A validated'
+        })
+
+        expect(result.status).toBe('ACCEPTED')
+        expect(result.unitId).toBe(unitId)
+        expect(result.planId).toBe(planId)
+        expect(result.unitStatus).toBe('COMPLETED')
+        expect(result.reservationStatus).toBe('CONSUMED')
+        expect(result.planStatus).toBe('ACTIVE')
+        expect(result.nextEligibleUnit?.kind).toBe('ELIGIBLE')
+        if (result.nextEligibleUnit?.kind === 'ELIGIBLE') {
+          expect(result.nextEligibleUnit.unitId).toBe(unitId2)
+        }
+
+        const store = smc09.getStore(repoId09)
+        expect(store.getUnitState(sessionId, planId, unitId)?.status).toBe('COMPLETED')
+        expect(store.getReservation(reservationId)?.status).toBe('CONSUMED')
+        expect(store.getPlan(planId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 2 — Última unidade do plano transiciona plano para COMPLETED', () => {
+      it('deve retornar ALL_UNITS_COMPLETED e plano COMPLETED ao aceitar única unidade', async () => {
+        const { sessionId, planId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0002-0000-4000-8000-000000000002'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09()]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000002-0000-4000-8000-000000000002',
+          proofIds: [proofId],
+          acceptanceSummary: 'Single unit plan complete'
+        })
+
+        expect(result.status).toBe('ACCEPTED')
+        expect(result.planStatus).toBe('COMPLETED')
+        expect(result.nextEligibleUnit?.kind).toBe('ALL_UNITS_COMPLETED')
+
+        const store = smc09.getStore(repoId09)
+        expect(store.getPlan(planId)?.status).toBe('COMPLETED')
+      })
+    })
+
+    describe('Prova 3 — Prova FAILED rejeitada com EVIDENCE_REQUIRED', () => {
+      it('deve retornar EVIDENCE_REQUIRED quando status da prova não é PASSED', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0003-0000-4000-8000-000000000003'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09({ status: 'FAILED' })]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000003-0000-4000-8000-000000000003',
+          proofIds: [proofId],
+          acceptanceSummary: 'Should fail'
+        })
+
+        expect(result.status).toBe('EVIDENCE_REQUIRED')
+        expect(result.reason).toMatch(/PROOF_NOT_PASSED/i)
+      })
+    })
+
+    describe('Prova 4 — Prova EXECUTOR_REPORTED sem checkout nativo rejeitada com EVIDENCE_REQUIRED', () => {
+      it('deve retornar EVIDENCE_REQUIRED para prova sem checkout', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0004-0000-4000-8000-000000000004'
+        const unverifiedProof = {
+          status: 'PASSED',
+          commandProfile: {
+            receipt: { trust: 'EXECUTOR_REPORTED' },
+            checkout: null
+          }
+        }
+        const ledger = makeMockLedger09(new Map([[proofId, unverifiedProof]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000004-0000-4000-8000-000000000004',
+          proofIds: [proofId],
+          acceptanceSummary: 'No checkout'
+        })
+
+        expect(result.status).toBe('EVIDENCE_REQUIRED')
+        expect(result.reason).toMatch(/PROOF_UNTRUSTED/i)
+      })
+    })
+
+    describe('Prova 5 — Prova com head divergente retorna STALE', () => {
+      it('deve retornar STALE quando checkout.head difere do head atual', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0005-0000-4000-8000-000000000005'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09({ head: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' })]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000005-0000-4000-8000-000000000005',
+          proofIds: [proofId],
+          acceptanceSummary: 'Stale head'
+        })
+
+        expect(result.status).toBe('STALE')
+        expect(result.reason).toMatch(/PROOF_HEAD_STALE/i)
+      })
+    })
+
+    describe('Prova 6 — Prova com worktreeId errado retorna STALE', () => {
+      it('deve retornar STALE quando checkout.worktreeId diverge do attempt', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0006-0000-4000-8000-000000000006'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09({ worktreeId: 'wt-different-99' })]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000006-0000-4000-8000-000000000006',
+          proofIds: [proofId],
+          acceptanceSummary: 'Wrong worktree'
+        })
+
+        expect(result.status).toBe('STALE')
+        expect(result.reason).toMatch(/PROOF_WORKTREE_MISMATCH/i)
+      })
+    })
+
+    describe('Prova 7 — Prova com freshness SOURCE_STALE retorna STALE', () => {
+      it('deve retornar STALE quando freshness for SOURCE_STALE', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0007-0000-4000-8000-000000000007'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09({ freshness: 'SOURCE_STALE' })]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000007-0000-4000-8000-000000000007',
+          proofIds: [proofId],
+          acceptanceSummary: 'Stale freshness'
+        })
+
+        expect(result.status).toBe('STALE')
+        expect(result.reason).toMatch(/PROOF_STALE/i)
+      })
+    })
+
+    describe('Prova 8 — Attempt não COMPLETED retorna CONFLICT', () => {
+      it('deve retornar CONFLICT quando attempt ainda está em STARTING', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true, attemptStatus: 'STARTING' })
+        const proofId = 'aaaa0008-0000-4000-8000-000000000008'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09()]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000008-0000-4000-8000-000000000008',
+          proofIds: [proofId],
+          acceptanceSummary: 'Attempt not COMPLETED'
+        })
+
+        expect(result.status).toBe('CONFLICT')
+        expect(result.reason).toMatch(/ATTEMPT_NOT_COMPLETED/i)
+      })
+    })
+
+    describe('Prova 9 — Unidade não VALIDATING retorna CONFLICT', () => {
+      it('deve retornar CONFLICT quando unidade já foi COMPLETED', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0009-0000-4000-8000-000000000009'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09()]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        // Primeiro aceite conclui a unidade
+        const opId1 = '0a000009-0000-4000-8000-000000000001'
+        const r1 = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: opId1,
+          proofIds: [proofId],
+          acceptanceSummary: 'First acceptance'
+        })
+        expect(r1.status).toBe('ACCEPTED')
+
+        // Segunda tentativa com outro opId: a unidade já está COMPLETED, não VALIDATING
+        const opId2 = '0a000009-0000-4000-8000-000000000002'
+        const r2 = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: opId2,
+          proofIds: [proofId],
+          acceptanceSummary: 'Second acceptance with divergent opId'
+        })
+
+        expect(r2.status).toBe('CONFLICT')
+        expect(r2.reason).toMatch(/UNIT_NOT_VALIDATING/i)
+      })
+    })
+
+    describe('Prova 10 — Idempotência: mesmo acceptanceOperationId retorna ACCEPTED consistente', () => {
+      it('deve retornar ACCEPTED idêntico em chamadas repetidas com mesmo opId', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0010-0000-4000-8000-000000000010'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09()]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const opId = '0a000010-0000-4000-8000-000000000010'
+        const opts = { acceptanceOperationId: opId, proofIds: [proofId], acceptanceSummary: 'Idempotent' }
+
+        const r1 = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, opts)
+        const r2 = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, opts)
+
+        expect(r1.status).toBe('ACCEPTED')
+        expect(r2.status).toBe('ACCEPTED')
+        expect(r2.unitId).toBe(unitId)
+        expect(r2.planId).toBe(planId)
+      })
+    })
+
+    describe('Prova 11 — Concorrência: Promise.all produz exatamente uma entrada SMC', () => {
+      it('deve garantir exatamente uma entrada RESULT para chamadas simultâneas com mesmo opId', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0011-0000-4000-8000-000000000011'
+        const ledger = makeMockLedger09(new Map([[proofId, goodProof09()]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const opId = '0a000011-0000-4000-8000-000000000011'
+        const opts = { acceptanceOperationId: opId, proofIds: [proofId], acceptanceSummary: 'Concurrent' }
+
+        const [r1, r2] = await Promise.all([
+          svc.acceptValidatedUnit(repoId09, sessionId, attemptId, opts),
+          svc.acceptValidatedUnit(repoId09, sessionId, attemptId, opts)
+        ])
+
+        expect(r1.status).toBe('ACCEPTED')
+        expect(r2.status).toBe('ACCEPTED')
+
+        const store = smc09.getStore(repoId09)
+        const { entries } = store.listEntries(sessionId)
+        const expectedEntryId = deterministicEntryId('accept', opId)
+        const acceptEntries = entries.filter(e => e.kind === 'RESULT' && e.entryId === expectedEntryId)
+        expect(acceptEntries).toHaveLength(1)
+      })
+    })
+
+    describe('Prova 12 — Store unit: transitionUnitToAccepted com expectedUnitRevision errada lança erro', () => {
+      it('deve lançar erro de conflito se CAS de unit falhar', async () => {
+        const { sessionId, planId, unitId, reservationId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const store = smc09.getStore(repoId09)
+
+        expect(() => {
+          store.transitionUnitToAccepted({
+            sessionId, planId, unitId,
+            expectedUnitRevision: 9999,
+            reservationId, attemptId,
+            acceptanceOperationId: '0a000012-0000-4000-8000-000000000012',
+            proofIds: ['aaaa0012-0000-4000-8000-000000000012'],
+            acceptanceSummary: 'CAS test',
+            gitIdentity: {
+              worktreeId: DEFAULT_WT_ID_09, generation: DEFAULT_GEN_09,
+              branch: DEFAULT_BRANCH_09, head: DEFAULT_HEAD_09
+            }
+          })
+        }).toThrow(UnitFlowAcceptanceConflictError)
+      })
+    })
+
+    describe('Prova 13 — Prova não encontrada no ledger retorna EVIDENCE_REQUIRED', () => {
+      it('deve retornar EVIDENCE_REQUIRED quando proofId não existe no ledger', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const ledger = makeMockLedger09(new Map())
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000013-0000-4000-8000-000000000013',
+          proofIds: ['aaaa0013-0000-4000-8000-000000000013'],
+          acceptanceSummary: 'Proof not found'
+        })
+
+        expect(result.status).toBe('EVIDENCE_REQUIRED')
+        expect(result.reason).toMatch(/PROOF_NOT_FOUND/i)
+      })
+    })
+  })
 })
-
-
-

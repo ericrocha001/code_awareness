@@ -79,3 +79,9 @@ export class UnitFlowReservationNotFoundError extends Error {
   }
 }
 
+export class UnitFlowAcceptanceConflictError extends Error {
+  constructor(reason: string) {
+    super(reason.startsWith('ACCEPTANCE_') ? reason : `ACCEPTANCE_CONFLICT: ${reason}`)
+    this.name = 'UnitFlowAcceptanceConflictError'
+  }
+}

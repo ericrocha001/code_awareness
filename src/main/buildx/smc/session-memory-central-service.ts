@@ -15,7 +15,9 @@ import type {
   UnitFlowReservationRecord,
   UnitFlowUnitHeaderRecord,
   UnitFlowUnitRecord,
-  UnitFlowUnitStateRecord
+  UnitFlowUnitStateRecord,
+  AcceptUnitFlowUnitStoreInput,
+  AcceptUnitFlowUnitStoreResult
 } from '../../../shared/types/buildx/unitflow-types'
 import type {
   BuildXWorkspaceBindingRecord,
@@ -193,6 +195,12 @@ export class SessionMemoryCentralService {
     return this.getStore(repositoryId).transitionAttemptToSettled(input)
   }
 
+  transitionUnitToAccepted(
+    repositoryId: string,
+    input: AcceptUnitFlowUnitStoreInput
+  ): AcceptUnitFlowUnitStoreResult {
+    return this.getStore(repositoryId).transitionUnitToAccepted(input)
+  }
   closeStore(repositoryId: string): void {
     const validRepoId = validateRepositoryId(repositoryId)
     const store = this.stores.get(validRepoId)
