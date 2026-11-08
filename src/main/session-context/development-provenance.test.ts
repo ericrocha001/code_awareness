@@ -74,6 +74,17 @@ async function commit(f: ReturnType<typeof setup>, session = 'session', sha = 'a
   expect(await correlateNativeGit(f.sessions.registry, binding, invocationId, git, () => {})).toBe('VERIFIED')
   return sha
 }
+it('F2 preserves separate native and Entire identities without an independently verified alias', async () => {
+  const f = setup(), receipt = await f.publish(markdown('Separate providers'), 'call', 'same-session-label')
+  f.sessions.ingest({ provider: 'entire', providerSessionId: 'same-session-label', providerVersion: 'fixture', agent: 'codex',
+    state: 'UNKNOWN', coverage: 'PARTIAL', importState: 'METADATA_ONLY', sourceDigest: nativeDigest('fixture'), sourceBytes: 0 }, [])
+  const native = f.sessions.registry.nativeSessions(0, 20)
+  expect(native).toHaveLength(1)
+  expect(native[0].aliasState).toBe('NOT_RECONCILED')
+  const graph = await pages(f, { type: 'ARTIFACT', id: receipt.artifactId, revision: 1 })
+  expect(graph.edges.some(edge => edge.from.endsWith('entire:same-session-label') || edge.to.endsWith('entire:same-session-label'))).toBe(false)
+  expect(f.sessions.registry.contextGraph({ kind: 'SESSION', id: 'entire:same-session-label' }).nodes).toHaveLength(1)
+})
 async function pages(f: ReturnType<typeof setup>, selector: object, extra = {}) {
   const edges: any[] = [], paths: any[] = []
   let cursor: string | undefined

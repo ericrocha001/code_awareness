@@ -44,6 +44,7 @@ import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { SessionContextClient } from './session-context/client'
 import { sessionTargetResolver } from './session-context/target'
 import { registrySources } from './session-context/registry-sources'
+import { SessionProjectionCoordinator } from './session-context/projection-coordinator'
 import { registerApplicationShutdown } from './application-shutdown'
 import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
 import { NgrokTransport } from './mcp/connection/ngrok-transport'
@@ -623,21 +624,14 @@ app.whenReady().then(async () => {
       void sessionContext.call('list_agent_sessions', { source: 'NATIVE_HOOK', limit: 1 }).catch(() => {})
       gitOperations.bindCommitObservation(async (target, commitSha) => {
         await sessionContext.call('inspect_capture_health', { ...target, commitSha, trigger: 'LOCAL_COMMIT' })
-        return sessionContext.call('reconcile_checkpoint_registry', { commitSha })
+        const result = await sessionContext.call('reconcile_checkpoint_registry', { commitSha })
+        projection.request()
+        return result
       })
       void sessionContext.call('inspect_capture_health', { trigger: 'BEGIN' })
-      let projecting = false
-      let projectionRequested = false
-      const reconcile = () => {
-        if (!sessionIsCurrent()) return
-        if (projecting) { projectionRequested = true; return }
-        projecting = true
-        void sessionContext.call('reconcile_checkpoint_registry', {}).finally(() => {
-          projecting = false
-          if (projectionRequested) { projectionRequested = false; queueMicrotask(reconcile) }
-        })
-      }
-      sessionProjectionSubscriptions = [continuumSession.onChanged(reconcile), validationLedger.onRecorded(reconcile)]
+      const projection = new SessionProjectionCoordinator(() => sessionContext.reconcileProjection(), sessionIsCurrent)
+      sessionProjectionSubscriptions = [projection.stop, continuumSession.onChanged(projection.request), validationLedger.onRecorded(projection.request), settingsService.onChanged(projection.request)]
+      projection.request()
     }
     if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
       const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache.js')
@@ -838,13 +832,15 @@ registerApplicationShutdown(app, async () => {
     console.error('[Main] Erro ao fechar conexões de banco:', error)
   }
   try {
+    for (const unsubscribe of sessionProjectionSubscriptions) unsubscribe()
+    sessionProjectionSubscriptions = []
+    await activeSessionContext?.dispose()
     validationLedger.close()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Validation Ledger:', error)
   }
   try {
     localAgentChannel.dispose()
-    activeSessionContext?.dispose()
     continuumSession.dispose()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Continuum Session:', error)

@@ -80,6 +80,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
         }
       }
     }
+    parentPort?.postMessage({ id: message.id, phase: isLiveSessionTool(message.name) ? 'live-metadata' : 'store-open' })
     const requestStore = isLiveSessionTool(message.name) ? storeIdentity : (store ??= new SessionStore(storeIdentity.path, repositoryId))
     const publication = <T>(request: object): Promise<T> => new Promise((resolve, reject) => {
       assertRequest()
@@ -93,6 +94,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       invalidate: (invocationId, state) => publication<void>({ action: 'invalidate', invocationId, state })
     }
     if (store && message.nativeTargets?.length && !nativeIngesting) {
+      parentPort?.postMessage({ id: message.id, phase: 'native-ingestion' })
       nativeIngesting = true
       try {
       for (const nativeTarget of message.nativeTargets) {
@@ -145,6 +147,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
     }
     const readRegistry: RegistryReader = request => new Promise((resolve, reject) => {
       assertRequest()
+      parentPort?.postMessage({ id: message.id, phase: 'registry-source-read' })
       const token = ++validationId
       registryReads.set(token, { resolve, reject })
       parentPort?.postMessage({ id: message.id, registryRead: { token, request } })
@@ -153,6 +156,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       (exe, args, cwd, limit, consume, timeout) => runReadOnly(exe, args, cwd, limit, consume, timeout, abort.signal),
       target || message.liveTargets ? async () => { await validateTarget(message.id) } : async () => {},
       phase => { if (!closing) parentPort?.postMessage({ id: message.id, phase }) }, target?.selection)
+    parentPort?.postMessage({ id: message.id, phase: message.name === 'discover_execution_context' ? 'registry-map' : 'session-tool' })
     const result = isLiveSessionTool(message.name)
       ? await executeLiveSessionTool(provider, message.name, message.args, assertRequest, message.liveTargets ?? [])
       : await executeSessionTool(
