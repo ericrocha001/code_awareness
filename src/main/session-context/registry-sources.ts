@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto'
+import { discoverGitHubPage } from './github-discovery'
 import type { ContinuumService } from '../continuum/continuum-service'
 import type { Artifact } from '../continuum/continuum-types'
 import type { ValidationLedger } from '../validation-ledger/validation-ledger'
@@ -8,10 +10,11 @@ import { extractArtifactReferences } from '../continuum/artifact-references'
 
 export function registrySources(options: {
   repositoryId: string; root: string; continuum: () => ContinuumService | null; ledger: ValidationLedger
-  github: Pick<GitHubIntegrationService, 'commitPullRequests' | 'getPullRequest' | 'pullRequestCommits'>
+  github: Pick<GitHubIntegrationService, 'commitPullRequests' | 'getPullRequest' | 'pullRequestCommits'> & Partial<Pick<GitHubIntegrationService, 'pullRequestCatalogPage'>>
   networkAllowed: () => boolean; assertCurrent: () => void
 }): RegistryReader {
   const { repositoryId, assertCurrent } = options
+  const discoveryEpoch = randomUUID()
   return async ({ selector, neighbors = [], cursors }) => {
     assertCurrent()
     const batches: RegistryBatch[] = [], artifacts = new Map<string, Artifact>(), prs = new Set<number>()
@@ -88,26 +91,55 @@ export function registrySources(options: {
     else {
       try {
         const assertNetwork = () => { assertCurrent(); if (!options.networkAllowed()) throw new Error('NETWORK_NOT_AUTHORIZED') }
+        let discoveryUnavailable = false
+        if (!selector && options.github.pullRequestCatalogPage) {
+          const discovery = await discoverGitHubPage({ repositoryId, root: options.root, read: options.github.pullRequestCatalogPage.bind(options.github), cursor: cursors.GITHUB_DISCOVERY, epoch: discoveryEpoch, assertCurrent, assertNetwork })
+          batches.push(...discovery)
+          const state = discovery.find(batch => batch.source === 'GITHUB_DISCOVERY')
+          discoveryUnavailable = state?.status === 'UNAVAILABLE'
+          if (state) {
+            const progress = JSON.parse(state.cursor ?? '{}')
+            diagnostic('GITHUB_DISCOVERY', progress.reasonCode ?? 'SOURCE_READY', 'CATALOG_PAGE')
+          }
+        }
         if (selector?.kind === 'COMMIT') {
           assertNetwork()
           for (const number of await options.github.commitPullRequests(options.root, selector.id)) prs.add(number)
         }
         for (const number of [...prs].slice(0, 2)) {
           assertNetwork()
-          const pr = (await options.github.getPullRequest(options.root, number)).pullRequest
           const key = 'GITHUB:PR:' + number
           const saved = JSON.parse(cursors[key] ?? '{}')
-          if (saved.head === pr.head.sha && saved.nextPage === null) continue
+          const catalog = batches.find(batch => batch.source === 'GITHUB_CATALOG:PR:' + number)?.cursor ?? cursors['GITHUB_CATALOG:PR:' + number]
+          const catalogRecord = catalog ? JSON.parse(catalog) : undefined
+          const { scanPass: _scanPass, ...catalogFields } = catalogRecord ?? {}
+          const catalogRevision = catalog ? digest(JSON.stringify(catalogFields)) : undefined
+          const record = catalogRecord
+          if (record && (record.head.repositoryId !== record.base.repositoryId || record.head.repository?.toLowerCase() !== record.base.repository.toLowerCase())) {
+            addBatch({ source: key, revision: record.head.sha, status: 'CONFLICT', cursor: JSON.stringify({ head: record.head.sha, nextPage: null, catalogRevision, reasonCode: 'SOURCE_IDENTITY_CONFLICT' }), edges: [] })
+            continue
+          }
+          const pr = (await options.github.getPullRequest(options.root, number)).pullRequest
+          if (saved.head === pr.head.sha && saved.nextPage === null && saved.catalogRevision === catalogRevision) continue
           const pageNumber = saved.head === pr.head.sha ? saved.nextPage ?? 1 : 1
           assertNetwork()
-          const page = await options.github.pullRequestCommits(options.root, number, pr.head.sha, pageNumber)
+          let page
+          try { page = await options.github.pullRequestCommits(options.root, number, pr.head.sha, pageNumber) }
+          catch (error) {
+            assertNetwork()
+            if (error instanceof Error && error.message === 'PR_SOURCE_REPOSITORY_MISMATCH') {
+              addBatch({ source: key, revision: pr.head.sha, status: 'CONFLICT', cursor: JSON.stringify({ head: pr.head.sha, nextPage: null, catalogRevision, reasonCode: 'SOURCE_IDENTITY_CONFLICT' }), edges: [] })
+              continue
+            }
+            throw error
+          }
           assertCurrent()
           if (page.repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
           addBatch({ source: key + ':' + pageNumber, revision: pr.head.sha, status: 'COMPLETE', entities: [{ kind: 'PR', id: String(number) }], edges: page.commits.map(commit => ({
             from: { kind: 'COMMIT', id: commit.sha }, relation: 'member-of', to: { kind: 'PR', id: String(number) }, evidenceKind: 'GITHUB_COMMIT_LIST', evidenceRef: `PR:${number}:${pr.head.sha}:${pageNumber}`, digest: digest(JSON.stringify(page.commits)), freshness: 'OBSERVED_SNAPSHOT' })) })
-          addBatch({ source: key, revision: pr.head.sha, status: page.nextPage ? 'PARTIAL' : 'COMPLETE', cursor: JSON.stringify({ head: pr.head.sha, nextPage: page.nextPage }), edges: [] })
+          addBatch({ source: key, revision: pr.head.sha, status: page.nextPage ? 'PARTIAL' : 'COMPLETE', cursor: JSON.stringify({ head: pr.head.sha, nextPage: page.nextPage, catalogRevision }), edges: [] })
         }
-        addBatch({ source: 'GITHUB', revision: digest(JSON.stringify([...prs])), status: prs.size > 2 ? 'PARTIAL' : 'OBSERVED_SNAPSHOT', edges: [] })
+        addBatch({ source: 'GITHUB', revision: digest(JSON.stringify([...prs])), status: discoveryUnavailable ? 'UNAVAILABLE' : prs.size > 2 ? 'PARTIAL' : 'OBSERVED_SNAPSHOT', edges: [] })
       } catch (error) {
         assertCurrent()
         unavailable('GITHUB', error instanceof Error && error.message === 'NETWORK_NOT_AUTHORIZED' ? 'NETWORK_NOT_AUTHORIZED' : 'UNAVAILABLE')

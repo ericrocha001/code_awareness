@@ -72,6 +72,23 @@ export class GitHubIntegrationService {
     }
   }
 
+  async pullRequestCatalogPage(repoPath: string, page: number, assertCurrent: () => void = () => {}) {
+    const connection = this.connectionRevision, origin = await this.pullRequestOrigin(repoPath)
+    const account = this.credentials.loadMetadata().user?.id
+    if (!account) throw new Error('ACCOUNT_IDENTITY_UNAVAILABLE')
+    assertCurrent()
+    const repository = await this.api!.getPullRequestRepository(origin.fullName)
+    assertCurrent()
+    if (origin.providerRepositoryId && repository.id !== origin.providerRepositoryId) throw new Error('REMOTE_IDENTITY_MISMATCH')
+    const result = await this.api!.listPullRequestCatalogPage(origin.fullName, page)
+    assertCurrent()
+    const after = await this.pullRequestOrigin(repoPath)
+    if (connection !== this.connectionRevision || origin.repositoryId !== after.repositoryId || origin.fullName !== after.fullName || account !== this.credentials.loadMetadata().user?.id) throw new Error('REMOTE_CONTEXT_CHANGED')
+    if (result.items.some(pr => pr.base.repositoryId !== repository.id || pr.base.repository.toLowerCase() !== origin.fullName.toLowerCase())) throw new Error('REMOTE_IDENTITY_MISMATCH')
+    return { ...result, repositoryId: origin.repositoryId, providerRepositoryId: repository.id,
+      scope: createHash('sha256').update(JSON.stringify([origin.repositoryId, repository.id, origin.fullName.toLowerCase(), account])).digest('hex'), observedAt: new Date().toISOString() }
+  }
+
   async branchProtection(repoPath: string, branch: string) {
     const origin = await this.pullRequestOrigin(repoPath)
     return this.api!.getBranchProtection(origin.fullName, branch)
@@ -93,12 +110,13 @@ export class GitHubIntegrationService {
     const connection = this.connectionRevision
     const origin = await this.pullRequestOrigin(repoPath)
     const before = await this.api!.getPullRequestCatalogRecord(origin.fullName, number)
+    if (before.head.repository?.toLowerCase() !== origin.fullName.toLowerCase() || before.head.repositoryId !== before.base.repositoryId) throw new Error('PR_SOURCE_REPOSITORY_MISMATCH')
     if (before.head.sha !== head || before.base.repository.toLowerCase() !== origin.fullName.toLowerCase()) throw new Error('PR_STATE_CHANGED')
     const commits = await this.api!.getPullRequestCommits(origin.fullName, number, page)
     const after = await this.api!.getPullRequestCatalogRecord(origin.fullName, number)
     const afterOrigin = await this.pullRequestOrigin(repoPath)
     if (connection !== this.connectionRevision || origin.repositoryId !== afterOrigin.repositoryId || origin.fullName !== afterOrigin.fullName) throw new Error('REMOTE_CONTEXT_CHANGED')
-    if (after.head.sha !== head || after.updatedAt !== before.updatedAt) throw new Error('PR_STATE_CHANGED')
+    if (after.id !== before.id || after.head.sha !== head || after.head.repositoryId !== before.head.repositoryId || after.base.repositoryId !== before.base.repositoryId || after.updatedAt !== before.updatedAt) throw new Error('PR_STATE_CHANGED')
     return { repositoryId: origin.repositoryId, prNumber: number, head, source: 'GITHUB_REST', observedAt: new Date().toISOString(), ...commits }
   }
   async commitPullRequests(repoPath: string, sha: string): Promise<number[]> {

@@ -35,7 +35,8 @@ export class CheckpointRegistry {
   pendingReconciliation(kind: 'PR' | 'COMMIT', limit = 5): RegistryEntity[] {
     const prefix = kind === 'PR' ? 'GITHUB:PR:' : 'GIT:'
     return (this.db.prepare(`SELECT e.externalId FROM registry_entities e LEFT JOIN registry_sources s ON s.source=?||e.externalId
-      WHERE e.kind=? AND (s.source IS NULL ${kind === 'PR' ? "OR s.status='PARTIAL'" : ''})
+      LEFT JOIN registry_sources c ON c.source='GITHUB_CATALOG:PR:'||e.externalId
+      WHERE e.kind=? AND (s.source IS NULL ${kind === 'PR' ? "OR s.status='PARTIAL' OR (c.source IS NOT NULL AND c.revision<>coalesce(CASE WHEN json_valid(s.cursor) THEN json_extract(s.cursor,'$.catalogRevision') END,''))" : ''})
       ORDER BY CASE WHEN s.source IS NULL THEN 0 ELSE 1 END,e.externalId LIMIT ?`).all(prefix, kind, limit) as { externalId: string }[])
       .map(row => ({ kind, id: row.externalId }))
   }
@@ -48,10 +49,17 @@ export class CheckpointRegistry {
     const github = this.source('GITHUB')?.status
     const unavailable = sources.filter(source => ['CONTINUUM', 'LEDGER'].includes(source.source) && source.status === 'UNAVAILABLE').map(source => source.source)
     const local = sources.some(source => ['CONTINUUM', 'LEDGER'].includes(source.source) && source.status === 'PARTIAL') || this.pendingReconciliation('COMMIT', 1).length > 0
-    const remote = this.pendingReconciliation('PR', 1).length > 0 || this.source('GITHUB_REFRESH')?.status === 'PARTIAL'
+    let discovery: { phase?: string; reasonCode?: string; lastAttemptAt?: string; lastAdvanceAt?: string; page?: number } = {}
+    try { discovery = JSON.parse(this.source('GITHUB_DISCOVERY')?.cursor ?? '{}') } catch {}
+    const discoveryPending = discovery.phase === 'FULL' || discovery.phase === 'PREFIX'
+    const remote = discoveryPending || this.pendingReconciliation('PR', 1).length > 0 || this.source('GITHUB_REFRESH')?.status === 'PARTIAL'
     const blocked = remote && ['NETWORK_NOT_AUTHORIZED', 'UNAVAILABLE'].includes(github ?? 'UNAVAILABLE')
     return { pending: local || remote || unavailable.length > 0, drainable: local || remote && !blocked, blockedSources: [...unavailable, ...(blocked ? ['GITHUB'] : [])],
-      sources: sources.filter(source => source.status === 'PARTIAL').map(source => source.source) }
+      sources: sources.filter(source => source.status === 'PARTIAL').map(source => source.source),
+      details: this.source('GITHUB_DISCOVERY') ? [{ source: 'GITHUB_DISCOVERY', scope: 'UPDATED_PR_CATALOG',
+        ...(typeof discovery.reasonCode === 'string' && /^[A-Z_]{1,80}$/.test(discovery.reasonCode) ? { reasonCode: discovery.reasonCode } : {}),
+        ...(discovery.lastAttemptAt ? { lastAttemptAt: discovery.lastAttemptAt } : {}), ...(discovery.lastAdvanceAt ? { lastAdvanceAt: discovery.lastAdvanceAt } : {}),
+        pending: discoveryPending }] : [] }
   }
   nativeCaptureWindows(worktreeId: string, generation: string) {
     const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
@@ -132,13 +140,32 @@ export class CheckpointRegistry {
     return this.db.prepare('SELECT * FROM registry_sources ORDER BY observedAt DESC,source LIMIT 20').all() as ReturnType<CheckpointRegistry['sources']>
   }
   coverageSources(): ReturnType<CheckpointRegistry['sources']> {
-    return this.db.prepare("SELECT * FROM registry_sources WHERE source IN ('CONTINUUM','LEDGER','GITHUB','NATIVE_HOOK','IMPORTED_SESSIONS','ENTIRE_COMMITS','ENTIRE_REFS','LEGACY') ORDER BY source").all() as ReturnType<CheckpointRegistry['sources']>
+    return this.db.prepare("SELECT * FROM registry_sources WHERE source IN ('CONTINUUM','LEDGER','GITHUB','GITHUB_DISCOVERY','NATIVE_HOOK','IMPORTED_SESSIONS','ENTIRE_COMMITS','ENTIRE_REFS','LEGACY') ORDER BY source").all() as ReturnType<CheckpointRegistry['sources']>
   }
   source(source: string): ReturnType<CheckpointRegistry['sources']>[number] | undefined { return this.db.prepare('SELECT * FROM registry_sources WHERE source=?').get(source) as ReturnType<CheckpointRegistry['source']> }
-  cursors(): Record<string, string> { return Object.fromEntries((this.db.prepare('SELECT source,cursor FROM registry_sources WHERE cursor IS NOT NULL ORDER BY observedAt DESC LIMIT 100').all() as { source: string; cursor: string }[]).map(s => [s.source, s.cursor])) }
+  cursors(): Record<string, string> { return Object.fromEntries((this.db.prepare("SELECT source,cursor FROM registry_sources WHERE cursor IS NOT NULL ORDER BY CASE WHEN source IN ('CONTINUUM','LEDGER','GITHUB_DISCOVERY','GITHUB_REFRESH','ENTIRE_REFS') THEN 0 ELSE 1 END,observedAt DESC LIMIT 100").all() as { source: string; cursor: string }[]).map(s => [s.source, s.cursor])) }
   applyAll(batches: RegistryBatch[], assertCurrent: () => void): void {
     this.db.transaction(() => {
-      for (const batch of batches) this.apply(batch, this.source(batch.source)?.revision, assertCurrent)
+      const discovery = batches.find(batch => batch.source === 'GITHUB_DISCOVERY')
+      const repeated = !!discovery && batches.some(batch => {
+        if (!/^GITHUB_CATALOG:PR:[0-9]+$/.test(batch.source)) return false
+        try {
+          const incoming = JSON.parse(batch.cursor ?? '{}'), prior = JSON.parse(this.source(batch.source)?.cursor ?? '{}')
+          return typeof incoming.scanPass === 'string' && incoming.scanPass === prior.scanPass
+        } catch { return false }
+      })
+      for (let batch of batches) {
+        if (batch === discovery && repeated) {
+          const cursor = JSON.parse(batch.cursor ?? '{}')
+          Object.assign(cursor, { phase: 'FULL', page: 1, rolling: digest('GITHUB_UPDATED_DESC_V1'), reasonCode: 'CATALOG_PAGE_OVERLAP', pass: digest(String(cursor.pass) + 'RESTART') })
+          const previous = JSON.parse(this.source('GITHUB_DISCOVERY')?.cursor ?? '{}')
+          if (previous.highWatermarkUpdatedAt) cursor.highWatermarkUpdatedAt = previous.highWatermarkUpdatedAt
+          else delete cursor.highWatermarkUpdatedAt
+          delete cursor.previousPass; delete cursor.high
+          batch = { ...batch, revision: digest(JSON.stringify(cursor)), cursor: JSON.stringify(cursor), status: 'PARTIAL' }
+        }
+        this.apply(batch, this.source(batch.source)?.revision, assertCurrent)
+      }
       assertCurrent()
     }).immediate()
   }
@@ -170,6 +197,7 @@ export class CheckpointRegistry {
         this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND sourceRevision<>? AND state=?').run('SUPERSEDED', batch.source, batch.revision, 'OBSERVED')
       }
       if (batch.status === 'CHECKPOINT_NOT_OBSERVED') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('STALE', batch.source, 'OBSERVED')
+      if (/^GITHUB:PR:[0-9]+$/.test(batch.source) && batch.status === 'CONFLICT') this.db.prepare("UPDATE registry_edges SET state='CONFLICT' WHERE source LIKE ? AND state='OBSERVED'").run(batch.source + ':%')
       if (batch.status === 'CONFLICT') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('CONFLICT', batch.source, 'OBSERVED')
       if (batch.status === 'REPLACED') this.db.prepare('UPDATE registry_edges SET state=? WHERE source=? AND state=?').run('SUPERSEDED', batch.source, 'OBSERVED')
       if (/^GITHUB:PR:[0-9]+$/.test(batch.source) && ['PARTIAL', 'COMPLETE'].includes(batch.status)) this.db.prepare("UPDATE registry_edges SET state='STALE' WHERE source LIKE ? AND sourceRevision<>? AND state='OBSERVED'").run(batch.source + ':%', batch.revision)
