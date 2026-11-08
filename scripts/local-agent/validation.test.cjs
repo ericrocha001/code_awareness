@@ -34,7 +34,7 @@ function fixture(t, responses = {}) {
     setTimeout(() => socket.emit('connect'), 0)
     return socket
   } } }).connect
-  const helper = load('validation.cjs', { './client.cjs': { connect }, './discovery.cjs': { readDescriptor: () => descriptor },
+  const helper = load('validation.cjs', { './client.cjs': { connect }, './discovery.cjs': { ...require('./discovery.cjs'), readDescriptor: () => descriptor },
     'node:fs': { realpathSync: value => value }, 'node:child_process': { execFileSync: () => root } })
   const open = async () => { const pending = helper.validationConnection(root); t.mock.timers.tick(0); return pending }
   return { requests, helper, root, open, tick: ms => { t.mock.timers.tick(0); t.mock.timers.tick(ms) } }
@@ -101,4 +101,13 @@ test('explicit receipt replay preserves the same idempotency identity and server
   assert.equal((await replay).replayed, true)
   assert.deepEqual(f.requests[1].args, f.requests[2].args)
   assert.equal(f.requests.length, 3)
+})
+
+test('snapshot and register errors retain their operation without automatic retries', async t => {
+  const f = fixture(t, { snapshot: { delay: 12001, result: {} }, register: { delay: 12001, result: {} } }), connection = await f.open()
+  for (const operation of ['snapshot', 'register']) {
+    const rejected = assert.rejects(connection[operation](receiptId), { code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation })
+    f.tick(12000); await rejected
+  }
+  assert.deepEqual(f.requests.map(request => request.action), ['status', 'snapshot', 'register'])
 })
