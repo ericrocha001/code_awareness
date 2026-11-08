@@ -33,6 +33,7 @@ function proofFor(f: ReturnType<typeof setup>, id: string, finishedAt: string): 
 
 it('edits description, relations, tags and status in one revision without a desktop or a required Handoff, and replays once', async () => {
   const f = setup(), original = f.service.get(f.plan.artifactId)!
+  f.store.saveTag({ slug: 'p6-reviewed', name: 'P6 reviewed' }, true)
   const raw = original.rawMarkdown.replace('status: PENDING', `status: COMPLETED\ntags: [p6-reviewed]\nrelations:\n  - artifactId: ${f.report.artifactId}\n    kind: derived-from`).replace(original.metadata.description!, 'Delivery completed with scoped evidence')
   const result = await f.service.updateAgent(f.authority, f.plan.artifactId, 1, raw, {}, f.lifecycle)
   expect(result).toMatchObject({ state: 'PERSISTED', revision: 2, lifecycleReceipt: { review: { evidenceMode: 'REVIEWED_ATTESTATION', supporting: null }, approval: { source: 'AUTHENTICATED_AUTHORITY', principalId: f.authority.principal.principalId } } })
@@ -111,8 +112,19 @@ it('binds actual MCP writes to the canonical repository rather than the Code Map
   } finally { await mcp.dispose() }
 })
 
+it('rolls an agent lifecycle update back when its YAML references an unknown catalog tag', async () => {
+  const f = setup(), before = f.store.get(f.plan.artifactId)!
+  const raw = before.rawMarkdown.replace('status: PENDING', 'status: COMPLETED\ntags: [unknown]')
+  await expect(f.service.updateAgent(f.authority, before.artifactId, 1, raw, {}, f.lifecycle)).rejects.toThrow('TAG_NOT_FOUND')
+  expect(f.store.get(before.artifactId)).toEqual(before)
+  expect(f.store.getRevision(before.artifactId, 2)).toBeNull()
+  expect(f.store.tags()).toEqual([])
+  expect(lifecycleReceipt(f.store.get(before.artifactId)!)).toBeNull()
+})
+
 it('rolls combined status, tags, indexes, history and receipts back atomically on publication failure', async () => {
   const f = setup(), before = f.store.get(f.plan.artifactId)!
+  f.store.saveTag({ slug: 'rollback-tag', name: 'Rollback tag' }, true)
   vi.spyOn(PublicationReceipts.prototype, 'issue').mockImplementation(() => { throw new Error('receipt failure') })
   await expect(f.service.updateAgent(f.authority, before.artifactId, 1, before.rawMarkdown.replace('status: PENDING', 'status: COMPLETED\ntags: [rollback-tag]'), {}, f.lifecycle)).rejects.toThrow('receipt failure')
   expect(f.store.get(before.artifactId)).toEqual(before)

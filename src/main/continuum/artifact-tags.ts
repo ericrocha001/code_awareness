@@ -48,15 +48,19 @@ export class ArtifactTags {
     }).immediate()
     if (!db.prepare('SELECT 1 FROM continuum_tag_migrations WHERE version = 1').get()) db.transaction(() => {
       const rows = db.prepare('SELECT artifact_id, metadata_json FROM artifacts').all() as { artifact_id: string; metadata_json: string }[]
-      for (const row of rows) this.project(row.artifact_id, JSON.parse(row.metadata_json).tags)
+      for (const row of rows) {
+        const tags = artifactTags(JSON.parse(row.metadata_json).tags)
+        for (const slug of tags) db.prepare('INSERT OR IGNORE INTO continuum_tags (slug, name) VALUES (?, ?)').run(slug, slug)
+        this.project(row.artifact_id, tags)
+      }
       db.prepare('INSERT INTO continuum_tag_migrations VALUES (1)').run()
     }).immediate()
   }
   project(artifactId: string, value: unknown): void {
     const tags = artifactTags(value)
+    for (const slug of tags) this.require(slug)
     this.db.prepare('DELETE FROM artifact_tags WHERE artifact_id = ?').run(artifactId)
     for (const slug of tags) {
-      this.db.prepare('INSERT OR IGNORE INTO continuum_tags (slug, name) VALUES (?, ?)').run(slug, slug)
       this.db.prepare('INSERT INTO artifact_tags VALUES (?, ?)').run(artifactId, slug)
     }
   }

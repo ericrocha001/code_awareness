@@ -553,7 +553,10 @@ it('derives typed filters, search and generic detail from the read API and refre
   await screen.findByRole('heading', { name: 'Updated body' })
   revealFacet('brandNew')
   expect(await screen.findByRole('heading', { name: 'Updated body' })).toBeTruthy()
-  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ sortBy: 'createdAt', includeTags: true, repositoryId: 'catalog-A', query: 'First', metadata: {} }))
+  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ sortBy: 'createdAt', includeTags: true, repositoryId: 'catalog-A', query: 'First', metadata: { futureUnknownKey: false } }))
+  expect(screen.queryByRole('checkbox', { name: 'futureUnknownKey' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Remover filtro futureUnknownKey' }))
+  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({ metadata: {} })))
   unmount(); expect(unsubscribe).toHaveBeenCalled()
 })
 
@@ -599,7 +602,7 @@ it('renders read errors and treats raw HTML as text', async () => {
   expect(document.querySelector('script, iframe')).toBeNull()
 })
 
-it('selects year/month hierarchies, intersects exact facets, resets pagination and prunes vanished periods', async () => {
+it('selects year/month hierarchies and preserves removable filters when facets disappear', async () => {
   facets.push({ key: 'occurred', values: [{ value: 'invalid date', count: 1 }], years: [{ year: 2026, count: 8, months: [{ month: 11, count: 3 }, { month: 10, count: 5 }] }] })
   const view = render(<ContinuumView activeProject={project} />)
   await screen.findByText('First artifact')
@@ -628,6 +631,8 @@ it('selects year/month hierarchies, intersects exact facets, resets pagination a
   fireEvent.click(month)
   facets = facets.filter(f => f.key !== 'occurred')
   act(() => receive({ repositoryId: 'catalog-A' }))
+  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({ metadata: { futureUnknownKey: false }, periods: { occurred: { year: 2026, month: 10 } } })))
+  fireEvent.click(screen.getByRole('button', { name: 'Remover filtro occurred' }))
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ sortBy: 'createdAt', includeTags: true, repositoryId: 'catalog-A', query: '', metadata: { futureUnknownKey: false } }))
   view.rerender(<ContinuumView activeProject={{ ...project, path: '/B' }} />)
   await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith({ sortBy: 'createdAt', includeTags: true, repositoryId: 'catalog-B', query: '', metadata: {} }))
@@ -700,12 +705,12 @@ it('persists free facet visibility by catalog identity without refetching and ke
   expect(localStorage.getItem('continuum:visible-facets:catalog-B')).toBeNull()
   fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
   expect((screen.getByRole('checkbox', { name: 'futureUnknownKey' }) as HTMLInputElement).checked).toBe(false)
-  expect((screen.getByRole('checkbox', { name: 'feature' }) as HTMLInputElement).checked).toBe(true)
+  expect((screen.getByRole('checkbox', { name: 'feature' }) as HTMLInputElement).checked).toBe(false)
   restarted.rerender(<ContinuumView activeProject={project} />)
   await screen.findByText('First artifact')
   fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
   fireEvent.click(screen.getByRole('button', { name: 'Restaurar padrão' }))
-  expect(document.querySelectorAll('.continuum-facet-groups > details').length).toBe(2)
+  expect(document.querySelectorAll('.continuum-facet-groups > details').length).toBe(1)
   expect(localStorage.getItem('continuum:visible-facets:catalog-A')).toBeNull()
 })
 

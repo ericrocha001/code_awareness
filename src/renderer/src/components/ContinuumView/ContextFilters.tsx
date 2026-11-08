@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react'
 import { ChevronsDownUp, ChevronsUpDown, RotateCcw, SlidersHorizontal, X } from 'lucide-react'
 import type { ContinuumFacet, ContinuumPeriod, ContinuumScalar } from '../../../../shared/types/continuum-ui-types'
 
-const defaults = ['kind', 'status', 'date', 'feature']
+const defaults = ['kind', 'status', 'date']
 const preferenceKey = (repositoryId: string) => `continuum:visible-facets:${repositoryId}`
 
 function readPreference(repositoryId: string): string[] | null {
