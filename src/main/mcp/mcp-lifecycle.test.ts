@@ -41,6 +41,23 @@ function setup(factory?: (navigation: ProjectContextNavigation) => Server) {
 }
 
 describe('MCP lifecycle', () => {
+  it('awaits telemetry shutdown after draining calls and closing catalog exposure', async () => {
+    let release!: () => void
+    const usage = { catalog: vi.fn(), complete: vi.fn(), flush: vi.fn(async () => {}), close: vi.fn(() => new Promise<void>(resolve => { release = resolve })) }
+    const lifecycle = new McpLifecycle({ usage: usage as any, log: () => {} })
+    await lifecycle.activate('A', navigation('A'))
+    expect(usage.catalog.mock.calls[0][0].tools.length).toBeGreaterThan(0)
+    await call(endpoint(lifecycle))
+    expect(usage.complete).toHaveBeenCalledTimes(1)
+    let settled = false
+    const disposing = lifecycle.dispose().then(() => { settled = true })
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'))
+    expect(settled).toBe(false)
+    expect(usage.catalog.mock.calls.at(-1)![0].tools).toEqual([])
+    release()
+    await disposing
+    expect(settled).toBe(true)
+  })
   it('keeps preview activation disabled before any endpoint or context server is created', async () => {
     const createServer = vi.fn(), createContextServer = vi.fn()
     const lifecycle = new McpLifecycle({ disabled: true, createServer, createContextServer })

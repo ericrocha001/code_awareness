@@ -22,6 +22,7 @@ interface McpLifecycleOptions {
   log?: (state: McpLifecycleState) => void
   trace?: ChannelTraceSink
   activity?: ChannelActivityMonitor
+  usage?: import('./channel-usage').ChannelUsage
   systemHealth?: import('../system-health/system-health-core').SystemHealthCore
   runtimeIdentity?: import('../runtime-identity/runtime-identity-provider').RuntimeIdentityProvider
   validationLedger?: import('../validation-ledger/validation-ledger').ValidationLedger
@@ -31,6 +32,7 @@ interface McpLifecycleOptions {
 export class McpLifecycle {
   private readonly governor = new McpWorkloadGovernor()
   private readonly activity: ChannelActivityMonitor
+  private readonly usage?: import('./channel-usage').ChannelUsage
   private state: McpLifecycleState = { status: 'STOPPED', available: false }
   private server: Server | null = null
   private binding: string | null = null
@@ -52,6 +54,7 @@ export class McpLifecycle {
     this.instanceId = options.runtimeIdentity?.getInstanceId() ?? randomUUID()
     this.disabled = options.disabled ?? false
     this.activity = options.activity ?? new ChannelActivityMonitor()
+    this.usage = options.usage
     this.createServer = options.createContextServer ?? (options.createServer
       ? ((context) => options.createServer!(context.navigation, context.artifactReader))
       : ((context) => {
@@ -161,7 +164,7 @@ export class McpLifecycle {
   dispose(): Promise<void> {
     if (this.disposed) return this.transition
     this.disposed = true
-    return this.deactivate()
+    return this.deactivate().then(async () => { await this.usage?.close() })
   }
 
   private schedule(): Promise<void> {
@@ -197,6 +200,9 @@ export class McpLifecycle {
       server.closeIdleConnections()
     })
     this.server = null
+    this.currentAdapter?.stopUsage()
+    this.currentAdapter = null
+    void this.usage?.flush()
     this.binding = null
     this.bindingReader = undefined
     server.removeAllListeners('error')
@@ -251,6 +257,7 @@ export class McpLifecycle {
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('MCP address unavailable')
       this.binding = requested.projectId
+      if (this.usage) this.currentAdapter?.setUsage(this.usage)
       this.bindingReader = requested.continuum ?? requested.artifactReader
       await this.setState({ status: 'RUNNING', available: true, endpoint: `http://127.0.0.1:${address.port}/mcp`, projectId: requested.projectId })
     } catch {
