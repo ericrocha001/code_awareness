@@ -27,7 +27,7 @@ describe('Repository coordination, isolation and migration', () => {
     const receipt = service.publish(markdown('New', 'arbitrary: true\n'))
     service.update(receipt.artifactId, 1, markdown('Updated', 'arbitrary: false\n'))
     expect(changes).toEqual(['catalog-A', 'catalog-A', 'catalog-A'])
-    expect(service.facets().find(f => f.key === 'arbitrary')).toBeUndefined()
+    expect(service.facets().find(f => f.key === 'arbitrary')?.values).toEqual([{ value: false, count: 1 }])
     expect(service.list({ metadata: { arbitrary: false } }).artifacts).toHaveLength(1)
     expect(() => service.update(receipt.artifactId, 1, markdown('Stale'))).toThrow(/REVISION_CONFLICT/)
     expect(changes).toHaveLength(3)

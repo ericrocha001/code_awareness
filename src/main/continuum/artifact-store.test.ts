@@ -70,17 +70,20 @@ describe('Repository Artifact Store', () => {
     expect(tokenize).not.toHaveBeenCalled()
     tokenize.mockRestore()
   })
-  it('projects only canonical facets while preserving exact technical filters and value types', () => {
+  it('offers every existing scalar facet for customization independently of default visibility', () => {
     const { store } = setup()
     const original = store.create(input('A', { metadata: { name: 'A', description: 'A', kind: 'CUSTOM', futureKey: 'blue', count: 4, enabled: false, nullKey: null, arrayKey: ['a'], objectKey: { x: 1 } } }))
     store.create(input('B', { metadata: { ...original.metadata, name: 'B', count: '4' } }))
     const facets = store.facets()
-    expect(facets).toEqual([{ key: 'kind', values: [{ value: 'CUSTOM', count: 2 }] }])
+    expect(facets.map(f => f.key)).toEqual(['count', 'enabled', 'futureKey', 'kind'])
+    expect(facets.find(f => f.key === 'futureKey')?.values).toEqual([{ value: 'blue', count: 2 }])
+    expect(facets.find(f => f.key === 'count')?.values).toEqual(expect.arrayContaining([{ value: '4', count: 1 }, { value: 4, count: 1 }]))
+    expect(facets.find(f => f.key === 'enabled')?.values).toEqual([{ value: false, count: 2 }])
     expect(store.list({ metadata: { futureKey: 'blue', count: 4 } }).artifacts.map(a => a.artifactId)).toEqual(['A'])
     expect(store.list({ metadata: { futureKey: 'blue', count: '4' } }).artifacts.map(a => a.artifactId)).toEqual(['B'])
     store.update({ artifactId: 'A', expectedRevision: 1, metadata: { name: 'A', description: 'A', kind: 'NEW', brandNew: true }, rawMarkdown: 'Changed' })
     store.update({ artifactId: 'B', expectedRevision: 1, metadata: { name: 'B', description: 'B', kind: 'NEW' }, rawMarkdown: 'Changed' })
-    expect(store.facets().map(f => f.key)).toEqual(['kind'])
+    expect(store.facets().map(f => f.key)).toEqual(['brandNew', 'kind'])
   })
   it('persists exact bytes, central/extensible metadata and revision 1 across restart, rejecting a different repository identity', () => {
     const { store, path } = setup(); const created = store.create(input())
@@ -337,10 +340,9 @@ it('aggregates lexical ISO periods compactly and filters before pagination witho
   expect(() => other.store.list({ periods, cursor: page.nextCursor })).toThrow(/cursor/)
 })
 
-it('keeps the facet boundary bounded for one thousand distinct timestamps without projecting Markdown', () => {
+it('keeps optional timestamp metadata selectable as literal values without changing exact filters', () => {
   const { store } = setup()
-  for (let i = 0; i < 1000; i++) store.create(input(`scale-${i}`, { metadata: { name: 'Scale', description: 'Scale fixture', kind: 'SCALE', arbitraryDate: `2026-10-11T12:00:00.${String(i).padStart(3, '0')}Z` } }))
-  expect(store.facets().find(f => f.key === 'arbitraryDate')).toBeUndefined()
-  expect(store.list({ metadata: { arbitraryDate: '2026-10-11T12:00:00.999Z' } }).artifacts).toHaveLength(1)
-  expect(JSON.stringify(store.facets()).length).toBeLessThan(300)
+  for (let i = 0; i < 3; i++) store.create(input(`timestamp-${i}`, { metadata: { name: 'Timestamp', description: 'Optional timestamp fixture', kind: 'DOCUMENT', arbitraryDate: `2026-10-11T12:00:00.${String(i).padStart(3, '0')}Z` } }))
+  expect(store.facets().find(f => f.key === 'arbitraryDate')).toEqual({ key: 'arbitraryDate', values: [0, 1, 2].map(i => ({ value: `2026-10-11T12:00:00.${String(i).padStart(3, '0')}Z`, count: 1 })) })
+  expect(store.list({ metadata: { arbitraryDate: '2026-10-11T12:00:00.002Z' } }).artifacts).toHaveLength(1)
 })
