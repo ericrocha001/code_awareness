@@ -1,3 +1,4 @@
+import { safeDiagnostic } from '../../shared/local-agent-diagnostic.cjs'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
@@ -94,7 +95,7 @@ export class LocalChannelHost {
           const field = (error as { field?: unknown })?.field
           const semantic = code === 'MISSING_SEMANTIC_FIELD' && typeof field === 'string' && ['name', 'description', 'kind'].includes(field)
             ? { field, guidance: `Provide an explicit semantic ${field}` } : {}
-          socket.end(JSON.stringify({ error: { code, ...semantic } }) + '\n')
+          socket.end(JSON.stringify({ error: { ...safeDiagnostic({ ...(error as object), code }), ...semantic } }) + '\n')
         }
       })()
     })
