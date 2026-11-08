@@ -258,17 +258,6 @@ export function ContinuumView({ activeProject, artifactIntent }: { activeProject
       if (cancelled || currentPath.current !== path) return
       boundPath.current = path
       setRepositoryId(result.repositoryId); setFacets(result.facets); setError('')
-      setMetadata(previous => {
-        const valid = Object.fromEntries(Object.entries(previous).filter(([key, value]) =>
-          result.facets.some(facet => facet.key === key && facet.values.some(entry => entry.value === value))))
-        return Object.keys(valid).length === Object.keys(previous).length ? previous : valid
-      })
-      setPeriods(previous => {
-        const valid = Object.fromEntries(Object.entries(previous).filter(([key, period]) => result.facets.some(facet =>
-          facet.key === key && facet.years?.some(year => year.year === period.year &&
-            (period.month === undefined || year.months.some(month => month.month === period.month))))))
-        return Object.keys(valid).length === Object.keys(previous).length ? previous : valid
-      })
       if (!result.repositoryId) { setItems([]); setSelectedId(null); setArtifact(null); setCursor(undefined) }
     }).catch(reason => { if (!cancelled) { setError(String(reason)); setRepositoryId(null); setFacets([]); setItems([]); setArtifact(null) } })
       .finally(() => { if (!cancelled) setFacetsLoading(false) })
