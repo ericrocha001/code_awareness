@@ -146,7 +146,10 @@ export class SessionContextClient implements SessionContextPort {
     }
     return this.retiring
   }
-  private dispatch(name: SessionToolName, args: unknown): Promise<McpToolResult> {
+  reconcileProjection(): Promise<McpToolResult> {
+    return this.active() ? this.dispatch('reconcile_checkpoint_registry', {}, { captureNative: false }) : Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
+  }
+  private dispatch(name: SessionToolName, args: unknown, options: { captureNative?: boolean } = {}): Promise<McpToolResult> {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
@@ -161,7 +164,8 @@ export class SessionContextClient implements SessionContextPort {
           let target
           let liveTargets
           let nativeTargets
-          if (this.resolveTarget?.discover && ['reconcile_checkpoint_registry','discover_execution_context','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
+          if (options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
+            request.phase = 'native-target-resolution'
             const available = (await this.resolveTarget.discover()).filter(target => existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')))
             const start = this.nativeOffset % Math.max(1, available.length)
             nativeTargets = [...available.slice(start), ...available.slice(0, start)].slice(0, 8)

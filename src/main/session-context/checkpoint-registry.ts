@@ -32,6 +32,27 @@ export const REGISTRY_SCHEMA = `
 const kinds: EntityKind[] = ['COMMIT', 'CHECKPOINT', 'SESSION', 'PR', 'ARTIFACT', 'PROOF', 'WORKTREE', 'EXECUTION']
 export class CheckpointRegistry {
   constructor(private readonly db: Database.Database, readonly repositoryId: string) {}
+  pendingReconciliation(kind: 'PR' | 'COMMIT', limit = 5): RegistryEntity[] {
+    const prefix = kind === 'PR' ? 'GITHUB:PR:' : 'GIT:'
+    return (this.db.prepare(`SELECT e.externalId FROM registry_entities e LEFT JOIN registry_sources s ON s.source=?||e.externalId
+      WHERE e.kind=? AND (s.source IS NULL ${kind === 'PR' ? "OR s.status='PARTIAL'" : ''})
+      ORDER BY CASE WHEN s.source IS NULL THEN 0 ELSE 1 END,e.externalId LIMIT ?`).all(prefix, kind, limit) as { externalId: string }[])
+      .map(row => ({ kind, id: row.externalId }))
+  }
+  reconciliationPullRequests(after: string, limit = 3): RegistryEntity[] {
+    return (this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='PR' AND externalId>? ORDER BY externalId LIMIT ?").all(after, limit) as { externalId: string }[])
+      .map(row => ({ kind: 'PR', id: row.externalId }))
+  }
+  reconciliationBacklog() {
+    const sources = this.coverageSources()
+    const github = this.source('GITHUB')?.status
+    const unavailable = sources.filter(source => ['CONTINUUM', 'LEDGER'].includes(source.source) && source.status === 'UNAVAILABLE').map(source => source.source)
+    const local = sources.some(source => ['CONTINUUM', 'LEDGER'].includes(source.source) && source.status === 'PARTIAL') || this.pendingReconciliation('COMMIT', 1).length > 0
+    const remote = this.pendingReconciliation('PR', 1).length > 0 || this.source('GITHUB_REFRESH')?.status === 'PARTIAL'
+    const blocked = remote && ['NETWORK_NOT_AUTHORIZED', 'UNAVAILABLE'].includes(github ?? 'UNAVAILABLE')
+    return { pending: local || remote || unavailable.length > 0, drainable: local || remote && !blocked, blockedSources: [...unavailable, ...(blocked ? ['GITHUB'] : [])],
+      sources: sources.filter(source => source.status === 'PARTIAL').map(source => source.source) }
+  }
   nativeCaptureWindows(worktreeId: string, generation: string) {
     const scope = this.key({ kind: 'WORKTREE', id: worktreeId + ':' + generation })
     const boundaries = this.db.prepare(`SELECT e.payload,e.integrity FROM registry_edges e WHERE e.toId=? AND e.state='OBSERVED'
@@ -195,6 +216,7 @@ export class CheckpointRegistry {
     type Node = { key: string; type: EntityKind; id: string; revision?: number; generation?: string; provider?: string; agent?: string; payloadState?: string; selector?: object; deepen?: { tool: string; arguments: object } }
     type Edge = { id: string; from: string; to: string; relation: string; evidenceKind: string; source: string; state: string; freshness: string; observedAt: string; sourceRevision: string; revision: string; evidenceRef: string; digest: string; confidenceClass: ProvenanceClass; coverage: string; revisionScope: string }
     const nodes = new Map<string, Node>(), edges = new Map<string, Edge>(), paths: { target: string; edges: string[] }[] = []
+    const continuumUnavailable = this.source('CONTINUUM')?.status === 'UNAVAILABLE'
     let bounded = false
     const authority = new Map<string, boolean>()
     const nativeAuthority = (source: string, receiptId: string) => {
@@ -252,9 +274,10 @@ export class CheckpointRegistry {
           if (!['CHECKPOINT_VERIFIED', 'CHECKPOINT_SESSION_METADATA', 'GITHUB_COMMIT_LIST', 'CONTINUUM_TYPED_RELATION', 'CONTINUUM_REFERENCE', 'CONTINUUM_REVISION', 'EXECUTION_MEMBERSHIP', 'LEDGER_EVIDENCE_FOR', 'HANDOFF_DECLARED', 'WORKTREE_VERIFIED', 'PROVIDER_OBSERVED', 'NATIVE_HOOK_OBSERVED', 'NATIVE_GIT_CAUSAL', 'NATIVE_GIT_SCOPE', 'NATIVE_GIT_REQUEST', 'NATIVE_ARTIFACT_CAUSAL', 'NATIVE_ARTIFACT_SCOPE', 'NATIVE_ARTIFACT_REQUEST'].includes(value.evidenceKind)) continue
           const from = add(value.from), to = add(value.to)
           const invalidAuthority = value.evidenceKind === 'NATIVE_ARTIFACT_CAUSAL' && !nativeAuthority(row.source, value.evidenceRef)
-          const state = row.state === 'CONFLICT' || invalidAuthority ? 'UNKNOWN' : row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : ['HANDOFF_DECLARED', 'CONTINUUM_TYPED_RELATION'].includes(value.evidenceKind) ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE','NATIVE_ARTIFACT_REQUEST','NATIVE_ARTIFACT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
+          const projectionStale = continuumUnavailable && row.source.startsWith('CONTINUUM')
+          const state = row.state === 'CONFLICT' || invalidAuthority ? 'UNKNOWN' : projectionStale || row.state !== 'OBSERVED' || value.freshness === 'SOURCE_STALE' ? 'STALE' : ['HANDOFF_DECLARED', 'CONTINUUM_TYPED_RELATION'].includes(value.evidenceKind) ? 'DECLARED' : ['NATIVE_HOOK_OBSERVED','NATIVE_GIT_REQUEST','NATIVE_GIT_SCOPE','NATIVE_ARTIFACT_REQUEST','NATIVE_ARTIFACT_SCOPE'].includes(value.evidenceKind) ? 'OBSERVED' : 'VERIFIED'
           const source = this.source(row.source)
-          edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: invalidAuthority ? 'SOURCE_STALE' : value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, revision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest,
+          edges.set(row.id, { id: row.id, from, to, relation: value.relation, evidenceKind: value.evidenceKind, source: row.source.split(':')[0], state, freshness: invalidAuthority || projectionStale ? 'SOURCE_STALE' : value.freshness, observedAt: row.observedAt, sourceRevision: row.sourceRevision, revision: row.sourceRevision, evidenceRef: value.evidenceRef, digest: value.digest,
             confidenceClass: provenanceClass(value.evidenceKind, state), coverage: state === 'UNKNOWN' || state === 'STALE' || source?.status === 'PARTIAL' ? 'PARTIAL' : 'OBSERVED_INDEX', revisionScope: value.evidenceKind === 'LEDGER_EVIDENCE_FOR' ? 'ARTIFACT_IDENTITY_ONLY' : 'EXACT_SOURCE' })
           const next = from === key ? value.to : value.from, target = this.key(next)
           if (!visited.has(target)) {

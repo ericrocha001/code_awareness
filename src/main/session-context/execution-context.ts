@@ -34,7 +34,13 @@ export function discoverExecutionContext(store: SessionStore, query: z.infer<typ
 function contextSnapshot(store: SessionStore, query: z.infer<typeof executionContextQuery>, accountHash: string | undefined, pageLimit: number) {
   const selector = executionEntity(store, query.selector, accountHash)
   const graph = selector ? store.registry.contextGraph(selector, accountHash, query.depth) : { nodes: [], edges: [], paths: [], bounded: false }
-  const sourceCoverage = store.registry.coverageSources().map(s => ({ source: s.source, status: s.status, observedAt: s.observedAt }))
+  const sourceCoverage = store.registry.coverageSources().map(s => {
+    let diagnostic: { reasonCode?: string; stage?: string } = {}
+    try { diagnostic = JSON.parse(store.registry.source(s.source + ':DIAGNOSTIC')?.cursor ?? '{}') } catch {}
+    return { source: s.source, status: s.status, observedAt: s.observedAt,
+      ...(typeof diagnostic.reasonCode === 'string' && /^[A-Z_]{1,80}$/.test(diagnostic.reasonCode) ? { reasonCode: diagnostic.reasonCode } : {}),
+      ...(typeof diagnostic.stage === 'string' && /^[A-Z_]{1,80}$/.test(diagnostic.stage) ? { stage: diagnostic.stage } : {}) }
+  })
   const reasons = new Set<string>()
   if (graph.bounded) reasons.add('GRAPH_LIMIT_REACHED')
   for (const source of sourceCoverage) if (['PARTIAL','UNAVAILABLE','UNSUPPORTED','NETWORK_NOT_AUTHORIZED'].includes(source.status)) reasons.add(source.source + '_' + source.status)
@@ -47,7 +53,7 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
   const observedRelations = graph.edges.some(edge => edge.evidenceKind !== 'CONTINUUM_REVISION')
   if (!observedRelations) reasons.add('PROVENANCE_NOT_OBSERVED')
   const coverage = { state: reasons.size ? observedRelations ? 'PARTIAL' : 'UNKNOWN' : 'SELECTED_SCOPE', reasons: [...reasons].sort(), negativeInference: 'NOT_AUTHORIZED' }
-  const revision = digest(JSON.stringify([graph, sourceCoverage, coverage]))
+  const revision = digest(JSON.stringify([graph, sourceCoverage.map(({ observedAt: _observedAt, ...source }) => source), coverage]))
   const scope = { name: 'discover_execution_context', repositoryId: store.repositoryId, selector: query.selector, mode: query.mode, depth: query.depth, limit: query.limit, revision, accountHash }
   const offset = store.offset(query.cursor, scope)
   if (offset > graph.edges.length) throw new Error('CURSOR_STALE')

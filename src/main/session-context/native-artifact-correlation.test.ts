@@ -175,10 +175,12 @@ it('retries persisted native evidence incrementally through worker ports when ca
   const delayed = { ...f.port, readReceipt: async (id: string) => available ? f.port.readReceipt(id) : null }
   const client = new SessionContextClient(f.dir, 'catalog-A', f.dir, () => true, workerPath, resolve, 20000, undefined, undefined, delayed)
   try {
+    expect((await client.call('reconcile_checkpoint_registry', {})).isError).toBeFalsy()
     const pending = await client.call('discover_execution_context', { selector: { type: 'ARTIFACT', id: receipt.artifactId, revision: 1 } })
     expect(pending.isError).toBeFalsy()
     expect(f.service.get(receipt.artifactId)!.provenance.nativeArtifact).toBeUndefined()
     available = true
+    expect((await client.call('reconcile_checkpoint_registry', {})).isError).toBeFalsy()
     const result = await client.call('discover_execution_context', { selector: { type: 'ARTIFACT', id: receipt.artifactId, revision: 1 }, mode: 'RELATION_DETAIL' })
     expect(result.isError).toBeFalsy()
     const graph = JSON.parse((result.content[0] as { text: string }).text)

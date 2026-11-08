@@ -181,6 +181,7 @@ test('requires explicit opt-in, preserves Entire handlers and restores exact con
   const config = join(f.root, '.codex/hooks.json'); writeFileSync(config, before)
   const record = { path: f.root, worktreeId: f.binding.worktreeId, generation: f.binding.generation, branch: 'test', head: 'a'.repeat(40), detached: false, locked: false, missing: false, prunable: false }
   expect(() => installNativeHooks({ repositoryId: 'repository', record, commandPath, nodePath: process.execPath, authorized: false })).toThrow('HOOK_AUTHORIZATION_REQUIRED')
+  expect(() => installNativeHooks({ repositoryId: 'repository', record, commandPath, nodePath: process.execPath, authorized: true, gitCommitTool: 'untrusted_commit_tool' })).toThrow('INVALID_BINDING')
   expect(readFileSync(config, 'utf8')).toBe(before)
   expect(installNativeHooks({ repositoryId: 'repository', record, commandPath, nodePath: process.execPath, authorized: true })).toMatchObject({ state: 'CONFIGURED', capture: 'UNOBSERVED' })
   const composed = JSON.parse(readFileSync(config, 'utf8'))

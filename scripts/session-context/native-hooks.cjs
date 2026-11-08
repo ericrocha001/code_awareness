@@ -14,7 +14,7 @@ buildSync({ entryPoints: [resolve(__dirname, '../../src/main/session-context/nat
 const { installNativeHooks, disableNativeHooks } = require(output)
 if (action === 'install') {
   const version = execFileSync('codex', ['--version'], { encoding: 'utf8', windowsHide: true }).trim()
-  if (version !== 'codex-cli 0.166.0-alpha.6') throw new Error('UNSUPPORTED_CODEX_VERSION: validate the hook protocol before installation')
+  if (!['codex-cli 0.166.0-alpha.6', 'codex-cli 0.167.0-alpha.3.2'].includes(version)) throw new Error('UNSUPPORTED_CODEX_VERSION: validate the hook protocol before installation')
   require('./build-native-hook.cjs')
   const branch = execFileSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()
   const head = execFileSync('git', ['rev-parse', '--verify', 'HEAD'], { encoding: 'utf8', windowsHide: true }).trim()

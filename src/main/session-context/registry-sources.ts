@@ -15,26 +15,52 @@ export function registrySources(options: {
   return async ({ selector, neighbors = [], cursors }) => {
     assertCurrent()
     const batches: RegistryBatch[] = [], artifacts = new Map<string, Artifact>(), prs = new Set<number>()
+    for (const neighbor of neighbors) if (neighbor.kind === 'PR') prs.add(Number(neighbor.id))
     let selectedPartial = false
     const service = options.continuum()
     service?.assertRepository(repositoryId)
+    let continuumStage = 'SERVICE'
     const addArtifact = (id: string) => {
       if (artifacts.size >= 20 || !service || artifacts.has(id)) return
       const version = /^(.*):([1-9][0-9]*)$/.exec(id)
+      continuumStage = 'ARTIFACT_READBACK'
       const artifact = version ? service.provenanceSnapshot(version[1], Number(version[2])) : service.provenanceSnapshot ? service.provenanceSnapshot(id) : service.get(id)
       if (artifact) artifacts.set(id, artifact)
     }
     const addBatch = (batch: Omit<RegistryBatch, 'repositoryId'>) => batches.push({ repositoryId, ...batch })
-    const unavailable = (source: string, status = 'UNAVAILABLE') => addBatch({ source, revision: digest(status), cursor: cursors[source], status, edges: [] })
+    const diagnostic = (source: string, reasonCode: string, stage: string) => {
+      const cursor = JSON.stringify({ reasonCode, stage })
+      addBatch({ source: source + ':DIAGNOSTIC', revision: digest(cursor), cursor, status: reasonCode, edges: [] })
+    }
+    const unavailable = (source: string, status = 'UNAVAILABLE', reasonCode = 'SOURCE_UNAVAILABLE', stage = 'SOURCE_READ') => {
+      addBatch({ source, revision: digest(status + reasonCode), cursor: cursors[source], status, edges: [] })
+      diagnostic(source, reasonCode, stage)
+    }
     if (service) {
       if (!selector) try {
+        continuumStage = 'INVENTORY_CURSOR'
         const saved = JSON.parse(cursors.CONTINUUM ?? '{}')
+        if (!saved || typeof saved !== 'object' || Array.isArray(saved) || ['after', 'until'].some(key => saved[key] !== undefined &&
+          (typeof saved[key] !== 'string' || !Number.isFinite(Date.parse(saved[key])))) || saved.cursor !== undefined && typeof saved.cursor !== 'string') throw new Error('REGISTRY_CURSOR_STALE')
         const until = saved.until ?? new Date().toISOString()
-        const page = service.list({ limit: 10, sortBy: 'updatedAt', updatedAfter: saved.after, updatedBefore: until, cursor: saved.cursor })
+        continuumStage = 'INVENTORY_LIST'
+        const page = service.list({ limit: 10, sortBy: 'updatedAt', updatedBefore: until,
+          ...(saved.after ? { updatedAfter: saved.after } : {}), ...(saved.cursor ? { cursor: saved.cursor } : {}) })
         for (const row of page.artifacts) addArtifact(row.artifactId)
         addBatch({ source: 'CONTINUUM', revision: digest(JSON.stringify(page.artifacts.map(a => [a.artifactId, a.revision]))), status: page.nextCursor ? 'PARTIAL' : 'COMPLETE', edges: [],
           cursor: JSON.stringify(page.nextCursor ? { after: saved.after, until, cursor: page.nextCursor } : { after: new Date(Date.parse(until) - 1).toISOString() }) })
-      } catch { unavailable('CONTINUUM') }
+        diagnostic('CONTINUUM', page.nextCursor ? 'BACKLOG_PENDING' : 'SOURCE_READY', continuumStage)
+      } catch (error) {
+        assertCurrent()
+        const stale = error instanceof SyntaxError || error instanceof Error && (error.message === 'REGISTRY_CURSOR_STALE' || /^INVALID_ARGUMENT: (?:invalid cursor|cursor does not match|invalid updatedAfter|invalid updatedBefore)/.test(error.message))
+        if (stale) {
+          let after: string | undefined
+          try { const saved = JSON.parse(cursors.CONTINUUM ?? '{}'); if (typeof saved.after === 'string' && Number.isFinite(Date.parse(saved.after))) after = saved.after } catch {}
+          const cursor = JSON.stringify(after ? { after } : {})
+          addBatch({ source: 'CONTINUUM', revision: digest(cursor + 'CURSOR_STALE'), cursor, status: 'PARTIAL', edges: [] })
+          diagnostic('CONTINUUM', 'CURSOR_STALE', continuumStage)
+        } else unavailable('CONTINUUM', 'UNAVAILABLE', 'PROJECTION_ERROR', continuumStage)
+      }
       if (selector?.kind === 'ARTIFACT') {
         addArtifact(selector.id)
         const id = selector.id.replace(/:([1-9][0-9]*)$/, '')
@@ -61,26 +87,38 @@ export function registrySources(options: {
     if (!options.networkAllowed()) unavailable('GITHUB', 'NETWORK_NOT_AUTHORIZED')
     else {
       try {
-        if (selector?.kind === 'COMMIT') for (const number of await options.github.commitPullRequests(options.root, selector.id)) prs.add(number)
+        const assertNetwork = () => { assertCurrent(); if (!options.networkAllowed()) throw new Error('NETWORK_NOT_AUTHORIZED') }
+        if (selector?.kind === 'COMMIT') {
+          assertNetwork()
+          for (const number of await options.github.commitPullRequests(options.root, selector.id)) prs.add(number)
+        }
         for (const number of [...prs].slice(0, 2)) {
+          assertNetwork()
           const pr = (await options.github.getPullRequest(options.root, number)).pullRequest
           const key = 'GITHUB:PR:' + number
           const saved = JSON.parse(cursors[key] ?? '{}')
+          if (saved.head === pr.head.sha && saved.nextPage === null) continue
           const pageNumber = saved.head === pr.head.sha ? saved.nextPage ?? 1 : 1
+          assertNetwork()
           const page = await options.github.pullRequestCommits(options.root, number, pr.head.sha, pageNumber)
+          assertCurrent()
           if (page.repositoryId !== repositoryId) throw new Error('REPOSITORY_MISMATCH')
           addBatch({ source: key + ':' + pageNumber, revision: pr.head.sha, status: 'COMPLETE', entities: [{ kind: 'PR', id: String(number) }], edges: page.commits.map(commit => ({
             from: { kind: 'COMMIT', id: commit.sha }, relation: 'member-of', to: { kind: 'PR', id: String(number) }, evidenceKind: 'GITHUB_COMMIT_LIST', evidenceRef: `PR:${number}:${pr.head.sha}:${pageNumber}`, digest: digest(JSON.stringify(page.commits)), freshness: 'OBSERVED_SNAPSHOT' })) })
           addBatch({ source: key, revision: pr.head.sha, status: page.nextPage ? 'PARTIAL' : 'COMPLETE', cursor: JSON.stringify({ head: pr.head.sha, nextPage: page.nextPage }), edges: [] })
         }
         addBatch({ source: 'GITHUB', revision: digest(JSON.stringify([...prs])), status: prs.size > 2 ? 'PARTIAL' : 'OBSERVED_SNAPSHOT', edges: [] })
-      } catch { unavailable('GITHUB') }
+      } catch (error) {
+        assertCurrent()
+        unavailable('GITHUB', error instanceof Error && error.message === 'NETWORK_NOT_AUTHORIZED' ? 'NETWORK_NOT_AUTHORIZED' : 'UNAVAILABLE')
+      }
     }
     if (service) {
       for (const number of [...prs].slice(0, 2)) for (const row of service.list({ metadata: { pullRequest: number }, limit: 5 }).artifacts) addArtifact(row.artifactId)
       for (const artifact of [...artifacts.values()]) for (const relation of artifact.metadata.relations ?? []) addArtifact(relation.artifactId)
     }
     const projectProof = (proof: Awaited<ReturnType<ValidationLedger['getProofWithFreshness']>>) => {
+      assertCurrent()
       if (!proof) return
       const sourceRepo = proof.commandProfile?.source?.repositoryId ?? proof.commandProfile?.checkout?.repositoryId
       if (sourceRepo && sourceRepo !== repositoryId) return
@@ -97,7 +135,7 @@ export function registrySources(options: {
       for (const proof of page?.proofs ?? []) projectProof(proof)
       for (const artifact of [...artifacts.values()].slice(0, 3)) for (const proof of await options.ledger.listProofs({ requirementId: artifact.artifactId, limit: 10 })) projectProof(proof)
       addBatch({ source: 'LEDGER', revision: digest(page?.cursor ?? selector?.id ?? ''), cursor: page?.cursor ?? cursors.LEDGER, status: page?.more ? 'PARTIAL' : selector ? 'SELECTED_SCOPE' : 'COMPLETE', edges: [] })
-    } catch { unavailable('LEDGER') }
+    } catch { assertCurrent(); unavailable('LEDGER') }
     for (const artifact of artifacts.values()) {
       const identity: RegistryEntity = { kind: 'ARTIFACT', id: artifact.artifactId }
       const from: RegistryEntity = { kind: 'ARTIFACT', id: artifact.artifactId + ':' + artifact.revision }

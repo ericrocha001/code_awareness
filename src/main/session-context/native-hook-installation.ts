@@ -67,6 +67,7 @@ export function composeNativeHooks(text: string | null, command: string, command
 
 export function installNativeHooks(options: { repositoryId: string; record: WorktreeRecord; commandPath: string; nodePath: string; gitCommitTool?: string; authorized: boolean }): { state: 'CONFIGURED'; bindingPath: string; hooksDigest: string; capture: 'UNOBSERVED' } {
   if (!options.authorized) throw new Error('HOOK_AUTHORIZATION_REQUIRED')
+  if (options.gitCommitTool !== undefined && !/^mcp__[a-zA-Z0-9_-]+__commit_git_changes$/.test(options.gitCommitTool)) throw new Error('INVALID_BINDING')
   if (options.record.detached || options.record.missing || options.record.prunable || !options.record.branch || !options.record.head) throw new Error('WORKTREE_STALE')
   const root = options.record.path, directory = join(root, '.code-awareness/native-hooks'), bindingPath = join(directory, 'binding.json')
   if (existsSync(join(directory, 'installation.json'))) throw new Error('NATIVE_HOOK_ALREADY_CONFIGURED')
