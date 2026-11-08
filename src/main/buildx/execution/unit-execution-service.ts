@@ -6,7 +6,8 @@ import type {
   StartUnitExecutionOptions,
   UnitExecutionResult,
   UnitExecutionStatus,
-  ExecutionAttemptRecord
+  ExecutionAttemptRecord,
+  UnitSettlementResult
 } from '../../../shared/types/buildx/execution-types'
 import type { BuildXInspectWorkspaceResult } from '../../../shared/types/buildx/workspace-types'
 import type {
@@ -508,6 +509,503 @@ export class UnitExecutionService {
     }
 
     return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId)
+  }
+
+  async settleUnitExecution(
+    repositoryId: string,
+    sessionId: string,
+    attemptId: string
+  ): Promise<UnitSettlementResult> {
+    let validRepoId: string
+    try {
+      validRepoId = validateRepositoryId(repositoryId)
+    } catch {
+      return {
+        status: 'UNKNOWN',
+        attemptId: attemptId ?? '',
+        sessionId: sessionId ?? '',
+        repositoryId: repositoryId ?? '',
+        reason: 'INVALID_REPOSITORY_ID'
+      }
+    }
+
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: attemptId ?? '',
+        sessionId: sessionId ?? '',
+        repositoryId: validRepoId,
+        reason: 'INVALID_SESSION_ID'
+      }
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+
+    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: attemptId ?? '',
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'INVALID_ATTEMPT_ID'
+      }
+    }
+    const cleanAttemptId = attemptId.trim().toLowerCase()
+
+    let attempt: ExecutionAttemptRecord | null
+    try {
+      attempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+    } catch {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'ATTEMPT_READ_ERROR'
+      }
+    }
+
+    if (!attempt || attempt.sessionId !== cleanSessionId) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'ATTEMPT_NOT_FOUND'
+      }
+    }
+
+    const store = this.smcService.getStore(validRepoId)
+
+    // Replay / idempotência: se já finalizado em estado terminal
+    if (attempt.status === 'COMPLETED') {
+      const unitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      return {
+        status: 'VALIDATION_READY',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: 'COMPLETED',
+        unitFlowStatus: unitState?.status,
+        cliStatus: 'SUCCEEDED'
+      }
+    }
+
+    if (attempt.status === 'FAILED' || attempt.status === 'CANCELLED') {
+      const unitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      return {
+        status: 'RECONCILING',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: attempt.status,
+        unitFlowStatus: unitState?.status,
+        cliStatus: attempt.status
+      }
+    }
+
+    if (attempt.status !== 'STARTING' && attempt.status !== 'RUNNING') {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: `ATTEMPT_NOT_ACTIVE: status=${attempt.status}`
+      }
+    }
+
+    const reservation = store.getReservation(attempt.reservationId)
+    if (!reservation || reservation.sessionId !== cleanSessionId) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'RESERVATION_NOT_FOUND'
+      }
+    }
+
+    const plan = store.getPlan(attempt.planId)
+    if (!plan) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'PLAN_NOT_FOUND'
+      }
+    }
+
+    const unitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+    if (!unitState) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'UNIT_STATE_NOT_FOUND'
+      }
+    }
+
+    const cliService = await this.cliResolver(validRepoId)
+    if (!cliService || !cliService.isEnabled() || !cliService.get) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'CLI_UNAVAILABLE'
+      }
+    }
+
+    let snapshot: CliExecutionSnapshot
+    try {
+      snapshot = await cliService.get({ operationId: cleanAttemptId })
+    } catch (err: any) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: `CLI_GET_ERROR: ${err?.message ?? String(err)}`
+      }
+    }
+
+    // Classificação dos fatos
+    if (snapshot.status === 'AWAITING_APPROVAL') {
+      return {
+        status: 'ACTIVE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: 'STARTING',
+        unitFlowStatus: 'RESERVED',
+        cliStatus: snapshot.status,
+        cliPhase: snapshot.phase
+      }
+    }
+
+    if (snapshot.status === 'RUNNING') {
+      if (attempt.status === 'STARTING') {
+        try {
+          this.smcService.transitionAttemptToRunning(
+            validRepoId,
+            cleanAttemptId,
+            attempt.revision,
+            attempt.unitId,
+            unitState.revision
+          )
+        } catch {}
+      }
+      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+      const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      return {
+        status: 'ACTIVE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: currentAttempt?.status ?? 'RUNNING',
+        unitFlowStatus: currentUnit?.status ?? 'EXECUTING',
+        cliStatus: snapshot.status,
+        cliPhase: snapshot.phase
+      }
+    }
+
+    if (snapshot.phase === 'TERMINATION_UNCONFIRMED') {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: attempt.status,
+        unitFlowStatus: unitState.status,
+        cliStatus: snapshot.status,
+        cliPhase: snapshot.phase,
+        exitCode: snapshot.exitCode,
+        reason: 'TERMINATION_UNCONFIRMED'
+      }
+    }
+
+    if (snapshot.status === 'SUCCEEDED') {
+      const isCleanTree = Boolean(
+        snapshot.treeObservation &&
+        snapshot.treeObservation.activeProcesses === 0 &&
+        snapshot.treeObservation.handlesClosed === true
+      )
+      const isTerminalPhase = snapshot.phase === 'TERMINAL'
+      const isZeroExit = snapshot.exitCode === 0
+
+      if (!isCleanTree || !isTerminalPhase || !isZeroExit) {
+        return {
+          status: 'UNKNOWN',
+          attemptId: cleanAttemptId,
+          sessionId: cleanSessionId,
+          repositoryId: validRepoId,
+          planId: attempt.planId,
+          unitId: attempt.unitId,
+          attemptStatus: attempt.status,
+          unitFlowStatus: unitState.status,
+          cliStatus: snapshot.status,
+          cliPhase: snapshot.phase,
+          exitCode: snapshot.exitCode,
+          reason: 'TERMINATION_UNCONFIRMED'
+        }
+      }
+
+      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
+      const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
+
+      let settledAttempt: ExecutionAttemptRecord
+      try {
+        settledAttempt = this.smcService.transitionAttemptToSettled(validRepoId, {
+          attemptId: cleanAttemptId,
+          expectedAttemptRevision: currentAttempt.revision,
+          unitId: attempt.unitId,
+          expectedUnitRevision: currentUnit.revision,
+          terminalOutcome: 'SUCCEEDED',
+          entryData: {
+            title: `Execution attempt completed: ${attempt.unitId}`,
+            body: JSON.stringify({
+              attemptId: cleanAttemptId,
+              unitId: attempt.unitId,
+              planId: attempt.planId,
+              terminalOutcome: 'SUCCEEDED',
+              cliStatus: snapshot.status,
+              cliPhase: snapshot.phase,
+              exitCode: snapshot.exitCode,
+              treeObservation: snapshot.treeObservation
+            }),
+            kind: 'RESULT'
+          }
+        })
+      } catch (err: any) {
+        if (err instanceof ExecutionAttemptConflictError) {
+          const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+          if (recheck?.status === 'COMPLETED') {
+            settledAttempt = recheck
+          } else {
+            return {
+              status: 'UNKNOWN',
+              attemptId: cleanAttemptId,
+              sessionId: cleanSessionId,
+              repositoryId: validRepoId,
+              reason: `SETTLE_CONFLICT: ${err.message}`
+            }
+          }
+        } else {
+          return {
+            status: 'UNKNOWN',
+            attemptId: cleanAttemptId,
+            sessionId: cleanSessionId,
+            repositoryId: validRepoId,
+            reason: `SETTLE_ERROR: ${err?.message ?? String(err)}`
+          }
+        }
+      }
+
+      this.stageService.releaseAttemptRetention(cleanAttemptId)
+
+      const finalUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      return {
+        status: 'VALIDATION_READY',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: settledAttempt.status,
+        unitFlowStatus: finalUnit?.status,
+        cliStatus: snapshot.status,
+        cliPhase: snapshot.phase,
+        exitCode: snapshot.exitCode
+      }
+    }
+
+    if (snapshot.status === 'REFUSED') {
+      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
+      const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
+
+      let settledAttempt: ExecutionAttemptRecord
+      try {
+        settledAttempt = this.smcService.transitionAttemptToSettled(validRepoId, {
+          attemptId: cleanAttemptId,
+          expectedAttemptRevision: currentAttempt.revision,
+          unitId: attempt.unitId,
+          expectedUnitRevision: currentUnit.revision,
+          terminalOutcome: 'CANCELLED',
+          entryData: {
+            title: `Execution attempt refused: ${attempt.unitId}`,
+            body: JSON.stringify({
+              attemptId: cleanAttemptId,
+              unitId: attempt.unitId,
+              planId: attempt.planId,
+              terminalOutcome: 'CANCELLED',
+              cliStatus: snapshot.status,
+              cliPhase: snapshot.phase
+            }),
+            kind: 'PENDING'
+          }
+        })
+      } catch (err: any) {
+        if (err instanceof ExecutionAttemptConflictError) {
+          const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+          if (recheck?.status === 'CANCELLED' || recheck?.status === 'FAILED') {
+            settledAttempt = recheck
+          } else {
+            return {
+              status: 'UNKNOWN',
+              attemptId: cleanAttemptId,
+              sessionId: cleanSessionId,
+              repositoryId: validRepoId,
+              reason: `SETTLE_CONFLICT: ${err.message}`
+            }
+          }
+        } else {
+          return {
+            status: 'UNKNOWN',
+            attemptId: cleanAttemptId,
+            sessionId: cleanSessionId,
+            repositoryId: validRepoId,
+            reason: `SETTLE_ERROR: ${err?.message ?? String(err)}`
+          }
+        }
+      }
+
+      this.stageService.releaseAttemptRetention(cleanAttemptId)
+
+      const finalUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      return {
+        status: 'RECONCILING',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: settledAttempt.status,
+        unitFlowStatus: finalUnit?.status,
+        cliStatus: snapshot.status,
+        cliPhase: snapshot.phase,
+        exitCode: snapshot.exitCode
+      }
+    }
+
+    if (
+      snapshot.status === 'FAILED' ||
+      snapshot.status === 'TIMED_OUT' ||
+      snapshot.status === 'CANCELLED' ||
+      snapshot.status === 'INTERRUPTED'
+    ) {
+      const isCleanTree = Boolean(
+        snapshot.treeObservation &&
+        snapshot.treeObservation.activeProcesses === 0 &&
+        snapshot.treeObservation.handlesClosed === true
+      )
+      const isTerminalPhase = snapshot.phase === 'TERMINAL'
+
+      if (!isCleanTree || !isTerminalPhase) {
+        return {
+          status: 'UNKNOWN',
+          attemptId: cleanAttemptId,
+          sessionId: cleanSessionId,
+          repositoryId: validRepoId,
+          planId: attempt.planId,
+          unitId: attempt.unitId,
+          attemptStatus: attempt.status,
+          unitFlowStatus: unitState.status,
+          cliStatus: snapshot.status,
+          cliPhase: snapshot.phase,
+          exitCode: snapshot.exitCode,
+          reason: 'TERMINATION_UNCONFIRMED'
+        }
+      }
+
+      const terminalOutcome = snapshot.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED'
+      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
+      const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
+
+      let settledAttempt: ExecutionAttemptRecord
+      try {
+        settledAttempt = this.smcService.transitionAttemptToSettled(validRepoId, {
+          attemptId: cleanAttemptId,
+          expectedAttemptRevision: currentAttempt.revision,
+          unitId: attempt.unitId,
+          expectedUnitRevision: currentUnit.revision,
+          terminalOutcome,
+          entryData: {
+            title: `Execution attempt failed: ${attempt.unitId} (${snapshot.status})`,
+            body: JSON.stringify({
+              attemptId: cleanAttemptId,
+              unitId: attempt.unitId,
+              planId: attempt.planId,
+              terminalOutcome,
+              cliStatus: snapshot.status,
+              cliPhase: snapshot.phase,
+              exitCode: snapshot.exitCode,
+              treeObservation: snapshot.treeObservation,
+              diagnostic: snapshot.diagnostic
+            }),
+            kind: 'PENDING'
+          }
+        })
+      } catch (err: any) {
+        if (err instanceof ExecutionAttemptConflictError) {
+          const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+          if (recheck?.status === 'FAILED' || recheck?.status === 'CANCELLED') {
+            settledAttempt = recheck
+          } else {
+            return {
+              status: 'UNKNOWN',
+              attemptId: cleanAttemptId,
+              sessionId: cleanSessionId,
+              repositoryId: validRepoId,
+              reason: `SETTLE_CONFLICT: ${err.message}`
+            }
+          }
+        } else {
+          return {
+            status: 'UNKNOWN',
+            attemptId: cleanAttemptId,
+            sessionId: cleanSessionId,
+            repositoryId: validRepoId,
+            reason: `SETTLE_ERROR: ${err?.message ?? String(err)}`
+          }
+        }
+      }
+
+      this.stageService.releaseAttemptRetention(cleanAttemptId)
+
+      const finalUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      return {
+        status: 'RECONCILING',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptStatus: settledAttempt.status,
+        unitFlowStatus: finalUnit?.status,
+        cliStatus: snapshot.status,
+        cliPhase: snapshot.phase,
+        exitCode: snapshot.exitCode
+      }
+    }
+
+    return {
+      status: 'UNKNOWN',
+      attemptId: cleanAttemptId,
+      sessionId: cleanSessionId,
+      repositoryId: validRepoId,
+      reason: `UNRECOGNIZED_CLI_STATUS: ${snapshot.status}`
+    }
   }
 
   private async observeRunningAttempt(

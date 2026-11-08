@@ -80,7 +80,8 @@ import type {
   CliProposal,
   CliExecutionSnapshot,
   StartCliExecutionInput,
-  GetCliExecutionInput
+  GetCliExecutionInput,
+  CliExecutionStatus
 } from '../../cli-execution/cli-execution-types'
 import { CliExecutionService } from '../../cli-execution/cli-execution-service'
 import { resolveCliCommand } from '../../cli-execution/cli-command-resolver'
@@ -7668,6 +7669,710 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const inspectionAfter = await stageService07.inspectStagedPrompt(repoId, sessionId, attemptId, stageOpId)
         expect(inspectionAfter.status).toBe('UNKNOWN')
         expect(inspectionAfter.reason).toBe('STAGE_NOT_FOUND_OR_EXPIRED')
+      })
+    })
+  })
+
+  describe('BuildX Execution-08 — Fechamento terminal e reconciliação de tentativa (Provas Dirigidas)', () => {
+    const repoId = 'repo-execution-08'
+    let tempBaseDir08: string
+    let isolatedStageDir08: string
+    let isolatedWorktreeDir08: string
+    let smc: SessionMemoryCentralService
+    let gitPort08: any
+    let workspaceService08: WorkspaceBindingService
+    let stageService08: UnitPromptStageService
+    let originalEnvPath08: string | undefined
+    let simClock08: number
+
+    const DEFAULT_HEAD = '8888888888888888888888888888888888888888'
+    const DEFAULT_WT_ID = 'wt-ex08-01'
+    const DEFAULT_GEN = 'gen-ex08-1'
+    const DEFAULT_BRANCH = 'feature-ex08'
+
+    function createFixtureInventory08(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      path?: string
+    }): any {
+      const worktreeId = options?.worktreeId ?? DEFAULT_WT_ID
+      const generation = options?.generation ?? DEFAULT_GEN
+      const branchName = options?.branch ?? DEFAULT_BRANCH
+      const head = options?.head ?? DEFAULT_HEAD
+      const wtPath = options?.path ?? isolatedWorktreeDir08
+      const worktree: any = {
+        worktreeId,
+        generation,
+        path: wtPath,
+        head,
+        branch: branchName,
+        detached: false,
+        locked: false,
+        missing: false,
+        prunable: false
+      }
+      const branchRecord: any = {
+        key: 'key-' + branchName,
+        repositoryId: repoId,
+        ref: 'refs/heads/' + branchName,
+        name: branchName,
+        namespace: 'LOCAL',
+        head,
+        upstream: null,
+        generation: 'branch-gen-ex08',
+        revision: 'branch-rev-ex08',
+        creation: { at: '2026-11-08T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-08T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+      return {
+        repositoryId: repoId,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-08T00:00:00.000Z',
+        revision: 'inv-ex08-1',
+        worktrees: [worktree],
+        branches: [branchRecord],
+        unassignedWorktrees: []
+      }
+    }
+
+    function createMockCli08(options?: {
+      enabled?: boolean
+      startStatus?: CliExecutionStatus
+      startPhase?: string
+      startError?: Error
+      hasGet?: boolean
+    }) {
+      const startCalls: any[] = []
+      const getCalls: any[] = []
+      const knownSnapshots = new Map<string, CliExecutionSnapshot>()
+
+      const port: any = {
+        startCalls,
+        getCalls,
+        knownSnapshots,
+        isEnabled: () => (options?.enabled !== undefined ? options.enabled : true),
+        getRepositoryId: () => repoId,
+        prepare: async (input: any) => {
+          const canonicalWtDir = realpathSync(isolatedWorktreeDir08)
+          let desc: any
+          try {
+            desc = resolveCliCommand(canonicalWtDir, 'grok', input.args ?? [])
+          } catch {
+            desc = {
+              executable: 'grok',
+              originalExecutable: 'grok',
+              args: input.args ?? [],
+              originalArgs: input.args ?? [],
+              cwd: canonicalWtDir,
+              relativeCwd: '.',
+              displayCommandLine: 'grok ' + (input.args ?? []).join(' ')
+            }
+          }
+          return {
+            proposalId: 'proposal-ex08-' + Math.random().toString(36).slice(2, 8),
+            repositoryId: repoId,
+            repositoryDirectory: canonicalWtDir,
+            checkoutFingerprint: 'fp-ex08',
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+            status: 'PENDING',
+            risks: [],
+            worktree: {
+              worktreeId: input.worktree?.worktreeId ?? DEFAULT_WT_ID,
+              generation: input.worktree?.generation ?? DEFAULT_GEN,
+              branch: DEFAULT_BRANCH,
+              head: DEFAULT_HEAD,
+              indexRevision: 'idx-ex08'
+            },
+            command: desc,
+            policy: { mode: 'SUPERVISED', revision: 'default', rule: 'native-command-consent' },
+            autoAuthorized: false
+          }
+        },
+        start: async (input: any) => {
+          startCalls.push(input)
+          if (options?.startError) {
+            throw options.startError
+          }
+          const desc = typeof input.command === 'string' ? input.command : `${input.command?.cmd} ${(input.command?.args ?? []).join(' ')}`
+          if (options?.startStatus === 'REFUSED') {
+            const snap: CliExecutionSnapshot = {
+              operationId: input.operationId,
+              proposalId: input.proposalId,
+              command: desc,
+              status: 'REFUSED',
+              phase: 'TERMINAL',
+              exitCode: null,
+              stdout: '',
+              stderr: 'permission denied',
+              totalStdoutBytes: 0,
+              totalStderrBytes: 17,
+              hasMore: false,
+              nextCursor: null,
+              truncated: false,
+              origin: 'CLI_EXECUTION_CAPABILITY',
+              startedAt: new Date().toISOString()
+            }
+            knownSnapshots.set(input.operationId, snap)
+            return snap
+          }
+          const snap: CliExecutionSnapshot = {
+            operationId: input.operationId,
+            proposalId: input.proposalId,
+            command: desc,
+            status: options?.startStatus ?? 'AWAITING_APPROVAL',
+            phase: (options?.startPhase ?? (options?.startStatus === 'RUNNING' ? 'RUNNING' : 'AWAITING_APPROVAL')) as any,
+            exitCode: null,
+            stdout: '',
+            stderr: '',
+            totalStdoutBytes: 0,
+            totalStderrBytes: 0,
+            hasMore: false,
+            nextCursor: null,
+            truncated: false,
+            origin: 'CLI_EXECUTION_CAPABILITY',
+            startedAt: new Date().toISOString()
+          }
+          knownSnapshots.set(input.operationId, snap)
+          return snap
+        }
+      }
+
+      if (options?.hasGet !== false) {
+        port.get = async (input: any) => {
+          getCalls.push(input)
+          const snap = knownSnapshots.get(input.operationId)
+          if (!snap) throw new Error('OPERATION_NOT_FOUND')
+          return snap
+        }
+      }
+
+      port.setSnapshot = (operationId: string, updates: Partial<CliExecutionSnapshot>) => {
+        const existing = knownSnapshots.get(operationId)
+        if (existing) {
+          Object.assign(existing, updates)
+        } else {
+          knownSnapshots.set(operationId, updates as any)
+        }
+      }
+
+      return port
+    }
+
+    async function createEx08Fixture(overrides?: {
+      sessionId?: string
+      planId?: string
+      unitId?: string
+      reservationId?: string
+      attemptId?: string
+    }) {
+      const sessionId = overrides?.sessionId ?? '11111111-1111-4111-8111-111111111111'
+      const planId = overrides?.planId ?? '22222222-2222-4222-8222-222222222222'
+      const unitId = overrides?.unitId ?? '33333333-3333-4333-8333-333333333333'
+      const reservationId = overrides?.reservationId ?? '44444444-4444-4444-8444-444444444444'
+      const attemptId = overrides?.attemptId ?? '55555555-5555-4555-8555-555555555555'
+
+      const session = smc.createSession(repoId, { sessionId })
+      await workspaceService08.bindWorkspace(repoId, sessionId, DEFAULT_WT_ID)
+      const planSvc = new UnitFlowService(smc)
+      planSvc.registerPlan(repoId, sessionId, { planId, title: 'Ex08 Plan' })
+      planSvc.definePlanUnits(repoId, sessionId, planId, [{
+        unitId,
+        title: 'Ex08 Unit',
+        objective: 'Run headless Grok and settle',
+        acceptanceCriteria: 'Terminal settlement reconciled'
+      }])
+      const resSvc = new UnitFlowReservationService(smc, gitPort08)
+      const resRes = await resSvc.reserveNextEligibleUnit(repoId, sessionId, planId, { reservationId })
+      if (resRes.kind !== 'RESERVED') throw new Error('Expected RESERVED')
+      const attemptSvc = new ExecutionAttemptService(smc, gitPort08)
+      const attempt = await attemptSvc.prepareExecutionAttempt(repoId, sessionId, reservationId, { attemptId })
+      return { sessionId, planId, unitId, reservationId, attemptId, session, attempt }
+    }
+
+    async function stagePromptForFixture(sessionId: string, attemptId: string, stageOpId = 'f1f1f1f1-f1f1-41f1-81f1-f1f1f1f1f1f1'): Promise<string> {
+      const res = await stageService08.stageUnitPrompt(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+      if (!res.success) throw new Error('Stage failed: ' + res.reason)
+      return stageOpId
+    }
+
+    beforeEach(() => {
+      tempBaseDir08 = mkdtempSync(join(tmpdir(), 'smc-test-ex08-'))
+      isolatedStageDir08 = mkdtempSync(join(tmpdir(), 'smc-stage-ex08-'))
+      isolatedWorktreeDir08 = mkdtempSync(join(tmpdir(), 'smc-wt-ex08-'))
+      simClock08 = Date.now()
+      smc = new SessionMemoryCentralService(tempBaseDir08)
+      gitPort08 = {
+        getBranchInventory: async () => createFixtureInventory08(),
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+      workspaceService08 = new WorkspaceBindingService(smc, gitPort08)
+      stageService08 = new UnitPromptStageService(smc, workspaceService08, {
+        stagingDirectory: isolatedStageDir08,
+        clock: () => simClock08
+      })
+
+      originalEnvPath08 = process.env.PATH
+      const scriptName = process.platform === 'win32' ? 'grok.cmd' : 'grok'
+      writeFileSync(join(isolatedStageDir08, scriptName), '@echo grok')
+      process.env.PATH = isolatedStageDir08 + delimiter + (process.env.PATH ?? '')
+    })
+
+    afterEach(() => {
+      try { smc.close() } catch {}
+      if (originalEnvPath08 !== undefined) {
+        process.env.PATH = originalEnvPath08
+      }
+      try { rmSync(tempBaseDir08, { recursive: true, force: true }) } catch {}
+      try { rmSync(isolatedStageDir08, { recursive: true, force: true }) } catch {}
+      try { rmSync(isolatedWorktreeDir08, { recursive: true, force: true }) } catch {}
+    })
+
+    describe('Prova 1 — Término positivo comprovado (SUCCEEDED) avança attempt para COMPLETED, unit para VALIDATING e gera entrada de resultado na SMC', () => {
+      it('settleUnitExecution com SUCCEEDED, phase TERMINAL, exitCode 0 e árvore limpa conclui com VALIDATION_READY', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx08Fixture()
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        expect(stageService08.isStageRetained(stageOpId)).toBe(true)
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'SUCCEEDED',
+          phase: 'TERMINAL',
+          exitCode: 0,
+          treeObservation: {
+            observedAt: new Date().toISOString(),
+            rootPid: 1234,
+            activeProcesses: 0,
+            treeProcesses: [{ pid: 1234, parentPid: 1, command: 'grok', cpuPercent: 0, memoryBytes: 0, elapsedMs: 50 }],
+            handlesClosed: true
+          }
+        })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+
+        expect(result.status).toBe('VALIDATION_READY')
+        expect(result.attemptId).toBe(attemptId)
+        expect(result.sessionId).toBe(sessionId)
+        expect(result.repositoryId).toBe(repoId)
+        expect(result.planId).toBe(planId)
+        expect(result.unitId).toBe(unitId)
+        expect(result.attemptStatus).toBe('COMPLETED')
+        expect(result.unitFlowStatus).toBe('VALIDATING')
+        expect(result.cliStatus).toBe('SUCCEEDED')
+        expect(result.exitCode).toBe(0)
+
+        const store = smc.getStore(repoId)
+        const attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('COMPLETED')
+        expect(attemptRec?.updatedAt).toBeDefined()
+
+        const unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('VALIDATING')
+
+        const { entries } = store.listEntries(sessionId)
+        const resultEntryMeta = entries.find(e => e.kind === 'RESULT')
+        expect(resultEntryMeta).toBeDefined()
+        expect(resultEntryMeta?.title).toContain('Execution attempt completed')
+        const resultEntry = store.getEntry(sessionId, resultEntryMeta!.entryId)
+        expect(resultEntry?.body).toContain(attemptId)
+        expect(resultEntry?.body).toContain('SUCCEEDED')
+
+        expect(stageService08.isStageRetained(stageOpId)).toBe(false)
+      })
+    })
+
+    describe('Prova 2 — Fast exit: término positivo direto de STARTING promove attempt e unit sem exigir passagem por RUNNING', () => {
+      it('processo rápido termina com SUCCEEDED enquanto attempt ainda estava em STARTING', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx08Fixture({
+          sessionId: 'a2a2a2a2-2222-4222-8222-222222222222',
+          planId: 'b2b2b2b2-2222-4222-8222-222222222222',
+          unitId: 'c2c2c2c2-2222-4222-8222-222222222222',
+          reservationId: 'd2d2d2d2-2222-4222-8222-222222222222',
+          attemptId: 'e2e2e2e2-2222-4222-8222-222222222222'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        const store = smc.getStore(repoId)
+        const attemptBefore = store.getExecutionAttempt(attemptId)
+        expect(attemptBefore?.status).toBe('STARTING')
+        const unitBefore = store.getUnitState(sessionId, planId, unitId)
+        expect(unitBefore?.status).toBe('RESERVED')
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'SUCCEEDED',
+          phase: 'TERMINAL',
+          exitCode: 0,
+          treeObservation: {
+            observedAt: new Date().toISOString(),
+            rootPid: 5678,
+            activeProcesses: 0,
+            treeProcesses: [],
+            handlesClosed: true
+          }
+        })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('VALIDATION_READY')
+        expect(result.attemptStatus).toBe('COMPLETED')
+        expect(result.unitFlowStatus).toBe('VALIDATING')
+
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('COMPLETED')
+        const unitAfter = store.getUnitState(sessionId, planId, unitId)
+        expect(unitAfter?.status).toBe('VALIDATING')
+      })
+    })
+
+    describe('Prova 3 — Falha terminal comprovada (FAILED, TIMED_OUT, CANCELLED, INTERRUPTED) com árvore limpa transiciona para RECONCILING e anexa PENDING na SMC', () => {
+      it('settleUnitExecution com FAILED transiciona attempt para FAILED, unit para RECONCILING e anexa entrada PENDING', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx08Fixture({
+          sessionId: 'a3a3a3a3-3333-4333-8333-333333333333',
+          planId: 'b3b3b3b3-3333-4333-8333-333333333333',
+          unitId: 'c3c3c3c3-3333-4333-8333-333333333333',
+          reservationId: 'd3d3d3d3-3333-4333-8333-333333333333',
+          attemptId: 'e3e3e3e3-3333-4333-8333-333333333333'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'FAILED',
+          phase: 'TERMINAL',
+          exitCode: 1,
+          diagnostic: 'Compilation error',
+          treeObservation: {
+            observedAt: new Date().toISOString(),
+            rootPid: 9999,
+            activeProcesses: 0,
+            treeProcesses: [],
+            handlesClosed: true
+          }
+        })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('RECONCILING')
+        expect(result.attemptStatus).toBe('FAILED')
+        expect(result.unitFlowStatus).toBe('RECONCILING')
+        expect(result.cliStatus).toBe('FAILED')
+        expect(result.exitCode).toBe(1)
+
+        const store = smc.getStore(repoId)
+        const attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('FAILED')
+
+        const unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('RECONCILING')
+
+        const { entries } = store.listEntries(sessionId)
+        const pendingEntryMeta = entries.find(e => e.kind === 'PENDING')
+        expect(pendingEntryMeta).toBeDefined()
+        expect(pendingEntryMeta?.title).toContain('Execution attempt failed')
+        const pendingEntry = store.getEntry(sessionId, pendingEntryMeta!.entryId)
+        expect(pendingEntry?.body).toContain('Compilation error')
+
+        expect(stageService08.isStageRetained(stageOpId)).toBe(false)
+      })
+
+      it('settleUnitExecution com CANCELLED transiciona attempt para CANCELLED e unit para RECONCILING', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx08Fixture({
+          sessionId: 'a3b3a3b3-3333-4333-8333-333333333333',
+          planId: 'b3b3b3b3-3333-4333-8333-333333333334',
+          unitId: 'c3c3c3c3-3333-4333-8333-333333333334',
+          reservationId: 'd3d3d3d3-3333-4333-8333-333333333334',
+          attemptId: 'e3e3e3e3-3333-4333-8333-333333333334'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'CANCELLED',
+          phase: 'TERMINAL',
+          exitCode: null,
+          treeObservation: {
+            observedAt: new Date().toISOString(),
+            rootPid: 1000,
+            activeProcesses: 0,
+            treeProcesses: [],
+            handlesClosed: true
+          }
+        })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('RECONCILING')
+        expect(result.attemptStatus).toBe('CANCELLED')
+        expect(result.unitFlowStatus).toBe('RECONCILING')
+      })
+    })
+
+    describe('Prova 4 — Recusa pré-lançamento (REFUSED) transiciona para RECONCILING sem exigir treeObservation', () => {
+      it('start retorna REFUSED: settleUnitExecution transiciona attempt para CANCELLED e unit para RECONCILING', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx08Fixture({
+          sessionId: 'a4a4a4a4-4444-4444-8444-444444444444',
+          planId: 'b4b4b4b4-4444-4444-8444-444444444444',
+          unitId: 'c4c4c4c4-4444-4444-8444-444444444444',
+          reservationId: 'd4d4d4d4-4444-4444-8444-444444444444',
+          attemptId: 'e4e4e4e4-4444-4444-8444-444444444444'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'REFUSED',
+          phase: 'TERMINAL'
+        })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('RECONCILING')
+        expect(result.attemptStatus).toBe('CANCELLED')
+        expect(result.unitFlowStatus).toBe('RECONCILING')
+        expect(result.cliStatus).toBe('REFUSED')
+
+        const store = smc.getStore(repoId)
+        const attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('CANCELLED')
+
+        const unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('RECONCILING')
+
+        expect(stageService08.isStageRetained(stageOpId)).toBe(false)
+      })
+    })
+
+    describe('Prova 5 — Término não comprovado (TERMINATION_UNCONFIRMED ou processos ativos) retorna UNKNOWN e preserva retenção', () => {
+      it('phase TERMINATION_UNCONFIRMED: retorna UNKNOWN e não altera estado nem libera retenção', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx08Fixture({
+          sessionId: 'a5a5a5a5-5555-4555-8555-555555555555',
+          planId: 'b5b5b5b5-5555-4555-8555-555555555555',
+          unitId: 'c5c5c5c5-5555-4555-8555-555555555555',
+          reservationId: 'd5d5d5d5-5555-4555-8555-555555555555',
+          attemptId: 'e5e5e5e5-5555-4555-8555-555555555555'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'SUCCEEDED',
+          phase: 'TERMINATION_UNCONFIRMED' as any,
+          exitCode: 0
+        })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('UNKNOWN')
+        expect(result.reason).toBe('TERMINATION_UNCONFIRMED')
+
+        const store = smc.getStore(repoId)
+        const attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('RUNNING')
+
+        const unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('EXECUTING')
+
+        expect(stageService08.isStageRetained(stageOpId)).toBe(true)
+      })
+
+      it('SUCCEEDED mas árvore ainda possui processos ativos: retorna UNKNOWN', async () => {
+        const { sessionId, attemptId } = await createEx08Fixture({
+          sessionId: 'a5b5a5b5-5555-4555-8555-555555555555',
+          planId: 'b5b5b5b5-5555-4555-8555-555555555556',
+          unitId: 'c5c5c5c5-5555-4555-8555-555555555556',
+          reservationId: 'd5d5d5d5-5555-4555-8555-555555555556',
+          attemptId: 'e5e5e5e5-5555-4555-8555-555555555556'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'SUCCEEDED',
+          phase: 'TERMINAL',
+          exitCode: 0,
+          treeObservation: {
+            observedAt: new Date().toISOString(),
+            rootPid: 1234,
+            activeProcesses: 1,
+            treeProcesses: [{ pid: 1234, parentPid: 1, command: 'grok-helper', cpuPercent: 5, memoryBytes: 1024, elapsedMs: 100 }],
+            handlesClosed: false
+          }
+        })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('UNKNOWN')
+        expect(result.reason).toBe('TERMINATION_UNCONFIRMED')
+        expect(stageService08.isStageRetained(stageOpId)).toBe(true)
+      })
+    })
+
+    describe('Prova 6 — Indisponibilidade de CLI ou erro em get retorna UNKNOWN e preserva estado', () => {
+      it('cliService.get lança erro: retorna UNKNOWN sem alterar banco', async () => {
+        const { sessionId, attemptId } = await createEx08Fixture({
+          sessionId: 'a6a6a6a6-6666-4666-8666-666666666666',
+          planId: 'b6b6b6b6-6666-4666-8666-666666666666',
+          unitId: 'c6c6c6c6-6666-4666-8666-666666666666',
+          reservationId: 'd6d6d6d6-6666-4666-8666-666666666666',
+          attemptId: 'e6e6e6e6-6666-4666-8666-666666666666'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        mockCli.get = async () => { throw new Error('DAEMON_CONNECTION_LOST') }
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('UNKNOWN')
+        expect(result.reason).toContain('DAEMON_CONNECTION_LOST')
+
+        const store = smc.getStore(repoId)
+        const attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('RUNNING')
+        expect(stageService08.isStageRetained(stageOpId)).toBe(true)
+      })
+    })
+
+    describe('Prova 7 — Idempotência e concorrência: chamadas simultâneas ou repetidas produzem exatamente um assentamento', () => {
+      it('duas chamadas concorrentes de settleUnitExecution retornam VALIDATION_READY e gravam uma única entrada SMC', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx08Fixture({
+          sessionId: 'a7a7a7a7-7777-4777-8777-777777777777',
+          planId: 'b7b7b7b7-7777-4777-8777-777777777777',
+          unitId: 'c7c7c7c7-7777-4777-8777-777777777777',
+          reservationId: 'd7d7d7d7-7777-4777-8777-777777777777',
+          attemptId: 'e7e7e7e7-7777-4777-8777-777777777777'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        mockCli.setSnapshot(attemptId, {
+          status: 'SUCCEEDED',
+          phase: 'TERMINAL',
+          exitCode: 0,
+          treeObservation: {
+            observedAt: new Date().toISOString(),
+            rootPid: 7777,
+            activeProcesses: 0,
+            treeProcesses: [],
+            handlesClosed: true
+          }
+        })
+
+        const [r1, r2] = await Promise.all([
+          svc.settleUnitExecution(repoId, sessionId, attemptId),
+          svc.settleUnitExecution(repoId, sessionId, attemptId)
+        ])
+
+        expect(r1.status).toBe('VALIDATION_READY')
+        expect(r2.status).toBe('VALIDATION_READY')
+
+        const store = smc.getStore(repoId)
+        const { entries } = store.listEntries(sessionId)
+        const resultEntries = entries.filter(e => e.kind === 'RESULT')
+        expect(resultEntries.length).toBe(1)
+
+        const r3 = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(r3.status).toBe('VALIDATION_READY')
+        expect(r3.attemptStatus).toBe('COMPLETED')
+      })
+    })
+
+    describe('Prova 8 — Tentativa ainda ativa (AWAITING_APPROVAL ou RUNNING) retorna ACTIVE e mantém retenção', () => {
+      it('processo em RUNNING retorna ACTIVE e preserva retenção', async () => {
+        const { sessionId, attemptId } = await createEx08Fixture({
+          sessionId: 'a8a8a8a8-8888-4888-8888-888888888888',
+          planId: 'b8b8b8b8-8888-4888-8888-888888888888',
+          unitId: 'c8c8c8c8-8888-4888-8888-888888888888',
+          reservationId: 'd8d8d8d8-8888-4888-8888-888888888888',
+          attemptId: 'e8e8e8e8-8888-4888-8888-888888888888'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('ACTIVE')
+        expect(result.cliStatus).toBe('RUNNING')
+        expect(stageService08.isStageRetained(stageOpId)).toBe(true)
+      })
+
+      it('processo em AWAITING_APPROVAL retorna ACTIVE e preserva retenção', async () => {
+        const { sessionId, attemptId } = await createEx08Fixture({
+          sessionId: 'a8b8a8b8-8888-4888-8888-888888888888',
+          planId: 'b8b8b8b8-8888-4888-8888-888888888889',
+          unitId: 'c8c8c8c8-8888-4888-8888-888888888889',
+          reservationId: 'd8d8d8d8-8888-4888-8888-888888888889',
+          attemptId: 'e8e8e8e8-8888-4888-8888-888888888889'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli08({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        const result = await svc.settleUnitExecution(repoId, sessionId, attemptId)
+        expect(result.status).toBe('ACTIVE')
+        expect(result.cliStatus).toBe('AWAITING_APPROVAL')
+        expect(stageService08.isStageRetained(stageOpId)).toBe(true)
+      })
+    })
+
+    describe('Prova 9 — Store unit test: transitionAttemptToSettled lança ExecutionAttemptConflictError se revision divergir', () => {
+      it('rejeita com ExecutionAttemptConflictError se expectedAttemptRevision não coincidir', async () => {
+        const { sessionId, attemptId, attempt } = await createEx08Fixture({
+          sessionId: 'a9a9a9a9-9999-4999-8999-999999999999',
+          planId: 'b9b9b9b9-9999-4999-8999-999999999999',
+          unitId: 'c9c9c9c9-9999-4999-8999-999999999999',
+          reservationId: 'd9d9d9d9-9999-4999-8999-999999999999',
+          attemptId: 'e9e9e9e9-9999-4999-8999-999999999999'
+        })
+        const store = smc.getStore(repoId)
+        const unitState = store.getUnitState(sessionId, attempt.planId, attempt.unitId)!
+
+        expect(() => {
+          store.transitionAttemptToSettled({
+            attemptId,
+            expectedAttemptRevision: attempt.revision + 999,
+            unitId: attempt.unitId,
+            expectedUnitRevision: unitState.revision,
+            terminalOutcome: 'SUCCEEDED',
+            entryData: {
+              title: 'Conflict test',
+              body: 'should fail',
+              kind: 'RESULT'
+            }
+          })
+        }).toThrow(ExecutionAttemptConflictError)
+
+        const unchanged = store.getExecutionAttempt(attemptId)
+        expect(unchanged?.status).toBe(attempt.status)
       })
     })
   })

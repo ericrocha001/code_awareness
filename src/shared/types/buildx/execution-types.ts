@@ -1,3 +1,5 @@
+import type { UnitFlowUnitStatus } from './unitflow-types'
+
 export type ExecutionAttemptStatus =
   | 'PREPARED'
   | 'STARTING'
@@ -171,4 +173,38 @@ export interface UnitExecutionResult {
   readonly cliStatus?: string
   readonly unitFlowStatus?: string
   readonly reason?: string
+}
+
+export type UnitSettlementStatus =
+  | 'VALIDATION_READY'
+  | 'RECONCILING'
+  | 'ACTIVE'
+  | 'UNKNOWN'
+
+export interface UnitSettlementResult {
+  readonly status: UnitSettlementStatus
+  readonly attemptId: string
+  readonly sessionId: string
+  readonly repositoryId: string
+  readonly planId?: string
+  readonly unitId?: string
+  readonly attemptStatus?: ExecutionAttemptStatus
+  readonly unitFlowStatus?: UnitFlowUnitStatus
+  readonly cliStatus?: string
+  readonly cliPhase?: string
+  readonly exitCode?: number | null
+  readonly reason?: string
+}
+
+export interface SettleExecutionAttemptStoreInput {
+  readonly attemptId: string
+  readonly expectedAttemptRevision: number
+  readonly unitId: string
+  readonly expectedUnitRevision: number
+  readonly terminalOutcome: 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
+  readonly entryData?: {
+    readonly title: string
+    readonly body: string
+    readonly kind: 'RESULT' | 'PENDING'
+  }
 }

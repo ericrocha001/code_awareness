@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type {
@@ -37,7 +37,8 @@ import type {
 } from '../../../shared/types/buildx/workspace-types'
 import type {
   ExecutionAttemptRecord,
-  ExecutionAttemptStatus
+  ExecutionAttemptStatus,
+  SettleExecutionAttemptStoreInput
 } from '../../../shared/types/buildx/execution-types'
 import {
   BuildXWorkspaceBindingConflictError
@@ -303,6 +304,18 @@ function decodeCursor(cursor: string): SmcCursorPayload {
   } catch {
     throw new SmcInvalidEntryError('Malformed or invalid pagination cursor')
   }
+}
+
+
+export function deterministicEntryId(prefix: string, attemptId: string): string {
+  const hash = createHash('sha256').update(`${prefix}:${attemptId}`).digest('hex')
+  return [
+    hash.slice(0, 8),
+    hash.slice(8, 12),
+    '4' + hash.slice(13, 16),
+    '8' + hash.slice(17, 20),
+    hash.slice(20, 32)
+  ].join('-')
 }
 
 export class SessionMemoryCentralStore {
@@ -2352,6 +2365,126 @@ export class SessionMemoryCentralStore {
       if (unitResult.changes === 0) {
         throw new ExecutionAttemptConflictError(
           `CAS conflict: unit "${unitId}" not in RESERVED@${unitRevision}`
+        )
+      }
+
+      const updated = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+      `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow
+      return this.mapRawToExecutionAttemptRecord(updated)
+    })()
+  }
+
+  transitionAttemptToSettled(input: SettleExecutionAttemptStoreInput): ExecutionAttemptRecord {
+    if (typeof input.attemptId !== 'string' || !input.attemptId.trim() || !UUID_REGEX.test(input.attemptId.trim())) {
+      throw new ExecutionInvalidAttemptIdError(input.attemptId ?? '')
+    }
+    const cleanId = input.attemptId.trim().toLowerCase()
+    const now = new Date().toISOString()
+
+    return this.db.transaction((): ExecutionAttemptRecord => {
+      const existing = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+      `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow | undefined
+
+      if (!existing) {
+        throw new ExecutionAttemptConflictError(`Attempt "${cleanId}" not found`)
+      }
+
+      if (existing.status === 'COMPLETED' || existing.status === 'FAILED' || existing.status === 'CANCELLED') {
+        return this.mapRawToExecutionAttemptRecord(existing)
+      }
+
+      if (existing.status !== 'STARTING' && existing.status !== 'RUNNING') {
+        throw new ExecutionAttemptConflictError(
+          `Attempt "${cleanId}" status="${existing.status}", expected STARTING or RUNNING`
+        )
+      }
+
+      let targetAttemptStatus: ExecutionAttemptStatus
+      let targetUnitStatus: string
+      let defaultKind: 'RESULT' | 'PENDING'
+      if (input.terminalOutcome === 'SUCCEEDED') {
+        targetAttemptStatus = 'COMPLETED'
+        targetUnitStatus = 'VALIDATING'
+        defaultKind = 'RESULT'
+      } else if (input.terminalOutcome === 'CANCELLED') {
+        targetAttemptStatus = 'CANCELLED'
+        targetUnitStatus = 'RECONCILING'
+        defaultKind = 'PENDING'
+      } else {
+        targetAttemptStatus = 'FAILED'
+        targetUnitStatus = 'RECONCILING'
+        defaultKind = 'PENDING'
+      }
+
+      const attemptResult = this.db.prepare(`
+        UPDATE smc_execution_attempts
+        SET status = ?, revision = revision + 1, updated_at = ?
+        WHERE attempt_id = ? AND repository_id = ? AND status IN ('STARTING', 'RUNNING') AND revision = ?
+      `).run(targetAttemptStatus, now, cleanId, this.repositoryId, input.expectedAttemptRevision)
+
+      if (attemptResult.changes === 0) {
+        const recheck = this.db.prepare(`
+          SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+        `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow | undefined
+        if (recheck && (recheck.status === 'COMPLETED' || recheck.status === 'FAILED' || recheck.status === 'CANCELLED')) {
+          return this.mapRawToExecutionAttemptRecord(recheck)
+        }
+        throw new ExecutionAttemptConflictError(
+          `CAS conflict: attempt "${cleanId}" status="${recheck?.status}" revision=${recheck?.revision}, expected STARTING/RUNNING@${input.expectedAttemptRevision}`
+        )
+      }
+
+      const unitResult = this.db.prepare(`
+        UPDATE smc_unit_states
+        SET status = ?, revision = revision + 1, updated_at = ?
+        WHERE unit_id = ? AND revision = ? AND status IN ('RESERVED', 'EXECUTING')
+      `).run(targetUnitStatus, now, input.unitId, input.expectedUnitRevision)
+
+      if (unitResult.changes === 0) {
+        const recheckUnit = this.db.prepare(`
+          SELECT status, revision FROM smc_unit_states WHERE unit_id = ?
+        `).get(input.unitId) as { status: string; revision: number } | undefined
+        if (recheckUnit && (recheckUnit.status === 'VALIDATING' || recheckUnit.status === 'RECONCILING')) {
+          // Concorrência já atualizou unidade
+        } else {
+          throw new ExecutionAttemptConflictError(
+            `CAS conflict: unit "${input.unitId}" not in (RESERVED, EXECUTING)@${input.expectedUnitRevision}`
+          )
+        }
+      }
+
+      const entryId = deterministicEntryId('settle', cleanId)
+      const existingEntry = this.db.prepare(`
+        SELECT entry_id FROM smc_entries WHERE entry_id = ? AND session_id = ?
+      `).get(entryId, existing.session_id)
+
+      if (!existingEntry) {
+        const title = input.entryData?.title ?? `Execution attempt settled: ${targetAttemptStatus}`
+        const body = input.entryData?.body ?? JSON.stringify({
+          attemptId: cleanId,
+          unitId: input.unitId,
+          terminalOutcome: input.terminalOutcome,
+          attemptStatus: targetAttemptStatus,
+          unitStatus: targetUnitStatus
+        })
+        const kind = input.entryData?.kind ?? defaultKind
+        const referencesJson = JSON.stringify([{ kind: 'PROOF', target: cleanId }])
+
+        this.db.prepare(`
+          INSERT INTO smc_entries (
+            entry_id, session_id, kind, title, body,
+            emitter_role, emitter_id, references_json, supersedes_entry_id, created_at
+          ) VALUES (?, ?, ?, ?, ?, 'SYSTEM', 'buildx-execution-service', ?, NULL, ?)
+        `).run(
+          entryId,
+          existing.session_id,
+          kind,
+          title,
+          body,
+          referencesJson,
+          now
         )
       }
 
