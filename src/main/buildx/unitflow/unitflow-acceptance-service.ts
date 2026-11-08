@@ -17,6 +17,7 @@ import { SessionMemoryCentralService as SmcServiceImpl } from '../smc/session-me
 import { deterministicEntryId } from '../smc/session-memory-central-store'
 import type { ExecutionAttemptRecord } from '../../../shared/types/buildx/execution-types'
 import { UnitFlowAcceptanceConflictError } from './unitflow-errors'
+import { validationSourceFingerprint } from '../../validation-execution/validation-source'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -413,19 +414,73 @@ export class UnitFlowAcceptanceService {
         }
       }
 
-      if (proof.commandProfile?.receipt?.trust === 'EXECUTOR_REPORTED' && !proof.commandProfile?.checkout) {
+      const freshness = (proof as any).freshness
+      if (freshness === 'SOURCE_STALE' || freshness === 'RUNTIME_HISTORICAL') {
+        return {
+          status: 'STALE',
+          repositoryId: validRepoId,
+          sessionId: cleanSessionId,
+          planId: attempt.planId,
+          unitId: attempt.unitId,
+          reason: `PROOF_STALE: proof "${proofId}" freshness="${freshness}"`
+        }
+      }
+
+      const cp = proof.commandProfile
+      if (!cp || (!cp.checkout && !cp.source)) {
         return {
           status: 'EVIDENCE_REQUIRED',
           repositoryId: validRepoId,
           sessionId: cleanSessionId,
           planId: attempt.planId,
           unitId: attempt.unitId,
-          reason: `PROOF_UNTRUSTED: proof "${proofId}" is EXECUTOR_REPORTED without native checkout link`
+          reason: `PROOF_UNTRUSTED: proof "${proofId}" has neither verifiable checkout nor source provenance linked to worktree`
         }
       }
 
-      if (proof.commandProfile?.checkout) {
-        const co = proof.commandProfile.checkout
+      let provenanceVerified = false
+
+      // Chain (b): Verificação de commandProfile.checkout nativo
+      if (cp.checkout) {
+        const co = cp.checkout
+        if (
+          !co.worktreeId ||
+          !co.head ||
+          !co.generation ||
+          !co.issuer ||
+          !co.runId ||
+          typeof co.worktreeId !== 'string' ||
+          typeof co.head !== 'string' ||
+          typeof co.generation !== 'string' ||
+          typeof co.issuer !== 'string' ||
+          typeof co.runId !== 'string' ||
+          !co.worktreeId.trim() ||
+          !co.head.trim() ||
+          !co.generation.trim() ||
+          !co.issuer.trim() ||
+          !co.runId.trim()
+        ) {
+          return {
+            status: 'EVIDENCE_REQUIRED',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_UNTRUSTED: proof "${proofId}" has incomplete checkout identity or missing issuer/runId`
+          }
+        }
+
+        if (co.issuer !== 'VALIDATION_EXECUTION') {
+          return {
+            status: 'EVIDENCE_REQUIRED',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_UNTRUSTED: proof "${proofId}" checkout issuer "${co.issuer}" is not trusted`
+          }
+        }
+
         if (co.repositoryId && co.repositoryId !== validRepoId) {
           return {
             status: 'CONFLICT',
@@ -436,7 +491,8 @@ export class UnitFlowAcceptanceService {
             reason: `PROOF_REPOSITORY_MISMATCH: proof "${proofId}" repo="${co.repositoryId}" expected "${validRepoId}"`
           }
         }
-        if (co.worktreeId && co.worktreeId !== attempt.worktreeId) {
+
+        if (co.worktreeId !== attempt.worktreeId) {
           return {
             status: 'STALE',
             repositoryId: validRepoId,
@@ -446,7 +502,8 @@ export class UnitFlowAcceptanceService {
             reason: `PROOF_WORKTREE_MISMATCH: proof "${proofId}" worktree="${co.worktreeId}" expected "${attempt.worktreeId}"`
           }
         }
-        if (co.generation && co.generation !== attempt.generation) {
+
+        if (co.generation !== attempt.generation) {
           return {
             status: 'STALE',
             repositoryId: validRepoId,
@@ -456,7 +513,8 @@ export class UnitFlowAcceptanceService {
             reason: `PROOF_GENERATION_MISMATCH: proof "${proofId}" generation="${co.generation}" expected "${attempt.generation}"`
           }
         }
-        if (co.head && co.head !== currentHead) {
+
+        if (co.head !== currentHead) {
           return {
             status: 'STALE',
             repositoryId: validRepoId,
@@ -466,17 +524,134 @@ export class UnitFlowAcceptanceService {
             reason: `PROOF_HEAD_STALE: proof "${proofId}" head="${co.head}" currentHead="${currentHead}"`
           }
         }
+
+        provenanceVerified = true
       }
 
-      const freshness = (proof as any).freshness
-      if (freshness === 'SOURCE_STALE' || freshness === 'RUNTIME_HISTORICAL') {
+      // Chain (a): Verificação de commandProfile.source
+      if (!provenanceVerified && cp.source) {
+        const src = cp.source
+
+        if (
+          !src.worktreeId ||
+          !src.head ||
+          !src.generation ||
+          typeof src.worktreeId !== 'string' ||
+          typeof src.head !== 'string' ||
+          typeof src.generation !== 'string'
+        ) {
+          return {
+            status: 'EVIDENCE_REQUIRED',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_UNTRUSTED: proof "${proofId}" has incomplete source identity`
+          }
+        }
+
+        if (src.repositoryId && src.repositoryId !== validRepoId) {
+          return {
+            status: 'CONFLICT',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_REPOSITORY_MISMATCH: proof "${proofId}" repo="${src.repositoryId}" expected "${validRepoId}"`
+          }
+        }
+
+        if (src.worktreeId !== attempt.worktreeId) {
+          return {
+            status: 'STALE',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_WORKTREE_MISMATCH: proof "${proofId}" worktree="${src.worktreeId}" expected "${attempt.worktreeId}"`
+          }
+        }
+
+        if (src.generation !== attempt.generation) {
+          return {
+            status: 'STALE',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_GENERATION_MISMATCH: proof "${proofId}" generation="${src.generation}" expected "${attempt.generation}"`
+          }
+        }
+
+        if (src.head !== currentHead) {
+          return {
+            status: 'STALE',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_HEAD_STALE: proof "${proofId}" head="${src.head}" currentHead="${currentHead}"`
+          }
+        }
+
+        if (proof.sourceFingerprint) {
+          try {
+            const expectedFp = validationSourceFingerprint(src)
+            if (proof.sourceFingerprint !== expectedFp) {
+              return {
+                status: 'STALE',
+                repositoryId: validRepoId,
+                sessionId: cleanSessionId,
+                planId: attempt.planId,
+                unitId: attempt.unitId,
+                reason: `PROOF_FINGERPRINT_MISMATCH: proof "${proofId}" fingerprint does not match source digest`
+              }
+            }
+          } catch {
+            return {
+              status: 'STALE',
+              repositoryId: validRepoId,
+              sessionId: cleanSessionId,
+              planId: attempt.planId,
+              unitId: attempt.unitId,
+              reason: `PROOF_FINGERPRINT_MISMATCH: failed to verify fingerprint for proof "${proofId}"`
+            }
+          }
+        }
+
+        if (freshness && freshness !== 'CURRENT') {
+          return {
+            status: 'STALE',
+            repositoryId: validRepoId,
+            sessionId: cleanSessionId,
+            planId: attempt.planId,
+            unitId: attempt.unitId,
+            reason: `PROOF_STALE: proof "${proofId}" source freshness is "${freshness}", expected CURRENT`
+          }
+        }
+
+        provenanceVerified = true
+      }
+
+      if (!provenanceVerified) {
         return {
-          status: 'STALE',
+          status: 'EVIDENCE_REQUIRED',
           repositoryId: validRepoId,
           sessionId: cleanSessionId,
           planId: attempt.planId,
           unitId: attempt.unitId,
-          reason: `PROOF_STALE: proof "${proofId}" freshness="${freshness}"`
+          reason: `PROOF_UNTRUSTED: proof "${proofId}" could not be verified via checkout or source provenance`
+        }
+      }
+
+      if (cp.receipt?.trust === 'EXECUTOR_REPORTED' && !cp.checkout) {
+        return {
+          status: 'EVIDENCE_REQUIRED',
+          repositoryId: validRepoId,
+          sessionId: cleanSessionId,
+          planId: attempt.planId,
+          unitId: attempt.unitId,
+          reason: `PROOF_UNTRUSTED: proof "${proofId}" is EXECUTOR_REPORTED without native checkout link`
         }
       }
     }

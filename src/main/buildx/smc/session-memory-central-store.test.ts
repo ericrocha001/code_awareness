@@ -104,6 +104,7 @@ import { ChannelMcpAdapter } from '../../mcp/channel-mcp-adapter'
 import { bindProjectNavigation } from '../../core/context/project-context-navigation'
 import type { ContextNavigationPort } from '../../core/context/context-navigation-port'
 import { textContent } from '../../mcp/mcp-test-content'
+import { validationSourceFingerprint } from '../../validation-execution/validation-source'
 
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -8443,10 +8444,13 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         status: overrides?.status ?? 'PASSED',
         commandProfile: overrides?.commandProfile ?? {
           checkout: {
+            repositoryId: repoId09,
             worktreeId: overrides?.worktreeId ?? DEFAULT_WT_ID_09,
             generation: overrides?.generation ?? DEFAULT_GEN_09,
             branch: overrides?.branch ?? DEFAULT_BRANCH_09,
-            head: overrides?.head ?? DEFAULT_HEAD_09
+            head: overrides?.head ?? DEFAULT_HEAD_09,
+            issuer: 'VALIDATION_EXECUTION',
+            runId: 'run-09-default'
           }
         },
         freshness: overrides?.freshness
@@ -8798,6 +8802,229 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
 
         expect(result.status).toBe('EVIDENCE_REQUIRED')
         expect(result.reason).toMatch(/PROOF_NOT_FOUND/i)
+      })
+    })
+
+    describe('Prova 14 — Prova PASSED sem checkout e sem source falha com EVIDENCE_REQUIRED', () => {
+      it('deve rejeitar com EVIDENCE_REQUIRED (PROOF_UNTRUSTED) quando prova não tem proveniência de worktree', async () => {
+        const { sessionId, attemptId, unitId, reservationId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0014-0000-4000-8000-000000000014'
+        const unlinkedProof = {
+          status: 'PASSED',
+          commandProfile: {
+            command: 'npm test'
+          }
+        }
+        const ledger = makeMockLedger09(new Map([[proofId, unlinkedProof]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000014-0000-4000-8000-000000000014',
+          proofIds: [proofId],
+          acceptanceSummary: 'Unlinked proof'
+        })
+
+        expect(result.status).toBe('EVIDENCE_REQUIRED')
+        expect(result.reason).toMatch(/PROOF_UNTRUSTED/i)
+
+        // Estado do banco não deve sofrer mutação
+        const store = smc09.getStore(repoId09)
+        expect(store.getUnitState(sessionId, 'b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2', unitId)?.status).toBe('VALIDATING')
+        expect(store.getReservation(reservationId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 15 — Prova com checkout incompleto (sem issuer ou runId) falha com EVIDENCE_REQUIRED', () => {
+      it('deve rejeitar checkout sem issuer válido ou sem runId com PROOF_UNTRUSTED', async () => {
+        const { sessionId, attemptId, unitId, reservationId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0015-0000-4000-8000-000000000015'
+        const incompleteProof = {
+          status: 'PASSED',
+          commandProfile: {
+            checkout: {
+              worktreeId: DEFAULT_WT_ID_09,
+              generation: DEFAULT_GEN_09,
+              branch: DEFAULT_BRANCH_09,
+              head: DEFAULT_HEAD_09
+              // issuer and runId missing
+            }
+          }
+        }
+        const ledger = makeMockLedger09(new Map([[proofId, incompleteProof]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000015-0000-4000-8000-000000000015',
+          proofIds: [proofId],
+          acceptanceSummary: 'Incomplete checkout proof'
+        })
+
+        expect(result.status).toBe('EVIDENCE_REQUIRED')
+        expect(result.reason).toMatch(/PROOF_UNTRUSTED/i)
+
+        const store = smc09.getStore(repoId09)
+        expect(store.getUnitState(sessionId, 'b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2', unitId)?.status).toBe('VALIDATING')
+        expect(store.getReservation(reservationId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 16 — Prova com Chain (a) source válida, fingerprint correspondente e freshness CURRENT é aceita', () => {
+      it('deve aceitar prova ancorada via commandProfile.source com CURRENT', async () => {
+        const { sessionId, planId, unitId, reservationId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0016-0000-4000-8000-000000000016'
+        const validSource = {
+          version: 1 as const,
+          repositoryId: repoId09,
+          repositoryDirectory: isolatedWorktreeDir09,
+          cwd: isolatedWorktreeDir09,
+          worktreeId: DEFAULT_WT_ID_09,
+          generation: DEFAULT_GEN_09,
+          head: DEFAULT_HEAD_09,
+          branch: DEFAULT_BRANCH_09,
+          indexRevision: 'idx-rev-09',
+          worktreeRevision: 'wt-rev-09'
+        }
+        const sourceFp = validationSourceFingerprint(validSource)
+        const sourceProof = {
+          status: 'PASSED',
+          sourceFingerprint: sourceFp,
+          freshness: 'CURRENT',
+          commandProfile: {
+            source: validSource
+          }
+        }
+        const ledger = makeMockLedger09(new Map([[proofId, sourceProof]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000016-0000-4000-8000-000000000016',
+          proofIds: [proofId],
+          acceptanceSummary: 'Source proof valid'
+        })
+
+        expect(result.status).toBe('ACCEPTED')
+        expect(result.unitId).toBe(unitId)
+        expect(result.unitStatus).toBe('COMPLETED')
+        expect(result.reservationStatus).toBe('CONSUMED')
+        expect(result.planStatus).toBe('COMPLETED')
+
+        const store = smc09.getStore(repoId09)
+        expect(store.getUnitState(sessionId, planId, unitId)?.status).toBe('COMPLETED')
+        expect(store.getReservation(reservationId)?.status).toBe('CONSUMED')
+      })
+    })
+
+    describe('Prova 17 — Prova com Chain (a) source de outra worktree é rejeitada com STALE', () => {
+      it('deve retornar STALE com PROOF_WORKTREE_MISMATCH quando source.worktreeId divergir', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0017-0000-4000-8000-000000000017'
+        const foreignSource = {
+          version: 1 as const,
+          repositoryId: repoId09,
+          repositoryDirectory: isolatedWorktreeDir09,
+          cwd: isolatedWorktreeDir09,
+          worktreeId: 'wt-foreign-999',
+          generation: DEFAULT_GEN_09,
+          head: DEFAULT_HEAD_09,
+          branch: DEFAULT_BRANCH_09,
+          indexRevision: 'idx-rev-09',
+          worktreeRevision: 'wt-rev-09'
+        }
+        const sourceProof = {
+          status: 'PASSED',
+          sourceFingerprint: validationSourceFingerprint(foreignSource),
+          freshness: 'CURRENT',
+          commandProfile: {
+            source: foreignSource
+          }
+        }
+        const ledger = makeMockLedger09(new Map([[proofId, sourceProof]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000017-0000-4000-8000-000000000017',
+          proofIds: [proofId],
+          acceptanceSummary: 'Foreign source worktree'
+        })
+
+        expect(result.status).toBe('STALE')
+        expect(result.reason).toMatch(/PROOF_WORKTREE_MISMATCH/i)
+      })
+    })
+
+    describe('Prova 18 — Prova com Chain (a) source com head divergente é rejeitada com STALE', () => {
+      it('deve retornar STALE com PROOF_HEAD_STALE quando source.head divergir do currentHead', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0018-0000-4000-8000-000000000018'
+        const staleHeadSource = {
+          version: 1 as const,
+          repositoryId: repoId09,
+          repositoryDirectory: isolatedWorktreeDir09,
+          cwd: isolatedWorktreeDir09,
+          worktreeId: DEFAULT_WT_ID_09,
+          generation: DEFAULT_GEN_09,
+          head: '0000000000000000000000000000000000000000',
+          branch: DEFAULT_BRANCH_09,
+          indexRevision: 'idx-rev-09',
+          worktreeRevision: 'wt-rev-09'
+        }
+        const sourceProof = {
+          status: 'PASSED',
+          sourceFingerprint: validationSourceFingerprint(staleHeadSource),
+          freshness: 'CURRENT',
+          commandProfile: {
+            source: staleHeadSource
+          }
+        }
+        const ledger = makeMockLedger09(new Map([[proofId, sourceProof]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000018-0000-4000-8000-000000000018',
+          proofIds: [proofId],
+          acceptanceSummary: 'Stale head in source'
+        })
+
+        expect(result.status).toBe('STALE')
+        expect(result.reason).toMatch(/PROOF_HEAD_STALE/i)
+      })
+    })
+
+    describe('Prova 19 — Prova com Chain (a) source onde sourceFingerprint diverge é rejeitada com STALE', () => {
+      it('deve retornar STALE com PROOF_FINGERPRINT_MISMATCH quando fingerprint do proof diferir do source', async () => {
+        const { sessionId, attemptId } = await createEx09Fixture({ singleUnit: true })
+        const proofId = 'aaaa0019-0000-4000-8000-000000000019'
+        const validSource = {
+          version: 1 as const,
+          repositoryId: repoId09,
+          repositoryDirectory: isolatedWorktreeDir09,
+          cwd: isolatedWorktreeDir09,
+          worktreeId: DEFAULT_WT_ID_09,
+          generation: DEFAULT_GEN_09,
+          head: DEFAULT_HEAD_09,
+          branch: DEFAULT_BRANCH_09,
+          indexRevision: 'idx-rev-09',
+          worktreeRevision: 'wt-rev-09'
+        }
+        const sourceProof = {
+          status: 'PASSED',
+          sourceFingerprint: 'tampered-fingerprint-digest-1234',
+          freshness: 'CURRENT',
+          commandProfile: {
+            source: validSource
+          }
+        }
+        const ledger = makeMockLedger09(new Map([[proofId, sourceProof]]))
+        const svc = new UnitFlowAcceptanceService(smc09, workspaceService09, ledger)
+
+        const result = await svc.acceptValidatedUnit(repoId09, sessionId, attemptId, {
+          acceptanceOperationId: '0a000019-0000-4000-8000-000000000019',
+          proofIds: [proofId],
+          acceptanceSummary: 'Fingerprint mismatch in source'
+        })
+
+        expect(result.status).toBe('STALE')
+        expect(result.reason).toMatch(/PROOF_FINGERPRINT_MISMATCH/i)
       })
     })
   })
