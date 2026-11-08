@@ -25,7 +25,7 @@ describe('Agent-first acceptance over real MCP HTTP and repository lifecycle', (
       const state = lifecycle.getState(); if (state.status !== 'RUNNING') throw new Error('MCP not running'); endpoint = state.endpoint
     }
     const rpc = async (method: string, params: unknown): Promise<any> => {
-      const response = await fetch(endpoint, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })
+      const response = await fetch(endpoint, { method: 'POST', headers: { accept: 'application/json', 'content-type': 'application/json', ...lifecycle.getAgentBindingHeaders() }, body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }) })
       expect(response.status).toBe(200); return ((await response.json()) as { result: unknown }).result
     }
     const call = (name: string, args: unknown) => rpc('tools/call', { name, arguments: args })

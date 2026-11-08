@@ -36,7 +36,14 @@ export const App: React.FC = () => {
   useTheme();
 
   const [artifactIntent, setArtifactIntent] = useState<{ repositoryId: string; artifactId: string } | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("home");
+  const [activeTab, setCurrentTab] = useState<Tab>("home");
+  const academyNavigationGuard = useRef<((proceed: () => void) => void) | null>(null);
+  const setAcademyNavigationGuard = useCallback((guard: ((proceed: () => void) => void) | null) => { academyNavigationGuard.current = guard; }, []);
+  const setActiveTab = useCallback((tab: Tab) => {
+    const proceed = () => setCurrentTab(tab);
+    if (tab !== 'academy' && academyNavigationGuard.current) academyNavigationGuard.current(proceed);
+    else proceed();
+  }, []);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const navigation = useNavigationVisibility();
   const [commitIntent, setCommitIntent] = useState<CommitNavigationIntent | null>(null);
@@ -195,7 +202,7 @@ export const App: React.FC = () => {
           setCommitIntent(intent); setActiveTab('git-management');
         }} />
         <ChannelTab active={activeTab === "channel"} />
-        {activeTab === "academy" && <AcademyView />}
+        {activeTab === "academy" && <AcademyView onNavigationGuardChange={setAcademyNavigationGuard} />}
         {activeTab === "continuum" && <ContinuumView key={activeProject?.path ?? 'none'} activeProject={activeProject} artifactIntent={artifactIntent} />}
         {activeTab === "home" && (
           <HomeView

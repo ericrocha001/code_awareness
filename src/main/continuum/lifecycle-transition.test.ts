@@ -6,7 +6,7 @@ import { fixture, withFixtureDatabase } from './continuum-test-fixtures'
 import { ContinuumService } from './continuum-service'
 import { ArtifactStore } from './artifact-store'
 import { PublicationReceipts } from './publication-receipts'
-import { executeContinuumAgent, parseContinuumAgentRequest } from './continuum-agent'
+import { parseContinuumAgentRequest } from './continuum-agent'
 import { executeGetArtifact } from './continuum-mcp'
 import { lifecycleReceipt, type LifecycleApproval, type LifecycleRequest, type LifecycleReview } from './artifact-lifecycle'
 import type { LifecycleDependencies } from './artifact-lifecycle-policy'
@@ -114,7 +114,7 @@ it('requires the approved Handoff and rechecks its attested evidence before plan
 
 it('persists an authorized Handoff and real closure once, with MCP readback and restart-safe receipts', async () => {
   const f = setup(), raw = f.service.get(f.handoff.artifactId)!.rawMarkdown
-  const accepted = await executeContinuumAgent(f.service, 'transition_artifact_lifecycle', f.request)
+  const accepted = await f.service.transitionLifecycle(f.request)
   expect(accepted).toMatchObject({ state: 'PERSISTED', revision: 2, replayed: false })
   const read = JSON.parse(executeGetArtifact(f.service, { artifactId: f.handoff.artifactId }).content[0].text)
   expect(read).toMatchObject({ metadata: { status: 'VALIDATED' }, lifecycle: { basis: 'AUTHORIZED_TRANSITION', assessment: 'APPROVED_AT_REVISION', revision: 2 } })

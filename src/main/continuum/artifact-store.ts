@@ -67,6 +67,29 @@ export class ArtifactStore {
       return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
     }).immediate()
   }
+  repairPublished(artifactId: string, expectedRevision: number, requestDigest: string, principalId: string) {
+    return this.db.transaction(() => {
+      const current = this.db.prepare('SELECT revision FROM artifacts WHERE artifact_id=?').get(artifactId) as { revision: number } | undefined
+      if (!current) throw new Error('ARTIFACT_NOT_FOUND')
+      if (current.revision !== expectedRevision) throw new ArtifactRevisionConflictError(artifactId, current.revision)
+      const latest = this.db.prepare('SELECT revision FROM artifact_revisions WHERE artifact_id=? ORDER BY revision DESC LIMIT 1').get(artifactId) as { revision: number } | undefined
+      if (!latest) throw new Error('CANONICAL_SOURCE_UNAVAILABLE')
+      const canonical = this.getRevision(artifactId, latest.revision)!, initial = this.getRevision(artifactId, 1)!
+      if (!initial) throw new Error('CANONICAL_SOURCE_UNAVAILABLE')
+      const metadata = /^(?:\uFEFF)?---\r?\n/.test(canonical.rawMarkdown) ? parseArtifactMarkdown(canonical.rawMarkdown, true).metadata : canonical.metadata
+      if (canonical.metadata.kind === 'VISUAL_REFERENCE') metadata.media = canonical.metadata.media
+      this.db.prepare(`UPDATE artifacts SET revision=?, metadata_json=?, name=?, description=?, kind=?, status=?, created_at=?, updated_at=?, raw_markdown=?, content_hash=?, provenance_json=? WHERE artifact_id=? AND revision=?`)
+        .run(canonical.revision, JSON.stringify(metadata), metadata.name, metadata.description ?? null, metadata.kind, metadata.status ?? null, initial.createdAt, canonical.updatedAt,
+          canonical.rawMarkdown, computeContentHash(canonical.rawMarkdown), JSON.stringify(canonical.provenance), artifactId, expectedRevision)
+      if (canonical.metadata.kind === 'VISUAL_REFERENCE') this.getVisual(artifactId)
+      const provenance = { ...canonical.provenance, technicalRepair: { principalId, requestDigest, source: 'IMMUTABLE_REVISION', sourceRevision: canonical.revision, sourceContentHash: canonical.contentHash } }
+      const artifact: Artifact = { ...canonical, metadata, createdAt: initial.createdAt, revision: canonical.revision + 1,
+        updatedAt: new Date(Math.max(Date.now(), Date.parse(canonical.updatedAt) + 1)).toISOString(), contentHash: computeContentHash(canonical.rawMarkdown), provenance }
+      this.db.prepare('UPDATE artifacts SET revision=?, updated_at=?, provenance_json=? WHERE artifact_id=?').run(artifact.revision, artifact.updatedAt, JSON.stringify(provenance), artifactId)
+      this.writeIndexes(artifact)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
+    }).immediate()
+  }
   createVisualPublished(input: CreateArtifactInput, data: Buffer, media: VisualMedia, requestDigest: string) {
     return this.db.transaction(() => {
       const artifact = this.createVisual(input, data, media)
@@ -171,11 +194,17 @@ export class ArtifactStore {
   graph(query: ContinuumGraphQuery = {}, options: { indexOnly?: boolean } = {}) { return this.graphIndex.query(query, filter => this.list(filter), options) }
   backfillReferences(limit = 100) { return this.graphIndex.backfill(limit) }
   facets(): ContinuumFacet[] {
-    const rows = this.db.prepare(`SELECT key, CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END AS value_json,
-      metadata_year(value_json) AS year, metadata_month(value_json) AS month, count(*) AS count FROM artifact_metadata
-      WHERE key NOT IN ('name', 'description', 'relations')
-      AND json_type(value_json) IN ('text', 'integer', 'real', 'true', 'false')
-      GROUP BY key, metadata_year(value_json), metadata_month(value_json), CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END ORDER BY key, year DESC, month DESC, value_json`).all() as { key: string; value_json: string; year: number | null; month: number | null; count: number }[]
+    const rows = this.db.prepare(`WITH eligible AS (
+      SELECT m.key, m.value_json,
+        CASE WHEN m.key = 'date' THEN metadata_year(m.value_json) END AS year,
+        CASE WHEN m.key = 'date' THEN metadata_month(m.value_json) END AS month
+      FROM artifact_metadata m JOIN artifacts a ON a.artifact_id = m.artifact_id
+      WHERE m.key NOT IN ('name', 'description', 'relations')
+        AND json_type(m.value_json) IN ('text', 'integer', 'real', 'true', 'false')
+        AND NOT (m.key = 'status' AND a.kind = 'OBSERVATION' AND m.value_json = '"VERIFIED_AT_BINDING"')
+    ) SELECT key, CASE WHEN year IS NULL THEN value_json END AS value_json, year, month, count(*) AS count
+      FROM eligible GROUP BY key, year, month, CASE WHEN year IS NULL THEN value_json END
+      ORDER BY key, year DESC, month DESC, value_json`).all() as { key: string; value_json: string; year: number | null; month: number | null; count: number }[]
     const groups = new Map<string, ContinuumFacet>()
     for (const row of rows) {
       let group = groups.get(row.key)

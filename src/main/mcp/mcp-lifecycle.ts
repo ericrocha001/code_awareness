@@ -8,6 +8,7 @@ import { ChannelActivityMonitor } from './channel-activity-monitor'
 import type { ChannelTraceSink } from '../../shared/types/channel-types'
 import type { IArtifactReader } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 
 export type McpLifecycleState =
   | { status: 'STOPPED' | 'STARTING' | 'STOPPING'; available: false }
@@ -41,12 +42,14 @@ export class McpLifecycle {
   private disposed = false
   private runtimeFailure = false
   private endpointGeneration: string | null = null
+  private readonly instanceId: string
   private readonly listeners = new Set<(state: McpLifecycleState) => void | Promise<void>>()
   private readonly createServer: (context: McpProjectContext) => Server
   private readonly log: (state: McpLifecycleState) => void
   private readonly disabled: boolean
 
   constructor(options: McpLifecycleOptions = {}) {
+    this.instanceId = options.runtimeIdentity?.getInstanceId() ?? randomUUID()
     this.disabled = options.disabled ?? false
     this.activity = options.activity ?? new ChannelActivityMonitor()
     this.createServer = options.createContextServer ?? (options.createServer
@@ -67,8 +70,13 @@ export class McpLifecycle {
         const supplied = headers['x-code-awareness-binding']
         if (supplied === undefined) return true
         return this.state.status === 'RUNNING' && this.endpointGeneration === generation && supplied === generation &&
-          headers['x-code-awareness-instance'] === options.runtimeIdentity?.getInstanceId() &&
+          headers['x-code-awareness-instance'] === this.instanceId &&
           headers['x-code-awareness-project'] === context.projectId
+      }, (headers, connected) => {
+        const isActive = () => this.state.status === 'RUNNING' && this.endpointGeneration === generation && connected()
+        if (!headers['x-code-awareness-binding'] || headers['x-code-awareness-binding'] !== generation || headers['x-code-awareness-instance'] !== this.instanceId || headers['x-code-awareness-project'] !== context.projectId || !isActive()) return undefined
+        if (!context.continuum?.repositoryId) return undefined
+        return authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', isActive), context.continuum.repositoryId, isActive)
       })
     }))
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))
@@ -77,6 +85,10 @@ export class McpLifecycle {
 
   getState(): McpLifecycleState {
     return { ...this.state }
+  }
+  getAgentBindingHeaders(): Record<string, string> {
+    if (this.state.status !== 'RUNNING' || !this.endpointGeneration) return {}
+    return { 'x-code-awareness-binding': this.endpointGeneration, 'x-code-awareness-instance': this.instanceId, 'x-code-awareness-project': this.state.projectId }
   }
 
   getLocalEndpoint(instanceId: string) {
