@@ -71,7 +71,10 @@ import {
   type UnitPromptStageResult,
   type UnitPromptStageInspection,
   type UnitPromptReleaseResult,
-  type StageUnitPromptOptions
+  type StageUnitPromptOptions,
+  UnitExecutionService,
+  type UnitExecutionResult,
+  type StartUnitExecutionOptions
 } from '../execution'
 import type {
   CliProposal,
@@ -6977,6 +6980,533 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
   })
 
 })
+  describe('BuildX Execution-07 — Primeiro disparo headless do Grok na Worktree (Provas Dirigidas)', () => {
+    const repoId = 'repo-execution-07'
+    let smc: SessionMemoryCentralService
+    let tempBaseDir07: string
+    let isolatedStageDir07: string
+    let isolatedWorktreeDir07: string
+    let originalEnvPath07: string | undefined
+    let gitPort07: GitOperationsPort
+    let workspaceService07: WorkspaceBindingService
+    let stageService07: UnitPromptStageService
+
+    const DEFAULT_HEAD = '7777777777777777777777777777777777777777'
+    const DEFAULT_WT_ID = 'wt-ex07-01'
+    const DEFAULT_GEN = 'gen-ex07-1'
+    const DEFAULT_BRANCH = 'feature-ex07'
+
+    function createFixtureInventory07(options?: {
+      worktreeId?: string
+      generation?: string
+      branch?: string
+      head?: string
+      path?: string
+    }): BranchInventory {
+      const worktreeId = options?.worktreeId ?? DEFAULT_WT_ID
+      const generation = options?.generation ?? DEFAULT_GEN
+      const branchName = options?.branch ?? DEFAULT_BRANCH
+      const head = options?.head ?? DEFAULT_HEAD
+      const wtPath = options?.path ?? isolatedWorktreeDir07
+      const worktree: any = {
+        worktreeId,
+        generation,
+        path: wtPath,
+        head,
+        branch: branchName,
+        detached: false,
+        locked: false,
+        missing: false,
+        prunable: false
+      }
+      const branchRecord: BranchRecord = {
+        key: 'key-' + branchName,
+        repositoryId: repoId,
+        ref: 'refs/heads/' + branchName,
+        name: branchName,
+        namespace: 'LOCAL',
+        head,
+        upstream: null,
+        generation: 'branch-gen-ex07',
+        revision: 'branch-rev-ex07',
+        creation: { at: '2026-11-08T00:00:00.000Z', source: 'APP_RECEIPT' },
+        lastCommitAt: '2026-11-08T00:00:00.000Z',
+        worktrees: [{ worktreeId, generation }]
+      }
+      return {
+        repositoryId: repoId,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-08T00:00:00.000Z',
+        revision: 'inv-ex07-1',
+        worktrees: [worktree],
+        branches: [branchRecord],
+        unassignedWorktrees: []
+      }
+    }
+
+    type MockCliOptions = {
+      enabled?: boolean
+      repoId?: string
+      startStatus?: 'AWAITING_APPROVAL' | 'RUNNING' | 'SUCCEEDED' | 'FAILED' | 'REFUSED' | 'CANCELLED' | 'TIMED_OUT' | 'INTERRUPTED'
+      startPhase?: string
+      startError?: Error
+      hasStart?: boolean
+      hasGet?: boolean
+      autoAuthorized?: boolean
+    }
+
+    function createMockCli07(options?: MockCliOptions): CliExecutionPort & {
+      startCalls: StartCliExecutionInput[]
+      getCalls: GetCliExecutionInput[]
+    } {
+      const startCalls: StartCliExecutionInput[] = []
+      const getCalls: GetCliExecutionInput[] = []
+      const knownSnapshots = new Map<string, CliExecutionSnapshot>()
+
+      const port: any = {
+        startCalls,
+        getCalls,
+        isEnabled: () => options?.enabled ?? true,
+        getRepositoryId: () => options?.repoId ?? repoId,
+        prepare: async (input: any) => {
+          const canonicalWtDir = realpathSync(isolatedWorktreeDir07)
+          let desc: any
+          try {
+            desc = resolveCliCommand(canonicalWtDir, 'grok', input.args ?? [])
+          } catch {
+            desc = {
+              executable: 'grok',
+              originalExecutable: 'grok',
+              args: input.args ?? [],
+              originalArgs: input.args ?? [],
+              cwd: canonicalWtDir,
+              relativeCwd: '.',
+              displayCommandLine: 'grok ' + (input.args ?? []).join(' ')
+            }
+          }
+          return {
+            proposalId: 'proposal-ex07-' + Math.random().toString(36).slice(2, 8),
+            repositoryId: options?.repoId ?? repoId,
+            repositoryDirectory: canonicalWtDir,
+            checkoutFingerprint: 'fp-ex07',
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 60000).toISOString(),
+            status: 'PENDING',
+            risks: [],
+            worktree: {
+              worktreeId: input.worktree?.worktreeId ?? DEFAULT_WT_ID,
+              generation: input.worktree?.generation ?? DEFAULT_GEN,
+              branch: DEFAULT_BRANCH,
+              head: DEFAULT_HEAD,
+              indexRevision: 'idx-ex07'
+            },
+            command: desc,
+            policy: { mode: 'SUPERVISED', revision: 'default', rule: 'native-command-consent' },
+            autoAuthorized: options?.autoAuthorized ?? false
+          }
+        }
+      }
+
+      if (options?.hasStart !== false) {
+        port.start = (input: any) => {
+          startCalls.push(input)
+          if (options?.startError) throw options.startError
+          const canonicalWtDir = realpathSync(isolatedWorktreeDir07)
+          let desc: any
+          try {
+            desc = resolveCliCommand(canonicalWtDir, 'grok', ['version'])
+          } catch {
+            desc = {
+              executable: 'grok',
+              originalExecutable: 'grok',
+              args: ['version'],
+              originalArgs: ['version'],
+              cwd: canonicalWtDir,
+              relativeCwd: '.',
+              displayCommandLine: 'grok version'
+            }
+          }
+          const snap: CliExecutionSnapshot = {
+            operationId: input.operationId,
+            proposalId: input.proposalId,
+            command: desc,
+            status: options?.startStatus ?? 'AWAITING_APPROVAL',
+            phase: (options?.startPhase ?? (options?.startStatus === 'RUNNING' ? 'RUNNING' : 'AWAITING_APPROVAL')) as any,
+            exitCode: null,
+            stdout: '',
+            stderr: '',
+            totalStdoutBytes: 0,
+            totalStderrBytes: 0,
+            hasMore: false,
+            nextCursor: null,
+            truncated: false,
+            origin: 'CLI_EXECUTION_CAPABILITY',
+            startedAt: new Date().toISOString()
+          }
+          knownSnapshots.set(input.operationId, snap)
+          return snap
+        }
+      }
+
+      if (options?.hasGet !== false) {
+        port.get = (input: any) => {
+          getCalls.push(input)
+          const snap = knownSnapshots.get(input.operationId)
+          if (!snap) throw new Error('OPERATION_NOT_FOUND')
+          return snap
+        }
+      }
+
+      return port
+    }
+
+    async function createEx07Fixture(overrides?: {
+      sessionId?: string
+      planId?: string
+      unitId?: string
+      reservationId?: string
+      attemptId?: string
+    }) {
+      const sessionId = overrides?.sessionId ?? 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+      const planId = overrides?.planId ?? 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+      const unitId = overrides?.unitId ?? 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+      const reservationId = overrides?.reservationId ?? 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+      const attemptId = overrides?.attemptId ?? 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee'
+
+      const session = smc.createSession(repoId, { sessionId })
+      await workspaceService07.bindWorkspace(repoId, sessionId, DEFAULT_WT_ID)
+      const planSvc = new UnitFlowService(smc)
+      planSvc.registerPlan(repoId, sessionId, { planId, title: 'Ex07 Plan' })
+      planSvc.definePlanUnits(repoId, sessionId, planId, [{
+        unitId,
+        title: 'Ex07 Unit',
+        objective: 'Run headless Grok',
+        acceptanceCriteria: 'Grok starts'
+      }])
+      const resSvc = new UnitFlowReservationService(smc, gitPort07)
+      const resRes = await resSvc.reserveNextEligibleUnit(repoId, sessionId, planId, { reservationId })
+      if (resRes.kind !== 'RESERVED') throw new Error('Expected RESERVED')
+      const attemptSvc = new ExecutionAttemptService(smc, gitPort07)
+      const attempt = await attemptSvc.prepareExecutionAttempt(repoId, sessionId, reservationId, { attemptId })
+      return { sessionId, planId, unitId, reservationId, attemptId, session, attempt }
+    }
+
+    async function stagePromptForFixture(sessionId: string, attemptId: string): Promise<string> {
+      const stageOpId = 'f0f0f0f0-f0f0-4f0f-8f0f-f0f0f0f0f0f0'
+      const res = await stageService07.stageUnitPrompt(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+      if (!res.success) throw new Error('Stage failed: ' + res.reason)
+      return stageOpId
+    }
+
+    beforeEach(() => {
+      tempBaseDir07 = mkdtempSync(join(tmpdir(), 'smc-test-ex07-'))
+      isolatedStageDir07 = mkdtempSync(join(tmpdir(), 'smc-stage-ex07-'))
+      isolatedWorktreeDir07 = mkdtempSync(join(tmpdir(), 'smc-wt-ex07-'))
+      smc = new SessionMemoryCentralService(tempBaseDir07)
+      gitPort07 = {
+        getBranchInventory: async () => createFixtureInventory07(),
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+      workspaceService07 = new WorkspaceBindingService(smc, gitPort07)
+      stageService07 = new UnitPromptStageService(smc, workspaceService07, { stagingDirectory: isolatedStageDir07 })
+
+      originalEnvPath07 = process.env.PATH
+      const scriptName = process.platform === 'win32' ? 'grok.cmd' : 'grok'
+      writeFileSync(join(isolatedStageDir07, scriptName), '@echo grok')
+      process.env.PATH = isolatedStageDir07 + delimiter + (process.env.PATH ?? '')
+    })
+
+    afterEach(() => {
+      try { smc.close() } catch {}
+      if (originalEnvPath07 !== undefined) {
+        process.env.PATH = originalEnvPath07
+      }
+      try { rmSync(tempBaseDir07, { recursive: true, force: true }) } catch {}
+      try { rmSync(isolatedStageDir07, { recursive: true, force: true }) } catch {}
+      try { rmSync(isolatedWorktreeDir07, { recursive: true, force: true }) } catch {}
+    })
+
+    describe('Prova 1 — Admissão com stage READY retorna AWAITING_APPROVAL e transiciona attempt para STARTING', () => {
+      it('start returns AWAITING_APPROVAL: attempt -> STARTING, unit permanece RESERVED', async () => {
+        const { sessionId, unitId, attemptId, attempt } = await createEx07Fixture()
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(result.status).toBe('AWAITING_APPROVAL')
+        expect(result.attemptId).toBe(attemptId)
+        expect(result.sessionId).toBe(sessionId)
+        expect(result.repositoryId).toBe(repoId)
+
+        expect(mockCli.startCalls.length).toBe(1)
+        expect(mockCli.startCalls[0].operationId).toBe(attemptId)
+
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('STARTING')
+        expect(attemptAfter?.revision).toBe(attempt.revision + 1)
+
+        const activeRes = store.getActiveReservation(sessionId)
+        const unitAfter = store.getUnitState(sessionId, activeRes!.planId, unitId)
+        expect(unitAfter?.status).toBe('RESERVED')
+      })
+    })
+
+    describe('Prova 2 — start retorna RUNNING: attempt -> RUNNING, unit -> EXECUTING (CAS atômico)', () => {
+      it('start returns RUNNING: attempt RUNNING, unit EXECUTING, resultado RUNNING', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx07Fixture({
+          sessionId: 'a1a1a1a1-a1a1-4a1a-8a1a-a1a1a1a1a1a1',
+          planId: 'b1b1b1b1-b1b1-4b1b-8b1b-b1b1b1b1b1b1',
+          unitId: 'c1c1c1c1-c1c1-4c1c-8c1c-c1c1c1c1c1c1',
+          reservationId: 'd1d1d1d1-d1d1-4d1d-8d1d-d1d1d1d1d1d1',
+          attemptId: 'e1e1e1e1-e1e1-4e1e-8e1e-e1e1e1e1e1e1'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'RUNNING', startPhase: 'RUNNING' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(result.status).toBe('RUNNING')
+        expect(result.unitFlowStatus).toBe('EXECUTING')
+
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('RUNNING')
+
+        const unitAfter = store.getUnitState(sessionId, planId, unitId)
+        expect(unitAfter?.status).toBe('EXECUTING')
+      })
+    })
+
+    describe('Prova 3 — Replay com attempt já STARTING: get é chamado em vez de start', () => {
+      it('segunda chamada com attempt STARTING usa get e não chama start novamente', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'a2a2a2a2-a2a2-4a2a-8a2a-a2a2a2a2a2a2',
+          planId: 'b2b2b2b2-b2b2-4b2b-8b2b-b2b2b2b2b2b2',
+          unitId: 'c2c2c2c2-c2c2-4c2c-8c2c-c2c2c2c2c2c2',
+          reservationId: 'd2d2d2d2-d2d2-4d2d-8d2d-d2d2d2d2d2d2',
+          attemptId: 'e2e2e2e2-e2e2-4e2e-8e2e-e2e2e2e2e2e2'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        expect(mockCli.startCalls.length).toBe(1)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(mockCli.startCalls.length).toBe(1)
+        expect(mockCli.getCalls.length).toBe(1)
+        expect(mockCli.getCalls[0].operationId).toBe(attemptId)
+      })
+    })
+
+    describe('Prova 4 — CLI retorna REFUSED: resultado REFUSED, attempt permanece STARTING', () => {
+      it('start returns REFUSED: resultado REFUSED, attempt STARTING', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'a3a3a3a3-a3a3-4a3a-8a3a-a3a3a3a3a3a3',
+          planId: 'b3b3b3b3-b3b3-4b3b-8b3b-b3b3b3b3b3b3',
+          unitId: 'c3c3c3c3-c3c3-4c3c-8c3c-c3c3c3c3c3c3',
+          reservationId: 'd3d3d3d3-d3d3-4d3d-8d3d-d3d3d3d3d3d3',
+          attemptId: 'e3e3e3e3-e3e3-4e3e-8e3e-e3e3e3e3e3e3'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'REFUSED' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(result.status).toBe('REFUSED')
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('STARTING')
+      })
+    })
+
+    describe('Prova 5 — Stage expirado antes de iniciar: UNAVAILABLE com STAGE_NOT_READY', () => {
+      it('resolveStagedPromptPath null: attempt permanece PREPARED, resultado UNAVAILABLE', async () => {
+        const { sessionId, attemptId, attempt } = await createEx07Fixture({
+          sessionId: 'a4a4a4a4-a4a4-4a4a-8a4a-a4a4a4a4a4a4',
+          planId: 'b4b4b4b4-b4b4-4b4b-8b4b-b4b4b4b4b4b4',
+          unitId: 'c4c4c4c4-c4c4-4c4c-8c4c-c4c4c4c4c4c4',
+          reservationId: 'd4d4d4d4-d4d4-4d4d-8d4d-d4d4d4d4d4d4',
+          attemptId: 'e4e4e4e4-e4e4-4e4e-8e4e-e4e4e4e4e4e4'
+        })
+        const fakeStageOpId = 'f4f4f4f4-f4f4-4f4f-8f4f-f4f4f4f4f4f4'
+        const mockCli = createMockCli07()
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: fakeStageOpId })
+
+        expect(result.status).toBe('UNAVAILABLE')
+        expect(result.reason).toBe('STAGE_NOT_READY')
+        expect(mockCli.startCalls.length).toBe(0)
+
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('PREPARED')
+        expect(attemptAfter?.revision).toBe(attempt.revision)
+      })
+    })
+
+    describe('Prova 6 — CLI indisponível: UNAVAILABLE sem transição de estado', () => {
+      it('cli disabled: retorna UNAVAILABLE sem modificar attempt', async () => {
+        const { sessionId, attemptId, attempt } = await createEx07Fixture({
+          sessionId: 'a5a5a5a5-a5a5-4a5a-8a5a-a5a5a5a5a5a5',
+          planId: 'b5b5b5b5-b5b5-4b5b-8b5b-b5b5b5b5b5b5',
+          unitId: 'c5c5c5c5-c5c5-4c5c-8c5c-c5c5c5c5c5c5',
+          reservationId: 'd5d5d5d5-d5d5-4d5d-8d5d-d5d5d5d5d5d5',
+          attemptId: 'e5e5e5e5-e5e5-4e5e-8e5e-e5e5e5e5e5e5'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ enabled: false })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(result.status).toBe('UNAVAILABLE')
+        expect(result.reason).toBe('CLI_UNAVAILABLE')
+
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('PREPARED')
+        expect(attemptAfter?.revision).toBe(attempt.revision)
+      })
+    })
+
+    describe('Prova 7 — Crash entre CAS e start: estado UNKNOWN preserva STARTING', () => {
+      it('start lança exceção após CAS STARTING: resultado UNKNOWN, attempt permanece STARTING', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'a6a6a6a6-a6a6-4a6a-8a6a-a6a6a6a6a6a6',
+          planId: 'b6b6b6b6-b6b6-4b6b-8b6b-b6b6b6b6b6b6',
+          unitId: 'c6c6c6c6-c6c6-4c6c-8c6c-c6c6c6c6c6c6',
+          reservationId: 'd6d6d6d6-d6d6-4d6d-8d6d-d6d6d6d6d6d6',
+          attemptId: 'e6e6e6e6-e6e6-4e6e-8e6e-e6e6e6e6e6e6'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startError: new Error('CLI_CRASH') })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(result.status).toBe('UNKNOWN')
+
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('STARTING')
+      })
+    })
+
+    describe('Prova 8 — Concorrência: Promise.all — exatamente um STARTING via CAS', () => {
+      it('dois startUnitExecution concorrentes: exatamente um start chamado, attempt STARTING', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'a7a7a7a7-a7a7-4a7a-8a7a-a7a7a7a7a7a7',
+          planId: 'b7b7b7b7-b7b7-4b7b-8b7b-b7b7b7b7b7b7',
+          unitId: 'c7c7c7c7-c7c7-4c7c-8c7c-c7c7c7c7c7c7',
+          reservationId: 'd7d7d7d7-d7d7-4d7d-8d7d-d7d7d7d7d7d7',
+          attemptId: 'e7e7e7e7-e7e7-4e7e-8e7e-e7e7e7e7e7e7'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const [r1, r2] = await Promise.all([
+          svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId }),
+          svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        ])
+
+        expect(mockCli.startCalls.length).toBe(1)
+        expect(mockCli.startCalls[0].operationId).toBe(attemptId)
+
+        const validStatuses = ['AWAITING_APPROVAL', 'RUNNING', 'UNKNOWN', 'UNAVAILABLE']
+        expect(validStatuses).toContain(r1.status)
+        expect(validStatuses).toContain(r2.status)
+
+        const store = smc.getStore(repoId)
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('STARTING')
+      })
+    })
+
+    describe('Prova 9 — Prova de pureza: stage path não vaza para o resultado público', () => {
+      it('UnitExecutionResult não contém stage path em nenhum campo', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'a8a8a8a8-a8a8-4a8a-8a8a-a8a8a8a8a8a8',
+          planId: 'b8b8b8b8-b8b8-4b8b-8b8b-b8b8b8b8b8b8',
+          unitId: 'c8c8c8c8-c8c8-4c8c-8c8c-c8c8c8c8c8c8',
+          reservationId: 'd8d8d8d8-d8d8-4d8d-8d8d-d8d8d8d8d8d8',
+          attemptId: 'e8e8e8e8-e8e8-4e8e-8e8e-e8e8e8e8e8e8'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+
+        const inspection = await stageService07.inspectStagedPrompt(repoId, sessionId, attemptId, stageOpId)
+        expect(inspection.status).toBe('READY')
+
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        const resultString = JSON.stringify(result)
+        expect(resultString).not.toMatch(/buildx-prompt|\.tmp|stagingDirectory/i)
+        expect((result as any).stagePath).toBeUndefined()
+        expect((result as any).filePath).toBeUndefined()
+      })
+    })
+
+    describe('Prova 10 — CAS RUNNING + EXECUTING: transação atômica no SQLite', () => {
+      it('transitionAttemptToRunning é atômico: se unit não RESERVED, attempt não avança', async () => {
+        const { planId, unitId, attemptId } = await createEx07Fixture({
+          sessionId: '99999999-9999-4999-8999-999999999999',
+          planId: '99999999-9999-4999-8999-999999999998',
+          unitId: '99999999-9999-4999-8999-999999999997',
+          reservationId: '99999999-9999-4999-8999-999999999996',
+          attemptId: '99999999-9999-4999-8999-999999999995'
+        })
+        const store = smc.getStore(repoId)
+        const startingAttempt = store.transitionAttemptToStarting(attemptId, 1)
+        expect(startingAttempt.status).toBe('STARTING')
+
+        const rawDb = new Database(smcDatabasePath(tempBaseDir07, repoId))
+        rawDb.prepare('UPDATE smc_unit_states SET status = ? WHERE unit_id = ?').run('AVAILABLE', unitId)
+
+        expect(() => {
+          store.transitionAttemptToRunning(attemptId, startingAttempt.revision, unitId, 1)
+        }).toThrow(/CAS conflict/)
+
+        const attemptAfter = store.getExecutionAttempt(attemptId)
+        expect(attemptAfter?.status).toBe('STARTING')
+        expect(attemptAfter?.revision).toBe(startingAttempt.revision)
+
+        rawDb.close()
+      })
+    })
+
+    describe('Prova 11 — Proposta auto-autorizada sem autorização explícita é REFUSED', () => {
+      it('autoAuthorized sem allowAlwaysApprove: retorna REFUSED', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'a9a9a9a9-a9a9-4a9a-8a9a-a9a9a9a9a9a9',
+          planId: 'b9b9b9b9-b9b9-4b9b-8b9b-b9b9b9b9b9b9',
+          unitId: 'c9c9c9c9-c9c9-4c9c-8c9c-c9c9c9c9c9c9',
+          reservationId: 'd9d9d9d9-d9d9-4d9d-8d9d-d9d9d9d9d9d9',
+          attemptId: 'e9e9e9e9-e9e9-4e9e-8e9e-e9e9e9e9e9e9'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ autoAuthorized: true })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(result.status).toBe('REFUSED')
+        expect(result.reason).toBe('AUTO_AUTHORIZED_NOT_REQUESTED')
+        expect(mockCli.startCalls.length).toBe(0)
+      })
+    })
+  })
+
 })
 
 

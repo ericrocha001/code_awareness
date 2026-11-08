@@ -24,7 +24,6 @@ import type {
 import type { ExecutionAttemptRecord } from '../../../shared/types/buildx/execution-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
-
 export class SessionMemoryCentralService {
   private readonly stores = new Map<string, SessionMemoryCentralStore>()
 
@@ -167,6 +166,24 @@ export class SessionMemoryCentralService {
     sessionId: string
   ): ExecutionAttemptRecord | null {
     return this.getStore(repositoryId).getPreparedExecutionAttempt(sessionId)
+  }
+
+  transitionAttemptToStarting(
+    repositoryId: string,
+    attemptId: string,
+    expectedRevision: number
+  ): ExecutionAttemptRecord {
+    return this.getStore(repositoryId).transitionAttemptToStarting(attemptId, expectedRevision)
+  }
+
+  transitionAttemptToRunning(
+    repositoryId: string,
+    attemptId: string,
+    expectedRevision: number,
+    unitId: string,
+    unitRevision: number
+  ): ExecutionAttemptRecord {
+    return this.getStore(repositoryId).transitionAttemptToRunning(attemptId, expectedRevision, unitId, unitRevision)
   }
 
   closeStore(repositoryId: string): void {

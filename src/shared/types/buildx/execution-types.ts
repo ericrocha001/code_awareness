@@ -149,4 +149,26 @@ export interface UnitPromptReleaseResult {
   readonly reason?: string
 }
 
+export type UnitExecutionStatus =
+  | 'AWAITING_APPROVAL'
+  | 'RUNNING'
+  | 'TERMINAL_OBSERVED'
+  | 'UNAVAILABLE'
+  | 'REFUSED'
+  | 'UNKNOWN'
 
+export interface StartUnitExecutionOptions {
+  readonly stageOperationId: string
+  readonly allowAlwaysApprove?: boolean
+}
+
+export interface UnitExecutionResult {
+  readonly status: UnitExecutionStatus
+  readonly attemptId: string
+  readonly sessionId: string
+  readonly repositoryId: string
+  readonly cliPhase?: string
+  readonly cliStatus?: string
+  readonly unitFlowStatus?: string
+  readonly reason?: string
+}

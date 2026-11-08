@@ -2281,6 +2281,87 @@ export class SessionMemoryCentralStore {
     return this.mapRawToExecutionAttemptRecord(row)
   }
 
+  transitionAttemptToStarting(attemptId: string, expectedRevision: number): ExecutionAttemptRecord {
+    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
+      throw new ExecutionInvalidAttemptIdError(attemptId ?? '')
+    }
+    const cleanId = attemptId.trim().toLowerCase()
+    const now = new Date().toISOString()
+
+    const result = this.db.prepare(`
+      UPDATE smc_execution_attempts
+      SET status = 'STARTING', revision = revision + 1, updated_at = ?
+      WHERE attempt_id = ? AND repository_id = ? AND status = 'PREPARED' AND revision = ?
+    `).run(now, cleanId, this.repositoryId, expectedRevision)
+
+    if (result.changes === 0) {
+      const existing = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+      `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow | undefined
+      if (!existing) {
+        throw new ExecutionAttemptConflictError(`Attempt "${cleanId}" not found`)
+      }
+      throw new ExecutionAttemptConflictError(
+        `CAS conflict: attempt "${cleanId}" status="${existing.status}" revision=${existing.revision}, expected PREPARED@${expectedRevision}`
+      )
+    }
+
+    const updated = this.db.prepare(`
+      SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+    `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow
+    return this.mapRawToExecutionAttemptRecord(updated)
+  }
+
+  transitionAttemptToRunning(
+    attemptId: string,
+    expectedRevision: number,
+    unitId: string,
+    unitRevision: number
+  ): ExecutionAttemptRecord {
+    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
+      throw new ExecutionInvalidAttemptIdError(attemptId ?? '')
+    }
+    const cleanId = attemptId.trim().toLowerCase()
+    const now = new Date().toISOString()
+
+    return this.db.transaction((): ExecutionAttemptRecord => {
+      const attemptResult = this.db.prepare(`
+        UPDATE smc_execution_attempts
+        SET status = 'RUNNING', revision = revision + 1, updated_at = ?
+        WHERE attempt_id = ? AND repository_id = ? AND status = 'STARTING' AND revision = ?
+      `).run(now, cleanId, this.repositoryId, expectedRevision)
+
+      if (attemptResult.changes === 0) {
+        const existing = this.db.prepare(`
+          SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+        `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow | undefined
+        if (!existing) {
+          throw new ExecutionAttemptConflictError(`Attempt "${cleanId}" not found`)
+        }
+        throw new ExecutionAttemptConflictError(
+          `CAS conflict: attempt "${cleanId}" status="${existing.status}" revision=${existing.revision}, expected STARTING@${expectedRevision}`
+        )
+      }
+
+      const unitResult = this.db.prepare(`
+        UPDATE smc_unit_states
+        SET status = 'EXECUTING', revision = revision + 1, updated_at = ?
+        WHERE unit_id = ? AND revision = ? AND status = 'RESERVED'
+      `).run(now, unitId, unitRevision)
+
+      if (unitResult.changes === 0) {
+        throw new ExecutionAttemptConflictError(
+          `CAS conflict: unit "${unitId}" not in RESERVED@${unitRevision}`
+        )
+      }
+
+      const updated = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+      `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow
+      return this.mapRawToExecutionAttemptRecord(updated)
+    })()
+  }
+
   close(): void {
     if (this.db && this.db.open) {
       this.db.close()
