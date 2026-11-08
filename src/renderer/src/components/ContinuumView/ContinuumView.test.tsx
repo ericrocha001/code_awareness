@@ -665,6 +665,31 @@ function revealFacet(key: string) {
   const expand = screen.queryByRole('button', { name: 'Expandir tudo' }); if (expand) fireEvent.click(expand)
 }
 
+it('offers every available facet for customization even when saved preferences show only the default', async () => {
+  facets = [
+    { key: 'kind', values: [{ value: 'DOCUMENT', count: 2 }] },
+    { key: 'feature', values: [{ value: 'navigation', count: 1 }] },
+    { key: 'executionId', values: [{ value: 'optional-run', count: 1 }] }
+  ]
+  localStorage.setItem('continuum:visible-facets:catalog-A', JSON.stringify(['kind']))
+  const view = render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  expect(document.querySelectorAll('.continuum-facet-groups > details')).toHaveLength(1)
+  fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
+  expect(screen.getAllByRole('checkbox').filter(input => ['kind', 'feature', 'executionId'].includes(input.closest('label')?.textContent ?? ''))).toHaveLength(3)
+  expect((screen.getByRole('checkbox', { name: 'feature' }) as HTMLInputElement).checked).toBe(false)
+  expect((screen.getByRole('checkbox', { name: 'executionId' }) as HTMLInputElement).checked).toBe(false)
+  revealFacet('feature')
+  fireEvent.click(screen.getByRole('button', { name: 'navigation 1' }))
+  await waitFor(() => expect(window.codeAwareness.listContinuumArtifacts).toHaveBeenLastCalledWith(expect.objectContaining({ metadata: { feature: 'navigation' } })))
+  view.unmount()
+  render(<ContinuumView activeProject={project} />)
+  await screen.findByText('First artifact')
+  fireEvent.click(screen.getByRole('button', { name: 'Personalizar filtros' }))
+  expect((screen.getByRole('checkbox', { name: 'feature' }) as HTMLInputElement).checked).toBe(true)
+  expect((screen.getByRole('checkbox', { name: 'executionId' }) as HTMLInputElement).checked).toBe(false)
+})
+
 it('persists free facet visibility by catalog identity without refetching and keeps hidden criteria removable', async () => {
   facets.push({ key: 'kind', values: [{ value: 'DOCUMENT', count: 1 }] })
   vi.mocked(window.codeAwareness.getContinuumFacets).mockImplementation(async path => ({ repositoryId: path === '/A' ? 'catalog-A' : 'catalog-B', facets }))

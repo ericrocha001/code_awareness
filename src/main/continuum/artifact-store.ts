@@ -194,18 +194,17 @@ export class ArtifactStore {
   graph(query: ContinuumGraphQuery = {}, options: { indexOnly?: boolean } = {}) { return this.graphIndex.query(query, filter => this.list(filter), options) }
   backfillReferences(limit = 100) { return this.graphIndex.backfill(limit) }
   facets(): ContinuumFacet[] {
-    const keys = ['kind', 'status', 'date', 'artifactRole', 'livingArtifact']
     const rows = this.db.prepare(`WITH eligible AS (
       SELECT m.key, m.value_json,
         CASE WHEN m.key = 'date' THEN metadata_year(m.value_json) END AS year,
         CASE WHEN m.key = 'date' THEN metadata_month(m.value_json) END AS month
       FROM artifact_metadata m JOIN artifacts a ON a.artifact_id = m.artifact_id
-      WHERE m.key IN (${keys.map(() => '?').join(',')})
+      WHERE m.key NOT IN ('name', 'description', 'relations')
         AND json_type(m.value_json) IN ('text', 'integer', 'real', 'true', 'false')
         AND NOT (m.key = 'status' AND a.kind = 'OBSERVATION' AND m.value_json = '"VERIFIED_AT_BINDING"')
     ) SELECT key, CASE WHEN year IS NULL THEN value_json END AS value_json, year, month, count(*) AS count
       FROM eligible GROUP BY key, year, month, CASE WHEN year IS NULL THEN value_json END
-      ORDER BY key, year DESC, month DESC, value_json`).all(...keys) as { key: string; value_json: string; year: number | null; month: number | null; count: number }[]
+      ORDER BY key, year DESC, month DESC, value_json`).all() as { key: string; value_json: string; year: number | null; month: number | null; count: number }[]
     const groups = new Map<string, ContinuumFacet>()
     for (const row of rows) {
       let group = groups.get(row.key)
