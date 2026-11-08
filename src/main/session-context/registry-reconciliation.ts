@@ -33,7 +33,12 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
     const pending = !selector ? registry.pendingReconciliation('PR', 2) : []
     if (!selector && !pending.length) refreshPullRequests = registry.reconciliationPullRequests(registry.source('GITHUB_REFRESH')?.cursor ?? '')
     const neighbors: RegistryEntity[] = selector ? registry.contextGraph(selector, undefined, 2).nodes.filter(node => node.type === 'ARTIFACT').slice(0, 20).map(node => ({ kind: 'ARTIFACT', id: node.id + (node.revision ? ':' + node.revision : '') })) : pending.length ? pending : refreshPullRequests!.slice(0, 2)
-    batches = await read({ selector, neighbors, cursors: registry.cursors() })
+    const cursors = registry.cursors()
+    for (const entity of [...neighbors, ...(selector ? [selector] : [])]) if (entity.kind === 'PR') for (const prefix of ['GITHUB:PR:', 'GITHUB_CATALOG:PR:']) {
+      const cursor = registry.source(prefix + entity.id)?.cursor
+      if (cursor) cursors[prefix + entity.id] = cursor
+    }
+    batches = await read({ selector, neighbors, cursors })
   }
   assertCurrent()
   registry.applyAll(batches, assertCurrent)

@@ -74,7 +74,7 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
     }), sourceCoverage,
     captureCoverage: graph.nodes.some(node => node.type === 'CHECKPOINT') ? 'CHECKPOINT_OBSERVED' : 'CHECKPOINT_NOT_OBSERVED',
     freshness: 'LAST_KNOWN_NOT_RECHECKED', authorship: 'NOT_INFERRED',
-    reconciliation: { state: 'EXPLICIT_REFRESH_AVAILABLE', tool: 'refresh_agent_sessions', arguments: { contextSelector: query.selector } },
+    reconciliation: { backlog: store.registry.reconciliationBacklog(), state: 'EXPLICIT_REFRESH_AVAILABLE', tool: 'refresh_agent_sessions', arguments: { contextSelector: query.selector } },
     ...(more ? { nextCursor: store.cursor(scope, offset + edges.length) } : {}),
     discovery: { depth: query.depth, nextStep: 'SELECT_NEIGHBOR', suggestions: 'SEPARATE_FROM_CONFIRMED_EDGES' },
     ...(graph.bounded ? { continuation: 'Select a node with depth=1 for its bounded immediate neighborhood.' } : {}) }
