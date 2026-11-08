@@ -7059,6 +7059,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
     function createMockCli07(options?: MockCliOptions): CliExecutionPort & {
       startCalls: StartCliExecutionInput[]
       getCalls: GetCliExecutionInput[]
+      setSnapshot: (operationId: string, updates: Partial<CliExecutionSnapshot>) => void
     } {
       const startCalls: StartCliExecutionInput[] = []
       const getCalls: GetCliExecutionInput[] = []
@@ -7158,6 +7159,15 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         }
       }
 
+      port.setSnapshot = (operationId: string, updates: Partial<CliExecutionSnapshot>) => {
+        const existing = knownSnapshots.get(operationId)
+        if (existing) {
+          Object.assign(existing, updates)
+        } else {
+          knownSnapshots.set(operationId, updates as any)
+        }
+      }
+
       return port
     }
 
@@ -7199,17 +7209,23 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
       return stageOpId
     }
 
+    let simClock07: number
+
     beforeEach(() => {
       tempBaseDir07 = mkdtempSync(join(tmpdir(), 'smc-test-ex07-'))
       isolatedStageDir07 = mkdtempSync(join(tmpdir(), 'smc-stage-ex07-'))
       isolatedWorktreeDir07 = mkdtempSync(join(tmpdir(), 'smc-wt-ex07-'))
+      simClock07 = Date.now()
       smc = new SessionMemoryCentralService(tempBaseDir07)
       gitPort07 = {
         getBranchInventory: async () => createFixtureInventory07(),
         getCoordinationSnapshot: async () => ({ reference: false })
       }
       workspaceService07 = new WorkspaceBindingService(smc, gitPort07)
-      stageService07 = new UnitPromptStageService(smc, workspaceService07, { stagingDirectory: isolatedStageDir07 })
+      stageService07 = new UnitPromptStageService(smc, workspaceService07, {
+        stagingDirectory: isolatedStageDir07,
+        clock: () => simClock07
+      })
 
       originalEnvPath07 = process.env.PATH
       const scriptName = process.platform === 'win32' ? 'grok.cmd' : 'grok'
@@ -7503,6 +7519,155 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         expect(result.status).toBe('REFUSED')
         expect(result.reason).toBe('AUTO_AUTHORIZED_NOT_REQUESTED')
         expect(mockCli.startCalls.length).toBe(0)
+      })
+    })
+
+    describe('Prova 12 — Observação posterior de RUNNING via get() avança persistência para RUNNING/EXECUTING', () => {
+      it('start retorna AWAITING_APPROVAL e get posterior retorna RUNNING: transiciona attempt para RUNNING e unit para EXECUTING', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx07Fixture({
+          sessionId: 'b1b1b1b1-1111-4111-8111-111111111111',
+          planId: 'b2b2b2b2-2222-4222-8222-222222222222',
+          unitId: 'b3b3b3b3-3333-4333-8333-333333333333',
+          reservationId: 'b4b4b4b4-4444-4444-8444-444444444444',
+          attemptId: 'b5b5b5b5-5555-4555-8555-555555555555'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        const startRes = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        expect(startRes.status).toBe('AWAITING_APPROVAL')
+        expect(startRes.unitFlowStatus).toBe('RESERVED')
+
+        const store = smc.getStore(repoId)
+        let attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('STARTING')
+        let unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('RESERVED')
+
+        mockCli.setSnapshot(attemptId, { status: 'RUNNING', phase: 'RUNNING' })
+
+        const observeRes = await svc.observeUnitExecution(repoId, sessionId, attemptId)
+        expect(observeRes.status).toBe('RUNNING')
+        expect(observeRes.unitFlowStatus).toBe('EXECUTING')
+        expect(observeRes.cliStatus).toBe('RUNNING')
+
+        attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('RUNNING')
+        unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('EXECUTING')
+
+        const replayRes = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        expect(replayRes.status).toBe('RUNNING')
+        expect(replayRes.unitFlowStatus).toBe('EXECUTING')
+        expect(mockCli.startCalls.length).toBe(1)
+      })
+    })
+
+    describe('Prova 13 — Concorrência na observação de RUNNING (Promise.all)', () => {
+      it('múltiplas chamadas observeUnitExecution concorrentes sob transição para RUNNING resultam todas em RUNNING/EXECUTING', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx07Fixture({
+          sessionId: 'c1c1c1c1-1111-4111-8111-111111111111',
+          planId: 'c2c2c2c2-2222-4222-8222-222222222222',
+          unitId: 'c3c3c3c3-3333-4333-8333-333333333333',
+          reservationId: 'c4c4c4c4-4444-4444-8444-444444444444',
+          attemptId: 'c5c5c5c5-5555-4555-8555-555555555555'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        mockCli.setSnapshot(attemptId, { status: 'RUNNING', phase: 'RUNNING' })
+
+        const [obs1, obs2] = await Promise.all([
+          svc.observeUnitExecution(repoId, sessionId, attemptId),
+          svc.observeUnitExecution(repoId, sessionId, attemptId)
+        ])
+
+        expect(obs1.status).toBe('RUNNING')
+        expect(obs1.unitFlowStatus).toBe('EXECUTING')
+        expect(obs2.status).toBe('RUNNING')
+        expect(obs2.unitFlowStatus).toBe('EXECUTING')
+
+        const store = smc.getStore(repoId)
+        const attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('RUNNING')
+        const unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('EXECUTING')
+      })
+    })
+
+    describe('Prova 14 — Terminal antecipado antes de RUNNING não avança UnitFlow', () => {
+      it('get retorna terminal (FAILED) antes de RUNNING: resultado TERMINAL_OBSERVED, attempt permanece STARTING e unit permanece RESERVED', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx07Fixture({
+          sessionId: 'd1d1d1d1-1111-4111-8111-111111111111',
+          planId: 'd2d2d2d2-2222-4222-8222-222222222222',
+          unitId: 'd3d3d3d3-3333-4333-8333-333333333333',
+          reservationId: 'd4d4d4d4-4444-4444-8444-444444444444',
+          attemptId: 'd5d5d5d5-5555-4555-8555-555555555555'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        mockCli.setSnapshot(attemptId, { status: 'FAILED', phase: 'TERMINAL' })
+
+        const observeRes = await svc.observeUnitExecution(repoId, sessionId, attemptId)
+        expect(observeRes.status).toBe('TERMINAL_OBSERVED')
+        expect(observeRes.cliStatus).toBe('FAILED')
+
+        const store = smc.getStore(repoId)
+        const attemptRec = store.getExecutionAttempt(attemptId)
+        expect(attemptRec?.status).toBe('STARTING')
+        const unitRec = store.getUnitState(sessionId, planId, unitId)
+        expect(unitRec?.status).toBe('RESERVED')
+      })
+    })
+
+    describe('Prova 15 — Retenção do prompt em memória impede cleanup por TTL durante aprovação/execução', () => {
+      it('arquivo de prompt permanece preservado mesmo com relógio avançado além do TTL durante aprovação e é liberado após término', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'e1e1e1e1-1111-4111-8111-111111111111',
+          planId: 'e2e2e2e2-2222-4222-8222-222222222222',
+          unitId: 'e3e3e3e3-3333-4333-8333-333333333333',
+          reservationId: 'e4e4e4e4-4444-4444-8444-444444444444',
+          attemptId: 'e5e5e5e5-5555-4555-8555-555555555555'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+
+        await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+        expect(stageService07.isStageRetained(stageOpId)).toBe(true)
+
+        // Avança o relógio em 15 minutos (além do TTL de 10 min)
+        simClock07 += 15 * 60 * 1000
+
+        // Executa limpeza de estágios expirados
+        const cleaned = stageService07.cleanupExpiredStages()
+        expect(cleaned).toBe(0)
+
+        // Verifica que o prompt continua em READY e o arquivo existe
+        const inspection = await stageService07.inspectStagedPrompt(repoId, sessionId, attemptId, stageOpId)
+        expect(inspection.status).toBe('READY')
+
+        // Agora o processo atinge estado terminal
+        mockCli.setSnapshot(attemptId, { status: 'FAILED', phase: 'TERMINAL' })
+        await svc.observeUnitExecution(repoId, sessionId, attemptId)
+
+        // Retenção deve ter sido liberada
+        expect(stageService07.isStageRetained(stageOpId)).toBe(false)
+
+        // Executa limpeza: o arquivo agora é limpo sem deixar resíduos
+        const cleanedAfter = stageService07.cleanupExpiredStages()
+        expect(cleanedAfter).toBeGreaterThanOrEqual(1)
+
+        // Inspeção confirma que expirou e foi limpo
+        const inspectionAfter = await stageService07.inspectStagedPrompt(repoId, sessionId, attemptId, stageOpId)
+        expect(inspectionAfter.status).toBe('UNKNOWN')
+        expect(inspectionAfter.reason).toBe('STAGE_NOT_FOUND_OR_EXPIRED')
       })
     })
   })

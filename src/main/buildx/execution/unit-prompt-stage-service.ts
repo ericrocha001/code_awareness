@@ -32,6 +32,8 @@ interface InternalStageRecord {
   filePath: string
   createdAt: string
   expiresAt: string
+  retained?: boolean
+  retainedBy?: string
   reason?: string
 }
 
@@ -1075,7 +1077,7 @@ export class UnitPromptStageService {
     }
 
     const now = this.clock()
-    if (now >= new Date(record.expiresAt).getTime()) {
+    if (!record.retained && now >= new Date(record.expiresAt).getTime()) {
       this.cleanupStageRecord(record)
       record.status = 'EXPIRED'
       return {
@@ -1245,7 +1247,7 @@ export class UnitPromptStageService {
     }
 
     const now = this.clock()
-    if (now >= new Date(record.expiresAt).getTime()) {
+    if (!record.retained && now >= new Date(record.expiresAt).getTime()) {
       this.cleanupStageRecord(record)
       record.status = 'EXPIRED'
       return null
@@ -1307,11 +1309,53 @@ export class UnitPromptStageService {
     return record.filePath
   }
 
+  retainStage(stageOperationId: string, attemptId: string): boolean {
+    const cleanStageOpId = stageOperationId?.trim().toLowerCase() ?? ''
+    const cleanAttemptId = attemptId?.trim().toLowerCase() ?? ''
+    const record = this.stages.get(cleanStageOpId)
+    if (!record || record.status !== 'READY' || record.attemptId !== cleanAttemptId) {
+      return false
+    }
+    record.retained = true
+    record.retainedBy = cleanAttemptId
+    return true
+  }
+
+  releaseStageRetention(stageOperationId: string, attemptId?: string): boolean {
+    const cleanStageOpId = stageOperationId?.trim().toLowerCase() ?? ''
+    const cleanAttemptId = attemptId?.trim().toLowerCase() ?? ''
+    const record = this.stages.get(cleanStageOpId)
+    if (!record) return false
+    if (cleanAttemptId && record.retainedBy && record.retainedBy !== cleanAttemptId) return false
+    record.retained = false
+    delete record.retainedBy
+    return true
+  }
+
+  releaseAttemptRetention(attemptId: string): void {
+    const cleanAttemptId = attemptId?.trim().toLowerCase() ?? ''
+    for (const record of this.stages.values()) {
+      if (record.retainedBy === cleanAttemptId) {
+        record.retained = false
+        delete record.retainedBy
+      }
+    }
+  }
+
+  isStageRetained(stageOperationId: string): boolean {
+    const cleanStageOpId = stageOperationId?.trim().toLowerCase() ?? ''
+    const record = this.stages.get(cleanStageOpId)
+    return Boolean(record?.retained)
+  }
+
   cleanupExpiredStages(): number {
     let cleanedCount = 0
     const now = this.clock()
 
     for (const [id, record] of Array.from(this.stages.entries())) {
+      if (record.retained) {
+        continue
+      }
       if (now >= new Date(record.expiresAt).getTime() || record.status !== 'READY') {
         this.cleanupStageRecord(record)
         this.stages.delete(id)
@@ -1325,7 +1369,7 @@ export class UnitPromptStageService {
         const files = fs.readdirSync(resolvedStageDir)
         const activePaths = new Set(
           Array.from(this.stages.values())
-            .filter(r => r.status === 'READY')
+            .filter(r => r.status === 'READY' || r.retained)
             .map(r => normalizePathForComparison(r.filePath))
         )
 

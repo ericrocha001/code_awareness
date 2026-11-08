@@ -156,19 +156,9 @@ export class UnitExecutionService {
       }
     }
 
-    // Handle replay: attempt already STARTING or RUNNING
-    if (attempt.status === 'STARTING') {
+    // Handle replay: attempt already STARTING or RUNNING -> delegate directly to observation
+    if (attempt.status === 'STARTING' || attempt.status === 'RUNNING') {
       return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId)
-    }
-    if (attempt.status === 'RUNNING') {
-      return {
-        status: 'RUNNING',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        cliStatus: 'RUNNING',
-        unitFlowStatus: 'EXECUTING'
-      }
     }
     if (attempt.status !== 'PREPARED') {
       return {
@@ -261,6 +251,9 @@ export class UnitExecutionService {
       }
     }
 
+    // Retém o arquivo de prompt em memória enquanto a CLI prepara e executa
+    this.stageService.retainStage(options.stageOperationId, cleanAttemptId)
+
     // 7. Prepare CLI proposal
     const headlessArgs = [
       '--prompt-file', stagePath,
@@ -277,6 +270,7 @@ export class UnitExecutionService {
         args: headlessArgs
       })
     } catch (err: any) {
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
         status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
@@ -293,6 +287,7 @@ export class UnitExecutionService {
       proposal.command.originalArgs[0] !== '--prompt-file' ||
       proposal.command.originalArgs[1] !== stagePath
     ) {
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
         status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
@@ -303,6 +298,7 @@ export class UnitExecutionService {
     }
 
     if (proposal.autoAuthorized === true && !options.allowAlwaysApprove) {
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
         status: 'REFUSED',
         attemptId: cleanAttemptId,
@@ -318,21 +314,13 @@ export class UnitExecutionService {
       startingAttempt = this.smcService.transitionAttemptToStarting(validRepoId, cleanAttemptId, attempt.revision)
     } catch (err: any) {
       if (err instanceof ExecutionAttemptConflictError) {
-        // Re-read current state and observe
+        // Re-read current state and observe; keep retention active for the active attempt
         const current = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
-        if (current?.status === 'STARTING') {
+        if (current?.status === 'STARTING' || current?.status === 'RUNNING') {
           return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId)
         }
-        if (current?.status === 'RUNNING') {
-          return {
-            status: 'RUNNING',
-            attemptId: cleanAttemptId,
-            sessionId: cleanSessionId,
-            repositoryId: validRepoId,
-            unitFlowStatus: 'EXECUTING'
-          }
-        }
       }
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
         status: 'UNKNOWN',
         attemptId: cleanAttemptId,
@@ -344,6 +332,7 @@ export class UnitExecutionService {
 
     // 10. Start CLI execution — operationId === attemptId (durable correlation)
     if (!cliService.start) {
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
         status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
@@ -357,7 +346,7 @@ export class UnitExecutionService {
     try {
       snapshot = await cliService.start({ proposalId: proposal.proposalId, operationId: cleanAttemptId })
     } catch (err: any) {
-      // After CAS to STARTING, start threw — state is ambiguous; leave attempt STARTING
+      // After CAS to STARTING, start threw — state is ambiguous; leave attempt STARTING and keep retention
       return {
         status: 'UNKNOWN',
         attemptId: cleanAttemptId,
@@ -369,6 +358,7 @@ export class UnitExecutionService {
 
     // 11. Observe snapshot and transition accordingly
     if (snapshot.status === 'AWAITING_APPROVAL') {
+      // Prompts permanecem retidos enquanto aguarda aprovação
       return {
         status: 'AWAITING_APPROVAL',
         attemptId: cleanAttemptId,
@@ -389,6 +379,19 @@ export class UnitExecutionService {
           attempt.unitId,
           unitState.revision
         )
+      } catch (err: any) {
+        if (!(err instanceof ExecutionAttemptConflictError)) {
+          return {
+            status: 'UNKNOWN',
+            attemptId: cleanAttemptId,
+            sessionId: cleanSessionId,
+            repositoryId: validRepoId,
+            reason: `CAS_RUNNING_ERROR: ${err?.message ?? String(err)}`
+          }
+        }
+      }
+      const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+      if (recheck?.status === 'RUNNING') {
         return {
           status: 'RUNNING',
           attemptId: cleanAttemptId,
@@ -398,18 +401,18 @@ export class UnitExecutionService {
           cliPhase: snapshot.phase,
           unitFlowStatus: 'EXECUTING'
         }
-      } catch (err: any) {
-        return {
-          status: 'UNKNOWN',
-          attemptId: cleanAttemptId,
-          sessionId: cleanSessionId,
-          repositoryId: validRepoId,
-          reason: `CAS_RUNNING_ERROR: ${err?.message ?? String(err)}`
-        }
+      }
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'CAS_RUNNING_NOT_ESTABLISHED'
       }
     }
 
     if (snapshot.status === 'REFUSED') {
+      this.stageService.releaseAttemptRetention(cleanAttemptId)
       return {
         status: 'REFUSED',
         attemptId: cleanAttemptId,
@@ -421,6 +424,7 @@ export class UnitExecutionService {
     }
 
     // Terminal states: SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, INTERRUPTED
+    this.stageService.releaseAttemptRetention(cleanAttemptId)
     return {
       status: 'TERMINAL_OBSERVED',
       attemptId: cleanAttemptId,
@@ -482,14 +486,13 @@ export class UnitExecutionService {
       }
     }
 
-    if (attempt.status === 'RUNNING') {
+    if (attempt.status !== 'STARTING' && attempt.status !== 'RUNNING') {
       return {
-        status: 'RUNNING',
+        status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        cliStatus: 'RUNNING',
-        unitFlowStatus: 'EXECUTING'
+        reason: `ATTEMPT_NOT_ACTIVE: status=${attempt.status}`
       }
     }
 
@@ -523,17 +526,9 @@ export class UnitExecutionService {
       }
     }
 
+    let snapshot: CliExecutionSnapshot
     try {
-      const snapshot = await cliService.get({ operationId: cleanAttemptId })
-      const unitStatus = mapCliStatusToUnitStatus(snapshot)
-      return {
-        status: unitStatus,
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase
-      }
+      snapshot = await cliService.get({ operationId: cleanAttemptId })
     } catch (err: any) {
       return {
         status: 'UNKNOWN',
@@ -542,6 +537,93 @@ export class UnitExecutionService {
         repositoryId: validRepoId,
         reason: `CLI_GET_ERROR: ${err?.message ?? String(err)}`
       }
+    }
+
+    if (snapshot.status === 'AWAITING_APPROVAL') {
+      return {
+        status: 'AWAITING_APPROVAL',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        cliStatus: snapshot.status,
+        cliPhase: snapshot.phase,
+        unitFlowStatus: 'RESERVED'
+      }
+    }
+
+    if (snapshot.status === 'RUNNING') {
+      // Re-consult SMC state: if attempt is in STARTING, execute atomic CAS transition to RUNNING and unit to EXECUTING
+      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+      if (currentAttempt && currentAttempt.status === 'STARTING') {
+        const store = this.smcService.getStore(validRepoId)
+        const unitState = store.getUnitState(cleanSessionId, currentAttempt.planId, currentAttempt.unitId)
+        if (unitState && unitState.status === 'RESERVED') {
+          try {
+            this.smcService.transitionAttemptToRunning(
+              validRepoId,
+              cleanAttemptId,
+              currentAttempt.revision,
+              currentAttempt.unitId,
+              unitState.revision
+            )
+          } catch (err: any) {
+            if (!(err instanceof ExecutionAttemptConflictError)) {
+              return {
+                status: 'UNKNOWN',
+                attemptId: cleanAttemptId,
+                sessionId: cleanSessionId,
+                repositoryId: validRepoId,
+                reason: `CAS_RUNNING_ERROR: ${err?.message ?? String(err)}`
+              }
+            }
+          }
+        }
+      }
+
+      // Read back to confirm state
+      const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+      if (recheck?.status === 'RUNNING') {
+        return {
+          status: 'RUNNING',
+          attemptId: cleanAttemptId,
+          sessionId: cleanSessionId,
+          repositoryId: validRepoId,
+          cliStatus: snapshot.status,
+          cliPhase: snapshot.phase,
+          unitFlowStatus: 'EXECUTING'
+        }
+      }
+
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'CAS_RUNNING_NOT_ESTABLISHED'
+      }
+    }
+
+    if (snapshot.status === 'REFUSED') {
+      this.stageService.releaseAttemptRetention(cleanAttemptId)
+      return {
+        status: 'REFUSED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        cliStatus: snapshot.status,
+        unitFlowStatus: 'RESERVED'
+      }
+    }
+
+    // Terminal states: SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, INTERRUPTED
+    this.stageService.releaseAttemptRetention(cleanAttemptId)
+    return {
+      status: 'TERMINAL_OBSERVED',
+      attemptId: cleanAttemptId,
+      sessionId: cleanSessionId,
+      repositoryId: validRepoId,
+      cliStatus: snapshot.status,
+      cliPhase: snapshot.phase
     }
   }
 }
