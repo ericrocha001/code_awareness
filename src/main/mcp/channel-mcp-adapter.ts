@@ -6,6 +6,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
 import { GITHUB_PR_TOOLS, executeGitHubPrTool } from '../github/github-pr-mcp'
 import { ChannelActivityMonitor } from './channel-activity-monitor'
+import { GET_CHANNEL_USAGE_TOOL, executeGetChannelUsage } from './channel-usage-mcp'
+import type { ChannelUsagePort } from './channel-usage-types'
 import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
@@ -77,6 +79,21 @@ function stableDescriptor(value: unknown): unknown {
 export class ChannelMcpAdapter {
   private governor = new McpWorkloadGovernor()
   private activity = new ChannelActivityMonitor()
+  private usage?: ChannelUsagePort
+  private repositoryId: string | null = null
+  private catalogSignature?: string
+  private readonly owners = new Map<string, string | undefined>()
+
+  setUsage(usage: ChannelUsagePort): void {
+    this.usage = usage
+    this.catalogSignature = undefined
+    this.listTools()
+  }
+
+  stopUsage(): void {
+    try { this.usage?.catalog({ at: Date.now(), repositoryId: this.repositoryId, tools: [] }) } catch {}
+    this.usage = undefined
+  }
 
   setActivityMonitor(activity: ChannelActivityMonitor): void { this.activity = activity }
   getActivityState() { return this.activity.getState() }
@@ -136,6 +153,7 @@ export class ChannelMcpAdapter {
   ) {
     if ('navigation' in navigation && 'projectId' in navigation) {
       const context = navigation as McpProjectContext
+      this.repositoryId = context.continuum?.repositoryId ?? null
       this.navigation = context.navigation
       this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
       this.runtimeIdentity = (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ?? this.systemHealth?.getRuntimeIdentityProvider()
@@ -189,6 +207,7 @@ export class ChannelMcpAdapter {
       ...CODE_NAVIGATION_MCP_TOOLS.filter(tool => tool.name !== 'inspect_worktree_structure' || !!this.navigation.inspectWorktreeStructure),
       SYSTEM_HEALTH_MCP_TOOL,
       RUNTIME_IDENTITY_MCP_TOOL,
+      GET_CHANNEL_USAGE_TOOL,
     ]
     if (this.validationLedger) {
       tools.push(
@@ -220,6 +239,13 @@ export class ChannelMcpAdapter {
     if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     if (this.cliExecution) tools.push(...CLI_EXECUTION_TOOLS)
+    if (this.usage) {
+      const inventory = tools.map(tool => ({ name: tool.name, capability: this.capabilityForTool(tool.name) ?? 'unclassified', instrumental: tool.name === GET_CHANNEL_USAGE_TOOL.name })).sort((a, b) => a.name < b.name ? -1 : 1)
+      const signature = JSON.stringify(inventory)
+      if (signature !== this.catalogSignature) {
+        try { this.usage.catalog({ at: Date.now(), repositoryId: this.repositoryId, tools: inventory }); this.catalogSignature = signature } catch {}
+      }
+    }
     return tools.map(tool => literalReadTools.has(tool.name) ? { ...tool, outputSchema: literalReadOutputSchema } : tool)
   }
 
@@ -237,12 +263,22 @@ export class ChannelMcpAdapter {
     const requestId = invocationContext?.requestId ?? randomUUID()
     const startedAt = performance.now()
     const channelCapability = this.capabilityForTool(name)
-    const record = (status: ChannelTraceEvent['status'], error?: string) => this.activity.record({
-      timestamp: new Date().toISOString(), requestId, sessionId: invocationContext?.sessionId ?? 'local',
-      method: 'tools/call', tool: channelCapability ? name : 'unknown', channelCapability,
-      stage: status === 'started' ? 'channel-request-started' : 'channel-request-completed',
-      status, durationMs: performance.now() - startedAt, ...(error ? { error } : {})
-    })
+    const usage = this.usage
+    const repositoryId = ['Channel', 'System Health', 'Runtime Identity/Restart', 'Academy'].includes(channelCapability ?? '') ? null : this.repositoryId
+    let completed = false
+    const record = (status: ChannelTraceEvent['status'], error?: string) => {
+      if (status !== 'started' && !completed) {
+        completed = true
+        try { usage?.complete({ name: name.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 128), capability: channelCapability ?? 'unclassified', instrumental: name === GET_CHANNEL_USAGE_TOOL.name,
+          repositoryId, at: Date.now(), durationMs: Math.max(0, performance.now() - startedAt), status: status === 'success' ? 'success' : error === 'REQUEST_TIMEOUT' ? 'timeout' : 'error' }) } catch {}
+      }
+      this.activity.record({
+        timestamp: new Date().toISOString(), requestId, sessionId: invocationContext?.sessionId ?? 'local',
+        method: 'tools/call', tool: channelCapability ? name : 'unknown', channelCapability,
+        stage: status === 'started' ? 'channel-request-started' : 'channel-request-completed',
+        status, durationMs: performance.now() - startedAt, ...(error ? { error } : {})
+      })
+    }
     record('started')
     let result: McpToolResult
     try {
@@ -274,7 +310,15 @@ export class ChannelMcpAdapter {
     return result
   }
 
-  private capabilityForTool(name: string): string | undefined {
+  capabilityForTool(name: string): string | undefined {
+    if (this.owners.has(name)) return this.owners.get(name)
+    const owner = this.classifyTool(name)
+    if (this.owners.size < 2048) this.owners.set(name, owner)
+    return owner
+  }
+
+  private classifyTool(name: string): string | undefined {
+    if (name === GET_CHANNEL_USAGE_TOOL.name) return 'Channel'
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return 'CLI Execution'
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return 'Session Context'
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return 'Work Orchestration'
@@ -292,6 +336,7 @@ export class ChannelMcpAdapter {
   }
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
+    if (name === GET_CHANNEL_USAGE_TOOL.name) return executeGetChannelUsage(this.usage, args, this.repositoryId)
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return this.cliExecution ? executeCliTool(this.cliExecution, name, args) : { content: [{ type: 'text', text: JSON.stringify({ code: 'CLI_EXECUTION_UNAVAILABLE' }) }], isError: true }
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return this.sessionContext ? this.sessionContext.call(name as SessionToolName, args) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
     if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {

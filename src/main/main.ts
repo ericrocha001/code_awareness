@@ -5,6 +5,7 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage, powerMonitor } from 'electron'
 import { existsSync, mkdirSync, realpathSync } from 'fs'
 import { join, resolve } from 'path'
+import { ChannelUsage } from './mcp/channel-usage'
 import { pathToFileURL } from 'node:url'
 import { registerFileHandlers } from './ipc/file-handler'
 import { registerSettingsHandlers } from './ipc/settings-handler'
@@ -196,6 +197,7 @@ const traceSink = {
 }
 const mcpLifecycle = new McpLifecycle({
   disabled: isRuntimePreview(),
+  usage: isRuntimePreview() ? undefined : new ChannelUsage(join(app.getPath('userData'), 'channel-usage', 'usage.sqlite')),
   activity: channelActivity,
   trace: traceSink,
   systemHealth,
