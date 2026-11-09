@@ -58,6 +58,7 @@ export class CliExecutionService {
   }
   setApprovalHandler(handler: CliApprovalHandler): void { this.approvalHandler = handler }
   isEnabled(): boolean { return this.enabled }
+  getRepositoryId(): string | null { return this.repositoryId }
   getActiveOperationId(): string | null { return this.activeOperationId }
   setEnabled(enabled: boolean): void {
     this.enabled = enabled

@@ -61,6 +61,8 @@ import { RUNTIME_PREVIEW_TOOLS, executeRuntimePreviewTool } from '../work-orches
 import { SESSION_CONTEXT_TOOLS, type SessionToolName } from '../session-context/mcp'
 import { CLI_EXECUTION_TOOLS, executeCliTool } from '../cli-execution/cli-execution-mcp'
 import type { CliExecutionService } from '../cli-execution/cli-execution-service'
+import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../buildx/smc/session-memory-central-mcp'
+import type { SessionMemoryCentralService } from '../buildx/smc/session-memory-central-service'
 
 const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file', 'read_agent_session_event'])
 const literalReadOutputSchema = {
@@ -118,6 +120,9 @@ export class ChannelMcpAdapter {
   private readonly runtimePreview?: McpProjectContext['runtimePreview']
   private readonly sessionContext?: McpProjectContext['sessionContext']
   private readonly cliExecution?: CliExecutionService
+  private readonly sessionMemoryCentral?: SessionMemoryCentralService
+  private readonly projectId?: string
+  private readonly assertActiveProject?: () => void
 
   constructor(
     context: McpProjectContext,
@@ -172,6 +177,9 @@ export class ChannelMcpAdapter {
       this.runtimePreview = context.runtimePreview
       this.sessionContext = context.sessionContext
       this.cliExecution = context.cliExecution
+      this.sessionMemoryCentral = context.sessionMemoryCentral
+      this.projectId = context.projectId
+      this.assertActiveProject = context.assertActiveProject
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
     } else if (typeof repoPathOrHealth === 'string') {
       this.navigation = bindProjectNavigation(navigation as ContextNavigationPort, repoPathOrHealth)
@@ -239,6 +247,7 @@ export class ChannelMcpAdapter {
     if (this.repositoryFileEditing) tools.push(...REPOSITORY_FILE_EDITING_TOOLS)
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     if (this.cliExecution) tools.push(...CLI_EXECUTION_TOOLS)
+    if (this.sessionMemoryCentral && this.projectId) tools.push(...BUILDX_SMC_TOOLS)
     if (this.usage) {
       const inventory = tools.map(tool => ({ name: tool.name, capability: this.capabilityForTool(tool.name) ?? 'unclassified', instrumental: tool.name === GET_CHANNEL_USAGE_TOOL.name })).sort((a, b) => a.name < b.name ? -1 : 1)
       const signature = JSON.stringify(inventory)
@@ -320,6 +329,7 @@ export class ChannelMcpAdapter {
   private classifyTool(name: string): string | undefined {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return 'Channel'
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return 'CLI Execution'
+    if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) return 'BuildX'
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return 'Session Context'
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return 'Work Orchestration'
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
@@ -337,6 +347,14 @@ export class ChannelMcpAdapter {
 
   private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return executeGetChannelUsage(this.usage, args, this.repositoryId)
+    if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) {
+      if (!this.sessionMemoryCentral || !this.projectId) {
+        return { content: [{ type: 'text', text: JSON.stringify({ code: 'BUILDX_SMC_UNAVAILABLE', message: 'Session Memory Central is not available for active project' }) }], isError: true }
+      }
+      return executeBuildxSmcTool(this.sessionMemoryCentral, this.projectId, name, args, {
+        assertActiveProject: this.assertActiveProject
+      })
+    }
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return this.cliExecution ? executeCliTool(this.cliExecution, name, args) : { content: [{ type: 'text', text: JSON.stringify({ code: 'CLI_EXECUTION_UNAVAILABLE' }) }], isError: true }
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return this.sessionContext ? this.sessionContext.call(name as SessionToolName, args) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
     if (name === ASSESS_EXECUTION_CLOSURE_TOOL.name) {

@@ -60,6 +60,7 @@ import { registerConnectionHandlers } from './ipc/connection-handler'
 import { ChannelStateProjection } from './integrations/channel-state-projection'
 import { isInstallationConfigured } from './integrations/installation-configured'
 import { registerChannelHandlers } from './ipc/channel-handler'
+import { SessionMemoryCentralService } from './buildx/smc'
 import { registerLocalMcpClientHandlers } from './ipc/local-mcp-client-handler'
 import { createDesktopClientSetup } from './local-mcp-clients/desktop-client-setup'
 import { ChannelFunctionalHealthMonitor } from './mcp/channel-functional-health'
@@ -166,6 +167,7 @@ const continuumSession = new RepositoryContinuumSession(join(app.getPath('userDa
   approve: async review => (await import('./continuum/lifecycle-approval.js')).approveLifecycleInDesktop(review)
 } })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
+const sessionMemoryCentral = new SessionMemoryCentralService(app.getPath('userData'))
 const localAgentChannel = new LocalChannelHost(
   [new ContinuumLocalAdapter(continuumSession, (artifact, target) => handoffSessionCoverage(activeSessionContext, artifact, target)), new AcademyLocalAdapter(academyService), new TestOutputLocalAdapter(continuumSession, validationLedger)],
   app.getPath('userData'),
@@ -657,6 +659,12 @@ app.whenReady().then(async () => {
       repoRoot: project.path,
       navigation,
       sessionContext: activeSessionContext,
+      sessionMemoryCentral,
+      assertActiveProject: () => {
+        if (activeProjects?.getState().project?.id !== project.id || activeProjects.getState().revision !== gitProjectRevision) {
+          throw new Error('PROJECT_CONTEXT_CHANGED')
+        }
+      },
       continuum,
       visualContinuum: continuum,
       ...(continuum && gitRepositoryId ? { executionClosure: { repositoryId: gitRepositoryId, assertActive: () => {
@@ -856,6 +864,11 @@ registerApplicationShutdown(app, async () => {
     repositoryCatalog?.store.close()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Repository Catalog:', error)
+  }
+  try {
+    sessionMemoryCentral.close()
+  } catch (error: any) {
+    console.error('[Main] Erro ao fechar Session Memory Central:', error)
   }
 })
 

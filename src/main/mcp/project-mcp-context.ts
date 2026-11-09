@@ -29,4 +29,6 @@ export interface McpProjectContext {
   repositoryFileIngress?: RepositoryFileIngress
   repositoryFileEditing?: RepositoryFileEditing
   runtimePreview?: { service: import('../work-orchestration/runtime-preview/operations').RuntimePreviewOperations; isCurrent: () => boolean }
+  sessionMemoryCentral?: import('../buildx/smc').SessionMemoryCentralService
+  assertActiveProject?: () => void
 }
