@@ -1,0 +1,23 @@
+name: academy-governance
+on:
+  pull_request:
+    paths: ['skills/**', '.academy/**', 'plugin.json', 'assets/**']
+  push:
+    branches: [main]
+    paths: ['skills/**', '.academy/**', 'plugin.json', 'assets/**']
+permissions:
+  contents: read
+jobs:
+  academy-governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate commit and identity history
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: node scripts/academy-governance/validate.cjs HEAD "$BASE_SHA"

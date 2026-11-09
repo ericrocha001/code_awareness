@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { GitHubRepositoryIdentity, GitHubRepositoryVisibility } from '../../shared/types/repository-catalog-types'
 import type { GitHubUserProjection } from '../../shared/types/github-types'
 import type { PullRequestMergeability } from '../../shared/types/git-evidence-types'
@@ -32,20 +33,21 @@ export class GitHubApiClient {
   }
 
   async listPullRequestCatalogPage(fullName: string, page: number) {
-    if (!Number.isSafeInteger(page) || page < 1 || page > 1000) throw malformed()
+    if (!Number.isSafeInteger(page) || page < 1) throw malformed()
     const path = `/repos/${encodeRepositoryFullName(fullName)}/pulls?state=all&sort=updated&direction=desc&per_page=100&page=${page}`
     const cached = this.pullRequestPages.get(path)
     const version = this.pullRequestCacheRevision
     const { value, response } = await this.requestWithResponse<any>(path, { signal: AbortSignal.timeout(10_000), ...(cached ? { headers: { 'If-None-Match': cached.etag } } : {}) }, undefined, [], cached?.items)
-    if (response.status === 304 && cached) return { items: cached.items, hasNext: cached.hasNext }
-    if (!Array.isArray(value)) throw malformed()
+    if (version !== this.pullRequestCacheRevision) throw new Error('REMOTE_CONTEXT_CHANGED')
+    if (response.status === 304 && cached) return { items: cached.items, hasNext: cached.hasNext, representation: { page, etag: cached.etag, notModified: true, revision: createHash('sha256').update(JSON.stringify([cached.items, cached.hasNext])).digest('hex') } }
+    if (!Array.isArray(value) || value.length > 100) throw malformed()
     const result = { items: value.map(parsePullRequest), hasNext: !!nextLink(response.headers.get('link')) }
     const etag = response.headers.get('etag')
     if (etag && version === this.pullRequestCacheRevision) {
       if (this.pullRequestPages.size >= 100) this.pullRequestPages.delete(this.pullRequestPages.keys().next().value!)
       this.pullRequestPages.set(path, { ...result, etag })
     }
-    return result
+    return { ...result, representation: { page, etag, notModified: false, revision: createHash('sha256').update(JSON.stringify([result.items, result.hasNext])).digest('hex') } }
   }
 
   async getPullRequestCatalogRecord(fullName: string, number: number): Promise<PullRequestRecord> {

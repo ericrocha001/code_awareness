@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { mkdtempSync, mkdirSync, rmSync, unlinkSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildSync } from 'esbuild'
 import { SessionStore, sessionStorePath } from './store'
@@ -13,6 +13,8 @@ import type { McpProjectContext } from '../mcp/project-mcp-context'
 import type { McpToolResult } from '../mcp/mcp-types'
 import { createMcpHttpServer } from '../mcp/mcp-http-server'
 import type { EventInput } from './types'
+import { EntireTranscriptStream, ENTIRE_TRANSCRIPT_NORMALIZERS, normalizeEntireRecord } from './entire-transcript'
+import { entireFileIdentity } from './entire-source'
 
 const cleanup: (() => void | Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.reverse()) await close(); cleanup.length = 0 })
@@ -23,12 +25,31 @@ function setup() {
   const base = mkdtempSync(join(tmpdir(), 'session-channel-'))
   cleanup.push(() => rmSync(base, { recursive: true, force: true }))
   const store = new SessionStore(sessionStorePath(base, 'A'), 'A'); cleanup.push(() => store.close())
+  const executable = join(base, process.platform === 'win32' ? 'entire.exe' : 'entire')
+  writeFileSync(executable, 'fixture Entire executable')
+  writeFileSync(join(dirname(store.path), 'session-context.provider.json'), JSON.stringify({ enabled: true, repositoryId: 'A', executable, version: '0.12.2', sha256: createHash('sha256').update('fixture Entire executable').digest('hex') }))
+  mkdirSync(join(base, '.entire'))
+  writeFileSync(join(base, '.entire/settings.local.json'), JSON.stringify({ strategy_options: { push_sessions: false }, telemetry: false }))
   const refresh = vi.fn(async () => ({ coverage: 'UNAVAILABLE', code: 'PROVIDER_UNAVAILABLE' }))
   let current = true
   const assert = () => { if (!current) throw new Error('PROJECT_CONTEXT_CHANGED') }
-  const call = (name: SessionToolName, args: unknown) => executeSessionTool(store, { refresh }, name, args, assert)
+  const provider = new EntireProvider(store, base, assert, async (_exe, args) => ({ code: args.includes('ls-files') ? 1 : 0, text: args[0] === 'version' ? 'Entire CLI 0.12.2' : '--json --transcript', limited: false }))
+  const call = (name: SessionToolName, args: unknown) => executeSessionTool(store, { refresh, readEvent: provider.readEvent.bind(provider) }, name, args, assert)
+  const ingest = async (input: ReturnType<typeof sessionInput>, records: EventInput[], target = store) => {
+    const metadata = target.ingest({ ...input, importState: 'METADATA_ONLY' }, [])
+    if (!records.length) return metadata
+    const path = join(base, '.entire/metadata', input.providerSessionId, 'full.jsonl')
+    mkdirSync(dirname(path), { recursive: true })
+    const source = Buffer.from(records.map(event => JSON.stringify({ type: 'event_msg', payload: { type: event.type === 'INPUT' ? 'user_message' : event.type === 'ERROR' ? 'error' : 'agent_message', message: event.text } })).join('\n') + '\n')
+    writeFileSync(path, source)
+    const run = target.references.begin(metadata.sessionId, { kind: 'ENTIRE_FILE', path, identity: await entireFileIdentity(path) }, ENTIRE_TRANSCRIPT_NORMALIZERS.codex)
+    const stream = new EntireTranscriptStream(record => target.references.append(run, normalizeEntireRecord('codex', record, () => undefined)))
+    stream.push(source)
+    const parsed = await stream.finish()
+    return target.references.commit(run, parsed.sourceDigest, parsed.sourceBytes, assert, 'COMPLETE')
+  }
   const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: base, navigation: {} as McpProjectContext['navigation'], sessionContext: { call } })
-  return { base, store, refresh, call, adapter, switchProject: () => { current = false } }
+  return { base, store, refresh, call, adapter, ingest, switchProject: () => { current = false } }
 }
 function events(n: number): EventInput[] { return Array.from({ length: n }, (_, index) => ({ type: index === 487 ? 'ERROR' : 'AGENT_UPDATE', text: index === 487 ? 'unique failure evidence: token=private-value' : `progress ${index}`, sourcePosition: index + 1 })) }
 
@@ -39,9 +60,9 @@ describe('Session Context progressive MCP disclosure', () => {
     const catalog = data(await f.call('list_agent_sessions', {}))
     expect(catalog.sessions[0]).toMatchObject({ importState: 'METADATA_ONLY', eventCount: 0, coverageReasons: { TRANSCRIPT_NOT_IMPORTED: 1 } })
     expect(catalog.sessions[0].sourceObservation).toBeUndefined()
-    const imported = f.store.ingest({ ...sessionInput('metadata-only'), importState: 'TRANSCRIPT_IMPORTED', sourceDigest: 'materialized', coverage: 'PARTIAL', coverageReasons: { UNKNOWN_RECORD: 2 } }, [{ type: 'INPUT', text: 'public selected literal', sourcePosition: 1 }])
+    const imported = await f.ingest(sessionInput('metadata-only'), [{ type: 'INPUT', text: 'public selected literal', sourcePosition: 1 }])
     const map = data(await f.call('inspect_agent_session', { sessionId: discovered.sessionId }))
-    expect(map).toMatchObject({ importState: 'TRANSCRIPT_IMPORTED', eventCount: 1, coverageReasons: { UNKNOWN_RECORD: 2 }, sourceObservation: { identity: 'UNKNOWN' }, associationCoverage: 'UNAVAILABLE' })
+    expect(map).toMatchObject({ importState: 'TRANSCRIPT_REFERENCED', eventCount: 1, coverageReasons: {}, sourceObservation: { identity: 'UNKNOWN' }, associationCoverage: 'UNAVAILABLE' })
     const selected = data(await f.call('list_agent_session_events', { sessionId: imported.sessionId }))
     const literal = await f.adapter.callTool('read_agent_session_event', { sessionId: imported.sessionId, eventId: selected.events[0].eventId, expectedRevision: imported.revision })
     expect(literal.structuredContent).toMatchObject({ content: 'public selected literal', untrusted: true })
@@ -54,7 +75,7 @@ describe('Session Context progressive MCP disclosure', () => {
   it('keeps projected literal pages within the wire budget and preserves exact bytes, cursors and metadata', async () => {
     const f = setup()
     for (const text of ['public '.repeat(4000), ('"\\\n🧪').repeat(4000)]) {
-      const imported = f.store.ingest(sessionInput('public-' + text.length), [{ type: 'INPUT', text, sourcePosition: 1 }])
+      const imported = await f.ingest(sessionInput('public-' + text.length), [{ type: 'INPUT', text, sourcePosition: 1 }])
       const event = f.store.events(imported.sessionId, {}, 0, 1)[0]
       const stored = f.store.event(imported.sessionId, event.id)
       let cursor: string | undefined, literal = '', offset = 0, pages = 0
@@ -65,24 +86,25 @@ describe('Session Context progressive MCP disclosure', () => {
         const page = JSON.parse(first.text)
         expect(result.structuredContent).toEqual(page)
         expect(Buffer.byteLength(JSON.stringify({ jsonrpc: '2.0', id: 1, result }))).toBeLessThanOrEqual(SESSION_RESPONSE_BUDGETS.read_agent_session_event)
-        expect(page).toMatchObject({ sessionId: imported.sessionId, eventId: event.id, revision: imported.revision, provenance: 'OBSERVED_FROM_PROVIDER', untrusted: true, sourcePosition: 1, payloadDigest: createHash('sha256').update(stored.text ?? '').digest('hex') })
+        expect(page).toMatchObject({ sessionId: imported.sessionId, eventId: event.id, revision: imported.revision, provenance: 'OBSERVED_FROM_PROVIDER', untrusted: true, sourcePosition: 1, payloadDigest: createHash('sha256').update(text).digest('hex') })
         expect(page.range).toEqual({ startByte: offset, endByte: offset + Buffer.byteLength(page.content) })
         expect(page.omission).toBe(stored.omission)
         expect(page.sanitized).toBe(!!stored.sanitized)
         literal += page.content; offset = page.range.endByte; cursor = page.nextCursor; pages++
       } while (cursor)
-      expect(literal).toBe(stored.text)
+      expect(stored.text).toBeNull()
+      expect(literal).toBe(text)
       expect(literal).not.toContain('�')
       expect(pages).toBeGreaterThan(1)
       const stale = await f.adapter.callTool('read_agent_session_event', { sessionId: imported.sessionId, eventId: event.id, expectedRevision: imported.revision + 1 })
       expect(stale.isError).toBe(true)
       expect(stale.structuredContent).toBeUndefined()
     }
-  })
+  }, 30000)
 
   it('finds a specific failure in 740 events with four real Channel HTTP calls and no transcript expansion', async () => {
     const f = setup()
-    f.store.ingest(sessionInput('large-session'), events(740))
+    await f.ingest(sessionInput('large-session'), events(740))
     const server = createMcpHttpServer(f.adapter, () => {})
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
     cleanup.push(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())))
@@ -111,7 +133,7 @@ describe('Session Context progressive MCP disclosure', () => {
     const f = setup()
     for (let n = 0; n < 30; n++) f.store.ingest(sessionInput(`session-${n}`), [])
     const text = ('"\\\n🧪').repeat(5000)
-    const imported = f.store.ingest(sessionInput('payload'), [{ type: 'INPUT', text, sourcePosition: 1 }, ...events(2000)])
+    const imported = await f.ingest(sessionInput('payload'), [{ type: 'INPUT', text, sourcePosition: 1 }, ...events(2000)])
     let cursor: string | undefined, count = 0
     do {
       const result = await f.call('list_agent_sessions', { limit: 20, cursor })
@@ -130,30 +152,31 @@ describe('Session Context progressive MCP disclosure', () => {
       const result = await f.call('read_agent_session_event', { sessionId: imported.sessionId, eventId: stored.id, expectedRevision: imported.revision, cursor })
       expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(16384)
       const page = data(result); literal += page.content; cursor = page.nextCursor; pages++
-      expect(page.omission).toBe('LIMIT_REACHED')
+      expect(page.omission).toBeNull()
     } while (cursor)
-    expect(literal).toBe(stored.text); expect(pages).toBeGreaterThan(1)
+    expect(stored.text).toBeNull(); expect(literal).toBe(text); expect(pages).toBeGreaterThan(1)
     expect(literal).not.toContain('�')
     const foreign = new SessionStore(sessionStorePath(f.base, 'B'), 'B'); cleanup.push(() => foreign.close())
-    const other = foreign.ingest(sessionInput('foreign'), events(1))
+    const other = await f.ingest(sessionInput('foreign'), events(1), foreign)
     expect(data(await f.call('inspect_agent_session', { sessionId: other.sessionId })).code).toBe('SESSION_UNAVAILABLE')
     expect(data(await f.call('list_agent_sessions', { repositoryId: 'B' })).code).toBe('INVALID_ARGUMENT')
-    f.store.ingest({ ...sessionInput('payload'), sourceDigest: 'changed' }, events(5))
+    await f.ingest({ ...sessionInput('payload'), sourceDigest: 'changed' }, events(5))
     expect(data(await f.call('inspect_agent_session', { sessionId: imported.sessionId, cursor: firstMap.nextCursor, limit: 1 })).code).toBe('CURSOR_STALE')
     expect(data(await f.call('read_agent_session_event', { sessionId: imported.sessionId, eventId: stored.id, expectedRevision: imported.revision })).code).toBe('REVISION_CONFLICT')
     expect(data(await f.call('list_agent_sessions', { executionId: 'unverified' })).sessions).toEqual([])
     f.switchProject()
     for (const tool of SESSION_CONTEXT_TOOLS) expect(data(await f.call(tool.name as SessionToolName, {})).code).toBe('PROJECT_CONTEXT_CHANGED')
-  })
-  it('reports evicted sessions and provider absence honestly, never resurrecting them from a read', async () => {
+  }, 30000)
+  it('reports removed sessions and provider absence honestly, never resurrecting them from a read', async () => {
     const f = setup()
-    const first = f.store.ingest(sessionInput('first'), events(1))
+    const first = await f.ingest(sessionInput('first'), events(1))
     const payload = f.store.events(first.sessionId, {}, 0, 1)[0]
-    for (let n = 1; n <= 500; n++) f.store.ingest({ ...sessionInput(`next-${n}`), endedAt: '2026-02-01T00:00:00Z' }, [])
-    expect(data(await f.call('read_agent_session_event', { sessionId: first.sessionId, eventId: payload.id, expectedRevision: 1 })).code).toBe('SESSION_EVICTED')
+    f.store.references.db.prepare('DELETE FROM sessions WHERE id=?').run(first.sessionId)
+    expect(data(await f.call('read_agent_session_event', { sessionId: first.sessionId, eventId: payload.id, expectedRevision: first.revision })).code).toBe('SESSION_EVICTED')
+    unlinkSync(join(dirname(f.store.path), 'session-context.provider.json'))
     const provider = new EntireProvider(f.store, f.base, () => {})
     expect(await provider.refresh()).toMatchObject({ code: 'PROVIDER_UNAVAILABLE', coverage: 'UNAVAILABLE' })
-    expect(f.store.count()).toBe(500)
+    expect(f.store.count()).toBe(0)
   })
   it('runs the genuine worker off the main event loop, persists across restart and rejects project-switch races', async () => {
     const f = setup(), output = process.env.SESSION_CONTEXT_BUILT_SMOKE === '1' ? join(process.cwd(), 'out/main/session-context-worker.js') : join(f.base, 'worker.cjs')
@@ -161,13 +184,14 @@ describe('Session Context progressive MCP disclosure', () => {
       const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
       writeFileSync(output, `require = require('node:module').createRequire(${JSON.stringify(join(process.cwd(), 'package.json'))});\n` + code)
     }
-    f.store.ingest(sessionInput('worker-session'), events(740))
+    await f.ingest(sessionInput('worker-session'), events(740))
     let current = true, ticks = 0
     const timer = setInterval(() => ticks++, 1); cleanup.push(() => clearInterval(timer))
     const client = new SessionContextClient(f.base, 'A', f.base, () => current, output); cleanup.push(() => client.dispose())
     const catalog = data(await client.call('list_agent_sessions', {}))
     expect(catalog.sessions[0].eventCount).toBe(740)
     expect(ticks).toBeGreaterThan(5)
+    unlinkSync(join(dirname(f.store.path), 'session-context.provider.json'))
     expect(data(await client.call('refresh_agent_sessions', {}))).toMatchObject({ coverage: 'UNAVAILABLE', code: 'PROVIDER_UNAVAILABLE' })
     client.dispose()
     const restarted = new SessionContextClient(f.base, 'A', f.base, () => current, output); cleanup.push(() => restarted.dispose())

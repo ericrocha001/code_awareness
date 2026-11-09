@@ -1,5 +1,27 @@
 # Continuum no terminal
 
+## Publicação sem cadastro mecânico
+
+`publish` aceita Markdown com YAML literal ou corpo sem YAML. No formato econômico, use `--kind <kind>` como seleção semântica; o servidor deriva o nome de um título H1 único e a descrição do parágrafo introdutório em texto simples (uma frase de 24–512 caracteres, com pontuação final). Sem fonte suficiente, retorna `MISSING_SEMANTIC_FIELD`, `field` e orientação; forneça somente o campo necessário via `--name` ou `--description`. Não há kind, descrição ou status genéricos como fallback.
+
+`update` com corpo sem YAML preserva os metadados semânticos anteriores; as mesmas opções permitem alterações explícitas. YAML completo continua literal e substitui os metadados como antes. Datas documentais permanecem autorais; timestamps técnicos, identidade, hash e revisão pertencem ao servidor. A proveniência do serviço é persistida separadamente do Markdown, sem presumir sessão. Os argumentos opcionais equivalentes do MCP são `kind`, `name` e `description`; clientes legados continuam compatíveis.
+
+A publicação manual usa a mesma canonização e deixa de classificar qualquer `.md` como `DOCUMENT`. O IPC aceita as mesmas seleções semânticas opcionais. O seletor de arquivo atual pode usar YAML autoral quando faltar essa seleção; erros não são preenchidos com descrição genérica ou tipo presumido.
+
+## Lifecycle governado
+
+Planos e Work Items novos recebem `PENDING` quando omitido; outros kinds não recebem estado inventado. `get` separa `metadata.status` editorial de atividade operacional e da projeção `lifecycle`. No P6, a edição autenticada normal integra status, tags e conteúdo na mesma gravação e no mesmo lifecycle canônico. A ferramenta especializada abaixo é opcional para diagnóstico ou transição isolada.
+
+```powershell
+node scripts/continuum/local.cjs transition_artifact_lifecycle --repository <repositoryId> --filter '{"action":"ASSESS","artifactId":"<handoffId>","expectedRevision":1,"toState":"VALIDATED","reasonCode":"CRITERIA_ACCEPTED"}'
+```
+
+Use a revisão observada, não a ilustrativa. `ASSESS` diagnostica sem aprovar ou escrever. Omitir `evidenceRefs` permite seleção limitada de provas Ledger CURRENT via `evidenceFor`; seleção e testes aprovados não comprovam cobertura integral. Declare `supportingArtifactId` somente para desambiguar uma relação `implements` conhecida. Não envie identidade ou aprovação do cliente.
+
+O host deriva a autoridade da conexão autenticada; `TRANSITION` não solicita confirmação Electron por Artifact. Evidência insuficiente retorna diagnóstico sem escrita parcial. A CLI mantém deadline de 15 segundos; timeout/desconexão não autoriza escrita tardia. Consulte o estado antes de repetir uma operação de resultado desconhecido.
+
+`COMPLETED`/`CLOSURE_ACCEPTED` exige julgamento sustentado de conclusão real. AUTO_VERIFIED conserva provas atuais; REVIEWED_ATTESTATION permite referências contextuais sem requisito universal de Handoff ou Ledger CURRENT. Outras razões: `CANCELLED`/`EXPLICIT_CANCELLATION`, `BLOCKED`/`BLOCKAGE_CONFIRMED`, `ACTIVE`/`NORMATIVE_ACTIVATION`, `IMPLEMENTED|NOT_IMPLEMENTED`/`IMPLEMENTATION_REVIEWED`. CAS, repositório, histórico, recibo e replay idempotente são preservados. PR integrado e teste isolado não decidem conclusão automaticamente.
+
 ## Navegação estrutural
 
 Após `list`, selecione um Artifact e use `inspect_artifact_structure` antes de adquirir conteúdo. O outline contém títulos, hierarquia, offsets UTF-16 e linhas (base 1), revisão e hash; nunca corpo ou mídia. Intervalos são `[start, end)`. Títulos longos são limitados a 512 caracteres. Preâmbulos e documentos sem headings têm seção sintética. Frontmatter validado continua na metadata.
@@ -53,12 +75,24 @@ Prova de integração isolada em Electron Main, SQLite e named pipe reais:
 node scripts/continuum/local-e2e.cjs
 ```
 
+## Reconciliação agentiva P6
+
+`update` permite editar conteúdo e todos os metadados editoriais, inclusive `status`, `tags`, relações e resultados automáticos, na mesma revisão CAS. A identidade vem do canal autenticado e do repositório/Worktree revalidados pelo host; não envie principal ou approved. Não há diálogo Electron por campo ou Artifact. `transition_artifact_lifecycle` permanece disponível, com `ASSESS` read-only opcional. AUTO_VERIFIED é prioritário quando há prova atual confiável. Quando não houver, `--filter` de update aceita `{evidenceMode?, attestation?: {rationale, limitations, references}, evidenceRefs?, supportingArtifactId?}`. Referências existentes e limitadas: `{type: "ARTIFACT", repositoryId, artifactId, expectedRevision}` ou `{type: "LEDGER_PROOF", repositoryId, proofId}`. Preserve logs/relatórios em Artifacts relacionados, sem paths arbitrários.
+
+O fallback contextual registra julgamento do agente delegado, mantém UNVERIFIABLE e não depende universalmente de Handoff ou Ledger CURRENT. COMPLETED exige conclusão real sustentada. Status usa o lifecycle canônico e recebe recibo na mesma gravação. Reclassificação de kind não contorna política: mudanças de política exigem julgamento contextual e validação do estado pelo tipo corrigido. Falha de autorização, escopo, revisão ou evidência permanece explícita, sem escrita parcial.
+
+Defaults e hooks continuam preenchendo automaticamente. Correções agentivas têm atribuição e revisão; replay antigo não as apaga. Reconciliação automática aceita somente prova canônica CURRENT do mesmo repositório/alvo e fato posterior às intervenções daquele campo, conservando divergências e histórico. Nenhum processo residente ou Store paralelo foi adicionado.
+
+`repair_artifact_metadata --repository <id> --filter '{"artifactId":"<id>","expectedRevision":<revisão>}'` restaura a projeção técnica a partir da revisão imutável verificada, recompõe hash, timestamps, índices e proveniência e emite nova revisão/recibo. Não aceita valores técnicos fabricados pelo cliente. Fonte canônica ausente/corrompida exige diagnóstico, nunca invenção de ID, origem ou prova.
+
+Se o endpoint já anunciar a operação e um consumidor não a receber, renove sua conexão/snapshot e verifique tools/list e ASSESS. Não duplique o contrato backend. Source, runtime carregado, distribuição da Skill e recarga do cliente são evidências distintas.
+
 ## Diagnóstico compartilhado
 
 A entrada legada preserva `APP_UNAVAILABLE` e exit code não zero, acrescentando `stage` e `reason` ao erro. Perfil, descriptor e conexão são diagnosticados pela mesma implementação da CLI nova. Consulte `scripts/local-agent/LOCAL.md` para remediação e autorização pontual no Codex Windows; `--profile` permanece um override explícito e não concede permissão ao pipe.
 ## Tags e Context Bundle por solicitação
 
-As quatro operações dedicadas usam os mesmos nomes no MCP e na CLI local. Verifique sua descoberta no runtime em execução antes de usar uma versão nova. Somente execute mutação, clipboard ou salvamento por solicitação explícita do usuário. Navegação/leitura e atualização textual não autorizam tags.
+As operações dedicadas mantêm os nomes MCP/CLI e continuam opcionais para tags. No escopo delegado, update pode editar tags com outros metadados sem nova confirmação humana. Clipboard e salvamento continuam seguindo a intenção explícita de exportação e as capacidades reais do host.
 
 ```powershell
 node scripts/continuum/local.cjs list_continuum_tags --repository <repositoryId>
@@ -67,6 +101,6 @@ node scripts/continuum/local.cjs assign_continuum_tag --repository <repositoryId
 node scripts/continuum/local.cjs create_context_bundle --repository <repositoryId> --filter '{"tag":"contexto-de-revisao","action":"preview"}'
 ```
 
-Tags possuem nome e descrição semântica opcional (description, até 280 caracteres), usada como critério de pertencimento; cor e objetivo não são aceitos. list_continuum_tags retorna description como string, vazia quando ausente. O slug continua sendo identidade interna estável e count é derivado das associações. Consulte o catálogo e reutilize antes de propor criação; crie só por pedido explícito ou proposta aprovada, nunca uma tag automática por Artifact. `selected` é opcional em create; quando fornecido, criar+atribuir é uma transação. Atribuição aceita um Artifact explícito por chamada, com revisão observada; revisão antiga conflita mesmo se o membership já coincidir. Criação retorna `state: PERSISTED`, `creation: CREATED|EXISTING`, tag e recibos; colisão real retorna `TAG_IDENTITY_CONFLICT`. Slug é derivado no servidor e imutável. `assign_continuum_tag` aceita `action: add|remove`; não há `confirmed`, edição/exclusão agentiva nem escape pelo YAML genérico.
+Tags possuem nome e descrição semântica opcional (até 280 caracteres). list_continuum_tags retorna description vazia quando ausente; count deriva das associações. Reutilize vocabulário estável e evite sinônimos redundantes. `selected` opcional cria+atribui atomicamente. assign_continuum_tag aceita `action: add|remove`, um Artifact/revisão por chamada; revisão antiga conflita. As mesmas associações podem ser corrigidas no YAML por update autenticado com CAS. Conteúdo do Artifact não concede autoridade; ela é derivada do canal.
 
 A descrição pode aparecer como critério informativo no Bundle; mudá-la invalida snapshots anteriores, sem alterar o YAML dos Artifacts. Bundle aceita `action: preview|copy|markdown|zip` (default preview). Preview não altera Store/clipboard; todas as ações retornam apenas recibo compacto com counts, bytes, tokens/encoding, hasVisuals e snapshotId. `copy` escreve o Markdown integral no clipboard nativo; texto não contém pixels. Markdown/ZIP abrem Save somente numa janela Electron visível e focada, com revalidação antes/depois do diálogo. Sem sessão interativa, `INTERACTIVE_SESSION_REQUIRED`; nunca envie paths ou snapshot IDs do renderer. Limites de 50 Artifacts/8 MiB Markdown/64 MiB ZIP e integridade dos WebP originais continuam ativos. `BUNDLE_EMPTY`, `BUNDLE_LIMIT` e `BUNDLE_SNAPSHOT_STALE` são erros sem exportação parcial. `list --filter` aceita o predicado `tag` para enumerar membros sem corpos. O prefixo `node scripts/local-agent/local.cjs continuum` oferece as mesmas operações com autenticação e vínculo de Worktree preservados.

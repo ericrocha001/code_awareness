@@ -28,10 +28,29 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
         digest: digest(JSON.stringify(capture.capture)), freshness: 'OBSERVED_SNAPSHOT' }] })
   }
   let batches: RegistryBatch[] = []
-  if (read) batches = await read({ selector, cursors: registry.cursors() })
+  let refreshPullRequests: RegistryEntity[] | undefined
+  if (read) {
+    const pending = !selector ? registry.pendingReconciliation('PR', 2) : []
+    if (!selector && !pending.length) refreshPullRequests = registry.reconciliationPullRequests(registry.source('GITHUB_REFRESH')?.cursor ?? '')
+    const neighbors: RegistryEntity[] = selector ? registry.contextGraph(selector, undefined, 2).nodes.filter(node => node.type === 'ARTIFACT').slice(0, 20).map(node => ({ kind: 'ARTIFACT', id: node.id + (node.revision ? ':' + node.revision : '') })) : pending.length ? pending : refreshPullRequests!.slice(0, 2)
+    const cursors = registry.cursors()
+    for (const entity of [...neighbors, ...(selector ? [selector] : [])]) if (entity.kind === 'PR') for (const prefix of ['GITHUB:PR:', 'GITHUB_CATALOG:PR:']) {
+      const cursor = registry.source(prefix + entity.id)?.cursor
+      if (cursor) cursors[prefix + entity.id] = cursor
+    }
+    batches = await read({ selector, neighbors, cursors })
+  }
   assertCurrent()
   registry.applyAll(batches, assertCurrent)
+  if (refreshPullRequests) {
+    const previous = registry.source('GITHUB_REFRESH')
+    const unavailable = ['NETWORK_NOT_AUTHORIZED', 'UNAVAILABLE'].includes(registry.source('GITHUB')?.status ?? 'UNAVAILABLE') && refreshPullRequests.length > 0
+    const cursor = unavailable ? previous?.cursor ?? '' : refreshPullRequests.length > 2 ? refreshPullRequests[1].id : ''
+    apply({ repositoryId: store.repositoryId, source: 'GITHUB_REFRESH', revision: digest(cursor + String(unavailable)), cursor,
+      status: unavailable || refreshPullRequests.length > 2 ? 'PARTIAL' : 'COMPLETE', edges: [] })
+  }
   const commits = new Set<string>()
+  if (!selector && read) for (const candidate of registry.pendingReconciliation('COMMIT', 5)) commits.add(candidate.id)
   if (selector?.kind === 'COMMIT') commits.add(selector.id)
   if (capture?.checkpoint.commitSha) commits.add(capture.checkpoint.commitSha)
   else if (capture && /^[a-f0-9]{40}$/.test(capture.head)) commits.add(capture.head)
@@ -41,7 +60,7 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
     if (head.code === 0 && /^[a-f0-9]{40}$/.test(head.text.trim())) commits.add(head.text.trim())
   }
   const unobserved = [...commits].filter(sha => !registry.source('GIT:' + sha))
-  const selected = selector?.kind === 'COMMIT' ? [selector.id] : unobserved.length ? unobserved : [...commits]
+  const selected = read ? unobserved : selector?.kind === 'COMMIT' ? [selector.id] : unobserved.length ? unobserved : [...commits]
   const requests: { commitSha?: string; checkpointId?: string }[] = selected.slice(0, 4).map(commitSha => ({ commitSha }))
   if (selector?.kind === 'CHECKPOINT') requests.push({ checkpointId: selector.id })
   let refInventory: RegistryBatch | undefined
@@ -89,5 +108,10 @@ export async function reconcileRegistry(store: SessionStore, runner: CommandRunn
   }
   if (refInventory) apply(refInventory)
   apply({ repositoryId: store.repositoryId, source: 'ENTIRE_COMMITS', revision: digest(JSON.stringify([...commits])), status: unobserved.length > 4 ? 'PARTIAL' : 'OBSERVED_SNAPSHOT', edges: [] })
-  return selector ? registry.map(selector) : { repositoryId: store.repositoryId, sources: registry.sources() }
+  const backlog = registry.reconciliationBacklog()
+  if (!backlog.pending) {
+    const github = registry.source('GITHUB')
+    if (github?.status === 'PARTIAL') apply({ repositoryId: store.repositoryId, source: 'GITHUB', revision: github.revision, cursor: github.cursor, status: 'OBSERVED_SNAPSHOT', edges: [] })
+  }
+  return selector ? registry.map(selector) : { repositoryId: store.repositoryId, sources: registry.coverageSources(), backlog }
 }

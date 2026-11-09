@@ -1,3 +1,4 @@
+import { safeDiagnostic } from '../../shared/local-agent-diagnostic.cjs'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, renameSync, unlinkSync } from 'node:fs'
@@ -5,6 +6,7 @@ import { join } from 'node:path'
 import { createServer, type Server, type Socket } from 'node:net'
 import { object, text } from './request-validation'
 import type { LocalChannelAdapter, LocalRequestContext } from './local-channel-types'
+import { authenticatedAgentPrincipal } from '../continuum/agent-authority'
 
 export const LOCAL_MAX_BYTES = 8 * 1024 * 1024
 export const LOCAL_TIMEOUT_MS = 15_000
@@ -90,7 +92,10 @@ export class LocalChannelHost {
           const message = error instanceof Error ? error.message : ''
           const explicit = (error as { code?: string })?.code
           const code = /^[A-Z][A-Z0-9_]{2,64}$/.test(explicit ?? '') ? explicit : /^([A-Z][A-Z0-9_]{2,64})(?::|$)/.exec(message)?.[1] ?? (error instanceof SyntaxError ? 'INVALID_ARGUMENT' : 'INTERNAL_ERROR')
-          socket.end(JSON.stringify({ error: { code } }) + '\n')
+          const field = (error as { field?: unknown })?.field
+          const semantic = code === 'MISSING_SEMANTIC_FIELD' && typeof field === 'string' && ['name', 'description', 'kind'].includes(field)
+            ? { field, guidance: `Provide an explicit semantic ${field}` } : {}
+          socket.end(JSON.stringify({ error: { ...safeDiagnostic({ ...(error as object), code }), ...semantic } }) + '\n')
         }
       })()
     })
@@ -120,7 +125,7 @@ export class LocalChannelHost {
     }
     const adapter = this.adapters.find(adapter => adapter.domain === domain)
     if (!adapter || !Object.hasOwn(adapter.operations, action)) fail('METHOD_NOT_FOUND')
-    const context: LocalRequestContext = { connected }
+    const context: LocalRequestContext = { connected, principal: authenticatedAgentPrincipal('LOCAL_AGENT_CHANNEL', () => !!this.server && connected()) }
     if (!connected()) fail('IPC_CLOSED')
     return adapter.operations[action].execute(args, context)
   }

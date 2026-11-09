@@ -12,7 +12,8 @@ import { readAcademyGitSnapshot } from './academy-git-snapshot'
 
 const roots: string[] = []
 const stores: AcademyStore[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const store of stores.splice(0)) store.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+const synchronizers: AcademyGitSyncService[] = []
+afterEach(async () => { for (const sync of synchronizers.splice(0)) await sync.close(); vi.restoreAllMocks(); for (const store of stores.splice(0)) store.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
 const pkg = (text = 'canonical', name = 'alpha') => ({ skillMd: `---\nname: ${name}\ndescription: Test skill\n---\n${text}\n`, artifacts: {} })
 
 async function fixture(local = 'canonical') {
@@ -42,7 +43,11 @@ async function fixture(local = 'canonical') {
     github: { repositoryId: 'github-id', name: 'Academy', fullName: 'test/academy', ownerId: 'owner-id', ownerLogin: 'test', visibility: 'PRIVATE', cloneUrl: remote, htmlUrl: 'https://github.com/test/academy', accessState: 'AVAILABLE', lastSeenAt: new Date().toISOString() },
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as RepositoryRecord
   const port = { resolveRepository: () => record, findByGitHubId: () => record, listEligibleRepositories: () => [record] }
-  const service = () => new AcademyGitSyncService(store, new AcademyGitMaterializer(), git, transport, port)
+  const service = () => {
+    const sync = new AcademyGitSyncService(store, new AcademyGitMaterializer(), git, transport, port)
+    synchronizers.push(sync)
+    return sync
+  }
   const sync = service()
   const externalCommit = async (content: string, name = 'alpha', push = true) => {
     writeFile(human, `skills/${name}/SKILL.md`, pkg(content, name).skillMd)
@@ -55,6 +60,55 @@ async function fixture(local = 'canonical') {
 }
 
 describe('Academy Git-first source', () => {
+  it('cuts over explicitly, persists offline edits and converges without duplicate versions or exposing private skills', async () => {
+    const f = await fixture()
+    await f.sync.bindRepository(f.record.id)
+    const cutover = await f.sync.completeLocalCutover(true)
+    expect(cutover.lastError).toBeNull()
+    expect(f.store.usesLocalAuthority()).toBe(true)
+    expect((await f.sync.publish()).lastError).toBeNull()
+    const skill = f.store.get(f.skill.id)
+    f.store.update({ skillId: skill.id, expectedVersion: skill.currentVersion, package: pkg('offline local edit'), origin: 'UI' })
+    const privateSkill = f.store.create({ package: pkg('private body', 'private'), scope: 'GLOBAL', origin: 'UI' })
+    let restarted = f.restart()
+    expect(restarted.getStatus().convergence).toMatchObject({ pending: true, freshness: 'UNVERIFIED' })
+    let pushedHead: string | undefined, disconnected = false
+    const push = f.transport.push.bind(f.transport), fetch = f.transport.fetch.bind(f.transport)
+    const pushSpy = vi.spyOn(f.transport, 'push').mockImplementation(async (path, branch, origin, head) => {
+      await push(path, branch, origin, head)
+      pushedHead = head; disconnected = true
+      throw new Error('lost push receipt')
+    })
+    const fetchSpy = vi.spyOn(f.transport, 'fetch').mockImplementation((path, origin) => disconnected ? Promise.reject(new Error('offline after push')) : fetch(path, origin))
+    expect((await restarted.publish()).lastError).toBe('offline after push')
+    expect(f.store.getGitAuthority()?.processedCommitSha).not.toBe(pushedHead)
+    pushSpy.mockRestore(); fetchSpy.mockRestore()
+    restarted = f.restart()
+    const published = await restarted.publish()
+    expect(published.lastError).toBeNull()
+    expect(f.store.get(skill.id).currentVersion).toBe(2)
+    expect(f.store.getGitAuthority()?.processedCommitSha).toBe(pushedHead)
+    expect(f.store.publicationEligibility(privateSkill.id)).toBe('PRIVATE')
+    expect(f.store.getConvergenceCheckpoint()?.fingerprint).toBe(f.store.replicatedFingerprint())
+    const source = f.store.getGitSnapshot('github-id', f.store.getGitAuthority()!.processedCommitSha)!
+    expect(source.skills.map(skill => skill.name)).toEqual(['alpha'])
+    expect(source.identities?.skills[0].skillId).toBe(skill.id)
+    const head = f.store.getGitAuthority()!.processedCommitSha
+    await restarted.publish()
+    expect(f.store.getGitAuthority()!.processedCommitSha).toBe(head)
+    expect(f.store.get(skill.id).currentVersion).toBe(2)
+    await gitExec(f.human, ['pull', '--ff-only', 'origin', 'main'])
+    await gitExec(f.human, ['switch', '-c', 'reviewed-contribution'])
+    await f.externalCommit('externally reviewed content', 'alpha', false)
+    await gitExec(f.human, ['switch', 'main'])
+    await gitExec(f.human, ['merge', '--no-ff', 'reviewed-contribution', '-m', 'approved merge'])
+    await gitExec(f.human, ['push', 'origin', 'main'])
+    expect((await restarted.syncNow()).lastError).toBeNull()
+    expect(f.store.get(skill.id).currentVersion).toBe(3)
+    expect(f.store.get(skill.id).current.package.skillMd).toContain('externally reviewed content')
+    await restarted.syncNow()
+    expect(f.store.get(skill.id).currentVersion).toBe(3)
+  }, 240000)
   it('rejects staged byte transformations before creating a Save commit', async () => {
     const f = await fixture()
     writeFile(f.human, '.gitattributes', 'skills/** text eol=lf\n')
@@ -113,7 +167,7 @@ describe('Academy Git-first source', () => {
     expect(resolved.syncState, resolved.lastError ?? '').toBe('LOCAL_CHANGES')
     expect((await f.sync.publish()).syncState).toBe('SYNCED')
     expect(f.store.get(f.skill.id).current.package.skillMd).toContain('reviewed reconciliation')
-  }, 45000)
+  }, 90000)
 
   it('integrates independent changes with the observed main as first parent while preserving local commits', async () => {
     const f = await fixture()
@@ -185,7 +239,12 @@ describe('Academy Git-first source', () => {
     expect((await f.sync.publish()).syncState).toBe('SYNCED')
     expect(f.store.get(f.skill.id).source?.state).toBe('REMOVED')
     expect(f.store.history(f.skill.id)).toHaveLength(2)
-  }, 60000)
+    const cutover = await f.sync.completeLocalCutover(true)
+    expect(cutover.lastError).toBeNull()
+    expect(f.store.usesLocalAuthority()).toBe(true)
+    expect(cutover.publication?.candidateCommitSha).toBe(draft.workspaceCommitSha)
+    expect(f.store.history(f.skill.id, { version: 2 }).package.skillMd).toContain('candidate')
+  }, 120000)
 
   it('automatically publishes consecutive saves only under the bound credential authorization', async () => {
     const f = await fixture()

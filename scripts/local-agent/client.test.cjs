@@ -53,7 +53,7 @@ function socketFixture(onWrite = () => {}) {
 }
 
 test('connection errors retain legacy code and distinguish missing, refused, denied and reset', async () => {
-  for (const [code, reason] of [['ENOENT', 'PIPE_NOT_FOUND'], ['ECONNREFUSED', 'CONNECTION_REFUSED'], ['EACCES', 'ACCESS_DENIED'], ['EPERM', 'ACCESS_DENIED'], ['ETIMEDOUT', 'TIMEOUT'], ['ECONNRESET', 'CONNECTION_RESET']]) {
+  for (const [code, reason] of [['ENOENT', 'PIPE_NOT_FOUND'], ['ECONNREFUSED', 'CONNECTION_REFUSED'], ['EACCES', 'ACCESS_DENIED'], ['EPERM', 'ACCESS_DENIED'], ['ECONNRESET', 'CONNECTION_RESET']]) {
     const socket = socketFixture()
     const result = connect(descriptor, {}, { createConnection: () => socket })
     socket.emit('error', { code, message: 'private-token private-profile' })
@@ -85,5 +85,40 @@ test('response framing, legacy errors and authentication outcomes remain compati
     socket.emit('data', wire)
     if (typeof expected === 'string') await assert.rejects(result, { code: expected })
     else assert.deepEqual(await result, expected)
+  }
+})
+
+test('semantic errors carry only an allowlisted field and generated guidance, never server text', async () => {
+  for (const field of ['name', 'description', 'kind', 'private-secret']) {
+    const socket = socketFixture()
+    const result = connect(descriptor, {}, { createConnection: () => socket })
+    socket.emit('connect')
+    socket.emit('data', JSON.stringify({ error: { code: 'MISSING_SEMANTIC_FIELD', field, guidance: 'private-secret', message: 'private-secret' } }) + '\n')
+    await assert.rejects(result, error => {
+      const projected = publicError(error)
+      assert.equal(projected.code, 'MISSING_SEMANTIC_FIELD')
+      if (field === 'private-secret') assert.deepEqual(projected, { code: 'MISSING_SEMANTIC_FIELD', stage: 'response', reason: 'SERVER_REJECTED' })
+      else assert.deepEqual(projected, { code: 'MISSING_SEMANTIC_FIELD', stage: 'response', reason: 'SERVER_REJECTED', field, guidance: `Provide an explicit semantic ${field}` })
+      assert.equal(JSON.stringify(projected).includes('private-secret'), false)
+      return true
+    })
+  }
+})
+
+test('OS timeouts retain IPC_TIMEOUT and safe transport/server diagnostics', async () => {
+  const socket = socketFixture(), pending = connect(descriptor, {}, { createConnection: () => socket })
+  socket.emit('error', { code: 'ETIMEDOUT', message: 'private-token' })
+  await assert.rejects(pending, { code: 'IPC_TIMEOUT', stage: 'connect', reason: 'TIMEOUT' })
+  const reply = socketFixture(), response = connect(descriptor, {}, { createConnection: () => reply })
+  reply.emit('connect'); reply.emit('data', JSON.stringify({ error: { code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation: 'register', token: 'private-token' } }) + '\n')
+  await assert.rejects(response, error => { assert.deepEqual(publicError(error), { code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation: 'register' }); return true })
+  assert.deepEqual(publicError({ code: 'BAD_CODE', stage: '/private/path', reason: 'private-token', operation: 'private-payload' }), { code: 'BAD_CODE' })
+})
+
+test('malformed responses have a safe response-stage reason', async () => {
+  for (const wire of ['null\n', '[]\n', '{}\n', '{"error":{"code":"private secret"}}\n']) {
+    const socket = socketFixture(), result = connect(descriptor, {}, { createConnection: () => socket })
+    socket.emit('connect'); socket.emit('data', wire)
+    await assert.rejects(result, { code: 'IPC_PROTOCOL_ERROR', stage: 'response', reason: 'MALFORMED_RESPONSE' })
   }
 })

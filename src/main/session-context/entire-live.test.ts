@@ -81,7 +81,7 @@ describe('Entire live consultative contracts', () => {
     expect(f.store.catalogRevision()).toBe(revision)
     expect(f.store.sessions({}, 0, 10)).toEqual([])
     expect(readFileSync(f.store.path)).toEqual(before)
-    expect(SESSION_CONTEXT_TOOLS).toHaveLength(10)
+    expect(SESSION_CONTEXT_TOOLS).toHaveLength(11)
     const adapter = new ChannelMcpAdapter({ projectId: 'A', repoRoot: f.root, navigation: {} as McpProjectContext['navigation'], sessionContext: { call: (name, args) => executeSessionTool(f.store, f.provider, name, args, () => {}, undefined, f.targets) } })
     for (const name of ['discover_entire_sessions', 'inspect_entire_session', 'get_entire_session_usage'] as LiveSessionToolName[]) {
       expect(adapter.listTools().find(t => t.name === name)?.annotations?.readOnlyHint).toBe(true)

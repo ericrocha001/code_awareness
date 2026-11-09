@@ -8,6 +8,7 @@ import { ChannelActivityMonitor } from './channel-activity-monitor'
 import type { ChannelTraceSink } from '../../shared/types/channel-types'
 import type { IArtifactReader } from '../continuum/continuum-types'
 import type { McpProjectContext } from './project-mcp-context'
+import { authenticatedAgentPrincipal, authorizeArtifactAgent } from '../continuum/agent-authority'
 
 export type McpLifecycleState =
   | { status: 'STOPPED' | 'STARTING' | 'STOPPING'; available: false }
@@ -21,6 +22,7 @@ interface McpLifecycleOptions {
   log?: (state: McpLifecycleState) => void
   trace?: ChannelTraceSink
   activity?: ChannelActivityMonitor
+  usage?: import('./channel-usage').ChannelUsage
   systemHealth?: import('../system-health/system-health-core').SystemHealthCore
   runtimeIdentity?: import('../runtime-identity/runtime-identity-provider').RuntimeIdentityProvider
   validationLedger?: import('../validation-ledger/validation-ledger').ValidationLedger
@@ -30,6 +32,7 @@ interface McpLifecycleOptions {
 export class McpLifecycle {
   private readonly governor = new McpWorkloadGovernor()
   private readonly activity: ChannelActivityMonitor
+  private readonly usage?: import('./channel-usage').ChannelUsage
   private state: McpLifecycleState = { status: 'STOPPED', available: false }
   private server: Server | null = null
   private binding: string | null = null
@@ -41,14 +44,17 @@ export class McpLifecycle {
   private disposed = false
   private runtimeFailure = false
   private endpointGeneration: string | null = null
+  private readonly instanceId: string
   private readonly listeners = new Set<(state: McpLifecycleState) => void | Promise<void>>()
   private readonly createServer: (context: McpProjectContext) => Server
   private readonly log: (state: McpLifecycleState) => void
   private readonly disabled: boolean
 
   constructor(options: McpLifecycleOptions = {}) {
+    this.instanceId = options.runtimeIdentity?.getInstanceId() ?? randomUUID()
     this.disabled = options.disabled ?? false
     this.activity = options.activity ?? new ChannelActivityMonitor()
+    this.usage = options.usage
     this.createServer = options.createContextServer ?? (options.createServer
       ? ((context) => options.createServer!(context.navigation, context.artifactReader))
       : ((context) => {
@@ -67,8 +73,13 @@ export class McpLifecycle {
         const supplied = headers['x-code-awareness-binding']
         if (supplied === undefined) return true
         return this.state.status === 'RUNNING' && this.endpointGeneration === generation && supplied === generation &&
-          headers['x-code-awareness-instance'] === options.runtimeIdentity?.getInstanceId() &&
+          headers['x-code-awareness-instance'] === this.instanceId &&
           headers['x-code-awareness-project'] === context.projectId
+      }, (headers, connected) => {
+        const isActive = () => this.state.status === 'RUNNING' && this.endpointGeneration === generation && connected()
+        if (!headers['x-code-awareness-binding'] || headers['x-code-awareness-binding'] !== generation || headers['x-code-awareness-instance'] !== this.instanceId || headers['x-code-awareness-project'] !== context.projectId || !isActive()) return undefined
+        if (!context.continuum?.repositoryId) return undefined
+        return authorizeArtifactAgent(authenticatedAgentPrincipal('MCP', isActive), context.continuum.repositoryId, isActive)
       })
     }))
     this.log = options.log ?? ((state) => console.log('[MCP Lifecycle]', state))
@@ -77,6 +88,10 @@ export class McpLifecycle {
 
   getState(): McpLifecycleState {
     return { ...this.state }
+  }
+  getAgentBindingHeaders(): Record<string, string> {
+    if (this.state.status !== 'RUNNING' || !this.endpointGeneration) return {}
+    return { 'x-code-awareness-binding': this.endpointGeneration, 'x-code-awareness-instance': this.instanceId, 'x-code-awareness-project': this.state.projectId }
   }
 
   getLocalEndpoint(instanceId: string) {
@@ -149,7 +164,7 @@ export class McpLifecycle {
   dispose(): Promise<void> {
     if (this.disposed) return this.transition
     this.disposed = true
-    return this.deactivate()
+    return this.deactivate().then(async () => { await this.usage?.close() })
   }
 
   private schedule(): Promise<void> {
@@ -185,6 +200,9 @@ export class McpLifecycle {
       server.closeIdleConnections()
     })
     this.server = null
+    this.currentAdapter?.stopUsage()
+    this.currentAdapter = null
+    void this.usage?.flush()
     this.binding = null
     this.bindingReader = undefined
     server.removeAllListeners('error')
@@ -239,6 +257,7 @@ export class McpLifecycle {
       const address = server.address()
       if (!address || typeof address === 'string') throw new Error('MCP address unavailable')
       this.binding = requested.projectId
+      if (this.usage) this.currentAdapter?.setUsage(this.usage)
       this.bindingReader = requested.continuum ?? requested.artifactReader
       await this.setState({ status: 'RUNNING', available: true, endpoint: `http://127.0.0.1:${address.port}/mcp`, projectId: requested.projectId })
     } catch {

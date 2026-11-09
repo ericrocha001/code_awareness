@@ -90,6 +90,51 @@ async function gitFixture() {
 }
 
 describe('Academy Git-pinned plugin publication', () => {
+  it('builds sealed local releases offline with one candidate and an unsigned in-toto statement', async () => {
+    const f = await gitFixture()
+    try {
+      await f.sync.saveDraft({ skillId: f.global.id, expectedVersion: 1, package: { ...f.global.current.package, skillMd: skillMd('global-skill', 'reviewed legacy draft') }, origin: 'UI' })
+      expect((await f.sync.completeLocalCutover(true)).lastError).toBe('ACADEMY_CUTOVER_PENDING')
+      expect(f.service.store.usesLocalAuthority()).toBe(false)
+      expect(f.service.get(f.global.id).currentVersion).toBe(1)
+      expect((await f.sync.publish()).lastError).toBeNull()
+      expect((await f.sync.completeLocalCutover(true)).lastError).toBeNull()
+      const fetch = vi.spyOn(f.transport, 'fetch').mockRejectedValue(new Error('offline'))
+      await f.service.update({ skillId: f.global.id, expectedVersion: 2, package: { skillMd: skillMd('global-skill', 'local v2'), artifacts: { 'references/guide.md': 'sealed guide' } }, origin: 'UI' })
+      await f.service.create({ package: { skillMd: skillMd('private-new'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+      const [first, second] = await Promise.all([f.service.prepareOpenAiRelease({ mode: 'LATEST' }), f.service.prepareOpenAiRelease({ mode: 'LATEST' })])
+      expect(fetch).not.toHaveBeenCalled()
+      expect(first.id).toBe(second.id)
+      expect(first.artifactHash).toBe(second.artifactHash)
+      expect(first.status).toBe('READY_TO_UPLOAD')
+      expect(first.snapshot.map(skill => skill.name)).toEqual(['global-skill'])
+      const entries = readZipEntries(readFileSync(first.artifactPath!))
+      expect(entries.find(entry => entry.path.endsWith('/references/guide.md'))?.data.toString()).toBe('sealed guide')
+      const statement = JSON.parse(readFileSync(join(first.artifactPath!, '..', 'statement.intoto.json'), 'utf8'))
+      expect(statement._type).toBe('https://in-toto.io/Statement/v1')
+      expect(statement.subject[0].digest.sha256).toBe(first.artifactHash)
+      expect(statement.predicate.git.confirmation).toBe('UNVERIFIED')
+      expect(statement.predicate.signed).toBe(false)
+      expect(sha256(createDeterministicZip(entries))).toBe(first.artifactHash)
+      const executor = (f.service.openAiPublication as any).executor
+      const run = executor.run.bind(executor)
+      let started!: () => void, resume!: () => void
+      const startedPromise = new Promise<void>(resolve => { started = resolve })
+      const barrier = new Promise<void>(resolve => { resume = resolve })
+      vi.spyOn(executor, 'run').mockImplementation(async (task: any) => { started(); await barrier; return run(task) })
+      await f.service.update({ skillId: f.global.id, expectedVersion: 3, package: { skillMd: skillMd('global-skill', 'sealed v3'), artifacts: {} }, origin: 'UI' })
+      const building = f.service.prepareOpenAiRelease({ mode: 'LATEST' })
+      await startedPromise
+      await f.service.update({ skillId: f.global.id, expectedVersion: 4, package: { skillMd: skillMd('global-skill', 'newer v4'), artifacts: {} }, origin: 'UI' })
+      resume()
+      const stale = await building
+      expect(stale.status).toBe('STALE')
+      const sealed = readZipEntries(readFileSync(stale.artifactPath!))
+      expect(sealed.find(entry => entry.path.endsWith('/global-skill/SKILL.md'))?.data.toString()).toContain('sealed v3')
+      expect(stale.artifactHash).not.toBe(first.artifactHash)
+      expect(f.service.get(f.global.id).current.package.skillMd).toContain('newer v4')
+    } finally { await f.service.close() }
+  }, 120000)
   it('hydrates persisted identity, flags and upload state across restart while remote verification fails independently', async () => {
     const f = await gitFixture()
     let reopened: AcademyService | undefined
@@ -409,7 +454,7 @@ describe('Academy Git-pinned plugin publication', () => {
 describe('Academy OpenAI plugin publication', () => {
   it('bootstraps the existing identity and creates a complete validated deterministic ZIP from canonical GLOBAL ACTIVE Skills', async () => {
     const { root, service } = await fixture()
-    const release = service.prepareOpenAiRelease()
+    const release = await service.prepareOpenAiRelease()
     expect(release).toMatchObject({ pluginVersion: '0.1.4', status: 'READY_TO_UPLOAD', baseline: false })
     expect(release.snapshot.map((entry) => entry.name)).toEqual(['global-skill'])
     expect(release.artifactPath).toContain(join('academy', 'openai-plugin', 'releases'))
@@ -444,7 +489,7 @@ describe('Academy OpenAI plugin publication', () => {
     const skill = await service.create({ package: { skillMd: skillMd('worktree-execution'), artifacts }, scope: 'GLOBAL', origin: 'UI' })
     const canonical = service.get(skill.id)
     try {
-      const release = service.prepareOpenAiRelease()
+      const release = await service.prepareOpenAiRelease()
       expect(release.status).toBe('READY_TO_UPLOAD')
       const entries = readZipEntries(readFileSync(release.artifactPath!))
       for (const [path, content] of Object.entries(artifacts)) {
@@ -478,11 +523,11 @@ describe('Academy OpenAI plugin publication', () => {
 
   it('marks prepared releases stale, rejects stale confirmation, and records exact manual upload without claiming verification', async () => {
     const { service, global } = await fixture()
-    const prepared = service.prepareOpenAiRelease()
+    const prepared = await service.prepareOpenAiRelease()
     await service.update({ skillId: global.id, expectedVersion: global.currentVersion, package: { skillMd: skillMd('global-skill', 'v2'), artifacts: { 'references/guide.md': 'guide' } }, origin: 'UI' })
     expect(service.getOpenAiRelease(prepared.id).status).toBe('STALE')
     expect(() => service.confirmOpenAiUpload(prepared.id, prepared.artifactHash!)).toThrow('OPENAI_RELEASE_NOT_CONFIRMABLE')
-    const current = service.prepareOpenAiRelease()
+    const current = await service.prepareOpenAiRelease()
     expect(current.pluginVersion).toBe('0.1.5')
     expect(() => service.confirmOpenAiUpload(current.id, '0'.repeat(64))).toThrow('OPENAI_RELEASE_HASH_MISMATCH')
     const confirmed = service.confirmOpenAiUpload(current.id, current.artifactHash!)
@@ -495,26 +540,26 @@ describe('Academy OpenAI plugin publication', () => {
   it('blocks removal and rename until replacement semantics are proven', async () => {
     const { service, global, root } = await fixture()
     await service.setEnabled(global.id, false, global.stateRevision)
-    const blockedRemoval = service.prepareOpenAiRelease()
+    const blockedRemoval = await service.prepareOpenAiRelease()
     expect(blockedRemoval).toMatchObject({ status: 'BLOCKED', blockedReason: 'DESTRUCTIVE_DELTA_UNKNOWN', artifactPath: null })
     expect(blockedRemoval.delta.removed.map((item) => item.name)).toEqual(['global-skill'])
     expect(blockedRemoval.snapshot).toEqual([])
     expect(readFileSync(join(root, 'installed/academy-skills/skills/global-skill/SKILL.md'), 'utf8')).toBe(global.current.package.skillMd)
     expect(service.getOpenAiPublicationState().latestUploaded?.status).not.toBe('VERIFIED')
     service.openAiPublication.recordDeletionSemantics('PROVEN_REPLACE', 'Disposable plugin removal probe passed.')
-    const allowed = service.prepareOpenAiRelease()
+    const allowed = await service.prepareOpenAiRelease()
     expect(allowed.status).toBe('READY_TO_UPLOAD')
     expect(allowed.pluginVersion).toBe('0.2.0')
     expect(readZipEntries(readFileSync(allowed.artifactPath!)).some(entry => entry.path.includes('/skills/global-skill/'))).toBe(false)
     await service.update({ skillId: global.id, expectedVersion: 1, package: { ...global.current.package, skillMd: skillMd(global.name, 'private latest') }, origin: 'UI' })
-    expect(service.prepareOpenAiRelease().snapshot).toEqual([])
+    expect((await service.prepareOpenAiRelease()).snapshot).toEqual([])
     await service.setEnabled(global.id, true, 2)
-    expect(service.prepareOpenAiRelease().snapshot).toMatchObject([{ skillId: global.id, academyVersion: 2 }])
+    expect((await service.prepareOpenAiRelease()).snapshot).toMatchObject([{ skillId: global.id, academyVersion: 2 }])
     service.close()
 
     const renamedFixture = await fixture()
     await renamedFixture.service.update({ skillId: renamedFixture.global.id, expectedVersion: 1, package: { skillMd: skillMd('renamed-skill'), artifacts: { 'references/guide.md': 'guide' } }, origin: 'UI' })
-    const blockedRename = renamedFixture.service.prepareOpenAiRelease()
+    const blockedRename = await renamedFixture.service.prepareOpenAiRelease()
     expect(blockedRename.status).toBe('BLOCKED')
     expect(blockedRename.delta.renamed).toHaveLength(1)
     renamedFixture.service.close()
@@ -523,7 +568,7 @@ describe('Academy OpenAI plugin publication', () => {
   it('allows non-destructive additions while deletion semantics remain unknown', async () => {
     const { service } = await fixture()
     await service.create({ package: { skillMd: skillMd('added-skill'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
-    const release = service.prepareOpenAiRelease()
+    const release = await service.prepareOpenAiRelease()
     expect(release).toMatchObject({ pluginVersion: '0.2.0', status: 'READY_TO_UPLOAD' })
     expect(release.delta.added.map((item) => item.name)).toEqual(['added-skill'])
     service.close()
@@ -549,7 +594,7 @@ describe('Academy OpenAI plugin publication', () => {
   it.each(['mcp.json', '.app.json', '.codex-plugin/plugin.json', 'scripts/run.cjs', 'node_modules/a/index.js', 'skills/global-skill/node_modules/a/index.js', 'skills/global-skill/.codex-plugin/plugin.json', 'skills/unknown/scripts/run.cjs', 'skills/global-skill/../escape.txt', 'skills/global-skill/skill.md'])('rejects unauthorized or invalid path %s', async (path) => {
     const { service } = await fixture()
     try {
-      const release = service.prepareOpenAiRelease()
+      const release = await service.prepareOpenAiRelease()
       const entries = readZipEntries(readFileSync(release.artifactPath!))
       entries.push({ path: 'academy-skills/' + path, data: Buffer.from('safe') })
       expect(() => validateOpenAiPluginPackage(entries, service.getOpenAiPublicationState().profile!, release.snapshot)).toThrow(/FORBIDDEN_COMPONENT|UNEXPECTED_FILE|INVALID_PATH/)
@@ -558,7 +603,7 @@ describe('Academy OpenAI plugin publication', () => {
 
   it('persists profile, snapshots, hashes, destructive evidence, and confirmations across reopen', async () => {
     const { root, service } = await fixture()
-    const release = service.prepareOpenAiRelease()
+    const release = await service.prepareOpenAiRelease()
     service.confirmOpenAiUpload(release.id, release.artifactHash!)
     service.openAiPublication.recordDeletionSemantics('INCONCLUSIVE', 'Probe could not distinguish overlay from replacement.')
     const databasePath = service.store.databasePath

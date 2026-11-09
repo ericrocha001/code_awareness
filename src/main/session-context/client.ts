@@ -1,5 +1,7 @@
 import { Worker } from 'node:worker_threads'
+import { existsSync } from 'node:fs'
 import type { RegistryReader } from './checkpoint-registry'
+import type { PublicationProvenancePort, PublicationAssociation } from '../../shared/types/publication-provenance-types'
 import { join } from 'node:path'
 import type { McpToolResult } from '../mcp/mcp-types'
 import type { SessionContextPort, SessionToolName } from './mcp'
@@ -23,13 +25,14 @@ export class SessionContextClient implements SessionContextPort {
   private terminal = false
   private retiring: Promise<void> = Promise.resolve()
   private serial = 0
+  private nativeOffset = 0
   private pending = new Map<number, Request>()
   private refresh?: { key: string; task: Promise<McpToolResult> }
   constructor(private readonly storageBase: string, private readonly repositoryId: string, private readonly root: string, private readonly isCurrent: () => boolean,
     private readonly workerPath = join(__dirname, 'session-context-worker.js'), private readonly resolveTarget?: SessionTargetResolver,
     private readonly timeoutMs?: number,
     private readonly authorizeAssociation?: (request: ReturnType<typeof parseSessionRefresh>) => Promise<{ sourceRevision: number; sourceHash: string }>,
-    private readonly registryReader?: RegistryReader) {}
+    private readonly registryReader?: RegistryReader, private readonly publicationPort?: PublicationProvenancePort) {}
   private active(): boolean {
     if (!this.isCurrent()) void this.dispose()
     return !this.terminal
@@ -69,7 +72,7 @@ export class SessionContextClient implements SessionContextPort {
     const worker = new Worker(this.workerPath, { workerData: { storageBase: this.storageBase, repositoryId: this.repositoryId, root: this.root, cancellation: cancellation.buffer }, resourceLimits: { maxOldGenerationSizeMb: 128 } })
     const generation = { worker, cancellation, closing: false }
     this.generation = generation
-    worker.on('message', async (message: { id: number; result?: McpToolResult; validate?: number; sourceSelection?: SessionTargetSelection; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] } }) => {
+    worker.on('message', async (message: { id: number; result?: McpToolResult; validate?: number; sourceSelection?: SessionTargetSelection; phase?: string; registryRead?: { token: number; request: Parameters<RegistryReader>[0] }; publication?: { token: number; action: 'read' | 'associate' | 'invalidate'; receiptId?: string; association?: PublicationAssociation; invocationId?: string; state?: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS' } }) => {
       if (generation !== this.generation || generation.closing) return
       const request = this.pending.get(message.id)
       if (!request || request.generation !== generation) return
@@ -77,6 +80,17 @@ export class SessionContextClient implements SessionContextPort {
       if (Date.now() >= request.deadline) { this.expire(message.id); return }
       if (message.phase) {
         if (/^[a-z-]{1,40}$/.test(message.phase)) request.phase = message.phase
+        return
+      }
+      if (message.publication) {
+        let result: unknown, code: string | undefined
+        try {
+          if (!this.publicationPort) throw new Error('PUBLICATION_PORT_UNAVAILABLE')
+          const p = message.publication
+          result = p.action === 'read' ? await this.publicationPort.readReceipt(p.receiptId!) : p.action === 'associate' ? await this.publicationPort.associate(p.association!) : await this.publicationPort.invalidate(p.invocationId!, p.state!)
+        } catch { code = 'PUBLICATION_PORT_UNAVAILABLE' }
+        if (generation !== this.generation || generation.closing || !this.pending.has(message.id) || !this.active() || Date.now() >= request.deadline) return
+        worker.postMessage({ publicationResult: message.publication.token, result, code })
         return
       }
       if (message.registryRead) {
@@ -132,7 +146,10 @@ export class SessionContextClient implements SessionContextPort {
     }
     return this.retiring
   }
-  private dispatch(name: SessionToolName, args: unknown): Promise<McpToolResult> {
+  reconcileProjection(): Promise<McpToolResult> {
+    return this.active() ? this.dispatch('reconcile_checkpoint_registry', {}, { captureNative: false }) : Promise.resolve(failure('PROJECT_CONTEXT_CHANGED'))
+  }
+  private dispatch(name: SessionToolName, args: unknown, options: { captureNative?: boolean } = {}): Promise<McpToolResult> {
     if (this.pending.size >= 16) return Promise.resolve(failure('BACKPRESSURE'))
     const id = ++this.serial
     return new Promise<McpToolResult>(resolve => {
@@ -146,6 +163,14 @@ export class SessionContextClient implements SessionContextPort {
           if (!this.pending.has(id) || !this.active()) return
           let target
           let liveTargets
+          let nativeTargets
+          if (options.captureNative !== false && this.resolveTarget?.discover && ['reconcile_checkpoint_registry','list_agent_sessions','inspect_capture_health'].includes(name) && !(args && typeof args === 'object' && 'cursor' in args && args.cursor)) {
+            request.phase = 'native-target-resolution'
+            const available = (await this.resolveTarget.discover()).filter(target => existsSync(join(target.root, '.code-awareness/native-hooks/binding.json')))
+            const start = this.nativeOffset % Math.max(1, available.length)
+            nativeTargets = [...available.slice(start), ...available.slice(0, start)].slice(0, 8)
+            this.nativeOffset = (start + nativeTargets.length) % Math.max(1, available.length)
+          }
           if (name === 'inspect_capture_health') {
             const query = parseCaptureHealth(args)
             if (query.worktreeId && this.resolveTarget) {
@@ -211,7 +236,7 @@ export class SessionContextClient implements SessionContextPort {
           if (Date.now() >= deadline) { this.expire(id); return }
           request.phase = 'worker-dispatch'
           request.generation = this.generation ?? this.createGeneration()
-          request.generation.worker.postMessage({ id, name, args, deadline, ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
+          request.generation.worker.postMessage({ id, name, args, deadline, ...(nativeTargets ? { nativeTargets } : {}), ...(liveTargets ? { liveTargets } : {}), ...(target ? { target: { root: target.root, fingerprint: target.fingerprint, selection: target.selection } } : {}) })
         } catch (error) {
           this.finish(id, failure(error instanceof Error && /^[A-Z_]+$/.test(error.message) ? error.message : 'SESSION_CONTEXT_UNAVAILABLE'))
         }

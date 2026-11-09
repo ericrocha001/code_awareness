@@ -14,8 +14,10 @@ describe('domain-neutral local host', () => {
   async function setup() {
     profile = mkdtempSync(join(tmpdir(), 'local-host-'))
     host = new LocalChannelHost([{ domain: 'probe', operations: {
+      diagnostic: operation(input => object(input, []), () => { throw Object.assign(new Error('private-token'), { code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation: 'snapshot', token: 'private-token' }) }),
       echo: operation(input => object(input, ['value']), input => input),
-      large: operation(input => object(input, []), () => 'x'.repeat(LOCAL_MAX_BYTES * 2))
+      large: operation(input => object(input, []), () => 'x'.repeat(LOCAL_MAX_BYTES * 2)),
+      semantic: operation(input => object(input, ['field']), input => { throw Object.assign(new Error('private-secret'), { code: 'MISSING_SEMANTIC_FIELD', field: input.field }) })
     } }], profile)
     await host.start()
     const descriptor = JSON.parse(readFileSync(join(profile, 'local-agent-channel/endpoint.json'), 'utf8'))
@@ -29,6 +31,9 @@ describe('domain-neutral local host', () => {
   }
   it('routes only explicit registered actions and rejects schema/protocol/domain violations', async () => {
     const { request, descriptor } = await setup()
+    expect((await request({ domain: 'probe', action: 'diagnostic', args: {} })).error).toEqual({ code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation: 'snapshot' })
+    expect((await request({ domain: 'probe', action: 'semantic', args: { field: 'description' } })).error).toEqual({ code: 'MISSING_SEMANTIC_FIELD', field: 'description', guidance: 'Provide an explicit semantic description' })
+    expect((await request({ domain: 'probe', action: 'semantic', args: { field: 'private-secret' } })).error).toEqual({ code: 'MISSING_SEMANTIC_FIELD' })
     expect((await request({ domain: 'channel', action: 'status', args: {} })).result).toEqual({ available: true, domains: ['probe'] })
     expect((await request({ domain: 'channel', action: 'mcp_endpoint', args: {} })).result).toEqual({ status: 'UNAVAILABLE', reason: 'MCP_DISCOVERY_UNAVAILABLE' })
     expect((await request({ domain: 'channel', action: 'mcp_endpoint', args: { token: 'untrusted' } })).error.code).toBe('INVALID_ARGUMENT')

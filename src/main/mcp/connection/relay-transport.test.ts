@@ -38,7 +38,7 @@ async function fixture(acceptCredential = true, answerHeartbeat = true, requestT
   })
   const localEndpoint = `http://127.0.0.1:${(local.address() as { port: number }).port}/mcp`
   const endpoint = `http://127.0.0.1:${(gateway.address() as { port: number }).port}/mcp`
-  const transport = new RelayTransport(endpoint, { getId: () => newInstallationId(), getCredential: () => 'a'.repeat(43) }, 50, requestTimeoutMs, trace)
+  const transport = new RelayTransport(endpoint, { getId: () => newInstallationId(), getCredential: () => 'a'.repeat(43) }, 50, requestTimeoutMs, trace, () => ({ 'x-code-awareness-binding': 'host-issued-binding' }))
   return {
     transport, endpoint, localEndpoint, messages, localHeaders,
     send: (message: RelayMessage) => client.send(JSON.stringify(message)), connectionId,
@@ -62,6 +62,7 @@ describe('outbound RelayTransport', () => {
       await vi.waitFor(() => expect(f.messages.some(m => m.type === 'result')).toBe(true))
       const result = f.messages.find(m => m.type === 'result')!
       expect(result.type === 'result' && result.response.body).toBe(body)
+      expect(f.localHeaders[0]['x-code-awareness-binding']).toBe('host-issued-binding')
     } finally { await f.close() }
   })
 

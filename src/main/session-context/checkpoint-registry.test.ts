@@ -18,6 +18,14 @@ import { SessionContextClient } from './client'
 import { GitHubApiClient } from '../github/github-api-client'
 import { handoffSessionCoverage } from './handoff'
 import { GitHubIntegrationService } from '../github/github-integration-service'
+import { nativeObservationBatch } from './native-hook-ingestion'
+import { correlateNativeGit } from './native-git-correlation'
+import { recordNativeGap, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
+import { startCaptureFixture } from './fixtures/native-capture-fixture'
+import { fixture as continuumFixture, markdown } from '../continuum/continuum-test-fixtures'
+import { SessionProjectionCoordinator } from './projection-coordinator'
+import type { SessionTargetResolver } from './target'
+import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const f of cleanup.reverse()) f(); cleanup.length = 0 })
@@ -33,6 +41,177 @@ function fixture(withLegacy = false) {
   return { base, path, store: () => store, restart: () => { store.close(); store = new SessionStore(path, 'repo') } }
 }
 const commit = 'e9343e7998b877682604bb772a7ecb31bb8b81e5', checkpoint = '01M6EGW7096RMXJE1VPD76NDSQ'
+it('F2 projects an Artifact readable by the real Continuum service through the initial registry inventory', async () => {
+  const f = fixture(), continuum = continuumFixture('repo'), source = sources(f, false)
+  cleanup.push(continuum.close)
+  const receipt = continuum.service.publish(markdown('Projection'))
+  expect(continuum.service.get(receipt.artifactId)?.revision).toBe(1)
+  const read = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => continuum.service, ledger: source.ledger,
+    github: source.github as any, networkAllowed: () => false, assertCurrent: () => {} })
+  const batches = await read({ cursors: {} })
+  expect(batches.find(batch => batch.source === 'CONTINUUM')?.status).toBe('COMPLETE')
+  expect(batches.some(batch => batch.source === 'CONTINUUM:' + receipt.artifactId + ':1')).toBe(true)
+  f.store().registry.applyAll(batches, () => {})
+  continuum.service.update(receipt.artifactId, 1, markdown('Updated'))
+  f.store().registry.applyAll(await read({ selector: { kind: 'ARTIFACT', id: receipt.artifactId }, cursors: f.store().registry.cursors() }), () => {})
+  expect(f.store().registry.map({ kind: 'ARTIFACT', id: receipt.artifactId }).edges.some(edge => edge.to.id === receipt.artifactId + ':1' && edge.state === 'SUPERSEDED')).toBe(true)
+  expect(f.store().registry.source('CONTINUUM_CURRENT:' + receipt.artifactId)?.revision.startsWith('2:')).toBe(true)
+  const unavailable = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => null, ledger: source.ledger,
+    github: source.github as any, networkAllowed: () => false, assertCurrent: () => {} })
+  f.store().registry.applyAll(await unavailable({ cursors: f.store().registry.cursors() }), () => {})
+  expect(f.store().registry.contextGraph({ kind: 'ARTIFACT', id: receipt.artifactId }).edges.filter(edge => edge.source === 'CONTINUUM').every(edge => edge.state === 'STALE')).toBe(true)
+  expect(f.store().registry.source('CONTINUUM_CURRENT:' + receipt.artifactId)?.revision.startsWith('2:')).toBe(true)
+})
+it('F2 distinguishes stale inventory cursors from failed readback and retains the known projection', async () => {
+  const f = fixture(), continuum = continuumFixture('repo'), source = sources(f, false)
+  cleanup.push(continuum.close)
+  const receipt = continuum.service.publish(markdown('Cursor'))
+  const read = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => continuum.service, ledger: source.ledger,
+    github: source.github as any, networkAllowed: () => false, assertCurrent: () => {} })
+  const stale = await read({ cursors: { CONTINUUM: JSON.stringify({ after: '2020-01-01T00:00:00.000Z', cursor: 'obsolete' }) } })
+  expect(stale.find(batch => batch.source === 'CONTINUUM')?.status).toBe('PARTIAL')
+  expect(JSON.parse(stale.find(batch => batch.source === 'CONTINUUM:DIAGNOSTIC')!.cursor!)).toMatchObject({ reasonCode: 'CURSOR_STALE' })
+  const malformed = await read({ cursors: { CONTINUUM: 'null' } })
+  expect(JSON.parse(malformed.find(batch => batch.source === 'CONTINUUM:DIAGNOSTIC')!.cursor!)).toEqual({ reasonCode: 'CURSOR_STALE', stage: 'INVENTORY_CURSOR' })
+  f.store().registry.applyAll(stale, () => {})
+  f.restart()
+  f.store().registry.applyAll(await read({ cursors: f.store().registry.cursors() }), () => {})
+  expect(f.store().registry.source('CONTINUUM_CURRENT:' + receipt.artifactId)).toBeDefined()
+  const failure = vi.spyOn(continuum.service, 'provenanceSnapshot').mockImplementation(() => { throw new Error('PRIVATE_READBACK_FAILURE') })
+  const failed = await read({ cursors: {} })
+  expect(JSON.parse(failed.find(batch => batch.source === 'CONTINUUM:DIAGNOSTIC')!.cursor!)).toEqual({ reasonCode: 'PROJECTION_ERROR', stage: 'ARTIFACT_READBACK' })
+  expect(JSON.stringify(failed)).not.toContain('PRIVATE_READBACK_FAILURE')
+  f.store().registry.applyAll(failed, () => {})
+  expect(f.store().registry.source('CONTINUUM_CURRENT:' + receipt.artifactId)).toBeDefined()
+  failure.mockRestore()
+})
+it('F2 leaves unauthorized PR work pending while converging local sources without network', async () => {
+  const f = fixture(), continuum = continuumFixture('repo'), source = sources(f, false)
+  cleanup.push(continuum.close)
+  const receipt = continuum.service.publish(markdown('Pending', 'pullRequest: 101\n').replace('kind: DECISION', 'kind: IMPLEMENTATION_HANDOFF'))
+  const read = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => continuum.service, ledger: source.ledger,
+    github: source.github as any, networkAllowed: () => false, assertCurrent: () => {} })
+  const result = await reconcileRegistry(f.store(), absent, f.base, undefined, () => {}, read)
+  expect(result).toMatchObject({ backlog: { pending: true, drainable: false, blockedSources: ['GITHUB'] } })
+  expect(source.github.getPullRequest).not.toHaveBeenCalled()
+  expect(f.store().registry.source('CONTINUUM_CURRENT:' + receipt.artifactId)).toBeDefined()
+  expect(f.store().registry.contextGraph({ kind: 'PR', id: '101' }).edges.some(edge => edge.confidenceClass === 'VERIFIED_CAUSAL')).toBe(false)
+  let allowed = true
+  source.github.getPullRequest.mockImplementation(async () => { allowed = false; return { pullRequest: { head: { sha: 'd'.repeat(40) } } } })
+  const revoked = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => continuum.service, ledger: source.ledger,
+    github: source.github as any, networkAllowed: () => allowed, assertCurrent: () => {} })
+  const batches = await revoked({ selector: { kind: 'PR', id: '101' }, cursors: f.store().registry.cursors() })
+  expect(source.github.pullRequestCommits).not.toHaveBeenCalled()
+  expect(batches.find(batch => batch.source === 'GITHUB')?.status).toBe('NETWORK_NOT_AUTHORIZED')
+})
+it('F2 drains more than one quota of Artifacts, PRs, commits and proofs across edits and restart', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const f = fixture(), continuum = continuumFixture('repo'), source = sources(f, false)
+  cleanup.push(continuum.close)
+  const artifacts = Array.from({ length: 27 }, (_, index) => continuum.service.publish(markdown('Item' + index, 'pullRequest: ' + (100 + index % 4) + '\n').replace('kind: DECISION', 'kind: IMPLEMENTATION_HANDOFF')))
+  const proofs = Array.from({ length: 23 }, (_, index) => source.ledger.recordProof({ kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED',
+    startedAt: '2026-11-03T22:00:00Z', finishedAt: '2026-11-03T22:00:01Z', durationMs: 1000, scope: ['fixture'], summary: 'fixture', evidenceFor: [artifacts[0].artifactId], deduplicationKey: String(index) }))
+  const commits = Array.from({ length: 12 }, (_, index) => (index + 1).toString(16).padStart(40, '0'))
+  let remoteChanged = false
+  const github = { commitPullRequests: vi.fn(async () => []), getPullRequest: vi.fn(async (_root: string, number: number) => ({ pullRequest: { head: { sha: (remoteChanged && number === 100 ? 'e' : 'd').repeat(40) } } })),
+    pullRequestCommits: vi.fn(async (_root: string, number: number) => ({ repositoryId: 'repo', commits: [...commits.slice((number - 100) * 3, (number - 99) * 3), ...(remoteChanged && number === 100 ? ['f'.repeat(40)] : [])].map(sha => ({ sha })), nextPage: null })) }
+  const readSource = registrySources({ repositoryId: 'repo', root: f.base, continuum: () => continuum.service, ledger: source.ledger, github: github as any, networkAllowed: () => true, assertCurrent: () => {} })
+  let rounds = 0
+  const errors: string[] = []
+  const coordinator = new SessionProjectionCoordinator(async () => {
+    try {
+    const result = await reconcileRegistry(f.store(), absent, f.base, undefined, () => {}, async request => {
+      const batches = await readSource(request)
+      if (rounds === 0) await Promise.all([0, 1].map(index => Promise.resolve(continuum.service.update(artifacts[index].artifactId, 1,
+        markdown('Edited' + index, 'pullRequest: ' + (100 + index % 4) + '\n').replace('kind: DECISION', 'kind: IMPLEMENTATION_HANDOFF')))))
+      return batches
+    })
+    if (++rounds === 1) f.restart()
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] }
+    } catch (error) { errors.push(error instanceof Error ? error.message : 'UNKNOWN'); throw error }
+  }, () => true)
+  const unsubscribe = continuum.service.onChanged(coordinator.request)
+  try {
+    coordinator.request(); await vi.runAllTimersAsync()
+    expect(errors).toEqual([])
+    expect(rounds).toBeGreaterThan(2); expect(rounds).toBeLessThan(15)
+    for (const artifact of artifacts) expect(f.store().registry.source('CONTINUUM_CURRENT:' + artifact.artifactId)).toBeDefined()
+    for (const artifact of artifacts.slice(0, 2)) expect(f.store().registry.source('CONTINUUM_CURRENT:' + artifact.artifactId)?.revision.startsWith('2:')).toBe(true)
+    for (const sha of commits) expect(f.store().registry.source('GIT:' + sha)).toBeDefined()
+    for (const number of [100, 101, 102, 103]) expect(f.store().registry.source('GITHUB:PR:' + number)?.status).toBe('COMPLETE')
+    for (const proof of proofs) expect(f.store().registry.source('LEDGER:' + proof.proofId)).toBeDefined()
+    expect(f.store().registry.reconciliationBacklog()).toMatchObject({ pending: false, drainable: false })
+    const before = f.store().registry.contextGraph({ kind: 'ARTIFACT', id: artifacts[0].artifactId }).edges.map(edge => edge.id).sort()
+    await reconcileRegistry(f.store(), absent, f.base, undefined, () => {}, readSource)
+    expect(f.store().registry.contextGraph({ kind: 'ARTIFACT', id: artifacts[0].artifactId }).edges.map(edge => edge.id).sort()).toEqual(before)
+    remoteChanged = true
+    coordinator.request(); await vi.runAllTimersAsync()
+    expect(f.store().registry.source('GITHUB:PR:100')?.revision).toBe('e'.repeat(40))
+    expect(f.store().registry.source('GIT:' + 'f'.repeat(40))).toBeDefined()
+  } finally { coordinator.stop(); unsubscribe(); vi.useRealTimers() }
+}, 20000)
+it('F2 serves depth one through the Channel and worker without target fanout and reports the blocked source phase', async () => {
+  const f = fixture(), workerPath = join(f.base, 'worker.cjs')
+  const code = buildSync({ entryPoints: ['src/main/session-context/worker.ts'], bundle: true, platform: 'node', format: 'cjs', packages: 'external', write: false }).outputFiles[0].text
+  writeFileSync(workerPath, `require = require('node:module').createRequire(${JSON.stringify(join(process.cwd(), 'package.json'))});\n` + code)
+  const resolve: SessionTargetResolver = async () => { throw new Error('TARGET_MUST_NOT_RESOLVE') }
+  resolve.discover = vi.fn(async () => { throw new Error('INVENTORY_MUST_NOT_RUN') })
+  let entered!: () => void, release!: (batches: RegistryBatch[]) => void
+  const waiting = new Promise<void>(ready => { entered = ready })
+  const read = vi.fn(() => { entered(); return new Promise<RegistryBatch[]>(ready => { release = ready }) })
+  f.store().registry.apply({ repositoryId: 'repo', source: 'FIXTURE', revision: '1', status: 'COMPLETE', edges: [{ from: { kind: 'COMMIT', id: commit }, to: { kind: 'PR', id: '90' },
+    relation: 'member-of', evidenceKind: 'GITHUB_COMMIT_LIST', evidenceRef: 'fixture', digest: digest('fixture'), freshness: 'OBSERVED_SNAPSHOT' }] }, undefined)
+  const client = new SessionContextClient(f.base, 'repo', f.base, () => true, workerPath, resolve, 5000, undefined, read)
+  const adapter = new ChannelMcpAdapter({ projectId: 'repo', repoRoot: f.base, navigation: {} as any, sessionContext: client })
+  try {
+    const result = await adapter.callTool('discover_execution_context', { selector: { type: 'PR', id: '90' }, depth: 1 })
+    expect(result.isError).toBeFalsy()
+    expect(JSON.parse((result.content[0] as { text: string }).text).discovery.depth).toBe(1)
+    expect(resolve.discover).not.toHaveBeenCalled(); expect(read).not.toHaveBeenCalled()
+    const blocked = client.reconcileProjection()
+    await waiting
+    const timeout = await blocked
+    expect(JSON.parse((timeout.content[0] as { text: string }).text)).toEqual({ code: 'SESSION_CONTEXT_TIMEOUT', phase: 'registry-source-read' })
+    release([batch('late')])
+    await new Promise<void>(ready => setImmediate(ready))
+    expect(f.store().registry.source('CONTINUUM:handoff')).toBeUndefined()
+    expect(resolve.discover).not.toHaveBeenCalled()
+  } finally { await client.dispose() }
+}, 20000)
+it('requires matching native invocation, fresh Git receipt and exact object before causal promotion', async () => {
+  const f = fixture(), registry = f.store().registry
+  const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'repo', worktreeId: '1'.repeat(64), generation: '2'.repeat(64), root: f.base, commonDirectory: f.base, directoryIdentity: '3'.repeat(64), spool: f.base }
+  const invocationId = '4'.repeat(64), fingerprint = '5'.repeat(64), parent = '6'.repeat(40), sessionId = '7'.repeat(64)
+  const stamp = startCaptureFixture(registry, binding, sessionId)
+  const observe = (event: 'PreToolUse' | 'PostToolUse', replayed = false) => {
+    const envelope: NativeHookEnvelope = { schema: 1, source: 'CODEX_NATIVE_HOOK', repositoryId: 'repo', worktreeId: binding.worktreeId, generation: binding.generation,
+      sessionId, event, invocationId, observedAt: new Date().toISOString(), eventId: digest(event + replayed), digest: digest('payload' + event + replayed),
+      git: { operationId: 'commit-proof', fingerprint, expectedHead: parent, ...(event === 'PostToolUse' ? { sha: commit, parent, replayed } : {}) } }
+    const batch = nativeObservationBatch(stamp(envelope)); registry.apply(batch, undefined)
+  }
+  let receiptFingerprint = fingerprint
+  const git = { readOperationReceipt: async () => ({ sha: '8'.repeat(40), receipt: { operationId: 'commit-proof', operation: 'commit_git_changes', argumentFingerprint: receiptFingerprint,
+    status: 'COMPLETED' as const, createdAt: new Date().toISOString(), result: { content: [{ type: 'text' as const, text: JSON.stringify({ sha: commit, parent }) }] } } }),
+    getCommitOperationObjects: async () => [{ sha: commit, parents: [parent], title: 'not persisted' }] }
+  observe('PostToolUse')
+  expect(await correlateNativeGit(registry, binding, invocationId, git, () => {})).toBe('INVOCATION_INCOMPLETE')
+  observe('PreToolUse')
+  expect(await correlateNativeGit(registry, binding, invocationId, git, () => {})).toBe('VERIFIED')
+  const first = registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL')
+  expect(first).toHaveLength(2)
+  f.restart()
+  expect(await correlateNativeGit(f.store().registry, binding, invocationId, git, () => {})).toBe('VERIFIED')
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL')).toHaveLength(2)
+  receiptFingerprint = '0'.repeat(64)
+  expect(await correlateNativeGit(f.store().registry, binding, invocationId, git, () => {})).toBe('RECEIPT_UNVERIFIED')
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL').every(edge => edge.state === 'CONFLICT')).toBe(true)
+  const otherBinding = { ...binding, worktreeId: '9'.repeat(64) }
+  expect(await correlateNativeGit(f.store().registry, otherBinding, invocationId, git, () => {})).toBe('INVOCATION_AMBIGUOUS')
+  receiptFingerprint = fingerprint
+  recordNativeGap(binding.spool, 'SPOOL_FULL')
+  expect(await correlateNativeGit(f.store().registry, binding, invocationId, git, () => {})).toBe('CAPTURE_PARTIAL')
+  expect(f.store().registry.map({ kind: 'COMMIT', id: commit }).edges.filter(edge => edge.evidenceKind === 'NATIVE_GIT_CAUSAL').every(edge => edge.state !== 'VERIFIED')).toBe(true)
+})
 const runner: CommandRunner = async (_exe, args) => {
   const text = args.includes('log') ? 'Subject\nEntire-Checkpoint: ' + checkpoint : args.includes('rev-parse') ? 'a'.repeat(40) : args.some(a => a.endsWith(':metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, cli_version: '0.12.2', sessions: [{}, {}] }) : args.some(a => a.endsWith(':0/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'codex', session_id: 'session-one' }) : args.some(a => a.endsWith(':1/metadata.json')) ? JSON.stringify({ checkpoint_id: checkpoint, agent: 'antigravity', session_id: 'session-two' }) : ''
   return { text, code: 0, limited: false }
@@ -105,7 +284,7 @@ function sources(f: ReturnType<typeof fixture>, allowed = true) {
     handoff: { artifactId: 'handoff', revision: 1, contentHash: digest('handoff'), metadata: { kind: 'IMPLEMENTATION_HANDOFF', pullRequest: 90, relations: [{ artifactId: 'plan', kind: 'implements' }] }, updatedAt: now },
     plan: { artifactId: 'plan', revision: 1, contentHash: digest('plan'), metadata: { kind: 'EXECUTABLE_PLAN' }, updatedAt: now }
   }
-  const continuum = { get: (id: string) => artifacts[id] ?? null, list: () => ({ artifacts: Object.values(artifacts) }) }
+  const continuum = { assertRepository: () => {}, get: (id: string) => artifacts[id] ?? null, provenanceSnapshot: (id: string, revision?: number) => artifacts[id] && (revision === undefined || artifacts[id].revision === revision) ? artifacts[id] : null, list: () => ({ artifacts: Object.values(artifacts) }) }
   const github = { commitPullRequests: vi.fn(async () => [90]), getPullRequest: vi.fn(async () => ({ pullRequest: { head: { sha: 'd'.repeat(40) } } })), pullRequestCommits: vi.fn(async () => ({ repositoryId: 'repo', commits: [{ sha: commit }], nextPage: null })) }
   const read = registrySources({ repositoryId: 'repo', root: '/fixture', continuum: () => continuum as any, ledger, github: github as any, networkAllowed: () => allowed, assertCurrent: () => {} })
   return { ledger, read, github, artifacts }
@@ -115,7 +294,7 @@ it('automatically composes PR → real member → checkpoint → two sessions an
   source.ledger.recordProof({ kind: 'TARGETED_TEST', producer: 'IMPLEMENTER', status: 'PASSED', startedAt: '2026-11-03T22:00:00Z', finishedAt: '2026-11-03T22:00:01Z', durationMs: 1000, scope: ['fixture'], summary: 'fixture', evidenceFor: ['plan'] })
   const map = await reconcileRegistry(f.store(), runner, '/fixture', { kind: 'PR', id: '90' }, () => {}, source.read) as any
   expect(map.edges.some((e: any) => e.to.kind === 'PROOF' && e.freshness === 'UNVERIFIABLE')).toBe(true)
-  expect(map.edges.some((e: any) => e.from.id === 'handoff' && e.evidenceKind === 'HANDOFF_DECLARED')).toBe(true)
+  expect(map.edges.some((e: any) => e.from.id === 'handoff:1' && e.evidenceKind === 'HANDOFF_DECLARED')).toBe(true)
   expect(map.edges.filter((e: any) => e.to.kind === 'SESSION')).toHaveLength(2)
   expect(map.edges.some((e: any) => e.from.kind === 'COMMIT' && e.from.id === 'd'.repeat(40))).toBe(false)
   f.restart()
@@ -188,7 +367,7 @@ it('advances durable Ledger cursors and excludes a foreign checkout even when it
   const second = await source.ledger.projectionPage(first.cursor)
   expect(second.proofs).toHaveLength(2)
   expect(second.more).toBe(false)
-  const batches = await source.read({ selector: { kind: 'ARTIFACT', id: 'plan' }, cursors: {} })
+  const batches = await source.read({ cursors: {} })
   expect(batches.some(b => b.source === 'LEDGER:' + foreign.proofId)).toBe(false)
   expect(batches.find(b => b.source === 'LEDGER')?.status).toBe('PARTIAL')
 })
@@ -219,7 +398,7 @@ it('requests automatic reconciliation for a Handoff without sessionLinks without
 })
 it('rejects PR composition if the authorized GitHub origin changes during the read', async () => {
   let remote = 'https://github.com/owner/repo.git'
-  const api = { getPullRequestCatalogRecord: async () => ({ head: { sha: commit }, base: { repository: 'owner/repo' }, updatedAt: 'stable' }), getPullRequestCommits: async () => { remote = 'https://github.com/other/repo.git'; return { commits: [{ sha: commit }], nextPage: null } } }
+  const api = { getPullRequestCatalogRecord: async () => ({ id: '90', head: { sha: commit, repositoryId: 'remote', repository: 'owner/repo' }, base: { repositoryId: 'remote', repository: 'owner/repo' }, updatedAt: 'stable' }), getPullRequestCommits: async () => { remote = 'https://github.com/other/repo.git'; return { commits: [{ sha: commit }], nextPage: null } } }
   const service = new GitHubIntegrationService({ clientId: 'fixture', appSlug: 'fixture' }, {} as any, { hasCredentials: () => true } as any, api as any, { findByPath: () => ({ id: 'repo' }) } as any, { getRemoteUrl: async () => remote } as any, {} as any)
   await expect(service.pullRequestCommits('/fixture', 90, commit)).rejects.toThrow('REMOTE_CONTEXT_CHANGED')
 })

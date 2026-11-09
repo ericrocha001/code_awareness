@@ -28,13 +28,15 @@ export class RelayTransport implements ConnectionTransportPort {
   private readonly pending = new Map<RequestId, Promise<void>>()
   private readonly outcomes = new Map<RequestId, { tool: string }>()
   private readonly listeners = new Set<(state: TransportState) => void>()
+  private agentHeaders: Record<string, string> = {}
 
   constructor(
     private readonly endpoint: string,
     private readonly identity: RelayIdentity,
     private readonly heartbeatMs = 30_000,
     private readonly requestTimeoutMs = 25_000,
-    private readonly trace?: ChannelTraceSink
+    private readonly trace?: ChannelTraceSink,
+    private readonly bindingHeaders?: () => Record<string, string>
   ) {}
 
   getState(): TransportState { return { ...this.state } }
@@ -46,6 +48,7 @@ export class RelayTransport implements ConnectionTransportPort {
   start(localEndpoint: string, _configuration: ConnectionConfiguration, signal: AbortSignal): Promise<{ externalEndpoint: string }> {
     if (this.starting) return this.starting
     if (this.socket) return Promise.reject(new ConnectionError('RELAY_BUSY'))
+    this.agentHeaders = { ...this.bindingHeaders?.() }
     const operation = this.launch(localEndpoint, signal)
     this.starting = operation
     void operation.finally(() => { if (this.starting === operation) this.starting = null }).catch(() => {})
@@ -173,6 +176,7 @@ export class RelayTransport implements ConnectionTransportPort {
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
+          ...this.agentHeaders,
           'content-type': 'application/json',
           'x-code-awareness-request-id': message.requestId,
           'x-code-awareness-session-id': message.connectionId

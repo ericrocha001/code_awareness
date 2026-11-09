@@ -18,6 +18,9 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:create', (_event, input: Omit<AcademyCreateInput, 'origin'>) => service.saveNewSkill({ ...input, origin: 'UI' }))
   ipcMain.handle('academy:update', (_event, input: Omit<AcademyUpdateInput, 'origin'>) => service.saveSkill({ ...input, origin: 'UI' }))
   ipcMain.handle('academy:git-draft', (_event, name: string) => service.gitSync?.getDraft(name))
+  ipcMain.handle('academy:local-cutover', (_event, confirmed: boolean) => service.gitSync?.completeLocalCutover(confirmed))
+  ipcMain.handle('academy:approve-public', (_event, id: string, version: number, confirmed: boolean) => service.approvePublicSkill(id, version, confirmed))
+  ipcMain.handle('academy:delete-global', (_event, id: string, version: number, confirmed: boolean) => service.deleteGlobalSkill(id, version, confirmed))
   ipcMain.handle('academy:git-publish', (_event, expected: { localHead: string; remoteHead: string | null }) => {
     if (!expected || !/^[a-f0-9]{40,64}$/.test(expected.localHead) || !expected.remoteHead || !/^[a-f0-9]{40,64}$/.test(expected.remoteHead)) throw new Error('PUBLICATION_REVIEW_REQUIRED')
     return service.gitSync?.publish(expected)

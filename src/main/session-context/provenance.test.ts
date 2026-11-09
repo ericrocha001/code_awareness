@@ -17,6 +17,30 @@ const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
 const data = (result: McpToolResult) => JSON.parse(result.content[0].text)
 
+
+function provenanceHistoryFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'provenance-history-'))
+  cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+  const git = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
+  git('init', '-q')
+  git('config', 'user.name', 'Fixture')
+  git('config', 'user.email', 'fixture@example.invalid')
+  git('config', 'commit.gpgsign', 'false')
+  git('config', 'core.hooksPath', join(root, '.disabled-hooks'))
+  mkdirSync(join(root, 'docs'))
+  const file = 'docs/session-context.md', checkpointId = '01FIXTURE0000000000000001'
+  const initial = Array.from({ length: 38 }, (_, i) => 'baseline ' + i + '\n').join('')
+  writeFileSync(join(root, file), initial)
+  git('add', file); git('commit', '-qm', 'baseline without checkpoint')
+  const baseline = git('rev-parse', 'HEAD')
+  writeFileSync(join(root, file), initial + Array.from({ length: 7 }, (_, i) => 'checkpoint ' + i + '\n').join(''))
+  git('add', file); git('commit', '-qm', 'checkpoint change\n\nEntire-Checkpoint: ' + checkpointId)
+  const commit = git('rev-parse', 'HEAD')
+  createGitCheckpointFixture(root, checkpointId, { cli_version: '0.12.2', checkpoint_id: checkpointId, sessions: [{ prompt: '/0/prompt.txt' }, { prompt: '/1/prompt.txt' }] },
+    [0, 1].map(index => ({ metadataJsonText: JSON.stringify({ session_id: 'fixture-' + index, agent: 'Codex', files_touched: [file] }), promptText: 'PRIVATE_SELECTED_PROMPT_' + index })))
+  return { root, checkpointId, commit, baseline }
+}
+
 describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
   it('parses incremental git blame and reorders blocks correctly', () => {
     const rawBlame = [
@@ -66,7 +90,7 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
   })
 
   it('runs MAP on real repository file, returning compact segments on positive and negative lines', async () => {
-    const root = process.cwd()
+    const { root, checkpointId, commit } = provenanceHistoryFixture()
     const base = mkdtempSync(join(tmpdir(), 'provenance-test-'))
     cleanup.push(() => rmSync(base, { force: true, recursive: true }))
     const store = new SessionStore(sessionStorePath(base, 'A'), 'A')
@@ -116,18 +140,18 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
       range: { startLine: 39, endLine: 45 },
       coverage: 'COMPLETE'
     })
-    const segment = mapPositive.segments.find((s: any) => s.checkpointId === '01M6EGW7096RMXJE1VPD76NDSQ')
+    const segment = mapPositive.segments.find((s: any) => s.checkpointId === checkpointId)
     expect(segment).toBeDefined()
     expect(segment.status).toBe('checkpoint')
-    expect(segment.commit).toBe('e9343e7998b877682604bb772a7ecb31bb8b81e5')
+    expect(segment.commit).toBe(commit)
 
     const rawStr = JSON.stringify(mapPositive)
     expect(rawStr).not.toContain('O Entire instala os hooks')
     expect(rawStr).not.toContain('PRIVATE_')
-  })
+  }, 30000)
 
   it('runs DETAIL on real commit with verified trailer and identifies candidate sessions with fileMatch', async () => {
-    const root = process.cwd()
+    const { root, checkpointId } = provenanceHistoryFixture()
     const base = mkdtempSync(join(tmpdir(), 'provenance-detail-'))
     cleanup.push(() => rmSync(base, { force: true, recursive: true }))
     const store = new SessionStore(sessionStorePath(base, 'A'), 'A')
@@ -150,7 +174,7 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
     expect(detailPositive).toMatchObject({
       source: 'GIT_BLAME_PROVENANCE',
       linkStrength: 'TRAILER_VERIFIED',
-      checkpointId: '01M6EGW7096RMXJE1VPD76NDSQ',
+      checkpointId,
       coverage: 'COMPLETE'
     })
     expect(detailPositive.candidates).toHaveLength(2)
@@ -191,7 +215,7 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
       checkpointId: null,
       candidates: []
     })
-  })
+  }, 30000)
 
   it('inspects checkpoint in INSPECT mode without dumping session bodies or transcripts', async () => {
     const root = process.cwd()
@@ -229,7 +253,7 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
   })
 
   it('inspects checkpoint via commit SHA resolution', async () => {
-    const root = process.cwd()
+    const { root, checkpointId, commit, baseline } = provenanceHistoryFixture()
     const base = mkdtempSync(join(tmpdir(), 'checkpoint-commit-'))
     cleanup.push(() => rmSync(base, { force: true, recursive: true }))
     const store = new SessionStore(sessionStorePath(base, 'A'), 'A')
@@ -239,7 +263,7 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
       store,
       { refresh: async () => ({}) },
       'inspect_entire_checkpoint',
-      { commit: 'e9343e7998b877682604bb772a7ecb31bb8b81e5', mode: 'INSPECT' },
+      { commit, mode: 'INSPECT' },
       () => {},
       undefined,
       [],
@@ -249,14 +273,14 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
 
     expect(resCommit.isError).toBeFalsy()
     const commitData = data(resCommit)
-    expect(commitData.checkpointId).toBe('01M6EGW7096RMXJE1VPD76NDSQ')
+    expect(commitData.checkpointId).toBe(checkpointId)
     expect(commitData.linkSource).toBe('TRAILER_VERIFIED')
 
     const resNegativeCommit = await executeSessionTool(
       store,
       { refresh: async () => ({}) },
       'inspect_entire_checkpoint',
-      { commit: 'a88fced139c3688b8020c48132fe5997594281d6', mode: 'INSPECT' },
+      { commit: baseline, mode: 'INSPECT' },
       () => {},
       undefined,
       [],
@@ -265,7 +289,7 @@ describe('Unit A — Code Provenance and Checkpoint Disambiguation', () => {
     )
     expect(resNegativeCommit.isError).toBe(true)
     expect(data(resNegativeCommit).code).toBe('CHECKPOINT_NOT_FOUND')
-  })
+  }, 30000)
 
   it('disambiguates sessions and tests fileMatch and opt-in prompt preview', async () => {
     const root = process.cwd()
@@ -954,7 +978,7 @@ describe('Units C1, C2, C3 Addendum Contracts', () => {
     const resPage2Altered = await runCall('inspect_entire_checkpoint', { checkpointId: cpId, mode: 'READ_FIELD', sessionIndex: 0, field: 'STORED_PROMPT', cursor })
     expect(resPage2Altered.isError).toBe(true)
     expect(data(resPage2Altered).code).toBe('CURSOR_STALE')
-  })
+  }, 30000)
 
   it('C2: validates cursor constraints: worktree mismatch, invalid offset, and stale offset', async () => {
     const tempRepo = mkdtempSync(join(tmpdir(), 'c2-constraints-'))
@@ -1049,7 +1073,7 @@ describe('Units C1, C2, C3 Addendum Contracts', () => {
   }, { timeout: 60000 })
 
   it('C3: validates MCP tool registration, budgets, and read-only annotations without client catalog drift', () => {
-    expect(SESSION_CONTEXT_TOOLS).toHaveLength(10)
+    expect(SESSION_CONTEXT_TOOLS).toHaveLength(11)
     expect(SESSION_RESPONSE_BUDGETS.inspect_code_provenance).toBe(12288)
     expect(SESSION_RESPONSE_BUDGETS.inspect_entire_checkpoint).toBe(16384)
 

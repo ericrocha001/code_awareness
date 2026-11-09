@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { executeListArtifacts, executeGetArtifact, executePublishArtifact, executeUpdateArtifact, executeArtifactNavigation, LIST_ARTIFACTS_TOOL, PUBLISH_ARTIFACT_TOOL, UPDATE_ARTIFACT_TOOL, INSPECT_ARTIFACT_STRUCTURE_TOOL } from './continuum-mcp'
-import { fixture, markdown } from './continuum-test-fixtures'
+import { fixture, markdown, withFixtureDatabase } from './continuum-test-fixtures'
+import { ArtifactStore, computeContentHash } from './artifact-store'
+import { parseArtifactMarkdown } from './artifact-metadata'
+import { ContinuumService } from './continuum-service'
 import type { McpToolResult } from '../mcp/channel-mcp-adapter'
 import * as tokenizer from '../core/tokenizer'
 const cleanup: (() => void)[] = []
@@ -8,6 +11,56 @@ afterEach(() => { vi.restoreAllMocks(); for (const close of cleanup) close(); cl
 function data(result: McpToolResult) { expect(result.isError).not.toBe(true); return JSON.parse(result.content[0].text) }
 describe('Repository Continuum MCP contracts', () => {
   function setup() { const f = fixture(); cleanup.push(f.close); return f }
+  it('publishes every textual kind economically and persists revision-scoped service provenance across CAS and restart', () => {
+    const { service, path } = setup()
+    const kinds = ['EXECUTABLE_PLAN', 'IMPLEMENTATION_HANDOFF', 'VALIDATION_PROOF', 'WORK_ITEM', 'ARCHITECTURAL_DECISION', 'CAPABILITY_OPPORTUNITY', 'INVESTIGATION', 'OBSERVATION', 'FEATURE_IDEA', 'DOCUMENT', 'FUTURE_KIND']
+    const rawMarkdown = '# Metadados automáticos\r\n\r\nPublica conteúdo literal com identidade e integridade verificáveis.\r\n\r\n## Resultado\r\n${literal} $(command)\r\n'
+    for (const kind of kinds) {
+      const receipt = data(executePublishArtifact(service, { rawMarkdown, kind }))
+      const artifact = service.get(receipt.artifactId)!
+      expect(artifact.metadata).toEqual({ name: 'Metadados automáticos', description: 'Publica conteúdo literal com identidade e integridade verificáveis.', kind, ...(['EXECUTABLE_PLAN', 'WORK_ITEM'].includes(kind) ? { status: 'PENDING' } : {}) })
+      expect(parseArtifactMarkdown(artifact.rawMarkdown).body).toBe(rawMarkdown)
+      expect(artifact.contentHash).toBe(computeContentHash(artifact.rawMarkdown))
+      expect(artifact.provenance).toEqual({ publication: { schemaVersion: 1, publisher: 'CONTINUUM_SERVICE', repositoryId: 'catalog-A', sessionEvidence: 'UNAVAILABLE' } })
+      expect(receipt.updatedAt).toBe(artifact.createdAt)
+      const updated = data(executeUpdateArtifact(service, { artifactId: receipt.artifactId, expectedRevision: 1, rawMarkdown: 'New literal body.\r\n' }))
+      expect(updated.revision).toBe(2)
+      const next = service.get(receipt.artifactId)!
+      expect(next.metadata).toEqual(artifact.metadata)
+      expect(next.createdAt).toBe(artifact.createdAt)
+      expect(next.updatedAt > artifact.updatedAt).toBe(true)
+      expect(next.provenance).toEqual(artifact.provenance)
+      expect(next.contentHash).toBe(computeContentHash(next.rawMarkdown))
+      expect(executeUpdateArtifact(service, { artifactId: receipt.artifactId, expectedRevision: 1, rawMarkdown: 'Stale body.' }).isError).toBe(true)
+      const reopened = new ArtifactStore(path, 'catalog-A')
+      try { expect(new ContinuumService(reopened).get(receipt.artifactId)).toEqual(next) } finally { reopened.close() }
+      withFixtureDatabase(path, db => {
+        const snapshots = db.prepare('SELECT snapshot_json FROM artifact_revisions WHERE artifact_id = ? ORDER BY revision').all(receipt.artifactId) as { snapshot_json: string }[]
+        expect(snapshots.map(row => JSON.parse(row.snapshot_json))).toEqual([artifact, next].map(({ lifecycle: _lifecycle, operationalActivity: _activity, ...snapshot }) => snapshot))
+      })
+    }
+    expect(service.list({ limit: 100 }).artifacts).toHaveLength(kinds.length)
+    expect(executePublishArtifact(service, { rawMarkdown, kind: 'VISUAL_REFERENCE' }).content[0].text).toContain('RESERVED_VISUAL_METADATA')
+    expect(executePublishArtifact(service, { rawMarkdown }).content[0].text).toContain('MISSING_SEMANTIC_FIELD: kind')
+    const inactiveStore = new ArtifactStore(path, 'catalog-A')
+    const inactive = new ContinuumService(inactiveStore, undefined, () => false)
+    try { expect(() => inactive.publish(rawMarkdown, { kind: 'DOCUMENT' })).toThrow('REPOSITORY_CONTEXT_CHANGED') } finally { inactiveStore.close() }
+  })
+  it('preserves authored tags, declared graph edges and dates during economic updates and rolls back invalid relations', () => {
+    const { service, store } = setup()
+    store.saveTag({ slug: 'canonical', name: 'Canonical' }, true)
+    const target = service.publish(markdown('Target'))
+    const raw = markdown('Tagged', `date: 2020-01-01\ntags: [canonical]\nrelations:\n  - artifactId: ${target.artifactId}\n    kind: implements\n`)
+    const source = service.publishHuman(raw, true)
+    const before = service.get(source.artifactId)!
+    service.update(source.artifactId, 1, 'Changed literal context.')
+    const after = service.get(source.artifactId)!
+    expect(after.metadata).toEqual(before.metadata)
+    expect(service.list({ tag: 'canonical' }).artifacts.map(item => item.artifactId)).toEqual([source.artifactId])
+    expect(service.graph({ artifactIds: [source.artifactId], expand: true }).edges).toMatchObject([{ sourceId: source.artifactId, targetId: target.artifactId, kind: 'implements', nature: 'DECLARED', sourceRevision: 2 }])
+    expect(() => service.update(source.artifactId, 2, after.rawMarkdown.replace(target.artifactId, 'missing'))).toThrow('INVALID_RELATION')
+    expect(service.get(source.artifactId)).toEqual(after)
+  })
   it('estimates only the transmitted JSON and selected literal Markdown, deterministically and on demand', () => {
     const { service } = setup()
     const rawMarkdown = markdown('Ação 日本語 🚀', '', '# Português\r\n"aspas" e \\caminho\n\n```ts\n${literal}\n```')
@@ -92,7 +145,7 @@ describe('Repository Continuum MCP contracts', () => {
   it('publishes open kinds with compact receipts, reads deliberately and updates stable identity with optimistic concurrency', () => {
     const { service } = setup()
     const receipt = data(executePublishArtifact(service, { rawMarkdown: markdown('Local', 'status: BLOCKED\n') }))
-    expect(Object.keys(receipt).sort()).toEqual(['artifactId', 'revision', 'success', 'updatedAt'])
+    expect(Object.keys(receipt).sort()).toEqual(['artifactId', 'publicationReceipt', 'replayed', 'revision', 'success', 'updatedAt'])
     const original = data(executeGetArtifact(service, { artifactId: receipt.artifactId }))
     expect(original.revision).toBe(1); expect(original.rawMarkdown).toBe(markdown('Local', 'status: BLOCKED\n'))
     expect(original).not.toHaveProperty('provenance'); expect(original).not.toHaveProperty('contentHash')

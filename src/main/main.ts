@@ -5,6 +5,7 @@
 import { app, BrowserWindow, dialog, Menu, nativeTheme, shell, safeStorage, powerMonitor } from 'electron'
 import { existsSync, mkdirSync, realpathSync } from 'fs'
 import { join, resolve } from 'path'
+import { ChannelUsage } from './mcp/channel-usage'
 import { pathToFileURL } from 'node:url'
 import { registerFileHandlers } from './ipc/file-handler'
 import { registerSettingsHandlers } from './ipc/settings-handler'
@@ -44,6 +45,7 @@ import { McpLifecycle } from './mcp/mcp-lifecycle'
 import { SessionContextClient } from './session-context/client'
 import { sessionTargetResolver } from './session-context/target'
 import { registrySources } from './session-context/registry-sources'
+import { SessionProjectionCoordinator } from './session-context/projection-coordinator'
 import { registerApplicationShutdown } from './application-shutdown'
 import { ConnectionLifecycle } from './mcp/connection/connection-lifecycle'
 import { NgrokTransport } from './mcp/connection/ngrok-transport'
@@ -158,7 +160,12 @@ const validationLedger = new ValidationLedger(
 )
 const continuumSession = new RepositoryContinuumSession(join(app.getPath('userData'), 'continuum'), {
   findByPath: path => repositoryCatalog?.findByPath(path) ?? null
-}, { ingestCheckout: !isRuntimePreview() })
+}, { ingestCheckout: !isRuntimePreview(), lifecycle: {
+  activity: (repositoryId, artifactId) => activeValidationExecution?.lifecycleActivity(repositoryId, artifactId) ?? { state: 'UNKNOWN', source: 'NO_ACTIVE_OPERATION_OBSERVED' },
+  proof: id => validationLedger.getProofWithFreshness(id),
+  proofsFor: id => validationLedger.listProofs({ requirementId: id, limit: 10 }),
+  approve: async review => (await import('./continuum/lifecycle-approval.js')).approveLifecycleInDesktop(review)
+} })
 const academyService = new AcademyService(desktopProfilePaths(app.getPath('userData')).academyPath, app.getPath('downloads'))
 const sessionMemoryCentral = new SessionMemoryCentralService(app.getPath('userData'))
 const localAgentChannel = new LocalChannelHost(
@@ -192,6 +199,7 @@ const traceSink = {
 }
 const mcpLifecycle = new McpLifecycle({
   disabled: isRuntimePreview(),
+  usage: isRuntimePreview() ? undefined : new ChannelUsage(join(app.getPath('userData'), 'channel-usage', 'usage.sqlite')),
   activity: channelActivity,
   trace: traceSink,
   systemHealth,
@@ -209,7 +217,8 @@ const selectedTransport = new SelectedTransport(
       new InstallationIdentityService(installPath, safeStorage),
       30_000,
       25_000,
-      traceSink
+      traceSink,
+      () => mcpLifecycle.getAgentBindingHeaders()
     )
   }
 )
@@ -600,26 +609,33 @@ app.whenReady().then(async () => {
         continuum: () => continuumSession.getActiveSession()?.repositoryId === gitRepositoryId ? continuumSession.getActiveService() : null,
         ledger: validationLedger, github: githubIntegration,
         networkAllowed: () => settingsService.loadSettings().gitManagement?.automaticFetch !== false,
-        assertCurrent: () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') } }))
+        assertCurrent: () => { if (!sessionIsCurrent()) throw new Error('PROJECT_CONTEXT_CHANGED') } }), {
+        readReceipt: async receiptId => {
+          if (!sessionIsCurrent() || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('PROJECT_CONTEXT_CHANGED')
+          return continuumSession.getActiveService()!.readPublicationReceipt(receiptId)
+        },
+        associate: async association => {
+          if (!sessionIsCurrent() || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('PROJECT_CONTEXT_CHANGED')
+          return continuumSession.getActiveService()!.associatePublication(association)
+        },
+        invalidate: async (invocationId, state) => {
+          if (!sessionIsCurrent() || continuumSession.getActiveSession()?.repositoryId !== gitRepositoryId) throw new Error('PROJECT_CONTEXT_CHANGED')
+          continuumSession.getActiveService()!.invalidatePublication(invocationId, state)
+        }
+      })
     if (activeSessionContext) {
       const sessionContext = activeSessionContext
+      void sessionContext.call('list_agent_sessions', { source: 'NATIVE_HOOK', limit: 1 }).catch(() => {})
       gitOperations.bindCommitObservation(async (target, commitSha) => {
         await sessionContext.call('inspect_capture_health', { ...target, commitSha, trigger: 'LOCAL_COMMIT' })
-        return sessionContext.call('reconcile_checkpoint_registry', { commitSha })
+        const result = await sessionContext.call('reconcile_checkpoint_registry', { commitSha })
+        projection.request()
+        return result
       })
       void sessionContext.call('inspect_capture_health', { trigger: 'BEGIN' })
-      let projecting = false
-      let projectionRequested = false
-      const reconcile = () => {
-        if (!sessionIsCurrent()) return
-        if (projecting) { projectionRequested = true; return }
-        projecting = true
-        void sessionContext.call('reconcile_checkpoint_registry', {}).finally(() => {
-          projecting = false
-          if (projectionRequested) { projectionRequested = false; queueMicrotask(reconcile) }
-        })
-      }
-      sessionProjectionSubscriptions = [continuumSession.onChanged(reconcile), validationLedger.onRecorded(reconcile)]
+      const projection = new SessionProjectionCoordinator(() => sessionContext.reconcileProjection(), sessionIsCurrent)
+      sessionProjectionSubscriptions = [projection.stop, continuumSession.onChanged(projection.request), validationLedger.onRecorded(projection.request), settingsService.onChanged(projection.request)]
+      projection.request()
     }
     if (gitRepositoryId) gitOperations.bindAtlasPersistence(async common => {
       const { GitAtlasSqliteCache } = await import('./git-operations/git-atlas-sqlite-cache.js')
@@ -826,13 +842,15 @@ registerApplicationShutdown(app, async () => {
     console.error('[Main] Erro ao fechar conexões de banco:', error)
   }
   try {
+    for (const unsubscribe of sessionProjectionSubscriptions) unsubscribe()
+    sessionProjectionSubscriptions = []
+    await activeSessionContext?.dispose()
     validationLedger.close()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Validation Ledger:', error)
   }
   try {
     localAgentChannel.dispose()
-    activeSessionContext?.dispose()
     continuumSession.dispose()
   } catch (error: any) {
     console.error('[Main] Erro ao fechar Continuum Session:', error)

@@ -76,7 +76,7 @@ describe('MCP HTTP server', () => {
     expect(initialized.response.status).toBe(200)
     expect(initialized.body.result.protocolVersion).toBe('2025-06-18')
     expect(listed.body.result.tools.map((tool: { name: string }) => tool.name)).toEqual([
-      'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health', 'get_runtime_identity'
+      'discover_repository', 'get_relationships', 'inspect_files', 'get_references', 'get_symbol_dependencies', 'get_symbol_hierarchy', 'read_code', 'get_system_health', 'get_runtime_identity', 'get_channel_usage'
     ])
     for (const tool of listed.body.result.tools) {
       expect(tool.securitySchemes).toEqual([{ type: 'oauth2', scopes: [] }])

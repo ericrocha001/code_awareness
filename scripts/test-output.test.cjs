@@ -149,3 +149,42 @@ test('direct Vitest invocation without summaries remains unknown', async () => {
   assert.equal(receipt.state, 'UNKNOWN')
   assert.equal(receipt.validation.state, 'UNKNOWN')
 })
+
+function diagnosticRunner(connection) {
+  const { createRequire } = require('node:module'), { runInNewContext } = require('node:vm')
+  const filename = path.join(__dirname, 'test-output.cjs'), localRequire = createRequire(filename), module = { exports: {} }
+  const mockedRequire = name => name === './local-agent/validation.cjs' ? { validationConnection: connection } : localRequire(name)
+  runInNewContext(fs.readFileSync(filename, 'utf8'), { module, exports: module.exports, require: mockedRequire, __dirname, process, Buffer, setTimeout, clearTimeout, console }, { filename })
+  return module.exports
+}
+
+test('receipt and compact output retain discovery and register diagnostics without retry or secrets', async () => {
+  const association = { kind: 'TARGETED_TEST', scope: ['fixture'], evidenceFor: ['plan-fixture'] }
+  for (const diagnostic of [
+    { code: 'APP_UNAVAILABLE', stage: 'descriptor', reason: 'DESCRIPTOR_NOT_FOUND' },
+    { code: 'APP_UNAVAILABLE', stage: 'connect', reason: 'ACCESS_DENIED' },
+    { code: 'IPC_TIMEOUT', stage: 'connect', reason: 'TIMEOUT', operation: 'status' },
+    { code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation: 'status' },
+    { code: 'WORKTREE_UNLINKED', stage: 'worktree', reason: 'IDENTITY_UNAVAILABLE', operation: 'worktree' }
+  ]) {
+    let attempts = 0
+    const api = diagnosticRunner(async () => { attempts++; throw Object.assign(new Error('private-pipe private-token'), diagnostic, { endpoint: 'private-pipe', token: 'private-token' }) })
+    const receipt = await api.run(process.execPath, ['-e', ''], { association })
+    assert.equal(receipt.state, 'PASS'); assert.equal(attempts, 1)
+    const summary = JSON.parse(api.project(receipt))
+    assert.deepEqual(summary.registration.diagnostic, diagnostic)
+    assert.equal(JSON.stringify(receipt).includes('private-token'), false)
+    assert.ok(Buffer.byteLength(api.project(receipt)) <= limits.success)
+  }
+  for (const code of ['IPC_TIMEOUT', 'REGISTRATION_REJECTED']) {
+    let attempts = 0, snapshots = 0
+    const api = diagnosticRunner(async () => ({ identity: { repositoryId: 'fixture' }, snapshot: async () => { if (++snapshots === 1) throw Object.assign(new Error(), { code: 'IPC_TIMEOUT', stage: 'response', reason: 'TIMEOUT', operation: 'snapshot' }); return {} },
+      register: async id => { attempts++; assert.match(id, /^[a-f0-9-]{36}$/); throw Object.assign(new Error('private-token'), { code, stage: 'response', reason: code === 'IPC_TIMEOUT' ? 'TIMEOUT' : 'SERVER_REJECTED', operation: 'register' }) } }))
+    const receipt = await api.run(process.execPath, ['-e', ''], { association })
+    const summary = JSON.parse(api.project(receipt))
+    assert.equal(summary.registration.reason, code); assert.equal(summary.registration.diagnostic.operation, 'register')
+    assert.equal(summary.ledgerDiagnostics[0].operation, 'snapshot'); assert.equal(attempts, 1)
+    assert.equal(JSON.stringify(receipt).includes('private-token'), false)
+    assert.equal(fs.existsSync(path.join(receipt.directory, 'receipt.json')), true)
+  }
+})

@@ -1,9 +1,13 @@
 import { CONTINUUM_AGENT_TOOLS, executeContinuumAgent, supportsContinuumAgent } from '../continuum/continuum-agent'
+import { executeAgentUpdateArtifact } from '../continuum/continuum-mcp'
+import { assertArtifactAgent } from '../continuum/agent-authority'
 import { ASSESS_EXECUTION_CLOSURE_TOOL, executeAssessExecutionClosure, type ClosureContext } from './execution-closure'
 import { createHash, randomUUID } from 'node:crypto'
 import { INSPECT_PULL_REQUEST_MERGEABILITY_TOOL, executeInspectPullRequestMergeability } from '../github/github-mergeability-mcp'
 import { GITHUB_PR_TOOLS, executeGitHubPrTool } from '../github/github-pr-mcp'
 import { ChannelActivityMonitor } from './channel-activity-monitor'
+import { GET_CHANNEL_USAGE_TOOL, executeGetChannelUsage } from './channel-usage-mcp'
+import type { ChannelUsagePort } from './channel-usage-types'
 import type { ChannelTraceEvent } from '../../shared/types/channel-types'
 import { McpWorkloadGovernor } from './mcp-workload-governor'
 import type { GitOperationsService } from '../git-operations/git-operations-service'
@@ -77,6 +81,21 @@ function stableDescriptor(value: unknown): unknown {
 export class ChannelMcpAdapter {
   private governor = new McpWorkloadGovernor()
   private activity = new ChannelActivityMonitor()
+  private usage?: ChannelUsagePort
+  private repositoryId: string | null = null
+  private catalogSignature?: string
+  private readonly owners = new Map<string, string | undefined>()
+
+  setUsage(usage: ChannelUsagePort): void {
+    this.usage = usage
+    this.catalogSignature = undefined
+    this.listTools()
+  }
+
+  stopUsage(): void {
+    try { this.usage?.catalog({ at: Date.now(), repositoryId: this.repositoryId, tools: [] }) } catch {}
+    this.usage = undefined
+  }
 
   setActivityMonitor(activity: ChannelActivityMonitor): void { this.activity = activity }
   getActivityState() { return this.activity.getState() }
@@ -139,6 +158,7 @@ export class ChannelMcpAdapter {
   ) {
     if ('navigation' in navigation && 'projectId' in navigation) {
       const context = navigation as McpProjectContext
+      this.repositoryId = context.continuum?.repositoryId ?? null
       this.navigation = context.navigation
       this.systemHealth = repoPathOrHealth as SystemHealthCore | undefined
       this.runtimeIdentity = (systemHealthOrIdentity as RuntimeIdentityProvider | undefined) ?? this.systemHealth?.getRuntimeIdentityProvider()
@@ -195,6 +215,7 @@ export class ChannelMcpAdapter {
       ...CODE_NAVIGATION_MCP_TOOLS.filter(tool => tool.name !== 'inspect_worktree_structure' || !!this.navigation.inspectWorktreeStructure),
       SYSTEM_HEALTH_MCP_TOOL,
       RUNTIME_IDENTITY_MCP_TOOL,
+      GET_CHANNEL_USAGE_TOOL,
     ]
     if (this.validationLedger) {
       tools.push(
@@ -227,6 +248,13 @@ export class ChannelMcpAdapter {
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     if (this.cliExecution) tools.push(...CLI_EXECUTION_TOOLS)
     if (this.sessionMemoryCentral && this.projectId) tools.push(...BUILDX_SMC_TOOLS)
+    if (this.usage) {
+      const inventory = tools.map(tool => ({ name: tool.name, capability: this.capabilityForTool(tool.name) ?? 'unclassified', instrumental: tool.name === GET_CHANNEL_USAGE_TOOL.name })).sort((a, b) => a.name < b.name ? -1 : 1)
+      const signature = JSON.stringify(inventory)
+      if (signature !== this.catalogSignature) {
+        try { this.usage.catalog({ at: Date.now(), repositoryId: this.repositoryId, tools: inventory }); this.catalogSignature = signature } catch {}
+      }
+    }
     return tools.map(tool => literalReadTools.has(tool.name) ? { ...tool, outputSchema: literalReadOutputSchema } : tool)
   }
 
@@ -240,20 +268,30 @@ export class ChannelMcpAdapter {
     return hasher.digest('hex')
   }
 
-  async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+  async callTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
     const requestId = invocationContext?.requestId ?? randomUUID()
     const startedAt = performance.now()
     const channelCapability = this.capabilityForTool(name)
-    const record = (status: ChannelTraceEvent['status'], error?: string) => this.activity.record({
-      timestamp: new Date().toISOString(), requestId, sessionId: invocationContext?.sessionId ?? 'local',
-      method: 'tools/call', tool: channelCapability ? name : 'unknown', channelCapability,
-      stage: status === 'started' ? 'channel-request-started' : 'channel-request-completed',
-      status, durationMs: performance.now() - startedAt, ...(error ? { error } : {})
-    })
+    const usage = this.usage
+    const repositoryId = ['Channel', 'System Health', 'Runtime Identity/Restart', 'Academy'].includes(channelCapability ?? '') ? null : this.repositoryId
+    let completed = false
+    const record = (status: ChannelTraceEvent['status'], error?: string) => {
+      if (status !== 'started' && !completed) {
+        completed = true
+        try { usage?.complete({ name: name.replace(/[^a-zA-Z0-9_.-]/g, '_').slice(0, 128), capability: channelCapability ?? 'unclassified', instrumental: name === GET_CHANNEL_USAGE_TOOL.name,
+          repositoryId, at: Date.now(), durationMs: Math.max(0, performance.now() - startedAt), status: status === 'success' ? 'success' : error === 'REQUEST_TIMEOUT' ? 'timeout' : 'error' }) } catch {}
+      }
+      this.activity.record({
+        timestamp: new Date().toISOString(), requestId, sessionId: invocationContext?.sessionId ?? 'local',
+        method: 'tools/call', tool: channelCapability ? name : 'unknown', channelCapability,
+        stage: status === 'started' ? 'channel-request-started' : 'channel-request-completed',
+        status, durationMs: performance.now() - startedAt, ...(error ? { error } : {})
+      })
+    }
     record('started')
     let result: McpToolResult
     try {
-      result = await this.governor.run(name, args, requestId, invocationContext?.deadlineAtMs, () => this.dispatchTool(name, args, invocationContext))
+      result = await this.governor.run(name, args, requestId, invocationContext?.deadlineAtMs, () => this.dispatchTool(name, args, invocationContext, authority))
     } catch (error) {
       record('error', error instanceof Error ? error.name : 'EXECUTION_FAILED')
       throw error
@@ -281,7 +319,15 @@ export class ChannelMcpAdapter {
     return result
   }
 
-  private capabilityForTool(name: string): string | undefined {
+  capabilityForTool(name: string): string | undefined {
+    if (this.owners.has(name)) return this.owners.get(name)
+    const owner = this.classifyTool(name)
+    if (this.owners.size < 2048) this.owners.set(name, owner)
+    return owner
+  }
+
+  private classifyTool(name: string): string | undefined {
+    if (name === GET_CHANNEL_USAGE_TOOL.name) return 'Channel'
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return 'CLI Execution'
     if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) return 'BuildX'
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return 'Session Context'
@@ -299,7 +345,8 @@ export class ChannelMcpAdapter {
     return undefined
   }
 
-  private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext): Promise<McpToolResult> {
+  private async dispatchTool(name: string, args: unknown, invocationContext?: import('../core/context/context-navigation-port').NavigationInvocationContext, authority?: import('../continuum/agent-authority').AgentAuthority): Promise<McpToolResult> {
+    if (name === GET_CHANNEL_USAGE_TOOL.name) return executeGetChannelUsage(this.usage, args, this.repositoryId)
     if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) {
       if (!this.sessionMemoryCentral || !this.projectId) {
         return { content: [{ type: 'text', text: JSON.stringify({ code: 'BUILDX_SMC_UNAVAILABLE', message: 'Session Memory Central is not available for active project' }) }], isError: true }
@@ -366,7 +413,7 @@ export class ChannelMcpAdapter {
 
     if (CONTINUUM_AGENT_TOOLS.some(tool => tool.name === name)) {
       if (!supportsContinuumAgent(this.continuum)) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE' }], isError: true }
-      try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args)) }] } }
+      try { return { content: [{ type: 'text', text: JSON.stringify(await executeContinuumAgent(this.continuum, name, args, undefined, authority)) }] } }
       catch (error) { return { content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }], isError: true } }
     }
     if (name === 'inspect_artifact_structure' || name === 'read_artifact_section') {
@@ -389,7 +436,11 @@ export class ChannelMcpAdapter {
 
     if (name === 'publish_artifact' || name === 'update_artifact') {
       if (!this.continuum) return { content: [{ type: 'text', text: 'CONTINUUM_UNAVAILABLE: repository service is not configured' }], isError: true }
-      return name === 'publish_artifact' ? executePublishArtifact(this.continuum, args) : executeUpdateArtifact(this.continuum, args)
+      if (name === 'publish_artifact') {
+        try { assertArtifactAgent(authority, this.continuum.repositoryId ?? ''); return executePublishArtifact(this.continuum, args, authority) }
+        catch (error) { return { isError: true, content: [{ type: 'text', text: error instanceof Error ? error.message : String(error) }] } }
+      }
+      return executeAgentUpdateArtifact(this.continuum, args, authority)
     }
 
     if (name === 'get_runtime_identity') {
@@ -403,7 +454,7 @@ export class ChannelMcpAdapter {
     if (name === 'get_system_health') {
       if (args && typeof args === 'object' && !Array.isArray(args) && (args as Record<string, unknown>).feature === 'session_context') {
         const { feature: _feature, refresh, ...query } = args as Record<string, unknown>
-        if (refresh !== undefined && typeof refresh !== 'boolean' || Object.keys(query).some(key => !['worktreeId', 'generation', 'cycleId', 'commitSha', 'agent'].includes(key))) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
+        if (refresh !== undefined && typeof refresh !== 'boolean' || Object.keys(query).some(key => !['worktreeId', 'generation', 'cycleId', 'commitSha', 'agent', 'inspectNativeTrust'].includes(key))) return { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'INVALID_ARGUMENT' }) }] }
         return this.sessionContext ? this.sessionContext.call('inspect_capture_health', { ...query, trigger: refresh ? 'RECHECK' : 'INSPECT' }) : { isError: true, content: [{ type: 'text', text: JSON.stringify({ code: 'SESSION_CONTEXT_UNAVAILABLE' }) }] }
       }
       const core = this.systemHealth ?? new SystemHealthCore()

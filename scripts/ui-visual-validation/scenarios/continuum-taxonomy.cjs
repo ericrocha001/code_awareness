@@ -1,0 +1,57 @@
+const { setup } = require('./continuum-runtime.cjs')
+
+exports.run = async ctx => {
+  const runtime = await setup(ctx)
+  try {
+    const service = runtime.session.getActiveService()
+    service.mutateTags({ repositoryId: 'acceptance-A', intent: 'create', tag: { slug: 'canonical', name: 'Canonical' } })
+    const markdown = (name, extra) => `---\nname: ${name}\ndescription: Canonical taxonomy acceptance\nkind: DOCUMENT\ndate: 2026-11-08\nstatus: ACTIVE\nexecutionId: execution-${name}\nworktreePath: C:/technical/${name}\n${extra}---\n# ${name}\n\nLiteral useful context ç 日本語 🚀\n`
+    const firstRaw = markdown('Principles', 'artifactRole: ARCHITECTURAL_PRINCIPLES\nlivingArtifact: true\nfeature: navigation\ntags: [canonical]\n')
+    const first = service.publishHuman(firstRaw, true)
+    service.publishHuman(markdown('Reference', 'artifactRole: REFERENCE\nlivingArtifact: false\n'))
+    service.publishHuman(markdown('Binding', '').replace('kind: DOCUMENT', 'kind: OBSERVATION').replace('status: ACTIVE', 'status: VERIFIED_AT_BINDING'))
+    const before = service.list({ limit: 100 }).artifacts.map(item => service.get(item.artifactId))
+    const available = [...service.facets().map(f => f.key), 'tags'].sort()
+    ctx.check('Real Store exposes optional semantic and technical facets', ['feature', 'executionId', 'worktreePath'].every(key => available.includes(key)))
+    ctx.check('Technical binding remains exactly queryable', service.list({ metadata: { status: 'VERIFIED_AT_BINDING', executionId: 'execution-Binding' } }).artifacts.length === 1)
+    ctx.check('Technical binding status is absent only from facets', !JSON.stringify(service.facets().find(f => f.key === 'status')).includes('VERIFIED_AT_BINDING'))
+    ctx.check('Agent exact filter preserves literal content', service.get(service.list({ metadata: { executionId: 'execution-Principles' } }).artifacts[0].artifactId).rawMarkdown === firstRaw)
+    try { service.publishHuman(markdown('Unknown', 'tags: [unknown]\n'), true); ctx.check('Unknown tag is rejected', false) } catch (error) { ctx.check('Unknown tag is rejected', error.message.includes('TAG_NOT_FOUND')) }
+    ctx.check('Unknown publication leaves catalog and documents unchanged', service.tags().length === 1 && service.list().artifacts.length === 3)
+    await runtime.open()
+    await ctx.waitFor(() => document.querySelectorAll('.continuum-item').length === 3)
+    await ctx.viewport(1440, 900)
+    ctx.check('Initial visibility does not restrict the customization catalog', await ctx.evaluate(() => [...document.querySelectorAll('.continuum-facet-groups > details > summary')].map(summary => summary.textContent).sort().join(',') === 'date,kind,status'))
+    await ctx.click('[aria-label="Personalizar filtros"]')
+    await ctx.waitFor(count => document.querySelectorAll('.continuum-facet-options label').length === count, available.length)
+    const offered = await ctx.evaluate(() => [...document.querySelectorAll('.continuum-facet-options label')].map(label => label.textContent).sort().join(','))
+    ctx.check('Every available facet is offered for customization: ' + offered, offered === available.join(','))
+    await ctx.evaluate(() => {
+      for (const label of document.querySelectorAll('.continuum-facet-options label')) {
+        if (['artifactRole', 'livingArtifact', 'feature', 'tags'].includes(label.textContent)) label.querySelector('input').click()
+      }
+    })
+    await ctx.click('[aria-label="Expandir tudo"]')
+    await ctx.evaluate(() => [...document.querySelectorAll('.continuum-facet-groups button')].find(button => button.textContent.includes('ARCHITECTURAL_PRINCIPLES')).click())
+    await ctx.waitFor(() => document.querySelectorAll('.continuum-item').length === 1)
+    await ctx.click('.continuum-item')
+    await ctx.waitFor(() => document.querySelector('.continuum-markdown h1')?.textContent === 'Principles')
+    ctx.check('Optional facet selection changes real backend results', await ctx.evaluate(() => document.querySelector('.continuum-item').textContent.includes('Principles')))
+    await ctx.click('[aria-label="Remover filtro artifactRole"]')
+    await ctx.waitFor(() => document.querySelectorAll('.continuum-item').length === 3)
+    await ctx.evaluate(() => [...document.querySelectorAll('.continuum-facet-groups button')].find(button => button.textContent.includes('navigation')).click())
+    await ctx.waitFor(() => document.querySelectorAll('.continuum-item').length === 1)
+    ctx.check('A facet outside the former whitelist filters real backend results', await ctx.evaluate(() => document.querySelector('.continuum-item').textContent.includes('Principles')))
+    await ctx.capture('available-facets-dark')
+    await ctx.evaluate(() => [...document.querySelectorAll('.continuum-facet-options label')].find(label => label.textContent === 'feature').querySelector('input').click())
+    ctx.check('Hiding an optional facet preserves its removable active criterion', await ctx.evaluate(() => document.querySelectorAll('.continuum-item').length === 1 && !!document.querySelector('[aria-label="Remover filtro feature"]')))
+    await ctx.click('[aria-label="Remover filtro feature"]')
+    await ctx.waitFor(() => document.querySelectorAll('.continuum-item').length === 3)
+    await ctx.evaluate(() => { document.body.dataset.theme = 'light' })
+    await ctx.viewport(1000, 760)
+    await ctx.overflow()
+    await ctx.capture('available-facets-light')
+    ctx.check('Browsing preserves bytes, identity, revisions and provenance', JSON.stringify(service.list({ limit: 100 }).artifacts.map(item => service.get(item.artifactId))) === JSON.stringify(before))
+    ctx.check('Exact document read remains unchanged', service.get(first.artifactId).rawMarkdown === firstRaw)
+  } finally { runtime.close() }
+}

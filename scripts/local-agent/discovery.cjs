@@ -1,3 +1,4 @@
+const { safeDiagnostic } = require('../../src/shared/local-agent-diagnostic.cjs')
 const fs = require('node:fs')
 const path = require('node:path')
 const { desktopUserData } = require('../../src/shared/desktop-profile.cjs')
@@ -40,7 +41,9 @@ function readDescriptor(profileOverride, channel, { platform = process.platform,
 }
 
 function publicError(error) {
-  return { code: error.code || 'INVALID_ARGUMENT', ...(error.stage ? { stage: error.stage } : {}), ...(error.reason ? { reason: error.reason } : {}) }
+  const semantic = error.code === 'MISSING_SEMANTIC_FIELD' && ['name', 'description', 'kind'].includes(error.field)
+    ? { field: error.field, guidance: `Provide an explicit semantic ${error.field}` } : {}
+  return { ...safeDiagnostic(error), ...semantic }
 }
 
 module.exports = { readDescriptor, unavailable, publicError }

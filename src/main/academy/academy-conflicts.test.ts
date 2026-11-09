@@ -17,7 +17,7 @@ async function fixture(run: (service: AcademyService, root: string, destinationI
     await service.waitForReconciliation()
     expect(service.store.listDestinations()[0].lastError).toBeNull()
     await run(service, root, destination.id, skill.id)
-  } finally { service.close(); rmSync(root, { recursive: true, force: true }) }
+  } finally { await service.close(); rmSync(root, { recursive: true, force: true }) }
 }
 
 describe('Academy conflict safety', () => {
@@ -172,13 +172,13 @@ describe('Academy conflict safety', () => {
       await service.registerDestination(root, 'Test')
       const skill = await service.create({ package: pkg('canonical'), scope: 'GLOBAL', origin: 'UI' })
       await service.waitForReconciliation()
-      service.close()
+      await service.close()
       rmSync(join(root, '.skills/protected'), { recursive: true })
       service = new AcademyService(join(root, 'academy.db'))
       await service.reconcileAll(); await service.reconcileAll()
       expect(service.store.listConflicts()).toHaveLength(1)
       expect(service.store.listConflicts()[0].divergentHash).toBe('DELETED')
       expect(service.history(skill.id)).toHaveLength(1)
-    } finally { service.close(); rmSync(root, { recursive: true, force: true }) }
+    } finally { await service.close(); rmSync(root, { recursive: true, force: true }) }
   })
 })

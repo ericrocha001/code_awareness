@@ -15,6 +15,8 @@ export interface ArtifactMetadata {
   [key: string]: MetadataValue | ArtifactRelation[] | undefined
 }
 export interface Artifact {
+  lifecycle?: import('./artifact-lifecycle-policy').ReturnLifecycleProjection
+  operationalActivity?: import('./artifact-lifecycle-policy').LifecycleActivity
   artifactId: string
   revision: number
   metadata: ArtifactMetadata
@@ -76,8 +78,12 @@ export interface UpdateArtifactInput {
   expectedRevision: number
   metadata: ArtifactMetadata
   rawMarkdown: string
+  provenance?: Record<string, MetadataValue>
 }
-export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string }
+export interface ArtifactSemanticFields { name?: string; description?: string; kind?: string }
+import type { PublicationReceipt } from '../../shared/types/publication-provenance-types'
+export type { PublicationReceipt } from '../../shared/types/publication-provenance-types'
+export interface ArtifactReceipt { success: true; artifactId: string; revision: number; updatedAt: string; publicationReceipt?: PublicationReceipt; replayed?: boolean }
 export interface VisualMedia {
   mimeType: 'image/webp'
   sha256: string
@@ -102,6 +108,8 @@ export interface IArtifactStructureReader {
   readSection(query: import('./artifact-structure').SectionQuery): import('./artifact-structure').SectionPage
 }
 export interface IContinuumService extends IArtifactReader {
-  publish(rawMarkdown: string): ArtifactReceipt
-  update(artifactId: string, expectedRevision: number, rawMarkdown: string): ArtifactReceipt
+  readonly repositoryId?: string
+  updateAgent?: import('./continuum-service').ContinuumService['updateAgent']
+  publish(rawMarkdown: string, fields?: ArtifactSemanticFields, authority?: import('./agent-authority').AgentAuthority): ArtifactReceipt
+  update(artifactId: string, expectedRevision: number, rawMarkdown: string, fields?: ArtifactSemanticFields): ArtifactReceipt
 }

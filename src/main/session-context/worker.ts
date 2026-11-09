@@ -5,6 +5,14 @@ import { executeSessionTool, executeLiveSessionTool, type SessionToolName } from
 import { isLiveSessionTool } from './entire-live'
 import { sourceFingerprint, type SessionTargetSelection, type LiveSessionTarget } from './target'
 import type { RegistryBatch, RegistryReader } from './checkpoint-registry'
+import { join } from 'node:path'
+import { readNativeBinding } from './native-hooks'
+import { ingestNativeHooks } from './native-hook-ingestion'
+import { correlateNativeGit } from './native-git-correlation'
+import { nativeInvocationWindow } from './native-capture-window'
+import { correlateNativeArtifact } from './native-artifact-correlation'
+import type { PublicationProvenancePort, PublicationReceipt, PublicationAssociationResult } from '../../shared/types/publication-provenance-types'
+import { GitService } from '../core/git-service'
 
 const { storageBase, repositoryId, root, cancellation } = workerData as { storageBase: string; repositoryId: string; root: string; cancellation: SharedArrayBuffer }
 const cancelled = new Int32Array(cancellation)
@@ -13,10 +21,12 @@ const assertActive = () => { if (Atomics.load(cancelled, 0)) throw new Error('PR
 const storeIdentity = { path: sessionStorePath(storageBase, repositoryId), repositoryId }
 let store: SessionStore | undefined
 let pending = 0, closing = false
+let nativeIngesting = false
 let validationId = 0
 type ResolvedTarget = { root: string; fingerprint: string; selection: SessionTargetSelection }
 const validations = new Map<number, { resolve: (target?: ResolvedTarget) => void; reject: (error: Error) => void }>()
 const registryReads = new Map<number, { resolve: (batches: RegistryBatch[]) => void; reject: (error: Error) => void }>()
+const publicationReads = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>()
 const validateTarget = (id: number, sourceSelection?: SessionTargetSelection) => new Promise<ResolvedTarget | undefined>((resolve, reject) => {
   assertActive()
   const validation = ++validationId
@@ -24,7 +34,12 @@ const validateTarget = (id: number, sourceSelection?: SessionTargetSelection) =>
   parentPort?.postMessage({ id, validate: validation, ...(sourceSelection ? { sourceSelection } : {}) })
 })
 const close = () => { if (closing && !pending) { store?.close(); parentPort?.close() } }
-parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string }) => {
+parentPort?.on('message', async (message: { id: number; name: SessionToolName; args: unknown; deadline: number; nativeTargets?: LiveSessionTarget[]; liveTargets?: LiveSessionTarget[]; target?: ResolvedTarget } | { close: true } | { validation: number; code?: string; target?: ResolvedTarget } | { registryResult: number; batches: RegistryBatch[]; code?: string } | { publicationResult: number; result?: unknown; code?: string }) => {
+  if ('publicationResult' in message) {
+    const entry = publicationReads.get(message.publicationResult); publicationReads.delete(message.publicationResult)
+    if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve(message.result)
+    return
+  }
   if ('registryResult' in message) {
     const entry = registryReads.get(message.registryResult); registryReads.delete(message.registryResult)
     if (message.code) entry?.reject(new Error(message.code)); else entry?.resolve(message.batches)
@@ -43,6 +58,8 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
     validations.clear()
     for (const entry of registryReads.values()) entry.reject(new Error('PROJECT_CONTEXT_CHANGED'))
     registryReads.clear()
+    for (const entry of publicationReads.values()) entry.reject(new Error('PROJECT_CONTEXT_CHANGED'))
+    publicationReads.clear()
     close()
     return
   }
@@ -63,7 +80,63 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
         }
       }
     }
+    parentPort?.postMessage({ id: message.id, phase: isLiveSessionTool(message.name) ? 'live-metadata' : 'store-open' })
     const requestStore = isLiveSessionTool(message.name) ? storeIdentity : (store ??= new SessionStore(storeIdentity.path, repositoryId))
+    const publication = <T>(request: object): Promise<T> => new Promise((resolve, reject) => {
+      assertRequest()
+      const token = ++validationId
+      publicationReads.set(token, { resolve: value => resolve(value as T), reject })
+      parentPort?.postMessage({ id: message.id, publication: { token, ...request } })
+    })
+    const publicationPort: PublicationProvenancePort = {
+      readReceipt: receiptId => publication<PublicationReceipt | null>({ action: 'read', receiptId }),
+      associate: association => publication<PublicationAssociationResult>({ action: 'associate', association }),
+      invalidate: (invocationId, state) => publication<void>({ action: 'invalidate', invocationId, state })
+    }
+    if (store && message.nativeTargets?.length && !nativeIngesting) {
+      parentPort?.postMessage({ id: message.id, phase: 'native-ingestion' })
+      nativeIngesting = true
+      try {
+      for (const nativeTarget of message.nativeTargets) {
+        try {
+          const binding = readNativeBinding(join(nativeTarget.root, '.code-awareness/native-hooks/binding.json'))
+          if (binding.repositoryId !== repositoryId || binding.worktreeId !== nativeTarget.worktreeId || binding.generation !== nativeTarget.generation) throw new Error('WORKTREE_STALE')
+          const observed = new Map<string, { git: boolean; artifact: boolean }>()
+          await ingestNativeHooks(store.registry, binding, async selection => {
+            const resolved = await validateTarget(message.id, selection)
+            if (!resolved) throw new Error('WORKTREE_STALE')
+            return { ...resolved, validate: async () => { await validateTarget(message.id, selection); assertRequest() } }
+          }, assertRequest, Date.now(), async event => {
+            if (event.invocationId && (event.git || event.artifact)) observed.set(event.invocationId, { git: !!event.git, artifact: !!event.artifact })
+          })
+          for (const [invocation, kinds] of observed) {
+            if (kinds.git) await correlateNativeGit(store.registry, binding, invocation, new GitService(), assertRequest)
+            if (kinds.artifact) await correlateNativeArtifact(store.registry, binding, invocation, publicationPort, assertRequest)
+          }
+          for (const kind of ['ARTIFACT', 'GIT'] as const) {
+            const scan = `NATIVE_${kind}_SCAN:${binding.worktreeId}:${binding.generation}`
+            const previous = store.registry.source(scan)
+            const candidates = store.registry.nativeCorrelationCandidates(kind, binding.worktreeId, binding.generation, previous?.cursor)
+            for (const key of candidates) {
+              const invocationId = store.registry.invocationFromKey(key)
+              if (observed.has(invocationId)) continue
+              const session = store.registry.directEvidence({ kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, `NATIVE_${kind}_REQUEST`).find(edge => edge.relation === 'PreToolUse')?.to
+              const current = session && nativeInvocationWindow(store.registry, binding, { kind: 'EXECUTION', id: 'native-invocation:' + invocationId }, session) === 'VERIFIED'
+              if (store.registry.source(`NATIVE_${kind}:` + invocationId)?.status !== 'COMPLETE' || !current) {
+                if (kind === 'ARTIFACT') await correlateNativeArtifact(store.registry, binding, invocationId, publicationPort, assertRequest)
+                else await correlateNativeGit(store.registry, binding, invocationId, new GitService(), assertRequest)
+              }
+            }
+            store.registry.apply({ repositoryId, source: scan, revision: String(Date.now()), status: candidates.length === 32 ? 'PARTIAL' : 'COMPLETE', cursor: candidates.length === 32 ? candidates.at(-1) : '', edges: [] }, previous?.revision, assertRequest)
+          }
+        } catch {
+          assertRequest()
+          const previous = store.registry.source('NATIVE_HOOK')
+          store.registry.apply({ repositoryId, source: 'NATIVE_HOOK', revision: previous?.revision ?? 'unavailable', status: 'PARTIAL', edges: [] }, previous?.revision, assertRequest)
+        }
+      }
+      } finally { nativeIngesting = false }
+    }
     if (message.name === 'read_agent_session_event' && store && message.args && typeof message.args === 'object' && 'sessionId' in message.args && typeof message.args.sessionId === 'string') {
       const selection = store.references.source(message.args.sessionId)?.locator.target
       if (selection) {
@@ -74,6 +147,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
     }
     const readRegistry: RegistryReader = request => new Promise((resolve, reject) => {
       assertRequest()
+      parentPort?.postMessage({ id: message.id, phase: 'registry-source-read' })
       const token = ++validationId
       registryReads.set(token, { resolve, reject })
       parentPort?.postMessage({ id: message.id, registryRead: { token, request } })
@@ -82,6 +156,7 @@ parentPort?.on('message', async (message: { id: number; name: SessionToolName; a
       (exe, args, cwd, limit, consume, timeout) => runReadOnly(exe, args, cwd, limit, consume, timeout, abort.signal),
       target || message.liveTargets ? async () => { await validateTarget(message.id) } : async () => {},
       phase => { if (!closing) parentPort?.postMessage({ id: message.id, phase }) }, target?.selection)
+    parentPort?.postMessage({ id: message.id, phase: message.name === 'discover_execution_context' ? 'registry-map' : 'session-tool' })
     const result = isLiveSessionTool(message.name)
       ? await executeLiveSessionTool(provider, message.name, message.args, assertRequest, message.liveTargets ?? [])
       : await executeSessionTool(

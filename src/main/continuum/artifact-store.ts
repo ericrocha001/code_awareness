@@ -1,4 +1,7 @@
 import { ArtifactTokenCache, TOKEN_CACHE_SCHEMA } from './artifact-token-cache'
+import { PublicationReceipts } from './publication-receipts'
+import { PublicationAssociations } from './publication-associations'
+import type { PublicationAssociation } from '../../shared/types/publication-provenance-types'
 import { ArtifactTags, editArtifactTags } from './artifact-tags'
 import { artifactTags, quickTag, tagDescription, validateTagSlug, type ContinuumTagAssignment, type ContinuumTagDefinition } from '../../shared/types/continuum-tag-types'
 import { parseArtifactMarkdown } from './artifact-metadata'
@@ -46,6 +49,53 @@ interface DiscoveryRow {
 }
 
 export class ArtifactStore {
+  private readonly publicationReceipts: PublicationReceipts
+  private readonly publicationAssociations: PublicationAssociations
+  associatePublication(value: PublicationAssociation) { return this.publicationAssociations.record(value) }
+  invalidatePublication(invocationId: string, state: 'UNAVAILABLE' | 'PARTIAL' | 'AMBIGUOUS') { this.publicationAssociations.invalidate(invocationId, state) }
+  publicationProvenance(artifactId: string, revision: number) { return this.publicationAssociations.projection(artifactId, revision) }
+  readPublicationReceipt(receiptId: string) { return this.publicationReceipts.read(receiptId) }
+  createPublished(input: CreateArtifactInput, requestDigest: string) {
+    return this.db.transaction(() => {
+      const artifact = this.createInsideTransaction(input)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest) }
+    }).immediate()
+  }
+  updatePublished(input: UpdateArtifactInput, requestDigest: string) {
+    return this.db.transaction(() => {
+      const artifact = this.update(input)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
+    }).immediate()
+  }
+  repairPublished(artifactId: string, expectedRevision: number, requestDigest: string, principalId: string) {
+    return this.db.transaction(() => {
+      const current = this.db.prepare('SELECT revision FROM artifacts WHERE artifact_id=?').get(artifactId) as { revision: number } | undefined
+      if (!current) throw new Error('ARTIFACT_NOT_FOUND')
+      if (current.revision !== expectedRevision) throw new ArtifactRevisionConflictError(artifactId, current.revision)
+      const latest = this.db.prepare('SELECT revision FROM artifact_revisions WHERE artifact_id=? ORDER BY revision DESC LIMIT 1').get(artifactId) as { revision: number } | undefined
+      if (!latest) throw new Error('CANONICAL_SOURCE_UNAVAILABLE')
+      const canonical = this.getRevision(artifactId, latest.revision)!, initial = this.getRevision(artifactId, 1)!
+      if (!initial) throw new Error('CANONICAL_SOURCE_UNAVAILABLE')
+      const metadata = /^(?:\uFEFF)?---\r?\n/.test(canonical.rawMarkdown) ? parseArtifactMarkdown(canonical.rawMarkdown, true).metadata : canonical.metadata
+      if (canonical.metadata.kind === 'VISUAL_REFERENCE') metadata.media = canonical.metadata.media
+      this.db.prepare(`UPDATE artifacts SET revision=?, metadata_json=?, name=?, description=?, kind=?, status=?, created_at=?, updated_at=?, raw_markdown=?, content_hash=?, provenance_json=? WHERE artifact_id=? AND revision=?`)
+        .run(canonical.revision, JSON.stringify(metadata), metadata.name, metadata.description ?? null, metadata.kind, metadata.status ?? null, initial.createdAt, canonical.updatedAt,
+          canonical.rawMarkdown, computeContentHash(canonical.rawMarkdown), JSON.stringify(canonical.provenance), artifactId, expectedRevision)
+      if (canonical.metadata.kind === 'VISUAL_REFERENCE') this.getVisual(artifactId)
+      const provenance = { ...canonical.provenance, technicalRepair: { principalId, requestDigest, source: 'IMMUTABLE_REVISION', sourceRevision: canonical.revision, sourceContentHash: canonical.contentHash } }
+      const artifact: Artifact = { ...canonical, metadata, createdAt: initial.createdAt, revision: canonical.revision + 1,
+        updatedAt: new Date(Math.max(Date.now(), Date.parse(canonical.updatedAt) + 1)).toISOString(), contentHash: computeContentHash(canonical.rawMarkdown), provenance }
+      this.db.prepare('UPDATE artifacts SET revision=?, updated_at=?, provenance_json=? WHERE artifact_id=?').run(artifact.revision, artifact.updatedAt, JSON.stringify(provenance), artifactId)
+      this.writeIndexes(artifact)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'UPDATE', requestDigest) }
+    }).immediate()
+  }
+  createVisualPublished(input: CreateArtifactInput, data: Buffer, media: VisualMedia, requestDigest: string) {
+    return this.db.transaction(() => {
+      const artifact = this.createVisual(input, data, media)
+      return { artifact, publicationReceipt: this.publicationReceipts.issue(artifact, 'PUBLISH', requestDigest) }
+    }).immediate()
+  }
   private readonly tagIndex: ArtifactTags
   private readonly tokenCache: ArtifactTokenCache
   tags() { return this.tagIndex.list() }
@@ -141,14 +191,20 @@ export class ArtifactStore {
   private readonly db: Database.Database
   private readonly graphIndex: ArtifactGraph
   suggestions(query: ContinuumSuggestionQuery) { return new ArtifactSuggestions(this.db, this.repositoryId).query(query) }
-  graph(query: ContinuumGraphQuery = {}) { return this.graphIndex.query(query, filter => this.list(filter)) }
+  graph(query: ContinuumGraphQuery = {}, options: { indexOnly?: boolean } = {}) { return this.graphIndex.query(query, filter => this.list(filter), options) }
   backfillReferences(limit = 100) { return this.graphIndex.backfill(limit) }
   facets(): ContinuumFacet[] {
-    const rows = this.db.prepare(`SELECT key, CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END AS value_json,
-      metadata_year(value_json) AS year, metadata_month(value_json) AS month, count(*) AS count FROM artifact_metadata
-      WHERE key NOT IN ('name', 'description', 'relations')
-      AND json_type(value_json) IN ('text', 'integer', 'real', 'true', 'false')
-      GROUP BY key, metadata_year(value_json), metadata_month(value_json), CASE WHEN metadata_year(value_json) IS NULL THEN value_json ELSE NULL END ORDER BY key, year DESC, month DESC, value_json`).all() as { key: string; value_json: string; year: number | null; month: number | null; count: number }[]
+    const rows = this.db.prepare(`WITH eligible AS (
+      SELECT m.key, m.value_json,
+        CASE WHEN m.key = 'date' THEN metadata_year(m.value_json) END AS year,
+        CASE WHEN m.key = 'date' THEN metadata_month(m.value_json) END AS month
+      FROM artifact_metadata m JOIN artifacts a ON a.artifact_id = m.artifact_id
+      WHERE m.key NOT IN ('name', 'description', 'relations')
+        AND json_type(m.value_json) IN ('text', 'integer', 'real', 'true', 'false')
+        AND NOT (m.key = 'status' AND a.kind = 'OBSERVATION' AND m.value_json = '"VERIFIED_AT_BINDING"')
+    ) SELECT key, CASE WHEN year IS NULL THEN value_json END AS value_json, year, month, count(*) AS count
+      FROM eligible GROUP BY key, year, month, CASE WHEN year IS NULL THEN value_json END
+      ORDER BY key, year DESC, month DESC, value_json`).all() as { key: string; value_json: string; year: number | null; month: number | null; count: number }[]
     const groups = new Map<string, ContinuumFacet>()
     for (const row of rows) {
       let group = groups.get(row.key)
@@ -179,6 +235,8 @@ export class ArtifactStore {
       if (scope && scope.repository_id !== repositoryId) throw new Error('REPOSITORY_SCOPE_MISMATCH: Store belongs to another repository')
       this.db.prepare('INSERT OR IGNORE INTO repository_scope VALUES (1, ?)').run(repositoryId)
       this.ensureSchema()
+      this.publicationReceipts = new PublicationReceipts(this.db, repositoryId)
+      this.publicationAssociations = new PublicationAssociations(this.db, repositoryId, id => this.publicationReceipts.read(id))
       this.tokenCache = new ArtifactTokenCache(this.db)
       this.tagIndex = new ArtifactTags(this.db)
       this.graphIndex = new ArtifactGraph(this.db, repositoryId)
@@ -378,13 +436,14 @@ export class ArtifactStore {
       const checked = this.validate(input, false, visual)
       if (visual) checked.metadata = { ...checked.metadata, media: current.metadata.media }
       const artifact: Artifact = { ...current, metadata: checked.metadata, rawMarkdown: checked.rawMarkdown,
+        provenance: { ...current.provenance, ...input.provenance },
         revision: current.revision + 1, updatedAt: new Date(Math.max(Date.now(), Date.parse(current.updatedAt) + 1)).toISOString(),
         contentHash: computeContentHash(checked.rawMarkdown) }
       this.db.prepare(`UPDATE artifacts SET revision = ?, metadata_json = ?, name = ?, description = ?, kind = ?, status = ?,
-        updated_at = ?, raw_markdown = ?, content_hash = ? WHERE artifact_id = ? AND revision = ?`)
+        updated_at = ?, raw_markdown = ?, content_hash = ?, provenance_json = ? WHERE artifact_id = ? AND revision = ?`)
         .run(artifact.revision, JSON.stringify(artifact.metadata), artifact.metadata.name, artifact.metadata.description ?? null,
           artifact.metadata.kind, artifact.metadata.status ?? null, artifact.updatedAt, artifact.rawMarkdown,
-          artifact.contentHash, artifact.artifactId, input.expectedRevision)
+          artifact.contentHash, JSON.stringify(artifact.provenance), artifact.artifactId, input.expectedRevision)
       this.writeIndexes(artifact)
       return artifact
     }).immediate()
@@ -392,6 +451,14 @@ export class ArtifactStore {
   get(artifactId: string): Artifact | null {
     const row = this.db.prepare('SELECT * FROM artifacts WHERE artifact_id = ?').get(artifactId) as ArtifactRow | undefined
     return row ? this.decode(row) : null
+  }
+  getRevision(artifactId: string, revision: number): Artifact | null {
+    if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('INVALID_ARTIFACT_REVISION')
+    const row = this.db.prepare('SELECT snapshot_json FROM artifact_revisions WHERE artifact_id=? AND revision=?').get(artifactId, revision) as { snapshot_json: string } | undefined
+    if (!row) return null
+    const artifact = JSON.parse(row.snapshot_json) as Artifact
+    if (artifact.artifactId !== artifactId || artifact.revision !== revision || computeContentHash(artifact.rawMarkdown) !== artifact.contentHash) throw new Error('ARTIFACT_REVISION_INTEGRITY')
+    return artifact
   }
 
   list(filter: ListArtifactsFilter = {}): ArtifactPage {

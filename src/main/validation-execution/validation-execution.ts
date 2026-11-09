@@ -90,6 +90,12 @@ export class ValidationExecution {
   listProfiles(): ValidationProfile[] {
     return this.catalog.list()
   }
+  lifecycleActivity(repositoryId: string, artifactId: string): import('../continuum/artifact-lifecycle-policy').LifecycleActivity {
+    const active = this.active
+    return this.repositoryId === repositoryId && active?.publicRun.status === 'RUNNING' && active.evidenceFor.includes(artifactId)
+      ? { state: 'IN_PROGRESS', source: 'VALIDATION_EXECUTION', evidenceRef: active.publicRun.runId, observedAt: active.publicRun.startedAt }
+      : { state: 'UNKNOWN', source: 'NO_ACTIVE_OPERATION_OBSERVED' }
+  }
 
   async start(input: StartValidationInput): Promise<ValidationRun> {
     const activeRunId = this.getActiveRunId()

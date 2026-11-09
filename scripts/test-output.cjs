@@ -6,6 +6,7 @@ const readline = require('node:readline')
 const { spawn, spawnSync } = require('node:child_process')
 const { receiptDigest } = require('../src/shared/validation/test-output-receipt.cjs')
 const { validationConnection, registerReceipt } = require('./local-agent/validation.cjs')
+const { publicError } = require('./local-agent/discovery.cjs')
 
 const root = path.resolve(__dirname, '..')
 const evidenceRoot = path.join(root, '.code-awareness', 'test-output')
@@ -68,6 +69,7 @@ function project(receipt) {
   if (receipt.state !== 'PASS') summary.diagnostic = bounded(receipt.diagnostic || 'See full logs.', 2100)
   if (receipt.cleanupWarning) summary.cleanupWarning = receipt.cleanupWarning
   if (receipt.registration) summary.registration = receipt.registration
+  if (receipt.ledgerDiagnostics?.length) summary.ledgerDiagnostics = receipt.ledgerDiagnostics.slice(0, 3)
   summary.logs = 'Full stdout/stderr and receipt in evidence; inspect for selective expansion.'
   let output = JSON.stringify(summary)
   while (Buffer.byteLength(output) > budget && summary.diagnostic?.length > 40) {
@@ -101,14 +103,16 @@ async function run(command, args = [], options = {}) {
   const testSummaries = []
   const tapCounts = {}
   const receipt = { version: 1, id, command: [command, ...args], cwd: fs.realpathSync(options.cwd || root), directory, startedAt: new Date(started).toISOString(), state: 'RUNNING', pid: null }
-  let connection
+  let connection, registrationDiagnostic
+  const diagnostics = []
   let before = null
   const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
     evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
   if (!options.evidenceRoot && options.register !== false && (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)) {
-    try { connection = await validationConnection(receipt.cwd, options.profile); before = await connection.snapshot() } catch { /* Receipt remains recoverable without the Desktop. */ }
+    try { connection = await validationConnection(receipt.cwd, options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
   }
   receipt.ledger = { association, identity: connection?.identity || null, before, after: null }
+  receipt.ledgerDiagnostics = diagnostics
   const receiptPath = path.join(directory, 'receipt.json')
   const save = () => fs.writeFileSync(receiptPath, JSON.stringify(receipt, null, 2), { mode: 0o600 })
   save()
@@ -200,13 +204,13 @@ async function run(command, args = [], options = {}) {
     receipt.state = receipt.validation.state === 'FAILED' ? 'FAIL' : receipt.validation.state
     receipt.diagnostic = receipt.validation.reason || 'Test summary reports failures.'
   }
-  if (connection) { try { receipt.ledger.after = await connection.snapshot() } catch {} }
+  if (connection) { try { receipt.ledger.after = await connection.snapshot() } catch (error) { diagnostics.push(publicError(error)) } }
   receipt.digest = receiptDigest(receipt)
-  receipt.registration = { state: 'REGISTRATION_PENDING', reason: options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? 'APP_UNAVAILABLE' : 'REGISTRATION_NOT_REQUESTED' }
+  receipt.registration = { state: 'REGISTRATION_PENDING', reason: options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? registrationDiagnostic?.code || 'APP_UNAVAILABLE' : 'REGISTRATION_NOT_REQUESTED', ...(registrationDiagnostic ? { diagnostic: registrationDiagnostic } : {}) }
   save()
   if (connection) {
     try { receipt.registration = await connection.register(id) }
-    catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: error.code || 'REGISTRATION_UNAVAILABLE' } }
+    catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: publicError(error).code, diagnostic: publicError(error) } }
     save()
   }
   return receipt
