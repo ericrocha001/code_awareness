@@ -83,7 +83,8 @@ const nativeTestFiles = Object.freeze([
   'src/main/repository-catalog/repository-catalog.test.ts',
   'src/main/repository-catalog/repository-catalog-acceptance.test.ts',
   'src/main/github/github-integration.test.ts',
-  'src/main/buildx/smc/session-memory-central-store.test.ts'
+  'src/main/buildx/smc/session-memory-central-store.test.ts',
+  'src/main/buildx/unitflow/unitflow-runtime.test.ts'
 ])
 
 const checkoutTestRoots = ['src', 'infra', 'docs', 'scripts']

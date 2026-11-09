@@ -61,6 +61,7 @@ import { ChannelStateProjection } from './integrations/channel-state-projection'
 import { isInstallationConfigured } from './integrations/installation-configured'
 import { registerChannelHandlers } from './ipc/channel-handler'
 import { SessionMemoryCentralService } from './buildx/smc'
+import { UnitFlowRuntimeFacade } from './buildx/unitflow/unitflow-runtime-facade'
 import { registerLocalMcpClientHandlers } from './ipc/local-mcp-client-handler'
 import { createDesktopClientSetup } from './local-mcp-clients/desktop-client-setup'
 import { ChannelFunctionalHealthMonitor } from './mcp/channel-functional-health'
@@ -654,12 +655,29 @@ app.whenReady().then(async () => {
       isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision
     })
     activeProjects!.updateCapability(revision, 'channel', { state: 'INITIALIZING' })
+    const unitflowRuntime = gitRepositoryId
+      ? new UnitFlowRuntimeFacade({
+          repositoryId: gitRepositoryId,
+          repoRoot: project.path,
+          smcService: sessionMemoryCentral,
+          gitOperations,
+          cliExecution: activeCliExecution,
+          validationLedger,
+          stagingDirectory: join(app.getPath('userData'), 'buildx-staging'),
+          assertActiveProject: () => {
+            if (activeProjects?.getState().project?.id !== project.id || activeProjects.getState().revision !== gitProjectRevision) {
+              throw new Error('PROJECT_CONTEXT_CHANGED')
+            }
+          }
+        })
+      : undefined
     void mcpLifecycle.activateContext({
       projectId: project.id,
       repoRoot: project.path,
       navigation,
       sessionContext: activeSessionContext,
       sessionMemoryCentral,
+      unitflowRuntime,
       assertActiveProject: () => {
         if (activeProjects?.getState().project?.id !== project.id || activeProjects.getState().revision !== gitProjectRevision) {
           throw new Error('PROJECT_CONTEXT_CHANGED')

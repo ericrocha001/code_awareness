@@ -30,5 +30,6 @@ export interface McpProjectContext {
   repositoryFileEditing?: RepositoryFileEditing
   runtimePreview?: { service: import('../work-orchestration/runtime-preview/operations').RuntimePreviewOperations; isCurrent: () => boolean }
   sessionMemoryCentral?: import('../buildx/smc').SessionMemoryCentralService
+  unitflowRuntime?: import('../buildx/unitflow/unitflow-runtime-facade').UnitFlowRuntimeFacade
   assertActiveProject?: () => void
 }
