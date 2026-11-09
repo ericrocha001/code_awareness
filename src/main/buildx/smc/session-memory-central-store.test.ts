@@ -105,6 +105,7 @@ import { bindProjectNavigation } from '../../core/context/project-context-naviga
 import type { ContextNavigationPort } from '../../core/context/context-navigation-port'
 import { textContent } from '../../mcp/mcp-test-content'
 import { validationSourceFingerprint } from '../../validation-execution/validation-source'
+import { UnitFlowReconciliationService } from '../unitflow/unitflow-reconciliation-service'
 
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -9025,6 +9026,577 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
 
         expect(result.status).toBe('STALE')
         expect(result.reason).toMatch(/PROOF_FINGERPRINT_MISMATCH/i)
+      })
+    })
+  })
+
+  describe('BuildX — Execution-10 — Provas Mínimas Dirigidas (Recuperação de tentativa encerrada com falha)', () => {
+    const repoId10 = '10101010-1010-4010-8010-101010101010'
+    const DEFAULT_WT_ID_10 = 'wt-ex10-001'
+    const DEFAULT_GEN_10 = 'gen-ex10-001'
+    const DEFAULT_BRANCH_10 = 'feature/ex10'
+    const DEFAULT_HEAD_10 = '1010101010101010101010101010101010101010'
+
+    let tempBaseDir10: string
+    let isolatedWorktreeDir10: string
+    let smc10: SessionMemoryCentralService
+    let gitPort10: any
+    let workspaceService10: WorkspaceBindingService
+
+    function createFixtureInventory10(overrides?: any): any {
+      const wtOverrides = overrides?.worktrees?.[0]
+      return {
+        repositoryId: repoId10,
+        source: 'GIT_LOCAL',
+        coverage: 'COMPLETE',
+        observedAt: '2026-11-08T00:00:00.000Z',
+        revision: 'inv-ex10-1',
+        worktrees: [
+          {
+            worktreeId: wtOverrides?.worktreeId ?? DEFAULT_WT_ID_10,
+            path: wtOverrides?.path ?? isolatedWorktreeDir10,
+            branch: wtOverrides?.branch ?? DEFAULT_BRANCH_10,
+            head: wtOverrides?.head ?? DEFAULT_HEAD_10,
+            generation: wtOverrides?.generation ?? DEFAULT_GEN_10,
+            locked: wtOverrides?.locked ?? false,
+            prunable: wtOverrides?.prunable ?? false,
+            detached: wtOverrides?.detached ?? false,
+            missing: wtOverrides?.missing ?? false
+          }
+        ],
+        branches: [
+          {
+            name: DEFAULT_BRANCH_10,
+            ref: `refs/heads/${DEFAULT_BRANCH_10}`,
+            head: DEFAULT_HEAD_10,
+            namespace: 'LOCAL',
+            worktrees: [
+              {
+                worktreeId: DEFAULT_WT_ID_10,
+                generation: DEFAULT_GEN_10
+              }
+            ]
+          }
+        ],
+        unassignedWorktrees: []
+      }
+    }
+
+    async function createEx10Fixture(overrides?: {
+      outcome?: 'FAILED' | 'CANCELLED' | 'SUCCEEDED' | 'STARTING' | 'RUNNING'
+      singleUnit?: boolean
+      missingPendingEntry?: boolean
+    }) {
+      const sessionId = '10100000-0000-4000-8000-000000000001'
+      const planId = '10200000-0000-4000-8000-000000000002'
+      const unitId1 = '10300000-0000-4000-8000-000000000001'
+      const unitId2 = '10300000-0000-4000-8000-000000000002'
+      const reservationId = '10400000-0000-4000-8000-000000000001'
+      const attemptId = '10500000-0000-4000-8000-000000000001'
+
+      const session = smc10.createSession(repoId10, { sessionId })
+      await workspaceService10.bindWorkspace(repoId10, sessionId, DEFAULT_WT_ID_10)
+
+      const planSvc = new UnitFlowService(smc10)
+      planSvc.registerPlan(repoId10, sessionId, { planId, title: 'Ex10 Plan' })
+      const unitsDef = overrides?.singleUnit ? [
+        {
+          unitId: unitId1,
+          title: 'Unit 10-1',
+          objective: 'Run Grok',
+          acceptanceCriteria: 'Criteria 10-1'
+        }
+      ] : [
+        {
+          unitId: unitId1,
+          title: 'Unit 10-1',
+          objective: 'Run Grok 1',
+          acceptanceCriteria: 'Criteria 10-1'
+        },
+        {
+          unitId: unitId2,
+          title: 'Unit 10-2',
+          objective: 'Run Grok 2',
+          acceptanceCriteria: 'Criteria 10-2',
+          dependsOnUnitIds: [unitId1]
+        }
+      ]
+      planSvc.definePlanUnits(repoId10, sessionId, planId, unitsDef)
+
+      const resSvc = new UnitFlowReservationService(smc10, gitPort10)
+      const resRes = await resSvc.reserveNextEligibleUnit(repoId10, sessionId, planId, { reservationId })
+      if (resRes.kind !== 'RESERVED') throw new Error('Expected RESERVED')
+
+      const attemptSvc = new ExecutionAttemptService(smc10, gitPort10)
+      const attempt = await attemptSvc.prepareExecutionAttempt(repoId10, sessionId, reservationId, { attemptId })
+
+      const store = smc10.getStore(repoId10)
+      const startingAttempt = store.transitionAttemptToStarting(attemptId, attempt.revision)
+
+      const outcome = overrides?.outcome ?? 'FAILED'
+      if (outcome === 'STARTING') {
+        return { sessionId, planId, unitId1, unitId2, reservationId, attemptId }
+      }
+
+      const unitState = store.getUnitState(sessionId, planId, unitId1)!
+      const runningAttempt = store.transitionAttemptToRunning(attemptId, startingAttempt.revision, unitId1, unitState.revision)
+      if (outcome === 'RUNNING') {
+        return { sessionId, planId, unitId1, unitId2, reservationId, attemptId }
+      }
+
+      const currentUnit = store.getUnitState(sessionId, planId, unitId1)!
+      store.transitionAttemptToSettled({
+        attemptId,
+        expectedAttemptRevision: runningAttempt.revision,
+        unitId: unitId1,
+        expectedUnitRevision: currentUnit.revision,
+        terminalOutcome: outcome,
+        entryData: overrides?.missingPendingEntry ? {
+          title: 'Corrupted settlement without PENDING',
+          body: JSON.stringify({ attemptId, unitId: unitId1 }),
+          kind: 'RESULT'
+        } : undefined
+      })
+
+      return { sessionId, planId, unitId1, unitId2, reservationId, attemptId }
+    }
+
+    beforeEach(() => {
+      tempBaseDir10 = mkdtempSync(join(tmpdir(), 'smc-test-ex10-'))
+      isolatedWorktreeDir10 = mkdtempSync(join(tmpdir(), 'smc-wt-ex10-'))
+      smc10 = new SessionMemoryCentralService(tempBaseDir10)
+      gitPort10 = {
+        getBranchInventory: async () => createFixtureInventory10(),
+        getCoordinationSnapshot: async () => ({ reference: false }),
+        getWorktreeChanges: async () => ({ totalCount: 0, changes: [] })
+      }
+      workspaceService10 = new WorkspaceBindingService(smc10, gitPort10)
+    })
+
+    afterEach(() => {
+      try { smc10.close() } catch {}
+      try { rmSync(tempBaseDir10, { recursive: true, force: true }) } catch {}
+      try { rmSync(isolatedWorktreeDir10, { recursive: true, force: true }) } catch {}
+    })
+
+    describe('Prova 1 — Reconciliação com sucesso após FAILED', () => {
+      it('deve retornar RETRY_ELIGIBLE, mover unidade para AVAILABLE, reserva para CANCELLED, e permitir nova reserva sem mutar tentativa anterior', async () => {
+        const { sessionId, planId, unitId1, reservationId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000001'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Preserving 2 modified files for retry'
+        })
+
+        expect(result.status).toBe('RETRY_ELIGIBLE')
+        expect(result.unitStatus).toBe('AVAILABLE')
+        expect(result.reservationStatus).toBe('CANCELLED')
+        expect(result.planStatus).toBe('ACTIVE')
+        expect(result.nextEligibleUnit).toEqual(expect.objectContaining({
+          kind: 'ELIGIBLE',
+          unitId: unitId1
+        }))
+
+        // Verificação no Store SQLite
+        const store = smc10.getStore(repoId10)
+        expect(store.getUnitState(sessionId, planId, unitId1)?.status).toBe('AVAILABLE')
+        expect(store.getReservation(reservationId)?.status).toBe('CANCELLED')
+
+        // Tentativa histórica permanece FAILED e intacta
+        const oldAttempt = store.getExecutionAttempt(attemptId)
+        expect(oldAttempt?.status).toBe('FAILED')
+
+        // Entrada INTERVENTION anexada na SMC
+        const { entries } = store.listEntries(sessionId)
+        const interventionEntry = entries.find(e => e.kind === 'INTERVENTION')
+        expect(interventionEntry).toBeDefined()
+        expect(interventionEntry?.title).toContain('Unit reconciliation: RETRY_SAME_UNIT')
+
+        // Permite nova reserva da mesma unidade com IDs novos
+        const newReservationId = '10400000-0000-4000-8000-000000000099'
+        const resSvc = new UnitFlowReservationService(smc10, gitPort10)
+        const newRes = await resSvc.reserveNextEligibleUnit(repoId10, sessionId, planId, { reservationId: newReservationId })
+        expect(newRes.kind).toBe('RESERVED')
+        if (newRes.kind === 'RESERVED') {
+          expect(newRes.reservation.unitId).toBe(unitId1)
+          expect(newRes.reservation.reservationId).toBe(newReservationId)
+        }
+
+        // Permite preparar nova tentativa com attemptId novo
+        const newAttemptId = '10500000-0000-4000-8000-000000000099'
+        const attemptSvc = new ExecutionAttemptService(smc10, gitPort10)
+        const prepared = await attemptSvc.prepareExecutionAttempt(repoId10, sessionId, newReservationId, { attemptId: newAttemptId })
+        expect(prepared.attemptId).toBe(newAttemptId)
+        expect(prepared.status).toBe('PREPARED')
+
+        // Tentativa original continua FAILED
+        expect(store.getExecutionAttempt(attemptId)?.status).toBe('FAILED')
+      })
+    })
+
+    describe('Prova 2 — Reconciliação com sucesso após CANCELLED', () => {
+      it('deve retornar RETRY_ELIGIBLE e reabrir unidade para AVAILABLE após cancelamento', async () => {
+        const { sessionId, planId, unitId1, reservationId, attemptId } = await createEx10Fixture({ outcome: 'CANCELLED' })
+        const opId = '0a000010-0000-4000-8000-000000000002'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Cancelled attempt reconciliation'
+        })
+
+        expect(result.status).toBe('RETRY_ELIGIBLE')
+        expect(result.unitStatus).toBe('AVAILABLE')
+        expect(result.reservationStatus).toBe('CANCELLED')
+
+        const store = smc10.getStore(repoId10)
+        expect(store.getUnitState(sessionId, planId, unitId1)?.status).toBe('AVAILABLE')
+        expect(store.getReservation(reservationId)?.status).toBe('CANCELLED')
+        expect(store.getExecutionAttempt(attemptId)?.status).toBe('CANCELLED')
+      })
+    })
+
+    describe('Prova 3 — Replay Idempotente com mesmo reconciliationOperationId', () => {
+      it('deve retornar resultado idêntico sem duplicar eventos na SMC nem alterar revisões', async () => {
+        const { sessionId, planId, unitId1, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000003'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const r1 = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'First call'
+        })
+        expect(r1.status).toBe('RETRY_ELIGIBLE')
+
+        const store = smc10.getStore(repoId10)
+        const entriesAfterR1 = store.listEntries(sessionId).entries.length
+        const unitRevAfterR1 = store.getUnitState(sessionId, planId, unitId1)?.revision
+
+        // Rechamada com mesmo opId
+        const r2 = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Second call identical'
+        })
+        expect(r2.status).toBe('RETRY_ELIGIBLE')
+        expect(r2.unitStatus).toBe('AVAILABLE')
+
+        const entriesAfterR2 = store.listEntries(sessionId).entries.length
+        const unitRevAfterR2 = store.getUnitState(sessionId, planId, unitId1)?.revision
+        expect(entriesAfterR2).toBe(entriesAfterR1)
+        expect(unitRevAfterR2).toBe(unitRevAfterR1)
+      })
+    })
+
+    describe('Prova 4 — Concorrência Simultânea (Promise.all)', () => {
+      it('duas chamadas concorrentes com mesmo ID resolvem com sucesso e gravam exatamente uma entrada na SMC', async () => {
+        const { sessionId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000004'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const [r1, r2] = await Promise.all([
+          svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+            reconciliationOperationId: opId,
+            decision: 'RETRY_SAME_UNIT',
+            summary: 'Concurrent call 1'
+          }),
+          svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+            reconciliationOperationId: opId,
+            decision: 'RETRY_SAME_UNIT',
+            summary: 'Concurrent call 2'
+          })
+        ])
+
+        expect(r1.status).toBe('RETRY_ELIGIBLE')
+        expect(r2.status).toBe('RETRY_ELIGIBLE')
+
+        const store = smc10.getStore(repoId10)
+        const interventionEntries = store.listEntries(sessionId).entries.filter(e => e.kind === 'INTERVENTION')
+        expect(interventionEntries).toHaveLength(1)
+      })
+    })
+
+    describe('Prova 5 — Replay com ID Divergente rejeitado com CONFLICT', () => {
+      it('mesmo reconciliationOperationId com payload divergente deve retornar CONFLICT', async () => {
+        const { sessionId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000005'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Original'
+        })
+
+        const otherAttemptId = '10500000-0000-4000-8000-000000000999'
+        const rDivergent = await svc.reconcileFailedUnit(repoId10, sessionId, otherAttemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Divergent attempt'
+        })
+
+        expect(rDivergent.status).toBe('CONFLICT')
+        expect(rDivergent.reason).toMatch(/RECONCILIATION_OPERATION_ID_CONFLICT/i)
+      })
+    })
+
+    describe('Prova 6 — Tentativa em STARTING ou RUNNING bloqueada com BLOCKED_UNKNOWN', () => {
+      it('tentativa em RUNNING retorna BLOCKED_UNKNOWN sem tocar unidade nem reserva', async () => {
+        const { sessionId, planId, unitId1, reservationId, attemptId } = await createEx10Fixture({ outcome: 'RUNNING' })
+        const opId = '0a000010-0000-4000-8000-000000000006'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Premature reconciliation'
+        })
+
+        expect(result.status).toBe('BLOCKED_UNKNOWN')
+        expect(result.reason).toMatch(/ATTEMPT_NOT_TERMINAL/i)
+
+        const store = smc10.getStore(repoId10)
+        expect(store.getUnitState(sessionId, planId, unitId1)?.status).toBe('EXECUTING')
+        expect(store.getReservation(reservationId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 7 — Prova terminal ausente na SMC (TERMINATION_UNCONFIRMED)', () => {
+      it('tentativa sem entrada terminal PENDING na SMC retorna BLOCKED_UNKNOWN', async () => {
+        const { sessionId, planId, unitId1, reservationId, attemptId } = await createEx10Fixture({ missingPendingEntry: true })
+        const opId = '0a000010-0000-4000-8000-000000000007'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Missing PENDING entry'
+        })
+
+        expect(result.status).toBe('BLOCKED_UNKNOWN')
+        expect(result.reason).toMatch(/TERMINATION_UNCONFIRMED/i)
+
+        const store = smc10.getStore(repoId10)
+        expect(store.getUnitState(sessionId, planId, unitId1)?.status).toBe('RECONCILING')
+        expect(store.getReservation(reservationId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 8 — Tentativa já COMPLETED rejeitada com CONFLICT', () => {
+      it('tentativa em COMPLETED retorna CONFLICT sem permitir transição para AVAILABLE', async () => {
+        const { sessionId, planId, unitId1, reservationId, attemptId } = await createEx10Fixture({ outcome: 'SUCCEEDED' })
+        const opId = '0a000010-0000-4000-8000-000000000008'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Attempt already succeeded'
+        })
+
+        expect(result.status).toBe('CONFLICT')
+        expect(result.reason).toMatch(/ATTEMPT_ALREADY_COMPLETED/i)
+
+        const store = smc10.getStore(repoId10)
+        expect(store.getUnitState(sessionId, planId, unitId1)?.status).toBe('VALIDATING')
+        expect(store.getReservation(reservationId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 9 — Unidade não RECONCILING rejeitada com CONFLICT', () => {
+      it('unidade já em AVAILABLE retorna CONFLICT ao tentar reconciliar novamente', async () => {
+        const { sessionId, attemptId } = await createEx10Fixture()
+        const opId1 = '0a000010-0000-4000-8000-000000000009'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId1,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'First reconciliation'
+        })
+
+        const opId2 = '0a000010-0000-4000-8000-000000000099'
+        const result2 = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId2,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Repeated with new opId'
+        })
+
+        expect(result2.status).toBe('CONFLICT')
+        expect(result2.reason).toMatch(/UNIT_NOT_RECONCILING/i)
+      })
+    })
+
+    describe('Prova 10 — Worktree missing bloqueada com BLOCKED_UNKNOWN', () => {
+      it('worktree marcada como missing retorna BLOCKED_UNKNOWN e não libera a reserva', async () => {
+        const { sessionId, planId, unitId1, reservationId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000010'
+
+        // Worktree desaparecida
+        const missingGitPort = {
+          getBranchInventory: async () => createFixtureInventory10({
+            worktrees: [{ worktreeId: DEFAULT_WT_ID_10, branch: DEFAULT_BRANCH_10, generation: DEFAULT_GEN_10, missing: true }]
+          }),
+          getCoordinationSnapshot: async () => ({ reference: false })
+        }
+        const svc = new UnitFlowReconciliationService(smc10, missingGitPort)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Worktree missing'
+        })
+
+        expect(result.status).toBe('BLOCKED_UNKNOWN')
+        expect(result.reason).toMatch(/WORKTREE_MISSING/i)
+
+        const store = smc10.getStore(repoId10)
+        expect(store.getUnitState(sessionId, planId, unitId1)?.status).toBe('RECONCILING')
+        expect(store.getReservation(reservationId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 11 — Erro Git read-only bloqueia sem liberar', () => {
+      it('falha na leitura de mudanças do Git retorna BLOCKED_UNKNOWN com GIT_READ_ERROR', async () => {
+        const { sessionId, planId, unitId1, reservationId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000011'
+
+        const failingGitPort = {
+          getBranchInventory: async () => createFixtureInventory10(),
+          getCoordinationSnapshot: async () => ({ reference: false }),
+          getWorktreeChanges: async () => {
+            throw new Error('EACCES: permission denied during git inspection')
+          }
+        }
+        const svc = new UnitFlowReconciliationService(smc10, failingGitPort)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Git read failed'
+        })
+
+        expect(result.status).toBe('BLOCKED_UNKNOWN')
+        expect(result.reason).toMatch(/GIT_READ_ERROR/i)
+
+        const store = smc10.getStore(repoId10)
+        expect(store.getUnitState(sessionId, planId, unitId1)?.status).toBe('RECONCILING')
+        expect(store.getReservation(reservationId)?.status).toBe('ACTIVE')
+      })
+    })
+
+    describe('Prova 12 — Dirty Worktree aceita com resumo observacional', () => {
+      it('alterações parciais na Worktree são registradas no resumo sem efetuar git reset ou clean', async () => {
+        const { sessionId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000012'
+
+        const dirtyGitPort = {
+          getBranchInventory: async () => createFixtureInventory10(),
+          getCoordinationSnapshot: async () => ({ reference: false }),
+          getWorktreeChanges: async () => ({
+            totalCount: 4,
+            changes: [
+              { path: 'src/file1.ts', unstagedState: 'MODIFIED' },
+              { path: 'src/file2.ts', stagedState: 'ADDED' },
+              { path: 'temp.log', untracked: true },
+              { path: 'old.ts', deleted: true }
+            ]
+          })
+        }
+        const svc = new UnitFlowReconciliationService(smc10, dirtyGitPort)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Preserved 4 partial changes (1 modified, 1 added, 1 untracked, 1 deleted)'
+        })
+
+        expect(result.status).toBe('RETRY_ELIGIBLE')
+        expect(result.unitStatus).toBe('AVAILABLE')
+
+        const store = smc10.getStore(repoId10)
+        const { entries } = store.listEntries(sessionId)
+        const entry = entries.find(e => e.kind === 'INTERVENTION')
+        expect(entry).toBeDefined()
+        const fullEntry = store.getEntry(sessionId, entry!.entryId)
+        expect(fullEntry).toBeDefined()
+        const parsedBody = JSON.parse(fullEntry!.body)
+        expect(parsedBody.worktreeChangesSummary).toEqual({
+          totalCount: 4,
+          dirty: true
+        })
+      })
+    })
+
+    describe('Prova 13 — Sequenciamento estrito preservado', () => {
+      it('reconciliação da Unidade 1 não permite que a Unidade 2 passe à frente', async () => {
+        const { sessionId, planId, unitId1, unitId2, attemptId } = await createEx10Fixture({ singleUnit: false })
+        const opId = '0a000010-0000-4000-8000-000000000013'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Strict sequencing test'
+        })
+
+        expect(result.status).toBe('RETRY_ELIGIBLE')
+        expect(result.nextEligibleUnit).toEqual(expect.objectContaining({
+          kind: 'ELIGIBLE',
+          unitId: unitId1
+        }))
+
+        // Consulta direta de elegibilidade: deve ser unitId1, jamais unitId2
+        const store = smc10.getStore(repoId10)
+        const eligibility = store.getNextEligibleUnit(sessionId, planId)
+        expect(eligibility.kind).toBe('ELIGIBLE')
+        if (eligibility.kind === 'ELIGIBLE') {
+          expect(eligibility.unitId).toBe(unitId1)
+          expect(eligibility.unitId).not.toBe(unitId2)
+        }
+      })
+    })
+
+    describe('Prova 14 — Summary obrigatório', () => {
+      it('deve rejeitar summary vazio com SUMMARY_REQUIRED', async () => {
+        const { sessionId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000014'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: '   '
+        })
+
+        expect(result.status).toBe('UNKNOWN')
+        expect(result.reason).toBe('SUMMARY_REQUIRED')
+      })
+    })
+
+    describe('Prova 15 — Sessão fechada rejeitada com CONFLICT', () => {
+      it('deve rejeitar reconciliação em sessão fechada com SESSION_CLOSED', async () => {
+        const { sessionId, attemptId } = await createEx10Fixture()
+        const opId = '0a000010-0000-4000-8000-000000000015'
+        const svc = new UnitFlowReconciliationService(smc10, workspaceService10)
+
+        // Fecha a sessão
+        const store = smc10.getStore(repoId10)
+        ;(store as any).db.prepare("UPDATE smc_sessions SET status = 'CLOSED' WHERE session_id = ?").run(sessionId)
+
+        const result = await svc.reconcileFailedUnit(repoId10, sessionId, attemptId, {
+          reconciliationOperationId: opId,
+          decision: 'RETRY_SAME_UNIT',
+          summary: 'Session closed'
+        })
+
+        expect(result.status).toBe('CONFLICT')
+        expect(result.reason).toBe('SESSION_CLOSED')
       })
     })
   })

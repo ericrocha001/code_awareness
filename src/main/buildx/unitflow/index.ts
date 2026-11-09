@@ -4,3 +4,4 @@ export * from './unitflow-service'
 export * from './unitflow-reservation-service'
 
 export * from './unitflow-acceptance-service'
+export * from './unitflow-reconciliation-service'

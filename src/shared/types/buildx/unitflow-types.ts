@@ -150,3 +150,68 @@ export interface AcceptUnitFlowUnitStoreResult {
   readonly planRevision: number
   readonly allUnitsCompleted: boolean
 }
+
+export type UnitReconciliationDecision = 'RETRY_SAME_UNIT'
+
+export type UnitReconciliationStatus =
+  | 'RETRY_ELIGIBLE'
+  | 'WAITING'
+  | 'BLOCKED_UNKNOWN'
+  | 'CONFLICT'
+  | 'STALE'
+  | 'UNKNOWN'
+
+export interface ReconcileFailedUnitOptions {
+  readonly reconciliationOperationId: string
+  readonly decision: UnitReconciliationDecision
+  readonly summary: string
+  readonly emitterId?: string
+}
+
+export interface UnitReconciliationResult {
+  readonly status: UnitReconciliationStatus
+  readonly repositoryId: string
+  readonly sessionId: string
+  readonly planId?: string
+  readonly unitId?: string
+  readonly unitStatus?: UnitFlowUnitStatus
+  readonly reservationStatus?: UnitFlowReservationStatus
+  readonly planStatus?: UnitFlowPlanStatus
+  readonly nextEligibleUnit?: UnitFlowEligibilityResult
+  readonly reconciliationOperationId?: string
+  readonly reason?: string
+}
+
+export interface ReconcileUnitFlowUnitStoreInput {
+  readonly sessionId: string
+  readonly planId: string
+  readonly unitId: string
+  readonly expectedUnitRevision: number
+  readonly reservationId: string
+  readonly attemptId: string
+  readonly reconciliationOperationId: string
+  readonly decision: UnitReconciliationDecision
+  readonly summary: string
+  readonly gitIdentity: {
+    readonly worktreeId: string
+    readonly generation: string
+    readonly branch: string
+    readonly head: string
+  }
+  readonly worktreeChangesSummary?: {
+    readonly totalCount?: number
+    readonly dirty?: boolean
+  }
+  readonly emitterId?: string
+}
+
+export interface ReconcileUnitFlowUnitStoreResult {
+  readonly unitId: string
+  readonly planId: string
+  readonly unitStatus: UnitFlowUnitStatus
+  readonly unitRevision: number
+  readonly reservationStatus: UnitFlowReservationStatus
+  readonly planStatus: UnitFlowPlanStatus
+  readonly planRevision: number
+  readonly decision: UnitReconciliationDecision
+}

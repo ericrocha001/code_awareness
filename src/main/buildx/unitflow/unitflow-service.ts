@@ -6,11 +6,16 @@ import type {
   UnitFlowReservationRecord,
   UnitFlowUnitHeaderRecord,
   UnitFlowUnitRecord,
-  UnitFlowUnitStateRecord
+  UnitFlowUnitStateRecord,
+  ReconcileFailedUnitOptions,
+  UnitReconciliationResult
 } from '../../../shared/types/buildx/unitflow-types'
 import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import { SessionMemoryCentralService as SmcServiceImpl } from '../smc/session-memory-central-service'
+import type { GitOperationsResolver } from '../execution/workspace-binding-service'
+import { WorkspaceBindingService } from '../execution/workspace-binding-service'
+import { UnitFlowReconciliationService } from './unitflow-reconciliation-service'
 
 export class UnitFlowService {
   private readonly smcService: SessionMemoryCentralService
@@ -123,6 +128,17 @@ export class UnitFlowService {
     const validRepoId = validateRepositoryId(repositoryId)
     const store = this.smcService.getStore(validRepoId)
     return store.getActiveReservation(sessionId)
+  }
+
+  async reconcileFailedUnit(
+    repositoryId: string,
+    sessionId: string,
+    attemptId: string,
+    options: ReconcileFailedUnitOptions,
+    workspaceServiceOrGit: WorkspaceBindingService | GitOperationsResolver
+  ): Promise<UnitReconciliationResult> {
+    const svc = new UnitFlowReconciliationService(this.smcService, workspaceServiceOrGit)
+    return svc.reconcileFailedUnit(repositoryId, sessionId, attemptId, options)
   }
 
   close(): void {

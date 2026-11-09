@@ -85,3 +85,10 @@ export class UnitFlowAcceptanceConflictError extends Error {
     this.name = 'UnitFlowAcceptanceConflictError'
   }
 }
+
+export class UnitFlowReconciliationConflictError extends Error {
+  constructor(reason: string) {
+    super(reason.startsWith('RECONCILIATION_') ? reason : `RECONCILIATION_CONFLICT: ${reason}`)
+    this.name = 'UnitFlowReconciliationConflictError'
+  }
+}
