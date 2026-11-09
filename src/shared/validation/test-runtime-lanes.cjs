@@ -1,5 +1,6 @@
 const nativeTestFiles = Object.freeze([
   'src/main/mcp/channel-usage-native.test.ts',
+  'src/main/session-context/github-discovery.test.ts',
   'src/main/session-context/native-artifact-correlation.test.ts',
   'src/main/continuum/publication-receipts.test.ts',
   'src/main/continuum/artifact-lifecycle.test.ts',

@@ -89,7 +89,7 @@ describe('repository pull request catalog', () => {
     const api = new GitHubApiClient(async () => 'secret', fetcher)
     const first = await api.listPullRequestCatalogPage('owner/repo', 1)
     const second = await api.listPullRequestCatalogPage('owner/repo', 1)
-    expect(second).toEqual(first); expect(second.hasNext).toBe(true)
+    expect(second.items).toEqual(first.items); expect(second.representation).toMatchObject({ notModified: true, revision: first.representation.revision }); expect(second.hasNext).toBe(true)
     expect(fetcher.mock.calls[1][1].headers['If-None-Match']).toBe('"snapshot"')
     api.clearPullRequestCache()
     fetcher.mockResolvedValueOnce(json([dto(2)]))
@@ -153,4 +153,35 @@ describe('repository pull request catalog', () => {
     expect(() => reader.project(inventory(), { ...catalog, repositoryId: 'other' })).toThrow('REPOSITORY_CONTEXT_CHANGED')
   })
 
+})
+
+it('never accepts 304 as a bodyless catalog after cache loss and keeps page variants separate', async () => {
+  const fetcher = vi.fn().mockResolvedValueOnce(json([dto(1)], { headers: { etag: '"page-one"' } })).mockResolvedValueOnce(new Response(null, { status: 304 }))
+  const api = new GitHubApiClient(async () => 'secret', fetcher)
+  await api.listPullRequestCatalogPage('owner/repo', 1)
+  await expect(api.listPullRequestCatalogPage('owner/repo', 2)).rejects.toThrow()
+  expect(fetcher.mock.calls[1][1].headers['If-None-Match']).toBeUndefined()
+  api.clearPullRequestCache(); fetcher.mockResolvedValueOnce(new Response(null, { status: 304 }))
+  await expect(api.listPullRequestCatalogPage('owner/repo', 1)).rejects.toThrow()
+  expect(fetcher.mock.calls[2][1].headers['If-None-Match']).toBeUndefined()
+})
+it('binds catalog pages to account/repository identity and rejects revocation before the next request', async () => {
+  let account = 'account-A', remote = 'https://github.com/owner/repo.git', active = true
+  const record = { id: 'local', github: { repositoryId: 'remote', fullName: 'owner/repo' } }
+  const api = { getPullRequestRepository: vi.fn(async () => ({ id: 'remote' })), listPullRequestCatalogPage: vi.fn(async () => { account = 'account-B'; return { items: [], hasNext: false } }) }
+  const service = new GitHubIntegrationService({ clientId: 'fixture', appSlug: 'fixture' }, { loadMetadata: () => ({ user: { id: account } }) } as any, { hasCredentials: () => true } as any, api as any, { findByPath: () => record } as any, { getRemoteUrl: async () => remote } as any, {} as any)
+  await expect(service.pullRequestCatalogPage('/fixture', 1)).rejects.toThrow('REMOTE_CONTEXT_CHANGED')
+  api.getPullRequestRepository.mockImplementationOnce(async () => { active = false; return { id: 'remote' } })
+  await expect(service.pullRequestCatalogPage('/fixture', 1, () => { if (!active) throw new Error('NETWORK_NOT_AUTHORIZED') })).rejects.toThrow('NETWORK_NOT_AUTHORIZED')
+  expect(api.listPullRequestCatalogPage).toHaveBeenCalledTimes(1)
+  active = true; account = 'account-A'
+  api.getPullRequestRepository.mockResolvedValueOnce({ id: 'foreign' })
+  await expect(service.pullRequestCatalogPage('/fixture', 1)).rejects.toThrow('REMOTE_IDENTITY_MISMATCH')
+})
+
+it('accepts a positive safe page beyond 1000 without broadening the per-page request', async () => {
+  const fetcher = vi.fn().mockResolvedValue(json([])), api = new GitHubApiClient(async () => 'secret', fetcher)
+  expect((await api.listPullRequestCatalogPage('owner/repo', 1001)).items).toEqual([])
+  expect(fetcher.mock.calls[0][0]).toContain('per_page=100&page=1001')
+  await expect(api.listPullRequestCatalogPage('owner/repo', Number.MAX_SAFE_INTEGER + 1)).rejects.toThrow()
 })

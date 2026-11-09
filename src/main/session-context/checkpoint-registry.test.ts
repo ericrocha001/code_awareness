@@ -398,7 +398,7 @@ it('requests automatic reconciliation for a Handoff without sessionLinks without
 })
 it('rejects PR composition if the authorized GitHub origin changes during the read', async () => {
   let remote = 'https://github.com/owner/repo.git'
-  const api = { getPullRequestCatalogRecord: async () => ({ head: { sha: commit }, base: { repository: 'owner/repo' }, updatedAt: 'stable' }), getPullRequestCommits: async () => { remote = 'https://github.com/other/repo.git'; return { commits: [{ sha: commit }], nextPage: null } } }
+  const api = { getPullRequestCatalogRecord: async () => ({ id: '90', head: { sha: commit, repositoryId: 'remote', repository: 'owner/repo' }, base: { repositoryId: 'remote', repository: 'owner/repo' }, updatedAt: 'stable' }), getPullRequestCommits: async () => { remote = 'https://github.com/other/repo.git'; return { commits: [{ sha: commit }], nextPage: null } } }
   const service = new GitHubIntegrationService({ clientId: 'fixture', appSlug: 'fixture' }, {} as any, { hasCredentials: () => true } as any, api as any, { findByPath: () => ({ id: 'repo' }) } as any, { getRemoteUrl: async () => remote } as any, {} as any)
   await expect(service.pullRequestCommits('/fixture', 90, commit)).rejects.toThrow('REMOTE_CONTEXT_CHANGED')
 })
