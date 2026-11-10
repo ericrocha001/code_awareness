@@ -119,6 +119,16 @@ const cases = [
       assert.strictEqual(result.stdout.includes('start electron app'), false)
     }
   },
+  {
+    name: 'Packaging build disables @electron/rebuild for N-API prebuilds while keeping native:doctor gate',
+    run: () => {
+      const fs = require('fs')
+      const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'))
+      assert.strictEqual(manifest.build && manifest.build.npmRebuild, false)
+      assert.ok(manifest.scripts && manifest.scripts.dist && manifest.scripts.dist.includes('npm run build'))
+      assert.ok(manifest.scripts && manifest.scripts.prebuild && manifest.scripts.prebuild.includes('native:doctor'))
+    }
+  },
 ]
 
 let failures = 0

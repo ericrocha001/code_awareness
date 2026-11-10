@@ -3,7 +3,7 @@ const path = require('node:path')
 const { createHash } = require('node:crypto')
 const { execFile } = require('node:child_process')
 const { buildSync } = require('esbuild')
-const { clipboard, ipcMain } = require('electron')
+const { clipboard, ClipboardItem, ipcMain } = require('electron')
 const sharp = require('sharp')
 
 exports.run = async ctx => {
@@ -23,7 +23,16 @@ exports.run = async ctx => {
   const originalText = service.get(markdown.artifactId).rawMarkdown
   const originalVisualText = service.get(visual.artifactId).rawMarkdown
   const digest = value => createHash('sha256').update(value).digest('hex')
-  const clipboardBefore = { text: clipboard.readText(), image: clipboard.readImage() }
+  const priorClipboard = {}
+  for (const item of await clipboard.read()) {
+    for (const type of item.types) {
+      if (type.startsWith('electron application/')) continue
+      try {
+        const blob = await item.getType(type)
+        if (blob && typeof blob.arrayBuffer === 'function') priorClipboard[type] = blob
+      } catch {}
+    }
+  }
   const preload = path.join(ctx.temporary, 'preload.cjs')
   buildSync({ entryPoints: [path.join(ctx.projectRoot, 'src/main/preload.ts')], bundle: true, outfile: preload, platform: 'node', format: 'cjs', external: ['electron'] })
   ctx.window.webContents.session.setPreloads([preload])
@@ -114,7 +123,7 @@ throw 'Owned native Save dialog controls not found'
     await ctx.capture('context-personalization-dark')
     await ctx.click('.continuum-export-actions button')
     await ctx.waitFor(() => document.querySelector('.continuum-export-feedback')?.textContent.includes('Copiado'))
-    ctx.check('Native Windows clipboard text is the exact canonical Markdown', clipboard.readText() === text)
+    ctx.check('Native Windows clipboard text is the exact canonical Markdown', (await clipboard.readText()) === text)
     await ctx.evaluate(() => { const editor = document.createElement('textarea'); editor.id = 'paste-text'; editor.setAttribute('aria-label', 'Native paste editor'); document.body.append(editor); editor.focus() })
     ctx.window.webContents.paste()
     await ctx.waitFor(() => document.querySelector('#paste-text').value.includes('const literal'))
@@ -127,7 +136,9 @@ throw 'Owned native Save dialog controls not found'
     await ctx.waitFor(() => !!document.querySelector('.continuum-visual-preview'))
     await ctx.click('.continuum-export-actions button')
     await ctx.waitFor(() => document.querySelector('.continuum-export-feedback')?.textContent.includes('Copiado'))
-    const png = clipboard.readImage().toPNG()
+    const clipboardItems = await clipboard.read()
+    const imageItem = clipboardItems.find(item => item.types.includes('image/png'))
+    const png = imageItem ? Buffer.from(await (await imageItem.getType('image/png')).arrayBuffer()) : Buffer.alloc(0)
     const sourcePixels = await sharp(webp).ensureAlpha().raw().toBuffer()
     ctx.check('Windows clipboard image retains original pixels and alpha', (await sharp(png).ensureAlpha().raw().toBuffer()).equals(sourcePixels))
     fs.writeFileSync(path.join(ctx.evidenceDir, 'clipboard.png'), png)
@@ -152,7 +163,8 @@ throw 'Owned native Save dialog controls not found'
     await ctx.capture('inspector-export-light')
     fs.writeFileSync(path.join(ctx.evidenceDir, 'fidelity.json'), JSON.stringify({ markdownBytes: Buffer.byteLength(text), webpBytes: webp.length, originalSHA256: digest(webp), savedSHA256: digest(saved), clipboard: 'PNG pixels and alpha compared; native paste in isolated Electron visual editor', dialog: 'Real Windows Save dialog, process-scoped Win32 controls' }, null, 2))
   } finally {
-    clipboard.write({ text: clipboardBefore.text, ...(!clipboardBefore.image.isEmpty() ? { image: clipboardBefore.image } : {}) })
+    if (Object.keys(priorClipboard).length > 0) await clipboard.write([new ClipboardItem(priorClipboard)])
+    else clipboard.clear()
     unsubscribe(); session.dispose()
     for (const channel of ['export', 'get', 'list', 'facets', 'graph', 'suggestions', 'publish', 'publish-visual', 'get-visual', 'get-visual-thumbnail']) ipcMain.removeHandler(`continuum:${channel}`)
   }

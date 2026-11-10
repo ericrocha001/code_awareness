@@ -6,7 +6,12 @@ import { InstallationIdentityService } from '../src/main/installation/installati
 import { installationId } from '../src/shared/distribution/relay-protocol'
 
 function finish(result: unknown) {
-  process.send?.(result, () => app.exit(0))
+  const shutdown = () => {
+    if (app.isReady()) app.quit()
+    else app.exit(0)
+  }
+  if (process.send) process.send(result, shutdown)
+  else shutdown()
 }
 
 process.once('message', async (input: { mode: string; appData?: string; wrongProfile?: boolean; credential?: string }) => {

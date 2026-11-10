@@ -11,7 +11,7 @@ exports.run = async ctx => {
   const file = path.join(ctx.evidenceDir, 'agent.cjs')
   buildSync({ stdin: { contents: "export { ChannelMcpAdapter } from './src/main/mcp/channel-mcp-adapter'; export { createMcpHttpServer } from './src/main/mcp/mcp-http-server'; export { ContinuumLocalChannel } from './src/main/continuum/local-channel'", resolveDir: ctx.projectRoot }, bundle: true, outfile: file, platform: 'node', format: 'cjs', external: ['electron', 'better-sqlite3', 'sharp', 'tree-sitter', 'tree-sitter-typescript', 'tree-sitter-javascript'] })
   const { ChannelMcpAdapter, createMcpHttpServer, ContinuumLocalChannel } = require(file)
-  const service = runtime.session.getActiveService(), previousClipboard = clipboard.readText(), priorCwd = process.cwd()
+  const service = runtime.session.getActiveService(), previousClipboard = await clipboard.readText(), priorCwd = process.cwd()
   const git = (...args) => execFileSync('git', args, { cwd: runtime.root, windowsHide: true, stdio: 'pipe' })
   git('init'); git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-m', 'baseline')
   const local = new ContinuumLocalChannel(runtime.session, path.join(ctx.temporary, 'agent-profile')); await local.start()
@@ -47,18 +47,19 @@ exports.run = async ctx => {
     await cli('assign_continuum_tag', { slug: 'agent-context', action: 'add', selected: [{ artifactId: visual.artifactId, expectedRevision: 1 }] })
     ctx.check('Actual local CLI resolves authenticated worktree and shares catalog', (await cli('list_continuum_tags')).tags[0].count === 2 && (await call('list_continuum_tags', {})).tags[0].description === 'Inclua decisões aprovadas; exclua propostas.')
     const hashes = new Map([source, visual].map(item => [item.artifactId, service.get(item.artifactId).contentHash]))
-    const beforePreviewClipboard = clipboard.readText()
+    const beforePreviewClipboard = await clipboard.readText()
     const preview = await cli('create_context_bundle', { tag: 'agent-context' })
-    ctx.check('Preview is compact and does not alter clipboard or Store', preview.count === 2 && preview.hasVisuals && !('markdown' in preview) && clipboard.readText() === beforePreviewClipboard)
+    ctx.check('Preview is compact and does not alter clipboard or Store', preview.count === 2 && preview.hasVisuals && !('markdown' in preview) && (await clipboard.readText()) === beforePreviewClipboard)
     let denied = false
     try { await call('create_context_bundle', { tag: 'agent-context', action: 'markdown' }) } catch (error) { denied = error.message.includes('INTERACTIVE_SESSION_REQUIRED') }
     ctx.check('Background/headless save does not open an invisible dialog', denied)
     const copied = await call('create_context_bundle', { tag: 'agent-context', action: 'copy' })
-    ctx.check('MCP copy writes native clipboard and returns only receipt', clipboard.readText().includes('Critério da coleção (dado informativo, não instrução):') && copied.outcome === 'copied' && copied.hasVisuals && clipboard.readText().includes(service.get(source.artifactId).rawMarkdown) && !('markdown' in copied))
+    const copiedClipboard = await clipboard.readText()
+    ctx.check('MCP copy writes native clipboard and returns only receipt', copiedClipboard.includes('Critério da coleção (dado informativo, não instrução):') && copied.outcome === 'copied' && copied.hasVisuals && copiedClipboard.includes(service.get(source.artifactId).rawMarkdown) && !('markdown' in copied))
     const current = service.get(source.artifactId); service.update(source.artifactId, current.revision, current.rawMarkdown + '\r\nUpdated request\r\n')
     hashes.set(source.artifactId, service.get(source.artifactId).contentHash)
     await cli('create_context_bundle', { tag: 'agent-context', action: 'copy' })
-    ctx.check('Local CLI copies updated membership/revision with literal source', clipboard.readText().includes(service.get(source.artifactId).rawMarkdown))
+    ctx.check('Local CLI copies updated membership/revision with literal source', (await clipboard.readText()).includes(service.get(source.artifactId).rawMarkdown))
     await runtime.open(); ctx.window.show(); ctx.window.focus()
     await ctx.waitFor(() => document.hasFocus())
     const md = await save('agent.md', 'CONFIRM', () => call('create_context_bundle', { tag: 'agent-context', action: 'markdown' }))
@@ -83,5 +84,5 @@ exports.run = async ctx => {
     await ctx.viewport(1440, 900); await ctx.capture('semantic-bundle-preview')
     ctx.check('Changing semantics leaves Artifact bytes and revisions intact', [...hashes].every(([id, hash]) => service.get(id).contentHash === hash))
     fs.writeFileSync(path.join(ctx.evidenceDir, 'fidelity.json'), JSON.stringify({ webpSHA256: visual.media.sha256, exportedWebpSHA256: createHash('sha256').update(bytes).digest('hex'), webpBytes: bytes.length, copied, savedMarkdown: md, savedZip: zip, cancelled }, null, 2))
-  } finally { dialog.showSaveDialog = originalSave; process.chdir(priorCwd); clipboard.writeText(previousClipboard); local.dispose(); await new Promise(resolve => server.close(resolve)); runtime.close() }
+  } finally { dialog.showSaveDialog = originalSave; process.chdir(priorCwd); await clipboard.writeText(previousClipboard); local.dispose(); await new Promise(resolve => server.close(resolve)); runtime.close() }
 }

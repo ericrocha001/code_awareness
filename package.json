@@ -100,6 +100,7 @@
     "vitest": "5.1.0"
   },
   "build": {
+    "npmRebuild": false,
     "beforePack": "./scripts/runtime-preview/pack.cjs",
     "afterPack": "./scripts/runtime-preview/pack.cjs",
     "appId": "com.ericrocha.codeawareness",
