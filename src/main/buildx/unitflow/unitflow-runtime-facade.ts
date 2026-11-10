@@ -144,37 +144,90 @@ export class UnitFlowRuntimeFacade {
           `Plan "${cleanPlanId}" already exists and belongs to a different session "${existingPlan.sessionId}"`
         )
       }
+      if (existingPlan.title.trim() !== input.title.trim()) {
+        throw new UnitFlowPlanConflictError(
+          `Plan "${cleanPlanId}" already exists with divergent title: expected "${existingPlan.title}", received "${input.title}"`
+        )
+      }
+      const existingSourceArtifactId = existingPlan.sourceArtifactId?.trim() ?? ''
+      const inputSourceArtifactId = input.sourceArtifactId?.trim() ?? ''
+      if (existingSourceArtifactId !== inputSourceArtifactId) {
+        throw new UnitFlowPlanConflictError(
+          `Plan "${cleanPlanId}" already exists with divergent sourceArtifactId: expected "${existingSourceArtifactId}", received "${inputSourceArtifactId}"`
+        )
+      }
+
       const existingUnits = this.unitflowService.listPlanUnits(this.repositoryId, cleanSessionId, cleanPlanId)
-      if (existingUnits.length === input.units.length) {
-        const unitsMatch = input.units.every((u, idx) => {
-          const ex = existingUnits[idx]
-          return ex && ex.unitId === u.unitId.toLowerCase() && ex.position === u.position
-        })
-        if (unitsMatch) {
-          const summaries: CompactUnitSummary[] = existingUnits.map(u => {
-            const state = this.unitflowService.getUnitState(this.repositoryId, cleanSessionId, cleanPlanId, u.unitId)
-            return {
-              unitId: u.unitId,
-              position: u.position,
-              title: u.title,
-              state: state?.status ?? 'READY'
-            }
-          })
-          return {
-            repositoryId: this.repositoryId,
-            sessionId: cleanSessionId,
-            planId: cleanPlanId,
-            title: existingPlan.title,
-            status: 'ACTIVE',
-            totalUnits: summaries.length,
-            units: summaries,
-            replayed: true
-          }
+      if (existingUnits.length !== input.units.length) {
+        throw new UnitFlowPlanConflictError(
+          `Plan "${cleanPlanId}" already exists with divergent unit count: expected ${existingUnits.length}, received ${input.units.length}`
+        )
+      }
+
+      for (let idx = 0; idx < input.units.length; idx++) {
+        const u = input.units[idx]
+        const cleanUnitId = u.unitId.trim().toLowerCase()
+        const fullUnit = this.unitflowService.getPlanUnit(this.repositoryId, cleanSessionId, cleanPlanId, cleanUnitId)
+        if (!fullUnit) {
+          throw new UnitFlowPlanConflictError(
+            `Plan "${cleanPlanId}" already exists but unit "${cleanUnitId}" was not found`
+          )
+        }
+        const positionMatches =
+          fullUnit.position === u.position ||
+          fullUnit.position === u.position + 1 ||
+          (u.position === idx && fullUnit.position === idx + 1)
+        if (!positionMatches) {
+          throw new UnitFlowPlanConflictError(
+            `Plan "${cleanPlanId}" unit "${cleanUnitId}" has divergent position: expected ${fullUnit.position}, received ${u.position}`
+          )
+        }
+        if (fullUnit.title.trim() !== u.title.trim()) {
+          throw new UnitFlowPlanConflictError(
+            `Plan "${cleanPlanId}" unit "${cleanUnitId}" has divergent title: expected "${fullUnit.title}", received "${u.title}"`
+          )
+        }
+        if (fullUnit.objective.trim() !== u.objective.trim()) {
+          throw new UnitFlowPlanConflictError(
+            `Plan "${cleanPlanId}" unit "${cleanUnitId}" has divergent objective`
+          )
+        }
+        if (fullUnit.acceptanceCriteria.trim() !== u.acceptanceCriteria.trim()) {
+          throw new UnitFlowPlanConflictError(
+            `Plan "${cleanPlanId}" unit "${cleanUnitId}" has divergent acceptanceCriteria`
+          )
+        }
+        const expectedDeps = [...(fullUnit.dependsOnUnitIds ?? [])].map(d => d.trim().toLowerCase()).sort()
+        const inputDeps = [...(u.dependsOnUnitIds ?? [])].map((d: string) => d.trim().toLowerCase()).sort()
+        if (
+          expectedDeps.length !== inputDeps.length ||
+          !expectedDeps.every((dep, i) => dep === inputDeps[i])
+        ) {
+          throw new UnitFlowPlanConflictError(
+            `Plan "${cleanPlanId}" unit "${cleanUnitId}" has divergent dependsOnUnitIds`
+          )
         }
       }
-      throw new UnitFlowPlanConflictError(
-        `Plan "${cleanPlanId}" already exists with divergent unit definitions`
-      )
+
+      const summaries: CompactUnitSummary[] = existingUnits.map(u => {
+        const state = this.unitflowService.getUnitState(this.repositoryId, cleanSessionId, cleanPlanId, u.unitId)
+        return {
+          unitId: u.unitId,
+          position: u.position,
+          title: u.title,
+          state: state?.status ?? 'READY'
+        }
+      })
+      return {
+        repositoryId: this.repositoryId,
+        sessionId: cleanSessionId,
+        planId: cleanPlanId,
+        title: existingPlan.title,
+        status: 'ACTIVE',
+        totalUnits: summaries.length,
+        units: summaries,
+        replayed: true
+      }
     }
 
     // Register plan
@@ -256,36 +309,87 @@ export class UnitFlowRuntimeFacade {
     const existingAttempt = this.smcService.getExecutionAttempt(this.repositoryId, cleanAttemptId)
     if (existingAttempt) {
       if (
-        existingAttempt.sessionId === cleanSessionId &&
-        existingAttempt.planId === cleanPlanId &&
-        existingAttempt.reservationId === cleanReservationId
+        existingAttempt.sessionId !== cleanSessionId ||
+        existingAttempt.planId !== cleanPlanId ||
+        existingAttempt.reservationId !== cleanReservationId
       ) {
-        if (existingAttempt.status === 'STARTING' || existingAttempt.status === 'RUNNING') {
-          const obs = await this.executionService.observeUnitExecution(
-            this.repositoryId,
-            cleanSessionId,
-            cleanAttemptId
-          )
+        throw new ExecutionAttemptConflictError(
+          `Attempt "${cleanAttemptId}" already exists with divergent scope`
+        )
+      }
+
+      if (existingAttempt.status === 'STARTING' || existingAttempt.status === 'RUNNING') {
+        const obs = await this.executionService.observeUnitExecution(
+          this.repositoryId,
+          cleanSessionId,
+          cleanAttemptId
+        )
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: existingAttempt.unitId,
+          reservationId: cleanReservationId,
+          attemptId: cleanAttemptId,
+          stageOperationId: cleanStageOpId,
+          status: obs.status,
+          reason: obs.reason ?? null,
+          proposalId: (obs as any).proposalId ?? null,
+          executionId: (obs as any).executionId ?? null,
+          replayed: true
+        }
+      }
+
+      if (existingAttempt.status === 'PREPARED') {
+        const stageResult = await this.promptStageService.stageUnitPrompt(
+          this.repositoryId,
+          cleanSessionId,
+          existingAttempt.attemptId,
+          {
+            stageOperationId: cleanStageOpId
+          }
+        )
+
+        if (!stageResult.success || stageResult.status !== 'READY') {
           return {
             repositoryId: this.repositoryId,
             sessionId: cleanSessionId,
             planId: cleanPlanId,
             unitId: existingAttempt.unitId,
             reservationId: cleanReservationId,
-            attemptId: cleanAttemptId,
+            attemptId: existingAttempt.attemptId,
             stageOperationId: cleanStageOpId,
-            status: obs.status,
-            reason: obs.reason ?? null,
-            proposalId: (obs as any).proposalId ?? null,
-            executionId: (obs as any).executionId ?? null,
-            replayed: true
+            status: 'UNAVAILABLE',
+            reason: stageResult.reason ?? 'STAGE_FAILED'
           }
         }
-      } else {
-        throw new ExecutionAttemptConflictError(
-          `Attempt "${cleanAttemptId}" already exists with divergent scope`
+
+        const execResult = await this.executionService.startUnitExecution(
+          this.repositoryId,
+          cleanSessionId,
+          existingAttempt.attemptId,
+          { stageOperationId: cleanStageOpId }
         )
+
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: existingAttempt.unitId,
+          reservationId: cleanReservationId,
+          attemptId: existingAttempt.attemptId,
+          stageOperationId: cleanStageOpId,
+          status: execResult.status,
+          reason: execResult.reason ?? null,
+          proposalId: (execResult as any).proposalId ?? null,
+          executionId: (execResult as any).executionId ?? null,
+          replayed: true
+        }
       }
+
+      throw new ExecutionAttemptConflictError(
+        `Attempt "${cleanAttemptId}" already exists in status "${existingAttempt.status}" and cannot be restarted`
+      )
     }
 
     // 2. Strict constraint: Exactly one active executor attempt per session
@@ -456,12 +560,13 @@ export class UnitFlowRuntimeFacade {
         const obs = await this.executionService.observeUnitExecution(
           this.repositoryId,
           cleanSessionId,
-          attemptRecord.attemptId
+          attemptRecord.attemptId,
+          { readOnly: true }
         )
         liveStatus = obs.status
-        if (obs.status === 'TERMINAL_OBSERVED') {
+        if (obs.status === 'TERMINAL_OBSERVED' || obs.status === 'REFUSED') {
           observedTerminal = true
-          liveStatus = (obs as any).cliStatus ?? 'TERMINAL_OBSERVED'
+          liveStatus = (obs as any).cliStatus ?? obs.status
         }
       }
 
@@ -547,9 +652,9 @@ export class UnitFlowRuntimeFacade {
     } else if (activeAttemptInfo && (activeAttemptInfo.status === 'STARTING' || activeAttemptInfo.status === 'AWAITING_APPROVAL')) {
       orchestrationState = 'STARTING'
       nextAllowedActions.push('get_unitflow_status')
-    } else if (activeAttemptInfo && (activeAttemptInfo.status === 'RUNNING' || observedTerminal)) {
+    } else if (activeAttemptInfo && (activeAttemptInfo.status === 'RUNNING' || observedTerminal || activeAttemptInfo.status === 'REFUSED')) {
       orchestrationState = 'RUNNING'
-      if (observedTerminal) {
+      if (observedTerminal || activeAttemptInfo.status === 'REFUSED') {
         nextAllowedActions.push('settle_unitflow_unit')
       } else {
         nextAllowedActions.push('get_unitflow_status', 'settle_unitflow_unit')

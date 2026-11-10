@@ -53,7 +53,6 @@ export interface StartNextUnitOptions {
   readonly reservationId: string
   readonly attemptId: string
   readonly stageOperationId: string
-  readonly customPromptText?: string
 }
 
 export interface StartedUnitFlowResult {

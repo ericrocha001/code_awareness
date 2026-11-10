@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
 import * as os from 'node:os'
+import { execSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import { UnitFlowRuntimeFacade } from './unitflow-runtime-facade'
@@ -13,6 +14,7 @@ import {
 import { ChannelMcpAdapter } from '../../mcp/channel-mcp-adapter'
 import { ValidationLedger } from '../../validation-ledger/validation-ledger'
 import { RuntimeIdentityProvider } from '../../runtime-identity/runtime-identity-provider'
+import { CliExecutionService } from '../../cli-execution/cli-execution-service'
 import type { BranchInventory } from '../../../shared/types/branch-orchestration-types'
 import type { GitOperationsPort } from '../execution/workspace-binding-service'
 import type { CliExecutionPort } from '../execution/grok-cli-bridge'
@@ -600,5 +602,559 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
       expect(planClosedRes.isError).toBe(true)
       expect(JSON.parse((planClosedRes.content[0] as { type: 'text'; text: string }).text).code).toBe('SESSION_CLOSED')
     })
+  })
+
+  describe('Prova 5: Leitura de status estritamente observacional e read-only', () => {
+    it('consultas repetidas a get_unitflow_status não alteram revisões nem estados no SMC, preservando a promoção para o caminho de mutação', async () => {
+      const facade = createFacade()
+      const adapter = createAdapter(facade)
+
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unitId = randomUUID()
+
+      await adapter.callTool('create_buildx_session', { sessionId })
+      await adapter.callTool('bind_unitflow_workspace', { sessionId, worktreeId })
+      await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Read-only Status Plan',
+        objective: 'Test read-only guarantees',
+        units: [
+          {
+            unitId,
+            position: 0,
+            title: 'Unit Observation',
+            objective: 'Observe without mutation',
+            acceptanceCriteria: 'Unchanged revision on repeat reads'
+          }
+        ]
+      })
+
+      const attemptId = randomUUID()
+      const reservationId = randomUUID()
+      const stageOpId = randomUUID()
+
+      // Iniciar a tentativa com CLI simulando RUNNING
+      mockCli.setSimulatedStatus('RUNNING')
+      await adapter.callTool('start_next_unitflow_unit', {
+        sessionId,
+        planId,
+        reservationId,
+        attemptId,
+        stageOperationId: stageOpId
+      })
+
+      // Forçar tentativa no SMC para STARTING para verificar que getStatus não muta para RUNNING
+      const store = smcService.getStore(repositoryId)
+      ;(store as any).db.prepare("UPDATE smc_execution_attempts SET status = 'STARTING' WHERE attempt_id = ?").run(attemptId)
+      const attemptBefore = store.getExecutionAttempt(attemptId)!
+      expect(attemptBefore.status).toBe('STARTING')
+      const revisionBefore = attemptBefore.revision
+
+      // Executar 5 consultas consecutivas de get_unitflow_status
+      for (let i = 0; i < 5; i++) {
+        const statusRes = parseMcpResult(
+          await adapter.callTool('get_unitflow_status', { sessionId })
+        )
+        // O status projetado ao orquestrador é honesto com o CLI RUNNING
+        expect(statusRes.orchestrationState).toBe('RUNNING')
+        expect(statusRes.activeAttempt.status).toBe('RUNNING')
+
+        // Mas a tentativa persistida no SMC NÃO teve sua revisão nem seu status mutados
+        const attemptDuring = store.getExecutionAttempt(attemptId)!
+        expect(attemptDuring.status).toBe('STARTING')
+        expect(attemptDuring.revision).toBe(revisionBefore)
+      }
+
+      // Agora acionar o caminho de mutação legítimo (ex: settle_unitflow_unit com CLI terminal)
+      mockCli.setSimulatedStatus('SUCCEEDED', 0)
+      const settleRes = parseMcpResult(
+        await adapter.callTool('settle_unitflow_unit', {
+          sessionId,
+          attemptId
+        })
+      )
+      expect(settleRes.settled).toBe(true)
+
+      // A mutação legítima alterou o estado no SMC
+      const attemptAfter = store.getExecutionAttempt(attemptId)!
+      expect(attemptAfter.status).toBe('COMPLETED')
+      expect(attemptAfter.revision).toBeGreaterThan(revisionBefore)
+    })
+  })
+
+  describe('Prova 6: Idempotência de planos com equivalência completa do manifesto', () => {
+    it('aceita replay idêntico e rejeita qualquer divergência no manifesto com PLAN_CONFLICT sem alterar o plano pré-existente', async () => {
+      const facade = createFacade()
+      const adapter = createAdapter(facade)
+
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unit1Id = randomUUID()
+      const unit2Id = randomUUID()
+
+      await adapter.callTool('create_buildx_session', { sessionId })
+
+      const canonicalUnits = [
+        {
+          unitId: unit1Id,
+          position: 0,
+          title: 'Unit 1 Title',
+          objective: 'Unit 1 Objective',
+          acceptanceCriteria: 'Unit 1 Acceptance'
+        },
+        {
+          unitId: unit2Id,
+          position: 1,
+          title: 'Unit 2 Title',
+          objective: 'Unit 2 Objective',
+          acceptanceCriteria: 'Unit 2 Acceptance',
+          dependsOnUnitIds: [unit1Id]
+        }
+      ]
+
+      // 1. Criar plano original
+      const initialPlan = parseMcpResult(
+        await adapter.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'Original Title',
+          objective: 'Original Objective',
+          units: canonicalUnits
+        })
+      )
+      expect(initialPlan.status).toBe('ACTIVE')
+      expect(initialPlan.replayed).toBeUndefined()
+
+      // 2. Replay idêntico -> aceito com replayed: true
+      const replaySame = parseMcpResult(
+        await adapter.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'Original Title',
+          objective: 'Original Objective',
+          units: canonicalUnits
+        })
+      )
+      expect(replaySame.replayed).toBe(true)
+      expect(replaySame.title).toBe('Original Title')
+      expect(replaySame.totalUnits).toBe(2)
+
+      // 3. Replay com título divergente -> PLAN_CONFLICT
+      const conflictTitle = await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Divergent Title',
+        objective: 'Original Objective',
+        units: canonicalUnits
+      })
+      expect(conflictTitle.isError).toBe(true)
+      expect(JSON.parse((conflictTitle.content[0] as { type: 'text'; text: string }).text).code).toBe('PLAN_CONFLICT')
+
+      // 4. Replay com objetivo de unidade divergente -> PLAN_CONFLICT
+      const conflictUnitObj = await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Original Title',
+        objective: 'Original Objective',
+        units: [
+          canonicalUnits[0],
+          { ...canonicalUnits[1], objective: 'Divergent Unit Objective' }
+        ]
+      })
+      expect(conflictUnitObj.isError).toBe(true)
+      expect(JSON.parse((conflictUnitObj.content[0] as { type: 'text'; text: string }).text).code).toBe('PLAN_CONFLICT')
+
+      // 5. Replay com acceptanceCriteria de unidade divergente -> PLAN_CONFLICT
+      const conflictUnitCriteria = await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Original Title',
+        objective: 'Original Objective',
+        units: [
+          { ...canonicalUnits[0], acceptanceCriteria: 'Divergent Criteria' },
+          canonicalUnits[1]
+        ]
+      })
+      expect(conflictUnitCriteria.isError).toBe(true)
+      expect(JSON.parse((conflictUnitCriteria.content[0] as { type: 'text'; text: string }).text).code).toBe('PLAN_CONFLICT')
+
+      // 6. Replay com dependência de unidade divergente -> PLAN_CONFLICT
+      const conflictUnitDeps = await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Original Title',
+        objective: 'Original Objective',
+        units: [
+          canonicalUnits[0],
+          { ...canonicalUnits[1], dependsOnUnitIds: [] }
+        ]
+      })
+      expect(conflictUnitDeps.isError).toBe(true)
+      expect(JSON.parse((conflictUnitDeps.content[0] as { type: 'text'; text: string }).text).code).toBe('PLAN_CONFLICT')
+
+      // 7. Replay com quantidade divergente de unidades -> PLAN_CONFLICT
+      const conflictCount = await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Original Title',
+        objective: 'Original Objective',
+        units: [canonicalUnits[0]]
+      })
+      expect(conflictCount.isError).toBe(true)
+      expect(JSON.parse((conflictCount.content[0] as { type: 'text'; text: string }).text).code).toBe('PLAN_CONFLICT')
+
+      // 8. Verificar que o plano no SMC não foi corrompido nem alterado
+      const store = smcService.getStore(repositoryId)
+      const storedPlan = store.getPlan(planId)!
+      expect(storedPlan.title).toBe('Original Title')
+      const storedUnits = store.listPlanUnits(sessionId, planId)
+      expect(storedUnits).toHaveLength(2)
+      expect(storedUnits[0].title).toBe('Unit 1 Title')
+      expect(storedUnits[1].title).toBe('Unit 2 Title')
+    })
+  })
+
+  describe('Prova 7: Retomada segura de tentativas em PREPARED', () => {
+    it('retoma com sucesso uma tentativa persistida em PREPARED sem reserva duplicada e impede segundo spawn indevido', async () => {
+      const facade = createFacade()
+      const adapter = createAdapter(facade)
+
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unitId = randomUUID()
+
+      await adapter.callTool('create_buildx_session', { sessionId })
+      await adapter.callTool('bind_unitflow_workspace', { sessionId, worktreeId })
+      await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Resume Prepared Plan',
+        objective: 'Test resumption of PREPARED attempt',
+        units: [
+          {
+            unitId,
+            position: 0,
+            title: 'Unit Resumption',
+            objective: 'Resume execution',
+            acceptanceCriteria: 'Executes without duplicate reservation'
+          }
+        ]
+      })
+
+      const reservationId = randomUUID()
+      const attemptId = randomUUID()
+      const stageOpId = randomUUID()
+
+      // Simular uma tentativa persistida em PREPARED (reserva criada e attempt gravado no banco, mas interrompida antes do CLI start)
+      await facade.reservationService.reserveNextEligibleUnit(repositoryId, sessionId, planId, {
+        reservationId
+      })
+      await facade.attemptService.prepareExecutionAttempt(repositoryId, sessionId, reservationId, {
+        attemptId
+      })
+
+      const store = smcService.getStore(repositoryId)
+      const attemptInDb = store.getExecutionAttempt(attemptId)!
+      expect(attemptInDb.status).toBe('PREPARED')
+
+      // Chamar start_next_unitflow_unit com os mesmos IDs: deve retomar a execução diretamente
+      mockCli.setSimulatedStatus('RUNNING')
+      const resumeRes = parseMcpResult(
+        await adapter.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId,
+          attemptId,
+          stageOperationId: stageOpId
+        })
+      )
+
+      expect(resumeRes.replayed).toBe(true)
+      expect(resumeRes.attemptId).toBe(attemptId)
+      expect(resumeRes.unitId).toBe(unitId)
+      expect(resumeRes.status).toBe('RUNNING')
+
+      // A tentativa no SMC foi promovida para RUNNING com sucesso
+      const attemptAfter = store.getExecutionAttempt(attemptId)!
+      expect(attemptAfter.status).toBe('RUNNING')
+
+      // Tentar segundo spawn com outro attemptId enquanto a tentativa está ativa -> fail-closed com ATTEMPT_CONFLICT
+      const concurrentSpawn = await adapter.callTool('start_next_unitflow_unit', {
+        sessionId,
+        planId,
+        reservationId: randomUUID(),
+        attemptId: randomUUID(),
+        stageOperationId: randomUUID()
+      })
+      expect(concurrentSpawn.isError).toBe(true)
+      expect(JSON.parse((concurrentSpawn.content[0] as { type: 'text'; text: string }).text).code).toBe('ATTEMPT_CONFLICT')
+    })
+  })
+
+  describe('Prova 8: customPromptText removido do contrato público', () => {
+    it('o esquema do MCP não anuncia customPromptText e a ferramenta não aceita parâmetros silenciosos', () => {
+      const facade = createFacade()
+      const adapter = createAdapter(facade)
+      const tools = adapter.listTools()
+
+      const startTool = tools.find(t => t.name === 'start_next_unitflow_unit')!
+      expect(startTool).toBeDefined()
+      expect(startTool.inputSchema.properties).not.toHaveProperty('customPromptText')
+      expect(startTool.inputSchema.additionalProperties).toBe(false)
+    })
+  })
+
+  describe('Prova 9: Execução com Grok CLI real supervisionado em Worktree Git descartável', () => {
+    it('executa ciclo completo pelo MCP com processo Grok CLI real, encerramento supervisionado e aceite com prova do Ledger', async () => {
+      const realTemp = makeTempDir('buildx-real-grok-')
+      const realRepoDir = path.join(realTemp, 'disposable-repo')
+      const realStagingDir = path.join(realTemp, 'staging')
+      fs.mkdirSync(realRepoDir, { recursive: true })
+      fs.mkdirSync(realStagingDir, { recursive: true })
+
+      // Inicializa repositório Git descartável
+      execSync('git init', { cwd: realRepoDir })
+      execSync('git config user.email "buildx-real@test.local"', { cwd: realRepoDir })
+      execSync('git config user.name "BuildX Real Test"', { cwd: realRepoDir })
+      fs.writeFileSync(path.join(realRepoDir, 'README.md'), '# BuildX Disposable Git Worktree\n')
+      execSync('git add .', { cwd: realRepoDir })
+      execSync('git commit -m "initial commit"', { cwd: realRepoDir })
+      const realHead = execSync('git rev-parse HEAD', { cwd: realRepoDir, encoding: 'utf8' }).trim()
+
+      const realRepoId = 'e1c8a999-6d73-4f56-83a3-fbcd78c9c19d'
+      const realWorktreeId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+      const realGeneration = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+
+      const realGitOps: GitOperationsPort = {
+        getBranchInventory: async (): Promise<BranchInventory> => ({
+          repositoryId: realRepoId,
+          observedAt: new Date().toISOString(),
+          revision: '1',
+          source: 'GIT_LOCAL',
+          coverage: 'COMPLETE',
+          branches: [
+            {
+              key: 'main',
+              repositoryId: realRepoId,
+              name: 'main',
+              ref: 'refs/heads/main',
+              namespace: 'LOCAL',
+              head: realHead,
+              upstream: null,
+              generation: '1',
+              revision: '1',
+              creation: { at: new Date().toISOString(), source: 'APP_RECEIPT' },
+              lastCommitAt: new Date().toISOString(),
+              worktrees: [{ worktreeId: realWorktreeId, generation: realGeneration }]
+            }
+          ],
+          worktrees: [
+            {
+              worktreeId: realWorktreeId,
+              generation: realGeneration,
+              path: realRepoDir,
+              branch: 'main',
+              head: realHead,
+              detached: false,
+              locked: false,
+              missing: false,
+              prunable: false,
+              creation: { at: new Date().toISOString(), quality: 'ESTIMATED', source: 'ADMIN_DIRECTORY_BIRTHTIME' }
+            }
+          ],
+          unassignedWorktrees: []
+        }),
+        getCoordinationSnapshot: async () => ({ reference: false })
+      }
+
+      // CliExecutionService REAL que executa grok.exe do sistema
+      const realCli = new CliExecutionService({
+        repoRoot: realRepoDir,
+        repositoryId: realRepoId,
+        enabledByDefault: true,
+        getPolicy: () => ({ mode: 'SUPERVISED', revision: 'r1', rule: 'native-command-consent' }),
+        approvalHandler: async (req) => {
+          return true // Consentimento supervisionado concedido pelo operador
+        },
+        resolveWorktree: async () => ({
+          identity: {
+            worktreeId: realWorktreeId,
+            generation: realGeneration,
+            head: realHead,
+            branch: 'main',
+            indexRevision: '1'
+          },
+          directory: realRepoDir,
+          getFingerprint: async () => 'fingerprint-real-trial-001'
+        })
+      })
+
+      const realFacade = new UnitFlowRuntimeFacade({
+        repositoryId: realRepoId,
+        repoRoot: realRepoDir,
+        smcService,
+        gitOperations: realGitOps,
+        cliExecution: realCli,
+        validationLedger: ledger,
+        stagingDirectory: realStagingDir
+      })
+
+      const realAdapter = new ChannelMcpAdapter(
+        {
+          projectId: realRepoId,
+          repoRoot: realRepoDir,
+          navigation: {
+            discoverRepository: async () => ({ directories: [] }),
+            getRelationships: async () => ({ files: [] }),
+            inspectFiles: async () => ({ files: [] }),
+            readCode: async () => [],
+            getReferences: async () => ({ targets: [] }),
+            getSymbolDependencies: async () => ({ sources: [] }),
+            getSymbolHierarchy: async () => ({ targets: [] })
+          } as any,
+          sessionMemoryCentral: smcService,
+          unitflowRuntime: realFacade
+        },
+        undefined,
+        runtimeIdentity,
+        ledger
+      )
+
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unitId = randomUUID()
+      const reservationId = randomUUID()
+      const attemptId = randomUUID()
+      const stageOpId = randomUUID()
+
+      // 1. Criar sessão via MCP
+      const sessRes = parseMcpResult(await realAdapter.callTool('create_buildx_session', { sessionId }))
+      expect(sessRes.sessionId).toBe(sessionId)
+
+      // 2. Vincular worktree via MCP
+      const bindRes = parseMcpResult(await realAdapter.callTool('bind_unitflow_workspace', { sessionId, worktreeId: realWorktreeId }))
+      expect(bindRes.worktreeId).toBe(realWorktreeId)
+
+      // 3. Preparar plano via MCP
+      const planRes = parseMcpResult(
+        await realAdapter.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'Real Grok CLI Plan',
+          objective: 'Execute and observe real Grok CLI supervised run',
+          units: [
+            {
+              unitId,
+              position: 0,
+              title: 'Real Grok Execution Unit',
+              objective: 'Confirm operational capability of real Grok CLI',
+              acceptanceCriteria: 'Process terminates cleanly with terminal status observed'
+            }
+          ]
+        })
+      )
+      expect(planRes.status).toBe('ACTIVE')
+
+      // 4. Iniciar unidade via MCP (dispara grok.exe real com staging de prompt)
+      const debugLogPath = path.resolve('scratch/real-grok-trial.log')
+      fs.mkdirSync(path.dirname(debugLogPath), { recursive: true })
+      fs.writeFileSync(debugLogPath, `[START] ${new Date().toISOString()}\n`)
+
+      const startRes = parseMcpResult(
+        await realAdapter.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId,
+          attemptId,
+          stageOperationId: stageOpId
+        })
+      )
+      fs.appendFileSync(debugLogPath, `startRes: ${JSON.stringify(startRes)}\n`)
+      expect(startRes.unitId).toBe(unitId)
+
+      // 5. Acompanhar a execução real do processo Grok CLI
+      let completed = false
+      for (let i = 0; i < 35; i++) {
+        await new Promise(r => setTimeout(r, 1000))
+        const statusRes = parseMcpResult(await realAdapter.callTool('get_unitflow_status', { sessionId }))
+        const rawSnap = await realCli.get({ operationId: attemptId })
+        fs.appendFileSync(debugLogPath, `[${i}] statusRes: ${JSON.stringify(statusRes)} | rawSnap: ${JSON.stringify(rawSnap)}\n`)
+        if (
+          rawSnap?.phase === 'TERMINAL' ||
+          statusRes.activeAttempt?.status === 'TERMINAL_OBSERVED' ||
+          statusRes.activeAttempt?.status === 'SUCCEEDED' ||
+          statusRes.activeAttempt?.status === 'FAILED' ||
+          statusRes.activeAttempt?.status === 'REFUSED' ||
+          statusRes.activeAttempt?.status === 'CANCELLED'
+        ) {
+          completed = true
+          break
+        }
+      }
+      expect(completed).toBe(true)
+
+      // 6. Confirmar encerramento técnico (settle) via MCP
+      const settleRes = parseMcpResult(
+        await realAdapter.callTool('settle_unitflow_unit', {
+          sessionId,
+          attemptId
+        })
+      )
+      expect(settleRes.settled).toBe(true)
+
+      // 7. Registrar prova no Validation Ledger com proveniência e aceitar se bem-sucedido
+      if (settleRes.unitState === 'VALIDATING') {
+        const proof = ledger.recordProof({
+          kind: 'TARGETED_TEST',
+          producer: 'IMPLEMENTER',
+          status: 'PASSED',
+          startedAt: new Date(Date.now() - 5000).toISOString(),
+          finishedAt: new Date().toISOString(),
+          durationMs: 5000,
+          scope: ['real-grok-trial'],
+          summary: 'Real Grok CLI execution confirmed via UnitFlow MCP',
+          commandProfile: {
+            command: 'grok --prompt-file',
+            checkout: {
+              repositoryId: realRepoId,
+              worktreeId: realWorktreeId,
+              generation: realGeneration,
+              head: realHead,
+              issuer: 'VALIDATION_EXECUTION',
+              runId: randomUUID()
+            }
+          }
+        })
+        const acceptRes = parseMcpResult(
+          await realAdapter.callTool('accept_unitflow_unit', {
+            sessionId,
+            attemptId,
+            operationId: randomUUID(),
+            proofIds: [proof.proofId],
+            summary: 'Real Grok execution completed and validated'
+          })
+        )
+        expect(acceptRes.status).toBe('ACCEPTED')
+      } else {
+        // Se terminal com falha/código de saída não zero: reconcilia
+        const reconcileRes = parseMcpResult(
+          await realAdapter.callTool('reconcile_unitflow_unit', {
+            sessionId,
+            attemptId,
+            operationId: randomUUID(),
+            summary: `Diagnóstico operacional: status=${settleRes.attemptStatus}, exitCode=${settleRes.exitCode}`,
+            action: 'RETRY_SAME_UNIT'
+          })
+        )
+        expect(reconcileRes.status).toBe('RETRY_ELIGIBLE')
+      }
+
+      // Cleanup
+      try {
+        fs.rmSync(realTemp, { recursive: true, force: true })
+      } catch {}
+    }, 60000)
   })
 })

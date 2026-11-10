@@ -161,10 +161,6 @@ export const START_NEXT_UNITFLOW_UNIT_TOOL = mutationTool(
       type: 'string',
       minLength: 1,
       description: 'Caller-generated stable operation ID for prompt staging idempotency.'
-    },
-    customPromptText: {
-      type: 'string',
-      description: 'Optional custom prompt text override for the unit task.'
     }
   },
   ['sessionId', 'planId', 'reservationId', 'attemptId', 'stageOperationId']
@@ -403,13 +399,11 @@ export async function executeBuildxUnitflowTool(
         const reservationId = String(rawArgs.reservationId ?? '')
         const attemptId = String(rawArgs.attemptId ?? '')
         const stageOperationId = String(rawArgs.stageOperationId ?? '')
-        const customPromptText = rawArgs.customPromptText !== undefined ? String(rawArgs.customPromptText) : undefined
 
         const result = await facade.startNextUnit(sessionId, planId, {
           reservationId,
           attemptId,
-          stageOperationId,
-          customPromptText
+          stageOperationId
         })
         return ok(result)
       }
