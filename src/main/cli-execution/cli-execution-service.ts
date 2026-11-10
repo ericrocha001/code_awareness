@@ -153,9 +153,9 @@ export class CliExecutionService {
     const proposal = this.proposals.get(input.proposalId)
     if (!proposal) throw new Error('PROPOSAL_NOT_FOUND')
     if (!!proposal.commands !== investigation) throw new Error('OPERATION_KIND_CONFLICT')
-    if (Date.now() > Date.parse(proposal.expiresAt) || proposal.status === 'EXPIRED') throw new Error('PROPOSAL_EXPIRED')
     if (proposal.status === 'CONSUMED') throw new Error('PROPOSAL_ALREADY_CONSUMED')
     if (proposal.status === 'REFUSED') throw new Error('PROPOSAL_REFUSED')
+    if (this.isProposalExpired(proposal)) throw new Error('PROPOSAL_EXPIRED')
     if (digest(proposal.policy) !== digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId)))) throw new Error('POLICY_CHANGED')
     if (proposal.policy?.mode === 'AUTONOMOUS_CONSULTATIVE' && !(proposal.commands ?? [proposal.command]).every(isConsultativeCommand)) throw new Error('NOT_AUTO_AUTHORIZED: Select SUPERVISED locally for native command approval')
     const record = this.record(input.operationId, proposal, proposal.command)
@@ -172,11 +172,19 @@ export class CliExecutionService {
       ...(proposal.worktree ? { worktree: { ...proposal.worktree } } : {}),
       origin: 'CLI_EXECUTION_CAPABILITY', status: 'AWAITING_APPROVAL', phase: 'AWAITING_APPROVAL', startedAt: new Date().toISOString() }
   }
-  private current(record: CliExecutionRecord, proposal: CliProposal, token: string): boolean {
+  private isProposalExpired(proposal: CliProposal): boolean {
+    return proposal.status === 'EXPIRED' || Date.now() > Date.parse(proposal.expiresAt)
+  }
+  private hasActiveAuthority(record: CliExecutionRecord, proposal: CliProposal, token: string): boolean {
     try {
       return this.enabled && this.activeOperationId === record.operationId && this.activeExecutionToken === token &&
-        digest(proposal.policy) === digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId))) && Date.now() <= Date.parse(proposal.expiresAt)
+        digest(proposal.policy) === digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId)))
     } catch { return false }
+  }
+  private current(record: CliExecutionRecord, proposal: CliProposal, token: string): boolean {
+    // Admission TTL only gates un-admitted proposals; once CONSUMED, execution runs until its own timeout/revocation.
+    return (proposal.status === 'CONSUMED' || !this.isProposalExpired(proposal)) &&
+      this.hasActiveAuthority(record, proposal, token)
   }
   private async authorize(record: CliExecutionRecord, proposal: CliProposal, token: string, command?: CliCommandDescriptor): Promise<boolean> {
     let fingerprint: string
@@ -241,7 +249,9 @@ export class CliExecutionService {
         let monitoring = false
         if (proposal.policy?.mode !== 'SUPERVISED') monitor = setInterval(() => {
           if (monitoring || !this.current(record, proposal, token)) {
-            if (!this.current(record, proposal, token) && this.activeOperationId === record.operationId) void this.abortActive('POLICY_CHANGED')
+            if (!this.current(record, proposal, token) && this.activeOperationId === record.operationId && this.activeExecutionToken === token) {
+              void this.abortActive('POLICY_CHANGED')
+            }
             return
           }
           monitoring = true
@@ -281,6 +291,7 @@ export class CliExecutionService {
       proposal.status = 'REFUSED'
     } finally {
       clearInterval(monitor)
+      if (proposal.status === 'PENDING' && this.isProposalExpired(proposal)) proposal.status = 'EXPIRED'
       if (!this.supervisor.isRunning) {
         if (steps && steps.length === proposal.commands!.length && steps.every(step => step.status === 'SUCCEEDED') && record.status === 'RUNNING') record.status = 'SUCCEEDED'
         if (record.status === 'AWAITING_APPROVAL' || record.status === 'RUNNING') { record.status = 'CANCELLED'; record.diagnostic ??= 'AUTHORITY_CHANGED' }
