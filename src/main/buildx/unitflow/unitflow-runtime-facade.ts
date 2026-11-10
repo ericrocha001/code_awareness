@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type {
   AcceptUnitFlowOptions,
   AcceptUnitFlowResult,
@@ -43,6 +44,11 @@ import {
 } from '../execution/execution-errors'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function derivePlanObjectiveEntryId(planId: string): string {
+  const hash = createHash('sha256').update(`smc:plan:objective:${planId.toLowerCase().trim()}`).digest('hex')
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`
+}
 
 export interface UnitFlowRuntimeFacadeDependencies {
   readonly repositoryId: string
@@ -157,6 +163,16 @@ export class UnitFlowRuntimeFacade {
         )
       }
 
+      const objectiveEntryId = derivePlanObjectiveEntryId(cleanPlanId)
+      const objectiveEntry = this.smcService.getEntry(this.repositoryId, cleanSessionId, objectiveEntryId)
+      if (objectiveEntry) {
+        if (objectiveEntry.body.trim() !== input.objective.trim()) {
+          throw new UnitFlowPlanConflictError(
+            `Plan "${cleanPlanId}" already exists with divergent objective: expected "${objectiveEntry.body}", received "${input.objective}"`
+          )
+        }
+      }
+
       const existingUnits = this.unitflowService.listPlanUnits(this.repositoryId, cleanSessionId, cleanPlanId)
       if (existingUnits.length !== input.units.length) {
         throw new UnitFlowPlanConflictError(
@@ -235,6 +251,15 @@ export class UnitFlowRuntimeFacade {
       planId: cleanPlanId,
       title: input.title.trim(),
       sourceArtifactId: input.sourceArtifactId?.trim()
+    })
+
+    // Persist plan objective into SMC
+    this.smcService.appendEntry(this.repositoryId, cleanSessionId, {
+      entryId: derivePlanObjectiveEntryId(cleanPlanId),
+      kind: 'DECISION',
+      title: `Plan Objective: ${cleanPlanId}`,
+      body: input.objective.trim(),
+      provenance: { role: 'AGENT' }
     })
 
     // Define ordered units

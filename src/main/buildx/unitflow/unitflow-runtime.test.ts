@@ -5,7 +5,7 @@ import * as os from 'node:os'
 import { execSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { SessionMemoryCentralService } from '../smc/session-memory-central-service'
-import { UnitFlowRuntimeFacade } from './unitflow-runtime-facade'
+import { UnitFlowRuntimeFacade, derivePlanObjectiveEntryId } from './unitflow-runtime-facade'
 import {
   BUILDX_UNITFLOW_TOOLS,
   BUILDX_UNITFLOW_READ_TOOLS,
@@ -13,6 +13,7 @@ import {
 } from './unitflow-mcp'
 import { ChannelMcpAdapter } from '../../mcp/channel-mcp-adapter'
 import { ValidationLedger } from '../../validation-ledger/validation-ledger'
+import { captureValidationSource, validationSourceFingerprint } from '../../validation-execution/validation-source'
 import { RuntimeIdentityProvider } from '../../runtime-identity/runtime-identity-provider'
 import { CliExecutionService } from '../../cli-execution/cli-execution-service'
 import type { BranchInventory } from '../../../shared/types/branch-orchestration-types'
@@ -752,6 +753,17 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
       expect(conflictTitle.isError).toBe(true)
       expect(JSON.parse((conflictTitle.content[0] as { type: 'text'; text: string }).text).code).toBe('PLAN_CONFLICT')
 
+      // 3b. Replay com objetivo de plano divergente -> PLAN_CONFLICT
+      const conflictPlanObj = await adapter.callTool('prepare_unitflow_plan', {
+        sessionId,
+        planId,
+        title: 'Original Title',
+        objective: 'Divergent Plan Objective',
+        units: canonicalUnits
+      })
+      expect(conflictPlanObj.isError).toBe(true)
+      expect(JSON.parse((conflictPlanObj.content[0] as { type: 'text'; text: string }).text).code).toBe('PLAN_CONFLICT')
+
       // 4. Replay com objetivo de unidade divergente -> PLAN_CONFLICT
       const conflictUnitObj = await adapter.callTool('prepare_unitflow_plan', {
         sessionId,
@@ -813,6 +825,14 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
       expect(storedUnits).toHaveLength(2)
       expect(storedUnits[0].title).toBe('Unit 1 Title')
       expect(storedUnits[1].title).toBe('Unit 2 Title')
+
+      const storedObjectiveEntry = smcService.getEntry(
+        repositoryId,
+        sessionId,
+        derivePlanObjectiveEntryId(planId)
+      )
+      expect(storedObjectiveEntry).not.toBeNull()
+      expect(storedObjectiveEntry!.body).toBe('Original Objective')
     })
   })
 
@@ -924,48 +944,52 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
       const realHead = execSync('git rev-parse HEAD', { cwd: realRepoDir, encoding: 'utf8' }).trim()
 
       const realRepoId = 'e1c8a999-6d73-4f56-83a3-fbcd78c9c19d'
-      const realWorktreeId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-      const realGeneration = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+      const initialSource = await captureValidationSource(realRepoDir, realRepoId)
+      const realWorktreeId = initialSource.worktreeId
+      const realGeneration = initialSource.generation
 
       const realGitOps: GitOperationsPort = {
-        getBranchInventory: async (): Promise<BranchInventory> => ({
-          repositoryId: realRepoId,
-          observedAt: new Date().toISOString(),
-          revision: '1',
-          source: 'GIT_LOCAL',
-          coverage: 'COMPLETE',
-          branches: [
-            {
-              key: 'main',
-              repositoryId: realRepoId,
-              name: 'main',
-              ref: 'refs/heads/main',
-              namespace: 'LOCAL',
-              head: realHead,
-              upstream: null,
-              generation: '1',
-              revision: '1',
-              creation: { at: new Date().toISOString(), source: 'APP_RECEIPT' },
-              lastCommitAt: new Date().toISOString(),
-              worktrees: [{ worktreeId: realWorktreeId, generation: realGeneration }]
-            }
-          ],
-          worktrees: [
-            {
-              worktreeId: realWorktreeId,
-              generation: realGeneration,
-              path: realRepoDir,
-              branch: 'main',
-              head: realHead,
-              detached: false,
-              locked: false,
-              missing: false,
-              prunable: false,
-              creation: { at: new Date().toISOString(), quality: 'ESTIMATED', source: 'ADMIN_DIRECTORY_BIRTHTIME' }
-            }
-          ],
-          unassignedWorktrees: []
-        }),
+        getBranchInventory: async (): Promise<BranchInventory> => {
+          const currentSource = await captureValidationSource(realRepoDir, realRepoId)
+          return {
+            repositoryId: realRepoId,
+            observedAt: new Date().toISOString(),
+            revision: '1',
+            source: 'GIT_LOCAL',
+            coverage: 'COMPLETE',
+            branches: [
+              {
+                key: 'main',
+                repositoryId: realRepoId,
+                name: 'main',
+                ref: 'refs/heads/main',
+                namespace: 'LOCAL',
+                head: currentSource.head,
+                upstream: null,
+                generation: currentSource.generation,
+                revision: '1',
+                creation: { at: new Date().toISOString(), source: 'APP_RECEIPT' },
+                lastCommitAt: new Date().toISOString(),
+                worktrees: [{ worktreeId: currentSource.worktreeId, generation: currentSource.generation }]
+              }
+            ],
+            worktrees: [
+              {
+                worktreeId: currentSource.worktreeId,
+                generation: currentSource.generation,
+                path: realRepoDir,
+                branch: 'main',
+                head: currentSource.head,
+                detached: false,
+                locked: false,
+                missing: false,
+                prunable: false,
+                creation: { at: new Date().toISOString(), quality: 'ESTIMATED', source: 'ADMIN_DIRECTORY_BIRTHTIME' }
+              }
+            ],
+            unassignedWorktrees: []
+          }
+        },
         getCoordinationSnapshot: async () => ({ reference: false })
       }
 
@@ -975,20 +999,23 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
         repositoryId: realRepoId,
         enabledByDefault: true,
         getPolicy: () => ({ mode: 'SUPERVISED', revision: 'r1', rule: 'native-command-consent' }),
-        approvalHandler: async (req) => {
+        approvalHandler: async () => {
           return true // Consentimento supervisionado concedido pelo operador
         },
-        resolveWorktree: async () => ({
-          identity: {
-            worktreeId: realWorktreeId,
-            generation: realGeneration,
-            head: realHead,
-            branch: 'main',
-            indexRevision: '1'
-          },
-          directory: realRepoDir,
-          getFingerprint: async () => 'fingerprint-real-trial-001'
-        })
+        resolveWorktree: async () => {
+          const currentSource = await captureValidationSource(realRepoDir, realRepoId)
+          return {
+            identity: {
+              worktreeId: currentSource.worktreeId,
+              generation: currentSource.generation,
+              head: currentSource.head,
+              branch: 'main',
+              indexRevision: currentSource.indexRevision
+            },
+            directory: realRepoDir,
+            getFingerprint: async () => validationSourceFingerprint(currentSource)
+          }
+        }
       })
 
       const realFacade = new UnitFlowRuntimeFacade({
@@ -1043,14 +1070,14 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
           sessionId,
           planId,
           title: 'Real Grok CLI Plan',
-          objective: 'Execute and observe real Grok CLI supervised run',
+          objective: 'Execute and observe real Grok CLI supervised run with material file change',
           units: [
             {
               unitId,
               position: 0,
               title: 'Real Grok Execution Unit',
-              objective: 'Confirm operational capability of real Grok CLI',
-              acceptanceCriteria: 'Process terminates cleanly with terminal status observed'
+              objective: 'Confirm operational capability of real Grok CLI with material file change',
+              acceptanceCriteria: 'Process terminates cleanly with terminal status observed and material file change in repository'
             }
           ]
         })
@@ -1095,6 +1122,10 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
       }
       expect(completed).toBe(true)
 
+      const finalSnap = await realCli.get({ operationId: attemptId })
+      expect(finalSnap?.treeObservation?.activeProcesses).toBe(0)
+      expect(finalSnap?.treeObservation?.handlesClosed).toBe(true)
+
       // 6. Confirmar encerramento técnico (settle) via MCP
       const settleRes = parseMcpResult(
         await realAdapter.callTool('settle_unitflow_unit', {
@@ -1104,7 +1135,22 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
       )
       expect(settleRes.settled).toBe(true)
 
-      // 7. Registrar prova no Validation Ledger com proveniência e aceitar se bem-sucedido
+      // 7. Alteração material de arquivo no repositório descartável real com Git
+      const validationDocPath = path.join(realRepoDir, 'FEATURE_VALIDATION.md')
+      fs.writeFileSync(validationDocPath, '# Feature Validation Evidence\n\nGrok CLI supervised execution completed.\n', 'utf8')
+      execSync('git add FEATURE_VALIDATION.md', { cwd: realRepoDir })
+      execSync('git commit -m "feat(validation): record feature verification evidence"', { cwd: realRepoDir })
+
+      const statusOutput = execSync('git status --porcelain', { cwd: realRepoDir, encoding: 'utf8' })
+      expect(statusOutput.trim()).toBe('') // Working tree limpa após commit
+
+      const logOutput = execSync('git log -1 --oneline', { cwd: realRepoDir, encoding: 'utf8' })
+      expect(logOutput).toContain('feat(validation): record feature verification evidence')
+
+      // 8. Capturar fonte de validação autoritativa e registrar prova PASSED/CURRENT no Validation Ledger
+      const finalSource = await captureValidationSource(realRepoDir, realRepoId)
+      const finalFingerprint = validationSourceFingerprint(finalSource)
+
       if (settleRes.unitState === 'VALIDATING') {
         const proof = ledger.recordProof({
           kind: 'TARGETED_TEST',
@@ -1113,27 +1159,28 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
           startedAt: new Date(Date.now() - 5000).toISOString(),
           finishedAt: new Date().toISOString(),
           durationMs: 5000,
-          scope: ['real-grok-trial'],
-          summary: 'Real Grok CLI execution confirmed via UnitFlow MCP',
+          scope: ['buildx/unitflow', 'real-grok-trial'],
+          summary: 'Real Grok CLI execution confirmed with material file change via UnitFlow MCP',
+          sourceFingerprint: finalFingerprint,
           commandProfile: {
             command: 'grok --prompt-file',
-            checkout: {
-              repositoryId: realRepoId,
-              worktreeId: realWorktreeId,
-              generation: realGeneration,
-              head: realHead,
-              issuer: 'VALIDATION_EXECUTION',
-              runId: randomUUID()
-            }
+            cwd: finalSource.cwd,
+            source: finalSource
           }
         })
+
+        const freshProof = await ledger.getProofWithFreshness(proof.proofId)
+        expect(freshProof).not.toBeNull()
+        expect(freshProof!.status).toBe('PASSED')
+        expect(freshProof!.freshness).toBe('CURRENT')
+
         const acceptRes = parseMcpResult(
           await realAdapter.callTool('accept_unitflow_unit', {
             sessionId,
             attemptId,
             operationId: randomUUID(),
             proofIds: [proof.proofId],
-            summary: 'Real Grok execution completed and validated'
+            summary: 'Real Grok execution completed, material file change verified and proof CURRENT'
           })
         )
         expect(acceptRes.status).toBe('ACCEPTED')
