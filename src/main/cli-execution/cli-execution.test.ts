@@ -292,4 +292,74 @@ describe('U1 — CLI Execution Service & Local Process Supervision', () => {
       })
     ).rejects.toThrow(/CLI_EXECUTION_DISABLED/)
   })
+
+  it('Property 11: Perfis de timeout separam CLI comum (<= 120s) de BUILDX_AGENTIC_UNIT (600s default / 900s cap) e concluem >60s reais', async () => {
+    const stdDefault = await service.prepare({ executable: process.execPath, args: ['-v'] })
+    expect(stdDefault.timeoutProfile).toBe('STANDARD_CLI')
+    expect(stdDefault.timeoutMs).toBe(60000)
+
+    const stdCapped = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'STANDARD_CLI', timeoutMs: 300000 })
+    expect(stdCapped.timeoutProfile).toBe('STANDARD_CLI')
+    expect(stdCapped.timeoutMs).toBe(120000)
+
+    const agenticDefault = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'BUILDX_AGENTIC_UNIT' })
+    expect(agenticDefault.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+    expect(agenticDefault.timeoutMs).toBe(600000)
+
+    const agenticCapped = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'BUILDX_AGENTIC_UNIT', timeoutMs: 1200000 })
+    expect(agenticCapped.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+    expect(agenticCapped.timeoutMs).toBe(900000)
+
+    const over60s = await service.prepare({
+      executable: process.execPath,
+      args: ['-e', 'setTimeout(() => console.log("AGENTIC_OVER_60S_OK"), 62000)'],
+      executionProfile: 'BUILDX_AGENTIC_UNIT'
+    })
+    service.start({ proposalId: over60s.proposalId, operationId: 'op-agentic-over-60s' })
+    const snap = await waitForStatus(service, 'op-agentic-over-60s', ['SUCCEEDED', 'TIMED_OUT', 'FAILED', 'CANCELLED'], 80000)
+    expect(snap.status, JSON.stringify(snap)).toBe('SUCCEEDED')
+    expect(snap.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+    expect(snap.timeoutMs).toBe(600000)
+    expect(snap.durationMs).toBeGreaterThanOrEqual(61000)
+    expect(snap.stdout.trim()).toBe('AGENTIC_OVER_60S_OK')
+    expect(snap.treeObservation).toEqual({ activeProcesses: 0, handlesClosed: true })
+  }, 95000)
+
+  it('Property 12: Timeout no perfil BUILDX_AGENTIC_UNIT encerra árvore inteira com TIMED_OUT', async () => {
+    const script = `
+      const { spawn } = require('child_process');
+      const sub = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)']);
+      console.log('AGENTIC_SUB_PID:' + sub.pid);
+      setInterval(() => {}, 1000);
+    `
+    const proposal = await service.prepare({
+      executable: process.execPath,
+      args: ['-e', script],
+      executionProfile: 'BUILDX_AGENTIC_UNIT',
+      timeoutMs: 1200
+    })
+    expect(proposal.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+    expect(proposal.timeoutMs).toBe(1200)
+
+    service.start({ proposalId: proposal.proposalId, operationId: 'op-agentic-timeout' })
+    const deadline = Date.now() + 6000
+    let grandchildPid: number | null = null
+    while (Date.now() < deadline) {
+      const snap = service.get({ operationId: 'op-agentic-timeout' })
+      const m = snap.stdout.match(/AGENTIC_SUB_PID:(\d+)/)
+      if (m) grandchildPid = Number(m[1])
+      if (snap.phase === 'TERMINAL') break
+      await new Promise((r) => setTimeout(r, 50))
+    }
+
+    const finalSnap = await waitForStatus(service, 'op-agentic-timeout', ['TIMED_OUT', 'FAILED', 'SUCCEEDED'], 6000)
+    expect(finalSnap.status).toBe('TIMED_OUT')
+    expect(finalSnap.treeObservation).toEqual({ activeProcesses: 0, handlesClosed: true })
+    expect(grandchildPid).toBeGreaterThan(0)
+
+    await new Promise((r) => setTimeout(r, 250))
+    let alive = true
+    try { process.kill(grandchildPid!, 0) } catch { alive = false }
+    expect(alive).toBe(false)
+  })
 })

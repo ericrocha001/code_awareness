@@ -67,6 +67,8 @@ export interface StartedUnitFlowResult {
   readonly reason?: string | null
   readonly proposalId?: string | null
   readonly executionId?: string | null
+  readonly timeoutProfile?: string
+  readonly timeoutMs?: number
   readonly replayed?: boolean
 }
 
@@ -114,6 +116,8 @@ export interface SettleUnitFlowResult {
   readonly unitState: string
   readonly exitCode: number | null
   readonly terminalReason: string | null
+  readonly timeoutProfile?: string
+  readonly timeoutMs?: number
 }
 
 export interface AcceptUnitFlowOptions {

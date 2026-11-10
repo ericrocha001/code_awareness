@@ -43,3 +43,17 @@ export function createCliProjectAuthority(options: {
       physicalRoot, generation: { dev: generation.dev, ino: generation.ino, birthtimeMs: generation.birthtimeMs }, git })).digest('hex')
   }
 }
+
+export function createCliProjectRuntimeAuthority(options: {
+  selection: CliProjectSelection
+  getSelection: () => CliProjectSelection
+  findRepository: (path: string) => CliCatalogCheckout | null
+  captureStableGitIdentity: (path: string) => Promise<unknown>
+}): () => Promise<string> {
+  return createCliProjectAuthority({
+    selection: options.selection,
+    getSelection: options.getSelection,
+    findRepository: options.findRepository,
+    captureGitIdentity: options.captureStableGitIdentity
+  })
+}

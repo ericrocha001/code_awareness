@@ -173,6 +173,8 @@ export interface UnitExecutionResult {
   readonly cliStatus?: string
   readonly unitFlowStatus?: string
   readonly reason?: string
+  readonly timeoutProfile?: string
+  readonly timeoutMs?: number
 }
 
 export type UnitSettlementStatus =
@@ -194,6 +196,8 @@ export interface UnitSettlementResult {
   readonly cliPhase?: string
   readonly exitCode?: number | null
   readonly reason?: string
+  readonly timeoutProfile?: string
+  readonly timeoutMs?: number
 }
 
 export interface SettleExecutionAttemptStoreInput {

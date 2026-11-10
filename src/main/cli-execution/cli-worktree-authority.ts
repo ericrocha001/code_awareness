@@ -22,6 +22,12 @@ export async function resolveCliWorktree(
   }
   const initial = await select()
   const directory = realpathSync(initial.path)
+  const runtimeIdentity = createHash('sha256').update(JSON.stringify({ worktreeId, generation, directory })).digest('hex')
+  const captureRuntime = async () => {
+    const currentRecord = await select()
+    if (realpathSync(currentRecord.path) !== directory) throw new Error('WORKTREE_IDENTITY_MISMATCH')
+    return { worktreeId, generation, directory }
+  }
   const capture = async () => {
     const before = await select()
     if (realpathSync(before.path) !== directory) throw new Error('WORKTREE_IDENTITY_MISMATCH')
@@ -41,6 +47,11 @@ export async function resolveCliWorktree(
     getFingerprint: async () => {
       const current = createHash('sha256').update(JSON.stringify(await capture())).digest('hex')
       if (current !== fingerprint) throw new Error('WORKTREE_STALE')
+      return current
+    },
+    getRuntimeIdentity: async () => {
+      const current = createHash('sha256').update(JSON.stringify(await captureRuntime())).digest('hex')
+      if (current !== runtimeIdentity) throw new Error('WORKTREE_STALE')
       return current
     }
   }

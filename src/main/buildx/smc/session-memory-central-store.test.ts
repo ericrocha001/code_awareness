@@ -5334,7 +5334,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
           displayCommandLine: 'grok version'
         }
 
-        // autoAuthorized true
+        // autoAuthorized true com SUPERVISED
         const prop = createFixtureProposalFromDescriptor(desc, { autoAuthorized: true })
         const bridge = new BuildXGrokCliBridge(smc, scenario.wsService, {
           isEnabled: () => true,
@@ -5346,6 +5346,40 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         if (result.status === 'CLI_DISABLED') {
           expect(result.reason).toBe('PROPOSAL_AUTO_AUTHORIZATION_DISALLOWED')
         }
+
+        // AUTONOMOUS_TRUSTED sem scope REPOSITORY_WORKTREES ainda é rejeitado
+        const legacyTrusted = createFixtureProposalFromDescriptor(desc, {
+          policyMode: 'AUTONOMOUS_TRUSTED',
+          autoAuthorized: true
+        })
+        const legacyBridge = new BuildXGrokCliBridge(smc, scenario.wsService, {
+          isEnabled: () => true,
+          getRepositoryId: () => repoId,
+          prepare: async () => legacyTrusted
+        })
+        const legacyRes = await legacyBridge.prepareGrokBuildProposal(repoId, scenario.session.sessionId, scenario.attempt.attemptId)
+        expect(legacyRes.status).toBe('CLI_DISABLED')
+        if (legacyRes.status === 'CLI_DISABLED') {
+          expect(legacyRes.reason).toBe('PROPOSAL_POLICY_UNSUPERVISED')
+        }
+
+        // AUTONOMOUS_TRUSTED com scope REPOSITORY_WORKTREES é aceito sem erro de política
+        const yoloProp = {
+          ...createFixtureProposalFromDescriptor(desc, { policyMode: 'AUTONOMOUS_TRUSTED', autoAuthorized: true }),
+          policy: { mode: 'AUTONOMOUS_TRUSTED' as const, scope: 'REPOSITORY_WORKTREES' as const, revision: 'yolo-1', rule: 'local-repository-worktree-trust' }
+        }
+        const yoloBridge = new BuildXGrokCliBridge(
+          smc,
+          scenario.wsService,
+          {
+            isEnabled: () => true,
+            getRepositoryId: () => repoId,
+            prepare: async () => yoloProp
+          },
+          () => desc
+        )
+        const yoloRes = await yoloBridge.prepareGrokBuildProposal(repoId, scenario.session.sessionId, scenario.attempt.attemptId)
+        expect(yoloRes.status).toBe('PROPOSAL_PREPARED')
       })
 
       it('revalidação pós-await: rejeita fail-closed quando sessão fechar ou HEAD avançar durante o prepare', async () => {
@@ -7676,6 +7710,123 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         expect(inspectionAfter.reason).toBe('STAGE_NOT_FOUND_OR_EXPIRED')
       })
     })
+
+    describe('Prova 16 — YOLO Worktree: deriva --always-approve do host, usa BUILDX_AGENTIC_UNIT e elimina AUTO_AUTHORIZED_NOT_REQUESTED', () => {
+      it('getPolicyForWorktree YOLO inclui --always-approve e inicia sem conflito AUTO_AUTHORIZED_NOT_REQUESTED', async () => {
+        const { sessionId, planId, unitId, attemptId } = await createEx07Fixture({
+          sessionId: 'f1f1f1f1-1111-4111-8111-111111111111',
+          planId: 'f2f2f2f2-2222-4222-8222-222222222222',
+          unitId: 'f3f3f3f3-3333-4333-8333-f3f3f3f3f3f3',
+          reservationId: 'f4f4f4f4-4444-4444-8444-444444444444',
+          attemptId: 'f5f5f5f5-5555-4555-8555-555555555555'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const baseMock = createMockCli07({ startStatus: 'RUNNING', startPhase: 'RUNNING' })
+        let preparedArgs: string[] = []
+        let preparedProfile: string | undefined
+        const yoloMock: CliExecutionPort = {
+          ...baseMock,
+          getPolicyForWorktree: async () => ({
+            mode: 'AUTONOMOUS_TRUSTED',
+            scope: 'REPOSITORY_WORKTREES',
+            revision: 'yolo-rev-1',
+            rule: 'local-repository-worktree-trust'
+          }),
+          prepare: async (input) => {
+            preparedArgs = input.args ?? []
+            preparedProfile = input.executionProfile
+            const prop = await baseMock.prepare(input)
+            return {
+              ...prop,
+              policy: {
+                mode: 'AUTONOMOUS_TRUSTED',
+                scope: 'REPOSITORY_WORKTREES',
+                revision: 'yolo-rev-1',
+                rule: 'local-repository-worktree-trust'
+              },
+              autoAuthorized: true,
+              timeoutProfile: 'BUILDX_AGENTIC_UNIT',
+              timeoutMs: 600000
+            }
+          }
+        }
+
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, yoloMock)
+        const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
+
+        expect(result.status).toBe('RUNNING')
+        expect(result.unitFlowStatus).toBe('EXECUTING')
+        expect(preparedProfile).toBe('BUILDX_AGENTIC_UNIT')
+        expect(preparedArgs).toContain('--always-approve')
+        expect(baseMock.startCalls).toHaveLength(1)
+
+        const store = smc.getStore(repoId)
+        expect(store.getExecutionAttempt(attemptId)?.status).toBe('RUNNING')
+        expect(store.getUnitState(sessionId, planId, unitId)?.status).toBe('EXECUTING')
+      })
+
+      it('SUPERVISED ou legado ACTIVE_CHECKOUT_ONLY omite --always-approve mesmo se caller passar allowAlwaysApprove', async () => {
+        const { sessionId, attemptId } = await createEx07Fixture({
+          sessionId: 'f6f6f6f6-1111-4111-8111-111111111111',
+          planId: 'f7f7f7f7-2222-4222-8222-222222222222',
+          unitId: 'f8f8f8f8-3333-4333-8333-f8f8f8f8f8f8',
+          reservationId: 'f9f9f9f9-4444-4444-8444-444444444444',
+          attemptId: 'fafafafa-5555-4555-8555-555555555555'
+        })
+        const stageOpId = await stagePromptForFixture(sessionId, attemptId)
+        const supervisedBase = createMockCli07({ autoAuthorized: true })
+        let supervisedArgs: string[] = []
+        const supervisedMock: CliExecutionPort = {
+          ...supervisedBase,
+          getPolicyForWorktree: async () => ({
+            mode: 'SUPERVISED',
+            scope: 'ACTIVE_CHECKOUT_ONLY',
+            revision: 'sup-1',
+            rule: 'native-worktree-command-consent'
+          }),
+          prepare: async (input) => {
+            supervisedArgs = input.args ?? []
+            return supervisedBase.prepare(input)
+          }
+        }
+        const svcSup = new UnitExecutionService(smc, workspaceService07, stageService07, supervisedMock)
+        const supRes = await svcSup.startUnitExecution(repoId, sessionId, attemptId, {
+          stageOperationId: stageOpId,
+          allowAlwaysApprove: true
+        })
+        expect(supervisedArgs).not.toContain('--always-approve')
+        expect(supRes.status).toBe('REFUSED')
+        expect(supRes.reason).toBe('AUTO_AUTHORIZED_NOT_REQUESTED')
+        expect(supervisedBase.startCalls).toHaveLength(0)
+      })
+
+      it('falha fechado em downgrade TOCTOU entre getPolicyForWorktree (YOLO) e prepare (SUPERVISED)', async () => {
+        const { sessionId: s2, attemptId: a2 } = await createEx07Fixture({
+          sessionId: 'fbfbfbfb-1111-4111-8111-111111111111',
+          planId: 'fcfcfcfc-2222-4222-8222-222222222222',
+          unitId: 'fdfdfdfd-3333-4333-8333-fdfdfdfdfdfd',
+          reservationId: 'fefefefe-4444-4444-8444-444444444444',
+          attemptId: 'f0f0f0f0-5555-4555-8555-555555555555'
+        })
+        const stageOp2 = await stagePromptForFixture(s2, a2)
+        const downgradeBase = createMockCli07()
+        const downgradeMock: CliExecutionPort = {
+          ...downgradeBase,
+          getPolicyForWorktree: async () => ({
+            mode: 'AUTONOMOUS_TRUSTED',
+            scope: 'REPOSITORY_WORKTREES',
+            revision: 'yolo-rev',
+            rule: 'local-repository-worktree-trust'
+          }),
+          prepare: async (input) => downgradeBase.prepare(input)
+        }
+        const svcDowngrade = new UnitExecutionService(smc, workspaceService07, stageService07, downgradeMock)
+        const downRes = await svcDowngrade.startUnitExecution(repoId, s2, a2, { stageOperationId: stageOp2 })
+        expect(downRes.status).toBe('REFUSED')
+        expect(downRes.reason).toBe('POLICY_CHANGED')
+        expect(downgradeBase.startCalls).toHaveLength(0)
+      })
+    })
   })
 
   describe('BuildX Execution-08 — Fechamento terminal e reconciliação de tentativa (Provas Dirigidas)', () => {
@@ -8378,6 +8529,95 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
 
         const unchanged = store.getExecutionAttempt(attemptId)
         expect(unchanged?.status).toBe(attempt.status)
+      })
+    })
+
+    describe('Prova 10 — Classificação diagnóstica factual e ausência de auto-retry em falha/timeout do Grok', () => {
+      const cleanTree = {
+        observedAt: new Date().toISOString(),
+        rootPid: 4321,
+        activeProcesses: 0,
+        treeProcesses: [],
+        handlesClosed: true
+      }
+
+      it('TIMED_OUT com pedido explícito de aprovação classifica APPROVAL_PROMPT_TIMED_OUT, preserva timeoutProfile/timeoutMs e não faz auto-retry', async () => {
+        const f1 = await createEx08Fixture({
+          sessionId: 'd1000001-1111-4111-8111-111111111111',
+          planId: 'd1000002-2222-4222-8222-222222222222',
+          unitId: 'd1000003-3333-4333-8333-333333333333',
+          reservationId: 'd1000004-4444-4444-8444-444444444444',
+          attemptId: 'd1000005-5555-4555-8555-555555555555'
+        })
+        const s1 = await stagePromptForFixture(f1.sessionId, f1.attemptId)
+        const m1 = createMockCli08({ startStatus: 'RUNNING' })
+        const svc1 = new UnitExecutionService(smc, workspaceService08, stageService08, m1)
+        await svc1.startUnitExecution(repoId, f1.sessionId, f1.attemptId, { stageOperationId: s1 })
+        m1.setSnapshot(f1.attemptId, {
+          status: 'TIMED_OUT',
+          phase: 'TERMINAL',
+          exitCode: null,
+          stderr: 'Confirmation required: waiting for approval to run tool',
+          timeoutProfile: 'BUILDX_AGENTIC_UNIT',
+          timeoutMs: 600000,
+          treeObservation: cleanTree
+        })
+        const r1 = await svc1.settleUnitExecution(repoId, f1.sessionId, f1.attemptId)
+        expect(r1.status).toBe('RECONCILING')
+        expect(r1.reason).toBe('APPROVAL_PROMPT_TIMED_OUT')
+        expect(r1.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+        expect(r1.timeoutMs).toBe(600000)
+        expect(m1.startCalls).toHaveLength(1)
+      })
+
+      it('FAILED sem stderr informativo classifica apenas exitCode observado sem inferir quota/auth', async () => {
+        const f2 = await createEx08Fixture({
+          sessionId: 'd2000001-1111-4111-8111-111111111111',
+          planId: 'd2000002-2222-4222-8222-222222222222',
+          unitId: 'd2000003-3333-4333-8333-333333333333',
+          reservationId: 'd2000004-4444-4444-8444-444444444444',
+          attemptId: 'd2000005-5555-4555-8555-555555555555'
+        })
+        const s2 = await stagePromptForFixture(f2.sessionId, f2.attemptId, 'f2f2f2f2-f2f2-42f2-82f2-f2f2f2f2f2f2')
+        const m2 = createMockCli08({ startStatus: 'RUNNING' })
+        const svc2 = new UnitExecutionService(smc, workspaceService08, stageService08, m2)
+        await svc2.startUnitExecution(repoId, f2.sessionId, f2.attemptId, { stageOperationId: s2 })
+        m2.setSnapshot(f2.attemptId, {
+          status: 'FAILED',
+          phase: 'TERMINAL',
+          exitCode: 2,
+          stderr: '',
+          treeObservation: cleanTree
+        })
+        const r2 = await svc2.settleUnitExecution(repoId, f2.sessionId, f2.attemptId)
+        expect(r2.status).toBe('RECONCILING')
+        expect(r2.reason).toBe('NON_ZERO_EXIT_CODE_2')
+        expect(m2.startCalls).toHaveLength(1)
+      })
+
+      it('FAILED com erro explícito de cota classifica GROK_QUOTA_OR_RATE_LIMIT e mantém zero auto-retry', async () => {
+        const f3 = await createEx08Fixture({
+          sessionId: 'd3000001-1111-4111-8111-111111111111',
+          planId: 'd3000002-2222-4222-8222-222222222222',
+          unitId: 'd3000003-3333-4333-8333-333333333333',
+          reservationId: 'd3000004-4444-4444-8444-444444444444',
+          attemptId: 'd3000005-5555-4555-8555-555555555555'
+        })
+        const s3 = await stagePromptForFixture(f3.sessionId, f3.attemptId, 'f3f3f3f3-f3f3-43f3-83f3-f3f3f3f3f3f3')
+        const m3 = createMockCli08({ startStatus: 'RUNNING' })
+        const svc3 = new UnitExecutionService(smc, workspaceService08, stageService08, m3)
+        await svc3.startUnitExecution(repoId, f3.sessionId, f3.attemptId, { stageOperationId: s3 })
+        m3.setSnapshot(f3.attemptId, {
+          status: 'FAILED',
+          phase: 'TERMINAL',
+          exitCode: 1,
+          stderr: 'Error 429: insufficient credits for workspace',
+          treeObservation: cleanTree
+        })
+        const r3 = await svc3.settleUnitExecution(repoId, f3.sessionId, f3.attemptId)
+        expect(r3.status).toBe('RECONCILING')
+        expect(r3.reason).toBe('GROK_QUOTA_OR_RATE_LIMIT')
+        expect(m3.startCalls).toHaveLength(1)
       })
     })
   })

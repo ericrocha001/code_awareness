@@ -67,9 +67,11 @@ export class ChannelStateProjection {
     else if (!project) availability = 'WAITING_FOR_PROJECT'
     else if (error) availability = 'OFFLINE'
     else availability = ready ? 'READY' : 'CONNECTING'
+    const policy = this.cliPolicy?.()
     const value: Omit<ChannelState, 'revision'> = {
       availability, remoteAccessEnabled: enabled, cliExecutionEnabled: this.cliExecutionEnabled, installationConfigured: configured, transport,
-      cliMode: this.cliPolicy?.().mode ?? 'SUPERVISED',
+      cliMode: policy?.mode ?? 'SUPERVISED',
+      cliScope: policy?.scope ?? 'ACTIVE_CHECKOUT_ONLY',
       connectionStatus: remote.status, mcpStatus: mcp.status,
       activeProject: project ? { id: project.id, name: project.name } : null,
       lastError,

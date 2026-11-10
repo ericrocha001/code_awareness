@@ -5,7 +5,7 @@ const { buildSync } = require('esbuild')
 exports.run = async ctx => {
   const { ipcMain } = require('electron')
   const backend = path.join(ctx.evidenceDir, 'backend.cjs')
-  buildSync({ stdin: { contents: "export {SettingsService} from './src/main/core/settings-service'; export {CliTrustPolicy} from './src/main/cli-execution/cli-trust-policy'; export {confirmCliAutonomy,confirmCliExecution} from './src/main/cli-execution/cli-authorization'; export {registerCliPolicyHandlers} from './src/main/ipc/cli-policy-handler'; export {CliExecutionService} from './src/main/cli-execution/cli-execution-service'; export {executeCliTool} from './src/main/cli-execution/cli-execution-mcp'; export {GitService} from './src/main/core/git-service'; export {createCliProjectAuthority} from './src/main/cli-execution/cli-project-authority'", resolveDir: ctx.projectRoot }, outfile: backend, bundle: true, platform: 'node', format: 'cjs', packages: 'external', logLevel: 'silent' })
+  buildSync({ stdin: { contents: "export {SettingsService} from './src/main/core/settings-service'; export {CliTrustPolicy} from './src/main/cli-execution/cli-trust-policy'; export {confirmCliAutonomy,confirmCliExecution} from './src/main/cli-execution/cli-authorization'; export {registerCliPolicyHandlers} from './src/main/ipc/cli-policy-handler'; export {CliExecutionService} from './src/main/cli-execution/cli-execution-service'; export {executeCliTool} from './src/main/cli-execution/cli-execution-mcp'; export {GitService} from './src/main/core/git-service'; export {createCliProjectAuthority,createCliProjectRuntimeAuthority} from './src/main/cli-execution/cli-project-authority'", resolveDir: ctx.projectRoot }, outfile: backend, bundle: true, platform: 'node', format: 'cjs', packages: 'external', logLevel: 'silent' })
   const api = require(backend)
   const worktreeBackend = path.join(ctx.evidenceDir, 'worktree-backend.cjs')
   buildSync({ stdin: { contents: "export {GitWorktreeRegistry} from './src/main/git-operations/git-worktree-registry'; export {resolveCliWorktree} from './src/main/cli-execution/cli-worktree-authority'", resolveDir: ctx.projectRoot }, outfile: worktreeBackend, bundle: true, platform: 'node', format: 'cjs', packages: 'external', logLevel: 'silent' })
@@ -35,15 +35,19 @@ exports.run = async ctx => {
       return accepted
     } finally { if (native.exitCode === null) native.kill() }
   }
-  const policy = new api.CliTrustPolicy(settings, () => ({ repositoryId: 'cli-fixture', path: root, revision: selection.revision }), async (mode, context) => {
+  const policy = new api.CliTrustPolicy(settings, () => ({ repositoryId: 'cli-fixture', path: root, revision: selection.revision }), async (mode, context, scope) => {
     initialDialogs++
-    return nativeDecision(() => api.confirmCliAutonomy(ctx.window, mode, context), ['NÃO é sandbox', 'conta Windows', 'cliente autenticado', 'prompt injection', context.repositoryId], 'Autorizar este modo')
+    const required = scope === 'REPOSITORY_WORKTREES'
+      ? ['Worktrees verificadas', 'BuildX/Grok', 'NÃO é sandbox', 'conta Windows', 'cliente autenticado', 'prompt injection', 'NÃO concede posse exclusiva Git (lock)', context.repositoryId]
+      : ['NÃO é sandbox', 'conta Windows', 'cliente autenticado', 'prompt injection', context.repositoryId]
+    return nativeDecision(() => api.confirmCliAutonomy(ctx.window, mode, context, scope), required, 'Autorizar este modo')
   })
   const service = new api.CliExecutionService({ repoRoot: root, repositoryId: 'cli-fixture', enabledByDefault: false,
     ownerPath: require(path.join(ctx.projectRoot, 'scripts/cli-execution/build.cjs')).ensureProduction(ctx.projectRoot).executable,
-    getPolicy: () => policy.getPolicy({ repositoryId: 'cli-fixture', path: root }),
+    getPolicy: target => policy.getPolicy({ repositoryId: 'cli-fixture', path: target ? target.directory : root }),
     resolveWorktree: selector => resolveCliWorktree(registry, git, selector),
     getFingerprint: api.createCliProjectAuthority({ selection, getSelection: () => selection, findRepository: () => ({ id: 'cli-fixture', localCheckout: { path: root, availability: 'AVAILABLE', gitState: 'GIT' } }), captureGitIdentity: async selected => { const snapshot = await git.captureWorktreeReadSnapshot(selected); return { head: snapshot.head, branch: snapshot.branch } } }),
+    getRuntimeIdentity: api.createCliProjectRuntimeAuthority({ selection, getSelection: () => selection, findRepository: () => ({ id: 'cli-fixture', localCheckout: { path: root, availability: 'AVAILABLE', gitState: 'GIT' } }), captureStableGitIdentity: async selected => { const dirs = await git.getRepositoryDirectories(selected); return { commonDirectory: fs.realpathSync(dirs.common), worktreeDirectory: fs.realpathSync(dirs.admin) } } }),
     approvalHandler: request => {
       commandDialogs++
       const required = request.worktree ? [request.worktree.worktreeId, request.worktree.generation, request.worktree.head, request.worktree.indexRevision, root, sibling, JSON.stringify(request.command.args), 'não concede lease Git', 'NÃO confina'] : [request.manifestHash, ...request.commands.map((_, index) => `Comando ${index + 1}`), JSON.stringify(['--version']), 'NÃO confina']
@@ -51,7 +55,7 @@ exports.run = async ctx => {
     }
   })
   const counters = { activeRequests: 0, peakConcurrentRequests: 0, totalRequests: 0, succeededRequests: 0, failedRequests: 0, timedOutRequests: 0, latency: { completedRequests: 0, totalDurationMs: 0, lastDurationMs: null, maxDurationMs: null } }
-  const state = () => ({ revision: stateRevision, availability: 'READY', remoteAccessEnabled: true, cliExecutionEnabled: settings.loadSettings().cliExecutionEnabled, cliMode: policy.getPolicy().mode, transport: 'relay', connectionStatus: 'CONNECTED', mcpStatus: 'RUNNING', activeProject: { id: 'cli-fixture', name: 'CLI validation repository' }, installationConfigured: true, lastError: null, functionalHealth: { status: 'UNKNOWN' }, activity: { ...counters, byTool: {}, byCapability: {} } })
+  const state = () => ({ revision: stateRevision, availability: 'READY', remoteAccessEnabled: true, cliExecutionEnabled: settings.loadSettings().cliExecutionEnabled, cliMode: policy.getPolicy().mode, cliScope: policy.getPolicy().scope, transport: 'relay', connectionStatus: 'CONNECTED', mcpStatus: 'RUNNING', activeProject: { id: 'cli-fixture', name: 'CLI validation repository' }, installationConfigured: true, lastError: null, functionalHealth: { status: 'UNKNOWN' }, activity: { ...counters, byTool: {}, byCapability: {} } })
   settings.onChanged(() => { service.setEnabled(settings.loadSettings().cliExecutionEnabled); service.refreshPolicy(); stateRevision++; ctx.window.webContents.send('channel:changed', state()) })
   api.registerCliPolicyHandlers(policy, () => ctx.window, () => service)
   ipcMain.handle('channel:get-state', () => state())
@@ -100,6 +104,21 @@ exports.run = async ctx => {
     const siblingResult = service.get({ operationId: 'selected-sibling' })
     ctx.check('Selected sibling receives real native identity consent and executes without project switch', siblingResult.status === 'SUCCEEDED' && fs.realpathSync(siblingResult.stdout.trim()) === fs.realpathSync(sibling) && siblingResult.worktree.generation === selected.generation && selection.project.path === root && commandDialogs === 1 && policy.getPolicy().mode === 'AUTONOMOUS_TRUSTED')
     const selectedWorktreeDialogs = commandDialogs
+    await ctx.evaluate(() => { const select = document.querySelector('#cli-mode'); select.value = 'AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES'; select.dispatchEvent(new Event('change', { bubbles: true })) })
+    const yoloDeadline = Date.now() + 20000
+    while ((policy.getPolicy().mode !== 'AUTONOMOUS_TRUSTED' || policy.getPolicy().scope !== 'REPOSITORY_WORKTREES') && Date.now() < yoloDeadline) await new Promise(resolve => setTimeout(resolve, 80))
+    ctx.check('YOLO Worktrees grant persists across settings reload', initialDialogs === 2 && policy.getPolicy().scope === 'REPOSITORY_WORKTREES' && new api.CliTrustPolicy(new api.SettingsService(), () => ({ repositoryId: 'cli-fixture', path: root, revision: 1 }), async () => false).getPolicy({ repositoryId: 'cli-fixture', path: sibling }).scope === 'REPOSITORY_WORKTREES')
+    await ctx.waitFor(() => document.querySelector('#cli-mode').value === 'AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES' && !document.querySelector('#cli-mode').disabled)
+    await ctx.evaluate(() => document.querySelector('#cli-autonomy-title').closest('section').scrollIntoView({ block: 'start' }))
+    await ctx.capture('cli-yolo-worktrees-desktop')
+    const yoloTarget = await call('prepare_cli_execution', { executable: 'node.exe', args: ['-e', 'console.log(process.cwd())'], worktree: { worktreeId: selected.worktreeId, generation: selected.generation } })
+    ctx.check('YOLO Worktree proposal is auto-authorized without per-command consent', yoloTarget.policy.mode === 'AUTONOMOUS_TRUSTED' && yoloTarget.policy.scope === 'REPOSITORY_WORKTREES' && yoloTarget.autoAuthorized === true)
+    await call('start_cli_execution', { proposalId: yoloTarget.proposalId, operationId: 'yolo-sibling-unit' })
+    const yoloUnitResult = await waitTerminal('get_cli_execution', 'yolo-sibling-unit')
+    const yoloBatch = await call('prepare_cli_investigation', { worktree: { worktreeId: selected.worktreeId, generation: selected.generation }, commands: [{ executable: 'node.exe', args: ['--version'] }, { executable: 'node.exe', args: ['-e', 'console.log(process.cwd())'] }] })
+    await call('start_cli_investigation', { proposalId: yoloBatch.proposalId, operationId: 'yolo-sibling-batch' })
+    const yoloBatchResult = await waitTerminal('get_cli_investigation', 'yolo-sibling-batch')
+    ctx.check('YOLO Worktree unitary and top-level batch succeed with zero extra command dialogs', yoloUnitResult.status === 'SUCCEEDED' && fs.realpathSync(yoloUnitResult.stdout.trim()) === fs.realpathSync(sibling) && yoloBatchResult.status === 'SUCCEEDED' && commandDialogs === selectedWorktreeDialogs)
     const running = await call('prepare_cli_execution', { executable: 'node.exe', args: ['-e', 'setInterval(()=>{},1000)'] })
     await call('start_cli_execution', { proposalId: running.proposalId, operationId: 'interactive' })
     const runDeadline = Date.now() + 8000
@@ -123,6 +142,6 @@ exports.run = async ctx => {
     await ctx.evaluate(() => document.querySelector('#cli-autonomy-title').closest('section').scrollIntoView({ block: 'start' }))
     await ctx.capture('cli-supervised-narrow')
     await ctx.overflow()
-    fs.writeFileSync(path.join(ctx.evidenceDir, 'cli-autonomy-proof.json'), JSON.stringify({ initialDialogs, trustedCommandDialogs, selectedWorktreeDialogs, selectedWorktreeId: selected.worktreeId, selectedGeneration: selected.generation, supervisedManifestDialogs: commandDialogs - selectedWorktreeDialogs, unitQueries: 3, batchCommands: 3, batchCalls: 3, maxIpcMs, latencyBudgetMs: 750, revoked: true, nativeSupervisor: true, scope: 'Isolated Electron profile, real preload/IPC/settings/CLI service and native consent; Channel state is a fixture, not full application bootstrap' }, null, 2))
+    fs.writeFileSync(path.join(ctx.evidenceDir, 'cli-autonomy-proof.json'), JSON.stringify({ initialDialogs, trustedCommandDialogs, selectedWorktreeDialogs, yoloWorktreesConfirmed: initialDialogs === 2, yoloWorktreeCommandDialogs: 0, yoloBatchInWorktree: true, selectedWorktreeId: selected.worktreeId, selectedGeneration: selected.generation, supervisedManifestDialogs: commandDialogs - selectedWorktreeDialogs, unitQueries: 3, batchCommands: 3, batchCalls: 3, maxIpcMs, latencyBudgetMs: 750, revoked: true, nativeSupervisor: true, scope: 'Isolated Electron profile, real preload/IPC/settings/CLI service and native consent; Channel state is a fixture, not full application bootstrap' }, null, 2))
   } finally { await service.shutdown() }
 }

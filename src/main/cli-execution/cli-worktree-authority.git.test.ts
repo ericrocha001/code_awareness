@@ -1,19 +1,24 @@
 import './cli-native-test-setup'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { GitService } from '../core/git-service'
+import { SettingsService } from '../core/settings-service'
 import { GitWorktreeRegistry, type WorktreeRecord } from '../git-operations/git-worktree-registry'
-import { createCliProjectAuthority } from './cli-project-authority'
+import { createCliProjectAuthority, createCliProjectRuntimeAuthority } from './cli-project-authority'
 import { resolveCliWorktree } from './cli-worktree-authority'
 import { CliExecutionService } from './cli-execution-service'
+import { CliTrustPolicy } from './cli-trust-policy'
 import { executeCliTool } from './cli-execution-mcp'
 import type { CliWorktreeSelector } from './cli-execution-types'
 import { textContent } from '../mcp/mcp-test-content'
 import type { CliPolicy } from '../../shared/types/cli-policy-types'
 import { CLI_EXECUTION_TOOLS } from './cli-execution-mcp'
+
+const localProfile = vi.hoisted(() => ({ path: '' }))
+vi.mock('electron', () => ({ app: { getPath: () => localProfile.path } }))
 
 function git(root: string, ...args: string[]) {
   return execFileSync('git', ['-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-c', `core.hooksPath=${join(root, 'no-hooks')}`, '-C', root, ...args],
@@ -41,6 +46,8 @@ describe('CLI general execution in discovered Worktrees', () => {
 
   beforeEach(async () => {
     directory = mkdtempSync(join(tmpdir(), 'ca-cli-worktree-'))
+    localProfile.path = join(directory, 'profile')
+    mkdirSync(localProfile.path, { recursive: true })
     main = join(directory, 'main'); sibling = join(directory, 'sibling'); other = join(directory, 'other')
     execFileSync('git', ['init', '-q', main], { windowsHide: true, timeout: 10000 })
     git(main, 'config', 'user.name', 'CLI Worktree Fixture')
@@ -67,7 +74,9 @@ describe('CLI general execution in discovered Worktrees', () => {
   afterEach(async () => {
     await service?.shutdown()
     vi.restoreAllMocks()
-    if (directory) rmSync(directory, { recursive: true, force: true })
+    if (directory) {
+      try { rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) } catch {}
+    }
   })
 
   it('executes in either selected sibling, preserves the active project and retains the unitary fallback', async () => {
@@ -146,8 +155,9 @@ describe('CLI general execution in discovered Worktrees', () => {
     expect(selection.revision).toBe(1)
   }, 30000)
 
-  it('keeps Worktree selection out of investigation manifests in schema and dispatch', async () => {
+  it('keeps Worktree selection out of investigation manifest items while exposing optional top-level worktree', async () => {
     const tool = CLI_EXECUTION_TOOLS.find(tool => tool.name === 'prepare_cli_investigation')!
+    expect((tool.inputSchema.properties as any).worktree).toBeDefined()
     const commands = (tool.inputSchema.properties as any).commands
     expect(commands.items.properties.worktree).toBeUndefined()
     const query = { executable: process.execPath, args: ['--version'] }
@@ -253,4 +263,201 @@ describe('CLI general execution in discovered Worktrees', () => {
     expect(result.status).toBe(action === 'refuse' ? 'REFUSED' : 'CANCELLED')
     expect(existsSync(join(sibling, 'must-not-run'))).toBe(false)
   }, 20000)
+
+  it('executes YOLO across existing and future Worktrees (unitary + top-level investigation) with zero command dialogs and zero changes to main', async () => {
+    const mainHead = git(main, 'rev-parse', 'HEAD')
+    const settings = new SettingsService()
+    settings.saveSettings({ ...settings.loadSettings(), cliExecutionEnabled: true })
+    const initialConsent = vi.fn(async () => true)
+    const trustPolicy = new CliTrustPolicy(
+      settings,
+      () => ({ repositoryId: 'repository', path: main, revision: selection.revision }),
+      initialConsent
+    )
+    await expect(trustPolicy.choose('AUTONOMOUS_TRUSTED', 'REPOSITORY_WORKTREES')).resolves.toBe(true)
+    expect(initialConsent).toHaveBeenCalledTimes(1)
+
+    const yoloService = new CliExecutionService({
+      repoRoot: main,
+      repositoryId: 'repository',
+      enabledByDefault: true,
+      approvalHandler: approval,
+      getPolicy: target => trustPolicy.getPolicy({ repositoryId: 'repository', path: target?.directory ?? main }),
+      getFingerprint: createCliProjectAuthority({
+        selection,
+        getSelection: () => selection,
+        findRepository: () => ({ id: 'repository', localCheckout: { path: main, availability: 'AVAILABLE', gitState: 'GIT' } }),
+        captureGitIdentity: async path => {
+          const dirs = await gitService.getRepositoryDirectories(path)
+          const snap = await gitService.captureWorktreeReadSnapshot(path)
+          return { commonDirectory: realpathSync(dirs.common), worktreeDirectory: realpathSync(dirs.admin), head: snap.head, branch: snap.branch, operation: snap.operation }
+        }
+      }),
+      getRuntimeIdentity: createCliProjectRuntimeAuthority({
+        selection,
+        getSelection: () => selection,
+        findRepository: () => ({ id: 'repository', localCheckout: { path: main, availability: 'AVAILABLE', gitState: 'GIT' } }),
+        captureStableGitIdentity: async path => {
+          const dirs = await gitService.getRepositoryDirectories(path)
+          return { commonDirectory: realpathSync(dirs.common), worktreeDirectory: realpathSync(dirs.admin) }
+        }
+      }),
+      resolveWorktree: target => resolveCliWorktree(registry, gitService, target)
+    })
+
+    try {
+      const hostPolicy = await yoloService.getPolicyForWorktree(selector())
+      expect(hostPolicy.mode).toBe('AUTONOMOUS_TRUSTED')
+      expect(hostPolicy.scope).toBe('REPOSITORY_WORKTREES')
+
+      // Future worktree created AFTER YOLO grant
+      const future = join(directory, 'future-wt')
+      git(main, 'worktree', 'add', '-qb', 'future-wt', future)
+      mkdirSync(join(future, 'nested'), { recursive: true })
+      const futureRecord = (await registry.discover()).worktrees.find(tree => tree.branch === 'future-wt')!
+      const futureSelector = { worktreeId: futureRecord.worktreeId, generation: futureRecord.generation }
+
+      // 1. Unitary op in future worktree with custom cwd & large paginated output
+      const payloadArg = 'arbitrary argv "quotes" & spaces'
+      const p1 = await executeCliTool(yoloService, 'prepare_cli_execution', {
+        worktree: futureSelector,
+        executable: process.execPath,
+        relativeCwd: 'nested',
+        args: ['-e', "console.log(process.cwd()); console.log(process.argv[1]); for (let i = 0; i < 500; i++) console.log('YOLO_PAGE_' + i + '_PADDING_012345678901234567890123456789');", payloadArg]
+      })
+      expect(p1.isError).not.toBe(true)
+      const prop1 = JSON.parse(textContent(p1.content[0]))
+      expect(prop1.policy.mode).toBe('AUTONOMOUS_TRUSTED')
+      expect(prop1.policy.scope).toBe('REPOSITORY_WORKTREES')
+      expect(prop1.autoAuthorized).toBe(true)
+      await executeCliTool(yoloService, 'start_cli_execution', { proposalId: prop1.proposalId, operationId: 'yolo-u1' })
+      const r1 = await until(() => yoloService.get({ operationId: 'yolo-u1' }), v => v.phase === 'TERMINAL')
+      expect(r1.status).toBe('SUCCEEDED')
+      expect(r1.treeObservation).toEqual({ activeProcesses: 0, handlesClosed: true })
+      expect(r1.stdout).toContain(realpathSync(join(future, 'nested')))
+      expect(r1.stdout).toContain(payloadArg)
+      const page1 = yoloService.get({ operationId: 'yolo-u1', cursor: '0' })
+      expect(page1.hasMore).toBe(true)
+      const page2 = yoloService.get({ operationId: 'yolo-u1', cursor: page1.nextCursor! })
+      expect(page2.stdout.length).toBeGreaterThan(0)
+
+      // 2. Second unitary op in `other` worktree
+      const otherRecord = (await registry.discover()).worktrees.find(tree => tree.branch === 'other')!
+      const p2 = await yoloService.prepare({
+        worktree: { worktreeId: otherRecord.worktreeId, generation: otherRecord.generation },
+        executable: process.execPath,
+        args: ['-e', "console.log('OTHER_WT:' + process.cwd())"]
+      })
+      expect(p2.autoAuthorized).toBe(true)
+      yoloService.start({ proposalId: p2.proposalId, operationId: 'yolo-u2' })
+      const r2 = await until(() => yoloService.get({ operationId: 'yolo-u2' }), v => v.phase === 'TERMINAL')
+      expect(r2.status).toBe('SUCCEEDED')
+      expect(r2.stdout).toContain(realpathSync(other))
+
+      // 3. Top-level worktree investigation batch in `sibling` where Step 0 commits and Step 1 verifies new HEAD
+      const batchPrep = await executeCliTool(yoloService, 'prepare_cli_investigation', {
+        worktree: selector(),
+        commands: [
+          { executable: 'git', args: ['status', '--short'] },
+          {
+            executable: process.execPath,
+            args: ['-e', "const fs=require('fs'), cp=require('child_process'); fs.writeFileSync('batch-commit.txt','from-batch'); cp.execFileSync('git',['add','batch-commit.txt'],{stdio:'inherit'}); cp.execFileSync('git',['-c','commit.gpgsign=false','commit','-qm','batch commit'],{stdio:'inherit'});"]
+          },
+          { executable: 'git', args: ['log', '-1', '--pretty=%s'] }
+        ]
+      })
+      expect(batchPrep.isError).not.toBe(true)
+      const batchProp = JSON.parse(textContent(batchPrep.content[0]))
+      expect(batchProp.autoAuthorized).toBe(true)
+      expect(batchProp.worktree.worktreeId).toBe(selected.worktreeId)
+      await executeCliTool(yoloService, 'start_cli_investigation', { proposalId: batchProp.proposalId, operationId: 'yolo-batch' })
+      const summary = await until(() => yoloService.getInvestigation({ operationId: 'yolo-batch' }), v => v.phase === 'TERMINAL')
+      expect(summary.status, JSON.stringify(summary)).toBe('SUCCEEDED')
+      expect(summary.worktree?.worktreeId).toBe(selected.worktreeId)
+      expect(summary.steps.every(s => s.status === 'SUCCEEDED')).toBe(true)
+      const step2Out = yoloService.getInvestigation({ operationId: 'yolo-batch', index: 2 })
+      expect('output' in step2Out && step2Out.output.stdout.trim()).toBe('batch commit')
+
+      expect(approval).not.toHaveBeenCalled()
+      expect(git(main, 'rev-parse', 'HEAD')).toBe(mainHead)
+      expect(git(main, 'status', '--porcelain')).toBe('')
+    } finally {
+      await yoloService.shutdown()
+    }
+  }, 45000)
+
+  it('survives a real git commit inside a running YOLO Worktree across monitor ticks while cancelling on revocation', async () => {
+    const settings = new SettingsService()
+    settings.saveSettings({ ...settings.loadSettings(), cliExecutionEnabled: true })
+    const trustPolicy = new CliTrustPolicy(
+      settings,
+      () => ({ repositoryId: 'repository', path: main, revision: selection.revision }),
+      async () => true
+    )
+    await trustPolicy.choose('AUTONOMOUS_TRUSTED', 'REPOSITORY_WORKTREES')
+
+    const yoloService = new CliExecutionService({
+      repoRoot: main,
+      repositoryId: 'repository',
+      enabledByDefault: true,
+      approvalHandler: approval,
+      getPolicy: target => trustPolicy.getPolicy({ repositoryId: 'repository', path: target?.directory ?? main }),
+      getFingerprint: createCliProjectAuthority({
+        selection,
+        getSelection: () => selection,
+        findRepository: () => ({ id: 'repository', localCheckout: { path: main, availability: 'AVAILABLE', gitState: 'GIT' } }),
+        captureGitIdentity: async path => {
+          const dirs = await gitService.getRepositoryDirectories(path)
+          const snap = await gitService.captureWorktreeReadSnapshot(path)
+          return { commonDirectory: realpathSync(dirs.common), worktreeDirectory: realpathSync(dirs.admin), head: snap.head, branch: snap.branch, operation: snap.operation }
+        }
+      }),
+      getRuntimeIdentity: createCliProjectRuntimeAuthority({
+        selection,
+        getSelection: () => selection,
+        findRepository: () => ({ id: 'repository', localCheckout: { path: main, availability: 'AVAILABLE', gitState: 'GIT' } }),
+        captureStableGitIdentity: async path => {
+          const dirs = await gitService.getRepositoryDirectories(path)
+          return { commonDirectory: realpathSync(dirs.common), worktreeDirectory: realpathSync(dirs.admin) }
+        }
+      }),
+      resolveWorktree: target => resolveCliWorktree(registry, gitService, target)
+    })
+
+    try {
+      const beforeHead = git(sibling, 'rev-parse', 'HEAD')
+      const commitProp = await yoloService.prepare({
+        worktree: selector(),
+        executable: process.execPath,
+        args: ['-e', "setTimeout(() => console.log('SURVIVED_COMMIT'), 1700)"]
+      })
+      yoloService.start({ proposalId: commitProp.proposalId, operationId: 'yolo-live-commit' })
+      await until(() => yoloService.get({ operationId: 'yolo-live-commit' }), v => v.status === 'RUNNING')
+      writeFileSync(join(sibling, 'live-commit.txt'), 'committed during monitor')
+      git(sibling, 'add', 'live-commit.txt')
+      git(sibling, 'commit', '-qm', 'live commit while running')
+      const commitResult = await until(() => yoloService.get({ operationId: 'yolo-live-commit' }), v => v.phase === 'TERMINAL')
+      expect(commitResult.status, JSON.stringify(commitResult)).toBe('SUCCEEDED')
+      expect(commitResult.stdout.trim()).toBe('SURVIVED_COMMIT')
+      expect(git(sibling, 'rev-parse', 'HEAD')).not.toBe(beforeHead)
+
+      // Revocation during active Worktree command cancels the process tree cleanly
+      const cancelProp = await yoloService.prepare({
+        worktree: selector(),
+        executable: process.execPath,
+        args: ['-e', 'setInterval(() => {}, 1000)']
+      })
+      yoloService.start({ proposalId: cancelProp.proposalId, operationId: 'yolo-revoke' })
+      await until(() => yoloService.get({ operationId: 'yolo-revoke' }), v => v.status === 'RUNNING')
+      await trustPolicy.choose('SUPERVISED')
+      yoloService.refreshPolicy()
+      const revokedResult = await until(() => yoloService.get({ operationId: 'yolo-revoke' }), v => v.phase === 'TERMINAL')
+      expect(revokedResult.status).toBe('CANCELLED')
+      expect(revokedResult.diagnostic).toBe('POLICY_CHANGED')
+      expect(revokedResult.treeObservation).toEqual({ activeProcesses: 0, handlesClosed: true })
+      expect(approval).not.toHaveBeenCalled()
+    } finally {
+      await yoloService.shutdown()
+    }
+  }, 45000)
 })
