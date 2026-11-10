@@ -12,17 +12,17 @@ const { readNpmLifecyclePolicy, lifecyclePreparationEnvironment } = require('./n
 
 function createValidManifest() {
   return {
-    packageManager: 'npm@10.9.4',
+    packageManager: 'npm@12.0.2',
     dependencies: {
       '@tanstack/react-virtual': '^3.13.0',
-      'better-sqlite3': '12.11.1',
+      'better-sqlite3': '13.0.3',
       'tree-sitter': '0.21.1',
       'tree-sitter-typescript': '0.23.2',
       'tree-sitter-javascript': '0.23.1'
     },
     devDependencies: {
-      electron: '32.0.0',
-      vitest: '3.2.7'
+      electron: '45.2.3',
+      vitest: '5.1.0'
     }
   }
 }
@@ -67,7 +67,7 @@ const cases = [
       const result = await evaluatePreflight({
         packageJson: createValidManifest(),
         lockfile: createCompatibleLockfile(),
-        npmVersion: '10.9.4',
+        npmVersion: '12.0.2',
         adapters
       })
       assert.strictEqual(result.ok, false)
@@ -85,7 +85,7 @@ const cases = [
       const result = await evaluatePreflight({
         packageJson: createValidManifest(),
         lockfile: createCompatibleLockfile(),
-        npmVersion: '10.9.4',
+        npmVersion: '12.0.2',
         adapters
       })
       assert.strictEqual(result.ok, false)
@@ -103,7 +103,7 @@ const cases = [
       const result = await evaluatePreflight({
         packageJson: createValidManifest(),
         lockfile: createCompatibleLockfile(),
-        npmVersion: '10.9.4',
+        npmVersion: '12.0.2',
         adapters
       })
       assert.strictEqual(result.ok, false)
@@ -115,11 +115,11 @@ const cases = [
     run: async () => {
       const calls = []
       const manifest = createValidManifest()
-      manifest.devDependencies.electron = '^32.0.0'
+      manifest.devDependencies.electron = '^45.2.3'
       const result = await evaluatePreflight({
         packageJson: manifest,
         lockfile: createCompatibleLockfile(manifest),
-        npmVersion: '10.9.4',
+        npmVersion: '12.0.2',
         adapters: createAvailableAdapters(calls)
       })
       assert.strictEqual(result.ok, false)
@@ -134,7 +134,7 @@ const cases = [
       const result = await evaluatePreflight({
         packageJson: createValidManifest(),
         lockfile: createCompatibleLockfile(),
-        npmVersion: '10.9.4',
+        npmVersion: '12.0.2',
         adapters: createAvailableAdapters(calls)
       })
       assert.strictEqual(result.ok, true)

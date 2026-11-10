@@ -63,7 +63,7 @@ function observeElectronVersions(electronPath) {
       'Electron runtime',
       'executable Electron runtime',
       result.error?.message || result.stderr || result.stdout || `exit ${result.status}`,
-      'Run npm ci with npm 10, or npm run native:prepare after a deliberate dependency change.'
+      'Run npm ci with the declared npm toolchain, or npm run native:prepare after a deliberate dependency change.'
     )
     if (['EACCES', 'EPERM'].includes(result.error?.code)) issue.code = 'NATIVE_RUNTIME_EXECUTION_BLOCKED'
     throw issue
@@ -123,7 +123,7 @@ function runChecks() {
       'package-lock.json',
       'present',
       'absent',
-      'Run npx -p npm@10.9.4 npm install once to create the lockfile, then use npm ci.'
+      'Run npx -p npm@12.0.2 npm install once to create the lockfile, then use npm ci.'
     ))
   }
 
@@ -135,7 +135,7 @@ function runChecks() {
       'node_modules/electron',
       EXPECTED_ELECTRON_VERSION,
       error.message,
-      'Run npm ci with npm 10.'
+      'Run npm ci with the declared npm toolchain.'
     ))
   }
 
@@ -144,7 +144,7 @@ function runChecks() {
       'node_modules/electron.version',
       EXPECTED_ELECTRON_VERSION,
       installedElectronVersion,
-      'Run npm ci with npm 10 so the installed Electron matches package.json.'
+      'Run npm ci with the declared npm toolchain so the installed Electron matches package.json.'
     ))
   }
 
@@ -156,7 +156,7 @@ function runChecks() {
           `node_modules/${dependencyName}.version`,
           expectedVersion,
           installedVersion,
-          'Run npm ci with npm 10 so installed native dependencies match package.json.'
+          'Run npm ci with the declared npm toolchain so installed native dependencies match package.json.'
         ))
       }
     } catch (error) {
@@ -164,7 +164,7 @@ function runChecks() {
         `node_modules/${dependencyName}`,
         expectedVersion,
         error.message,
-        'Run npm ci with npm 10.'
+        'Run npm ci with the declared npm toolchain.'
       ))
     }
   }
@@ -195,7 +195,7 @@ function runChecks() {
         'process.versions.electron',
         EXPECTED_ELECTRON_VERSION,
         versions.electron,
-        'Run npm ci with npm 10 so the executable Electron matches package.json.'
+        'Run npm ci with the declared npm toolchain so the executable Electron matches package.json.'
       )
     ])
   }
@@ -247,7 +247,7 @@ function runCli() {
   if (!result.ok) {
     try {
       const policy = readNpmLifecyclePolicy({ projectRoot })
-      if (policy.ignoreScripts) console.error(`${policy.code}: ignore-scripts=true (${policy.source}); installation hooks may have been skipped. Run npx --yes --package npm@10.9.4 npm run bootstrap for scoped preparation; do not change user/global npm config.`)
+      if (policy.ignoreScripts) console.error(`${policy.code}: ignore-scripts=true (${policy.source}); installation hooks may have been skipped. Run npx --yes --package npm@12.0.2 npm run bootstrap for scoped preparation; do not change user/global npm config.`)
     } catch (error) { console.error(error.message) }
     process.exitCode = 1
   }

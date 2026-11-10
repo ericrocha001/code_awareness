@@ -9,7 +9,7 @@ const directories: string[] = []
 afterEach(async () => { await Promise.all(directories.splice(0).map(path => rm(path, { recursive: true, force: true }))) })
 async function setup(root = process.cwd(), executable = join(process.cwd(), 'node_modules/electron/dist/electron.exe')) {
   const directory = await mkdtemp(join(tmpdir(), 'app-profile-')); directories.push(directory)
-  const store = new PreviewProfileStore(directory), resolver = new CodeAwarenessProfileResolver(store, { root, executable, electronVersion: '32.0.0', abi: '128' })
+  const store = new PreviewProfileStore(directory), resolver = new CodeAwarenessProfileResolver(store, { root, executable, electronVersion: '45.2.3', abi: '150' })
   return { store, resolver, directory }
 }
 it('resolves the installed Windows environment into one reusable host profile without manual configuration', async () => {
@@ -30,7 +30,7 @@ it('refuses an unavailable host template rather than trusting target manifests',
 }, 60000)
 it('diagnoses a legacy checkout before creating a profile or attempting launch', async () => {
   const f = await setup(), checkout = await mkdtemp(join(tmpdir(), 'legacy-app-')); directories.push(checkout)
-  await writeFile(join(checkout, 'package.json'), JSON.stringify({ name: 'code-awareness', packageManager: 'npm@10.9.4' }))
+  await writeFile(join(checkout, 'package.json'), JSON.stringify({ name: 'code-awareness', packageManager: 'npm@12.0.2' }))
   await expect(f.resolver.resolve('repo', 'tree', checkout)).rejects.toThrow('APP_COOPERATION_MISSING')
   expect(await f.store.profiles('repo')).toEqual([])
 }, 60000)

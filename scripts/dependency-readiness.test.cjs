@@ -11,7 +11,7 @@ function write(file, value) { fs.mkdirSync(path.dirname(file), { recursive: true
 function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dependency-readiness-'))
   cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }))
-  const manifest = { packageManager: 'npm@10.9.4', dependencies: { alpha: '^1.0.0' } }
+  const manifest = { packageManager: 'npm@12.0.2', dependencies: { alpha: '^1.0.0' } }
   const lock = { lockfileVersion: 3, packages: { '': { dependencies: { ...manifest.dependencies } }, 'node_modules/alpha': { version: '1.2.0', integrity: 'sha512-alpha' } } }
   write(path.join(root, 'package.json'), manifest); write(path.join(root, 'package-lock.json'), lock)
   const install = () => {
@@ -87,16 +87,30 @@ test('published metadata-only roots use actual SDK and asset subpaths without re
   write(path.join(f.root, 'node_modules/.package-lock.json'), { packages: Object.fromEntries(Object.entries(f.lock.packages).filter(([key]) => key)) })
   assert.equal((await f.run({ install: () => { throw Error('false positive') } })).status, 'READY')
 })
-test('selects incremental npm 10 with lockfile use and no-save; no ci or lockfile suppression', () => {
+test('skips internal monorepo source conditions like __vitest_source__ while validating published exports', async () => {
+  const f = fixture(), directory = path.join(f.root, 'node_modules/vitest')
+  f.manifest.devDependencies = { vitest: '5.1.0' }
+  f.lock.packages[''].devDependencies = { vitest: '5.1.0' }
+  f.lock.packages['node_modules/vitest'] = { version: '5.1.0' }
+  write(path.join(directory, 'package.json'), {
+    version: '5.1.0',
+    exports: { '.': { __vitest_source__: './src/public/index.ts', import: { types: './dist/index.d.ts', default: './dist/index.js' } } }
+  })
+  write(path.join(directory, 'dist/index.js'), 'fixture'); write(path.join(directory, 'dist/index.d.ts'), 'fixture')
+  write(path.join(f.root, 'package.json'), f.manifest); write(path.join(f.root, 'package-lock.json'), f.lock)
+  write(path.join(f.root, 'node_modules/.package-lock.json'), { packages: Object.fromEntries(Object.entries(f.lock.packages).filter(([key]) => key)) })
+  assert.equal((await f.run({ install: () => { throw Error('false positive') } })).status, 'READY')
+})
+test('selects incremental npm 11/12 with lockfile use and no-save; no ci or lockfile suppression', () => {
   const f = fixture(), state = snapshot(f.root)
   const directory = path.join(f.root, 'npm')
   const cli = path.join(directory, 'bin/npm-cli.js')
-  write(cli, ''); write(path.join(directory, 'package.json'), { version: '10.9.4' })
+  write(cli, ''); write(path.join(directory, 'package.json'), { version: '12.0.2' })
   const command = npmCommand(state, { npm_execpath: cli })
   assert.ok(command.args.includes('install')); assert.ok(command.args.includes('--no-save')); assert.ok(command.args.includes('--package-lock=true')); assert.ok(command.args.includes('--prefer-offline'))
   assert.ok(!command.args.includes('ci')); assert.ok(!command.args.includes('--package-lock=false'))
-  write(path.join(directory, 'package.json'), { version: '12.0.0' })
-  assert.ok(npmCommand(state, { npm_execpath: cli }).args.includes('--package=npm@10.9.4'))
+  write(path.join(directory, 'package.json'), { version: '10.9.4' })
+  assert.ok(npmCommand(state, { npm_execpath: cli }).args.includes('--package=npm@12.0.2'))
 })
 test('two processes serialize repair and the second observes the installation instead of installing concurrently', async () => {
   const f = fixture(); fs.unlinkSync(path.join(f.root, 'node_modules/alpha/index.js'))

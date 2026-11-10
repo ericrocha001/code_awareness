@@ -15,16 +15,16 @@ const {
 
 function createValidManifest() {
   return {
-    packageManager: 'npm@10.9.4',
+    packageManager: 'npm@12.0.2',
     dependencies: {
-      'better-sqlite3': '12.11.1',
+      'better-sqlite3': '13.0.3',
       'tree-sitter': '0.21.1',
       'tree-sitter-typescript': '0.23.2',
       'tree-sitter-javascript': '0.23.1'
     },
     devDependencies: {
-      electron: '32.0.0',
-      vitest: '3.2.7'
+      electron: '45.2.3',
+      vitest: '5.1.0'
     }
   }
 }
@@ -34,7 +34,7 @@ const cases = [
     name: 'Electron com range e rejeitado',
     run: () => {
       const manifest = createValidManifest()
-      manifest.devDependencies.electron = '^32.0.0'
+      manifest.devDependencies.electron = '^45.2.3'
       const result = validatePackageManifest(manifest)
       assert.strictEqual(result.ok, false)
       assert.ok(result.issues.some((issue) => issue.property === 'devDependencies.electron'))
@@ -78,7 +78,7 @@ const cases = [
   {
     name: 'npm fora do major autorizado e rejeitado',
     run: () => {
-      const result = validateNpmUserAgent('npm/12.0.2 node/v24.18.0 win32 x64 workspaces/false')
+      const result = validateNpmUserAgent('npm/10.9.4 node/v24.18.0 win32 x64 workspaces/false')
       assert.strictEqual(result.ok, false)
       assert.ok(result.issues.some((issue) => issue.property === 'npm major'))
     }

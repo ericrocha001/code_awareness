@@ -372,9 +372,9 @@ describe('FileCard — overflow de tags (+N e tooltip)', () => {
     ] as Tag[],
     fileTagIds: ['a', 'b', 'c'],
     isSelected: false,
-    onToggle: vi.fn(),
-    onTagInteraction: vi.fn(),
-    onActionInteraction: vi.fn()
+    onToggle: vi.fn<() => void>(),
+    onTagInteraction: vi.fn<(element: HTMLElement) => void>(),
+    onActionInteraction: vi.fn<(element: HTMLElement) => void>()
   }
 
   it('12. Com 3ª tag abaixo do teto (2 linhas), renderiza "+1" e tooltip com as 3 tags', () => {
@@ -422,7 +422,7 @@ describe('FileCard — overflow de tags (+N e tooltip)', () => {
  * Sprint 3 — Gatilho universal "+" de tags (paridade com FileRow).
  */
 describe('FileCard — gatilho universal "+" de tags (Sprint 3)', () => {
-  const cardPropsWith = (onTagInteraction: ReturnType<typeof vi.fn>) => ({
+  const cardPropsWith = (onTagInteraction: (element: HTMLElement) => void) => ({
     file: {
       relativePath: 'src/components/Button.tsx',
       name: 'Button.tsx',
@@ -432,15 +432,15 @@ describe('FileCard — gatilho universal "+" de tags (Sprint 3)', () => {
     allTags: [{ id: 'tag1', name: 'UI', color: '#ff0000' }] as Tag[],
     fileTagIds: ['tag1'] as string[],
     isSelected: false,
-    onToggle: vi.fn(),
+    onToggle: vi.fn<() => void>(),
     onTagInteraction,
-    onActionInteraction: vi.fn()
+    onActionInteraction: vi.fn<(element: HTMLElement) => void>()
   })
 
   it('15. Botão "+" está sempre visível na área de tags do card (inclusive com zero tags)', () => {
     render(
       <FileCard
-        {...cardPropsWith(vi.fn())}
+        {...cardPropsWith(vi.fn<(element: HTMLElement) => void>())}
         fileTagIds={[]}
         allTags={[]}
       />
@@ -450,7 +450,7 @@ describe('FileCard — gatilho universal "+" de tags (Sprint 3)', () => {
   })
 
   it('16. Clique no "+" chama onTagInteraction com o PRÓPRIO BOTÃO como âncora', () => {
-    const onTagInteraction = vi.fn()
+    const onTagInteraction = vi.fn<(element: HTMLElement) => void>()
     render(<FileCard {...cardPropsWith(onTagInteraction)} />)
 
     const addBtn = screen.getByRole('button', { name: /adicionar tag/i })

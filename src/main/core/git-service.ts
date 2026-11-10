@@ -9,6 +9,7 @@ import { tmpdir } from 'os'
 import { dirname, join, resolve } from 'path'
 import { DiffFileStatus } from '../../shared/types'
 import { FileListingPort } from './file-listing-port'
+import { removeDirectoryForceSync } from './force-remove'
 import type { GitOperationReceipt } from '../git-operations/git-operation-receipts'
 import type { GitHistoryNode } from '../../shared/types/git-management-types'
 import type { GitAtlasCheckoutObservation } from '../../shared/types/git-atlas-types'
@@ -1105,7 +1106,7 @@ export class GitService implements FileListingPort {
         this.runGit(['clone', '--', remoteUrl, directoryName], parentPath, { timeoutMs: 120_000, env })
       )
     } catch (error) {
-      rmSync(destination, { recursive: true, force: true })
+      removeDirectoryForceSync(destination)
       throw error
     }
     return destination

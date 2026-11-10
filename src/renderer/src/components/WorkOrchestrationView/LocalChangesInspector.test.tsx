@@ -14,13 +14,14 @@ const change = (path: string, stagedState: string | null, unstagedState: string 
 const success = (changes: LocalChange[], totalCount = changes.length, nextCursor: string | null = null): OrchestrationResult<OrchestrationData> => ({ success: true,
   context: { projectId: 'p', revision: 1 }, data: { repositoryId: 'r', worktreeId: tree.worktreeId, generation: tree.generation, snapshotRevision: tree.snapshotRevision!,
     changes, totalCount, revision: 'page', nextCursor } satisfies LocalChangesPage })
-const renderInspector = (query: ReturnType<typeof vi.fn>, selected = tree, stale = vi.fn()) => render(<LocalChangesInspector tree={selected} query={query} revalidate={vi.fn()} stale={stale} />)
+type Query = (extra: Pick<OrchestrationRequest, 'changes'>) => Promise<OrchestrationResult<OrchestrationData>>
+const renderInspector = (query: Query, selected = tree, stale = vi.fn<() => void>()) => render(<LocalChangesInspector tree={selected} query={query} revalidate={vi.fn<() => void>()} stale={stale} />)
 
 it('lists human classifications without a filter or prefix request and preserves multistate evidence', async () => {
   const changes = [change('added.txt', 'A', null), change('new.txt', null, null, { untracked: true }), change('modified.txt', null, 'M'),
     change('deleted.txt', null, 'D', { deleted: true }), change('renamed.txt', 'R', null, { renamed: true, previousPath: 'old.txt' }),
     change('conflict.txt', 'D', 'D', { conflicted: true, deleted: true }), change('both.txt', 'A', 'M'), change('unknown.txt', 'X', null)]
-  const query = vi.fn().mockResolvedValue(success(changes))
+  const query = vi.fn<Query>().mockResolvedValue(success(changes))
   renderInspector(query)
   await screen.findByText('8 arquivos · página 1')
   const section = screen.getByLabelText('Arquivos alterados')
@@ -44,13 +45,13 @@ it('lists human classifications without a filter or prefix request and preserves
 
 it('keeps bounded pages, cursors and stale errors without extra reads per file', async () => {
   const first = Array.from({ length: 50 }, (_, i) => change(`file-${i}.txt`, null, 'M'))
-  const query = vi.fn().mockResolvedValueOnce(success(first, 53, 'cursor:50')).mockResolvedValueOnce(success([change('file-50.txt', 'A', null), change('file-51.txt', 'A', null), change('file-52.txt', 'A', null)], 53))
+  const query = vi.fn<Query>().mockResolvedValueOnce(success(first, 53, 'cursor:50')).mockResolvedValueOnce(success([change('file-50.txt', 'A', null), change('file-51.txt', 'A', null), change('file-52.txt', 'A', null)], 53))
     .mockResolvedValueOnce({ success: false, code: 'GIT_STATE_CHANGED' })
-  const stale = vi.fn(); renderInspector(query, tree, stale)
+  const stale = vi.fn<() => void>(); renderInspector(query, tree, stale)
   await screen.findByText('53 arquivos · página 1'); expect(document.querySelectorAll('.wo-local-changes li')).toHaveLength(50)
   fireEvent.click(screen.getByText('Próxima página'))
   await screen.findByText('53 arquivos · página 2'); expect(document.querySelectorAll('.wo-local-changes li')).toHaveLength(3)
-  expect(query.mock.calls[1][0].changes.cursor).toBe('cursor:50')
+  expect(query.mock.calls[1][0].changes?.cursor).toBe('cursor:50')
   fireEvent.click(screen.getByText('Página anterior')); await screen.findByText(/O estado Git mudou/)
   expect(document.querySelectorAll('.wo-local-changes li')).toHaveLength(0); expect(stale).toHaveBeenCalledOnce()
   expect(query).toHaveBeenCalledTimes(3)
@@ -58,10 +59,10 @@ it('keeps bounded pages, cursors and stale errors without extra reads per file',
 })
 
 it('preserves empty and generic argument failures without instructions about the removed filter', async () => {
-  const query = vi.fn().mockResolvedValueOnce(success([])).mockResolvedValueOnce({ success: false, code: 'INVALID_ARGUMENT' })
-  const stale = vi.fn(), view = renderInspector(query, tree, stale)
+  const query = vi.fn<Query>().mockResolvedValueOnce(success([])).mockResolvedValueOnce({ success: false, code: 'INVALID_ARGUMENT' })
+  const stale = vi.fn<() => void>(), view = renderInspector(query, tree, stale)
   await screen.findByText('Nenhuma alteração local nesta observação.')
-  view.rerender(<LocalChangesInspector tree={{ ...tree, snapshotRevision: 'd'.repeat(64) }} query={query} revalidate={vi.fn()} stale={stale} />)
+  view.rerender(<LocalChangesInspector tree={{ ...tree, snapshotRevision: 'd'.repeat(64) }} query={query} revalidate={vi.fn<() => void>()} stale={stale} />)
   await screen.findByText(/Parâmetros de leitura inválidos/)
   expect(screen.queryByText(/curingas/)).toBeNull(); expect(screen.queryByText(/prefixo/)).toBeNull()
   expect(stale).not.toHaveBeenCalled()

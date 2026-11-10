@@ -6,11 +6,12 @@ import sharp from 'sharp'
 import { registerContinuumHandlers } from './continuum-handler'
 import type { RepositoryContinuumSession } from '../continuum/project-continuum-session'
 
-const { handlers, save, writeText, writeImage, createImage } = vi.hoisted(() => ({ handlers: new Map<string, Function>(), save: vi.fn(), writeText: vi.fn(), writeImage: vi.fn(), createImage: vi.fn((_data: Buffer) => ({ isEmpty: () => false })) }))
+const { handlers, save, writeText, write, createImage } = vi.hoisted(() => ({ handlers: new Map<string, Function>(), save: vi.fn(), writeText: vi.fn(), write: vi.fn(), createImage: vi.fn((_data: Buffer) => ({ isEmpty: () => false })) }))
 vi.mock('electron', () => ({
   app: { getPath: () => '/downloads' }, ipcMain: { handle: (key: string, handler: Function) => handlers.set(key, handler) },
   BrowserWindow: { fromWebContents: () => null, getAllWindows: () => [] }, dialog: { showSaveDialog: save },
-  clipboard: { writeText, writeImage }, nativeImage: { createFromBuffer: createImage }
+  clipboard: { writeText, write }, nativeImage: { createFromBuffer: createImage },
+  ClipboardItem: class { constructor(public items: Record<string, unknown>) {} }
 }))
 let folder: string, current: string, revision: number
 const rawMarkdown = '\uFEFF---\r\nname: Literal\r\ndescription: Export\r\nkind: DOCUMENT\r\n---\r\n# ç 日本語 🚀\r\n\r\n| a | b |\r\n|---|---|\r\n```ts\r\n${literal}\r\n```\r\n'
@@ -52,7 +53,10 @@ it('preserves WebP source bytes/hash and decodes only for a lossless PNG clipboa
   expect(png.subarray(1, 4).toString()).toBe('PNG')
   const decoded = (input: Buffer) => sharp(input).ensureAlpha().raw().toBuffer()
   expect(await decoded(png)).toEqual(await decoded(source))
-  expect(writeImage).toHaveBeenCalledTimes(1)
+  expect(write).toHaveBeenCalledTimes(1)
+  const items = write.mock.calls[0][0] as Array<{ items: Record<string, Blob> }>
+  expect(items).toHaveLength(1)
+  expect(Buffer.from(await items[0].items['image/png'].arrayBuffer())).toEqual(png)
   expect(writeText).not.toHaveBeenCalled()
   save.mockResolvedValue({ filePath: join(folder, 'original.webp'), canceled: false })
   await invoke('save')
@@ -70,7 +74,7 @@ it('refuses wrong repository/intent/selection, missing content and integrity err
   await expect(invoke()).rejects.toThrow('ARTIFACT_NOT_FOUND')
   kind = 'VISUAL_REFERENCE'; getVisual.mockImplementationOnce(() => { throw new Error('VISUAL_INTEGRITY_ERROR') })
   await expect(invoke('save')).rejects.toThrow('VISUAL_INTEGRITY_ERROR')
-  expect(save).not.toHaveBeenCalled(); expect(writeText).not.toHaveBeenCalled(); expect(writeImage).not.toHaveBeenCalled()
+  expect(save).not.toHaveBeenCalled(); expect(writeText).not.toHaveBeenCalled(); expect(write).not.toHaveBeenCalled()
   expect(readdirSync(folder)).toEqual([])
 })
 
