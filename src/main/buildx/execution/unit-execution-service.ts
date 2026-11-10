@@ -10,6 +10,7 @@ import type {
   UnitSettlementResult
 } from '../../../shared/types/buildx/execution-types'
 import type { BuildXInspectWorkspaceResult } from '../../../shared/types/buildx/workspace-types'
+import type { CliPolicy } from '../../../shared/types/cli-policy-types'
 import type {
   CliExecutionSnapshot
 } from '../../cli-execution/cli-execution-types'
@@ -17,6 +18,53 @@ import type { CliExecutionPort, CliExecutionResolver } from './grok-cli-bridge'
 import { ExecutionAttemptConflictError } from './execution-errors'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function timeoutMetadata(record: Pick<CliExecutionSnapshot, 'timeoutProfile' | 'timeoutMs'>): {
+  timeoutProfile?: string
+  timeoutMs?: number
+} {
+  return {
+    ...(record.timeoutProfile ? { timeoutProfile: record.timeoutProfile } : {}),
+    ...(record.timeoutMs !== undefined ? { timeoutMs: record.timeoutMs } : {})
+  }
+}
+
+function classifyObservedGrokOutcome(snapshot: CliExecutionSnapshot): string {
+  const diagnostic = typeof snapshot.diagnostic === 'string' && snapshot.diagnostic.trim()
+    ? snapshot.diagnostic.trim()
+    : undefined
+  const output = `${snapshot.stdout ?? ''}\n${snapshot.stderr ?? ''}`
+
+  if (snapshot.status === 'TIMED_OUT') {
+    if (/\b(approval required|confirmation required|waiting for approval|use --always-approve|allow tool)\b/i.test(output)) {
+      return 'APPROVAL_PROMPT_TIMED_OUT'
+    }
+    return diagnostic ?? 'TIMED_OUT'
+  }
+  if (snapshot.status === 'CANCELLED' || snapshot.status === 'INTERRUPTED') {
+    return diagnostic ?? snapshot.status
+  }
+  if (snapshot.status === 'FAILED') {
+    if (/\b(approval required|interactive permission|use --always-approve)\b/i.test(output)) {
+      return 'GROK_APPROVAL_REQUIRED'
+    }
+    if (/\b(unknown option|unknown flag|unrecognized arguments?|invalid option)\b/i.test(output)) {
+      return 'GROK_ARGUMENT_ERROR'
+    }
+    if (/\b(insufficient credits|quota exceeded|rate limit|billing|payment required|429)\b/i.test(output)) {
+      return 'GROK_QUOTA_OR_RATE_LIMIT'
+    }
+    if (/\b(invalid api key|authentication failed|not authenticated|unauthorized|401|XAI_API_KEY)\b/i.test(output)) {
+      return 'GROK_AUTHENTICATION_FAILED'
+    }
+    if (diagnostic) return diagnostic
+    if (snapshot.exitCode !== null && snapshot.exitCode !== undefined) {
+      return `NON_ZERO_EXIT_CODE_${snapshot.exitCode}`
+    }
+    return 'FAILED'
+  }
+  return diagnostic ?? snapshot.status
+}
 
 function mapCliStatusToUnitStatus(snapshot: CliExecutionSnapshot): UnitExecutionStatus {
   if (snapshot.status === 'AWAITING_APPROVAL') return 'AWAITING_APPROVAL'
@@ -255,12 +303,37 @@ export class UnitExecutionService {
     // Retém o arquivo de prompt em memória enquanto a CLI prepara e executa
     this.stageService.retainStage(options.stageOperationId, cleanAttemptId)
 
-    // 7. Prepare CLI proposal
+    // Derive autonomous permission strictly from local Desktop grant for this Worktree when available
+    let hostPolicy: CliPolicy | undefined
+    if (typeof cliService.getPolicyForWorktree === 'function') {
+      try {
+        hostPolicy = await cliService.getPolicyForWorktree({
+          worktreeId: attempt.worktreeId,
+          generation: attempt.generation
+        })
+      } catch (err: any) {
+        this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
+        return {
+          status: 'UNAVAILABLE',
+          attemptId: cleanAttemptId,
+          sessionId: cleanSessionId,
+          repositoryId: validRepoId,
+          reason: `CLI_POLICY_ERROR: ${err?.message ?? String(err)}`
+        }
+      }
+    }
+
+    const hostYoloAuthorized =
+      hostPolicy?.mode === 'AUTONOMOUS_TRUSTED' &&
+      hostPolicy?.scope === 'REPOSITORY_WORKTREES'
+    const allowAlwaysApprove = hostPolicy !== undefined ? hostYoloAuthorized : options.allowAlwaysApprove === true
+
+    // 7. Prepare CLI proposal (agentic Worktree unit timeout profile: 10m default, 15m hard cap)
     const headlessArgs = [
       '--prompt-file', stagePath,
       '--output-format', 'json',
       '--no-auto-update',
-      ...(options.allowAlwaysApprove ? ['--always-approve'] : [])
+      ...(allowAlwaysApprove ? ['--always-approve'] : [])
     ]
 
     let proposal: Awaited<ReturnType<typeof cliService.prepare>>
@@ -268,7 +341,8 @@ export class UnitExecutionService {
       proposal = await cliService.prepare({
         worktree: { worktreeId: attempt.worktreeId, generation: attempt.generation },
         executable: 'grok',
-        args: headlessArgs
+        args: headlessArgs,
+        executionProfile: 'BUILDX_AGENTIC_UNIT'
       })
     } catch (err: any) {
       this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
@@ -298,7 +372,7 @@ export class UnitExecutionService {
       }
     }
 
-    if (proposal.autoAuthorized === true && !options.allowAlwaysApprove) {
+    if (proposal.autoAuthorized === true && !allowAlwaysApprove) {
       this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
         status: 'REFUSED',
@@ -306,6 +380,23 @@ export class UnitExecutionService {
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
         reason: 'AUTO_AUTHORIZED_NOT_REQUESTED'
+      }
+    }
+
+    if (
+      allowAlwaysApprove &&
+      hostPolicy !== undefined &&
+      (proposal.policy?.mode !== 'AUTONOMOUS_TRUSTED' ||
+        proposal.policy?.scope !== 'REPOSITORY_WORKTREES' ||
+        proposal.autoAuthorized !== true)
+    ) {
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
+      return {
+        status: 'REFUSED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'POLICY_CHANGED'
       }
     }
 
@@ -367,7 +458,8 @@ export class UnitExecutionService {
         repositoryId: validRepoId,
         cliStatus: snapshot.status,
         cliPhase: snapshot.phase,
-        unitFlowStatus: 'RESERVED'
+        unitFlowStatus: 'RESERVED',
+        ...timeoutMetadata(snapshot)
       }
     }
 
@@ -400,7 +492,8 @@ export class UnitExecutionService {
           repositoryId: validRepoId,
           cliStatus: snapshot.status,
           cliPhase: snapshot.phase,
-          unitFlowStatus: 'EXECUTING'
+          unitFlowStatus: 'EXECUTING',
+          ...timeoutMetadata(snapshot)
         }
       }
       return {
@@ -420,7 +513,9 @@ export class UnitExecutionService {
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
         cliStatus: snapshot.status,
-        unitFlowStatus: 'RESERVED'
+        unitFlowStatus: 'RESERVED',
+        reason: snapshot.diagnostic ?? 'NATIVE_APPROVAL_REFUSED',
+        ...timeoutMetadata(snapshot)
       }
     }
 
@@ -432,7 +527,9 @@ export class UnitExecutionService {
       sessionId: cleanSessionId,
       repositoryId: validRepoId,
       cliStatus: snapshot.status,
-      cliPhase: snapshot.phase
+      cliPhase: snapshot.phase,
+      ...(snapshot.status !== 'SUCCEEDED' ? { reason: classifyObservedGrokOutcome(snapshot) } : {}),
+      ...timeoutMetadata(snapshot)
     }
   }
 
@@ -773,21 +870,23 @@ export class UnitExecutionService {
           unitId: attempt.unitId,
           expectedUnitRevision: currentUnit.revision,
           terminalOutcome: 'SUCCEEDED',
-          entryData: {
-            title: `Execution attempt completed: ${attempt.unitId}`,
-            body: JSON.stringify({
-              attemptId: cleanAttemptId,
-              unitId: attempt.unitId,
-              planId: attempt.planId,
-              terminalOutcome: 'SUCCEEDED',
-              cliStatus: snapshot.status,
-              cliPhase: snapshot.phase,
-              exitCode: snapshot.exitCode,
-              treeObservation: snapshot.treeObservation
-            }),
-            kind: 'RESULT'
-          }
-        })
+            entryData: {
+              title: `Execution attempt completed: ${attempt.unitId}`,
+              body: JSON.stringify({
+                attemptId: cleanAttemptId,
+                unitId: attempt.unitId,
+                planId: attempt.planId,
+                terminalOutcome: 'SUCCEEDED',
+                cliStatus: snapshot.status,
+                cliPhase: snapshot.phase,
+                exitCode: snapshot.exitCode,
+                durationMs: snapshot.durationMs,
+                ...timeoutMetadata(snapshot),
+                treeObservation: snapshot.treeObservation
+              }),
+              kind: 'RESULT'
+            }
+          })
       } catch (err: any) {
         if (err instanceof ExecutionAttemptConflictError) {
           const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
@@ -827,11 +926,13 @@ export class UnitExecutionService {
         unitFlowStatus: finalUnit?.status,
         cliStatus: snapshot.status,
         cliPhase: snapshot.phase,
-        exitCode: snapshot.exitCode
+        exitCode: snapshot.exitCode,
+        ...timeoutMetadata(snapshot)
       }
     }
 
     if (snapshot.status === 'REFUSED') {
+      const refusalReason = snapshot.diagnostic ?? 'NATIVE_APPROVAL_REFUSED'
       const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
       const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
 
@@ -851,7 +952,9 @@ export class UnitExecutionService {
               planId: attempt.planId,
               terminalOutcome: 'CANCELLED',
               cliStatus: snapshot.status,
-              cliPhase: snapshot.phase
+              cliPhase: snapshot.phase,
+              reason: refusalReason,
+              ...timeoutMetadata(snapshot)
             }),
             kind: 'PENDING'
           }
@@ -895,7 +998,9 @@ export class UnitExecutionService {
         unitFlowStatus: finalUnit?.status,
         cliStatus: snapshot.status,
         cliPhase: snapshot.phase,
-        exitCode: snapshot.exitCode
+        exitCode: snapshot.exitCode,
+        reason: refusalReason,
+        ...timeoutMetadata(snapshot)
       }
     }
 
@@ -929,6 +1034,7 @@ export class UnitExecutionService {
         }
       }
 
+      const classifiedReason = classifyObservedGrokOutcome(snapshot)
       const terminalOutcome = snapshot.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED'
       const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
       const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
@@ -951,8 +1057,11 @@ export class UnitExecutionService {
               cliStatus: snapshot.status,
               cliPhase: snapshot.phase,
               exitCode: snapshot.exitCode,
+              durationMs: snapshot.durationMs,
+              ...timeoutMetadata(snapshot),
               treeObservation: snapshot.treeObservation,
-              diagnostic: snapshot.diagnostic
+              diagnostic: snapshot.diagnostic,
+              reason: classifiedReason
             }),
             kind: 'PENDING'
           }
@@ -996,7 +1105,9 @@ export class UnitExecutionService {
         unitFlowStatus: finalUnit?.status,
         cliStatus: snapshot.status,
         cliPhase: snapshot.phase,
-        exitCode: snapshot.exitCode
+        exitCode: snapshot.exitCode,
+        reason: classifiedReason,
+        ...timeoutMetadata(snapshot)
       }
     }
 
@@ -1047,7 +1158,8 @@ export class UnitExecutionService {
         repositoryId: validRepoId,
         cliStatus: snapshot.status,
         cliPhase: snapshot.phase,
-        unitFlowStatus: 'RESERVED'
+        unitFlowStatus: 'RESERVED',
+        ...timeoutMetadata(snapshot)
       }
     }
 
@@ -1060,7 +1172,8 @@ export class UnitExecutionService {
           repositoryId: validRepoId,
           cliStatus: snapshot.status,
           cliPhase: snapshot.phase,
-          unitFlowStatus: 'EXECUTING'
+          unitFlowStatus: 'EXECUTING',
+          ...timeoutMetadata(snapshot)
         }
       }
 
@@ -1102,7 +1215,8 @@ export class UnitExecutionService {
           repositoryId: validRepoId,
           cliStatus: snapshot.status,
           cliPhase: snapshot.phase,
-          unitFlowStatus: 'EXECUTING'
+          unitFlowStatus: 'EXECUTING',
+          ...timeoutMetadata(snapshot)
         }
       }
 
@@ -1125,7 +1239,9 @@ export class UnitExecutionService {
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
         cliStatus: snapshot.status,
-        unitFlowStatus: 'RESERVED'
+        unitFlowStatus: 'RESERVED',
+        reason: snapshot.diagnostic ?? 'NATIVE_APPROVAL_REFUSED',
+        ...timeoutMetadata(snapshot)
       }
     }
 
@@ -1139,7 +1255,9 @@ export class UnitExecutionService {
       sessionId: cleanSessionId,
       repositoryId: validRepoId,
       cliStatus: snapshot.status,
-      cliPhase: snapshot.phase
+      cliPhase: snapshot.phase,
+      ...(snapshot.status !== 'SUCCEEDED' ? { reason: classifyObservedGrokOutcome(snapshot) } : {}),
+      ...timeoutMetadata(snapshot)
     }
   }
 }

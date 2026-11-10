@@ -7,10 +7,12 @@ import type {
 import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import type { WorkspaceBindingService } from './workspace-binding-service'
+import type { CliPolicy } from '../../../shared/types/cli-policy-types'
 import type {
   PrepareCliExecutionInput,
   CliProposal,
   CliCommandDescriptor,
+  CliWorktreeSelector,
   StartCliExecutionInput,
   GetCliExecutionInput,
   CliExecutionSnapshot
@@ -22,6 +24,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 export interface CliExecutionPort {
   isEnabled(): boolean
   getRepositoryId(): string | null
+  getPolicyForWorktree?(selector?: CliWorktreeSelector): Promise<CliPolicy> | CliPolicy
   prepare(input: PrepareCliExecutionInput): Promise<CliProposal>
   start?(input: StartCliExecutionInput): CliExecutionSnapshot | Promise<CliExecutionSnapshot>
   get?(input: GetCliExecutionInput): CliExecutionSnapshot | Promise<CliExecutionSnapshot>
@@ -507,8 +510,12 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    // Validate policy is SUPERVISED and not auto-authorized before descriptor integrity check
-    if (!proposal.policy || proposal.policy.mode !== 'SUPERVISED') {
+    // Validate policy is SUPERVISED (without auto-authorization) or verified repository YOLO Worktree grant
+    const yoloWorktreeAuthorized =
+      proposal.policy?.mode === 'AUTONOMOUS_TRUSTED' &&
+      proposal.policy?.scope === 'REPOSITORY_WORKTREES'
+
+    if (!proposal.policy || (proposal.policy.mode !== 'SUPERVISED' && !yoloWorktreeAuthorized)) {
       return {
         status: 'CLI_DISABLED',
         reason: 'PROPOSAL_POLICY_UNSUPERVISED',
@@ -518,7 +525,7 @@ export class BuildXGrokCliBridge {
       }
     }
 
-    if (proposal.autoAuthorized === true) {
+    if (proposal.policy.mode === 'SUPERVISED' && proposal.autoAuthorized === true) {
       return {
         status: 'CLI_DISABLED',
         reason: 'PROPOSAL_AUTO_AUTHORIZATION_DISALLOWED',

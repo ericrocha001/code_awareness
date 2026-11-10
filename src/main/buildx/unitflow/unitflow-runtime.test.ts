@@ -16,6 +16,10 @@ import { ValidationLedger } from '../../validation-ledger/validation-ledger'
 import { captureValidationSource, validationSourceFingerprint } from '../../validation-execution/validation-source'
 import { RuntimeIdentityProvider } from '../../runtime-identity/runtime-identity-provider'
 import { CliExecutionService } from '../../cli-execution/cli-execution-service'
+import { GitService } from '../../core/git-service'
+import { GitWorktreeRegistry } from '../../git-operations/git-worktree-registry'
+import { resolveCliWorktree } from '../../cli-execution/cli-worktree-authority'
+import type { CliPolicy } from '../../../shared/types/cli-policy-types'
 import type { BranchInventory } from '../../../shared/types/branch-orchestration-types'
 import type { GitOperationsPort } from '../execution/workspace-binding-service'
 import type { CliExecutionPort } from '../execution/grok-cli-bridge'
@@ -1203,5 +1207,255 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
         fs.rmSync(realTemp, { recursive: true, force: true })
       } catch {}
     }, 60000)
+  })
+
+  describe('Prova 10: BuildX/UnitFlow em Worktree YOLO vs SUPERVISED com executável controlado (sem cota externa)', () => {
+    it('injeta --always-approve e perfil 600s em YOLO sem AUTO_AUTHORIZED_NOT_REQUESTED ou diálogo, e omite em SUPERVISED', async () => {
+      const yoloTemp = makeTempDir('unitflow-yolo-controlled-')
+      const repoMain = path.join(yoloTemp, 'main')
+      const repoSibling = path.join(yoloTemp, 'sibling')
+      const fakeBin = path.join(yoloTemp, 'fake-bin')
+      const stagingDir = path.join(yoloTemp, 'staging')
+      fs.mkdirSync(repoMain, { recursive: true })
+      fs.mkdirSync(fakeBin, { recursive: true })
+      fs.mkdirSync(stagingDir, { recursive: true })
+
+      const originalPath = process.env.PATH
+      try {
+        execSync('git init -q', { cwd: repoMain })
+        execSync('git config user.email "unitflow-yolo@test.local"', { cwd: repoMain })
+        execSync('git config user.name "UnitFlow YOLO Test"', { cwd: repoMain })
+        fs.writeFileSync(path.join(repoMain, 'README.md'), '# Base\n')
+        execSync('git add README.md', { cwd: repoMain })
+        execSync('git commit -qm "baseline"', { cwd: repoMain })
+        execSync(`git worktree add -qb sibling-yolo "${repoSibling}"`, { cwd: repoMain })
+        const mainHead = execSync('git rev-parse HEAD', { cwd: repoMain, encoding: 'utf8' }).trim()
+
+        // Fake grok.cmd controlado em PATH que grava argv e cria arquivo dentro da worktree selecionada
+        const driverJs = path.join(fakeBin, 'fake-grok.cjs')
+        fs.writeFileSync(
+          driverJs,
+          `
+          const fs = require('fs');
+          const args = process.argv.slice(2);
+          fs.writeFileSync('grok-argv.json', JSON.stringify(args));
+          if (args.includes('--always-approve')) {
+            fs.writeFileSync('grok-produced.txt', 'created-under-yolo\\n');
+            console.log(JSON.stringify({ ok: true, mode: 'yolo' }));
+          } else {
+            fs.writeFileSync('grok-supervised.txt', 'created-under-supervised\\n');
+            console.log(JSON.stringify({ ok: true, mode: 'supervised' }));
+          }
+          `
+        )
+        const shimPath = path.join(fakeBin, process.platform === 'win32' ? 'grok.cmd' : 'grok')
+        fs.writeFileSync(shimPath, `@set ELECTRON_RUN_AS_NODE=1\r\n@"${process.execPath}" "${driverJs}" %*\r\n`)
+        process.env.PATH = fakeBin + path.delimiter + (originalPath ?? '')
+
+        const repoIdTest = 'e1c8a999-6d73-4f56-83a3-fbcd78c9c19d'
+        const mainSource = await captureValidationSource(repoMain, repoIdTest)
+        const siblingSource = await captureValidationSource(repoSibling, repoIdTest)
+
+        const gitSvc = new GitService()
+        const registry = new GitWorktreeRegistry(repoMain, gitSvc, { repositoryId: repoIdTest, isActive: () => true })
+        const siblingWt = (await registry.discover()).worktrees.find((w) => w.branch === 'sibling-yolo')!
+
+        const testGitOps: GitOperationsPort = {
+          getBranchInventory: async (): Promise<BranchInventory> => ({
+            repositoryId: repoIdTest,
+            observedAt: new Date().toISOString(),
+            revision: '1',
+            source: 'GIT_LOCAL',
+            coverage: 'COMPLETE',
+            branches: [
+              {
+                key: 'sibling-yolo',
+                repositoryId: repoIdTest,
+                name: 'sibling-yolo',
+                ref: 'refs/heads/sibling-yolo',
+                namespace: 'LOCAL',
+                head: siblingSource.head,
+                upstream: null,
+                generation: siblingWt.generation,
+                revision: '1',
+                creation: { at: new Date().toISOString(), source: 'APP_RECEIPT' },
+                lastCommitAt: new Date().toISOString(),
+                worktrees: [{ worktreeId: siblingWt.worktreeId, generation: siblingWt.generation }]
+              }
+            ],
+            worktrees: [siblingWt],
+            unassignedWorktrees: []
+          }),
+          getCoordinationSnapshot: async () => ({ reference: false })
+        }
+
+        let currentPolicy: CliPolicy = {
+          mode: 'AUTONOMOUS_TRUSTED',
+          scope: 'REPOSITORY_WORKTREES',
+          revision: 'yolo-rev-1',
+          rule: 'local-repository-worktree-trust'
+        }
+        let approvalCalls = 0
+        const controlledCli = new CliExecutionService({
+          repoRoot: repoMain,
+          repositoryId: repoIdTest,
+          enabledByDefault: true,
+          getPolicy: () => currentPolicy,
+          getFingerprint: async () => mainSource.head,
+          getRuntimeIdentity: async () => `main:${mainSource.worktreeId}`,
+          approvalHandler: async () => {
+            approvalCalls++
+            return true
+          },
+          resolveWorktree: (selector) => resolveCliWorktree(registry, gitSvc, selector)
+        })
+
+        const facade = new UnitFlowRuntimeFacade({
+          repositoryId: repoIdTest,
+          repoRoot: repoMain,
+          smcService,
+          gitOperations: testGitOps,
+          cliExecution: controlledCli,
+          validationLedger: ledger,
+          stagingDirectory: stagingDir
+        })
+        const adapter = new ChannelMcpAdapter(
+          {
+            projectId: repoIdTest,
+            repoRoot: repoMain,
+            navigation: {
+              discoverRepository: async () => ({ directories: [] }),
+              getRelationships: async () => ({ files: [] }),
+              inspectFiles: async () => ({ files: [] }),
+              readCode: async () => [],
+              getReferences: async () => ({ targets: [] }),
+              getSymbolDependencies: async () => ({ sources: [] }),
+              getSymbolHierarchy: async () => ({ targets: [] })
+            } as any,
+            sessionMemoryCentral: smcService,
+            unitflowRuntime: facade
+          },
+          undefined,
+          runtimeIdentity,
+          ledger
+        )
+
+        // MCP schema de start_next_unitflow_unit continua rejeitando allowAlwaysApprove/timeoutMs
+        const rejectedMcp = await adapter.callTool('start_next_unitflow_unit', {
+          sessionId: randomUUID(),
+          planId: randomUUID(),
+          reservationId: randomUUID(),
+          attemptId: randomUUID(),
+          stageOperationId: randomUUID(),
+          allowAlwaysApprove: true
+        })
+        expect(rejectedMcp.isError).toBe(true)
+
+        const sessionId = randomUUID()
+        const planId = randomUUID()
+        const u1 = randomUUID()
+        const u2 = randomUUID()
+
+        parseMcpResult(await adapter.callTool('create_buildx_session', { sessionId }))
+        parseMcpResult(await adapter.callTool('bind_unitflow_workspace', { sessionId, worktreeId: siblingWt.worktreeId }))
+        parseMcpResult(
+          await adapter.callTool('prepare_unitflow_plan', {
+            sessionId,
+            planId,
+            title: 'Controlled YOLO vs SUPERVISED Plan',
+            objective: 'Verify --always-approve derivation and timeout profile',
+            units: [
+              { unitId: u1, position: 0, title: 'Unit 1 YOLO', objective: 'Run in YOLO', acceptanceCriteria: 'Produces file' },
+              { unitId: u2, position: 1, title: 'Unit 2 SUPERVISED', objective: 'Run in SUPERVISED', acceptanceCriteria: 'No always-approve', dependsOnUnitIds: [u1] }
+            ]
+          })
+        )
+
+        // Unidade 1 em YOLO Worktree
+        const attempt1 = randomUUID()
+        const start1 = parseMcpResult(
+          await adapter.callTool('start_next_unitflow_unit', {
+            sessionId,
+            planId,
+            reservationId: randomUUID(),
+            attemptId: attempt1,
+            stageOperationId: randomUUID()
+          })
+        )
+        expect(start1.status).not.toBe('REFUSED')
+        expect(start1.reason).not.toBe('AUTO_AUTHORIZED_NOT_REQUESTED')
+
+        const waitDeadline = Date.now() + 15000
+        while (Date.now() < waitDeadline) {
+          if (controlledCli.get({ operationId: attempt1 }).phase === 'TERMINAL') break
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        const snap1 = controlledCli.get({ operationId: attempt1 })
+        expect(snap1.status).toBe('SUCCEEDED')
+        expect(snap1.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+        expect(snap1.timeoutMs).toBe(600000)
+        expect(approvalCalls).toBe(0)
+        expect(JSON.parse(fs.readFileSync(path.join(repoSibling, 'grok-argv.json'), 'utf8'))).toContain('--always-approve')
+        expect(fs.existsSync(path.join(repoSibling, 'grok-produced.txt'))).toBe(true)
+
+        const settle1 = parseMcpResult(await adapter.callTool('settle_unitflow_unit', { sessionId, attemptId: attempt1 }))
+        expect(settle1.settled).toBe(true)
+        expect(settle1.unitState).toBe('VALIDATING')
+        expect(settle1.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+        expect(settle1.timeoutMs).toBe(600000)
+
+        const currentSrc = await captureValidationSource(repoSibling, repoIdTest)
+        const proof1 = ledger.recordProof({
+          kind: 'TARGETED_TEST',
+          producer: 'IMPLEMENTER',
+          status: 'PASSED',
+          startedAt: new Date(Date.now() - 1000).toISOString(),
+          finishedAt: new Date().toISOString(),
+          durationMs: 1000,
+          scope: ['unit1-yolo'],
+          summary: 'Controlled YOLO unit verified',
+          sourceFingerprint: validationSourceFingerprint(currentSrc),
+          commandProfile: { command: 'grok --always-approve', cwd: currentSrc.cwd, source: currentSrc }
+        })
+        const acc1 = parseMcpResult(
+          await adapter.callTool('accept_unitflow_unit', {
+            sessionId,
+            attemptId: attempt1,
+            operationId: randomUUID(),
+            proofIds: [proof1.proofId],
+            summary: 'Accepted unit 1'
+          })
+        )
+        expect(acc1.status).toBe('ACCEPTED')
+
+        // Unidade 2 após revogar para SUPERVISED
+        currentPolicy = { mode: 'SUPERVISED', scope: 'ACTIVE_CHECKOUT_ONLY', revision: 'sup-rev-2', rule: 'native-command-consent' }
+        controlledCli.refreshPolicy()
+
+        const attempt2 = randomUUID()
+        await adapter.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: randomUUID(),
+          attemptId: attempt2,
+          stageOperationId: randomUUID()
+        })
+        const wait2 = Date.now() + 15000
+        while (Date.now() < wait2) {
+          if (controlledCli.get({ operationId: attempt2 }).phase === 'TERMINAL') break
+          await new Promise((r) => setTimeout(r, 50))
+        }
+        expect(controlledCli.get({ operationId: attempt2 }).status).toBe('SUCCEEDED')
+        expect(approvalCalls).toBe(1)
+        expect(JSON.parse(fs.readFileSync(path.join(repoSibling, 'grok-argv.json'), 'utf8'))).not.toContain('--always-approve')
+        expect(execSync('git rev-parse HEAD', { cwd: repoMain, encoding: 'utf8' }).trim()).toBe(mainHead)
+        expect(execSync('git status --porcelain', { cwd: repoMain, encoding: 'utf8' }).trim()).toBe('')
+
+        await controlledCli.shutdown()
+      } finally {
+        process.env.PATH = originalPath ?? ''
+        try { fs.rmSync(yoloTemp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) } catch {}
+      }
+    }, 45000)
   })
 })

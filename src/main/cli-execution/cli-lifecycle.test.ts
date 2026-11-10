@@ -110,3 +110,194 @@ describe('CLI lifecycle authorization and tree completion', () => {
     expect(() => service.start({ proposalId: proposal.proposalId, operationId: 'late' })).toThrow('CLI_EXECUTION_BUSY')
   })
 })
+
+function mockControlledSupervisor(service: CliExecutionService) {
+  const supervisor = (service as any).supervisor as CliProcessSupervisor
+  let running = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let finish!: (res: { status: 'SUCCEEDED' | 'CANCELLED' | 'TIMED_OUT'; exitCode?: number; durationMs: number; diagnostic?: string; treeObservation: { activeProcesses: 0; handlesClosed: true } }) => void
+  const launches: Array<{ timeoutMs?: number; maxTimeoutMs?: number; resumeAllowed?: boolean }> = []
+  let cancelledCount = 0
+  let startedAt = 0
+
+  Object.defineProperty(supervisor, 'isRunning', { configurable: true, get: () => running })
+  const settle = (status: 'SUCCEEDED' | 'CANCELLED' | 'TIMED_OUT', extra: { exitCode?: number; diagnostic?: string } = {}) => {
+    if (!running) return
+    running = false
+    if (timer) { clearTimeout(timer); timer = undefined }
+    finish({ status, durationMs: Date.now() - startedAt, treeObservation: { activeProcesses: 0, handlesClosed: true }, ...extra })
+  }
+  const launchSpy = vi.spyOn(supervisor, 'launch').mockImplementation((_cmd, options = {}) => {
+    startedAt = Date.now()
+    running = true
+    const entry: { timeoutMs?: number; maxTimeoutMs?: number; resumeAllowed?: boolean } = { timeoutMs: options.timeoutMs, maxTimeoutMs: options.maxTimeoutMs }
+    launches.push(entry)
+    return new Promise(resolve => {
+      finish = resolve
+      void Promise.resolve(options.authorizeResume ? options.authorizeResume() : true).then(
+        allowed => {
+          entry.resumeAllowed = allowed
+          if (!allowed) { settle('CANCELLED'); return }
+          if (!running) return
+          options.onRunning?.()
+          const hardCap = Math.min(options.maxTimeoutMs ?? 120000, 900000)
+          const effectiveTimeout = Math.max(1, Math.min(options.timeoutMs ?? 60000, hardCap))
+          timer = setTimeout(() => settle('TIMED_OUT'), effectiveTimeout)
+        },
+        () => { entry.resumeAllowed = false; settle('CANCELLED') }
+      )
+    })
+  })
+  const cancelSpy = vi.spyOn(supervisor, 'cancel').mockImplementation(async () => {
+    cancelledCount++
+    settle('CANCELLED')
+    return { status: 'CANCELLED', durationMs: Date.now() - startedAt, treeObservation: { activeProcesses: 0, handlesClosed: true } }
+  })
+  return { launches, launchSpy, cancelSpy, cancelledCount: () => cancelledCount, finishSuccess: () => settle('SUCCEEDED', { exitCode: 0 }) }
+}
+
+describe('Proposal admission TTL vs active execution authority', () => {
+  it('rejects proposals expired before admission and native approvals received past the 5-minute TTL', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-10T03:00:00Z'))
+    const approval = deferred<boolean>(), root = directory()
+    const service = new CliExecutionService({ repoRoot: root, enabledByDefault: true, approvalHandler: () => approval.promise })
+    try {
+      const { launchSpy } = mockControlledSupervisor(service)
+      const expiredBeforeStart = await service.prepare({ executable: process.execPath, args: ['-v'] })
+      expect(Date.parse(expiredBeforeStart.expiresAt) - Date.parse(expiredBeforeStart.createdAt)).toBe(300000)
+
+      await vi.advanceTimersByTimeAsync(300001)
+      expect(() => service.start({ proposalId: expiredBeforeStart.proposalId, operationId: 'expired-before-start' })).toThrow('PROPOSAL_EXPIRED')
+      expect(launchSpy).not.toHaveBeenCalled()
+
+      const lateApproval = await service.prepare({ executable: process.execPath, args: ['-v'] })
+      service.start({ proposalId: lateApproval.proposalId, operationId: 'late-approval' })
+      await vi.advanceTimersByTimeAsync(1)
+      expect(service.get({ operationId: 'late-approval' }).status).toBe('AWAITING_APPROVAL')
+
+      await vi.advanceTimersByTimeAsync(300001)
+      approval.resolve(true)
+      await vi.advanceTimersByTimeAsync(1)
+
+      const snap = service.get({ operationId: 'late-approval' })
+      expect(snap.status).toBe('CANCELLED')
+      expect(snap.phase).toBe('TERMINAL')
+      expect(snap.diagnostic).toBe('POLICY_CHANGED_OR_PROPOSAL_EXPIRED')
+      expect(lateApproval.status).toBe('EXPIRED')
+      expect(service.getActiveOperationId()).toBeNull()
+      expect(launchSpy).not.toHaveBeenCalled()
+    } finally {
+      await service.shutdown()
+      vi.useRealTimers()
+    }
+  })
+
+  it('keeps already-admitted YOLO executions active past 5 simulated minutes and preserves 600s/900s BuildX timeout limits', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-10T03:00:00Z'))
+    const root = directory()
+    const service = new CliExecutionService({
+      repoRoot: root,
+      repositoryId: 'repo-yolo',
+      enabledByDefault: true,
+      getPolicy: () => ({ mode: 'AUTONOMOUS_TRUSTED', scope: 'REPOSITORY_WORKTREES', revision: 'yolo-1', rule: 'local-repository-worktree-trust' }),
+      getRuntimeIdentity: async () => 'stable-runtime'
+    })
+    try {
+      const mock = mockControlledSupervisor(service)
+      const pDefault = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'BUILDX_AGENTIC_UNIT' })
+      expect(pDefault.timeoutProfile).toBe('BUILDX_AGENTIC_UNIT')
+      expect(pDefault.timeoutMs).toBe(600000)
+
+      service.start({ proposalId: pDefault.proposalId, operationId: 'yolo-over-5m' })
+      await vi.advanceTimersByTimeAsync(5)
+      expect(pDefault.status).toBe('CONSUMED')
+      expect(mock.launches[0]).toEqual({ timeoutMs: 600000, maxTimeoutMs: 900000, resumeAllowed: true })
+      expect(service.get({ operationId: 'yolo-over-5m' }).status).toBe('RUNNING')
+
+      await vi.advanceTimersByTimeAsync(360000)
+      expect(service.get({ operationId: 'yolo-over-5m' }).status).toBe('RUNNING')
+      expect(service.get({ operationId: 'yolo-over-5m' }).phase).toBe('RUNNING')
+      expect(mock.cancelledCount()).toBe(0)
+
+      mock.finishSuccess()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(service.get({ operationId: 'yolo-over-5m' }).status).toBe('SUCCEEDED')
+
+      const pCapped = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'BUILDX_AGENTIC_UNIT', timeoutMs: 1200000 })
+      expect(pCapped.timeoutMs).toBe(900000)
+      service.start({ proposalId: pCapped.proposalId, operationId: 'yolo-budget-cap' })
+      await vi.advanceTimersByTimeAsync(5)
+      expect(mock.launches[1]).toEqual({ timeoutMs: 900000, maxTimeoutMs: 900000, resumeAllowed: true })
+
+      await vi.advanceTimersByTimeAsync(899000)
+      expect(service.get({ operationId: 'yolo-budget-cap' }).status).toBe('RUNNING')
+
+      await vi.advanceTimersByTimeAsync(2000)
+      expect(service.get({ operationId: 'yolo-budget-cap' }).status).toBe('TIMED_OUT')
+      expect(service.get({ operationId: 'yolo-budget-cap' }).timeoutMs).toBe(900000)
+    } finally {
+      await service.shutdown()
+      vi.useRealTimers()
+    }
+  })
+
+  it('still aborts admitted executions past 5 minutes when policy is revoked or runtime identity changes', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-11-10T03:00:00Z'))
+    const root = directory()
+    let currentPolicy: { mode: 'AUTONOMOUS_TRUSTED' | 'SUPERVISED'; scope: 'REPOSITORY_WORKTREES' | 'ACTIVE_CHECKOUT_ONLY'; revision: string; rule: string } = {
+      mode: 'AUTONOMOUS_TRUSTED', scope: 'REPOSITORY_WORKTREES', revision: 'yolo-1', rule: 'local-repository-worktree-trust'
+    }
+    let runtimeIdentity = 'stable-runtime'
+    const service = new CliExecutionService({
+      repoRoot: root,
+      repositoryId: 'repo-yolo',
+      enabledByDefault: true,
+      getPolicy: () => currentPolicy,
+      getRuntimeIdentity: async () => runtimeIdentity
+    })
+    try {
+      const mock = mockControlledSupervisor(service)
+      const p1 = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'BUILDX_AGENTIC_UNIT' })
+      service.start({ proposalId: p1.proposalId, operationId: 'yolo-revoke' })
+      await vi.advanceTimersByTimeAsync(310000)
+      expect(service.get({ operationId: 'yolo-revoke' }).status).toBe('RUNNING')
+
+      currentPolicy = { mode: 'SUPERVISED', scope: 'ACTIVE_CHECKOUT_ONLY', revision: 'revoked-2', rule: 'native-command-consent' }
+      await vi.advanceTimersByTimeAsync(600)
+      expect(mock.cancelSpy).toHaveBeenCalledTimes(1)
+      expect(service.get({ operationId: 'yolo-revoke' }).status).toBe('CANCELLED')
+      expect(service.get({ operationId: 'yolo-revoke' }).diagnostic).toBe('POLICY_CHANGED')
+
+      currentPolicy = { mode: 'AUTONOMOUS_TRUSTED', scope: 'REPOSITORY_WORKTREES', revision: 'yolo-3', rule: 'local-repository-worktree-trust' }
+      service.refreshPolicy()
+      const p2 = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'BUILDX_AGENTIC_UNIT' })
+      service.start({ proposalId: p2.proposalId, operationId: 'yolo-drift' })
+      await vi.advanceTimersByTimeAsync(310000)
+      expect(service.get({ operationId: 'yolo-drift' }).status).toBe('RUNNING')
+
+      runtimeIdentity = 'changed-runtime'
+      await vi.advanceTimersByTimeAsync(600)
+      expect(mock.cancelSpy).toHaveBeenCalledTimes(2)
+      expect(service.get({ operationId: 'yolo-drift' }).status).toBe('CANCELLED')
+      expect(service.get({ operationId: 'yolo-drift' }).diagnostic).toBe('CHECKOUT_CHANGED')
+
+      runtimeIdentity = 'stable-runtime'
+      const p3 = await service.prepare({ executable: process.execPath, args: ['-v'], executionProfile: 'BUILDX_AGENTIC_UNIT' })
+      service.start({ proposalId: p3.proposalId, operationId: 'yolo-disable' })
+      await vi.advanceTimersByTimeAsync(310000)
+      expect(service.get({ operationId: 'yolo-disable' }).status).toBe('RUNNING')
+
+      service.setEnabled(false)
+      await vi.advanceTimersByTimeAsync(1)
+      expect(mock.cancelSpy).toHaveBeenCalledTimes(3)
+      expect(service.get({ operationId: 'yolo-disable' }).status).toBe('CANCELLED')
+      expect(service.get({ operationId: 'yolo-disable' }).diagnostic).toBe('CLI_EXECUTION_DISABLED')
+    } finally {
+      await service.shutdown()
+      vi.useRealTimers()
+    }
+  })
+})

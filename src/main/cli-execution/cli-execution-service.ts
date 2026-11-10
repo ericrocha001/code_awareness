@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { realpathSync } from 'node:fs'
-import type { CliPolicy } from '../../shared/types/cli-policy-types'
-import type { CancelCliExecutionInput, CliApprovalHandler, CliCommandDescriptor, CliExecutionRecord, CliExecutionSnapshot, CliInvestigationSummary, CliProposal, GetCliExecutionInput, GetCliInvestigationInput, PrepareCliExecutionInput, PrepareCliInvestigationInput, StartCliExecutionInput } from './cli-execution-types'
+import type { CliPolicy, CliTrustScope } from '../../shared/types/cli-policy-types'
+import { CLI_TRUST_SCOPES } from '../../shared/types/cli-policy-types'
+import type { CancelCliExecutionInput, CliApprovalHandler, CliCommandDescriptor, CliExecutionRecord, CliExecutionSnapshot, CliInvestigationSummary, CliProposal, CliTimeoutProfile, GetCliExecutionInput, GetCliInvestigationInput, PrepareCliExecutionInput, PrepareCliInvestigationInput, StartCliExecutionInput } from './cli-execution-types'
 import { detectRisks, resolveCliCommand } from './cli-command-resolver'
 import { isConsultativeCommand } from './cli-consultative-policy'
 import { CliProcessSupervisor } from './cli-process-supervisor'
@@ -12,29 +13,37 @@ export interface CliExecutionServiceOptions {
   repoRoot: string
   repositoryId?: string | null
   getFingerprint?: () => Promise<string>
-  getPolicy?: () => CliPolicy
+  getRuntimeIdentity?: () => Promise<string>
+  getPolicy?: (target?: CliResolvedWorktree) => CliPolicy
   approvalHandler?: CliApprovalHandler
   defaultTimeoutMs?: number
   enabledByDefault?: boolean
   ownerPath?: string
   resolveWorktree?: (selector: CliWorktreeSelector) => Promise<CliResolvedWorktree>
 }
-const supervised: CliPolicy = { mode: 'SUPERVISED', revision: 'default', rule: 'native-command-consent' }
+const supervised: CliPolicy = { mode: 'SUPERVISED', scope: 'ACTIVE_CHECKOUT_ONLY', revision: 'default', rule: 'native-command-consent' }
 const budgets = { commandTimeoutMs: 30000, totalTimeoutMs: 90000, stepOutputBytes: 65536, totalOutputBytes: 262144 }
+const STANDARD_MAX_TIMEOUT_MS = 120000
+const AGENTIC_DEFAULT_TIMEOUT_MS = 600000
+const AGENTIC_MAX_TIMEOUT_MS = 900000
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 
 export class CliExecutionService {
   private readonly repoRoot: string
   private readonly repositoryId: string | null
   private readonly getFingerprintFn: () => Promise<string>
-  private readonly getPolicyFn: () => CliPolicy
+  private readonly hasCustomRuntimeIdentity: boolean
+  private readonly getRuntimeIdentityFn: () => Promise<string>
+  private readonly getPolicyFn: (target?: CliResolvedWorktree) => CliPolicy
   private observedPolicy: string
   private approvalHandler: CliApprovalHandler
+  private readonly defaultTimeoutMs: number
   private readonly supervisor: CliProcessSupervisor
   private enabled: boolean
   private readonly ownerPath?: string
   private readonly resolveWorktree?: CliExecutionServiceOptions['resolveWorktree']
   private readonly proposalWorktrees = new Map<string, CliResolvedWorktree>()
+  private readonly proposalRuntimeIdentities = new Map<string, string>()
   private readonly proposals = new Map<string, CliProposal>()
   private readonly executions = new Map<string, CliExecutionRecord>()
   private readonly executionBuffers = new Map<string, CliOutputBuffer>()
@@ -48,10 +57,13 @@ export class CliExecutionService {
     this.repoRoot = realpathSync(options.repoRoot)
     this.repositoryId = options.repositoryId ?? null
     this.getFingerprintFn = options.getFingerprint ?? (async () => 'DEFAULT_CHECKOUT_FINGERPRINT')
+    this.hasCustomRuntimeIdentity = typeof options.getRuntimeIdentity === 'function'
+    this.getRuntimeIdentityFn = options.getRuntimeIdentity ?? this.getFingerprintFn
     this.getPolicyFn = options.getPolicy ?? (() => supervised)
     this.observedPolicy = digest(this.getPolicyFn())
     this.approvalHandler = options.approvalHandler ?? (async () => false)
-    this.supervisor = new CliProcessSupervisor(options.defaultTimeoutMs)
+    this.defaultTimeoutMs = options.defaultTimeoutMs ?? 60000
+    this.supervisor = new CliProcessSupervisor(this.defaultTimeoutMs)
     this.enabled = options.enabledByDefault ?? false
     this.ownerPath = options.ownerPath
     this.resolveWorktree = options.resolveWorktree
@@ -60,6 +72,13 @@ export class CliExecutionService {
   isEnabled(): boolean { return this.enabled }
   getRepositoryId(): string | null { return this.repositoryId }
   getActiveOperationId(): string | null { return this.activeOperationId }
+  async getPolicyForWorktree(selector?: CliWorktreeSelector): Promise<CliPolicy> {
+    if (!this.enabled) return { ...supervised, revision: 'disabled' }
+    if (selector === undefined) return this.policyForTarget(undefined)
+    if (!this.resolveWorktree) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+    const target = await this.resolveWorktree({ ...selector })
+    return this.policyForTarget(target)
+  }
   setEnabled(enabled: boolean): void {
     this.enabled = enabled
     if (!enabled) { this.activeExecutionToken = null; void this.abortActive('CLI_EXECUTION_DISABLED'); this.invalidateAllProposals() }
@@ -75,16 +94,20 @@ export class CliExecutionService {
   async prepare(input: PrepareCliExecutionInput): Promise<CliProposal> { return this.prepareCommands([input], false) }
   async prepareInvestigation(input: PrepareCliInvestigationInput): Promise<CliProposal> {
     if (!Array.isArray(input.commands) || input.commands.length < 2 || input.commands.length > 5) throw new Error('INVESTIGATION_COMMAND_LIMIT')
-    return this.prepareCommands(input.commands, true)
+    return this.prepareCommands(input.commands, true, input.worktree)
   }
-  private async prepareCommands(inputs: PrepareCliExecutionInput[], investigation: boolean): Promise<CliProposal> {
+  private async prepareCommands(inputs: PrepareCliExecutionInput[], investigation: boolean, topLevelWorktree?: CliWorktreeSelector): Promise<CliProposal> {
     this.assertEnabled()
     if (investigation && inputs.some(input => input.worktree !== undefined)) throw new Error('INVALID_WORKTREE_SELECTOR')
-    const selector = inputs[0].worktree
-    if (selector !== undefined && !this.resolveWorktree) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+    const selector = investigation ? topLevelWorktree : inputs[0].worktree
+    if (selector !== undefined) {
+      if (!selector || typeof selector !== 'object' || Array.isArray(selector)) throw new Error('INVALID_WORKTREE_SELECTOR')
+      if (!this.resolveWorktree) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+    }
     const target = selector !== undefined ? await this.resolveWorktree!({ ...selector }) : undefined
     const directory = target?.directory ?? this.repoRoot
     const policy = this.policyForTarget(target)
+    const timeoutBudget = this.resolveTimeoutBudget(inputs[0].executionProfile, inputs[0].timeoutMs, investigation)
     const commands = inputs.map(input => resolveCliCommand(directory, input.executable, input.args ?? [], input.relativeCwd))
     if (investigation && Buffer.byteLength(JSON.stringify(commands)) > 6144) throw new Error('MANIFEST_SIZE_LIMIT')
     if (investigation) {
@@ -92,6 +115,9 @@ export class CliExecutionService {
       Object.freeze(commands)
     }
     const fingerprint = await this.captureFingerprint(target)
+    const runtimeIdentity = (this.hasCustomRuntimeIdentity || target?.getRuntimeIdentity)
+      ? await this.captureRuntimeIdentity(target)
+      : fingerprint
     this.assertEnabled()
     if (digest(policy) !== digest(this.policyForTarget(target))) throw new Error('POLICY_CHANGED')
     const proposal: CliProposal = {
@@ -99,10 +125,12 @@ export class CliExecutionService {
       repositoryId: this.repositoryId, repositoryDirectory: directory, checkoutFingerprint: fingerprint,
       ...(target ? { worktree: { ...target.identity } } : {}),
       command: commands[0], risks: [...new Set(commands.flatMap(command => detectRisks(command.executable, command.originalExecutable, command.args)))],
-      policy, autoAuthorized: policy.mode === 'AUTONOMOUS_TRUSTED' || policy.mode === 'AUTONOMOUS_CONSULTATIVE' && commands.every(isConsultativeCommand), status: 'PENDING',
+      policy, timeoutProfile: timeoutBudget.timeoutProfile, timeoutMs: timeoutBudget.timeoutMs,
+      autoAuthorized: policy.mode === 'AUTONOMOUS_TRUSTED' || policy.mode === 'AUTONOMOUS_CONSULTATIVE' && commands.every(isConsultativeCommand), status: 'PENDING',
       ...(investigation ? { commands, budgets: { ...budgets }, manifestHash: digest({ commands, budgets, fingerprint, policy, repositoryId: this.repositoryId }) } : {})
     }
     this.proposals.set(proposal.proposalId, proposal)
+    this.proposalRuntimeIdentities.set(proposal.proposalId, runtimeIdentity)
     if (target) {
       proposal.risks.push('SELECTED_WORKTREE_GENERAL_CLI_NO_GIT_LEASE_GRANTED')
       this.proposalWorktrees.set(proposal.proposalId, target)
@@ -125,9 +153,9 @@ export class CliExecutionService {
     const proposal = this.proposals.get(input.proposalId)
     if (!proposal) throw new Error('PROPOSAL_NOT_FOUND')
     if (!!proposal.commands !== investigation) throw new Error('OPERATION_KIND_CONFLICT')
-    if (Date.now() > Date.parse(proposal.expiresAt) || proposal.status === 'EXPIRED') throw new Error('PROPOSAL_EXPIRED')
     if (proposal.status === 'CONSUMED') throw new Error('PROPOSAL_ALREADY_CONSUMED')
     if (proposal.status === 'REFUSED') throw new Error('PROPOSAL_REFUSED')
+    if (this.isProposalExpired(proposal)) throw new Error('PROPOSAL_EXPIRED')
     if (digest(proposal.policy) !== digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId)))) throw new Error('POLICY_CHANGED')
     if (proposal.policy?.mode === 'AUTONOMOUS_CONSULTATIVE' && !(proposal.commands ?? [proposal.command]).every(isConsultativeCommand)) throw new Error('NOT_AUTO_AUTHORIZED: Select SUPERVISED locally for native command approval')
     const record = this.record(input.operationId, proposal, proposal.command)
@@ -139,14 +167,24 @@ export class CliExecutionService {
   }
   private record(operationId: string, proposal: CliProposal, command: CliCommandDescriptor): CliExecutionRecord {
     return { operationId, proposalId: proposal.proposalId, command, policy: proposal.policy, repositoryId: this.repositoryId,
+      ...(proposal.timeoutProfile ? { timeoutProfile: proposal.timeoutProfile } : {}),
+      ...(proposal.timeoutMs !== undefined ? { timeoutMs: proposal.timeoutMs } : {}),
       ...(proposal.worktree ? { worktree: { ...proposal.worktree } } : {}),
       origin: 'CLI_EXECUTION_CAPABILITY', status: 'AWAITING_APPROVAL', phase: 'AWAITING_APPROVAL', startedAt: new Date().toISOString() }
   }
-  private current(record: CliExecutionRecord, proposal: CliProposal, token: string): boolean {
+  private isProposalExpired(proposal: CliProposal): boolean {
+    return proposal.status === 'EXPIRED' || Date.now() > Date.parse(proposal.expiresAt)
+  }
+  private hasActiveAuthority(record: CliExecutionRecord, proposal: CliProposal, token: string): boolean {
     try {
       return this.enabled && this.activeOperationId === record.operationId && this.activeExecutionToken === token &&
-        digest(proposal.policy) === digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId))) && Date.now() <= Date.parse(proposal.expiresAt)
+        digest(proposal.policy) === digest(this.policyForTarget(this.proposalWorktrees.get(proposal.proposalId)))
     } catch { return false }
+  }
+  private current(record: CliExecutionRecord, proposal: CliProposal, token: string): boolean {
+    // Admission TTL only gates un-admitted proposals; once CONSUMED, execution runs until its own timeout/revocation.
+    return (proposal.status === 'CONSUMED' || !this.isProposalExpired(proposal)) &&
+      this.hasActiveAuthority(record, proposal, token)
   }
   private async authorize(record: CliExecutionRecord, proposal: CliProposal, token: string, command?: CliCommandDescriptor): Promise<boolean> {
     let fingerprint: string
@@ -154,6 +192,17 @@ export class CliExecutionService {
     catch { throw new Error('CHECKOUT_CHANGED') }
     if (!this.current(record, proposal, token)) return false
     if (fingerprint !== proposal.checkoutFingerprint) throw new Error('CHECKOUT_CHANGED')
+    return this.authorizeCommandAndMode(proposal, command)
+  }
+  private async authorizeRuntime(record: CliExecutionRecord, proposal: CliProposal, token: string, command?: CliCommandDescriptor): Promise<boolean> {
+    let runtimeIdentity: string
+    try { runtimeIdentity = await this.captureRuntimeIdentity(this.proposalWorktrees.get(proposal.proposalId)) }
+    catch { throw new Error('CHECKOUT_CHANGED') }
+    if (!this.current(record, proposal, token)) return false
+    if (runtimeIdentity !== this.proposalRuntimeIdentities.get(proposal.proposalId)) throw new Error('CHECKOUT_CHANGED')
+    return this.authorizeCommandAndMode(proposal, command)
+  }
+  private authorizeCommandAndMode(proposal: CliProposal, command?: CliCommandDescriptor): boolean {
     if (command) {
       const effective = resolveCliCommand(proposal.repositoryDirectory, command.originalExecutable, command.originalArgs ?? command.args, command.relativeCwd)
       if (JSON.stringify(effective) !== JSON.stringify(command)) throw new Error('COMMAND_CHANGED')
@@ -164,6 +213,10 @@ export class CliExecutionService {
   private async run(record: CliExecutionRecord, proposal: CliProposal, token: string): Promise<void> {
     const steps = this.investigationSteps.get(record.operationId)
     let monitor: NodeJS.Timeout | undefined
+    const stepAuthorize = (index: number, stepCommand: CliCommandDescriptor) =>
+      index > 0 && proposal.policy?.mode === 'AUTONOMOUS_TRUSTED'
+        ? this.authorizeRuntime(record, proposal, token, stepCommand)
+        : this.authorize(record, proposal, token, stepCommand)
     try {
       if (proposal.worktree && !await this.authorize(record, proposal, token)) return
       let approved = true
@@ -188,7 +241,7 @@ export class CliExecutionService {
         if (!this.current(record, proposal, token)) break
         if (Date.now() >= deadline) { record.status = 'TIMED_OUT'; record.diagnostic = 'INVESTIGATION_TIME_BUDGET'; break }
         const command = commands[index]
-        if (steps && !await this.authorize(record, proposal, token, command)) break
+        if (steps && !await stepAuthorize(index, command)) break
         if (!this.current(record, proposal, token)) break
         const step = steps ? this.record(`${record.operationId}:${index}`, proposal, command) : record
         steps?.push(step); this.activeRecord = step
@@ -196,20 +249,25 @@ export class CliExecutionService {
         let monitoring = false
         if (proposal.policy?.mode !== 'SUPERVISED') monitor = setInterval(() => {
           if (monitoring || !this.current(record, proposal, token)) {
-            if (!this.current(record, proposal, token) && this.activeOperationId === record.operationId) void this.abortActive('POLICY_CHANGED')
+            if (!this.current(record, proposal, token) && this.activeOperationId === record.operationId && this.activeExecutionToken === token) {
+              void this.abortActive('POLICY_CHANGED')
+            }
             return
           }
           monitoring = true
-          void this.authorize(record, proposal, token).then(allowed => {
+          void this.authorizeRuntime(record, proposal, token).then(allowed => {
             if (!allowed && this.activeOperationId === record.operationId && this.activeExecutionToken === token) return this.abortActive('POLICY_CHANGED')
           }).catch(() => {
             if (this.activeOperationId === record.operationId && this.activeExecutionToken === token) return this.abortActive('CHECKOUT_CHANGED')
           }).finally(() => { monitoring = false })
         }, 500)
+        const unitTimeoutMaxMs = proposal.timeoutProfile === 'BUILDX_AGENTIC_UNIT' ? AGENTIC_MAX_TIMEOUT_MS : STANDARD_MAX_TIMEOUT_MS
         const completion = this.supervisor.launch(command, {
           ownerPath: this.ownerPath,
-          ...(steps ? { timeoutMs: Math.min(budgets.commandTimeoutMs, deadline - Date.now()), maxTotalOutputBytes: Math.min(budgets.stepOutputBytes, budgets.totalOutputBytes - outputBytes) } : {}),
-          authorizeResume: () => this.authorize(record, proposal, token, command),
+          ...(steps
+            ? { timeoutMs: Math.min(budgets.commandTimeoutMs, deadline - Date.now()), maxTimeoutMs: STANDARD_MAX_TIMEOUT_MS, maxTotalOutputBytes: Math.min(budgets.stepOutputBytes, budgets.totalOutputBytes - outputBytes) }
+            : { timeoutMs: Math.min(proposal.timeoutMs ?? this.defaultTimeoutMs, unitTimeoutMaxMs), maxTimeoutMs: unitTimeoutMaxMs }),
+          authorizeResume: () => stepAuthorize(index, command),
           onRunning: () => { step.status = record.status = 'RUNNING'; step.phase = record.phase = 'RUNNING' }
         })
         const buffer = this.supervisor.output
@@ -233,6 +291,7 @@ export class CliExecutionService {
       proposal.status = 'REFUSED'
     } finally {
       clearInterval(monitor)
+      if (proposal.status === 'PENDING' && this.isProposalExpired(proposal)) proposal.status = 'EXPIRED'
       if (!this.supervisor.isRunning) {
         if (steps && steps.length === proposal.commands!.length && steps.every(step => step.status === 'SUCCEEDED') && record.status === 'RUNNING') record.status = 'SUCCEEDED'
         if (record.status === 'AWAITING_APPROVAL' || record.status === 'RUNNING') { record.status = 'CANCELLED'; record.diagnostic ??= 'AUTHORITY_CHANGED' }
@@ -250,7 +309,9 @@ export class CliExecutionService {
     const record = this.executions.get(input.operationId), steps = this.investigationSteps.get(input.operationId)
     if (!record || !steps) throw new Error('OPERATION_NOT_FOUND: UNKNOWN_NOT_RECOVERABLE_AFTER_RESTART')
     const proposal = this.proposals.get(record.proposalId)!
-    const summary: CliInvestigationSummary = { operationId: record.operationId, proposalId: record.proposalId, manifestHash: proposal.manifestHash!, repositoryId: this.repositoryId,
+    const summary: CliInvestigationSummary = {
+      ...(proposal.worktree ? { worktree: { ...proposal.worktree } } : {}),
+      operationId: record.operationId, proposalId: record.proposalId, manifestHash: proposal.manifestHash!, repositoryId: this.repositoryId,
       policy: proposal.policy!, status: record.status, phase: record.phase, diagnostic: record.diagnostic, durationMs: record.durationMs, treeObservation: record.treeObservation,
       steps: proposal.commands!.map((_, index) => { const step = steps[index]; return { index, operationId: `${record.operationId}:${index}`,
         status: step?.status ?? 'NOT_STARTED', phase: step?.phase, exitCode: step?.exitCode, durationMs: step?.durationMs, diagnostic: step?.diagnostic, treeObservation: step?.treeObservation } }) }
@@ -294,9 +355,47 @@ export class CliExecutionService {
     if (record?.phase === 'TERMINAL') record.diagnostic = reason
   }
   private assertEnabled(): void { if (!this.enabled) throw new Error('CLI_EXECUTION_DISABLED') }
+  private resolveTimeoutBudget(
+    executionProfile: PrepareCliExecutionInput['executionProfile'] | undefined,
+    requestedTimeoutMs: number | undefined,
+    investigation: boolean
+  ): { timeoutProfile: CliTimeoutProfile; timeoutMs: number; maxTimeoutMs: number } {
+    if (investigation) {
+      return { timeoutProfile: 'INVESTIGATION_STEP', timeoutMs: budgets.commandTimeoutMs, maxTimeoutMs: STANDARD_MAX_TIMEOUT_MS }
+    }
+    if (executionProfile !== undefined && executionProfile !== 'STANDARD_CLI' && executionProfile !== 'BUILDX_AGENTIC_UNIT') {
+      throw new Error('INVALID_EXECUTION_PROFILE')
+    }
+    const requested = typeof requestedTimeoutMs === 'number' && Number.isFinite(requestedTimeoutMs) && requestedTimeoutMs > 0
+      ? Math.floor(requestedTimeoutMs)
+      : undefined
+    if (executionProfile === 'BUILDX_AGENTIC_UNIT') {
+      return {
+        timeoutProfile: 'BUILDX_AGENTIC_UNIT',
+        timeoutMs: Math.min(requested ?? AGENTIC_DEFAULT_TIMEOUT_MS, AGENTIC_MAX_TIMEOUT_MS),
+        maxTimeoutMs: AGENTIC_MAX_TIMEOUT_MS
+      }
+    }
+    return {
+      timeoutProfile: 'STANDARD_CLI',
+      timeoutMs: Math.min(requested ?? this.defaultTimeoutMs, STANDARD_MAX_TIMEOUT_MS),
+      maxTimeoutMs: STANDARD_MAX_TIMEOUT_MS
+    }
+  }
   private policyForTarget(target?: CliResolvedWorktree): CliPolicy {
-    const policy = { ...this.getPolicyFn() }
-    if (target && target.directory !== this.repoRoot) return { ...policy, mode: 'SUPERVISED', rule: 'native-worktree-command-consent' }
+    const raw = this.getPolicyFn(target)
+    if (raw.scope !== undefined && !CLI_TRUST_SCOPES.includes(raw.scope)) {
+      return { mode: 'SUPERVISED', scope: 'ACTIVE_CHECKOUT_ONLY', revision: `invalid:${raw.revision}`, rule: supervised.rule }
+    }
+    const scope: CliTrustScope = raw.scope ?? 'ACTIVE_CHECKOUT_ONLY'
+    if (scope === 'REPOSITORY_WORKTREES' && raw.mode !== 'AUTONOMOUS_TRUSTED') {
+      return { mode: 'SUPERVISED', scope: 'ACTIVE_CHECKOUT_ONLY', revision: `invalid:${raw.revision}`, rule: supervised.rule }
+    }
+    const policy: CliPolicy = { ...raw, scope }
+    if (target && target.directory !== this.repoRoot) {
+      if (policy.mode === 'AUTONOMOUS_TRUSTED' && policy.scope === 'REPOSITORY_WORKTREES') return policy
+      return { ...policy, mode: 'SUPERVISED', scope: 'ACTIVE_CHECKOUT_ONLY', rule: 'native-worktree-command-consent' }
+    }
     return policy
   }
   private async captureFingerprint(target?: CliResolvedWorktree): Promise<string> {
@@ -304,6 +403,13 @@ export class CliExecutionService {
     if (!target) return active
     const selected = await target.getFingerprint()
     if (active !== await this.getFingerprintFn()) throw new Error('PROJECT_CONTEXT_CHANGED')
+    return digest([active, target.directory, selected])
+  }
+  private async captureRuntimeIdentity(target?: CliResolvedWorktree): Promise<string> {
+    const active = await this.getRuntimeIdentityFn()
+    if (!target) return active
+    const selected = await (target.getRuntimeIdentity ? target.getRuntimeIdentity() : target.getFingerprint())
+    if (active !== await this.getRuntimeIdentityFn()) throw new Error('PROJECT_CONTEXT_CHANGED')
     return digest([active, target.directory, selected])
   }
   private invalidateAllProposals(): void { for (const proposal of this.proposals.values()) if (proposal.status === 'PENDING') proposal.status = 'EXPIRED' }

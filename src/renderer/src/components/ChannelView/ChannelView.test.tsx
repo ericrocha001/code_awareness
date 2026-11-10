@@ -222,7 +222,13 @@ it('toggles local CLI execution through settings and reflects state reactively',
 it('shows trust scope and honest OS limits, changes mode only through local IPC and provides revoke/stop', async () => {
   state.cliExecutionEnabled = true
   state.cliMode = 'SUPERVISED'
-  window.codeAwareness.chooseCliMode = vi.fn(async mode => { state.cliMode = mode; state.revision++; return { accepted: true } })
+  state.cliScope = 'ACTIVE_CHECKOUT_ONLY'
+  window.codeAwareness.chooseCliMode = vi.fn(async (mode, scope) => {
+    state.cliMode = mode
+    state.cliScope = scope ?? 'ACTIVE_CHECKOUT_ONLY'
+    state.revision++
+    return { accepted: true }
+  })
   window.codeAwareness.stopCliExecution = vi.fn(async () => ({ stopped: true }))
   render(<ChannelView />)
   const select = await screen.findByRole('combobox', { name: 'Modo de execução' })
@@ -231,6 +237,9 @@ it('shows trust scope and honest OS limits, changes mode only through local IPC 
   fireEvent.change(select, { target: { value: 'AUTONOMOUS_TRUSTED' } })
   await waitFor(() => expect(window.codeAwareness.chooseCliMode).toHaveBeenCalledWith('AUTONOMOUS_TRUSTED'))
   await waitFor(() => expect((select as HTMLSelectElement).value).toBe('AUTONOMOUS_TRUSTED'))
+  fireEvent.change(select, { target: { value: 'AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES' } })
+  await waitFor(() => expect(window.codeAwareness.chooseCliMode).toHaveBeenCalledWith('AUTONOMOUS_TRUSTED', 'REPOSITORY_WORKTREES'))
+  await waitFor(() => expect((select as HTMLSelectElement).value).toBe('AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES'))
   fireEvent.click(screen.getByRole('button', { name: 'Desativar autonomia' }))
   await waitFor(() => expect(window.codeAwareness.chooseCliMode).toHaveBeenCalledWith('SUPERVISED'))
   fireEvent.click(screen.getByRole('button', { name: 'Interromper execução CLI' }))

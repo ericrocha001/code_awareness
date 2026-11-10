@@ -6,9 +6,21 @@ import { DiagnosticModal } from '../SystemHealth/DiagnosticModal'
 import './ChannelView.css'
 import { LocalMcpSetup } from './LocalMcpSetup'
 import { updateSettings } from '../../utils/update-settings'
-import type { CliMode } from '../../../../shared/types/cli-policy-types'
+import type { CliMode, CliTrustScope } from '../../../../shared/types/cli-policy-types'
 
-const cliModes: Record<CliMode, string> = { SUPERVISED: 'Supervisionado', AUTONOMOUS_CONSULTATIVE: 'Autônomo consultivo', AUTONOMOUS_TRUSTED: 'Autônomo confiável' }
+type CliModeOption = CliMode | 'AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES'
+const cliModeOptions: Array<{ value: CliModeOption; label: string; mode: CliMode; scope?: CliTrustScope }> = [
+  { value: 'SUPERVISED', label: 'Supervisionado', mode: 'SUPERVISED' },
+  { value: 'AUTONOMOUS_CONSULTATIVE', label: 'Autônomo consultivo', mode: 'AUTONOMOUS_CONSULTATIVE' },
+  { value: 'AUTONOMOUS_TRUSTED', label: 'Autônomo confiável (checkout ativo)', mode: 'AUTONOMOUS_TRUSTED', scope: 'ACTIVE_CHECKOUT_ONLY' },
+  { value: 'AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES', label: 'YOLO — este repositório e suas Worktrees', mode: 'AUTONOMOUS_TRUSTED', scope: 'REPOSITORY_WORKTREES' }
+]
+const cliModeLabel = (mode?: CliMode, scope?: CliTrustScope): string => {
+  if (mode === 'AUTONOMOUS_TRUSTED' && scope === 'REPOSITORY_WORKTREES') {
+    return 'YOLO — este repositório e suas Worktrees'
+  }
+  return cliModeOptions.find(option => option.value === (mode ?? 'SUPERVISED'))?.label ?? 'Supervisionado'
+}
 
 const availabilityCopy: Record<ChannelAvailability, { title: string; description: string }> = {
   DISABLED: { title: 'Acesso remoto desativado', description: 'Ative o acesso remoto para disponibilizar o projeto ativo ao ChatGPT.' },
@@ -105,10 +117,17 @@ export function ChannelView({ active = true }: { active?: boolean }) {
   }
 
 
-  const chooseCliMode = async (mode: CliMode) => {
+  const chooseCliMode = async (optionValue: CliModeOption) => {
     if (cliPending) return
+    const selected = cliModeOptions.find(option => option.value === optionValue)
+    if (!selected) return
     setCliPending(true); setError(null)
-    try { await window.codeAwareness.chooseCliMode(mode); receive(await window.codeAwareness.getChannelState()) }
+    try {
+      await (selected.scope === 'REPOSITORY_WORKTREES'
+        ? window.codeAwareness.chooseCliMode(selected.mode, selected.scope)
+        : window.codeAwareness.chooseCliMode(selected.mode))
+      receive(await window.codeAwareness.getChannelState())
+    }
     catch { setError('Não foi possível alterar a autonomia CLI. Confira o repositório ativo.') }
     finally { if (mounted.current) setCliPending(false) }
   }
@@ -124,6 +143,10 @@ export function ChannelView({ active = true }: { active?: boolean }) {
   const copy = state ? availabilityCopy[state.availability] : null
   const readyTitle = state?.availability === 'READY' && health?.status === 'DEGRADED' ? 'Disponível · operação requer atenção' : copy?.title
   const mainTone = state?.availability === 'READY' && health ? healthTone[health.status] : state ? availabilityTone[state.availability] : 'neutral'
+  const selectedCliModeValue: CliModeOption = state?.cliMode === 'AUTONOMOUS_TRUSTED' && state?.cliScope === 'REPOSITORY_WORKTREES'
+    ? 'AUTONOMOUS_TRUSTED:REPOSITORY_WORKTREES'
+    : (state?.cliMode ?? 'SUPERVISED')
+  const activeCliModeLabel = state?.cliExecutionEnabled ? cliModeLabel(state.cliMode, state.cliScope) : 'OFF'
   return <>
     <section className="channel-view" aria-labelledby="channel-title">
       <header className="channel-heading">
@@ -139,14 +162,14 @@ export function ChannelView({ active = true }: { active?: boolean }) {
       <div className="channel-content">
       <LocalMcpSetup active={active} />
       {state && <section className="channel-panel" aria-labelledby="cli-autonomy-title">
-        <div className="channel-section-heading"><h2 id="cli-autonomy-title"><Terminal size={19} aria-hidden="true" />Autonomia CLI</h2><StatusBadge tone={state.cliExecutionEnabled ? 'warning' : 'neutral'}>{state.cliExecutionEnabled ? cliModes[state.cliMode ?? 'SUPERVISED'] : 'OFF'}</StatusBadge></div>
+        <div className="channel-section-heading"><h2 id="cli-autonomy-title"><Terminal size={19} aria-hidden="true" />Autonomia CLI</h2><StatusBadge tone={state.cliExecutionEnabled ? 'warning' : 'neutral'}>{activeCliModeLabel}</StatusBadge></div>
         <p className="channel-panel-description">Repositório autorizado: {state.activeProject?.name ?? 'Nenhum projeto identificado'}. A confiança vale para todos os clientes autenticados com acesso à capacidade CLI.</p>
         <label className="channel-label" htmlFor="cli-mode">Modo de execução</label>
-        <select id="cli-mode" className="channel-action" value={state.cliMode ?? 'SUPERVISED'} disabled={!state.cliExecutionEnabled || !state.activeProject || cliPending} onChange={event => void chooseCliMode(event.target.value as CliMode)}>
-          {Object.entries(cliModes).map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+        <select id="cli-mode" className="channel-action" value={selectedCliModeValue} disabled={!state.cliExecutionEnabled || !state.activeProject || cliPending} onChange={event => void chooseCliMode(event.target.value as CliModeOption)}>
+          {cliModeOptions.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
-        <p className="channel-note">Supervisionado pede aprovação por comando. Consultivo libera somente whoami.exe e hostname.exe reais do Windows, sem argumentos; para outros comandos, selecione Supervisionado. Confiável permite CLI geral, scripts e gerenciadores de pacotes sem novos diálogos.</p>
-        <p className="channel-note">Autonomia confiável não é sandbox: processos usam os direitos e credenciais da conta Windows e podem acessar arquivos e rede além do checkout. A supervisão controla a árvore de processos, sem elevar privilégios. Erros e prompt injection continuam possíveis.</p>
+        <p className="channel-note">Supervisionado pede aprovação por comando. Consultivo libera somente whoami.exe e hostname.exe reais do Windows, sem argumentos. Autônomo confiável (checkout ativo) libera CLI geral apenas neste checkout. YOLO libera CLI geral, BuildX/Grok e Worktrees verificadas deste repositório sem whitelist ou novos diálogos.</p>
+        <p className="channel-note">Autonomia confiável não é sandbox: processos usam os direitos e credenciais da conta Windows e podem acessar arquivos e rede além do checkout, sem conceder posse exclusiva Git sobre Worktrees. A supervisão controla a árvore de processos, sem elevar privilégios. Erros e prompt injection continuam possíveis.</p>
         <div className="channel-header-controls">
           <button type="button" className="channel-action" disabled={cliPending || (state.cliMode ?? 'SUPERVISED') === 'SUPERVISED'} onClick={() => void chooseCliMode('SUPERVISED')}>Desativar autonomia</button>
           <button type="button" className="channel-action" disabled={cliPending} onClick={() => void stopCli()}>Interromper execução CLI</button>
@@ -158,7 +181,7 @@ export function ChannelView({ active = true }: { active?: boolean }) {
           <div className="channel-section-heading"><h2 id="channel-path-title"><Radio size={19} aria-hidden="true" />Caminho operacional</h2><span>Controle local do acesso</span></div>
           <dl className="channel-path">
             <PathStep icon={ShieldCheck} label="Acesso remoto · ChatGPT" value={!state.installationConfigured ? 'Configuração necessária' : state.remoteAccessEnabled ? 'Ativado' : 'Desativado'} detail={!state.installationConfigured ? 'Instalação requer atenção' : undefined} tone={!state.installationConfigured ? 'warning' : state.remoteAccessEnabled ? 'healthy' : 'neutral'} />
-            <PathStep icon={Terminal} label="Execução local CLI" value={state.cliExecutionEnabled ? cliModes[state.cliMode ?? 'SUPERVISED'] : 'OFF'} tone={state.cliExecutionEnabled ? 'healthy' : 'neutral'} />
+            <PathStep icon={Terminal} label="Execução local CLI" value={activeCliModeLabel} tone={state.cliExecutionEnabled ? 'healthy' : 'neutral'} />
             <PathStep icon={Server} label={state.transport === 'relay' ? 'Relay' : 'Transporte de desenvolvimento'} value={connectionCopy[state.connectionStatus] ?? 'Indisponível'} tone={connectionTone(state.connectionStatus)} />
             <PathStep icon={Blocks} label="MCP Online" value={connectionCopy[state.mcpStatus] ?? 'Indisponível'} tone={connectionTone(state.mcpStatus)} />
             <PathStep icon={Folder} label="Projeto atendido" value={state.activeProject?.name ?? 'Aguardando projeto'} tone={state.activeProject ? 'healthy' : 'neutral'} />

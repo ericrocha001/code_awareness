@@ -119,7 +119,7 @@ import { RepositoryFileIngress } from './repository-file-ingress/repository-file
 import { RepositoryFileEditing } from './repository-file-ingress/repository-file-editing'
 import { CliExecutionService } from './cli-execution/cli-execution-service'
 import { confirmCliExecution, confirmCliAutonomy } from './cli-execution/cli-authorization'
-import { createCliProjectAuthority } from './cli-execution/cli-project-authority'
+import { createCliProjectAuthority, createCliProjectRuntimeAuthority } from './cli-execution/cli-project-authority'
 import { resolveCliWorktree } from './cli-execution/cli-worktree-authority'
 import { CliTrustPolicy } from './cli-execution/cli-trust-policy'
 import { registerCliPolicyHandlers } from './ipc/cli-policy-handler'
@@ -509,7 +509,7 @@ app.whenReady().then(async () => {
     const repository = repositoryCatalog?.findByPath(project.path)
     if (!repository || repository.id !== project.id || state.context.repositoryId !== repository.id || repository.localCheckout?.availability !== 'AVAILABLE') return null
     return { repositoryId: repository.id, path: project.path, revision: state.revision }
-  }, (mode, context) => confirmCliAutonomy(mainWindow, mode, context))
+  }, (mode, context, scope) => confirmCliAutonomy(mainWindow, mode, context, scope))
   registerCliPolicyHandlers(cliTrustPolicy, () => mainWindow, () => activeCliExecution)
   activeProjects.onChanged(({ project, revision, context }) => {
     if (revision === boundProjectRevision) return
@@ -549,7 +549,7 @@ app.whenReady().then(async () => {
     activeCliExecution = new CliExecutionService({
       repoRoot: project.path,
       repositoryId: gitRepositoryId ?? null,
-      getPolicy: () => cliTrustPolicy.getPolicy({ repositoryId: gitRepositoryId ?? null, path: project.path }),
+      getPolicy: target => cliTrustPolicy.getPolicy({ repositoryId: gitRepositoryId ?? null, path: target?.directory ?? project.path }),
       resolveWorktree: async selector => {
         if (!gitOperations.worktrees) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
         return resolveCliWorktree(gitOperations.worktrees, gitService, selector)
@@ -568,6 +568,15 @@ app.whenReady().then(async () => {
           const snapshot = await gitService.captureWorktreeReadSnapshot(path)
           return { commonDirectory: realpathSync(directories.common), worktreeDirectory: realpathSync(directories.admin),
             head: snapshot.head, branch: snapshot.branch, operation: snapshot.operation }
+        }
+      }),
+      getRuntimeIdentity: createCliProjectRuntimeAuthority({
+        selection: activeProjects!.getState(),
+        getSelection: () => activeProjects!.getState(),
+        findRepository: path => repositoryCatalog?.findByPath(path) ?? null,
+        captureStableGitIdentity: async path => {
+          const directories = await gitService.getRepositoryDirectories(path)
+          return { commonDirectory: realpathSync(directories.common), worktreeDirectory: realpathSync(directories.admin) }
         }
       }),
       approvalHandler: async (req) => {

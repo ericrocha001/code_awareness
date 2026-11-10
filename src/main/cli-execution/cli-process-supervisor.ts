@@ -14,6 +14,7 @@ export interface SupervisorExecutionResult {
 }
 export interface SupervisorLaunchOptions {
   timeoutMs?: number
+  maxTimeoutMs?: number
   maxOutputBytes?: number
   maxTotalOutputBytes?: number
   ownerPath?: string
@@ -171,7 +172,13 @@ export class CliProcessSupervisor {
             else failure(this.diagnostic ?? 'OWNER_LOST')
           })
           armWatchdog()
-          timeout = setTimeout(() => { this.stopReason = 'TIMED_OUT'; this.phase = 'STOPPING'; send('terminate') }, Math.min(options.timeoutMs ?? this.defaultTimeoutMs, 120000))
+          const hardCapMs = typeof options.maxTimeoutMs === 'number' && Number.isFinite(options.maxTimeoutMs) && options.maxTimeoutMs > 0
+            ? Math.min(Math.floor(options.maxTimeoutMs), 900000)
+            : 120000
+          const requestedMs = typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+            ? Math.floor(options.timeoutMs)
+            : this.defaultTimeoutMs
+          timeout = setTimeout(() => { this.stopReason = 'TIMED_OUT'; this.phase = 'STOPPING'; send('terminate') }, Math.max(1, Math.min(requestedMs, hardCapMs)))
         } catch { ownerClosed = true; failure('NATIVE_OWNER_UNAVAILABLE') }
       })
     })

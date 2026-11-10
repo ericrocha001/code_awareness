@@ -361,6 +361,8 @@ export class UnitFlowRuntimeFacade {
           reason: obs.reason ?? null,
           proposalId: (obs as any).proposalId ?? null,
           executionId: (obs as any).executionId ?? null,
+          ...(obs.timeoutProfile ? { timeoutProfile: obs.timeoutProfile } : {}),
+          ...(obs.timeoutMs !== undefined ? { timeoutMs: obs.timeoutMs } : {}),
           replayed: true
         }
       }
@@ -408,6 +410,8 @@ export class UnitFlowRuntimeFacade {
           reason: execResult.reason ?? null,
           proposalId: (execResult as any).proposalId ?? null,
           executionId: (execResult as any).executionId ?? null,
+          ...(execResult.timeoutProfile ? { timeoutProfile: execResult.timeoutProfile } : {}),
+          ...(execResult.timeoutMs !== undefined ? { timeoutMs: execResult.timeoutMs } : {}),
           replayed: true
         }
       }
@@ -515,7 +519,9 @@ export class UnitFlowRuntimeFacade {
       status: execResult.status,
       reason: execResult.reason ?? null,
       proposalId: (execResult as any).proposalId ?? null,
-      executionId: (execResult as any).executionId ?? null
+      executionId: (execResult as any).executionId ?? null,
+      ...(execResult.timeoutProfile ? { timeoutProfile: execResult.timeoutProfile } : {}),
+      ...(execResult.timeoutMs !== undefined ? { timeoutMs: execResult.timeoutMs } : {})
     }
   }
 
@@ -578,7 +584,7 @@ export class UnitFlowRuntimeFacade {
     if (attemptRecord) {
       let liveStatus: string = attemptRecord.status
       const exitCode: number | null = null
-      const terminalReason: string | null = null
+      let terminalReason: string | null = null
       const lastSummary: string | null = null
 
       if (attemptRecord.status === 'STARTING' || attemptRecord.status === 'RUNNING') {
@@ -592,6 +598,7 @@ export class UnitFlowRuntimeFacade {
         if (obs.status === 'TERMINAL_OBSERVED' || obs.status === 'REFUSED') {
           observedTerminal = true
           liveStatus = (obs as any).cliStatus ?? obs.status
+          terminalReason = obs.reason ?? null
         }
       }
 
@@ -749,7 +756,9 @@ export class UnitFlowRuntimeFacade {
       attemptStatus: settlement.attemptStatus ?? settlement.status,
       unitState: settlement.unitFlowStatus ?? 'UNKNOWN',
       exitCode: settlement.exitCode ?? null,
-      terminalReason: settlement.reason ?? null
+      terminalReason: settlement.reason ?? null,
+      ...(settlement.timeoutProfile ? { timeoutProfile: settlement.timeoutProfile } : {}),
+      ...(settlement.timeoutMs !== undefined ? { timeoutMs: settlement.timeoutMs } : {})
     }
   }
 

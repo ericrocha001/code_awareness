@@ -8,6 +8,7 @@ export interface ChannelState {
   remoteAccessEnabled: boolean
   cliExecutionEnabled: boolean
   cliMode?: import('./cli-policy-types').CliMode
+  cliScope?: import('./cli-policy-types').CliTrustScope
   installationConfigured: boolean
   transport: 'relay' | 'ngrok'
   connectionStatus: string

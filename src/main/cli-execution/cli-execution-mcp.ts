@@ -135,16 +135,27 @@ const investigationTool = (name: string, description: string, properties: Record
   annotations: { readOnlyHint: !mutation, openWorldHint: mutation, idempotentHint: true, ...(mutation ? { destructiveHint: true } : {}), title: name }, securitySchemes
 })
 const proposalOperation = { proposalId: { type: 'string', minLength: 1 }, operationId: { type: 'string', minLength: 1, maxLength: 128 } }
-const { worktree: _worktree, ...investigationCommandProperties } = CLI_EXECUTION_TOOLS[0].inputSchema.properties as Record<string, unknown>
+const { worktree: topLevelWorktreeSchema, ...investigationCommandProperties } = CLI_EXECUTION_TOOLS[0].inputSchema.properties as Record<string, unknown>
 CLI_EXECUTION_TOOLS.push(
-  investigationTool('prepare_cli_investigation', 'Resolve a closed ordered manifest of 2–5 literal commands in the active checkout without spawning. Same host policy as unitary CLI. Limits: 30s/step, 90s total, 64KiB combined output/step and 256KiB total; manifest limited to 6KiB. No dynamic insertion or executable placeholders.',
-    { commands: { type: 'array', minItems: 2, maxItems: 5, items: { ...CLI_EXECUTION_TOOLS[0].inputSchema, properties: investigationCommandProperties } } }, ['commands'], false),
+  investigationTool('prepare_cli_investigation', 'Resolve a closed ordered manifest of 2–5 literal commands in the active checkout or a single top-level discovered Worktree without spawning. Same host policy as unitary CLI. Limits: 30s/step, 90s total, 64KiB combined output/step and 256KiB total; manifest limited to 6KiB. No dynamic insertion or executable placeholders.',
+    { worktree: topLevelWorktreeSchema, commands: { type: 'array', minItems: 2, maxItems: 5, items: { ...CLI_EXECUTION_TOOLS[0].inputSchema, properties: investigationCommandProperties, required: ['executable'] } } }, ['commands'], false),
   investigationTool('start_cli_investigation', 'Start a prepared manifest sequentially with the shared Windows supervisor. One complete native approval in SUPERVISED, zero in locally authorized autonomous modes. Any failure or authority drift stops remaining steps. Recover lost responses with the same operationId; after restart missing receipts are not recoverable.', proposalOperation, ['proposalId', 'operationId'], true),
   investigationTool('get_cli_investigation', 'Get bounded manifest/step status without stdout/stderr. Supply index and optional cursor to read only that step output, at most 8KiB combined per page. Unknown operation after restart is not recoverable; never automatically replay using a new ID.',
     { operationId: { type: 'string', minLength: 1 }, index: { type: 'integer', minimum: 0, maximum: 4 }, cursor: { type: 'string' } }, ['operationId'], false),
   investigationTool('cancel_cli_investigation', 'Cancel the active manifest and its process tree, prevent all subsequent steps, and return observed status without output. TERMINATION_UNCONFIRMED retains the shared execution slot.',
     { operationId: { type: 'string', minLength: 1 } }, ['operationId'], true)
 )
+
+function parseWorktreeSelector(raw: unknown): { ok: true; value?: import('./cli-execution-types').CliWorktreeSelector } | { ok: false; result: McpToolResult } {
+  if (raw === undefined) return { ok: true, value: undefined }
+  const worktree = asObject(raw)
+  if (!worktree || Object.keys(worktree).some(key => !['worktreeId', 'generation'].includes(key)) ||
+    typeof worktree.worktreeId !== 'string' || !/^[a-f0-9]{64}$/.test(worktree.worktreeId) ||
+    typeof worktree.generation !== 'string' || !/^[a-f0-9]{64}$/.test(worktree.generation)) {
+    return { ok: false, result: error('INVALID_ARGUMENT', 'worktree requires discovered worktreeId and generation; paths are not accepted') }
+  }
+  return { ok: true, value: { worktreeId: worktree.worktreeId, generation: worktree.generation } }
+}
 
 function result(value: unknown): McpToolResult {
   return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }] }
@@ -177,11 +188,13 @@ export async function executeCliTool(
     const allowed: Record<string, string[]> = {
       prepare_cli_execution: ['executable', 'args', 'relativeCwd', 'worktree'], start_cli_execution: ['proposalId', 'operationId'],
       get_cli_execution: ['operationId', 'cursor'], cancel_cli_execution: ['operationId'],
-      prepare_cli_investigation: ['commands'], start_cli_investigation: ['proposalId', 'operationId'],
+      prepare_cli_investigation: ['worktree', 'commands'], start_cli_investigation: ['proposalId', 'operationId'],
       get_cli_investigation: ['operationId', 'index', 'cursor'], cancel_cli_investigation: ['operationId']
     }
     if (allowed[name] && Object.keys(values).some(key => !allowed[name].includes(key))) return error('INVALID_ARGUMENT', 'Unknown argument; autonomy is controlled only in Desktop')
     if (name === 'prepare_cli_investigation') {
+      const parsedWorktree = parseWorktreeSelector(values.worktree)
+      if (!parsedWorktree.ok) return parsedWorktree.result
       if (!Array.isArray(values.commands) || values.commands.length < 2 || values.commands.length > 5) return error('INVALID_ARGUMENT', 'Expected 2–5 commands')
       const commands: import('./cli-execution-types').PrepareCliExecutionInput[] = []
       for (const value of values.commands) {
@@ -192,7 +205,10 @@ export async function executeCliTool(
           command.relativeCwd !== undefined && typeof command.relativeCwd !== 'string') return error('INVALID_ARGUMENT', 'Invalid literal command')
         commands.push(command as unknown as import('./cli-execution-types').PrepareCliExecutionInput)
       }
-      const proposal = await service.prepareInvestigation({ commands })
+      const proposal = await service.prepareInvestigation({
+        ...(parsedWorktree.value ? { worktree: parsedWorktree.value } : {}),
+        commands
+      })
       return result({ ...proposal, command: undefined })
     }
     if (name === 'start_cli_investigation' || name === 'get_cli_investigation' || name === 'cancel_cli_investigation') {
@@ -206,12 +222,8 @@ export async function executeCliTool(
       return result(service.getInvestigation({ operationId: values.operationId, index: values.index as number | undefined, cursor: values.cursor as string | undefined }))
     }
     if (name === 'prepare_cli_execution') {
-      const worktree = values.worktree === undefined ? undefined : asObject(values.worktree)
-      if (values.worktree !== undefined && (!worktree || Object.keys(worktree).some(key => !['worktreeId', 'generation'].includes(key)) ||
-        typeof worktree.worktreeId !== 'string' || !/^[a-f0-9]{64}$/.test(worktree.worktreeId) ||
-        typeof worktree.generation !== 'string' || !/^[a-f0-9]{64}$/.test(worktree.generation))) {
-        return error('INVALID_ARGUMENT', 'worktree requires discovered worktreeId and generation; paths are not accepted')
-      }
+      const parsedWorktree = parseWorktreeSelector(values.worktree)
+      if (!parsedWorktree.ok) return parsedWorktree.result
       if (typeof values.executable !== 'string' || !values.executable.trim()) {
         return error('INVALID_ARGUMENT', 'executable is required')
       }
@@ -226,7 +238,7 @@ export async function executeCliTool(
       }
 
       const proposal = await service.prepare({
-        ...(worktree ? { worktree: { worktreeId: worktree.worktreeId as string, generation: worktree.generation as string } } : {}),
+        ...(parsedWorktree.value ? { worktree: parsedWorktree.value } : {}),
         executable: values.executable,
         args: values.args as string[] | undefined,
         relativeCwd: values.relativeCwd as string | undefined

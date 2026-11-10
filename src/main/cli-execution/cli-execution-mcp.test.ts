@@ -277,4 +277,87 @@ describe('U2 — Local Authorization & MCP Integration', () => {
     const cancelSnap = JSON.parse(textContent(cancelRes.content[0]))
     expect(cancelSnap.status).toBe('SUCCEEDED')
   })
+
+  it('Property 9: prepare_cli_investigation aceita worktree no topo mas bloqueia worktree por item', async () => {
+    const wtTool = CLI_EXECUTION_TOOLS.find((t) => t.name === 'prepare_cli_investigation')!
+    expect((wtTool.inputSchema.properties as any).worktree).toBeDefined()
+    expect((wtTool.inputSchema.properties as any).commands.items.properties.worktree).toBeUndefined()
+
+    const worktreeDir = join(testDir, '..', `wt-mcp-${Date.now()}`)
+    mkdirSync(worktreeDir, { recursive: true })
+    const validSelector = { worktreeId: 'a'.repeat(64), generation: 'b'.repeat(64) }
+
+    const yoloWtService = new CliExecutionService({
+      repoRoot: testDir,
+      repositoryId: 'repo-test',
+      enabledByDefault: true,
+      getFingerprint: async () => fingerprintValue,
+      getPolicy: () => ({
+        mode: 'AUTONOMOUS_TRUSTED',
+        scope: 'REPOSITORY_WORKTREES',
+        revision: 'yolo-rev',
+        rule: 'local-repository-worktree-trust'
+      }),
+      resolveWorktree: async (selector) => ({
+        directory: worktreeDir,
+        identity: {
+          worktreeId: selector.worktreeId,
+          generation: selector.generation,
+          head: 'c'.repeat(40),
+          branch: 'feat/test',
+          indexRevision: 'idx-1'
+        },
+        getFingerprint: async () => 'wt-fp',
+        getRuntimeIdentity: async () => 'wt-rt'
+      }),
+      approvalHandler: async () => false
+    })
+
+    try {
+      const topOk = await executeCliTool(yoloWtService, 'prepare_cli_investigation', {
+        worktree: validSelector,
+        commands: [
+          { executable: process.execPath, args: ['-v'] },
+          { executable: process.execPath, args: ['-e', 'console.log(1)'] }
+        ]
+      })
+      expect(topOk.isError).toBeUndefined()
+      const prop = JSON.parse(textContent(topOk.content[0]))
+      expect(prop.worktree?.worktreeId).toBe(validSelector.worktreeId)
+      expect(prop.autoAuthorized).toBe(true)
+
+      const itemRejected = await executeCliTool(yoloWtService, 'prepare_cli_investigation', {
+        commands: [
+          { executable: process.execPath, args: ['-v'], worktree: validSelector },
+          { executable: process.execPath, args: ['-v'] }
+        ]
+      })
+      expect(itemRejected.isError).toBe(true)
+    } finally {
+      await yoloWtService.shutdown()
+      try { rmSync(worktreeDir, { recursive: true, force: true }) } catch {}
+    }
+  })
+
+  it('Property 10: prepare_cli_execution via MCP rejeita executionProfile e timeoutMs vindos de cliente externo', async () => {
+    const prepTool = CLI_EXECUTION_TOOLS.find((t) => t.name === 'prepare_cli_execution')!
+    expect((prepTool.inputSchema.properties as any).executionProfile).toBeUndefined()
+    expect((prepTool.inputSchema.properties as any).timeoutMs).toBeUndefined()
+
+    const badProfile = await executeCliTool(service, 'prepare_cli_execution', {
+      executable: process.execPath,
+      args: ['-v'],
+      executionProfile: 'BUILDX_AGENTIC_UNIT'
+    })
+    expect(badProfile.isError).toBe(true)
+    expect(JSON.parse(textContent(badProfile.content[0])).code).toBe('INVALID_ARGUMENT')
+
+    const badTimeout = await executeCliTool(service, 'prepare_cli_execution', {
+      executable: process.execPath,
+      args: ['-v'],
+      timeoutMs: 600000
+    })
+    expect(badTimeout.isError).toBe(true)
+    expect(JSON.parse(textContent(badTimeout.content[0])).code).toBe('INVALID_ARGUMENT')
+  })
 })

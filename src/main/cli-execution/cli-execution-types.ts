@@ -21,10 +21,14 @@ export interface CliCommandDescriptor {
   displayCommandLine: string
 }
 
+export type CliTimeoutProfile = 'STANDARD_CLI' | 'INVESTIGATION_STEP' | 'BUILDX_AGENTIC_UNIT'
+
 export interface CliProposal {
   worktree?: CliWorktreeIdentity
   policy?: CliPolicy
   autoAuthorized?: boolean
+  timeoutProfile?: CliTimeoutProfile
+  timeoutMs?: number
   commands?: CliCommandDescriptor[]
   manifestHash?: string
   budgets?: { commandTimeoutMs: number; totalTimeoutMs: number; stepOutputBytes: number; totalOutputBytes: number }
@@ -53,6 +57,8 @@ export interface CliOutputPage {
 export interface CliExecutionRecord {
   worktree?: CliWorktreeIdentity
   policy?: CliPolicy
+  timeoutProfile?: CliTimeoutProfile
+  timeoutMs?: number
   repositoryId?: string | null
   origin?: 'CLI_EXECUTION_CAPABILITY'
   treeObservation?: { activeProcesses: 0; handlesClosed: true }
@@ -76,6 +82,8 @@ export interface PrepareCliExecutionInput {
   executable: string
   args?: string[]
   relativeCwd?: string
+  executionProfile?: Exclude<CliTimeoutProfile, 'INVESTIGATION_STEP'>
+  timeoutMs?: number
 }
 
 export interface StartCliExecutionInput {
@@ -108,7 +116,7 @@ export interface CliApprovalRequest {
 
 export type CliApprovalHandler = (request: CliApprovalRequest) => Promise<boolean>
 
-export interface PrepareCliInvestigationInput { commands: Omit<PrepareCliExecutionInput, 'worktree'>[] }
+export interface PrepareCliInvestigationInput { worktree?: CliWorktreeSelector; commands: Omit<PrepareCliExecutionInput, 'worktree'>[] }
 export interface CliWorktreeSelector { worktreeId: string; generation: string }
 export interface CliWorktreeIdentity extends CliWorktreeSelector {
   head: string | null
@@ -119,9 +127,11 @@ export interface CliResolvedWorktree {
   directory: string
   identity: CliWorktreeIdentity
   getFingerprint: () => Promise<string>
+  getRuntimeIdentity?: () => Promise<string>
 }
 export interface GetCliInvestigationInput extends GetCliExecutionInput { index?: number }
 export interface CliInvestigationSummary {
+  worktree?: CliWorktreeIdentity
   operationId: string
   proposalId: string
   manifestHash: string
