@@ -2300,6 +2300,44 @@ export class SessionMemoryCentralStore {
     return this.mapRawToExecutionAttemptRecord(row)
   }
 
+  getActiveExecutionAttempt(sessionId: string): ExecutionAttemptRecord | null {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    const row = this.db.prepare(`
+      SELECT * FROM smc_execution_attempts
+      WHERE session_id = ? AND repository_id = ? AND status IN ('PREPARED', 'STARTING', 'RUNNING')
+      ORDER BY created_at DESC LIMIT 1
+    `).get(cleanSessionId, this.repositoryId) as RawExecutionAttemptRow | undefined
+    if (!row) return null
+    return this.mapRawToExecutionAttemptRecord(row)
+  }
+
+  getLatestExecutionAttempt(sessionId: string, unitId?: string): ExecutionAttemptRecord | null {
+    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+      throw new SmcInvalidSessionIdError(sessionId ?? '')
+    }
+    const cleanSessionId = sessionId.trim().toLowerCase()
+    let row: RawExecutionAttemptRow | undefined
+    if (unitId && typeof unitId === 'string' && UUID_REGEX.test(unitId.trim())) {
+      const cleanUnitId = unitId.trim().toLowerCase()
+      row = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts
+        WHERE session_id = ? AND repository_id = ? AND unit_id = ?
+        ORDER BY created_at DESC LIMIT 1
+      `).get(cleanSessionId, this.repositoryId, cleanUnitId) as RawExecutionAttemptRow | undefined
+    } else {
+      row = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts
+        WHERE session_id = ? AND repository_id = ?
+        ORDER BY created_at DESC LIMIT 1
+      `).get(cleanSessionId, this.repositoryId) as RawExecutionAttemptRow | undefined
+    }
+    if (!row) return null
+    return this.mapRawToExecutionAttemptRecord(row)
+  }
+
   transitionAttemptToStarting(attemptId: string, expectedRevision: number): ExecutionAttemptRecord {
     if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
       throw new ExecutionInvalidAttemptIdError(attemptId ?? '')

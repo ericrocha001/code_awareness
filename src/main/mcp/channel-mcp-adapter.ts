@@ -63,6 +63,8 @@ import { CLI_EXECUTION_TOOLS, executeCliTool } from '../cli-execution/cli-execut
 import type { CliExecutionService } from '../cli-execution/cli-execution-service'
 import { BUILDX_SMC_TOOLS, executeBuildxSmcTool } from '../buildx/smc/session-memory-central-mcp'
 import type { SessionMemoryCentralService } from '../buildx/smc/session-memory-central-service'
+import { BUILDX_UNITFLOW_TOOLS, executeBuildxUnitflowTool } from '../buildx/unitflow/unitflow-mcp'
+import type { UnitFlowRuntimeFacade } from '../buildx/unitflow/unitflow-runtime-facade'
 
 const literalReadTools = new Set(['read_artifact_section', 'read_worktree_file', 'read_agent_session_event'])
 const literalReadOutputSchema = {
@@ -121,6 +123,7 @@ export class ChannelMcpAdapter {
   private readonly sessionContext?: McpProjectContext['sessionContext']
   private readonly cliExecution?: CliExecutionService
   private readonly sessionMemoryCentral?: SessionMemoryCentralService
+  private readonly unitflowRuntime?: UnitFlowRuntimeFacade
   private readonly projectId?: string
   private readonly assertActiveProject?: () => void
 
@@ -178,6 +181,7 @@ export class ChannelMcpAdapter {
       this.sessionContext = context.sessionContext
       this.cliExecution = context.cliExecution
       this.sessionMemoryCentral = context.sessionMemoryCentral
+      this.unitflowRuntime = context.unitflowRuntime
       this.projectId = context.projectId
       this.assertActiveProject = context.assertActiveProject
       this.academy = (validationLedgerOrReader as AcademyService | undefined) ?? academy
@@ -248,6 +252,7 @@ export class ChannelMcpAdapter {
     if (this.academy) tools.push(...ACADEMY_MCP_TOOLS)
     if (this.cliExecution) tools.push(...CLI_EXECUTION_TOOLS)
     if (this.sessionMemoryCentral && this.projectId) tools.push(...BUILDX_SMC_TOOLS)
+    if (this.unitflowRuntime && this.projectId) tools.push(...BUILDX_UNITFLOW_TOOLS)
     if (this.usage) {
       const inventory = tools.map(tool => ({ name: tool.name, capability: this.capabilityForTool(tool.name) ?? 'unclassified', instrumental: tool.name === GET_CHANNEL_USAGE_TOOL.name })).sort((a, b) => a.name < b.name ? -1 : 1)
       const signature = JSON.stringify(inventory)
@@ -329,7 +334,7 @@ export class ChannelMcpAdapter {
   private classifyTool(name: string): string | undefined {
     if (name === GET_CHANNEL_USAGE_TOOL.name) return 'Channel'
     if (CLI_EXECUTION_TOOLS.some(tool => tool.name === name)) return 'CLI Execution'
-    if (BUILDX_SMC_TOOLS.some(tool => tool.name === name)) return 'BuildX'
+    if (BUILDX_SMC_TOOLS.some(tool => tool.name === name) || BUILDX_UNITFLOW_TOOLS.some(tool => tool.name === name)) return 'BuildX'
     if (SESSION_CONTEXT_TOOLS.some(tool => tool.name === name)) return 'Session Context'
     if (RUNTIME_PREVIEW_TOOLS.some(tool => tool.name === name)) return 'Work Orchestration'
     if (REPOSITORY_FILE_EDITING_TOOLS.some(tool => tool.name === name)) return 'Repository File Editing'
@@ -352,6 +357,14 @@ export class ChannelMcpAdapter {
         return { content: [{ type: 'text', text: JSON.stringify({ code: 'BUILDX_SMC_UNAVAILABLE', message: 'Session Memory Central is not available for active project' }) }], isError: true }
       }
       return executeBuildxSmcTool(this.sessionMemoryCentral, this.projectId, name, args, {
+        assertActiveProject: this.assertActiveProject
+      })
+    }
+    if (BUILDX_UNITFLOW_TOOLS.some(tool => tool.name === name)) {
+      if (!this.unitflowRuntime || !this.projectId) {
+        return { content: [{ type: 'text', text: JSON.stringify({ code: 'BUILDX_UNITFLOW_UNAVAILABLE', message: 'UnitFlow runtime is not available for active project' }) }], isError: true }
+      }
+      return executeBuildxUnitflowTool(this.unitflowRuntime, this.projectId, name, args, {
         assertActiveProject: this.assertActiveProject
       })
     }

@@ -439,7 +439,8 @@ export class UnitExecutionService {
   async observeUnitExecution(
     repositoryId: string,
     sessionId: string,
-    attemptId: string
+    attemptId: string,
+    options?: { readOnly?: boolean }
   ): Promise<UnitExecutionResult> {
     let validRepoId: string
     try {
@@ -508,7 +509,7 @@ export class UnitExecutionService {
       }
     }
 
-    return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId)
+    return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId, options)
   }
 
   async settleUnitExecution(
@@ -1012,7 +1013,8 @@ export class UnitExecutionService {
     cliService: CliExecutionPort,
     cleanAttemptId: string,
     cleanSessionId: string,
-    validRepoId: string
+    validRepoId: string,
+    options?: { readOnly?: boolean }
   ): Promise<UnitExecutionResult> {
     if (!cliService.get) {
       return {
@@ -1050,6 +1052,18 @@ export class UnitExecutionService {
     }
 
     if (snapshot.status === 'RUNNING') {
+      if (options?.readOnly) {
+        return {
+          status: 'RUNNING',
+          attemptId: cleanAttemptId,
+          sessionId: cleanSessionId,
+          repositoryId: validRepoId,
+          cliStatus: snapshot.status,
+          cliPhase: snapshot.phase,
+          unitFlowStatus: 'EXECUTING'
+        }
+      }
+
       // Re-consult SMC state: if attempt is in STARTING, execute atomic CAS transition to RUNNING and unit to EXECUTING
       const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
       if (currentAttempt && currentAttempt.status === 'STARTING') {
@@ -1102,7 +1116,9 @@ export class UnitExecutionService {
     }
 
     if (snapshot.status === 'REFUSED') {
-      this.stageService.releaseAttemptRetention(cleanAttemptId)
+      if (!options?.readOnly) {
+        this.stageService.releaseAttemptRetention(cleanAttemptId)
+      }
       return {
         status: 'REFUSED',
         attemptId: cleanAttemptId,
@@ -1114,7 +1130,9 @@ export class UnitExecutionService {
     }
 
     // Terminal states: SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, INTERRUPTED
-    this.stageService.releaseAttemptRetention(cleanAttemptId)
+    if (!options?.readOnly) {
+      this.stageService.releaseAttemptRetention(cleanAttemptId)
+    }
     return {
       status: 'TERMINAL_OBSERVED',
       attemptId: cleanAttemptId,

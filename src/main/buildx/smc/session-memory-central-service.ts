@@ -172,6 +172,21 @@ export class SessionMemoryCentralService {
     return this.getStore(repositoryId).getPreparedExecutionAttempt(sessionId)
   }
 
+  getActiveExecutionAttempt(
+    repositoryId: string,
+    sessionId: string
+  ): ExecutionAttemptRecord | null {
+    return this.getStore(repositoryId).getActiveExecutionAttempt(sessionId)
+  }
+
+  getLatestExecutionAttempt(
+    repositoryId: string,
+    sessionId: string,
+    unitId?: string
+  ): ExecutionAttemptRecord | null {
+    return this.getStore(repositoryId).getLatestExecutionAttempt(sessionId, unitId)
+  }
+
   transitionAttemptToStarting(
     repositoryId: string,
     attemptId: string,
