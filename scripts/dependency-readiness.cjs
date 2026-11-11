@@ -19,8 +19,8 @@ function snapshot(root) {
     const declared = manifest[field] ?? {}, locked = lock.packages?.['']?.[field] ?? {}
     return [...new Set([...Object.keys(declared), ...Object.keys(locked)])].some(name => declared[name] !== locked[name])
   })
-  if (!compatibility.ok || mismatch || lock.lockfileVersion < 2) throw failure('DEPENDENCY_LOCK_MISMATCH', 'package.json e package-lock.json não concordam; reparação automática bloqueada.', 'Reconcilie os manifests deliberadamente com npm 10 e tente novamente.')
-  if (!/^npm@10\.\d+\.\d+$/.test(manifest.packageManager ?? '')) throw failure('DEPENDENCY_NPM_POLICY', 'O projeto deve declarar uma versão npm 10 exata.', 'Confira packageManager e a política npm do projeto.')
+  if (!compatibility.ok || mismatch || lock.lockfileVersion < 2) throw failure('DEPENDENCY_LOCK_MISMATCH', 'package.json e package-lock.json não concordam; reparação automática bloqueada.', 'Reconcilie os manifests deliberadamente com o npm declarado e tente novamente.')
+  if (!/^npm@(11|12)\.\d+\.\d+$/.test(manifest.packageManager ?? '')) throw failure('DEPENDENCY_NPM_POLICY', 'O projeto deve declarar uma versão npm 11 ou npm 12 exata.', 'Confira packageManager e a política npm do projeto.')
   const direct = { ...manifest.devDependencies, ...manifest.dependencies, ...manifest.optionalDependencies }
   for (const name of Object.keys(direct)) {
     const entry = lock.packages['node_modules/' + name]
@@ -39,7 +39,8 @@ function entryFiles(name, pkg) {
   const collect = value => {
     if (typeof value === 'string' && value.startsWith('./') && !value.includes('*')) entries.add(value)
     else if (Array.isArray(value)) value.forEach(collect)
-    else if (value && typeof value === 'object') Object.values(value).forEach(collect)
+    // Skip internal monorepo source conditions (e.g. __vitest_source__) absent from published tarballs.
+    else if (value && typeof value === 'object') Object.entries(value).forEach(([key, child]) => { if (!key.startsWith('__')) collect(child) })
   }
   // These published packages expose metadata-only root entries; the app consumes server/CSS subpaths.
   if (name === '@vscode/codicons') { entries.add('dist/codicon.css'); entries.add('dist/codicon.ttf') }
@@ -141,11 +142,11 @@ async function ensureDependencyReadiness({ root = process.cwd(), install = insta
     let observed = inspectInstallation(root, initial), repaired = false
     if (observed.problems.length) {
       log(`[Dependency Readiness] SYNC_REQUIRED: ${observed.problems.slice(0, 5).join('; ')}`)
-      try { await install(root, initial) } catch (error) { throw failure('DEPENDENCY_SYNC_FAILED', error.message, 'Confira acesso ao cache/registro e execute novamente com npm 10. O runtime não foi iniciado.') }
+      try { await install(root, initial) } catch (error) { throw failure('DEPENDENCY_SYNC_FAILED', error.message, 'Confira acesso ao cache/registro e execute novamente com o npm declarado. O runtime não foi iniciado.') }
       const current = snapshot(root)
       if (current.manifestHash !== initial.manifestHash || current.lockHash !== initial.lockHash) throw failure('DEPENDENCY_MANIFEST_CHANGED', 'Os manifests mudaram durante a sincronização.', 'Revise as alterações e tente novamente; o runtime não foi iniciado.')
       observed = inspectInstallation(root, current)
-      if (observed.problems.length) throw failure('DEPENDENCY_INSTALL_INCOMPLETE', observed.problems.slice(0, 5).join('; '), 'Confira a instalação local e repare com npm 10 antes de iniciar o runtime.')
+      if (observed.problems.length) throw failure('DEPENDENCY_INSTALL_INCOMPLETE', observed.problems.slice(0, 5).join('; '), 'Confira a instalação local e repare com o npm declarado antes de iniciar o runtime.')
       repaired = true
     }
     if (verifyRuntime) {

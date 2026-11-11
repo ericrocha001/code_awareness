@@ -29,7 +29,15 @@ async function createHarness() {
   function run(input) {
     return new Promise((resolve, reject) => {
       const env = { ...process.env }; delete env.ELECTRON_RUN_AS_NODE
-      const child = spawn(require('electron'), [worker], { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
+      const args = [worker]
+      if (input.appData) {
+        env.APPDATA = input.appData
+        const targetUserData = input.wrongProfile
+          ? path.join(input.appData, 'Electron')
+          : canonicalDesktopProfile(input.appData).userData
+        args.push(`--user-data-dir=${targetUserData}`)
+      }
+      const child = spawn(require('electron'), args, { env, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] })
       let result, output = ''
       const timeout = setTimeout(() => { child.kill(); reject(Object.assign(new Error('HARNESS_TIMEOUT'), { code: 'HARNESS_TIMEOUT' })) }, 30000)
       child.stdout.on('data', (data) => { output += data })

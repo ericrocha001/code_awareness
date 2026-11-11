@@ -45,10 +45,10 @@ async function main() {
   const fixed = [sdkRelative + 'launch.cjs', sdkRelative + 'cooperation.cjs', configFile]
   if (isElectron) fixed.push('scripts/runtime-preview/build-identity.cjs')
   const profile = { schemaVersion: 1, profileId: 'u3-' + kind, revision: 1, repositoryId,
-    runtime: isElectron ? 'ELECTRON_DEV' : 'WEB_DEV_SERVER', runtimeVersion: isElectron ? '32.0.0' : process.versions.node,
+    runtime: isElectron ? 'ELECTRON_DEV' : 'WEB_DEV_SERVER', runtimeVersion: isElectron ? '45.2.3' : process.versions.node,
     command: { executable: process.execPath, executableHash: hash(fs.readFileSync(process.execPath)), args: [sdkRelative + 'launch.cjs'], cwd: '.', inputs: fixed.map(file => ({ path: file, fingerprint: hash(fs.readFileSync(path.join(target, file))) })) }, env: {},
     resources: [{ name: 'runtime', strategy: 'SESSION_DIRECTORY' }, { name: 'http-hmr', strategy: 'SESSION_ENDPOINT' }],
-    dependencies: { packageManager: 'npm', packageManagerVersion: '10.9.4', manifest: 'package.json', lockfile: 'package-lock.json', manifestHash: hash(fs.readFileSync(path.join(target, 'package.json'))), lockfileHash: hash(fs.readFileSync(path.join(target, 'package-lock.json'))), abi: isElectron ? '128' : process.versions.modules, materialization: '.code-awareness/u3/materialization-unverified.json' },
+    dependencies: { packageManager: 'npm', packageManagerVersion: '12.0.2', manifest: 'package.json', lockfile: 'package-lock.json', manifestHash: hash(fs.readFileSync(path.join(target, 'package.json'))), lockfileHash: hash(fs.readFileSync(path.join(target, 'package-lock.json'))), abi: isElectron ? '150' : process.versions.modules, materialization: '.code-awareness/u3/materialization-unverified.json' },
     cooperation: { manifest: sdkRelative + 'cooperation.cjs', fingerprint: hash(fs.readFileSync(path.join(target, sdkRelative, 'cooperation.cjs'))) },
     adapter: { version: 1, kind: isElectron ? 'ELECTRON' : nodeWeb ? 'NODE_WEB' : 'VITE_WEB', port, configFile,
       ...(isElectron ? { runtimeExecutable: 'node_modules/electron/dist/electron.exe', runtimeExecutableHash: hash(fs.readFileSync('node_modules/electron/dist/electron.exe')) } : {}),

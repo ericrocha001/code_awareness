@@ -4,7 +4,7 @@ import type { ContinuumTagMutation } from '../../shared/types/continuum-tag-type
 import { validatePeriods } from '../continuum/temporal-metadata'
 import type { ContinuumGraphRequest } from '../../shared/types/continuum-graph-types'
 import type { ContinuumSuggestionRequest } from '../../shared/types/continuum-suggestion-types'
-import { app, BrowserWindow, clipboard, dialog, ipcMain, nativeImage } from 'electron'
+import { app, BrowserWindow, clipboard, ClipboardItem, dialog, ipcMain, nativeImage } from 'electron'
 import { dirname, extname, join, posix, win32 } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { renameSync, rmSync, writeFileSync } from 'node:fs'
@@ -112,10 +112,10 @@ export function registerContinuumHandlers(session: RepositoryContinuumSession): 
           const image = nativeImage.createFromBuffer(png)
           if (image.isEmpty()) throw new Error('INVALID_VISUAL_MEDIA')
           assertContext()
-          clipboard.writeImage(image)
+          await clipboard.write([new ClipboardItem({ 'image/png': new Blob([new Uint8Array(png)], { type: 'image/png' }) })])
         } else {
           assertContext()
-          clipboard.writeText(artifact.rawMarkdown)
+          await clipboard.writeText(artifact.rawMarkdown)
         }
         return receipt('copied')
       }

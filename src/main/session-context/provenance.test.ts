@@ -12,6 +12,7 @@ import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { McpProjectContext } from '../mcp/project-mcp-context'
 import type { McpToolResult } from '../mcp/mcp-types'
 import { countCanonicalTokens } from '../core/tokenizer'
+import { removeDirectoryForceSync } from '../core/force-remove'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { for (const close of cleanup.reverse()) close(); cleanup.length = 0 })
@@ -20,7 +21,7 @@ const data = (result: McpToolResult) => JSON.parse(result.content[0].text)
 
 function provenanceHistoryFixture() {
   const root = mkdtempSync(join(tmpdir(), 'provenance-history-'))
-  cleanup.push(() => rmSync(root, { recursive: true, force: true }))
+  cleanup.push(() => removeDirectoryForceSync(root))
   const git = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: root, encoding: 'utf8', windowsHide: true }).trim()
   git('init', '-q')
   git('config', 'user.name', 'Fixture')
@@ -778,7 +779,7 @@ function createGitCheckpointFixture(
   const suffix = checkpointId.slice(-2)
   const ref = `refs/entire/checkpoints/${suffix}/${checkpointId}`
   execFileSync('git', ['update-ref', ref, commitSha], { cwd: repoPath, env, windowsHide: true })
-  rmSync(stageDir, { recursive: true, force: true })
+  removeDirectoryForceSync(stageDir)
   rmSync(indexFile, { force: true })
   return ref
 }
@@ -786,7 +787,7 @@ function createGitCheckpointFixture(
 describe('Units C1, C2, C3 Addendum Contracts', () => {
   it('C1: rejects DETAIL on range spanning multiple distinct checkpoints with AMBIGUOUS_PROVENANCE_SELECTION', async () => {
     const tempRepo = mkdtempSync(join(tmpdir(), 'c1-multicp-'))
-    cleanup.push(() => rmSync(tempRepo, { recursive: true, force: true }))
+    cleanup.push(() => removeDirectoryForceSync(tempRepo))
 
     const runGit = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: tempRepo, encoding: 'utf8', windowsHide: true }).trim()
     runGit('init')
@@ -866,11 +867,11 @@ describe('Units C1, C2, C3 Addendum Contracts', () => {
     expect(normalData.linkStrength).toBe('UNKNOWN')
     expect(normalData.checkpointId).toBeNull()
     expect(normalData.candidates).toEqual([])
-  }, { timeout: 60000 })
+  }, 60000)
 
   it('C1: reports PARTIAL coverage and unavailableIndices when session metadata is corrupted in DISAMBIGUATE and DETAIL', async () => {
     const tempRepo = mkdtempSync(join(tmpdir(), 'c1-corrupt-'))
-    cleanup.push(() => rmSync(tempRepo, { recursive: true, force: true }))
+    cleanup.push(() => removeDirectoryForceSync(tempRepo))
 
     const runGit = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: tempRepo, encoding: 'utf8', windowsHide: true }).trim()
     runGit('init')
@@ -918,11 +919,11 @@ describe('Units C1, C2, C3 Addendum Contracts', () => {
     expect(detailData.coverage).toBe('PARTIAL')
     expect(detailData.unavailableIndices).toEqual([1])
     expect(detailData.unavailableCount).toBe(1)
-  }, { timeout: 60000 })
+  }, 60000)
 
   it('C2: binds cursor to immutable blobSha and throws CURSOR_STALE when ref is updated to different content of identical byte length', async () => {
     const tempRepo = mkdtempSync(join(tmpdir(), 'c2-paginate-'))
-    cleanup.push(() => rmSync(tempRepo, { recursive: true, force: true }))
+    cleanup.push(() => removeDirectoryForceSync(tempRepo))
 
     const runGit = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: tempRepo, encoding: 'utf8', windowsHide: true }).trim()
     runGit('init')
@@ -982,7 +983,7 @@ describe('Units C1, C2, C3 Addendum Contracts', () => {
 
   it('C2: validates cursor constraints: worktree mismatch, invalid offset, and stale offset', async () => {
     const tempRepo = mkdtempSync(join(tmpdir(), 'c2-constraints-'))
-    cleanup.push(() => rmSync(tempRepo, { recursive: true, force: true }))
+    cleanup.push(() => removeDirectoryForceSync(tempRepo))
 
     const runGit = (...args: string[]) => execFileSync('git', ['-c', 'core.fsmonitor=false', ...args], { cwd: tempRepo, encoding: 'utf8', windowsHide: true }).trim()
     runGit('init')
@@ -1070,7 +1071,7 @@ describe('Units C1, C2, C3 Addendum Contracts', () => {
       await call({ checkpointId: cpId, mode: 'READ_FIELD', sessionIndex: 0, field: 'STORED_PROMPT', cursor: 'not-a-valid-cursor' })
     } catch (e: any) { malformedCode = e?.message ?? '' }
     expect(malformedCode).toBe('CURSOR_INVALID')
-  }, { timeout: 60000 })
+  }, 60000)
 
   it('C3: validates MCP tool registration, budgets, and read-only annotations without client catalog drift', () => {
     expect(SESSION_CONTEXT_TOOLS).toHaveLength(11)

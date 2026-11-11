@@ -35,7 +35,7 @@ export class CodeAwarenessProfileResolver {
     let targetPackage: { name?: string; packageManager?: string }
     try { targetPackage = JSON.parse(await readFile(await checkoutPath(worktree, 'package.json', 'APP_CHECKOUT_UNSUPPORTED'), 'utf8')) }
     catch { throw new Error('APP_CHECKOUT_UNSUPPORTED') }
-    if (targetPackage.name !== 'code-awareness' || targetPackage.packageManager !== 'npm@10.9.4') throw new Error('APP_CHECKOUT_UNSUPPORTED')
+    if (targetPackage.name !== 'code-awareness' || targetPackage.packageManager !== 'npm@12.0.2') throw new Error('APP_CHECKOUT_UNSUPPORTED')
     const inputs: Array<{ path: string; fingerprint: string }> = []
     for (const file of launchInputs) {
       const trusted = await readFile(join(this.environment.root, file)).catch(() => { throw new Error('APP_HOST_PROFILE_UNAVAILABLE') })
@@ -63,7 +63,7 @@ export class CodeAwarenessProfileResolver {
         command: { executable: node, executableHash: bytesFingerprint(await readFile(node)), args: ['scripts/runtime-preview/launch.cjs'], cwd: '.', inputs },
         env: { PATH: dirname(git) + delimiter + join(process.env.SystemRoot!, 'System32') },
         resources: [{ name: 'runtime', strategy: 'SESSION_DIRECTORY' }, { name: 'http-hmr', strategy: 'SESSION_ENDPOINT' }],
-        dependencies: { packageManager: 'npm', packageManagerVersion: '10.9.4', manifest: 'package.json', lockfile: 'package-lock.json',
+        dependencies: { packageManager: 'npm', packageManagerVersion: '12.0.2', manifest: 'package.json', lockfile: 'package-lock.json',
           manifestHash: bytesFingerprint(await readFile(await previewPath(worktree, 'package.json'))), lockfileHash: bytesFingerprint(await readFile(await previewPath(worktree, 'package-lock.json'))),
           abi: this.environment.abi, materialization: '.code-awareness/runtime-preview/materialization.json' },
         cooperation: { manifest: 'scripts/runtime-preview/cooperation.cjs', fingerprint: inputs[1].fingerprint },

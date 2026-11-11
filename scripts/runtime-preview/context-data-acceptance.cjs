@@ -10,7 +10,7 @@ if (!process.versions.electron) {
   const { app, clipboard } = require('electron'), directory = fs.mkdtempSync(path.join(os.tmpdir(), 'preview-data-proof-'))
   for (const key of ['appData', 'userData', 'sessionData', 'home', 'temp']) { const file = path.join(directory, key); fs.mkdirSync(file); app.setPath(key, file) }
   app.setName('Preview Private Corpus Acceptance'); app.enableSandbox()
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     const evidenceRoot = path.join(output, 'acceptance-snapshot'), identity = JSON.parse(fs.readFileSync(path.join(evidenceRoot, 'identity.json')))
     const get = name => require(path.join(evidenceRoot, 'bundle', name + '.js'))
     const sessions = new (get('work-orchestration/runtime-preview/session-store').PreviewSessionStore)(path.join(identity.directory, 'sessions'))
@@ -34,7 +34,7 @@ if (!process.versions.electron) {
       const changed = service.update(original.artifactId, original.revision, rawMarkdown)
       assert.equal(changed.revision, original.revision + 1)
       const current = service.get(original.artifactId); assert.ok(current.metadata.tags.includes('unit-b-private-only'))
-      clipboard.writeText(current.rawMarkdown); assert.equal(clipboard.readText(), current.rawMarkdown)
+      await clipboard.writeText(current.rawMarkdown); assert.equal(await clipboard.readText(), current.rawMarkdown)
       const markdownFile = path.join(output, 'snapshot-private-export.md'); fs.writeFileSync(markdownFile, current.rawMarkdown)
       assert.deepEqual(fs.readFileSync(markdownFile), Buffer.from(current.rawMarkdown))
       const visual = service.list({ kind: 'VISUAL_REFERENCE', limit: 1 }).artifacts[0]; assert.ok(visual)

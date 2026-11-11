@@ -183,14 +183,14 @@ describe('RestoreService — Bateria de Testes de Integração', () => {
         // para acionar o rollback automático via backup de segurança
         const originalWriteFiles = (restoreService as any).writeCheckpointFiles.bind(restoreService)
         let callCount = 0
-        vi.spyOn(restoreService as any, 'writeCheckpointFiles').mockImplementation(async (rPath: string, cpData: any) => {
+        vi.spyOn(restoreService as any, 'writeCheckpointFiles').mockImplementation(async (rPath: unknown, cpData: unknown) => {
           callCount++
           if (callCount === 1) {
             // Primeira chamada (restauração primária): simula falha parcial
             return { restored: 2, failed: 1, errors: ['c.ts: permissão negada'] }
           }
           // Segunda chamada (rollback): executa restauração real do backup de segurança
-          return originalWriteFiles(rPath, cpData)
+          return originalWriteFiles(rPath as string, cpData)
         })
 
         const result = await restoreService.execute(repoPath, cp1.id, {

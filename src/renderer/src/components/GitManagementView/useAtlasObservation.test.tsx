@@ -8,17 +8,17 @@ const context = { projectId: 'p', revision: 1 }
 const page = { head: 'a', branch: 'main', observation: { referenceFingerprint: 'refs-a', sourceFingerprint: 'source-a' } } as GitAtlasPage
 const data = { head: 'a', branch: 'main', operation: null, referenceFingerprint: 'refs-a', sourceFingerprint: 'source-a' }
 const ok = (value = data) => ({ success: true, context, data: value })
-let read: ReturnType<typeof vi.fn>, reconcile: ReturnType<typeof vi.fn>
+let read: ReturnType<typeof vi.fn<(...args: any[]) => Promise<unknown>>>, reconcile: ReturnType<typeof vi.fn<() => Promise<void | boolean>>>
 beforeEach(() => {
   vi.useFakeTimers()
   vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
-  read = vi.fn().mockResolvedValue(ok()); reconcile = vi.fn().mockResolvedValue(undefined)
+  read = vi.fn<(...args: any[]) => Promise<unknown>>().mockResolvedValue(ok()); reconcile = vi.fn<() => Promise<void | boolean>>().mockResolvedValue(undefined)
   window.codeAwareness = { getGitAtlasCheckoutState: read } as any
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks() })
 const tick = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms) })
 function setup() {
-  return renderHook((props = { context, page, loading: false }) => useAtlasObservation({ ...props, operation: vi.fn(), reconcile }), { initialProps: { context, page, loading: false } })
+  return renderHook((props = { context, page, loading: false }) => useAtlasObservation({ ...props, operation: vi.fn<(value: string | null) => void>(), reconcile }), { initialProps: { context, page, loading: false } })
 }
 
 it('continues observing after collection is complete without refreshing unchanged pages', async () => {

@@ -6,15 +6,16 @@ const fs = require('fs')
 const path = require('path')
 const { spawnSync } = require('child_process')
 
-const EXPECTED_ELECTRON_VERSION = '32.0.0'
-const EXPECTED_VITEST_VERSION = '3.2.7'
-const EXPECTED_PACKAGE_MANAGER_PREFIX = 'npm@10.'
-const SUPPORTED_NPM_MAJOR = 10
+const EXPECTED_ELECTRON_VERSION = '45.2.3'
+const EXPECTED_VITEST_VERSION = '5.1.0'
+const EXPECTED_PACKAGE_MANAGER_PATTERN = /^npm@(11|12)\.\d+\.\d+$/
+const SUPPORTED_NPM_MAJORS = [11, 12]
+const SUPPORTED_NPM_MAJOR = 12
 const ELECTRON_RUN_AS_NODE_ENV = 'ELECTRON_RUN_AS_NODE'
 const ELECTRON_DESKTOP_ENVIRONMENT_CODE = 'ELECTRON_RUN_AS_NODE_LEAKED'
 
 const REQUIRED_NATIVE_DEPENDENCIES = Object.freeze({
-  'better-sqlite3': '12.11.1',
+  'better-sqlite3': '13.0.3',
   'tree-sitter': '0.21.1',
   'tree-sitter-typescript': '0.23.2',
   'tree-sitter-javascript': '0.23.1'
@@ -82,7 +83,7 @@ function validatePackageManifest(packageJson) {
       'devDependencies.electron',
       EXPECTED_ELECTRON_VERSION,
       electronVersion,
-      'Declare electron exactly as 32.0.0.'
+      `Declare electron exactly as ${EXPECTED_ELECTRON_VERSION}.`
     ))
   }
 
@@ -104,17 +105,17 @@ function validatePackageManifest(packageJson) {
       'devDependencies.vitest',
       EXPECTED_VITEST_VERSION,
       vitestVersion,
-      'Use Vitest 3.2.7 while the project remains on Vite 5.'
+      `Use Vitest ${EXPECTED_VITEST_VERSION} compatible with the active Vite toolchain.`
     ))
   }
 
   const packageManager = packageJson.packageManager
-  if (typeof packageManager !== 'string' || !packageManager.startsWith(EXPECTED_PACKAGE_MANAGER_PREFIX)) {
+  if (typeof packageManager !== 'string' || !EXPECTED_PACKAGE_MANAGER_PATTERN.test(packageManager)) {
     issues.push(createIssue(
       'packageManager',
-      `${EXPECTED_PACKAGE_MANAGER_PREFIX}x`,
+      'npm@11.x or npm@12.x',
       packageManager,
-      'Declare npm 10 as the supported installation toolchain.'
+      'Declare an exact npm 11 or npm 12 version in packageManager.'
     ))
   }
 
@@ -147,7 +148,7 @@ function validateNpmVersion(version) {
 }
 
 function validateNpmMajor(major) {
-  if (major === SUPPORTED_NPM_MAJOR) {
+  if (SUPPORTED_NPM_MAJORS.includes(major)) {
     return { ok: true, major }
   }
 
@@ -157,9 +158,9 @@ function validateNpmMajor(major) {
     issues: [
       createIssue(
         'npm major',
-        String(SUPPORTED_NPM_MAJOR),
+        SUPPORTED_NPM_MAJORS.join(' or '),
         major === null ? 'unknown' : String(major),
-        'Run the canonical bootstrap with npm 10, for example: npx -p npm@10.9.4 npm run bootstrap.'
+        'Run the canonical bootstrap with npm 11 or npm 12, for example: npx -p npm@12.0.2 npm run bootstrap.'
       )
     ]
   }
@@ -193,7 +194,7 @@ function detectCurrentNpmVersion() {
 function resolveNpmCli(environment = process.env) {
   const candidates = [environment.npm_execpath, path.join(path.dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), path.resolve(path.dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js')]
   const cli = candidates.find(file => file && path.isAbsolute(file) && fs.existsSync(file))
-  if (!cli) throw new Error('NPM_LIFECYCLE_POLICY_UNKNOWN: npm CLI unavailable; use npx --yes --package npm@10.9.4 npm run bootstrap.')
+  if (!cli) throw new Error('NPM_LIFECYCLE_POLICY_UNKNOWN: npm CLI unavailable; use npx --yes --package npm@12.0.2 npm run bootstrap.')
   return cli
 }
 
@@ -261,10 +262,11 @@ if (require.main === module) {
 
 module.exports = {
   EXPECTED_ELECTRON_VERSION,
-  EXPECTED_PACKAGE_MANAGER_PREFIX,
+  EXPECTED_PACKAGE_MANAGER_PATTERN,
   EXPECTED_VITEST_VERSION,
   REQUIRED_NATIVE_DEPENDENCIES,
   SUPPORTED_NPM_MAJOR,
+  SUPPORTED_NPM_MAJORS,
   ELECTRON_RUN_AS_NODE_ENV,
   ELECTRON_DESKTOP_ENVIRONMENT_CODE,
   formatIssues,

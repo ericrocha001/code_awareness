@@ -126,15 +126,15 @@ exports.run = async (ctx) => {
         packet[0].path === 'src/main/core/context/context-engine.ts' &&
         Object.keys(packet[0]).sort().join(',') === 'path,signature,source'
     )
-    const previous = clipboard.readText()
+    const previous = await clipboard.readText()
     try {
       ctx.window.webContents.focus()
       await ctx.click('.dash-context-pane .primary')
       await capture('clipboard-attempt')
       await ctx.waitFor(() => !!document.querySelector('.dash-copy-success'))
-      ctx.check('Native clipboard equals Context Packet', clipboard.readText() === context)
+      ctx.check('Native clipboard equals Context Packet', (await clipboard.readText()) === context)
     } finally {
-      clipboard.writeText(previous)
+      await clipboard.writeText(previous)
     }
     await ctx.overflow()
     await capture('wide-dark-success')

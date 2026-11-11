@@ -12,7 +12,7 @@ function fixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'readiness-flow-'))
   cleanups.push(() => fs.rmSync(root, { recursive: true, force: true }))
   const gate = require.resolve('./dependency-readiness.cjs').replace(/\\/g, '/')
-  const manifest = { packageManager: 'npm@10.9.4', dependencies: { 'readiness-test-fixture': '1.0.0' }, scripts: { predev: `node "${gate}" && node stages.cjs doctor`, dev: 'node stages.cjs runtime', prebuild: `node "${gate}" && node stages.cjs doctor`, build: 'node stages.cjs build' } }
+  const manifest = { packageManager: 'npm@12.0.2', dependencies: { 'readiness-test-fixture': '1.0.0' }, scripts: { predev: `node "${gate}" && node stages.cjs doctor`, dev: 'node stages.cjs runtime', prebuild: `node "${gate}" && node stages.cjs doctor`, build: 'node stages.cjs build' } }
   const lock = { lockfileVersion: 3, packages: { '': { dependencies: manifest.dependencies }, 'node_modules/readiness-test-fixture': { version: '1.0.0' } } }
   fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(manifest)); fs.writeFileSync(path.join(root, 'package-lock.json'), JSON.stringify(lock))
   fs.writeFileSync(path.join(root, 'stages.cjs'), "require('node:fs').appendFileSync('stages.log',process.argv[2]+'\\n')")

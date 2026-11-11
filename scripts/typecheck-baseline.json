@@ -691,14 +691,6 @@
     },
     {
       "project": "node",
-      "file": "src/main/core/restore-service.test.ts",
-      "code": 2769,
-      "category": "Error",
-      "message": "No overload matches this call.\n  Overload 1 of 2, '(fn: NormalizedProcedure<(this: unknown, ...args: unknown[]) => unknown>): MockInstance<(this: unknown, ...args: unknown[]) => unknown>', gave the following error.\n    Argument of type '(rPath: string, cpData: any) => Promise<any>' is not assignable to parameter of type 'NormalizedProcedure<(this: unknown, ...args: unknown[]) => unknown>'.\n      Types of parameters 'rPath' and 'args' are incompatible.\n        Type 'unknown' is not assignable to type 'string'.\n  Overload 2 of 2, '(fn: NormalizedProcedure<any>): MockInstance<(this: unknown, ...args: unknown[]) => unknown>', gave the following error.\n    Argument of type '(rPath: string, cpData: any) => Promise<any>' is not assignable to parameter of type 'NormalizedProcedure<any>'.\n      Types of parameters 'rPath' and 'args' are incompatible.\n        Type 'unknown' is not assignable to type 'string'.",
-      "count": 1
-    },
-    {
-      "project": "node",
       "file": "src/main/core/settings-service.ts",
       "code": 2339,
       "category": "Error",
@@ -1023,22 +1015,6 @@
       "code": 2304,
       "category": "Error",
       "message": "Cannot find name 'window'.",
-      "count": 1
-    },
-    {
-      "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyPanels.tsx",
-      "code": 2550,
-      "category": "Error",
-      "message": "Property 'replaceAll' does not exist on type 'string'. Do you need to change your target library? Try changing the 'lib' compiler option to 'es2021' or later.",
-      "count": 1
-    },
-    {
-      "project": "web",
-      "file": "src/renderer/src/components/AcademyView/AcademyPanels.tsx",
-      "code": 7006,
-      "category": "Error",
-      "message": "Parameter 'character' implicitly has an 'any' type.",
       "count": 1
     },
     {

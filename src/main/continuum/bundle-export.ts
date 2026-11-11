@@ -16,7 +16,7 @@ export async function exportContextBundle(bundle: ContextBundle, intent: Continu
   const snapshotId = bundle.preview.snapshotId
   if (intent === 'copy') {
     if (!clipboard?.writeText) throw new Error('INTERACTIVE_SESSION_REQUIRED: native clipboard unavailable')
-    clipboard.writeText(bundle.preview.markdown)
+    await clipboard.writeText(bundle.preview.markdown)
     exported?.(Buffer.from(bundle.preview.markdown, 'utf8'))
     return { outcome: 'copied' as const, snapshotId }
   }
@@ -41,7 +41,7 @@ export async function exportContextBundle(bundle: ContextBundle, intent: Continu
 export async function exportHistoricalBundle(result: import('../../shared/types/continuum-builder-types').BundleResult, data: Buffer, assertContext: () => void, parent: BrowserWindow | null) {
   assertContext()
   if (result.format === 'copy') {
-    clipboard.writeText(data.toString('utf8'))
+    await clipboard.writeText(data.toString('utf8'))
     return { outcome: 'copied' as const }
   }
   if (!parent || parent.isDestroyed() || !parent.isVisible()) throw new Error('INTERACTIVE_SESSION_REQUIRED')
@@ -63,7 +63,7 @@ export async function exportQuickContextBundle(bundle: ContextBundle, intent: Co
   const snapshotId = bundle.preview.snapshotId
   if (intent === 'copy') {
     if (!clipboard?.writeText) throw new Error('INTERACTIVE_SESSION_REQUIRED: native clipboard unavailable')
-    clipboard.writeText(bundle.preview.markdown)
+    await clipboard.writeText(bundle.preview.markdown)
     return { outcome: 'copied' as const, snapshotId }
   }
   let downloadsDir: string
