@@ -25,7 +25,11 @@ import type {
   BuildXWorkspaceBindingRecord,
   SaveWorkspaceBindingInput
 } from '../../../shared/types/buildx/workspace-types'
-import type { ExecutionAttemptRecord, SettleExecutionAttemptStoreInput } from '../../../shared/types/buildx/execution-types'
+import type {
+  ExecutionAttemptRecord,
+  ExecutorSelection,
+  SettleExecutionAttemptStoreInput
+} from '../../../shared/types/buildx/execution-types'
 import { smcDatabasePath, validateRepositoryId } from './session-memory-central-paths'
 import { SessionMemoryCentralStore } from './session-memory-central-store'
 export class SessionMemoryCentralService {
@@ -187,12 +191,20 @@ export class SessionMemoryCentralService {
     return this.getStore(repositoryId).getLatestExecutionAttempt(sessionId, unitId)
   }
 
+  getAttemptExecutorSelection(
+    repositoryId: string,
+    attemptId: string
+  ): ExecutorSelection | null {
+    return this.getStore(repositoryId).getAttemptExecutorSelection(attemptId)
+  }
+
   transitionAttemptToStarting(
     repositoryId: string,
     attemptId: string,
-    expectedRevision: number
+    expectedRevision: number,
+    executorSelection?: ExecutorSelection
   ): ExecutionAttemptRecord {
-    return this.getStore(repositoryId).transitionAttemptToStarting(attemptId, expectedRevision)
+    return this.getStore(repositoryId).transitionAttemptToStarting(attemptId, expectedRevision, executorSelection)
   }
 
   transitionAttemptToRunning(

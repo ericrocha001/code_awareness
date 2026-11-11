@@ -4,6 +4,7 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { execSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import { UnitFlowRuntimeFacade, derivePlanObjectiveEntryId } from './unitflow-runtime-facade'
 import {
@@ -23,6 +24,19 @@ import type { CliPolicy } from '../../../shared/types/cli-policy-types'
 import type { BranchInventory } from '../../../shared/types/branch-orchestration-types'
 import type { GitOperationsPort } from '../execution/workspace-binding-service'
 import type { CliExecutionPort } from '../execution/grok-cli-bridge'
+import { EventEmitter } from 'node:events'
+import type { UnitExecutorPort, UnitExecutorResolver } from '../execution/executor-port'
+import { GrokExecutorAdapter } from '../adapters/grok/grok-executor-adapter'
+import {
+  ClineSdkExecutorAdapter,
+  DEFAULT_CLINE_EXECUTOR_ID,
+  DEFAULT_CLINE_PROVIDER_ID,
+  type ClineStartAttemptRequest,
+  type ClineUtilityLauncher,
+  type ClineWorkerMessage,
+  type ClineWorkerRequest,
+  type SpawnedClineWorker
+} from '../adapters/cline'
 import type {
   CliProposal,
   CliExecutionSnapshot,
@@ -1210,7 +1224,21 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
   })
 
   describe('Prova 10: BuildX/UnitFlow em Worktree YOLO vs SUPERVISED com executável controlado (sem cota externa)', () => {
+    const ensureWindowsSupervisorReady = () => {
+      if (process.platform !== 'win32') return null
+      const require = createRequire(path.join(process.cwd(), 'package.json'))
+      const { ensureProduction } = require('./scripts/cli-execution/build.cjs') as {
+        ensureProduction: (root?: string) => { executable: string; receipt: string; rebuilt: boolean }
+      }
+      return ensureProduction(process.cwd())
+    }
+
     it('injeta --always-approve e perfil 600s em YOLO sem AUTO_AUTHORIZED_NOT_REQUESTED ou diálogo, e omite em SUPERVISED', async () => {
+      const supervisorArtifact = ensureWindowsSupervisorReady()
+      if (supervisorArtifact) {
+        expect(fs.existsSync(supervisorArtifact.executable)).toBe(true)
+        expect(fs.existsSync(supervisorArtifact.receipt)).toBe(true)
+      }
       const yoloTemp = makeTempDir('unitflow-yolo-controlled-')
       const repoMain = path.join(yoloTemp, 'main')
       const repoSibling = path.join(yoloTemp, 'sibling')
@@ -1456,6 +1484,587 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
         process.env.PATH = originalPath ?? ''
         try { fs.rmSync(yoloTemp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) } catch {}
       }
-    }, 45000)
+    }, 115000)
+  })
+
+  describe('Prova 11: Seleção pública no MCP e revogação TOCTOU (Gates A + B)', () => {
+    class MockUnitflowUtilityWorker extends EventEmitter implements SpawnedClineWorker {
+      killed = false
+      constructor(readonly pid: number | undefined = undefined) {
+        super()
+      }
+      postMessage(_message: ClineWorkerRequest): void {}
+      kill(): boolean {
+        this.killed = true
+        setImmediate(() => this.emit('exit', 1))
+        return true
+      }
+      emitReady(): void {
+        this.emit('spawn')
+        this.emit('message', { type: 'ready' } satisfies ClineWorkerMessage)
+      }
+      emitWorkerMessage(message: ClineWorkerMessage): void {
+        this.emit('message', message)
+      }
+    }
+
+    function createSimulatedExecutorHarness() {
+      const fakeWorkerPath = path.join(tempDir, 'fake-cline-worker.js')
+      fs.writeFileSync(fakeWorkerPath, '// mock worker\n', 'utf8')
+      const runtimeStorageBaseDir = path.join(tempDir, 'cline-runtime')
+      fs.mkdirSync(runtimeStorageBaseDir, { recursive: true })
+
+      let grokStartCount = 0
+      let prepareForkCount = 0
+      let startForkCount = 0
+      let approvalCalls = 0
+      let revokePolicyOnNextPrepare = false
+
+      let currentPolicy: CliPolicy = {
+        mode: 'AUTONOMOUS_TRUSTED',
+        scope: 'REPOSITORY_WORKTREES',
+        revision: 'yolo-rev-1',
+        rule: 'local-repository-worktree-trust'
+      }
+      let currentWorktree: { path: string; branch: string; reference: boolean } = {
+        path: worktreePath,
+        branch: 'feature-work',
+        reference: false
+      }
+
+      const startForks: ClineStartAttemptRequest[] = []
+      const persistedSelectionAtSpawn = new Map<string, unknown>()
+      const pendingWorkers = new Map<
+        string,
+        {
+          worker: MockUnitflowUtilityWorker
+          req: ClineStartAttemptRequest
+          exitPromise: Promise<void>
+        }
+      >()
+
+      const grokBase = new GrokExecutorAdapter(mockCli)
+      const wrappedGrok: UnitExecutorPort = {
+        identity: grokBase.identity,
+        checkAvailability: (repoId) => grokBase.checkAvailability(repoId),
+        prepareAttempt: (input) => grokBase.prepareAttempt(input),
+        startAttempt: async (input) => {
+          grokStartCount++
+          return await grokBase.startAttempt(input)
+        },
+        observeAttempt: (input) => grokBase.observeAttempt(input),
+        cancelAttempt: (input) => grokBase.cancelAttempt(input)
+      }
+
+      const clineLauncher: ClineUtilityLauncher = {
+        isAvailable: () => true,
+        fork: () => {
+          const worker = new MockUnitflowUtilityWorker()
+          const exitPromise = new Promise<void>((resolve) => {
+            worker.once('exit', () => resolve())
+          })
+          worker.postMessage = (req: ClineWorkerRequest) => {
+            if (req.type === 'prepare_attempt') {
+              prepareForkCount++
+              if (revokePolicyOnNextPrepare) {
+                revokePolicyOnNextPrepare = false
+                currentPolicy = {
+                  mode: 'SUPERVISED',
+                  scope: 'ACTIVE_CHECKOUT_ONLY',
+                  revision: 'sup-rev-2',
+                  rule: 'native-command-consent'
+                }
+              }
+              worker.emitWorkerMessage({
+                type: 'prepare_result',
+                requestId: req.requestId,
+                ok: true,
+                status: 'READY',
+                modelId: req.requestedModelId
+              })
+              worker.emit('exit', 0)
+            } else if (req.type === 'start_attempt') {
+              startForkCount++
+              startForks.push(req)
+              persistedSelectionAtSpawn.set(
+                req.attemptId,
+                smcService.getExecutionAttempt(repositoryId, req.attemptId)?.executorSelection ?? null
+              )
+              pendingWorkers.set(req.attemptId, { worker, req, exitPromise })
+              worker.emitWorkerMessage({
+                type: 'attempt_started',
+                attemptId: req.attemptId,
+                clineSessionId: `cline-${req.attemptId}`,
+                lockedModelId: req.modelId,
+                pid: 667788
+              })
+            } else if (req.type === 'approval_response') {
+              const entry = pendingWorkers.get(req.attemptId)
+              if (entry) {
+                entry.worker.emitWorkerMessage({
+                  type: 'attempt_terminal',
+                  attemptId: req.attemptId,
+                  clineSessionId: `cline-${req.attemptId}`,
+                  status: req.approved ? 'SUCCEEDED' : 'REFUSED',
+                  reason: req.reason,
+                  cleanup: { sessionDeleted: true, coreDisposed: true, dirRemoved: true },
+                  durationMs: 12
+                })
+                fs.rmSync(entry.req.isolatedStorageRoot, { recursive: true, force: true })
+                entry.worker.emit('exit', 0)
+              }
+            }
+          }
+          setImmediate(() => worker.emitReady())
+          return worker
+        }
+      }
+
+      const clineAdapters = new Map<string, ClineSdkExecutorAdapter>()
+      const executorResolver: UnitExecutorResolver = async (repoId, selection) => {
+        if (!selection || selection.executorId === wrappedGrok.identity.executorId) {
+          return wrappedGrok
+        }
+        if (selection.executorId === DEFAULT_CLINE_EXECUTOR_ID) {
+          const resolvedModelId = selection.modelId ?? 'free/dynamic-live-zero'
+          const cacheKey = `${repoId}:${resolvedModelId}`
+          let adapter = clineAdapters.get(cacheKey)
+          if (!adapter) {
+            adapter = new ClineSdkExecutorAdapter({
+              repositoryId: repoId,
+              modelId: resolvedModelId,
+              workerPath: fakeWorkerPath,
+              runtimeStorageBaseDir,
+              launcher: clineLauncher,
+              getPolicy: () => currentPolicy,
+              resolveWorktree: async () => currentWorktree,
+              approvalHandler: async () => {
+                approvalCalls++
+                return true
+              }
+            })
+            clineAdapters.set(cacheKey, adapter)
+          }
+          return adapter
+        }
+        return null
+      }
+
+      const facade = new UnitFlowRuntimeFacade({
+        repositoryId,
+        repoRoot: worktreePath,
+        smcService,
+        gitOperations: mockGit,
+        cliExecution: mockCli,
+        executor: executorResolver,
+        validationLedger: ledger,
+        stagingDirectory: path.join(tempDir, 'prompt-staging')
+      })
+      const mcp = createAdapter(facade)
+
+      async function finishWorker(attemptId: string, status: 'SUCCEEDED' | 'FAILED' = 'SUCCEEDED'): Promise<void> {
+        const entry = pendingWorkers.get(attemptId)
+        if (!entry) throw new Error(`Missing mock worker for attempt ${attemptId}`)
+        entry.worker.emitWorkerMessage({
+          type: 'attempt_terminal',
+          attemptId,
+          clineSessionId: `cline-${attemptId}`,
+          status,
+          cleanup: { sessionDeleted: true, coreDisposed: true, dirRemoved: true },
+          durationMs: 10
+        })
+        fs.rmSync(entry.req.isolatedStorageRoot, { recursive: true, force: true })
+        entry.worker.emit('exit', 0)
+        await entry.exitPromise
+      }
+
+      async function triggerApprovalAndWaitExit(attemptId: string): Promise<void> {
+        const entry = pendingWorkers.get(attemptId)
+        if (!entry) throw new Error(`Missing mock worker for attempt ${attemptId}`)
+        entry.worker.emitWorkerMessage({
+          type: 'approval_request',
+          attemptId,
+          toolCallId: `tc-${attemptId}`,
+          toolName: 'editor',
+          targetPath: 'src/target.ts',
+          summary: 'Supervised edit on worktree'
+        })
+        await entry.exitPromise
+      }
+
+      return {
+        mcp,
+        getCounts: () => ({ grokStartCount, prepareForkCount, startForkCount, approvalCalls }),
+        getStartForks: () => startForks,
+        getPersistedAtSpawn: (attemptId: string) => persistedSelectionAtSpawn.get(attemptId),
+        setRevokePolicyOnNextPrepare: (v: boolean) => {
+          revokePolicyOnNextPrepare = v
+        },
+        setWorktreeState: (next: { path: string; branch: string; reference: boolean }) => {
+          currentWorktree = next
+        },
+        finishWorker,
+        triggerApprovalAndWaitExit
+      }
+    }
+
+    it('expõe executorSelection opcional no MCP público, preserva grok-cli como padrão e valida seleção estritamente antes de reserva/spawn', async () => {
+      const h = createSimulatedExecutorHarness()
+      const startTool = h.mcp.listTools().find((t) => t.name === 'start_next_unitflow_unit')
+      expect(startTool).toBeDefined()
+      const props = startTool!.inputSchema.properties as Record<string, any>
+      expect(props).not.toHaveProperty('customPromptText')
+      expect(props).toHaveProperty('executorSelection')
+      expect(startTool!.inputSchema.required).not.toContain('executorSelection')
+      expect(props.executorSelection.additionalProperties).toBe(false)
+      expect(props.executorSelection.properties.executorId.enum).toEqual(['grok-cli', 'cline-sdk'])
+
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unit1Id = randomUUID()
+      const unit2Id = randomUUID()
+
+      parseMcpResult(await h.mcp.callTool('create_buildx_session', { sessionId }))
+      parseMcpResult(await h.mcp.callTool('bind_unitflow_workspace', { sessionId, worktreeId }))
+      parseMcpResult(
+        await h.mcp.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'Gate A Schema and Default Grok',
+          objective: 'Validate executorSelection schema and default routing',
+          units: [
+            { unitId: unit1Id, position: 0, title: 'U1', objective: 'Grok default unit', acceptanceCriteria: 'PASS' },
+            { unitId: unit2Id, position: 1, title: 'U2', objective: 'Followup unit', acceptanceCriteria: 'PASS', dependsOnUnitIds: [unit1Id] }
+          ]
+        })
+      )
+
+      const invalidCases = [
+        {
+          name: 'unexpected top-level field',
+          args: {
+            sessionId,
+            planId,
+            reservationId: randomUUID(),
+            attemptId: randomUUID(),
+            stageOperationId: randomUUID(),
+            customPromptText: 'forbidden'
+          }
+        },
+        {
+          name: 'unsupported executorId',
+          args: {
+            sessionId,
+            planId,
+            reservationId: randomUUID(),
+            attemptId: randomUUID(),
+            stageOperationId: randomUUID(),
+            executorSelection: { executorId: 'paid-anthropic' }
+          }
+        },
+        {
+          name: 'unsupported providerId for cline-sdk',
+          args: {
+            sessionId,
+            planId,
+            reservationId: randomUUID(),
+            attemptId: randomUUID(),
+            stageOperationId: randomUUID(),
+            executorSelection: { executorId: 'cline-sdk', providerId: 'cline-free' }
+          }
+        },
+        {
+          name: 'extra field on executorSelection',
+          args: {
+            sessionId,
+            planId,
+            reservationId: randomUUID(),
+            attemptId: randomUUID(),
+            stageOperationId: randomUUID(),
+            executorSelection: { executorId: 'cline-sdk', providerId: 'cline', unexpected: true }
+          }
+        }
+      ]
+
+      for (const tc of invalidCases) {
+        const res = await h.mcp.callTool('start_next_unitflow_unit', tc.args)
+        expect(res.isError, tc.name).toBe(true)
+        const payload = JSON.parse((res.content[0] as { type: 'text'; text: string }).text)
+        expect(payload.code, tc.name).toBe('INVALID_ARGUMENT')
+        expect(smcService.getActiveExecutionAttempt(repositoryId, sessionId), tc.name).toBeNull()
+        expect(h.getCounts().grokStartCount, tc.name).toBe(0)
+        expect(h.getCounts().startForkCount, tc.name).toBe(0)
+      }
+
+      // Default omitted selection preserves grok-cli
+      const res1 = randomUUID()
+      const attempt1 = randomUUID()
+      const stage1 = randomUUID()
+      const grokStart = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1
+        })
+      )
+      expect(grokStart.status).toBe('RUNNING')
+      expect(grokStart.unitId).toBe(unit1Id)
+      expect(h.getCounts().grokStartCount).toBe(1)
+      expect(h.getCounts().startForkCount).toBe(0)
+      expect(smcService.getExecutionAttempt(repositoryId, attempt1)?.executorSelection).toEqual({
+        executorId: 'grok-cli',
+        providerId: 'xai',
+        modelId: null
+      })
+
+      // Idempotent replay with compatible Grok selection does not respawn
+      const grokReplay = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          executorSelection: { executorId: 'grok-cli', providerId: 'xai' }
+        })
+      )
+      expect(grokReplay.replayed).toBe(true)
+      expect(h.getCounts().grokStartCount).toBe(1)
+
+      // Conflicting executorSelection on active RUNNING replay is blocked before spawn
+      const runningConflict = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          executorSelection: { executorId: 'cline-sdk', providerId: 'cline' }
+        })
+      )
+      expect(runningConflict.status).toBe('UNAVAILABLE')
+      expect(runningConflict.reason).toBe('EXECUTOR_SELECTION_CONFLICT')
+      expect(h.getCounts().startForkCount).toBe(0)
+
+      // Settle Grok unit, then verify terminal replay with divergent selection is also blocked
+      mockCli.setSimulatedStatus('SUCCEEDED', 0)
+      const settleGrok = parseMcpResult(
+        await h.mcp.callTool('settle_unitflow_unit', { sessionId, attemptId: attempt1 })
+      )
+      expect(settleGrok.attemptStatus).toBe('COMPLETED')
+
+      const settledConflict = await h.mcp.callTool('start_next_unitflow_unit', {
+        sessionId,
+        planId,
+        reservationId: res1,
+        attemptId: attempt1,
+        stageOperationId: stage1,
+        executorSelection: { executorId: 'cline-sdk', providerId: 'cline' }
+      })
+      expect(settledConflict.isError).toBe(true)
+      const settledErr = JSON.parse((settledConflict.content[0] as { type: 'text'; text: string }).text)
+      expect(settledErr.code).toBe('ATTEMPT_CONFLICT')
+      expect(settledErr.message).toContain('EXECUTOR_SELECTION_CONFLICT')
+      expect(h.getCounts().startForkCount).toBe(0)
+    })
+
+    it('seleciona cline-sdk via start_next_unitflow_unit, fixa modelId concreto na SMC antes do spawn, protege replay e fecha TOCTOU YOLO -> SUPERVISED', async () => {
+      const h = createSimulatedExecutorHarness()
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unit1Id = randomUUID()
+      const unit2Id = randomUUID()
+
+      parseMcpResult(await h.mcp.callTool('create_buildx_session', { sessionId }))
+      parseMcpResult(await h.mcp.callTool('bind_unitflow_workspace', { sessionId, worktreeId }))
+      parseMcpResult(
+        await h.mcp.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'Gate A+B Public Cline Flow',
+          objective: 'Verify live free model pinning, replay guard, and YOLO revocation',
+          units: [
+            { unitId: unit1Id, position: 0, title: 'U1', objective: 'YOLO unit', acceptanceCriteria: 'PASS' },
+            { unitId: unit2Id, position: 1, title: 'U2', objective: 'Revoked supervised unit', acceptanceCriteria: 'PASS', dependsOnUnitIds: [unit1Id] }
+          ]
+        })
+      )
+
+      // Unit 1: explicit cline-sdk without modelId -> live free model fixed in SMC before spawn
+      const res1 = randomUUID()
+      const attempt1 = randomUUID()
+      const stage1 = randomUUID()
+      const startU1 = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          executorSelection: {
+            executorId: DEFAULT_CLINE_EXECUTOR_ID,
+            providerId: DEFAULT_CLINE_PROVIDER_ID
+          }
+        })
+      )
+      expect(startU1.status).toBe('RUNNING')
+      expect(startU1.unitId).toBe(unit1Id)
+      expect(h.getCounts().grokStartCount).toBe(0)
+      expect(h.getCounts().startForkCount).toBe(1)
+      expect(h.getPersistedAtSpawn(attempt1)).toEqual({
+        executorId: 'cline-sdk',
+        providerId: 'cline',
+        modelId: 'free/dynamic-live-zero'
+      })
+      expect(h.getStartForks()[0].allowAutoApprove).toBe(true)
+      expect(h.getStartForks()[0].worktreeId).toBe(worktreeId)
+      expect(h.getStartForks()[0].generation).toBe(generation)
+      expect(h.getStartForks()[0].branch).toBe('feature-work')
+      expect(h.getStartForks()[0].policyRevision).toBe('yolo-rev-1')
+
+      // Same explicit selection (omitting modelId) replays idempotently
+      const replayCompat = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          executorSelection: { executorId: 'cline-sdk', providerId: 'cline' }
+        })
+      )
+      expect(replayCompat.replayed).toBe(true)
+      expect(h.getCounts().startForkCount).toBe(1)
+
+      // Divergent modelId replay conflicts
+      const replayModelConflict = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          executorSelection: { executorId: 'cline-sdk', providerId: 'cline', modelId: 'free/other-model' }
+        })
+      )
+      expect(replayModelConflict.reason).toBe('EXECUTOR_SELECTION_CONFLICT')
+      expect(h.getCounts().startForkCount).toBe(1)
+
+      // Finish U1, settle and accept via ledger proof
+      await h.finishWorker(attempt1, 'SUCCEEDED')
+      const settleU1 = parseMcpResult(
+        await h.mcp.callTool('settle_unitflow_unit', { sessionId, attemptId: attempt1 })
+      )
+      expect(settleU1.attemptStatus).toBe('COMPLETED')
+      const proof1 = ledger.recordProof({
+        kind: 'TARGETED_TEST',
+        producer: 'IMPLEMENTER',
+        status: 'PASSED',
+        startedAt: new Date(Date.now() - 1000).toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs: 1000,
+        scope: ['test/cline-u1'],
+        summary: 'Cline U1 accepted',
+        commandProfile: {
+          command: 'npm run test:cline-u1',
+          checkout: {
+            repositoryId,
+            worktreeId,
+            generation,
+            head: currentHead,
+            issuer: 'VALIDATION_EXECUTION',
+            runId: randomUUID()
+          }
+        }
+      })
+      const acceptU1 = parseMcpResult(
+        await h.mcp.callTool('accept_unitflow_unit', {
+          sessionId,
+          attemptId: attempt1,
+          operationId: randomUUID(),
+          proofIds: [proof1.proofId],
+          summary: 'Accept U1'
+        })
+      )
+      expect(acceptU1.status).toBe('ACCEPTED')
+
+      // Unit 2: revoke YOLO -> SUPERVISED between prepareAttempt and startAttempt (forkCount for start_attempt must stay 1)
+      h.setRevokePolicyOnNextPrepare(true)
+      const res2Blocked = randomUUID()
+      const attempt2Blocked = randomUUID()
+      const startU2Blocked = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res2Blocked,
+          attemptId: attempt2Blocked,
+          stageOperationId: randomUUID(),
+          executorSelection: { executorId: 'cline-sdk', providerId: 'cline' }
+        })
+      )
+      expect(startU2Blocked.status).toBe('REFUSED')
+      expect(startU2Blocked.reason).toBe('POLICY_CHANGED')
+      expect(h.getCounts().startForkCount).toBe(1)
+
+      const statusRefused = parseMcpResult(
+        await h.mcp.callTool('get_unitflow_status', { sessionId })
+      )
+      expect(statusRefused.activeAttempt.status).toBe('REFUSED')
+      expect(statusRefused.activeAttempt.terminalReason).toBe('POLICY_CHANGED')
+      expect(statusRefused.nextAllowedActions).toContain('settle_unitflow_unit')
+
+      const settleU2Blocked = parseMcpResult(
+        await h.mcp.callTool('settle_unitflow_unit', { sessionId, attemptId: attempt2Blocked })
+      )
+      expect(settleU2Blocked.attemptStatus).toBe('CANCELLED')
+      expect(settleU2Blocked.unitState).toBe('RECONCILING')
+
+      const statusReconciling = parseMcpResult(
+        await h.mcp.callTool('get_unitflow_status', { sessionId })
+      )
+      expect(statusReconciling.orchestrationState).toBe('RECONCILING')
+
+      // Reconcile and retry Unit 2 under SUPERVISED policy -> never reuses U1 YOLO, demands host approval
+      const reconcileU2 = parseMcpResult(
+        await h.mcp.callTool('reconcile_unitflow_unit', {
+          sessionId,
+          attemptId: attempt2Blocked,
+          operationId: randomUUID(),
+          summary: 'Reconciled revoked YOLO refusal',
+          action: 'RETRY_SAME_UNIT'
+        })
+      )
+      expect(reconcileU2.status).toBe('RETRY_ELIGIBLE')
+
+      const res2Sup = randomUUID()
+      const attempt2Sup = randomUUID()
+      const startU2Sup = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res2Sup,
+          attemptId: attempt2Sup,
+          stageOperationId: randomUUID(),
+          executorSelection: {
+            executorId: 'cline-sdk',
+            providerId: 'cline',
+            modelId: 'free/dynamic-live-zero'
+          }
+        })
+      )
+      expect(startU2Sup.status).toBe('RUNNING')
+      expect(h.getCounts().startForkCount).toBe(2)
+      expect(h.getStartForks()[1].allowAutoApprove).toBe(false)
+      expect(h.getStartForks()[1].policyRevision).toBe('sup-rev-2')
+
+      await h.triggerApprovalAndWaitExit(attempt2Sup)
+      expect(h.getCounts().approvalCalls).toBe(1)
+      const settleU2 = parseMcpResult(
+        await h.mcp.callTool('settle_unitflow_unit', { sessionId, attemptId: attempt2Sup })
+      )
+      expect(settleU2.attemptStatus).toBe('COMPLETED')
+    })
   })
 })

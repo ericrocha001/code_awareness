@@ -15,6 +15,7 @@ import type {
   CliWorktreeSelector,
   StartCliExecutionInput,
   GetCliExecutionInput,
+  CancelCliExecutionInput,
   CliExecutionSnapshot
 } from '../../cli-execution/cli-execution-types'
 import { resolveCliCommand } from '../../cli-execution/cli-command-resolver'
@@ -28,6 +29,7 @@ export interface CliExecutionPort {
   prepare(input: PrepareCliExecutionInput): Promise<CliProposal>
   start?(input: StartCliExecutionInput): CliExecutionSnapshot | Promise<CliExecutionSnapshot>
   get?(input: GetCliExecutionInput): CliExecutionSnapshot | Promise<CliExecutionSnapshot>
+  cancel?(input: CancelCliExecutionInput): CliExecutionSnapshot | Promise<CliExecutionSnapshot>
 }
 
 export function extractGrokVersion(stdout: string): string | null {

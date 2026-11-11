@@ -42,8 +42,14 @@ import type {
 import type {
   ExecutionAttemptRecord,
   ExecutionAttemptStatus,
+  ExecutorSelection,
   SettleExecutionAttemptStoreInput
 } from '../../../shared/types/buildx/execution-types'
+import {
+  executorSelectionsEqual,
+  formatExecutorSelection,
+  normalizeExecutorSelection
+} from '../execution/executor-port'
 import {
   BuildXWorkspaceBindingConflictError
 } from '../execution/workspace-binding-errors'
@@ -287,6 +293,7 @@ export interface PrepareExecutionAttemptInput {
     readonly branch: string
   }
   readonly headObserved: string
+  readonly executorSelection?: ExecutorSelection
 }
 
 interface SmcCursorPayload {
@@ -2038,7 +2045,67 @@ export class SessionMemoryCentralStore {
     return this.mapRawToReservationRecord(row)
   }
 
+  private readPersistedExecutorSelection(attemptId: string): ExecutorSelection | undefined {
+    const hasEntriesTable = Boolean(
+      this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'smc_entries'").get()
+    )
+    if (!hasEntriesTable) return undefined
+    const entryId = deterministicEntryId('executor-selection', attemptId.trim().toLowerCase())
+    const row = this.db.prepare(`
+      SELECT body FROM smc_entries WHERE entry_id = ?
+    `).get(entryId) as { body: string } | undefined
+    if (!row) return undefined
+    try {
+      const parsed = JSON.parse(row.body)
+      return normalizeExecutorSelection({
+        executorId: parsed.executorId,
+        providerId: parsed.providerId ?? null,
+        modelId: parsed.modelId ?? null
+      })
+    } catch {
+      return undefined
+    }
+  }
+
+  private writePersistedExecutorSelection(
+    sessionId: string,
+    attemptId: string,
+    selection: ExecutorSelection,
+    now: string
+  ): ExecutorSelection {
+    const normalized = normalizeExecutorSelection(selection)
+    const entryId = deterministicEntryId('executor-selection', attemptId)
+    const existing = this.readPersistedExecutorSelection(attemptId)
+    if (existing) {
+      if (!executorSelectionsEqual(existing, normalized)) {
+        throw new ExecutionAttemptConflictError(
+          `EXECUTOR_SELECTION_CONFLICT: Attempt "${attemptId}" already locked to (${formatExecutorSelection(existing)}), cannot switch to (${formatExecutorSelection(normalized)})`
+        )
+      }
+      return existing
+    }
+
+    const title = `Executor selection: ${normalized.executorId}`
+    const body = JSON.stringify({
+      attemptId,
+      executorId: normalized.executorId,
+      providerId: normalized.providerId ?? null,
+      modelId: normalized.modelId ?? null
+    })
+    const referencesJson = JSON.stringify([{ kind: 'OTHER', target: attemptId }])
+
+    this.db.prepare(`
+      INSERT INTO smc_entries (
+        entry_id, session_id, kind, title, body,
+        emitter_role, emitter_id, references_json, supersedes_entry_id, created_at
+      ) VALUES (?, ?, 'DECISION', ?, ?, 'SYSTEM', 'buildx-execution-service', ?, NULL, ?)
+    `).run(entryId, sessionId, title, body, referencesJson, now)
+
+    return normalized
+  }
+
   private mapRawToExecutionAttemptRecord(row: RawExecutionAttemptRow): ExecutionAttemptRecord {
+    const executorSelection = this.readPersistedExecutorSelection(row.attempt_id)
     return {
       attemptId: row.attempt_id,
       repositoryId: row.repository_id,
@@ -2052,6 +2119,7 @@ export class SessionMemoryCentralStore {
       headObservedAtPreparation: row.head_observed_at_preparation,
       status: row.status as ExecutionAttemptStatus,
       revision: row.revision,
+      ...(executorSelection ? { executorSelection } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     }
@@ -2077,6 +2145,15 @@ export class SessionMemoryCentralStore {
       throw new BuildXWorkspaceBindingConflictError('headObserved must be non-empty')
     }
 
+    let normalizedSelection: ExecutorSelection | undefined
+    if (input.executorSelection !== undefined) {
+      try {
+        normalizedSelection = normalizeExecutorSelection(input.executorSelection)
+      } catch (err: any) {
+        throw new ExecutionAttemptConflictError(err?.message ?? String(err))
+      }
+    }
+
     return this.db.transaction((): ExecutionAttemptRecord => {
       // 1. Replay check dentro da transação
       const existing = this.db.prepare(`
@@ -2089,6 +2166,15 @@ export class SessionMemoryCentralStore {
           existing.session_id === cleanSessionId &&
           existing.reservation_id === cleanReservationId
         ) {
+          if (normalizedSelection) {
+            const existingSelection = this.readPersistedExecutorSelection(cleanAttemptId)
+            if (!existingSelection || !executorSelectionsEqual(existingSelection, normalizedSelection)) {
+              throw new ExecutionAttemptIdConflictError(
+                cleanAttemptId,
+                `already exists with divergent executor selection (existing=${existingSelection ? formatExecutorSelection(existingSelection) : 'none'}, requested=${formatExecutorSelection(normalizedSelection)})`
+              )
+            }
+          }
           return this.mapRawToExecutionAttemptRecord(existing)
         }
         throw new ExecutionAttemptIdConflictError(
@@ -2255,6 +2341,10 @@ export class SessionMemoryCentralStore {
         throw new ExecutionAttemptConflictError(`Failed to persist execution attempt: ${msg}`)
       }
 
+      if (normalizedSelection) {
+        this.writePersistedExecutorSelection(cleanSessionId, cleanAttemptId, normalizedSelection, now)
+      }
+
       return {
         attemptId: cleanAttemptId,
         repositoryId: this.repositoryId,
@@ -2268,6 +2358,7 @@ export class SessionMemoryCentralStore {
         headObservedAtPreparation: input.headObserved,
         status: 'PREPARED',
         revision: 1,
+        ...(normalizedSelection ? { executorSelection: normalizedSelection } : {}),
         createdAt: now,
         updatedAt: now
       }
@@ -2338,35 +2429,67 @@ export class SessionMemoryCentralStore {
     return this.mapRawToExecutionAttemptRecord(row)
   }
 
-  transitionAttemptToStarting(attemptId: string, expectedRevision: number): ExecutionAttemptRecord {
+  getAttemptExecutorSelection(attemptId: string): ExecutorSelection | null {
+    const attempt = this.getExecutionAttempt(attemptId)
+    return attempt?.executorSelection ?? null
+  }
+
+  transitionAttemptToStarting(
+    attemptId: string,
+    expectedRevision: number,
+    executorSelection?: ExecutorSelection
+  ): ExecutionAttemptRecord {
     if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
       throw new ExecutionInvalidAttemptIdError(attemptId ?? '')
     }
     const cleanId = attemptId.trim().toLowerCase()
+    let normalizedSelection: ExecutorSelection | undefined
+    if (executorSelection !== undefined) {
+      try {
+        normalizedSelection = normalizeExecutorSelection(executorSelection)
+      } catch (err: any) {
+        throw new ExecutionAttemptConflictError(err?.message ?? String(err))
+      }
+    }
     const now = new Date().toISOString()
 
-    const result = this.db.prepare(`
-      UPDATE smc_execution_attempts
-      SET status = 'STARTING', revision = revision + 1, updated_at = ?
-      WHERE attempt_id = ? AND repository_id = ? AND status = 'PREPARED' AND revision = ?
-    `).run(now, cleanId, this.repositoryId, expectedRevision)
-
-    if (result.changes === 0) {
+    return this.db.transaction((): ExecutionAttemptRecord => {
       const existing = this.db.prepare(`
         SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
       `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow | undefined
       if (!existing) {
         throw new ExecutionAttemptConflictError(`Attempt "${cleanId}" not found`)
       }
-      throw new ExecutionAttemptConflictError(
-        `CAS conflict: attempt "${cleanId}" status="${existing.status}" revision=${existing.revision}, expected PREPARED@${expectedRevision}`
-      )
-    }
+      if (existing.status !== 'PREPARED' || existing.revision !== expectedRevision) {
+        throw new ExecutionAttemptConflictError(
+          `CAS conflict: attempt "${cleanId}" status="${existing.status}" revision=${existing.revision}, expected PREPARED@${expectedRevision}`
+        )
+      }
 
-    const updated = this.db.prepare(`
-      SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
-    `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow
-    return this.mapRawToExecutionAttemptRecord(updated)
+      if (normalizedSelection) {
+        this.writePersistedExecutorSelection(existing.session_id, cleanId, normalizedSelection, now)
+      }
+
+      const result = this.db.prepare(`
+        UPDATE smc_execution_attempts
+        SET status = 'STARTING', revision = revision + 1, updated_at = ?
+        WHERE attempt_id = ? AND repository_id = ? AND status = 'PREPARED' AND revision = ?
+      `).run(now, cleanId, this.repositoryId, expectedRevision)
+
+      if (result.changes === 0) {
+        const recheck = this.db.prepare(`
+          SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+        `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow | undefined
+        throw new ExecutionAttemptConflictError(
+          `CAS conflict: attempt "${cleanId}" status="${recheck?.status}" revision=${recheck?.revision}, expected PREPARED@${expectedRevision}`
+        )
+      }
+
+      const updated = this.db.prepare(`
+        SELECT * FROM smc_execution_attempts WHERE attempt_id = ? AND repository_id = ?
+      `).get(cleanId, this.repositoryId) as RawExecutionAttemptRow
+      return this.mapRawToExecutionAttemptRecord(updated)
+    })()
   }
 
   transitionAttemptToRunning(

@@ -1,108 +1,230 @@
+import { readFileSync } from 'node:fs'
 import { validateRepositoryId } from '../smc/session-memory-central-paths'
 import type { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import type { WorkspaceBindingService } from './workspace-binding-service'
 import type { UnitPromptStageService } from './unit-prompt-stage-service'
 import type {
+  ExecutionAttemptRecord,
+  ExecutorEvent,
+  ExecutorRunObservation,
+  ExecutorSelection,
+  ExecutorTerminationConfirmation,
   StartUnitExecutionOptions,
   UnitExecutionResult,
-  UnitExecutionStatus,
-  ExecutionAttemptRecord,
   UnitSettlementResult
 } from '../../../shared/types/buildx/execution-types'
-import type { BuildXInspectWorkspaceResult } from '../../../shared/types/buildx/workspace-types'
-import type { CliPolicy } from '../../../shared/types/cli-policy-types'
-import type {
-  CliExecutionSnapshot
-} from '../../cli-execution/cli-execution-types'
-import type { CliExecutionPort, CliExecutionResolver } from './grok-cli-bridge'
 import { ExecutionAttemptConflictError } from './execution-errors'
+import {
+  executorSelectionsEqual,
+  formatExecutorSelection,
+  normalizeExecutorSelection,
+  type UnitExecutorPort,
+  type UnitExecutorResolver
+} from './executor-port'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-function timeoutMetadata(record: Pick<CliExecutionSnapshot, 'timeoutProfile' | 'timeoutMs'>): {
+type IdValidationResult =
+  | {
+      ok: true
+      validRepoId: string
+      cleanSessionId: string
+      cleanAttemptId: string
+    }
+  | {
+      ok: false
+      reason: 'INVALID_REPOSITORY_ID' | 'INVALID_SESSION_ID' | 'INVALID_ATTEMPT_ID'
+      repositoryId: string
+      sessionId: string
+      attemptId: string
+    }
+
+function validateAttemptIdentifiers(
+  repositoryId: string,
+  sessionId: string,
+  attemptId: string
+): IdValidationResult {
+  let validRepoId: string
+  try {
+    validRepoId = validateRepositoryId(repositoryId)
+  } catch {
+    return {
+      ok: false,
+      reason: 'INVALID_REPOSITORY_ID',
+      repositoryId: repositoryId ?? '',
+      sessionId: sessionId ?? '',
+      attemptId: attemptId ?? ''
+    }
+  }
+
+  if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
+    return {
+      ok: false,
+      reason: 'INVALID_SESSION_ID',
+      repositoryId: validRepoId,
+      sessionId: sessionId ?? '',
+      attemptId: attemptId ?? ''
+    }
+  }
+  const cleanSessionId = sessionId.trim().toLowerCase()
+
+  if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
+    return {
+      ok: false,
+      reason: 'INVALID_ATTEMPT_ID',
+      repositoryId: validRepoId,
+      sessionId: cleanSessionId,
+      attemptId: attemptId ?? ''
+    }
+  }
+
+  return {
+    ok: true,
+    validRepoId,
+    cleanSessionId,
+    cleanAttemptId: attemptId.trim().toLowerCase()
+  }
+}
+
+function selectionFields(selection?: ExecutorSelection): {
+  executorId?: string
+  providerId?: string | null
+  modelId?: string | null
+} {
+  if (!selection) return {}
+  return {
+    executorId: selection.executorId,
+    providerId: selection.providerId ?? null,
+    modelId: selection.modelId ?? null
+  }
+}
+
+function timeoutMetadata(observation: Pick<ExecutorRunObservation, 'timeoutProfile' | 'timeoutMs'>): {
   timeoutProfile?: string
   timeoutMs?: number
 } {
   return {
-    ...(record.timeoutProfile ? { timeoutProfile: record.timeoutProfile } : {}),
-    ...(record.timeoutMs !== undefined ? { timeoutMs: record.timeoutMs } : {})
+    ...(observation.timeoutProfile ? { timeoutProfile: observation.timeoutProfile } : {}),
+    ...(observation.timeoutMs !== undefined ? { timeoutMs: observation.timeoutMs } : {})
   }
 }
 
-function classifyObservedGrokOutcome(snapshot: CliExecutionSnapshot): string {
-  const diagnostic = typeof snapshot.diagnostic === 'string' && snapshot.diagnostic.trim()
-    ? snapshot.diagnostic.trim()
-    : undefined
-  const output = `${snapshot.stdout ?? ''}\n${snapshot.stderr ?? ''}`
-
-  if (snapshot.status === 'TIMED_OUT') {
-    if (/\b(approval required|confirmation required|waiting for approval|use --always-approve|allow tool)\b/i.test(output)) {
-      return 'APPROVAL_PROMPT_TIMED_OUT'
-    }
-    return diagnostic ?? 'TIMED_OUT'
+function legacyStatusMetadata(observation: ExecutorRunObservation): {
+  cliStatus: string
+  cliPhase?: string
+} {
+  const cliStatus = observation.legacyExecution?.status ?? observation.status
+  const cliPhase = observation.legacyExecution?.phase ?? observation.phase
+  return {
+    cliStatus,
+    ...(cliPhase !== undefined ? { cliPhase } : {})
   }
-  if (snapshot.status === 'CANCELLED' || snapshot.status === 'INTERRUPTED') {
-    return diagnostic ?? snapshot.status
-  }
-  if (snapshot.status === 'FAILED') {
-    if (/\b(approval required|interactive permission|use --always-approve)\b/i.test(output)) {
-      return 'GROK_APPROVAL_REQUIRED'
-    }
-    if (/\b(unknown option|unknown flag|unrecognized arguments?|invalid option)\b/i.test(output)) {
-      return 'GROK_ARGUMENT_ERROR'
-    }
-    if (/\b(insufficient credits|quota exceeded|rate limit|billing|payment required|429)\b/i.test(output)) {
-      return 'GROK_QUOTA_OR_RATE_LIMIT'
-    }
-    if (/\b(invalid api key|authentication failed|not authenticated|unauthorized|401|XAI_API_KEY)\b/i.test(output)) {
-      return 'GROK_AUTHENTICATION_FAILED'
-    }
-    if (diagnostic) return diagnostic
-    if (snapshot.exitCode !== null && snapshot.exitCode !== undefined) {
-      return `NON_ZERO_EXIT_CODE_${snapshot.exitCode}`
-    }
-    return 'FAILED'
-  }
-  return diagnostic ?? snapshot.status
 }
 
-function mapCliStatusToUnitStatus(snapshot: CliExecutionSnapshot): UnitExecutionStatus {
-  if (snapshot.status === 'AWAITING_APPROVAL') return 'AWAITING_APPROVAL'
-  if (snapshot.status === 'RUNNING') return 'RUNNING'
-  if (snapshot.status === 'REFUSED') return 'REFUSED'
-  if (
-    snapshot.status === 'SUCCEEDED' ||
-    snapshot.status === 'FAILED' ||
-    snapshot.status === 'CANCELLED' ||
-    snapshot.status === 'TIMED_OUT' ||
-    snapshot.status === 'INTERRUPTED'
-  ) {
-    return 'TERMINAL_OBSERVED'
+function outcomeMetadata(observation: ExecutorRunObservation): {
+  usage?: NonNullable<ExecutorRunObservation['result']>['usage']
+  billing?: NonNullable<ExecutorRunObservation['result']>['billing']
+} {
+  return {
+    ...(observation.result?.usage ? { usage: observation.result.usage } : {}),
+    ...(observation.result?.billing ? { billing: observation.result.billing } : {})
   }
-  return 'UNKNOWN'
+}
+
+function isTerminalRunStatus(status: ExecutorRunObservation['status']): boolean {
+  return (
+    status === 'SUCCEEDED' ||
+    status === 'FAILED' ||
+    status === 'CANCELLED' ||
+    status === 'TIMED_OUT' ||
+    status === 'INTERRUPTED'
+  )
 }
 
 export class UnitExecutionService {
   private readonly smcService: SessionMemoryCentralService
   private readonly workspaceService: WorkspaceBindingService
   private readonly stageService: UnitPromptStageService
-  private readonly cliResolver: CliExecutionResolver
+  private readonly executorResolver: UnitExecutorResolver
 
   constructor(
     smcService: SessionMemoryCentralService,
     workspaceService: WorkspaceBindingService,
     stageService: UnitPromptStageService,
-    cliServiceOrResolver: CliExecutionPort | CliExecutionResolver | null
+    executorOrResolver: UnitExecutorPort | UnitExecutorResolver | null
   ) {
     this.smcService = smcService
     this.workspaceService = workspaceService
     this.stageService = stageService
-    if (typeof cliServiceOrResolver === 'function') {
-      this.cliResolver = cliServiceOrResolver
-    } else if (cliServiceOrResolver) {
-      this.cliResolver = () => cliServiceOrResolver
+    if (typeof executorOrResolver === 'function') {
+      this.executorResolver = executorOrResolver
+    } else if (executorOrResolver) {
+      this.executorResolver = () => executorOrResolver
     } else {
-      this.cliResolver = () => null
+      this.executorResolver = () => null
+    }
+  }
+
+  async resolveExecutorSelection(
+    repositoryId: string,
+    selection?: ExecutorSelection
+  ): Promise<{
+    readonly executor: UnitExecutorPort | null
+    readonly available: boolean
+    readonly selection?: ExecutorSelection
+    readonly reason?: string
+  }> {
+    let validRepoId: string
+    try {
+      validRepoId = validateRepositoryId(repositoryId)
+    } catch {
+      return { executor: null, available: false, reason: 'INVALID_REPOSITORY_ID' }
+    }
+
+    let executor: UnitExecutorPort | null
+    try {
+      executor = await this.executorResolver(validRepoId, selection)
+    } catch (err: any) {
+      return {
+        executor: null,
+        available: false,
+        ...(selection ? { selection } : {}),
+        reason: err?.message ?? String(err)
+      }
+    }
+
+    if (!executor) {
+      return {
+        executor: null,
+        available: false,
+        ...(selection ? { selection } : {}),
+        reason: 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    try {
+      const availability = await executor.checkAvailability(validRepoId)
+      if (!availability.available) {
+        return {
+          executor: null,
+          available: false,
+          selection: executor.identity,
+          reason: availability.reason ?? 'EXECUTOR_UNAVAILABLE'
+        }
+      }
+    } catch (err: any) {
+      return {
+        executor: null,
+        available: false,
+        selection: executor.identity,
+        reason: `EXECUTOR_AVAILABILITY_ERROR: ${err?.message ?? String(err)}`
+      }
+    }
+
+    return {
+      executor,
+      available: true,
+      selection: executor.identity
     }
   }
 
@@ -112,41 +234,17 @@ export class UnitExecutionService {
     attemptId: string,
     options: StartUnitExecutionOptions
   ): Promise<UnitExecutionResult> {
-    // 1. Parameter validation
-    let validRepoId: string
-    try {
-      validRepoId = validateRepositoryId(repositoryId)
-    } catch {
+    const ids = validateAttemptIdentifiers(repositoryId, sessionId, attemptId)
+    if (!ids.ok) {
       return {
         status: 'UNAVAILABLE',
-        attemptId: attemptId ?? '',
-        sessionId: sessionId ?? '',
-        repositoryId: repositoryId ?? '',
-        reason: 'INVALID_REPOSITORY_ID'
+        attemptId: ids.attemptId,
+        sessionId: ids.sessionId,
+        repositoryId: ids.repositoryId,
+        reason: ids.reason
       }
     }
-
-    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: attemptId ?? '',
-        sessionId: sessionId ?? '',
-        repositoryId: validRepoId,
-        reason: 'INVALID_SESSION_ID'
-      }
-    }
-    const cleanSessionId = sessionId.trim().toLowerCase()
-
-    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: attemptId ?? '',
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'INVALID_ATTEMPT_ID'
-      }
-    }
-    const cleanAttemptId = attemptId.trim().toLowerCase()
+    const { validRepoId, cleanSessionId, cleanAttemptId } = ids
 
     if (!options?.stageOperationId || typeof options.stageOperationId !== 'string' || !options.stageOperationId.trim()) {
       return {
@@ -158,30 +256,22 @@ export class UnitExecutionService {
       }
     }
 
-    // 2. Resolve CLI service
-    const cliService = await this.cliResolver(validRepoId)
-    if (!cliService || !cliService.isEnabled()) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'CLI_UNAVAILABLE'
+    let requestedSelection: ExecutorSelection | undefined
+    if (options.executorSelection !== undefined) {
+      try {
+        requestedSelection = normalizeExecutorSelection(options.executorSelection)
+      } catch (err: any) {
+        return {
+          status: 'UNAVAILABLE',
+          attemptId: cleanAttemptId,
+          sessionId: cleanSessionId,
+          repositoryId: validRepoId,
+          reason: err?.message ?? 'INVALID_EXECUTOR_SELECTION'
+        }
       }
     }
 
-    const cliRepoId = cliService.getRepositoryId()
-    if (cliRepoId !== null && cliRepoId !== validRepoId) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'CLI_REPOSITORY_MISMATCH'
-      }
-    }
-
-    // 3. Read SMC state
+    // 1. Read SMC attempt state upfront so persisted selection and replay are checked before spawning
     let attempt: ExecutionAttemptRecord | null
     try {
       attempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
@@ -195,19 +285,76 @@ export class UnitExecutionService {
       }
     }
 
+    const persistedSelection = attempt?.executorSelection
+
+    if (
+      attempt &&
+      attempt.sessionId === cleanSessionId &&
+      persistedSelection &&
+      requestedSelection &&
+      !executorSelectionsEqual(persistedSelection, requestedSelection)
+    ) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(persistedSelection),
+        reason: `EXECUTOR_SELECTION_CONFLICT: attempt locked to (${formatExecutorSelection(persistedSelection)}), requested (${formatExecutorSelection(requestedSelection)})`
+      }
+    }
+
+    // 2. Resolve and verify executor adapter
+    const selectionHint = requestedSelection ?? persistedSelection
+    const resolvedExecutor = await this.resolveExecutorSelection(validRepoId, selectionHint)
+    if (!resolvedExecutor.executor || !resolvedExecutor.available) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(resolvedExecutor.selection ?? selectionHint),
+        reason: resolvedExecutor.reason ?? 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+    const executor = resolvedExecutor.executor
+
+    if (requestedSelection && !executorSelectionsEqual(requestedSelection, executor.identity)) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
+        reason: `EXECUTOR_SELECTION_CONFLICT: requested (${formatExecutorSelection(requestedSelection)}) does not match resolved executor (${formatExecutorSelection(executor.identity)})`
+      }
+    }
+
     if (!attempt || attempt.sessionId !== cleanSessionId) {
       return {
         status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
         reason: 'ATTEMPT_NOT_FOUND'
       }
     }
 
-    // Handle replay: attempt already STARTING or RUNNING -> delegate directly to observation
+    if (persistedSelection && !executorSelectionsEqual(persistedSelection, executor.identity)) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(persistedSelection),
+        reason: `EXECUTOR_SELECTION_CONFLICT: attempt locked to (${formatExecutorSelection(persistedSelection)}), resolved executor is (${formatExecutorSelection(executor.identity)})`
+      }
+    }
+
+    // Replay: attempt already STARTING or RUNNING -> observe without spawning again
     if (attempt.status === 'STARTING' || attempt.status === 'RUNNING') {
-      return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId)
+      return this.observeRunningAttempt(executor, cleanAttemptId, cleanSessionId, validRepoId)
     }
     if (attempt.status !== 'PREPARED') {
       return {
@@ -215,11 +362,12 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(persistedSelection ?? executor.identity),
         reason: `ATTEMPT_NOT_PREPARED: status=${attempt.status}`
       }
     }
 
-    // 4. Verify reservation, plan, unit state
+    // 3. Verify reservation, plan, unit state
     const store = this.smcService.getStore(validRepoId)
     const reservation = store.getReservation(attempt.reservationId)
     if (!reservation || reservation.status !== 'ACTIVE' || reservation.sessionId !== cleanSessionId) {
@@ -228,6 +376,7 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
         reason: 'RESERVATION_NOT_ACTIVE'
       }
     }
@@ -239,6 +388,7 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
         reason: 'PLAN_NOT_ACTIVE'
       }
     }
@@ -250,12 +400,13 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
         reason: 'UNIT_NOT_RESERVED'
       }
     }
 
-    // 5. Verify workspace CURRENT
-    let ws: BuildXInspectWorkspaceResult
+    // 4. Verify workspace CURRENT
+    let ws: Awaited<ReturnType<WorkspaceBindingService['inspectBoundWorkspace']>>
     try {
       ws = await this.workspaceService.inspectBoundWorkspace(validRepoId, cleanSessionId)
     } catch {
@@ -264,6 +415,7 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
         reason: 'WORKSPACE_INSPECT_ERROR'
       }
     }
@@ -279,11 +431,12 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
         reason: 'WORKSPACE_NOT_CURRENT'
       }
     }
 
-    // 6. Resolve stage path (kept internal — not surfaced to callers)
+    // 5. Resolve staged prompt (kept internal — never surfaced to callers)
     const stagePath = await this.stageService.resolveStagedPromptPath(
       validRepoId,
       cleanSessionId,
@@ -296,53 +449,37 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
         reason: 'STAGE_NOT_READY'
       }
     }
 
-    // Retém o arquivo de prompt em memória enquanto a CLI prepara e executa
+    const boundWorktreePath = await this.workspaceService.getWorktreePath(validRepoId, attempt.worktreeId)
+
+    // Retain prompt file until attempt terminates or fails admission
     this.stageService.retainStage(options.stageOperationId, cleanAttemptId)
 
-    // Derive autonomous permission strictly from local Desktop grant for this Worktree when available
-    let hostPolicy: CliPolicy | undefined
-    if (typeof cliService.getPolicyForWorktree === 'function') {
-      try {
-        hostPolicy = await cliService.getPolicyForWorktree({
-          worktreeId: attempt.worktreeId,
-          generation: attempt.generation
-        })
-      } catch (err: any) {
-        this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
-        return {
-          status: 'UNAVAILABLE',
-          attemptId: cleanAttemptId,
-          sessionId: cleanSessionId,
-          repositoryId: validRepoId,
-          reason: `CLI_POLICY_ERROR: ${err?.message ?? String(err)}`
-        }
-      }
-    }
-
-    const hostYoloAuthorized =
-      hostPolicy?.mode === 'AUTONOMOUS_TRUSTED' &&
-      hostPolicy?.scope === 'REPOSITORY_WORKTREES'
-    const allowAlwaysApprove = hostPolicy !== undefined ? hostYoloAuthorized : options.allowAlwaysApprove === true
-
-    // 7. Prepare CLI proposal (agentic Worktree unit timeout profile: 10m default, 15m hard cap)
-    const headlessArgs = [
-      '--prompt-file', stagePath,
-      '--output-format', 'json',
-      '--no-auto-update',
-      ...(allowAlwaysApprove ? ['--always-approve'] : [])
-    ]
-
-    let proposal: Awaited<ReturnType<typeof cliService.prepare>>
+    // 6. Prepare attempt via agnostic executor port
+    let preparation: Awaited<ReturnType<UnitExecutorPort['prepareAttempt']>>
     try {
-      proposal = await cliService.prepare({
-        worktree: { worktreeId: attempt.worktreeId, generation: attempt.generation },
-        executable: 'grok',
-        args: headlessArgs,
-        executionProfile: 'BUILDX_AGENTIC_UNIT'
+      preparation = await executor.prepareAttempt({
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        planId: attempt.planId,
+        unitId: attempt.unitId,
+        attemptId: cleanAttemptId,
+        worktree: {
+          worktreeId: attempt.worktreeId,
+          generation: attempt.generation,
+          branch: attempt.branch,
+          ...(boundWorktreePath ? { path: boundWorktreePath } : {})
+        },
+        prompt: {
+          stageOperationId: options.stageOperationId,
+          promptFilePath: stagePath,
+          readPromptText: () => readFileSync(stagePath, 'utf8')
+        },
+        allowAlwaysApprove: options.allowAlwaysApprove
       })
     } catch (err: any) {
       this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
@@ -351,16 +488,28 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: `CLI_PREPARE_ERROR: ${err?.message ?? String(err)}`
+        ...selectionFields(executor.identity),
+        reason: `EXECUTOR_PREPARE_ERROR: ${err?.message ?? String(err)}`
       }
     }
 
-    // 8. Validate proposal integrity
+    if (preparation.status !== 'READY' || !preparation.handle) {
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
+      return {
+        status: preparation.status === 'REFUSED' ? 'REFUSED' : 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(executor.identity),
+        reason: preparation.reason ?? 'EXECUTOR_PREPARE_FAILED'
+      }
+    }
+
+    const preparedSelection = preparation.handle.selection
     if (
-      proposal.command.originalExecutable !== 'grok' ||
-      !Array.isArray(proposal.command.originalArgs) ||
-      proposal.command.originalArgs[0] !== '--prompt-file' ||
-      proposal.command.originalArgs[1] !== stagePath
+      !executorSelectionsEqual(preparedSelection, executor.identity) ||
+      (persistedSelection && !executorSelectionsEqual(preparedSelection, persistedSelection)) ||
+      (requestedSelection && !executorSelectionsEqual(preparedSelection, requestedSelection))
     ) {
       this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
@@ -368,48 +517,38 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: 'PROPOSAL_VALIDATION_FAILED'
+        ...selectionFields(persistedSelection ?? executor.identity),
+        reason: 'EXECUTOR_SELECTION_CONFLICT'
       }
     }
 
-    if (proposal.autoAuthorized === true && !allowAlwaysApprove) {
-      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
-      return {
-        status: 'REFUSED',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'AUTO_AUTHORIZED_NOT_REQUESTED'
-      }
-    }
-
-    if (
-      allowAlwaysApprove &&
-      hostPolicy !== undefined &&
-      (proposal.policy?.mode !== 'AUTONOMOUS_TRUSTED' ||
-        proposal.policy?.scope !== 'REPOSITORY_WORKTREES' ||
-        proposal.autoAuthorized !== true)
-    ) {
-      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
-      return {
-        status: 'REFUSED',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'POLICY_CHANGED'
-      }
-    }
-
-    // 9. CAS: PREPARED → STARTING
+    // 7. CAS: PREPARED -> STARTING with persisted executor selection BEFORE spawn
     let startingAttempt: ExecutionAttemptRecord
     try {
-      startingAttempt = this.smcService.transitionAttemptToStarting(validRepoId, cleanAttemptId, attempt.revision)
+      startingAttempt = this.smcService.transitionAttemptToStarting(
+        validRepoId,
+        cleanAttemptId,
+        attempt.revision,
+        preparedSelection
+      )
     } catch (err: any) {
       if (err instanceof ExecutionAttemptConflictError) {
-        // Re-read current state and observe; keep retention active for the active attempt
         const current = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+        if (current?.executorSelection && !executorSelectionsEqual(current.executorSelection, executor.identity)) {
+          if (current.status !== 'STARTING' && current.status !== 'RUNNING') {
+            this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
+          }
+          return {
+            status: 'UNAVAILABLE',
+            attemptId: cleanAttemptId,
+            sessionId: cleanSessionId,
+            repositoryId: validRepoId,
+            ...selectionFields(current.executorSelection),
+            reason: `EXECUTOR_SELECTION_CONFLICT: attempt locked to (${formatExecutorSelection(current.executorSelection)})`
+          }
+        }
         if (current?.status === 'STARTING' || current?.status === 'RUNNING') {
-          return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId)
+          return this.observeRunningAttempt(executor, cleanAttemptId, cleanSessionId, validRepoId)
         }
       }
       this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
@@ -418,25 +557,20 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(preparedSelection),
         reason: `CAS_STARTING_ERROR: ${err?.message ?? String(err)}`
       }
     }
 
-    // 10. Start CLI execution — operationId === attemptId (durable correlation)
-    if (!cliService.start) {
-      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'CLI_START_NOT_SUPPORTED'
-      }
-    }
-
-    let snapshot: CliExecutionSnapshot
+    // 8. Start execution via agnostic executor port
+    let observation: ExecutorRunObservation
     try {
-      snapshot = await cliService.start({ proposalId: proposal.proposalId, operationId: cleanAttemptId })
+      observation = await executor.startAttempt({
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId,
+        handle: preparation.handle
+      })
     } catch (err: any) {
       // After CAS to STARTING, start threw — state is ambiguous; leave attempt STARTING and keep retention
       return {
@@ -444,93 +578,45 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: `CLI_START_ERROR: ${err?.message ?? String(err)}`
+        ...selectionFields(preparedSelection),
+        reason: err?.message ?? String(err)
       }
     }
 
-    // 11. Observe snapshot and transition accordingly
-    if (snapshot.status === 'AWAITING_APPROVAL') {
-      // Prompts permanecem retidos enquanto aguarda aprovação
-      return {
-        status: 'AWAITING_APPROVAL',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase,
-        unitFlowStatus: 'RESERVED',
-        ...timeoutMetadata(snapshot)
-      }
-    }
-
-    if (snapshot.status === 'RUNNING') {
-      try {
-        this.smcService.transitionAttemptToRunning(
-          validRepoId,
-          cleanAttemptId,
-          startingAttempt.revision,
-          attempt.unitId,
-          unitState.revision
-        )
-      } catch (err: any) {
-        if (!(err instanceof ExecutionAttemptConflictError)) {
-          return {
-            status: 'UNKNOWN',
-            attemptId: cleanAttemptId,
-            sessionId: cleanSessionId,
-            repositoryId: validRepoId,
-            reason: `CAS_RUNNING_ERROR: ${err?.message ?? String(err)}`
-          }
-        }
-      }
-      const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
-      if (recheck?.status === 'RUNNING') {
-        return {
-          status: 'RUNNING',
-          attemptId: cleanAttemptId,
-          sessionId: cleanSessionId,
-          repositoryId: validRepoId,
-          cliStatus: snapshot.status,
-          cliPhase: snapshot.phase,
-          unitFlowStatus: 'EXECUTING',
-          ...timeoutMetadata(snapshot)
-        }
-      }
+    if (!executorSelectionsEqual(observation.selection, preparedSelection)) {
       return {
         status: 'UNKNOWN',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: 'CAS_RUNNING_NOT_ESTABLISHED'
+        ...selectionFields(preparedSelection),
+        reason: 'EXECUTOR_SELECTION_CONFLICT'
       }
     }
 
-    if (snapshot.status === 'REFUSED') {
-      this.stageService.releaseAttemptRetention(cleanAttemptId)
+    if (observation.status === 'UNAVAILABLE') {
+      this.stageService.releaseStageRetention(options.stageOperationId, cleanAttemptId)
       return {
-        status: 'REFUSED',
+        status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        cliStatus: snapshot.status,
-        unitFlowStatus: 'RESERVED',
-        reason: snapshot.diagnostic ?? 'NATIVE_APPROVAL_REFUSED',
-        ...timeoutMetadata(snapshot)
+        ...selectionFields(observation.selection),
+        reason: observation.reason ?? 'EXECUTOR_UNAVAILABLE',
+        ...timeoutMetadata(observation)
       }
     }
 
-    // Terminal states: SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, INTERRUPTED
-    this.stageService.releaseAttemptRetention(cleanAttemptId)
-    return {
-      status: 'TERMINAL_OBSERVED',
-      attemptId: cleanAttemptId,
-      sessionId: cleanSessionId,
-      repositoryId: validRepoId,
-      cliStatus: snapshot.status,
-      cliPhase: snapshot.phase,
-      ...(snapshot.status !== 'SUCCEEDED' ? { reason: classifyObservedGrokOutcome(snapshot) } : {}),
-      ...timeoutMetadata(snapshot)
-    }
+    return this.applyObservationToStartOrObserve(
+      observation,
+      validRepoId,
+      cleanSessionId,
+      cleanAttemptId,
+      startingAttempt.revision,
+      attempt.unitId,
+      unitState.revision,
+      false
+    )
   }
 
   async observeUnitExecution(
@@ -539,40 +625,17 @@ export class UnitExecutionService {
     attemptId: string,
     options?: { readOnly?: boolean }
   ): Promise<UnitExecutionResult> {
-    let validRepoId: string
-    try {
-      validRepoId = validateRepositoryId(repositoryId)
-    } catch {
+    const ids = validateAttemptIdentifiers(repositoryId, sessionId, attemptId)
+    if (!ids.ok) {
       return {
         status: 'UNAVAILABLE',
-        attemptId: attemptId ?? '',
-        sessionId: sessionId ?? '',
-        repositoryId: repositoryId ?? '',
-        reason: 'INVALID_REPOSITORY_ID'
+        attemptId: ids.attemptId,
+        sessionId: ids.sessionId,
+        repositoryId: ids.repositoryId,
+        reason: ids.reason
       }
     }
-
-    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: attemptId ?? '',
-        sessionId: sessionId ?? '',
-        repositoryId: validRepoId,
-        reason: 'INVALID_SESSION_ID'
-      }
-    }
-    const cleanSessionId = sessionId.trim().toLowerCase()
-
-    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: attemptId ?? '',
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'INVALID_ATTEMPT_ID'
-      }
-    }
-    const cleanAttemptId = attemptId.trim().toLowerCase()
+    const { validRepoId, cleanSessionId, cleanAttemptId } = ids
 
     const attempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
     if (!attempt || attempt.sessionId !== cleanSessionId) {
@@ -591,22 +654,233 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
         reason: `ATTEMPT_NOT_ACTIVE: status=${attempt.status}`
       }
     }
 
-    const cliService = await this.cliResolver(validRepoId)
-    if (!cliService || !cliService.isEnabled() || !cliService.get) {
+    const executor = await this.executorResolver(validRepoId, attempt.executorSelection)
+    if (!executor) {
       return {
         status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: 'CLI_UNAVAILABLE'
+        ...selectionFields(attempt.executorSelection),
+        reason: 'EXECUTOR_UNAVAILABLE'
       }
     }
 
-    return this.observeRunningAttempt(cliService, cleanAttemptId, cleanSessionId, validRepoId, options)
+    const availability = await executor.checkAvailability(validRepoId)
+    if (!availability.available) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection ?? executor.identity),
+        reason: availability.reason ?? 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    if (attempt.executorSelection && !executorSelectionsEqual(attempt.executorSelection, executor.identity)) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: `EXECUTOR_SELECTION_CONFLICT: attempt locked to (${formatExecutorSelection(attempt.executorSelection)}), resolved executor is (${formatExecutorSelection(executor.identity)})`
+      }
+    }
+
+    return this.observeRunningAttempt(executor, cleanAttemptId, cleanSessionId, validRepoId, options)
+  }
+
+  async cancelUnitExecution(
+    repositoryId: string,
+    sessionId: string,
+    attemptId: string
+  ): Promise<UnitExecutionResult> {
+    const ids = validateAttemptIdentifiers(repositoryId, sessionId, attemptId)
+    if (!ids.ok) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: ids.attemptId,
+        sessionId: ids.sessionId,
+        repositoryId: ids.repositoryId,
+        reason: ids.reason
+      }
+    }
+    const { validRepoId, cleanSessionId, cleanAttemptId } = ids
+
+    const attempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+    if (!attempt || attempt.sessionId !== cleanSessionId) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        reason: 'ATTEMPT_NOT_FOUND'
+      }
+    }
+
+    const store = this.smcService.getStore(validRepoId)
+    if (attempt.status === 'COMPLETED' || attempt.status === 'FAILED' || attempt.status === 'CANCELLED') {
+      const unitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+      return {
+        status: 'TERMINAL_OBSERVED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        unitFlowStatus: unitState?.status,
+        reason: `ATTEMPT_ALREADY_TERMINAL: ${attempt.status}`
+      }
+    }
+
+    if (attempt.status !== 'STARTING' && attempt.status !== 'RUNNING') {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: `ATTEMPT_NOT_ACTIVE: status=${attempt.status}`
+      }
+    }
+
+    const executor = await this.executorResolver(validRepoId, attempt.executorSelection)
+    if (!executor) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    const availability = await executor.checkAvailability(validRepoId)
+    if (!availability.available) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection ?? executor.identity),
+        reason: availability.reason ?? 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    if (attempt.executorSelection && !executorSelectionsEqual(attempt.executorSelection, executor.identity)) {
+      return {
+        status: 'UNAVAILABLE',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: `EXECUTOR_SELECTION_CONFLICT: attempt locked to (${formatExecutorSelection(attempt.executorSelection)}), resolved executor is (${formatExecutorSelection(executor.identity)})`
+      }
+    }
+
+    let observation: ExecutorRunObservation
+    try {
+      observation = await executor.cancelAttempt({
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId
+      })
+    } catch (err: any) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection ?? executor.identity),
+        reason: err?.message ?? String(err)
+      }
+    }
+
+    if (attempt.executorSelection && !executorSelectionsEqual(observation.selection, attempt.executorSelection)) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: 'EXECUTOR_SELECTION_CONFLICT'
+      }
+    }
+
+    if (observation.status === 'REFUSED') {
+      this.stageService.releaseAttemptRetention(cleanAttemptId)
+      return {
+        status: 'REFUSED',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(observation.selection),
+        ...legacyStatusMetadata(observation),
+        unitFlowStatus: 'RESERVED',
+        reason: observation.reason ?? 'NATIVE_APPROVAL_REFUSED',
+        ...timeoutMetadata(observation)
+      }
+    }
+
+    const confirmed = await this.verifyTerminationConfirmed(
+      executor,
+      validRepoId,
+      cleanSessionId,
+      cleanAttemptId,
+      observation,
+      false
+    )
+
+    if (!confirmed || !isTerminalRunStatus(observation.status)) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(observation.selection),
+        ...legacyStatusMetadata(observation),
+        reason: observation.termination?.reason ?? observation.reason ?? 'TERMINATION_UNCONFIRMED',
+        ...timeoutMetadata(observation)
+      }
+    }
+
+    this.stageService.releaseAttemptRetention(cleanAttemptId)
+    return {
+      status: 'TERMINAL_OBSERVED',
+      attemptId: cleanAttemptId,
+      sessionId: cleanSessionId,
+      repositoryId: validRepoId,
+      ...selectionFields(observation.selection),
+      ...legacyStatusMetadata(observation),
+      ...(observation.status !== 'SUCCEEDED' ? { reason: observation.reason ?? observation.status } : {}),
+      ...timeoutMetadata(observation),
+      ...outcomeMetadata(observation)
+    }
+  }
+
+  async subscribeAttemptEvents(
+    repositoryId: string,
+    sessionId: string,
+    attemptId: string,
+    listener: (event: ExecutorEvent) => void
+  ): Promise<(() => void) | null> {
+    const ids = validateAttemptIdentifiers(repositoryId, sessionId, attemptId)
+    if (!ids.ok) return null
+    const attempt = this.smcService.getExecutionAttempt(ids.validRepoId, ids.cleanAttemptId)
+    if (!attempt || attempt.sessionId !== ids.cleanSessionId) return null
+    const executor = await this.executorResolver(ids.validRepoId, attempt.executorSelection)
+    if (!executor?.subscribe) return null
+    if (attempt.executorSelection && !executorSelectionsEqual(attempt.executorSelection, executor.identity)) {
+      return null
+    }
+    return executor.subscribe(ids.cleanAttemptId, listener)
   }
 
   async settleUnitExecution(
@@ -614,40 +888,17 @@ export class UnitExecutionService {
     sessionId: string,
     attemptId: string
   ): Promise<UnitSettlementResult> {
-    let validRepoId: string
-    try {
-      validRepoId = validateRepositoryId(repositoryId)
-    } catch {
+    const ids = validateAttemptIdentifiers(repositoryId, sessionId, attemptId)
+    if (!ids.ok) {
       return {
         status: 'UNKNOWN',
-        attemptId: attemptId ?? '',
-        sessionId: sessionId ?? '',
-        repositoryId: repositoryId ?? '',
-        reason: 'INVALID_REPOSITORY_ID'
+        attemptId: ids.attemptId,
+        sessionId: ids.sessionId,
+        repositoryId: ids.repositoryId,
+        reason: ids.reason
       }
     }
-
-    if (typeof sessionId !== 'string' || !sessionId.trim() || !UUID_REGEX.test(sessionId.trim())) {
-      return {
-        status: 'UNKNOWN',
-        attemptId: attemptId ?? '',
-        sessionId: sessionId ?? '',
-        repositoryId: validRepoId,
-        reason: 'INVALID_SESSION_ID'
-      }
-    }
-    const cleanSessionId = sessionId.trim().toLowerCase()
-
-    if (typeof attemptId !== 'string' || !attemptId.trim() || !UUID_REGEX.test(attemptId.trim())) {
-      return {
-        status: 'UNKNOWN',
-        attemptId: attemptId ?? '',
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'INVALID_ATTEMPT_ID'
-      }
-    }
-    const cleanAttemptId = attemptId.trim().toLowerCase()
+    const { validRepoId, cleanSessionId, cleanAttemptId } = ids
 
     let attempt: ExecutionAttemptRecord | null
     try {
@@ -674,7 +925,7 @@ export class UnitExecutionService {
 
     const store = this.smcService.getStore(validRepoId)
 
-    // Replay / idempotência: se já finalizado em estado terminal
+    // Replay / idempotency for already settled terminal states
     if (attempt.status === 'COMPLETED') {
       const unitState = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
       return {
@@ -686,6 +937,7 @@ export class UnitExecutionService {
         unitId: attempt.unitId,
         attemptStatus: 'COMPLETED',
         unitFlowStatus: unitState?.status,
+        ...selectionFields(attempt.executorSelection),
         cliStatus: 'SUCCEEDED'
       }
     }
@@ -701,6 +953,7 @@ export class UnitExecutionService {
         unitId: attempt.unitId,
         attemptStatus: attempt.status,
         unitFlowStatus: unitState?.status,
+        ...selectionFields(attempt.executorSelection),
         cliStatus: attempt.status
       }
     }
@@ -711,6 +964,7 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
         reason: `ATTEMPT_NOT_ACTIVE: status=${attempt.status}`
       }
     }
@@ -748,32 +1002,82 @@ export class UnitExecutionService {
       }
     }
 
-    const cliService = await this.cliResolver(validRepoId)
-    if (!cliService || !cliService.isEnabled() || !cliService.get) {
+    const executor = await this.executorResolver(validRepoId, attempt.executorSelection)
+    if (!executor) {
       return {
         status: 'UNKNOWN',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: 'CLI_UNAVAILABLE'
+        ...selectionFields(attempt.executorSelection),
+        reason: 'EXECUTOR_UNAVAILABLE'
       }
     }
 
-    let snapshot: CliExecutionSnapshot
+    const availability = await executor.checkAvailability(validRepoId)
+    if (!availability.available) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection ?? executor.identity),
+        reason: availability.reason ?? 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    if (attempt.executorSelection && !executorSelectionsEqual(attempt.executorSelection, executor.identity)) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: `EXECUTOR_SELECTION_CONFLICT: attempt locked to (${formatExecutorSelection(attempt.executorSelection)}), resolved executor is (${formatExecutorSelection(executor.identity)})`
+      }
+    }
+
+    let observation: ExecutorRunObservation
     try {
-      snapshot = await cliService.get({ operationId: cleanAttemptId })
+      observation = await executor.observeAttempt({
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId
+      })
     } catch (err: any) {
       return {
         status: 'UNKNOWN',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: `CLI_GET_ERROR: ${err?.message ?? String(err)}`
+        ...selectionFields(attempt.executorSelection ?? executor.identity),
+        reason: err?.message ?? String(err)
       }
     }
 
-    // Classificação dos fatos
-    if (snapshot.status === 'AWAITING_APPROVAL') {
+    if (attempt.executorSelection && !executorSelectionsEqual(attempt.executorSelection, observation.selection)) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: 'EXECUTOR_SELECTION_CONFLICT'
+      }
+    }
+
+    if (observation.status === 'UNAVAILABLE' || observation.status === 'UNKNOWN') {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(observation.selection),
+        reason: observation.reason ?? 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    if (observation.status === 'AWAITING_APPROVAL') {
       return {
         status: 'ACTIVE',
         attemptId: cleanAttemptId,
@@ -783,12 +1087,12 @@ export class UnitExecutionService {
         unitId: attempt.unitId,
         attemptStatus: 'STARTING',
         unitFlowStatus: 'RESERVED',
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase
+        ...selectionFields(observation.selection),
+        ...legacyStatusMetadata(observation)
       }
     }
 
-    if (snapshot.status === 'RUNNING') {
+    if (observation.status === 'RUNNING') {
       if (attempt.status === 'STARTING') {
         try {
           this.smcService.transitionAttemptToRunning(
@@ -811,12 +1115,12 @@ export class UnitExecutionService {
         unitId: attempt.unitId,
         attemptStatus: currentAttempt?.status ?? 'RUNNING',
         unitFlowStatus: currentUnit?.status ?? 'EXECUTING',
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase
+        ...selectionFields(observation.selection),
+        ...legacyStatusMetadata(observation)
       }
     }
 
-    if (snapshot.phase === 'TERMINATION_UNCONFIRMED') {
+    if (observation.phase === 'TERMINATION_UNCONFIRMED') {
       return {
         status: 'UNKNOWN',
         attemptId: cleanAttemptId,
@@ -826,23 +1130,23 @@ export class UnitExecutionService {
         unitId: attempt.unitId,
         attemptStatus: attempt.status,
         unitFlowStatus: unitState.status,
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase,
-        exitCode: snapshot.exitCode,
+        ...selectionFields(observation.selection),
+        ...legacyStatusMetadata(observation),
+        exitCode: observation.exitCode,
         reason: 'TERMINATION_UNCONFIRMED'
       }
     }
 
-    if (snapshot.status === 'SUCCEEDED') {
-      const isCleanTree = Boolean(
-        snapshot.treeObservation &&
-        snapshot.treeObservation.activeProcesses === 0 &&
-        snapshot.treeObservation.handlesClosed === true
+    if (observation.status === 'SUCCEEDED') {
+      const confirmed = await this.verifyTerminationConfirmed(
+        executor,
+        validRepoId,
+        cleanSessionId,
+        cleanAttemptId,
+        observation,
+        true
       )
-      const isTerminalPhase = snapshot.phase === 'TERMINAL'
-      const isZeroExit = snapshot.exitCode === 0
-
-      if (!isCleanTree || !isTerminalPhase || !isZeroExit) {
+      if (!confirmed) {
         return {
           status: 'UNKNOWN',
           attemptId: cleanAttemptId,
@@ -852,172 +1156,89 @@ export class UnitExecutionService {
           unitId: attempt.unitId,
           attemptStatus: attempt.status,
           unitFlowStatus: unitState.status,
-          cliStatus: snapshot.status,
-          cliPhase: snapshot.phase,
-          exitCode: snapshot.exitCode,
+          ...selectionFields(observation.selection),
+          ...legacyStatusMetadata(observation),
+          exitCode: observation.exitCode,
           reason: 'TERMINATION_UNCONFIRMED'
         }
       }
 
-      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
-      const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
-
-      let settledAttempt: ExecutionAttemptRecord
-      try {
-        settledAttempt = this.smcService.transitionAttemptToSettled(validRepoId, {
-          attemptId: cleanAttemptId,
-          expectedAttemptRevision: currentAttempt.revision,
-          unitId: attempt.unitId,
-          expectedUnitRevision: currentUnit.revision,
-          terminalOutcome: 'SUCCEEDED',
-            entryData: {
-              title: `Execution attempt completed: ${attempt.unitId}`,
-              body: JSON.stringify({
-                attemptId: cleanAttemptId,
-                unitId: attempt.unitId,
-                planId: attempt.planId,
-                terminalOutcome: 'SUCCEEDED',
-                cliStatus: snapshot.status,
-                cliPhase: snapshot.phase,
-                exitCode: snapshot.exitCode,
-                durationMs: snapshot.durationMs,
-                ...timeoutMetadata(snapshot),
-                treeObservation: snapshot.treeObservation
-              }),
-              kind: 'RESULT'
-            }
-          })
-      } catch (err: any) {
-        if (err instanceof ExecutionAttemptConflictError) {
-          const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
-          if (recheck?.status === 'COMPLETED') {
-            settledAttempt = recheck
-          } else {
-            return {
-              status: 'UNKNOWN',
-              attemptId: cleanAttemptId,
-              sessionId: cleanSessionId,
-              repositoryId: validRepoId,
-              reason: `SETTLE_CONFLICT: ${err.message}`
-            }
-          }
-        } else {
-          return {
-            status: 'UNKNOWN',
+      return this.settleAttemptWithSmc(
+        validRepoId,
+        cleanSessionId,
+        cleanAttemptId,
+        attempt,
+        unitState.revision,
+        observation,
+        'SUCCEEDED',
+        'VALIDATION_READY',
+        {
+          title: `Execution attempt completed: ${attempt.unitId}`,
+          body: JSON.stringify({
             attemptId: cleanAttemptId,
-            sessionId: cleanSessionId,
-            repositoryId: validRepoId,
-            reason: `SETTLE_ERROR: ${err?.message ?? String(err)}`
-          }
+            unitId: attempt.unitId,
+            planId: attempt.planId,
+            terminalOutcome: 'SUCCEEDED',
+            ...legacyStatusMetadata(observation),
+            exitCode: observation.exitCode,
+            durationMs: observation.durationMs,
+            ...timeoutMetadata(observation),
+            ...(observation.legacyExecution?.treeObservation !== undefined
+              ? { treeObservation: observation.legacyExecution.treeObservation }
+              : {}),
+            executorSelection: observation.selection,
+            ...(observation.termination ? { termination: observation.termination } : {}),
+            ...(observation.result ? { result: observation.result } : {})
+          }),
+          kind: 'RESULT'
         }
-      }
-
-      this.stageService.releaseAttemptRetention(cleanAttemptId)
-
-      const finalUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
-      return {
-        status: 'VALIDATION_READY',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        planId: attempt.planId,
-        unitId: attempt.unitId,
-        attemptStatus: settledAttempt.status,
-        unitFlowStatus: finalUnit?.status,
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase,
-        exitCode: snapshot.exitCode,
-        ...timeoutMetadata(snapshot)
-      }
+      )
     }
 
-    if (snapshot.status === 'REFUSED') {
-      const refusalReason = snapshot.diagnostic ?? 'NATIVE_APPROVAL_REFUSED'
-      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
-      const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
-
-      let settledAttempt: ExecutionAttemptRecord
-      try {
-        settledAttempt = this.smcService.transitionAttemptToSettled(validRepoId, {
-          attemptId: cleanAttemptId,
-          expectedAttemptRevision: currentAttempt.revision,
-          unitId: attempt.unitId,
-          expectedUnitRevision: currentUnit.revision,
-          terminalOutcome: 'CANCELLED',
-          entryData: {
-            title: `Execution attempt refused: ${attempt.unitId}`,
-            body: JSON.stringify({
-              attemptId: cleanAttemptId,
-              unitId: attempt.unitId,
-              planId: attempt.planId,
-              terminalOutcome: 'CANCELLED',
-              cliStatus: snapshot.status,
-              cliPhase: snapshot.phase,
-              reason: refusalReason,
-              ...timeoutMetadata(snapshot)
-            }),
-            kind: 'PENDING'
-          }
-        })
-      } catch (err: any) {
-        if (err instanceof ExecutionAttemptConflictError) {
-          const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
-          if (recheck?.status === 'CANCELLED' || recheck?.status === 'FAILED') {
-            settledAttempt = recheck
-          } else {
-            return {
-              status: 'UNKNOWN',
-              attemptId: cleanAttemptId,
-              sessionId: cleanSessionId,
-              repositoryId: validRepoId,
-              reason: `SETTLE_CONFLICT: ${err.message}`
-            }
-          }
-        } else {
-          return {
-            status: 'UNKNOWN',
+    if (observation.status === 'REFUSED') {
+      const refusalReason = observation.reason ?? 'NATIVE_APPROVAL_REFUSED'
+      return this.settleAttemptWithSmc(
+        validRepoId,
+        cleanSessionId,
+        cleanAttemptId,
+        attempt,
+        unitState.revision,
+        observation,
+        'CANCELLED',
+        'RECONCILING',
+        {
+          title: `Execution attempt refused: ${attempt.unitId}`,
+          body: JSON.stringify({
             attemptId: cleanAttemptId,
-            sessionId: cleanSessionId,
-            repositoryId: validRepoId,
-            reason: `SETTLE_ERROR: ${err?.message ?? String(err)}`
-          }
-        }
-      }
-
-      this.stageService.releaseAttemptRetention(cleanAttemptId)
-
-      const finalUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
-      return {
-        status: 'RECONCILING',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        planId: attempt.planId,
-        unitId: attempt.unitId,
-        attemptStatus: settledAttempt.status,
-        unitFlowStatus: finalUnit?.status,
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase,
-        exitCode: snapshot.exitCode,
-        reason: refusalReason,
-        ...timeoutMetadata(snapshot)
-      }
+            unitId: attempt.unitId,
+            planId: attempt.planId,
+            terminalOutcome: 'CANCELLED',
+            ...legacyStatusMetadata(observation),
+            reason: refusalReason,
+            ...timeoutMetadata(observation),
+            executorSelection: observation.selection
+          }),
+          kind: 'PENDING'
+        },
+        refusalReason
+      )
     }
 
     if (
-      snapshot.status === 'FAILED' ||
-      snapshot.status === 'TIMED_OUT' ||
-      snapshot.status === 'CANCELLED' ||
-      snapshot.status === 'INTERRUPTED'
+      observation.status === 'FAILED' ||
+      observation.status === 'TIMED_OUT' ||
+      observation.status === 'CANCELLED' ||
+      observation.status === 'INTERRUPTED'
     ) {
-      const isCleanTree = Boolean(
-        snapshot.treeObservation &&
-        snapshot.treeObservation.activeProcesses === 0 &&
-        snapshot.treeObservation.handlesClosed === true
+      const confirmed = await this.verifyTerminationConfirmed(
+        executor,
+        validRepoId,
+        cleanSessionId,
+        cleanAttemptId,
+        observation,
+        false
       )
-      const isTerminalPhase = snapshot.phase === 'TERMINAL'
-
-      if (!isCleanTree || !isTerminalPhase) {
+      if (!confirmed) {
         return {
           status: 'UNKNOWN',
           attemptId: cleanAttemptId,
@@ -1027,88 +1248,52 @@ export class UnitExecutionService {
           unitId: attempt.unitId,
           attemptStatus: attempt.status,
           unitFlowStatus: unitState.status,
-          cliStatus: snapshot.status,
-          cliPhase: snapshot.phase,
-          exitCode: snapshot.exitCode,
+          ...selectionFields(observation.selection),
+          ...legacyStatusMetadata(observation),
+          exitCode: observation.exitCode,
           reason: 'TERMINATION_UNCONFIRMED'
         }
       }
 
-      const classifiedReason = classifyObservedGrokOutcome(snapshot)
-      const terminalOutcome = snapshot.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED'
-      const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
-      const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) ?? unitState
+      const classifiedReason = observation.reason ?? observation.status
+      const terminalOutcome = observation.status === 'CANCELLED' ? 'CANCELLED' : 'FAILED'
+      const rawStatusLabel = observation.legacyExecution?.status ?? observation.status
 
-      let settledAttempt: ExecutionAttemptRecord
-      try {
-        settledAttempt = this.smcService.transitionAttemptToSettled(validRepoId, {
-          attemptId: cleanAttemptId,
-          expectedAttemptRevision: currentAttempt.revision,
-          unitId: attempt.unitId,
-          expectedUnitRevision: currentUnit.revision,
-          terminalOutcome,
-          entryData: {
-            title: `Execution attempt failed: ${attempt.unitId} (${snapshot.status})`,
-            body: JSON.stringify({
-              attemptId: cleanAttemptId,
-              unitId: attempt.unitId,
-              planId: attempt.planId,
-              terminalOutcome,
-              cliStatus: snapshot.status,
-              cliPhase: snapshot.phase,
-              exitCode: snapshot.exitCode,
-              durationMs: snapshot.durationMs,
-              ...timeoutMetadata(snapshot),
-              treeObservation: snapshot.treeObservation,
-              diagnostic: snapshot.diagnostic,
-              reason: classifiedReason
-            }),
-            kind: 'PENDING'
-          }
-        })
-      } catch (err: any) {
-        if (err instanceof ExecutionAttemptConflictError) {
-          const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
-          if (recheck?.status === 'FAILED' || recheck?.status === 'CANCELLED') {
-            settledAttempt = recheck
-          } else {
-            return {
-              status: 'UNKNOWN',
-              attemptId: cleanAttemptId,
-              sessionId: cleanSessionId,
-              repositoryId: validRepoId,
-              reason: `SETTLE_CONFLICT: ${err.message}`
-            }
-          }
-        } else {
-          return {
-            status: 'UNKNOWN',
+      return this.settleAttemptWithSmc(
+        validRepoId,
+        cleanSessionId,
+        cleanAttemptId,
+        attempt,
+        unitState.revision,
+        observation,
+        terminalOutcome,
+        'RECONCILING',
+        {
+          title: `Execution attempt failed: ${attempt.unitId} (${rawStatusLabel})`,
+          body: JSON.stringify({
             attemptId: cleanAttemptId,
-            sessionId: cleanSessionId,
-            repositoryId: validRepoId,
-            reason: `SETTLE_ERROR: ${err?.message ?? String(err)}`
-          }
-        }
-      }
-
-      this.stageService.releaseAttemptRetention(cleanAttemptId)
-
-      const finalUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
-      return {
-        status: 'RECONCILING',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        planId: attempt.planId,
-        unitId: attempt.unitId,
-        attemptStatus: settledAttempt.status,
-        unitFlowStatus: finalUnit?.status,
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase,
-        exitCode: snapshot.exitCode,
-        reason: classifiedReason,
-        ...timeoutMetadata(snapshot)
-      }
+            unitId: attempt.unitId,
+            planId: attempt.planId,
+            terminalOutcome,
+            ...legacyStatusMetadata(observation),
+            exitCode: observation.exitCode,
+            durationMs: observation.durationMs,
+            ...timeoutMetadata(observation),
+            ...(observation.legacyExecution?.treeObservation !== undefined
+              ? { treeObservation: observation.legacyExecution.treeObservation }
+              : {}),
+            ...(observation.legacyExecution?.diagnostic !== undefined
+              ? { diagnostic: observation.legacyExecution.diagnostic }
+              : {}),
+            reason: classifiedReason,
+            executorSelection: observation.selection,
+            ...(observation.termination ? { termination: observation.termination } : {}),
+            ...(observation.result ? { result: observation.result } : {})
+          }),
+          kind: 'PENDING'
+        },
+        classifiedReason
+      )
     }
 
     return {
@@ -1116,80 +1301,234 @@ export class UnitExecutionService {
       attemptId: cleanAttemptId,
       sessionId: cleanSessionId,
       repositoryId: validRepoId,
-      reason: `UNRECOGNIZED_CLI_STATUS: ${snapshot.status}`
+      ...selectionFields(observation.selection),
+      reason: `UNRECOGNIZED_EXECUTOR_STATUS: ${observation.status}`
+    }
+  }
+
+  private async verifyTerminationConfirmed(
+    executor: UnitExecutorPort,
+    validRepoId: string,
+    cleanSessionId: string,
+    cleanAttemptId: string,
+    observation: ExecutorRunObservation,
+    requireZeroExitWhenPresent: boolean
+  ): Promise<boolean> {
+    if (observation.phase !== 'TERMINAL') {
+      return false
+    }
+    if (
+      requireZeroExitWhenPresent &&
+      observation.exitCode !== undefined &&
+      observation.exitCode !== null &&
+      observation.exitCode !== 0
+    ) {
+      return false
+    }
+
+    let termination: ExecutorTerminationConfirmation | undefined = observation.termination
+    if (!termination && executor.confirmTermination) {
+      try {
+        termination = await executor.confirmTermination({
+          repositoryId: validRepoId,
+          sessionId: cleanSessionId,
+          attemptId: cleanAttemptId
+        })
+      } catch {
+        return false
+      }
+    }
+
+    return termination?.confirmed === true
+  }
+
+  private settleAttemptWithSmc(
+    validRepoId: string,
+    cleanSessionId: string,
+    cleanAttemptId: string,
+    attempt: ExecutionAttemptRecord,
+    fallbackUnitRevision: number,
+    observation: ExecutorRunObservation,
+    terminalOutcome: 'SUCCEEDED' | 'FAILED' | 'CANCELLED',
+    resultStatus: 'VALIDATION_READY' | 'RECONCILING',
+    entryData: { title: string; body: string; kind: 'RESULT' | 'PENDING' },
+    resultReason?: string
+  ): UnitSettlementResult {
+    const store = this.smcService.getStore(validRepoId)
+    const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId) ?? attempt
+    const currentUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+    const expectedUnitRevision = currentUnit?.revision ?? fallbackUnitRevision
+
+    let settledAttempt: ExecutionAttemptRecord
+    try {
+      settledAttempt = this.smcService.transitionAttemptToSettled(validRepoId, {
+        attemptId: cleanAttemptId,
+        expectedAttemptRevision: currentAttempt.revision,
+        unitId: attempt.unitId,
+        expectedUnitRevision,
+        terminalOutcome,
+        entryData
+      })
+    } catch (err: any) {
+      if (err instanceof ExecutionAttemptConflictError) {
+        const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+        const expectedStates =
+          terminalOutcome === 'SUCCEEDED' ? ['COMPLETED'] : ['FAILED', 'CANCELLED']
+        if (recheck && expectedStates.includes(recheck.status)) {
+          settledAttempt = recheck
+        } else {
+          return {
+            status: 'UNKNOWN',
+            attemptId: cleanAttemptId,
+            sessionId: cleanSessionId,
+            repositoryId: validRepoId,
+            reason: `SETTLE_CONFLICT: ${err.message}`
+          }
+        }
+      } else {
+        return {
+          status: 'UNKNOWN',
+          attemptId: cleanAttemptId,
+          sessionId: cleanSessionId,
+          repositoryId: validRepoId,
+          reason: `SETTLE_ERROR: ${err?.message ?? String(err)}`
+        }
+      }
+    }
+
+    this.stageService.releaseAttemptRetention(cleanAttemptId)
+
+    const finalUnit = store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId)
+    return {
+      status: resultStatus,
+      attemptId: cleanAttemptId,
+      sessionId: cleanSessionId,
+      repositoryId: validRepoId,
+      planId: attempt.planId,
+      unitId: attempt.unitId,
+      attemptStatus: settledAttempt.status,
+      unitFlowStatus: finalUnit?.status,
+      ...selectionFields(observation.selection),
+      ...legacyStatusMetadata(observation),
+      exitCode: observation.exitCode,
+      ...(resultReason !== undefined ? { reason: resultReason } : {}),
+      ...timeoutMetadata(observation),
+      ...outcomeMetadata(observation)
     }
   }
 
   private async observeRunningAttempt(
-    cliService: CliExecutionPort,
+    executor: UnitExecutorPort,
     cleanAttemptId: string,
     cleanSessionId: string,
     validRepoId: string,
     options?: { readOnly?: boolean }
   ): Promise<UnitExecutionResult> {
-    if (!cliService.get) {
-      return {
-        status: 'UNKNOWN',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        reason: 'CLI_GET_NOT_SUPPORTED'
-      }
-    }
-
-    let snapshot: CliExecutionSnapshot
+    let observation: ExecutorRunObservation
     try {
-      snapshot = await cliService.get({ operationId: cleanAttemptId })
+      observation = await executor.observeAttempt({
+        repositoryId: validRepoId,
+        sessionId: cleanSessionId,
+        attemptId: cleanAttemptId
+      })
     } catch (err: any) {
       return {
         status: 'UNKNOWN',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        reason: `CLI_GET_ERROR: ${err?.message ?? String(err)}`
+        ...selectionFields(executor.identity),
+        reason: err?.message ?? String(err)
       }
     }
 
-    if (snapshot.status === 'AWAITING_APPROVAL') {
+    const attempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
+    if (attempt?.executorSelection && !executorSelectionsEqual(attempt.executorSelection, observation.selection)) {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(attempt.executorSelection),
+        reason: 'EXECUTOR_SELECTION_CONFLICT'
+      }
+    }
+
+    if (observation.status === 'UNKNOWN' || observation.status === 'UNAVAILABLE') {
+      return {
+        status: 'UNKNOWN',
+        attemptId: cleanAttemptId,
+        sessionId: cleanSessionId,
+        repositoryId: validRepoId,
+        ...selectionFields(observation.selection),
+        reason: observation.reason ?? 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    const store = this.smcService.getStore(validRepoId)
+    const unitState = attempt ? store.getUnitState(cleanSessionId, attempt.planId, attempt.unitId) : null
+
+    return this.applyObservationToStartOrObserve(
+      observation,
+      validRepoId,
+      cleanSessionId,
+      cleanAttemptId,
+      attempt?.revision ?? 0,
+      attempt?.unitId ?? '',
+      unitState?.revision ?? 0,
+      Boolean(options?.readOnly)
+    )
+  }
+
+  private applyObservationToStartOrObserve(
+    observation: ExecutorRunObservation,
+    validRepoId: string,
+    cleanSessionId: string,
+    cleanAttemptId: string,
+    attemptRevision: number,
+    unitId: string,
+    unitRevision: number,
+    readOnly: boolean
+  ): UnitExecutionResult {
+    if (observation.status === 'AWAITING_APPROVAL') {
       return {
         status: 'AWAITING_APPROVAL',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        cliStatus: snapshot.status,
-        cliPhase: snapshot.phase,
+        ...selectionFields(observation.selection),
+        ...legacyStatusMetadata(observation),
         unitFlowStatus: 'RESERVED',
-        ...timeoutMetadata(snapshot)
+        ...timeoutMetadata(observation)
       }
     }
 
-    if (snapshot.status === 'RUNNING') {
-      if (options?.readOnly) {
+    if (observation.status === 'RUNNING') {
+      if (readOnly) {
         return {
           status: 'RUNNING',
           attemptId: cleanAttemptId,
           sessionId: cleanSessionId,
           repositoryId: validRepoId,
-          cliStatus: snapshot.status,
-          cliPhase: snapshot.phase,
+          ...selectionFields(observation.selection),
+          ...legacyStatusMetadata(observation),
           unitFlowStatus: 'EXECUTING',
-          ...timeoutMetadata(snapshot)
+          ...timeoutMetadata(observation)
         }
       }
 
-      // Re-consult SMC state: if attempt is in STARTING, execute atomic CAS transition to RUNNING and unit to EXECUTING
       const currentAttempt = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
       if (currentAttempt && currentAttempt.status === 'STARTING') {
         const store = this.smcService.getStore(validRepoId)
-        const unitState = store.getUnitState(cleanSessionId, currentAttempt.planId, currentAttempt.unitId)
-        if (unitState && unitState.status === 'RESERVED') {
+        const currentUnit = store.getUnitState(cleanSessionId, currentAttempt.planId, currentAttempt.unitId)
+        if (currentUnit && currentUnit.status === 'RESERVED') {
           try {
             this.smcService.transitionAttemptToRunning(
               validRepoId,
               cleanAttemptId,
-              currentAttempt.revision,
-              currentAttempt.unitId,
-              unitState.revision
+              currentAttempt.revision || attemptRevision,
+              unitId || currentAttempt.unitId,
+              currentUnit.revision || unitRevision
             )
           } catch (err: any) {
             if (!(err instanceof ExecutionAttemptConflictError)) {
@@ -1198,6 +1537,7 @@ export class UnitExecutionService {
                 attemptId: cleanAttemptId,
                 sessionId: cleanSessionId,
                 repositoryId: validRepoId,
+                ...selectionFields(observation.selection),
                 reason: `CAS_RUNNING_ERROR: ${err?.message ?? String(err)}`
               }
             }
@@ -1205,7 +1545,6 @@ export class UnitExecutionService {
         }
       }
 
-      // Read back to confirm state
       const recheck = this.smcService.getExecutionAttempt(validRepoId, cleanAttemptId)
       if (recheck?.status === 'RUNNING') {
         return {
@@ -1213,10 +1552,10 @@ export class UnitExecutionService {
           attemptId: cleanAttemptId,
           sessionId: cleanSessionId,
           repositoryId: validRepoId,
-          cliStatus: snapshot.status,
-          cliPhase: snapshot.phase,
+          ...selectionFields(observation.selection),
+          ...legacyStatusMetadata(observation),
           unitFlowStatus: 'EXECUTING',
-          ...timeoutMetadata(snapshot)
+          ...timeoutMetadata(observation)
         }
       }
 
@@ -1225,12 +1564,13 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
+        ...selectionFields(observation.selection),
         reason: 'CAS_RUNNING_NOT_ESTABLISHED'
       }
     }
 
-    if (snapshot.status === 'REFUSED') {
-      if (!options?.readOnly) {
+    if (observation.status === 'REFUSED') {
+      if (!readOnly) {
         this.stageService.releaseAttemptRetention(cleanAttemptId)
       }
       return {
@@ -1238,15 +1578,15 @@ export class UnitExecutionService {
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        cliStatus: snapshot.status,
+        ...selectionFields(observation.selection),
+        ...legacyStatusMetadata(observation),
         unitFlowStatus: 'RESERVED',
-        reason: snapshot.diagnostic ?? 'NATIVE_APPROVAL_REFUSED',
-        ...timeoutMetadata(snapshot)
+        reason: observation.reason ?? 'NATIVE_APPROVAL_REFUSED',
+        ...timeoutMetadata(observation)
       }
     }
 
-    // Terminal states: SUCCEEDED, FAILED, CANCELLED, TIMED_OUT, INTERRUPTED
-    if (!options?.readOnly) {
+    if (!readOnly) {
       this.stageService.releaseAttemptRetention(cleanAttemptId)
     }
     return {
@@ -1254,10 +1594,11 @@ export class UnitExecutionService {
       attemptId: cleanAttemptId,
       sessionId: cleanSessionId,
       repositoryId: validRepoId,
-      cliStatus: snapshot.status,
-      cliPhase: snapshot.phase,
-      ...(snapshot.status !== 'SUCCEEDED' ? { reason: classifyObservedGrokOutcome(snapshot) } : {}),
-      ...timeoutMetadata(snapshot)
+      ...selectionFields(observation.selection),
+      ...legacyStatusMetadata(observation),
+      ...(observation.status !== 'SUCCEEDED' ? { reason: observation.reason ?? observation.status } : {}),
+      ...timeoutMetadata(observation),
+      ...outcomeMetadata(observation)
     }
   }
 }

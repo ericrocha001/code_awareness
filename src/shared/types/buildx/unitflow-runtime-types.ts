@@ -2,6 +2,7 @@ import type {
   DefineUnitFlowUnitInput,
   UnitFlowUnitStatus
 } from './unitflow-types'
+import type { ExecutorSelection } from './execution-types'
 
 export type OrchestrationState =
   | 'READY'
@@ -53,6 +54,7 @@ export interface StartNextUnitOptions {
   readonly reservationId: string
   readonly attemptId: string
   readonly stageOperationId: string
+  readonly executorSelection?: ExecutorSelection
 }
 
 export interface StartedUnitFlowResult {

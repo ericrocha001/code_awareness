@@ -14,11 +14,21 @@ import {
   ExecutionAttemptConflictError,
   ExecutionInvalidAttemptIdError
 } from '../execution/execution-errors'
+import { validatePublicExecutorSelection } from '../execution/executor-port'
 import {
   BuildXWorkspaceInvalidError,
   BuildXWorkspaceNotFoundError,
   BuildXWorkspaceRepositoryMismatchError
 } from '../execution/workspace-binding-errors'
+
+const ALLOWED_START_NEXT_ARGS = new Set([
+  'sessionId',
+  'planId',
+  'reservationId',
+  'attemptId',
+  'stageOperationId',
+  'executorSelection'
+])
 
 function readOnlyTool(
   name: string,
@@ -135,7 +145,7 @@ export const BIND_UNITFLOW_WORKSPACE_TOOL = mutationTool(
 
 export const START_NEXT_UNITFLOW_UNIT_TOOL = mutationTool(
   'start_next_unitflow_unit',
-  'Atomically advance to and start supervised execution of the next eligible unit in the active plan. Atomically reserves the unit, prepares the attempt, stages the prompt outside worktree, and initiates supervised Grok CLI execution. Idempotent by attemptId; prevents duplicate execution spawns.',
+  'Atomically advance to and start supervised execution of the next eligible unit in the active plan. Atomically reserves the unit, prepares the attempt, stages the prompt outside worktree, and initiates execution with "grok-cli" by default or explicit "cline-sdk" when requested. Idempotent by attemptId; prevents duplicate execution spawns.',
   {
     sessionId: {
       type: 'string',
@@ -161,6 +171,29 @@ export const START_NEXT_UNITFLOW_UNIT_TOOL = mutationTool(
       type: 'string',
       minLength: 1,
       description: 'Caller-generated stable operation ID for prompt staging idempotency.'
+    },
+    executorSelection: {
+      type: 'object',
+      description: 'Optional executor selection. Omit for default "grok-cli", or select { executorId: "cline-sdk", providerId: "cline", modelId? } for isolated Cline FREE SDK execution.',
+      properties: {
+        executorId: {
+          type: 'string',
+          enum: ['grok-cli', 'cline-sdk'],
+          description: 'Authorized executor identifier ("grok-cli" default or "cline-sdk").'
+        },
+        providerId: {
+          type: ['string', 'null'],
+          minLength: 1,
+          description: 'Optional provider identifier ("cline" for cline-sdk, "xai" for grok-cli).'
+        },
+        modelId: {
+          type: ['string', 'null'],
+          minLength: 1,
+          description: 'Optional model identifier fixed before launch (verified free model when using cline-sdk).'
+        }
+      },
+      required: ['executorId'],
+      additionalProperties: false
     }
   },
   ['sessionId', 'planId', 'reservationId', 'attemptId', 'stageOperationId']
@@ -394,6 +427,20 @@ export async function executeBuildxUnitflowTool(
       }
 
       case 'start_next_unitflow_unit': {
+        const unexpectedKeys = Object.keys(rawArgs).filter((key) => !ALLOWED_START_NEXT_ARGS.has(key))
+        if (unexpectedKeys.length > 0) {
+          return failure('INVALID_ARGUMENT', `Unexpected argument(s) for start_next_unitflow_unit: ${unexpectedKeys.join(', ')}`)
+        }
+
+        let executorSelection: ReturnType<typeof validatePublicExecutorSelection> | undefined
+        if (rawArgs.executorSelection !== undefined) {
+          try {
+            executorSelection = validatePublicExecutorSelection(rawArgs.executorSelection)
+          } catch (err: any) {
+            return failure('INVALID_ARGUMENT', err?.message ?? 'Invalid executorSelection')
+          }
+        }
+
         const sessionId = String(rawArgs.sessionId ?? '')
         const planId = String(rawArgs.planId ?? '')
         const reservationId = String(rawArgs.reservationId ?? '')
@@ -403,7 +450,8 @@ export async function executeBuildxUnitflowTool(
         const result = await facade.startNextUnit(sessionId, planId, {
           reservationId,
           attemptId,
-          stageOperationId
+          stageOperationId,
+          ...(executorSelection ? { executorSelection } : {})
         })
         return ok(result)
       }

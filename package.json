@@ -148,6 +148,7 @@
     }
   },
   "dependencies": {
+    "@cline/sdk": "0.2.0",
     "@modelcontextprotocol/sdk": "1.32.1",
     "@tanstack/react-virtual": "^3.13.0",
     "@types/dompurify": "^3.0.5",
