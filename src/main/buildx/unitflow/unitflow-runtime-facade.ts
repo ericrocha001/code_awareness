@@ -36,10 +36,21 @@ import {
   executorSelectionsEqual,
   isExecutorSelectionCompatible,
   validatePublicExecutorSelection,
+  type EconomicCandidateProvider,
   type UnitExecutorPort,
   type UnitExecutorResolver
 } from '../execution/executor-port'
-import type { ExecutorSelection } from '../../../shared/types/buildx/execution-types'
+import {
+  economicPoliciesEqual,
+  selectEconomicExecutor,
+  validateEconomicSelectionPolicy
+} from '../execution/economic-selection'
+import type {
+  EconomicSelectionDecision,
+  ExecutorSelection,
+  ExecutorWorktreeTarget,
+  NormalizedEconomicSelectionPolicy
+} from '../../../shared/types/buildx/execution-types'
 import type { CliExecutionPort, CliExecutionResolver } from '../execution/grok-cli-bridge'
 import {
   DEFAULT_GROK_EXECUTOR_ID,
@@ -75,6 +86,10 @@ export interface UnitFlowRuntimeFacadeDependencies {
   readonly smcService: SessionMemoryCentralService
   readonly gitOperations: GitOperationsResolver
   readonly executor?: UnitExecutorPort | UnitExecutorResolver | null
+  readonly economicProviders?:
+    | readonly EconomicCandidateProvider[]
+    | ((repositoryId: string) => readonly EconomicCandidateProvider[] | Promise<readonly EconomicCandidateProvider[]>)
+    | null
   readonly cliExecution?: CliExecutionPort | CliExecutionResolver | null
   readonly validationLedger: ValidationProofLookup | ValidationLedgerResolver
   readonly stagingDirectory?: string
@@ -94,12 +109,15 @@ export class UnitFlowRuntimeFacade {
   readonly acceptanceService: UnitFlowAcceptanceService
   readonly reconciliationService: UnitFlowReconciliationService
   readonly assertActiveProject?: () => void
+  private readonly economicProvidersDep?: UnitFlowRuntimeFacadeDependencies['economicProviders']
+  private readonly fallbackEconomicProviders: readonly EconomicCandidateProvider[]
 
   constructor(deps: UnitFlowRuntimeFacadeDependencies) {
     this.repositoryId = validateRepositoryId(deps.repositoryId)
     this.repoRoot = deps.repoRoot
     this.smcService = deps.smcService
     this.assertActiveProject = deps.assertActiveProject
+    this.economicProvidersDep = deps.economicProviders
 
     this.unitflowService = new UnitFlowService(this.smcService)
     this.workspaceService = new WorkspaceBindingService(this.smcService, deps.gitOperations)
@@ -108,12 +126,23 @@ export class UnitFlowRuntimeFacade {
     this.promptStageService = new UnitPromptStageService(this.smcService, this.workspaceService, {
       stagingDirectory: deps.stagingDirectory
     })
+    const defaultCliExecutor = deps.cliExecution ? new GrokExecutorAdapter(deps.cliExecution) : null
     const resolvedExecutor =
       deps.executor !== undefined
         ? deps.executor
-        : deps.cliExecution
-          ? new GrokExecutorAdapter(deps.cliExecution)
-          : null
+        : defaultCliExecutor
+    if (
+      resolvedExecutor &&
+      typeof resolvedExecutor === 'object' &&
+      'probeEconomicCandidate' in resolvedExecutor &&
+      typeof (resolvedExecutor as Record<string, unknown>).probeEconomicCandidate === 'function'
+    ) {
+      this.fallbackEconomicProviders = [resolvedExecutor as unknown as EconomicCandidateProvider]
+    } else if (defaultCliExecutor) {
+      this.fallbackEconomicProviders = [defaultCliExecutor]
+    } else {
+      this.fallbackEconomicProviders = []
+    }
     this.executionService = new UnitExecutionService(
       this.smcService,
       this.workspaceService,
@@ -133,6 +162,17 @@ export class UnitFlowRuntimeFacade {
 
   private verifyContext(): void {
     this.assertActiveProject?.()
+  }
+
+  private async resolveEconomicProviders(): Promise<readonly EconomicCandidateProvider[]> {
+    if (this.economicProvidersDep !== undefined) {
+      if (this.economicProvidersDep === null) return []
+      if (typeof this.economicProvidersDep === 'function') {
+        return await this.economicProvidersDep(this.repositoryId)
+      }
+      return this.economicProvidersDep
+    }
+    return this.fallbackEconomicProviders
   }
 
   private validateUuid(value: unknown, name: string): string {
@@ -356,6 +396,10 @@ export class UnitFlowRuntimeFacade {
 
     const cleanStageOpId = this.validateUuid(options?.stageOperationId, 'stageOperationId')
 
+    if (options.executorSelection !== undefined && options.economicSelection !== undefined) {
+      throw new Error('INVALID_ARGUMENT: executorSelection and economicSelection are mutually exclusive')
+    }
+
     let validatedSelection: ExecutorSelection | undefined
     if (options.executorSelection !== undefined) {
       try {
@@ -363,6 +407,11 @@ export class UnitFlowRuntimeFacade {
       } catch (err: any) {
         throw new Error(`INVALID_ARGUMENT: ${err?.message ?? String(err)}`)
       }
+    }
+
+    let validatedEconomicPolicy: NormalizedEconomicSelectionPolicy | undefined
+    if (options.economicSelection !== undefined) {
+      validatedEconomicPolicy = validateEconomicSelectionPolicy(options.economicSelection)
     }
 
     // 1. Check idempotency: attempt already prepared / active
@@ -378,13 +427,28 @@ export class UnitFlowRuntimeFacade {
         )
       }
 
+      const existingEconomic = existingAttempt.economicDecision
       const effectiveExistingSelection = existingAttempt.executorSelection ?? DEFAULT_IMPLICIT_GROK_SELECTION
-      const replaySelectionConflict =
+
+      let replayConflictReason: 'ECONOMIC_SELECTION_CONFLICT' | 'EXECUTOR_SELECTION_CONFLICT' | null = null
+      if (existingEconomic) {
+        if (
+          validatedSelection !== undefined ||
+          (validatedEconomicPolicy !== undefined && !economicPoliciesEqual(existingEconomic.policy, validatedEconomicPolicy))
+        ) {
+          replayConflictReason = 'ECONOMIC_SELECTION_CONFLICT'
+        }
+      } else if (validatedEconomicPolicy !== undefined) {
+        replayConflictReason = 'ECONOMIC_SELECTION_CONFLICT'
+      } else if (
         validatedSelection !== undefined &&
         !isExecutorSelectionCompatible(effectiveExistingSelection, validatedSelection)
+      ) {
+        replayConflictReason = 'EXECUTOR_SELECTION_CONFLICT'
+      }
 
       if (existingAttempt.status === 'STARTING' || existingAttempt.status === 'RUNNING') {
-        if (replaySelectionConflict) {
+        if (replayConflictReason) {
           return {
             repositoryId: this.repositoryId,
             sessionId: cleanSessionId,
@@ -394,7 +458,7 @@ export class UnitFlowRuntimeFacade {
             attemptId: cleanAttemptId,
             stageOperationId: cleanStageOpId,
             status: 'UNAVAILABLE',
-            reason: 'EXECUTOR_SELECTION_CONFLICT',
+            reason: replayConflictReason,
             proposalId: null,
             executionId: null,
             replayed: true
@@ -419,12 +483,14 @@ export class UnitFlowRuntimeFacade {
           executionId: (obs as any).executionId ?? null,
           ...(obs.timeoutProfile ? { timeoutProfile: obs.timeoutProfile } : {}),
           ...(obs.timeoutMs !== undefined ? { timeoutMs: obs.timeoutMs } : {}),
+          ...(existingAttempt.executorSelection ? { executorSelection: existingAttempt.executorSelection } : {}),
+          ...(existingEconomic ? { economicDecision: existingEconomic } : {}),
           replayed: true
         }
       }
 
       if (existingAttempt.status === 'PREPARED') {
-        if (replaySelectionConflict) {
+        if (replayConflictReason) {
           return {
             repositoryId: this.repositoryId,
             sessionId: cleanSessionId,
@@ -434,7 +500,7 @@ export class UnitFlowRuntimeFacade {
             attemptId: cleanAttemptId,
             stageOperationId: cleanStageOpId,
             status: 'UNAVAILABLE',
-            reason: 'EXECUTOR_SELECTION_CONFLICT',
+            reason: replayConflictReason,
             proposalId: null,
             executionId: null,
             replayed: true
@@ -460,7 +526,9 @@ export class UnitFlowRuntimeFacade {
             attemptId: existingAttempt.attemptId,
             stageOperationId: cleanStageOpId,
             status: 'UNAVAILABLE',
-            reason: stageResult.reason ?? 'STAGE_FAILED'
+            reason: stageResult.reason ?? 'STAGE_FAILED',
+            ...(existingAttempt.executorSelection ? { executorSelection: existingAttempt.executorSelection } : {}),
+            ...(existingEconomic ? { economicDecision: existingEconomic } : {})
           }
         }
 
@@ -489,13 +557,15 @@ export class UnitFlowRuntimeFacade {
           executionId: (execResult as any).executionId ?? null,
           ...(execResult.timeoutProfile ? { timeoutProfile: execResult.timeoutProfile } : {}),
           ...(execResult.timeoutMs !== undefined ? { timeoutMs: execResult.timeoutMs } : {}),
+          ...(replaySelection ? { executorSelection: replaySelection } : {}),
+          ...(existingEconomic ? { economicDecision: existingEconomic } : {}),
           replayed: true
         }
       }
 
-      if (replaySelectionConflict) {
+      if (replayConflictReason) {
         throw new ExecutionAttemptConflictError(
-          `EXECUTOR_SELECTION_CONFLICT: Attempt "${cleanAttemptId}" is locked to executor "${effectiveExistingSelection.executorId}"`
+          `${replayConflictReason}: Attempt "${cleanAttemptId}" is locked to executor "${effectiveExistingSelection.executorId}"`
         )
       }
 
@@ -528,10 +598,89 @@ export class UnitFlowRuntimeFacade {
       }
     }
 
-    // Resolve and lock explicit executor selection (including concrete free modelId for cline-sdk) before persisting in SMC
+    // Resolve economic policy or explicit executor selection (before reserving or writing SMC)
     let concreteSelection: ExecutorSelection | undefined = validatedSelection
-    if (validatedSelection) {
-      const resolved = await this.executionService.resolveExecutorSelection(this.repositoryId, validatedSelection)
+    let selectedEconomicDecision: EconomicSelectionDecision | undefined
+
+    if (validatedEconomicPolicy !== undefined) {
+      const workspaceInspection = await this.workspaceService.inspectBoundWorkspace(
+        this.repositoryId,
+        cleanSessionId
+      )
+      if (workspaceInspection.status !== 'CURRENT') {
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: eligibility.unitId,
+          reservationId: cleanReservationId,
+          attemptId: cleanAttemptId,
+          stageOperationId: cleanStageOpId,
+          status: 'UNAVAILABLE',
+          reason: `WORKSPACE_${workspaceInspection.status}`,
+          proposalId: null,
+          executionId: null
+        }
+      }
+
+      const worktreePath = await this.workspaceService.getWorktreePath(
+        this.repositoryId,
+        workspaceInspection.binding.worktreeId
+      )
+      if (!worktreePath) {
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: eligibility.unitId,
+          reservationId: cleanReservationId,
+          attemptId: cleanAttemptId,
+          stageOperationId: cleanStageOpId,
+          status: 'UNAVAILABLE',
+          reason: 'WORKSPACE_WORKTREE_PATH_UNAVAILABLE',
+          proposalId: null,
+          executionId: null
+        }
+      }
+
+      const worktreeTarget: ExecutorWorktreeTarget = {
+        worktreeId: workspaceInspection.binding.worktreeId,
+        generation: workspaceInspection.binding.generation,
+        branch: workspaceInspection.binding.branch,
+        path: worktreePath
+      }
+
+      const providers = await this.resolveEconomicProviders()
+      const economicDecision = await selectEconomicExecutor({
+        repositoryId: this.repositoryId,
+        policy: validatedEconomicPolicy,
+        providers,
+        worktree: worktreeTarget
+      })
+
+      if (economicDecision.status !== 'SELECTED' || !economicDecision.selection) {
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: eligibility.unitId,
+          reservationId: cleanReservationId,
+          attemptId: cleanAttemptId,
+          stageOperationId: cleanStageOpId,
+          status: 'UNAVAILABLE',
+          reason: economicDecision.reason,
+          proposalId: null,
+          executionId: null,
+          economicDecision
+        }
+      }
+
+      concreteSelection = economicDecision.selection
+      selectedEconomicDecision = economicDecision
+    }
+
+    if (concreteSelection) {
+      const resolved = await this.executionService.resolveExecutorSelection(this.repositoryId, concreteSelection)
       if (!resolved.executor || !resolved.available || !resolved.selection) {
         return {
           repositoryId: this.repositoryId,
@@ -542,10 +691,11 @@ export class UnitFlowRuntimeFacade {
           attemptId: cleanAttemptId,
           stageOperationId: cleanStageOpId,
           status: 'UNAVAILABLE',
-          reason: resolved.reason ?? 'EXECUTOR_UNAVAILABLE'
+          reason: resolved.reason ?? 'EXECUTOR_UNAVAILABLE',
+          ...(selectedEconomicDecision ? { economicDecision: selectedEconomicDecision } : {})
         }
       }
-      if (!isExecutorSelectionCompatible(resolved.selection, validatedSelection)) {
+      if (!isExecutorSelectionCompatible(resolved.selection, concreteSelection)) {
         return {
           repositoryId: this.repositoryId,
           sessionId: cleanSessionId,
@@ -555,7 +705,8 @@ export class UnitFlowRuntimeFacade {
           attemptId: cleanAttemptId,
           stageOperationId: cleanStageOpId,
           status: 'UNAVAILABLE',
-          reason: 'EXECUTOR_SELECTION_CONFLICT'
+          reason: 'EXECUTOR_SELECTION_CONFLICT',
+          ...(selectedEconomicDecision ? { economicDecision: selectedEconomicDecision } : {})
         }
       }
       if (resolved.selection.executorId === 'cline-sdk' && !resolved.selection.modelId) {
@@ -568,7 +719,8 @@ export class UnitFlowRuntimeFacade {
           attemptId: cleanAttemptId,
           stageOperationId: cleanStageOpId,
           status: 'REFUSED',
-          reason: 'FREE_MODEL_ID_REQUIRED'
+          reason: 'FREE_MODEL_ID_REQUIRED',
+          ...(selectedEconomicDecision ? { economicDecision: selectedEconomicDecision } : {})
         }
       }
       concreteSelection = resolved.selection
@@ -604,7 +756,8 @@ export class UnitFlowRuntimeFacade {
       reservation.reservationId,
       {
         attemptId: cleanAttemptId,
-        ...(concreteSelection ? { executorSelection: concreteSelection } : {})
+        ...(concreteSelection ? { executorSelection: concreteSelection } : {}),
+        ...(selectedEconomicDecision ? { economicDecision: selectedEconomicDecision } : {})
       }
     )
 
@@ -628,7 +781,9 @@ export class UnitFlowRuntimeFacade {
         attemptId: attempt.attemptId,
         stageOperationId: cleanStageOpId,
         status: 'UNAVAILABLE',
-        reason: stageResult.reason ?? 'STAGE_FAILED'
+        reason: stageResult.reason ?? 'STAGE_FAILED',
+        ...(attempt.executorSelection ? { executorSelection: attempt.executorSelection } : {}),
+        ...(attempt.economicDecision ? { economicDecision: attempt.economicDecision } : {})
       }
     }
 
@@ -656,7 +811,9 @@ export class UnitFlowRuntimeFacade {
       proposalId: (execResult as any).proposalId ?? null,
       executionId: (execResult as any).executionId ?? null,
       ...(execResult.timeoutProfile ? { timeoutProfile: execResult.timeoutProfile } : {}),
-      ...(execResult.timeoutMs !== undefined ? { timeoutMs: execResult.timeoutMs } : {})
+      ...(execResult.timeoutMs !== undefined ? { timeoutMs: execResult.timeoutMs } : {}),
+      ...(attempt.executorSelection ? { executorSelection: attempt.executorSelection } : {}),
+      ...(attempt.economicDecision ? { economicDecision: attempt.economicDecision } : {})
     }
   }
 

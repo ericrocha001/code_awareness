@@ -219,12 +219,42 @@ export class GrokExecutorAdapter implements UnitExecutorPort, EconomicCandidateP
       }
     }
 
-    if (input.worktree && typeof cliService.getPolicyForWorktree === 'function') {
+    if (input.worktree) {
+      if (typeof cliService.getPolicyForWorktree !== 'function') {
+        return {
+          selection: this.identity,
+          eligible: false,
+          hostAuthorized: false,
+          toolCapable: false,
+          privacyCompatible: true,
+          requiresExternalTransfer: true,
+          costTier: 'UNKNOWN',
+          quotaStatus: 'UNKNOWN',
+          reason: 'CLI_WORKTREE_POLICY_UNAVAILABLE',
+          source: 'GROK_WORKTREE_POLICY_CHECK',
+          probedAt
+        }
+      }
       try {
-        await cliService.getPolicyForWorktree({
+        const policy = await cliService.getPolicyForWorktree({
           worktreeId: input.worktree.worktreeId,
           generation: input.worktree.generation
         })
+        if (!policy || !policy.mode) {
+          return {
+            selection: this.identity,
+            eligible: false,
+            hostAuthorized: false,
+            toolCapable: false,
+            privacyCompatible: true,
+            requiresExternalTransfer: true,
+            costTier: 'UNKNOWN',
+            quotaStatus: 'UNKNOWN',
+            reason: 'CLI_WORKTREE_POLICY_UNAVAILABLE',
+            source: 'GROK_WORKTREE_POLICY_CHECK',
+            probedAt
+          }
+        }
       } catch (err: any) {
         return {
           selection: this.identity,

@@ -591,4 +591,51 @@ describe('Executor-12 U1 — Seleção econômica isolada (sem spawn)', () => {
     )
     expect(disabledGrok.getCounts()).toEqual({ prepareCalls: 0, startCalls: 0, policyCalls: 0 })
   })
+
+  it('Gate Adicional: falha fechado quando CliExecutionPort omite getPolicyForWorktree diante de uma Worktree', async () => {
+    let prepareCalls = 0
+    let startCalls = 0
+    const cliWithoutPolicy: CliExecutionPort = {
+      isEnabled: () => true,
+      getRepositoryId: () => 'repo-1',
+      prepare: async () => {
+        prepareCalls++
+        throw new Error('must not prepare during probe')
+      },
+      start: async () => {
+        startCalls++
+        throw new Error('must not start during probe')
+      },
+      get: async () => {
+        throw new Error('must not get during probe')
+      },
+      cancel: async () => {
+        throw new Error('must not cancel during probe')
+      }
+    }
+    const grokWithoutPolicy = new GrokExecutorAdapter(cliWithoutPolicy)
+
+    const signal = await grokWithoutPolicy.probeEconomicCandidate({
+      repositoryId: 'repo-1',
+      worktree: { worktreeId: 'wt-1', generation: 'gen-1', branch: 'feat/u2', path: worktreeDir }
+    })
+
+    expect(signal.eligible).toBe(false)
+    expect(signal.hostAuthorized).toBe(false)
+    expect(signal.toolCapable).toBe(false)
+    expect(signal.reason).toBe('CLI_WORKTREE_POLICY_UNAVAILABLE')
+
+    const decision = await selectEconomicExecutor({
+      repositoryId: 'repo-1',
+      policy: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true },
+      providers: [grokWithoutPolicy],
+      worktree: { worktreeId: 'wt-1', generation: 'gen-1', branch: 'feat/u2', path: worktreeDir }
+    })
+
+    expect(decision.status).toBe('UNAVAILABLE')
+    expect(decision.selection).toBeNull()
+    expect(decision.reason).toBe('CLI_WORKTREE_POLICY_UNAVAILABLE')
+    expect(prepareCalls).toBe(0)
+    expect(startCalls).toBe(0)
+  })
 })

@@ -218,6 +218,7 @@ export interface ExecutionAttemptRecord {
   readonly status: ExecutionAttemptStatus
   readonly revision: number
   readonly executorSelection?: ExecutorSelection
+  readonly economicDecision?: PersistedEconomicDecisionRecord
   readonly createdAt: string
   readonly updatedAt: string
 }
@@ -225,6 +226,7 @@ export interface ExecutionAttemptRecord {
 export interface PrepareExecutionAttemptOptions {
   readonly attemptId: string
   readonly executorSelection?: ExecutorSelection
+  readonly economicDecision?: EconomicSelectionDecision
 }
 
 export type GrokCliPreAdmissionStatus =
@@ -488,6 +490,23 @@ export interface EconomicSelectionDecision {
   readonly selection: ExecutorSelection | null
   readonly costTier: EconomicCandidateCostTier | null
   readonly quotaStatus: EconomicCandidateQuotaStatus | null
+  readonly reason: string
+  readonly tieBreakRule: string
+  readonly source: string | null
+  readonly probedAt: string
+  readonly candidateCount: number
+  readonly verifiedZeroModelsCount?: number
+  readonly rejections: readonly EconomicCandidateRejection[]
+}
+
+export interface PersistedEconomicDecisionRecord {
+  readonly decisionEntryId: string
+  readonly attemptId: string
+  readonly unitId: string
+  readonly policy: NormalizedEconomicSelectionPolicy
+  readonly selection: ExecutorSelection
+  readonly costTier: EconomicCandidateCostTier
+  readonly quotaStatus: EconomicCandidateQuotaStatus
   readonly reason: string
   readonly tieBreakRule: string
   readonly source: string | null

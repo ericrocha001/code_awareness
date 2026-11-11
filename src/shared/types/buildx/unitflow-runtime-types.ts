@@ -2,7 +2,13 @@ import type {
   DefineUnitFlowUnitInput,
   UnitFlowUnitStatus
 } from './unitflow-types'
-import type { ExecutorSelection } from './execution-types'
+import type {
+  EconomicSelectionDecision,
+  EconomicSelectionPolicy,
+  ExecutorSelection,
+  NormalizedEconomicSelectionPolicy,
+  PersistedEconomicDecisionRecord
+} from './execution-types'
 
 export type OrchestrationState =
   | 'READY'
@@ -55,6 +61,7 @@ export interface StartNextUnitOptions {
   readonly attemptId: string
   readonly stageOperationId: string
   readonly executorSelection?: ExecutorSelection
+  readonly economicSelection?: EconomicSelectionPolicy | NormalizedEconomicSelectionPolicy
 }
 
 export interface StartedUnitFlowResult {
@@ -71,6 +78,8 @@ export interface StartedUnitFlowResult {
   readonly executionId?: string | null
   readonly timeoutProfile?: string
   readonly timeoutMs?: number
+  readonly executorSelection?: ExecutorSelection | null
+  readonly economicDecision?: PersistedEconomicDecisionRecord | EconomicSelectionDecision | null
   readonly replayed?: boolean
 }
 

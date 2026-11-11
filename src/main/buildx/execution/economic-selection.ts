@@ -120,6 +120,34 @@ export function validateEconomicSelectionPolicy(raw: unknown): NormalizedEconomi
   })
 }
 
+export function economicPoliciesEqual(
+  a: EconomicSelectionPolicy | NormalizedEconomicSelectionPolicy,
+  b: EconomicSelectionPolicy | NormalizedEconomicSelectionPolicy
+): boolean {
+  try {
+    const normA = validateEconomicSelectionPolicy(a)
+    const normB = validateEconomicSelectionPolicy(b)
+    if (
+      normA.mode !== normB.mode ||
+      normA.allowUnknownCostFallback !== normB.allowUnknownCostFallback ||
+      normA.privacy !== normB.privacy
+    ) {
+      return false
+    }
+    if (normA.allowedExecutorIds === null || normB.allowedExecutorIds === null) {
+      return normA.allowedExecutorIds === normB.allowedExecutorIds
+    }
+    const sortedA = [...normA.allowedExecutorIds].sort()
+    const sortedB = [...normB.allowedExecutorIds].sort()
+    return (
+      sortedA.length === sortedB.length &&
+      sortedA.every((id, index) => id === sortedB[index])
+    )
+  } catch {
+    return false
+  }
+}
+
 interface AcceptedCandidate {
   readonly normalizedSelection: ExecutorSelection
   readonly costTier: 'VERIFIED_ZERO' | 'UNKNOWN'

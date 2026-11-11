@@ -731,6 +731,7 @@ app.whenReady().then(async () => {
           smcService: sessionMemoryCentral,
           gitOperations,
           executor: unitflowExecutorResolver,
+          economicProviders: (repoId) => [new ClineSdkExecutorAdapter(buildClineOptions(repoId)), grokExecutor],
           cliExecution: activeCliExecution,
           validationLedger,
           stagingDirectory: join(app.getPath('userData'), 'buildx-staging'),
