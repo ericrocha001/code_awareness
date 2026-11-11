@@ -1,7 +1,13 @@
 import type {
   ExecutionAttemptRecord,
+  ExecutorSelection,
   PrepareExecutionAttemptOptions
 } from '../../../shared/types/buildx/execution-types'
+import {
+  executorSelectionsEqual,
+  formatExecutorSelection,
+  normalizeExecutorSelection
+} from './executor-port'
 import {
   BuildXWorkspaceBindingConflictError,
   BuildXWorkspaceInvalidError
@@ -83,6 +89,15 @@ export class ExecutionAttemptService {
     }
     const cleanAttemptId = options.attemptId.trim().toLowerCase()
 
+    let normalizedSelection: ExecutorSelection | undefined
+    if (options.executorSelection !== undefined) {
+      try {
+        normalizedSelection = normalizeExecutorSelection(options.executorSelection)
+      } catch (err: any) {
+        throw new ExecutionAttemptConflictError(err?.message ?? String(err))
+      }
+    }
+
     const store = this.smcService.getStore(validRepoId)
 
     // 1. Replay check imediato (idempotente sem tocar Git)
@@ -93,6 +108,14 @@ export class ExecutionAttemptService {
         existing.sessionId === cleanSessionId &&
         existing.reservationId === cleanReservationId
       ) {
+        if (normalizedSelection) {
+          if (!existing.executorSelection || !executorSelectionsEqual(existing.executorSelection, normalizedSelection)) {
+            throw new ExecutionAttemptIdConflictError(
+              cleanAttemptId,
+              `already exists with divergent executor selection (existing=${existing.executorSelection ? formatExecutorSelection(existing.executorSelection) : 'none'}, requested=${formatExecutorSelection(normalizedSelection)})`
+            )
+          }
+        }
         return existing
       }
       throw new ExecutionAttemptIdConflictError(
@@ -185,7 +208,8 @@ export class ExecutionAttemptService {
         generation: inspectResult.binding.generation,
         branch: inspectResult.binding.branch
       },
-      headObserved: inspectResult.currentHead
+      headObserved: inspectResult.currentHead,
+      ...(normalizedSelection ? { executorSelection: normalizedSelection } : {})
     })
   }
 

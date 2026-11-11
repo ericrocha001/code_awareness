@@ -32,7 +32,13 @@ import {
 import { ExecutionAttemptService } from '../execution/execution-attempt-service'
 import { UnitPromptStageService } from '../execution/unit-prompt-stage-service'
 import { UnitExecutionService } from '../execution/unit-execution-service'
+import {
+  executorSelectionsEqual,
+  type UnitExecutorPort,
+  type UnitExecutorResolver
+} from '../execution/executor-port'
 import type { CliExecutionPort, CliExecutionResolver } from '../execution/grok-cli-bridge'
+import { GrokExecutorAdapter } from '../adapters/grok/grok-executor-adapter'
 import {
   UnitFlowInvalidPlanError,
   UnitFlowPlanConflictError,
@@ -55,6 +61,7 @@ export interface UnitFlowRuntimeFacadeDependencies {
   readonly repoRoot: string
   readonly smcService: SessionMemoryCentralService
   readonly gitOperations: GitOperationsResolver
+  readonly executor?: UnitExecutorPort | UnitExecutorResolver | null
   readonly cliExecution?: CliExecutionPort | CliExecutionResolver | null
   readonly validationLedger: ValidationProofLookup | ValidationLedgerResolver
   readonly stagingDirectory?: string
@@ -88,11 +95,17 @@ export class UnitFlowRuntimeFacade {
     this.promptStageService = new UnitPromptStageService(this.smcService, this.workspaceService, {
       stagingDirectory: deps.stagingDirectory
     })
+    const resolvedExecutor =
+      deps.executor !== undefined
+        ? deps.executor
+        : deps.cliExecution
+          ? new GrokExecutorAdapter(deps.cliExecution)
+          : null
     this.executionService = new UnitExecutionService(
       this.smcService,
       this.workspaceService,
       this.promptStageService,
-      deps.cliExecution ?? null
+      resolvedExecutor
     )
     this.acceptanceService = new UnitFlowAcceptanceService(
       this.smcService,
@@ -344,6 +357,26 @@ export class UnitFlowRuntimeFacade {
       }
 
       if (existingAttempt.status === 'STARTING' || existingAttempt.status === 'RUNNING') {
+        if (
+          options.executorSelection &&
+          existingAttempt.executorSelection &&
+          !executorSelectionsEqual(existingAttempt.executorSelection, options.executorSelection)
+        ) {
+          return {
+            repositoryId: this.repositoryId,
+            sessionId: cleanSessionId,
+            planId: cleanPlanId,
+            unitId: existingAttempt.unitId,
+            reservationId: cleanReservationId,
+            attemptId: cleanAttemptId,
+            stageOperationId: cleanStageOpId,
+            status: 'UNAVAILABLE',
+            reason: 'EXECUTOR_SELECTION_CONFLICT',
+            proposalId: null,
+            executionId: null,
+            replayed: true
+          }
+        }
         const obs = await this.executionService.observeUnitExecution(
           this.repositoryId,
           cleanSessionId,
@@ -395,7 +428,10 @@ export class UnitFlowRuntimeFacade {
           this.repositoryId,
           cleanSessionId,
           existingAttempt.attemptId,
-          { stageOperationId: cleanStageOpId }
+          {
+            stageOperationId: cleanStageOpId,
+            ...(options.executorSelection ? { executorSelection: options.executorSelection } : {})
+          }
         )
 
         return {
@@ -473,7 +509,10 @@ export class UnitFlowRuntimeFacade {
       this.repositoryId,
       cleanSessionId,
       reservation.reservationId,
-      { attemptId: cleanAttemptId }
+      {
+        attemptId: cleanAttemptId,
+        ...(options.executorSelection ? { executorSelection: options.executorSelection } : {})
+      }
     )
 
     // 5. Stage unit prompt safely outside worktree
@@ -500,12 +539,15 @@ export class UnitFlowRuntimeFacade {
       }
     }
 
-    // 6. Start supervised unit execution via Grok / CLI
+    // 6. Start supervised unit execution via agnostic executor port
     const execResult = await this.executionService.startUnitExecution(
       this.repositoryId,
       cleanSessionId,
       attempt.attemptId,
-      { stageOperationId: cleanStageOpId }
+      {
+        stageOperationId: cleanStageOpId,
+        ...(options.executorSelection ? { executorSelection: options.executorSelection } : {})
+      }
     )
 
     return {

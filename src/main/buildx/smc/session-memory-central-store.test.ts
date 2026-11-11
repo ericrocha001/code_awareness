@@ -79,6 +79,7 @@ import {
   type UnitExecutionResult,
   type StartUnitExecutionOptions
 } from '../execution'
+import { GrokExecutorAdapter } from '../adapters/grok'
 import type {
   CliProposal,
   CliExecutionSnapshot,
@@ -7288,7 +7289,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const { sessionId, unitId, attemptId, attempt } = await createEx07Fixture()
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -7322,7 +7323,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'RUNNING', startPhase: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -7349,7 +7350,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
         expect(mockCli.startCalls.length).toBe(1)
 
@@ -7372,7 +7373,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'REFUSED' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -7394,7 +7395,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const fakeStageOpId = 'f4f4f4f4-f4f4-4f4f-8f4f-f4f4f4f4f4f4'
         const mockCli = createMockCli07()
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: fakeStageOpId })
 
@@ -7420,7 +7421,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ enabled: false })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -7445,7 +7446,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startError: new Error('CLI_CRASH') })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -7468,7 +7469,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const [r1, r2] = await Promise.all([
           svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId }),
@@ -7503,7 +7504,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         expect(inspection.status).toBe('READY')
 
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
         const resultString = JSON.stringify(result)
@@ -7552,7 +7553,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ autoAuthorized: true })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -7573,7 +7574,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         const startRes = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
         expect(startRes.status).toBe('AWAITING_APPROVAL')
@@ -7615,7 +7616,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
         mockCli.setSnapshot(attemptId, { status: 'RUNNING', phase: 'RUNNING' })
@@ -7649,7 +7650,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
         mockCli.setSnapshot(attemptId, { status: 'FAILED', phase: 'TERMINAL' })
@@ -7677,7 +7678,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli07({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
         expect(stageService07.isStageRetained(stageOpId)).toBe(true)
@@ -7751,7 +7752,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
           }
         }
 
-        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, yoloMock)
+        const svc = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(yoloMock))
         const result = await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
         expect(result.status).toBe('RUNNING')
@@ -7789,7 +7790,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
             return supervisedBase.prepare(input)
           }
         }
-        const svcSup = new UnitExecutionService(smc, workspaceService07, stageService07, supervisedMock)
+        const svcSup = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(supervisedMock))
         const supRes = await svcSup.startUnitExecution(repoId, sessionId, attemptId, {
           stageOperationId: stageOpId,
           allowAlwaysApprove: true
@@ -7820,7 +7821,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
           }),
           prepare: async (input) => downgradeBase.prepare(input)
         }
-        const svcDowngrade = new UnitExecutionService(smc, workspaceService07, stageService07, downgradeMock)
+        const svcDowngrade = new UnitExecutionService(smc, workspaceService07, stageService07, new GrokExecutorAdapter(downgradeMock))
         const downRes = await svcDowngrade.startUnitExecution(repoId, s2, a2, { stageOperationId: stageOp2 })
         expect(downRes.status).toBe('REFUSED')
         expect(downRes.reason).toBe('POLICY_CHANGED')
@@ -8093,7 +8094,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         const { sessionId, planId, unitId, attemptId } = await createEx08Fixture()
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
         expect(stageService08.isStageRetained(stageOpId)).toBe(true)
@@ -8155,7 +8156,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8201,7 +8202,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8253,7 +8254,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8288,7 +8289,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8325,7 +8326,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8359,7 +8360,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8394,7 +8395,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8422,7 +8423,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8469,7 +8470,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'RUNNING' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8489,7 +8490,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const stageOpId = await stagePromptForFixture(sessionId, attemptId)
         const mockCli = createMockCli08({ startStatus: 'AWAITING_APPROVAL' })
-        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, mockCli)
+        const svc = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(mockCli))
 
         await svc.startUnitExecution(repoId, sessionId, attemptId, { stageOperationId: stageOpId })
 
@@ -8551,7 +8552,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const s1 = await stagePromptForFixture(f1.sessionId, f1.attemptId)
         const m1 = createMockCli08({ startStatus: 'RUNNING' })
-        const svc1 = new UnitExecutionService(smc, workspaceService08, stageService08, m1)
+        const svc1 = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(m1))
         await svc1.startUnitExecution(repoId, f1.sessionId, f1.attemptId, { stageOperationId: s1 })
         m1.setSnapshot(f1.attemptId, {
           status: 'TIMED_OUT',
@@ -8580,7 +8581,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const s2 = await stagePromptForFixture(f2.sessionId, f2.attemptId, 'f2f2f2f2-f2f2-42f2-82f2-f2f2f2f2f2f2')
         const m2 = createMockCli08({ startStatus: 'RUNNING' })
-        const svc2 = new UnitExecutionService(smc, workspaceService08, stageService08, m2)
+        const svc2 = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(m2))
         await svc2.startUnitExecution(repoId, f2.sessionId, f2.attemptId, { stageOperationId: s2 })
         m2.setSnapshot(f2.attemptId, {
           status: 'FAILED',
@@ -8605,7 +8606,7 @@ describe('Session Memory Central (SMC) — SMC-01, SMC-02, SMC-03 & SMC-04 Prova
         })
         const s3 = await stagePromptForFixture(f3.sessionId, f3.attemptId, 'f3f3f3f3-f3f3-43f3-83f3-f3f3f3f3f3f3')
         const m3 = createMockCli08({ startStatus: 'RUNNING' })
-        const svc3 = new UnitExecutionService(smc, workspaceService08, stageService08, m3)
+        const svc3 = new UnitExecutionService(smc, workspaceService08, stageService08, new GrokExecutorAdapter(m3))
         await svc3.startUnitExecution(repoId, f3.sessionId, f3.attemptId, { stageOperationId: s3 })
         m3.setSnapshot(f3.attemptId, {
           status: 'FAILED',
