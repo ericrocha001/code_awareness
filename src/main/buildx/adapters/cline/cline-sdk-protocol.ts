@@ -44,6 +44,10 @@ export interface ClineStartAttemptRequest {
   readonly attemptId: string
   readonly repositoryId: string
   readonly unitflowSessionId: string
+  readonly worktreeId?: string
+  readonly generation?: string
+  readonly branch?: string
+  readonly policyRevision?: string | null
   readonly worktreePath: string
   readonly modelId: string
   readonly promptText: string

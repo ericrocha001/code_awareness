@@ -471,12 +471,16 @@ async function runGatesInElectron(payload: HarnessPayload): Promise<any> {
     const receivedEvents: ExecutorEvent[] = []
     adapter.subscribe(attemptId, (ev) => receivedEvents.push(ev))
 
-    const started = await facade.startNextUnit(sessionId, planId, {
-      reservationId,
-      attemptId,
-      stageOperationId: stageOpId,
-      executorSelection: adapter.identity
-    })
+    const started = parseMcpResult(
+      await mcpAdapter.callTool('start_next_unitflow_unit', {
+        sessionId,
+        planId,
+        reservationId,
+        attemptId,
+        stageOperationId: stageOpId,
+        executorSelection: adapter.identity
+      })
+    )
     if (started.status !== 'RUNNING') {
       throw new Error(`Expected RUNNING start status, got ${started.status}: ${started.reason}`)
     }
@@ -553,12 +557,16 @@ async function runGatesInElectron(payload: HarnessPayload): Promise<any> {
         units: [{ unitId: unitB, position: 0, title: 'Unit B', objective: 'Trigger 429', acceptanceCriteria: 'Reconciles' }]
       })
     )
-    await facade.startNextUnit(sessionB, planB, {
-      reservationId: resB,
-      attemptId: attemptB,
-      stageOperationId: randomUUID(),
-      executorSelection: adapter.identity
-    })
+    parseMcpResult(
+      await mcpAdapter.callTool('start_next_unitflow_unit', {
+        sessionId: sessionB,
+        planId: planB,
+        reservationId: resB,
+        attemptId: attemptB,
+        stageOperationId: randomUUID(),
+        executorSelection: adapter.identity
+      })
+    )
     const obsB = await waitForAdapterTerminal(adapter, repoId, sessionB, attemptB, 30_000)
     const stB = parseMcpResult(await mcpAdapter.callTool('get_unitflow_status', { sessionId: sessionB }))
     if (obsB.status !== 'FAILED' || stB.activeAttempt?.status !== 'FAILED') {
@@ -600,12 +608,16 @@ async function runGatesInElectron(payload: HarnessPayload): Promise<any> {
         units: [{ unitId: unitC, position: 0, title: 'Unit C', objective: 'Hang then cancel', acceptanceCriteria: 'Cancelled cleanly' }]
       })
     )
-    await facade.startNextUnit(sessionC, planC, {
-      reservationId: resC,
-      attemptId: attemptC,
-      stageOperationId: stageC,
-      executorSelection: adapter.identity
-    })
+    parseMcpResult(
+      await mcpAdapter.callTool('start_next_unitflow_unit', {
+        sessionId: sessionC,
+        planId: planC,
+        reservationId: resC,
+        attemptId: attemptC,
+        stageOperationId: stageC,
+        executorSelection: adapter.identity
+      })
+    )
     await new Promise((r) => setTimeout(r, 400))
     const cancelRes = await facade.executionService.cancelUnitExecution(repoId, sessionC, attemptC)
     if (cancelRes.status !== 'TERMINAL_OBSERVED') {
@@ -827,12 +839,16 @@ async function runRealUnitInElectron(payload: HarnessPayload): Promise<any> {
     const events: ExecutorEvent[] = []
     adapter.subscribe(attemptId, (ev) => events.push(ev))
 
-    const started = await facade.startNextUnit(sessionId, planId, {
-      reservationId,
-      attemptId,
-      stageOperationId: stageOpId,
-      executorSelection: adapter.identity
-    })
+    const started = parseMcpResult(
+      await mcpAdapter.callTool('start_next_unitflow_unit', {
+        sessionId,
+        planId,
+        reservationId,
+        attemptId,
+        stageOperationId: stageOpId,
+        executorSelection: adapter.identity
+      })
+    )
     if (started.status !== 'RUNNING') {
       throw new Error(`Expected RUNNING start status in Gate 4, got ${started.status}: ${started.reason}`)
     }

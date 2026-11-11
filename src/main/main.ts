@@ -669,43 +669,60 @@ app.whenReady().then(async () => {
     activeProjects!.updateCapability(revision, 'channel', { state: 'INITIALIZING' })
     const grokExecutor = new GrokExecutorAdapter(activeCliExecution)
     const clineSdkExecutors = new Map<string, ClineSdkExecutorAdapter>()
-    const unitflowExecutorResolver: UnitExecutorResolver = (repositoryId, selection) => {
-      if (selection?.executorId === DEFAULT_CLINE_EXECUTOR_ID) {
-        const key = `${repositoryId}:${selection.modelId ?? ''}`
-        let adapter = clineSdkExecutors.get(key)
-        if (!adapter) {
-          adapter = new ClineSdkExecutorAdapter({
-            repositoryId,
-            modelId: selection.modelId ?? null,
-            workerPath: join(__dirname, 'cline-sdk-worker.js'),
-            runtimeStorageBaseDir: join(app.getPath('userData'), 'cline-sdk-runtime'),
-            getPolicy: ({ repositoryId: repoId, path: targetPath }) =>
-              cliTrustPolicy.getPolicy({ repositoryId: repoId, path: targetPath }),
-            resolveWorktree: async ({ worktreeId, generation }) => {
-              if (!gitOperations.worktrees) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
-              const resolved = await resolveCliWorktree(gitOperations.worktrees, gitService, { worktreeId, generation })
-              return { path: resolved.directory, branch: resolved.identity.branch ?? undefined, reference: false }
-            },
-            approvalHandler: async (req) => {
-              if (!mainWindow || mainWindow.isDestroyed() || !sessionIsCurrent()) return false
-              const response = await dialog.showMessageBox(mainWindow, {
-                type: 'question',
-                title: 'Autorizar edição do Cline SDK na worktree',
-                message: `Autorizar ${req.toolName} na worktree vinculada?`,
-                detail: `${req.summary}\nTentativa: ${req.attemptId}`,
-                buttons: ['Recusar', 'Autorizar esta ação'],
-                defaultId: 0,
-                cancelId: 0,
-                noLink: true
-              })
-              return response.response === 1 && sessionIsCurrent()
-            }
-          })
-          clineSdkExecutors.set(key, adapter)
-        }
-        return adapter
+    const buildClineOptions = (repositoryId: string) => ({
+      repositoryId,
+      workerPath: join(__dirname, 'cline-sdk-worker.js'),
+      runtimeStorageBaseDir: join(app.getPath('userData'), 'cline-sdk-runtime'),
+      getPolicy: ({ repositoryId: repoId, path: targetPath }: { repositoryId: string; path: string }) =>
+        cliTrustPolicy.getPolicy({ repositoryId: repoId, path: targetPath }),
+      resolveWorktree: async ({ worktreeId, generation }: { worktreeId: string; generation: string }) => {
+        if (!gitOperations.worktrees) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+        const resolved = await resolveCliWorktree(gitOperations.worktrees, gitService, { worktreeId, generation })
+        return { path: resolved.directory, branch: resolved.identity.branch ?? undefined, reference: false }
+      },
+      approvalHandler: async (req: { toolName: string; summary: string; attemptId: string }) => {
+        if (!mainWindow || mainWindow.isDestroyed() || !sessionIsCurrent()) return false
+        const response = await dialog.showMessageBox(mainWindow, {
+          type: 'question',
+          title: 'Autorizar edição do Cline SDK na worktree',
+          message: `Autorizar ${req.toolName} na worktree vinculada?`,
+          detail: `${req.summary}\nTentativa: ${req.attemptId}`,
+          buttons: ['Recusar', 'Autorizar esta ação'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true
+        })
+        return response.response === 1 && sessionIsCurrent()
       }
-      return grokExecutor
+    })
+    const unitflowExecutorResolver: UnitExecutorResolver = async (repositoryId, selection) => {
+      if (selection?.executorId === DEFAULT_CLINE_EXECUTOR_ID) {
+        if (selection.modelId) {
+          const key = `${repositoryId}:${selection.modelId}`
+          let adapter = clineSdkExecutors.get(key)
+          if (!adapter) {
+            adapter = new ClineSdkExecutorAdapter({
+              ...buildClineOptions(repositoryId),
+              modelId: selection.modelId
+            })
+            clineSdkExecutors.set(key, adapter)
+          }
+          return adapter
+        }
+        const dynamicAdapter = await ClineSdkExecutorAdapter.createForLiveFreeAttempt({
+          ...buildClineOptions(repositoryId),
+          requireAuth: true
+        })
+        const resolvedKey = `${repositoryId}:${dynamicAdapter.identity.modelId ?? ''}`
+        if (!clineSdkExecutors.has(resolvedKey)) {
+          clineSdkExecutors.set(resolvedKey, dynamicAdapter)
+        }
+        return clineSdkExecutors.get(resolvedKey)!
+      }
+      if (!selection || selection.executorId === grokExecutor.identity.executorId) {
+        return grokExecutor
+      }
+      return null
     }
     const unitflowRuntime = gitRepositoryId
       ? new UnitFlowRuntimeFacade({

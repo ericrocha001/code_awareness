@@ -6,6 +6,7 @@ import * as path from 'node:path'
 import type { ExecutorEvent } from '../../../../shared/types/buildx/execution-types'
 import {
   ClineSdkExecutorAdapter,
+  type ClineStartAttemptRequest,
   type ClineUtilityLauncher,
   type ClineWorkerMessage,
   type ClineWorkerRequest,
@@ -601,5 +602,311 @@ describe('ClineSdkExecutorAdapter — Portas, FREE Fail-Closed, Confinamento & L
     expect(crashedObs.reason).toBe('CLINE_WORKER_CRASHED_EXIT_139')
     expect(crashedObs.termination?.confirmed).toBe(true)
     expect(fs.existsSync(path.join(runtimeDir, attemptId))).toBe(false)
+  })
+
+  it('Gate B: revalida política e worktree antes do spawn no startAttempt (fecha TOCTOU de revogação YOLO -> SUPERVISED com forkCount === 0)', async () => {
+    const startForks: ClineStartAttemptRequest[] = []
+    const allWorkerRequests: ClineWorkerRequest[] = []
+    let prepareForkCount = 0
+    let startForkCount = 0
+    let approvalCalls = 0
+
+    let currentPolicy: {
+      mode: 'AUTONOMOUS_TRUSTED' | 'SUPERVISED'
+      scope: 'REPOSITORY_WORKTREES' | 'ACTIVE_CHECKOUT_ONLY'
+      revision: string
+      rule: string
+    } = {
+      mode: 'AUTONOMOUS_TRUSTED',
+      scope: 'REPOSITORY_WORKTREES',
+      revision: 'yolo-rev-1',
+      rule: 'local-repository-worktree-trust'
+    }
+    let currentWorktree = { path: worktreeDir, branch: 'feat/u2', reference: false }
+
+    const createSpyLauncher = (): ClineUtilityLauncher => ({
+      isAvailable: () => true,
+      fork: () => {
+        const w = new MockUtilityWorker(undefined)
+        const origPost = w.postMessage.bind(w)
+        w.postMessage = (req: ClineWorkerRequest) => {
+          origPost(req)
+          allWorkerRequests.push(req)
+          if (req.type === 'prepare_attempt') {
+            prepareForkCount++
+            w.emitWorkerMessage({
+              type: 'prepare_result',
+              requestId: req.requestId,
+              ok: true,
+              status: 'READY',
+              modelId: req.requestedModelId
+            })
+            w.emit('exit', 0)
+          } else if (req.type === 'start_attempt') {
+            startForkCount++
+            startForks.push(req)
+            w.emitWorkerMessage({
+              type: 'attempt_started',
+              attemptId: req.attemptId,
+              clineSessionId: `cline-${req.attemptId}`,
+              lockedModelId: req.modelId,
+              pid: 334455
+            })
+            if (req.allowAutoApprove) {
+              w.emitWorkerMessage({
+                type: 'attempt_terminal',
+                attemptId: req.attemptId,
+                clineSessionId: `cline-${req.attemptId}`,
+                status: 'SUCCEEDED',
+                cleanup: { sessionDeleted: true, coreDisposed: true, dirRemoved: true },
+                durationMs: 25
+              })
+              fs.rmSync(req.isolatedStorageRoot, { recursive: true, force: true })
+              w.emit('exit', 0)
+            } else if (req.attemptId === 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb') {
+              setTimeout(() => {
+                w.emitWorkerMessage({
+                  type: 'approval_request',
+                  attemptId: req.attemptId,
+                  toolCallId: 'tc-sup-drift',
+                  toolName: 'editor',
+                  targetPath: 'target.txt',
+                  summary: 'Mid-flight supervised edit'
+                })
+              }, 10)
+            } else {
+              w.emitWorkerMessage({
+                type: 'approval_request',
+                attemptId: req.attemptId,
+                toolCallId: 'tc-sup-1',
+                toolName: 'editor',
+                targetPath: 'target.txt',
+                summary: 'Supervised edit'
+              })
+            }
+          } else if (req.type === 'approval_response') {
+            const startReq = startForks[startForks.length - 1]
+            w.emitWorkerMessage({
+              type: 'attempt_terminal',
+              attemptId: req.attemptId,
+              clineSessionId: `cline-${req.attemptId}`,
+              status: req.approved ? 'SUCCEEDED' : 'REFUSED',
+              reason: req.reason,
+              cleanup: { sessionDeleted: true, coreDisposed: true, dirRemoved: true },
+              durationMs: 30
+            })
+            fs.rmSync(startReq.isolatedStorageRoot, { recursive: true, force: true })
+            w.emit('exit', 0)
+          }
+        }
+        setImmediate(() => w.emitReady())
+        return w
+      }
+    })
+
+    const adapter = new ClineSdkExecutorAdapter({
+      repositoryId: 'repo-1',
+      modelId: 'free/demo-model',
+      workerPath: dummyWorkerFile,
+      runtimeStorageBaseDir: runtimeDir,
+      launcher: createSpyLauncher(),
+      getPolicy: () => currentPolicy,
+      resolveWorktree: async () => currentWorktree,
+      approvalHandler: async () => {
+        approvalCalls++
+        return true
+      }
+    })
+
+    // 1. Prepare under AUTONOMOUS_TRUSTED, then revoke YOLO -> SUPERVISED before startAttempt
+    const prepRevoked = await adapter.prepareAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      planId: '22222222-2222-4222-8222-222222222222',
+      unitId: '33333333-3333-4333-8333-333333333333',
+      attemptId: '77777777-7777-4777-8777-777777777777',
+      worktree: { worktreeId: 'wt-1', generation: 'gen-1', branch: 'feat/u2', path: worktreeDir },
+      prompt: {
+        stageOperationId: 'stage-revoked',
+        promptFilePath: path.join(tempRoot, 'prompt.tmp'),
+        readPromptText: () => 'Edit target.txt under YOLO'
+      }
+    })
+    expect(prepRevoked.status).toBe('READY')
+    expect(prepareForkCount).toBe(1)
+
+    currentPolicy = {
+      mode: 'SUPERVISED',
+      scope: 'ACTIVE_CHECKOUT_ONLY',
+      revision: 'sup-rev-2',
+      rule: 'native-command-consent'
+    }
+
+    const blockedStart = await adapter.startAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: '77777777-7777-4777-8777-777777777777',
+      handle: prepRevoked.handle!
+    })
+    expect(blockedStart.status).toBe('REFUSED')
+    expect(blockedStart.phase).toBe('TERMINAL')
+    expect(blockedStart.reason).toBe('POLICY_CHANGED')
+    expect(blockedStart.termination?.confirmed).toBe(true)
+    expect(startForkCount).toBe(0)
+
+    // 2. Worktree drift (path / branch / reference) between prepareAttempt and startAttempt blocks before spawn
+    currentPolicy = {
+      mode: 'AUTONOMOUS_TRUSTED',
+      scope: 'REPOSITORY_WORKTREES',
+      revision: 'yolo-rev-3',
+      rule: 'local-repository-worktree-trust'
+    }
+    const altWorktreeDir = path.join(tempRoot, 'worktree-alt')
+    fs.mkdirSync(altWorktreeDir, { recursive: true })
+    const prepDrift = await adapter.prepareAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      planId: '22222222-2222-4222-8222-222222222222',
+      unitId: '33333333-3333-4333-8333-333333333333',
+      attemptId: '88888888-8888-4888-8888-888888888888',
+      worktree: { worktreeId: 'wt-1', generation: 'gen-1', branch: 'feat/u2', path: worktreeDir },
+      prompt: {
+        stageOperationId: 'stage-drift',
+        promptFilePath: path.join(tempRoot, 'prompt.tmp'),
+        readPromptText: () => 'Edit target.txt'
+      }
+    })
+    expect(prepDrift.status).toBe('READY')
+    currentWorktree = { path: altWorktreeDir, branch: 'feat/u2', reference: false }
+
+    const driftStart = await adapter.startAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: '88888888-8888-4888-8888-888888888888',
+      handle: prepDrift.handle!
+    })
+    expect(driftStart.status).toBe('REFUSED')
+    expect(driftStart.reason).toBe('WORKTREE_CHANGED')
+    expect(startForkCount).toBe(0)
+
+    // 3. Valid YOLO attempt succeeds with metadata on ClineStartAttemptRequest, then revoked SUPERVISED attempt demands host approval
+    currentWorktree = { path: worktreeDir, branch: 'feat/u2', reference: false }
+    const prepYolo = await adapter.prepareAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      planId: '22222222-2222-4222-8222-222222222222',
+      unitId: '33333333-3333-4333-8333-333333333333',
+      attemptId: '99999999-9999-4999-8999-999999999999',
+      worktree: { worktreeId: 'wt-1', generation: 'gen-1', branch: 'feat/u2', path: worktreeDir },
+      prompt: {
+        stageOperationId: 'stage-yolo-ok',
+        promptFilePath: path.join(tempRoot, 'prompt.tmp'),
+        readPromptText: () => 'Edit target.txt'
+      }
+    })
+    expect(prepYolo.status).toBe('READY')
+    const yoloStart = await adapter.startAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: '99999999-9999-4999-8999-999999999999',
+      handle: prepYolo.handle!
+    })
+    expect(yoloStart.status).toBe('RUNNING')
+    const yoloObs = await adapter.observeAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: '99999999-9999-4999-8999-999999999999'
+    })
+    expect(yoloObs.status).toBe('SUCCEEDED')
+    expect(approvalCalls).toBe(0)
+    expect(startForks[0].allowAutoApprove).toBe(true)
+    expect(startForks[0].worktreeId).toBe('wt-1')
+    expect(startForks[0].generation).toBe('gen-1')
+    expect(startForks[0].branch).toBe('feat/u2')
+    expect(startForks[0].policyRevision).toBe('yolo-rev-3')
+
+    currentPolicy = {
+      mode: 'SUPERVISED',
+      scope: 'ACTIVE_CHECKOUT_ONLY',
+      revision: 'sup-rev-4',
+      rule: 'native-command-consent'
+    }
+    const prepSup = await adapter.prepareAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      planId: '22222222-2222-4222-8222-222222222222',
+      unitId: '33333333-3333-4333-8333-333333333333',
+      attemptId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      worktree: { worktreeId: 'wt-1', generation: 'gen-1', branch: 'feat/u2', path: worktreeDir },
+      prompt: {
+        stageOperationId: 'stage-sup-ok',
+        promptFilePath: path.join(tempRoot, 'prompt.tmp'),
+        readPromptText: () => 'Edit target.txt supervised'
+      }
+    })
+    expect(prepSup.status).toBe('READY')
+    await adapter.startAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      handle: prepSup.handle!
+    })
+    await new Promise((r) => setTimeout(r, 30))
+    const supObs = await adapter.observeAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    })
+    expect(supObs.status).toBe('SUCCEEDED')
+    expect(approvalCalls).toBe(1)
+    expect(startForks[1].allowAutoApprove).toBe(false)
+    expect(startForks[1].policyRevision).toBe('sup-rev-4')
+
+    // 4. Mid-flight policy drift during SUPERVISED attempt blocks approval_request before invoking approvalHandler
+    const prepMidDrift = await adapter.prepareAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      planId: '22222222-2222-4222-8222-222222222222',
+      unitId: '33333333-3333-4333-8333-333333333333',
+      attemptId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      worktree: { worktreeId: 'wt-1', generation: 'gen-1', branch: 'feat/u2', path: worktreeDir },
+      prompt: {
+        stageOperationId: 'stage-mid-drift',
+        promptFilePath: path.join(tempRoot, 'prompt.tmp'),
+        readPromptText: () => 'Edit target.txt mid-flight drift'
+      }
+    })
+    expect(prepMidDrift.status).toBe('READY')
+    await adapter.startAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+      handle: prepMidDrift.handle!
+    })
+    currentPolicy = {
+      mode: 'SUPERVISED',
+      scope: 'ACTIVE_CHECKOUT_ONLY',
+      revision: 'sup-rev-5-drifted',
+      rule: 'native-command-consent'
+    }
+    await new Promise((r) => setTimeout(r, 50))
+    const midDriftObs = await adapter.observeAttempt({
+      repositoryId: 'repo-1',
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      attemptId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    })
+    expect(midDriftObs.status).toBe('REFUSED')
+    expect(midDriftObs.reason).toBe('POLICY_CHANGED')
+    expect(approvalCalls).toBe(1)
+    expect(
+      allWorkerRequests.some(
+        (r) => r.type === 'approval_response' && r.attemptId === 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' && !r.approved && r.reason === 'POLICY_CHANGED'
+      )
+    ).toBe(true)
+    expect(
+      allWorkerRequests.some(
+        (r) => r.type === 'cancel_attempt' && r.attemptId === 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' && r.reason === 'POLICY_CHANGED'
+      )
+    ).toBe(true)
   })
 })

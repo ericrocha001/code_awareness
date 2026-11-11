@@ -165,6 +165,69 @@ export class UnitExecutionService {
     }
   }
 
+  async resolveExecutorSelection(
+    repositoryId: string,
+    selection?: ExecutorSelection
+  ): Promise<{
+    readonly executor: UnitExecutorPort | null
+    readonly available: boolean
+    readonly selection?: ExecutorSelection
+    readonly reason?: string
+  }> {
+    let validRepoId: string
+    try {
+      validRepoId = validateRepositoryId(repositoryId)
+    } catch {
+      return { executor: null, available: false, reason: 'INVALID_REPOSITORY_ID' }
+    }
+
+    let executor: UnitExecutorPort | null
+    try {
+      executor = await this.executorResolver(validRepoId, selection)
+    } catch (err: any) {
+      return {
+        executor: null,
+        available: false,
+        ...(selection ? { selection } : {}),
+        reason: err?.message ?? String(err)
+      }
+    }
+
+    if (!executor) {
+      return {
+        executor: null,
+        available: false,
+        ...(selection ? { selection } : {}),
+        reason: 'EXECUTOR_UNAVAILABLE'
+      }
+    }
+
+    try {
+      const availability = await executor.checkAvailability(validRepoId)
+      if (!availability.available) {
+        return {
+          executor: null,
+          available: false,
+          selection: executor.identity,
+          reason: availability.reason ?? 'EXECUTOR_UNAVAILABLE'
+        }
+      }
+    } catch (err: any) {
+      return {
+        executor: null,
+        available: false,
+        selection: executor.identity,
+        reason: `EXECUTOR_AVAILABILITY_ERROR: ${err?.message ?? String(err)}`
+      }
+    }
+
+    return {
+      executor,
+      available: true,
+      selection: executor.identity
+    }
+  }
+
   async startUnitExecution(
     repositoryId: string,
     sessionId: string,
@@ -243,42 +306,18 @@ export class UnitExecutionService {
 
     // 2. Resolve and verify executor adapter
     const selectionHint = requestedSelection ?? persistedSelection
-    const executor = await this.executorResolver(validRepoId, selectionHint)
-    if (!executor) {
+    const resolvedExecutor = await this.resolveExecutorSelection(validRepoId, selectionHint)
+    if (!resolvedExecutor.executor || !resolvedExecutor.available) {
       return {
         status: 'UNAVAILABLE',
         attemptId: cleanAttemptId,
         sessionId: cleanSessionId,
         repositoryId: validRepoId,
-        ...selectionFields(selectionHint),
-        reason: 'EXECUTOR_UNAVAILABLE'
+        ...selectionFields(resolvedExecutor.selection ?? selectionHint),
+        reason: resolvedExecutor.reason ?? 'EXECUTOR_UNAVAILABLE'
       }
     }
-
-    let availability: Awaited<ReturnType<UnitExecutorPort['checkAvailability']>>
-    try {
-      availability = await executor.checkAvailability(validRepoId)
-    } catch (err: any) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        ...selectionFields(executor.identity),
-        reason: `EXECUTOR_AVAILABILITY_ERROR: ${err?.message ?? String(err)}`
-      }
-    }
-
-    if (!availability.available) {
-      return {
-        status: 'UNAVAILABLE',
-        attemptId: cleanAttemptId,
-        sessionId: cleanSessionId,
-        repositoryId: validRepoId,
-        ...selectionFields(executor.identity),
-        reason: availability.reason ?? 'EXECUTOR_UNAVAILABLE'
-      }
-    }
+    const executor = resolvedExecutor.executor
 
     if (requestedSelection && !executorSelectionsEqual(requestedSelection, executor.identity)) {
       return {

@@ -104,20 +104,36 @@ export interface ClineSdkExecutorAdapterOptions {
   readonly launcher?: ClineUtilityLauncher
 }
 
+interface ClinePolicySnapshot {
+  readonly mode: CliPolicy['mode']
+  readonly scope: CliPolicy['scope']
+  readonly revision: string
+  readonly rule: string
+}
+
 interface PreparedAttemptEntry {
   readonly preparedAttemptId: string
   readonly attemptId: string
   readonly repositoryId: string
+  readonly worktreeId: string
+  readonly generation: string
+  readonly branch: string
   readonly worktreePath: string
   readonly promptText: string
   readonly modelId: string
   readonly allowAutoApprove: boolean
+  readonly policySnapshot?: ClinePolicySnapshot
   readonly timeoutMs: number
 }
 
 interface ActiveAttemptRuntime {
   readonly attemptId: string
+  readonly repositoryId: string
+  readonly worktreeId: string
+  readonly generation: string
+  readonly branch: string
   readonly worktreePath: string
+  readonly policySnapshot?: ClinePolicySnapshot
   readonly isolatedStorageRoot: string
   readonly startedAt: number
   worker: SpawnedClineWorker | null
@@ -396,6 +412,7 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
   private readonly runtimeStorageBaseDir: string
   private readonly preparedHandles = new Map<string, PreparedAttemptEntry>()
   private readonly activeAttempts = new Map<string, ActiveAttemptRuntime>()
+  private readonly preSpawnTerminalObservations = new Map<string, ExecutorRunObservation>()
   private readonly listeners = new Map<string, Set<(event: ExecutorEvent) => void>>()
 
   constructor(options?: ClineSdkExecutorAdapterOptions) {
@@ -463,77 +480,23 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
       }
     }
 
-    let resolvedWorktree: ClineWorktreeAuthorityResolution
-    try {
-      if (this.options.resolveWorktree) {
-        resolvedWorktree = await this.options.resolveWorktree({
-          repositoryId: input.repositoryId,
-          worktreeId: input.worktree.worktreeId,
-          generation: input.worktree.generation
-        })
-      } else if (input.worktree.path) {
-        resolvedWorktree = { path: input.worktree.path, branch: input.worktree.branch }
-      } else {
-        return {
-          status: 'UNAVAILABLE',
-          reason: 'WORKTREE_PATH_UNAVAILABLE'
-        }
-      }
-    } catch (err) {
+    const validation = await this.validateWorktreeAndPolicy({
+      repositoryId: input.repositoryId,
+      worktreeId: input.worktree.worktreeId,
+      generation: input.worktree.generation,
+      branch: input.worktree.branch,
+      fallbackPath: input.worktree.path,
+      allowAlwaysApproveRequested: input.allowAlwaysApprove
+    })
+    if (!validation.ok) {
       return {
-        status: 'UNAVAILABLE',
-        reason: `WORKTREE_AUTHORITY_ERROR: ${err instanceof Error ? err.message : String(err)}`
+        status: validation.status,
+        reason: validation.reason
       }
     }
 
-    if (resolvedWorktree.reference === true) {
-      return {
-        status: 'REFUSED',
-        reason: 'REFERENCE_CHECKOUT_FORBIDDEN'
-      }
-    }
-
-    if (
-      !resolvedWorktree.path ||
-      !fs.existsSync(resolvedWorktree.path) ||
-      !fs.statSync(resolvedWorktree.path).isDirectory()
-    ) {
-      return {
-        status: 'UNAVAILABLE',
-        reason: 'WORKTREE_PATH_UNAVAILABLE'
-      }
-    }
-    const physicalWorktreePath = fs.realpathSync(resolvedWorktree.path)
-
-    let hostPolicy: CliPolicy | undefined
-    if (this.options.getPolicy) {
-      try {
-        hostPolicy = await this.options.getPolicy({
-          repositoryId: input.repositoryId,
-          worktreeId: input.worktree.worktreeId,
-          generation: input.worktree.generation,
-          path: physicalWorktreePath
-        })
-      } catch (err) {
-        return {
-          status: 'UNAVAILABLE',
-          reason: `HOST_POLICY_ERROR: ${err instanceof Error ? err.message : String(err)}`
-        }
-      }
-    }
-
-    const hostYoloAuthorized =
-      hostPolicy?.mode === 'AUTONOMOUS_TRUSTED' &&
-      hostPolicy?.scope === 'REPOSITORY_WORKTREES'
-
-    if (hostPolicy !== undefined && input.allowAlwaysApprove === true && !hostYoloAuthorized) {
-      return {
-        status: 'REFUSED',
-        reason: 'POLICY_CHANGED'
-      }
-    }
-
-    const allowAutoApprove = hostPolicy !== undefined ? hostYoloAuthorized : input.allowAlwaysApprove === true
+    const { physicalWorktreePath, hostYoloAuthorized, policySnapshot } = validation
+    const allowAutoApprove = policySnapshot !== undefined ? hostYoloAuthorized : input.allowAlwaysApprove === true
 
     let promptText: string
     try {
@@ -580,10 +543,14 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
       preparedAttemptId,
       attemptId: input.attemptId,
       repositoryId: input.repositoryId,
+      worktreeId: input.worktree.worktreeId,
+      generation: input.worktree.generation,
+      branch: input.worktree.branch,
       worktreePath: physicalWorktreePath,
       promptText,
       modelId: this.identity.modelId,
       allowAutoApprove,
+      ...(policySnapshot ? { policySnapshot } : {}),
       timeoutMs
     })
 
@@ -604,6 +571,10 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
     if (existing) {
       return existing.observation
     }
+    const existingPreSpawn = this.preSpawnTerminalObservations.get(cleanAttemptId)
+    if (existingPreSpawn) {
+      return existingPreSpawn
+    }
 
     const prepared = this.preparedHandles.get(input.handle.preparedAttemptId)
     if (!prepared || prepared.attemptId.trim().toLowerCase() !== cleanAttemptId) {
@@ -620,14 +591,36 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
 
     const avail = this.checkAvailability(input.repositoryId)
     if (!avail.available) {
-      return {
+      return this.recordPreSpawnTerminal(cleanAttemptId, {
         attemptId: input.attemptId,
         status: 'UNAVAILABLE',
         phase: 'TERMINAL',
         selection: this.identity,
         reason: avail.reason ?? 'CLINE_EXECUTOR_UNAVAILABLE',
         termination: { confirmed: true, activeProcesses: 0, handlesClosed: true }
-      }
+      })
+    }
+
+    // Revalidate Worktree authority and Host Policy strictly before fork (closes TOCTOU window)
+    const startValidation = await this.validateWorktreeAndPolicy({
+      repositoryId: prepared.repositoryId,
+      worktreeId: prepared.worktreeId,
+      generation: prepared.generation,
+      branch: prepared.branch,
+      fallbackPath: prepared.worktreePath,
+      expectedPhysicalPath: prepared.worktreePath,
+      expectedPolicySnapshot: prepared.policySnapshot,
+      preparedAllowAutoApprove: prepared.allowAutoApprove
+    })
+    if (!startValidation.ok) {
+      return this.recordPreSpawnTerminal(cleanAttemptId, {
+        attemptId: input.attemptId,
+        status: startValidation.status,
+        phase: 'TERMINAL',
+        selection: this.identity,
+        reason: startValidation.reason,
+        termination: { confirmed: true, activeProcesses: 0, handlesClosed: true }
+      })
     }
 
     const isolatedStorageRoot = path.join(this.runtimeStorageBaseDir, cleanAttemptId)
@@ -640,7 +633,12 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
 
     const runtime: ActiveAttemptRuntime = {
       attemptId: input.attemptId,
-      worktreePath: prepared.worktreePath,
+      repositoryId: prepared.repositoryId,
+      worktreeId: prepared.worktreeId,
+      generation: prepared.generation,
+      branch: prepared.branch,
+      worktreePath: startValidation.physicalWorktreePath,
+      ...(startValidation.policySnapshot ? { policySnapshot: startValidation.policySnapshot } : {}),
       isolatedStorageRoot,
       startedAt: Date.now(),
       worker: null,
@@ -707,10 +705,14 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
           attemptId: input.attemptId,
           repositoryId: input.repositoryId,
           unitflowSessionId: input.sessionId,
-          worktreePath: prepared.worktreePath,
+          worktreeId: prepared.worktreeId,
+          generation: prepared.generation,
+          branch: prepared.branch,
+          policyRevision: startValidation.policySnapshot?.revision ?? null,
+          worktreePath: startValidation.physicalWorktreePath,
           modelId: prepared.modelId,
           promptText: prepared.promptText,
-          allowAutoApprove: prepared.allowAutoApprove,
+          allowAutoApprove: startValidation.allowAutoApprove,
           timeoutMs: prepared.timeoutMs,
           isolatedStorageRoot,
           ...(this.options.apiBaseUrl ? { apiBaseUrl: this.options.apiBaseUrl } : {}),
@@ -809,10 +811,22 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
     return await handshakePromise
   }
 
+  private recordPreSpawnTerminal(
+    cleanAttemptId: string,
+    observation: ExecutorRunObservation
+  ): ExecutorRunObservation {
+    this.preSpawnTerminalObservations.set(cleanAttemptId, observation)
+    return observation
+  }
+
   async observeAttempt(input: ObserveExecutorAttemptInput): Promise<ExecutorRunObservation> {
     const cleanAttemptId = input.attemptId.trim().toLowerCase()
     const runtime = this.activeAttempts.get(cleanAttemptId)
     if (!runtime) {
+      const preSpawn = this.preSpawnTerminalObservations.get(cleanAttemptId)
+      if (preSpawn) {
+        return preSpawn
+      }
       return {
         attemptId: input.attemptId,
         status: 'UNKNOWN',
@@ -841,6 +855,10 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
     const cleanAttemptId = input.attemptId.trim().toLowerCase()
     const runtime = this.activeAttempts.get(cleanAttemptId)
     if (!runtime) {
+      const preSpawn = this.preSpawnTerminalObservations.get(cleanAttemptId)
+      if (preSpawn) {
+        return preSpawn
+      }
       return {
         attemptId: input.attemptId,
         status: 'UNKNOWN',
@@ -910,10 +928,164 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
     }
   }
 
+  private async validateWorktreeAndPolicy(input: {
+    readonly repositoryId: string
+    readonly worktreeId: string
+    readonly generation: string
+    readonly branch: string
+    readonly fallbackPath?: string
+    readonly expectedPhysicalPath?: string
+    readonly expectedPolicySnapshot?: ClinePolicySnapshot
+    readonly allowAlwaysApproveRequested?: boolean
+    readonly preparedAllowAutoApprove?: boolean
+  }): Promise<
+    | {
+        readonly ok: true
+        readonly physicalWorktreePath: string
+        readonly hostYoloAuthorized: boolean
+        readonly allowAutoApprove: boolean
+        readonly policySnapshot?: ClinePolicySnapshot
+      }
+    | {
+        readonly ok: false
+        readonly status: 'REFUSED' | 'UNAVAILABLE'
+        readonly reason: string
+      }
+  > {
+    let resolvedWorktree: ClineWorktreeAuthorityResolution
+    try {
+      if (this.options.resolveWorktree) {
+        resolvedWorktree = await this.options.resolveWorktree({
+          repositoryId: input.repositoryId,
+          worktreeId: input.worktreeId,
+          generation: input.generation
+        })
+      } else if (input.fallbackPath) {
+        resolvedWorktree = { path: input.fallbackPath, branch: input.branch }
+      } else {
+        return { ok: false, status: 'UNAVAILABLE', reason: 'WORKTREE_PATH_UNAVAILABLE' }
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        status: 'UNAVAILABLE',
+        reason: `WORKTREE_AUTHORITY_ERROR: ${err instanceof Error ? err.message : String(err)}`
+      }
+    }
+
+    if (resolvedWorktree.reference === true) {
+      return { ok: false, status: 'REFUSED', reason: 'REFERENCE_CHECKOUT_FORBIDDEN' }
+    }
+
+    if (
+      !resolvedWorktree.path ||
+      !fs.existsSync(resolvedWorktree.path) ||
+      !fs.statSync(resolvedWorktree.path).isDirectory()
+    ) {
+      return { ok: false, status: 'UNAVAILABLE', reason: 'WORKTREE_PATH_UNAVAILABLE' }
+    }
+
+    const physicalWorktreePath = fs.realpathSync(resolvedWorktree.path)
+    const norm = (value: string) => (process.platform === 'win32' ? value.toLowerCase() : value)
+    if (input.expectedPhysicalPath && norm(physicalWorktreePath) !== norm(input.expectedPhysicalPath)) {
+      return { ok: false, status: 'REFUSED', reason: 'WORKTREE_CHANGED' }
+    }
+    if (resolvedWorktree.branch !== undefined && resolvedWorktree.branch !== input.branch) {
+      return { ok: false, status: 'REFUSED', reason: 'WORKTREE_CHANGED' }
+    }
+
+    let hostPolicy: CliPolicy | undefined
+    if (this.options.getPolicy) {
+      try {
+        hostPolicy = await this.options.getPolicy({
+          repositoryId: input.repositoryId,
+          worktreeId: input.worktreeId,
+          generation: input.generation,
+          path: physicalWorktreePath
+        })
+      } catch (err) {
+        return {
+          ok: false,
+          status: 'UNAVAILABLE',
+          reason: `HOST_POLICY_ERROR: ${err instanceof Error ? err.message : String(err)}`
+        }
+      }
+    }
+
+    const hostYoloAuthorized =
+      hostPolicy?.mode === 'AUTONOMOUS_TRUSTED' &&
+      hostPolicy?.scope === 'REPOSITORY_WORKTREES'
+
+    if (hostPolicy !== undefined && input.allowAlwaysApproveRequested === true && !hostYoloAuthorized) {
+      return { ok: false, status: 'REFUSED', reason: 'POLICY_CHANGED' }
+    }
+
+    if (input.expectedPolicySnapshot) {
+      const snap = input.expectedPolicySnapshot
+      if (
+        !hostPolicy ||
+        hostPolicy.mode !== snap.mode ||
+        hostPolicy.scope !== snap.scope ||
+        hostPolicy.revision !== snap.revision ||
+        hostPolicy.rule !== snap.rule ||
+        (input.preparedAllowAutoApprove === true && !hostYoloAuthorized)
+      ) {
+        return { ok: false, status: 'REFUSED', reason: 'POLICY_CHANGED' }
+      }
+    }
+
+    const policySnapshot: ClinePolicySnapshot | undefined = hostPolicy
+      ? {
+          mode: hostPolicy.mode,
+          scope: hostPolicy.scope,
+          revision: hostPolicy.revision,
+          rule: hostPolicy.rule
+        }
+      : undefined
+    const allowAutoApprove =
+      policySnapshot !== undefined ? hostYoloAuthorized : input.preparedAllowAutoApprove === true
+
+    return {
+      ok: true,
+      physicalWorktreePath,
+      hostYoloAuthorized,
+      allowAutoApprove,
+      ...(policySnapshot ? { policySnapshot } : {})
+    }
+  }
+
   private async handleWorkerApprovalRequest(
     runtime: ActiveAttemptRuntime,
     msg: ClineApprovalRequestMessage
   ): Promise<void> {
+    const check = await this.validateWorktreeAndPolicy({
+      repositoryId: runtime.repositoryId,
+      worktreeId: runtime.worktreeId,
+      generation: runtime.generation,
+      branch: runtime.branch,
+      fallbackPath: runtime.worktreePath,
+      expectedPhysicalPath: runtime.worktreePath,
+      expectedPolicySnapshot: runtime.policySnapshot,
+      preparedAllowAutoApprove: false
+    })
+    if (!check.ok) {
+      try {
+        runtime.worker?.postMessage({
+          type: 'approval_response',
+          attemptId: runtime.attemptId,
+          toolCallId: msg.toolCallId,
+          approved: false,
+          reason: check.reason
+        })
+        runtime.worker?.postMessage({
+          type: 'cancel_attempt',
+          attemptId: runtime.attemptId,
+          reason: check.reason
+        })
+      } catch {}
+      return
+    }
+
     let approved = false
     let reason = 'HOST_APPROVAL_DENIED'
 
@@ -921,7 +1093,7 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
       try {
         approved = await this.options.approvalHandler({
           attemptId: runtime.attemptId,
-          repositoryId: this.options.repositoryId ?? '',
+          repositoryId: runtime.repositoryId,
           toolCallId: msg.toolCallId,
           toolName: msg.toolName,
           targetPath: msg.targetPath,

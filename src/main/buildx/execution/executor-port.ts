@@ -84,3 +84,68 @@ export function executorSelectionsEqual(a: ExecutorSelection, b: ExecutorSelecti
 export function formatExecutorSelection(selection: ExecutorSelection): string {
   return `executorId=${selection.executorId}, providerId=${selection.providerId ?? 'null'}, modelId=${selection.modelId ?? 'null'}`
 }
+
+export const PUBLIC_EXECUTOR_IDS = ['grok-cli', 'cline-sdk'] as const
+export type PublicExecutorId = (typeof PUBLIC_EXECUTOR_IDS)[number]
+
+const ALLOWED_SELECTION_KEYS = new Set(['executorId', 'providerId', 'modelId'])
+
+export function validatePublicExecutorSelection(raw: unknown): ExecutorSelection {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error('INVALID_EXECUTOR_SELECTION: executorSelection must be a plain object')
+  }
+  const extraKeys = Object.keys(raw as Record<string, unknown>).filter((key) => !ALLOWED_SELECTION_KEYS.has(key))
+  if (extraKeys.length > 0) {
+    throw new Error(`INVALID_EXECUTOR_SELECTION: unexpected fields (${extraKeys.join(', ')})`)
+  }
+
+  const normalized = normalizeExecutorSelection(raw as ExecutorSelection)
+  if (!PUBLIC_EXECUTOR_IDS.includes(normalized.executorId as PublicExecutorId)) {
+    throw new Error(
+      `INVALID_EXECUTOR_SELECTION: unsupported executorId "${normalized.executorId}"; allowed values are "grok-cli" or "cline-sdk"`
+    )
+  }
+
+  if (normalized.executorId === 'cline-sdk') {
+    if (normalized.providerId !== null && normalized.providerId !== 'cline') {
+      throw new Error(
+        `INVALID_EXECUTOR_SELECTION: cline-sdk requires providerId "cline" (received "${normalized.providerId}")`
+      )
+    }
+    return {
+      executorId: 'cline-sdk',
+      providerId: 'cline',
+      modelId: normalized.modelId ?? null
+    }
+  }
+
+  if (normalized.providerId !== null && normalized.providerId !== 'xai') {
+    throw new Error(
+      `INVALID_EXECUTOR_SELECTION: grok-cli requires providerId "xai" (received "${normalized.providerId}")`
+    )
+  }
+  return {
+    executorId: 'grok-cli',
+    providerId: 'xai',
+    modelId: normalized.modelId ?? null
+  }
+}
+
+export function isExecutorSelectionCompatible(
+  persisted: ExecutorSelection,
+  requested: ExecutorSelection
+): boolean {
+  if (executorSelectionsEqual(persisted, requested)) return true
+  try {
+    const normPersisted = normalizeExecutorSelection(persisted)
+    const normRequested = normalizeExecutorSelection(requested)
+    return (
+      normPersisted.executorId === 'cline-sdk' &&
+      normRequested.executorId === 'cline-sdk' &&
+      (normPersisted.providerId ?? 'cline') === (normRequested.providerId ?? 'cline') &&
+      (normRequested.modelId ?? null) === null
+    )
+  } catch {
+    return false
+  }
+}

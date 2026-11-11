@@ -125,7 +125,7 @@ describe('BuildX ClineSdkExecutorAdapter — Electron utilityProcess Real (Gates
     const res = await runInRealElectron({
       mode: 'gates',
       includeHardKillWorker: true,
-      timeoutMs: 150_000
+      timeoutMs: 180_000
     })
     expect(res.error).toBeUndefined()
     expect(res.success).toBe(true)
@@ -143,7 +143,7 @@ describe('BuildX ClineSdkExecutorAdapter — Electron utilityProcess Real (Gates
     expect(res.eventKinds).toContain('STARTED')
     expect(res.eventKinds).toContain('TOOL_ACTIVITY')
     expect(res.eventKinds).toContain('COMPLETED')
-  }, 160_000)
+  }, 195_000)
 
   describe.runIf(process.env.BUILDX_CLINE_REAL_UNIT_E2E === '1')(
     'Gate 4: Execução unitária real única com modelo gratuito oficial e edição controlada',

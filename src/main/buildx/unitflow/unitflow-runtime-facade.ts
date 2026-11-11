@@ -34,11 +34,18 @@ import { UnitPromptStageService } from '../execution/unit-prompt-stage-service'
 import { UnitExecutionService } from '../execution/unit-execution-service'
 import {
   executorSelectionsEqual,
+  isExecutorSelectionCompatible,
+  validatePublicExecutorSelection,
   type UnitExecutorPort,
   type UnitExecutorResolver
 } from '../execution/executor-port'
+import type { ExecutorSelection } from '../../../shared/types/buildx/execution-types'
 import type { CliExecutionPort, CliExecutionResolver } from '../execution/grok-cli-bridge'
-import { GrokExecutorAdapter } from '../adapters/grok/grok-executor-adapter'
+import {
+  DEFAULT_GROK_EXECUTOR_ID,
+  DEFAULT_GROK_PROVIDER_ID,
+  GrokExecutorAdapter
+} from '../adapters/grok/grok-executor-adapter'
 import {
   UnitFlowInvalidPlanError,
   UnitFlowPlanConflictError,
@@ -50,6 +57,12 @@ import {
 } from '../execution/execution-errors'
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+const DEFAULT_IMPLICIT_GROK_SELECTION: ExecutorSelection = Object.freeze({
+  executorId: DEFAULT_GROK_EXECUTOR_ID,
+  providerId: DEFAULT_GROK_PROVIDER_ID,
+  modelId: null
+})
 
 export function derivePlanObjectiveEntryId(planId: string): string {
   const hash = createHash('sha256').update(`smc:plan:objective:${planId.toLowerCase().trim()}`).digest('hex')
@@ -343,6 +356,15 @@ export class UnitFlowRuntimeFacade {
 
     const cleanStageOpId = this.validateUuid(options?.stageOperationId, 'stageOperationId')
 
+    let validatedSelection: ExecutorSelection | undefined
+    if (options.executorSelection !== undefined) {
+      try {
+        validatedSelection = validatePublicExecutorSelection(options.executorSelection)
+      } catch (err: any) {
+        throw new Error(`INVALID_ARGUMENT: ${err?.message ?? String(err)}`)
+      }
+    }
+
     // 1. Check idempotency: attempt already prepared / active
     const existingAttempt = this.smcService.getExecutionAttempt(this.repositoryId, cleanAttemptId)
     if (existingAttempt) {
@@ -356,12 +378,13 @@ export class UnitFlowRuntimeFacade {
         )
       }
 
+      const effectiveExistingSelection = existingAttempt.executorSelection ?? DEFAULT_IMPLICIT_GROK_SELECTION
+      const replaySelectionConflict =
+        validatedSelection !== undefined &&
+        !isExecutorSelectionCompatible(effectiveExistingSelection, validatedSelection)
+
       if (existingAttempt.status === 'STARTING' || existingAttempt.status === 'RUNNING') {
-        if (
-          options.executorSelection &&
-          existingAttempt.executorSelection &&
-          !executorSelectionsEqual(existingAttempt.executorSelection, options.executorSelection)
-        ) {
+        if (replaySelectionConflict) {
           return {
             repositoryId: this.repositoryId,
             sessionId: cleanSessionId,
@@ -401,6 +424,23 @@ export class UnitFlowRuntimeFacade {
       }
 
       if (existingAttempt.status === 'PREPARED') {
+        if (replaySelectionConflict) {
+          return {
+            repositoryId: this.repositoryId,
+            sessionId: cleanSessionId,
+            planId: cleanPlanId,
+            unitId: existingAttempt.unitId,
+            reservationId: cleanReservationId,
+            attemptId: cleanAttemptId,
+            stageOperationId: cleanStageOpId,
+            status: 'UNAVAILABLE',
+            reason: 'EXECUTOR_SELECTION_CONFLICT',
+            proposalId: null,
+            executionId: null,
+            replayed: true
+          }
+        }
+
         const stageResult = await this.promptStageService.stageUnitPrompt(
           this.repositoryId,
           cleanSessionId,
@@ -424,13 +464,14 @@ export class UnitFlowRuntimeFacade {
           }
         }
 
+        const replaySelection = existingAttempt.executorSelection ?? validatedSelection
         const execResult = await this.executionService.startUnitExecution(
           this.repositoryId,
           cleanSessionId,
           existingAttempt.attemptId,
           {
             stageOperationId: cleanStageOpId,
-            ...(options.executorSelection ? { executorSelection: options.executorSelection } : {})
+            ...(replaySelection ? { executorSelection: replaySelection } : {})
           }
         )
 
@@ -452,6 +493,12 @@ export class UnitFlowRuntimeFacade {
         }
       }
 
+      if (replaySelectionConflict) {
+        throw new ExecutionAttemptConflictError(
+          `EXECUTOR_SELECTION_CONFLICT: Attempt "${cleanAttemptId}" is locked to executor "${effectiveExistingSelection.executorId}"`
+        )
+      }
+
       throw new ExecutionAttemptConflictError(
         `Attempt "${cleanAttemptId}" already exists in status "${existingAttempt.status}" and cannot be restarted`
       )
@@ -465,7 +512,7 @@ export class UnitFlowRuntimeFacade {
       )
     }
 
-    // 3. Atomically reserve eligible unit
+    // 3. Verify eligible unit before resolving/reserving
     const eligibility = this.unitflowService.getNextEligibleUnit(this.repositoryId, cleanSessionId, cleanPlanId)
     if (eligibility.kind !== 'ELIGIBLE') {
       return {
@@ -479,6 +526,52 @@ export class UnitFlowRuntimeFacade {
         status: 'NONE_ELIGIBLE',
         reason: eligibility.kind
       }
+    }
+
+    // Resolve and lock explicit executor selection (including concrete free modelId for cline-sdk) before persisting in SMC
+    let concreteSelection: ExecutorSelection | undefined = validatedSelection
+    if (validatedSelection) {
+      const resolved = await this.executionService.resolveExecutorSelection(this.repositoryId, validatedSelection)
+      if (!resolved.executor || !resolved.available || !resolved.selection) {
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: eligibility.unitId,
+          reservationId: cleanReservationId,
+          attemptId: cleanAttemptId,
+          stageOperationId: cleanStageOpId,
+          status: 'UNAVAILABLE',
+          reason: resolved.reason ?? 'EXECUTOR_UNAVAILABLE'
+        }
+      }
+      if (!isExecutorSelectionCompatible(resolved.selection, validatedSelection)) {
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: eligibility.unitId,
+          reservationId: cleanReservationId,
+          attemptId: cleanAttemptId,
+          stageOperationId: cleanStageOpId,
+          status: 'UNAVAILABLE',
+          reason: 'EXECUTOR_SELECTION_CONFLICT'
+        }
+      }
+      if (resolved.selection.executorId === 'cline-sdk' && !resolved.selection.modelId) {
+        return {
+          repositoryId: this.repositoryId,
+          sessionId: cleanSessionId,
+          planId: cleanPlanId,
+          unitId: eligibility.unitId,
+          reservationId: cleanReservationId,
+          attemptId: cleanAttemptId,
+          stageOperationId: cleanStageOpId,
+          status: 'REFUSED',
+          reason: 'FREE_MODEL_ID_REQUIRED'
+        }
+      }
+      concreteSelection = resolved.selection
     }
 
     const reservationResult = await this.reservationService.reserveNextEligibleUnit(
@@ -511,7 +604,7 @@ export class UnitFlowRuntimeFacade {
       reservation.reservationId,
       {
         attemptId: cleanAttemptId,
-        ...(options.executorSelection ? { executorSelection: options.executorSelection } : {})
+        ...(concreteSelection ? { executorSelection: concreteSelection } : {})
       }
     )
 
@@ -546,7 +639,7 @@ export class UnitFlowRuntimeFacade {
       attempt.attemptId,
       {
         stageOperationId: cleanStageOpId,
-        ...(options.executorSelection ? { executorSelection: options.executorSelection } : {})
+        ...(concreteSelection ? { executorSelection: concreteSelection } : {})
       }
     )
 
