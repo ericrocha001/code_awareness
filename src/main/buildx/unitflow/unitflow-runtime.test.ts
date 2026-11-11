@@ -4,6 +4,7 @@ import * as path from 'node:path'
 import * as os from 'node:os'
 import { execSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { createRequire } from 'node:module'
 import { SessionMemoryCentralService } from '../smc/session-memory-central-service'
 import { UnitFlowRuntimeFacade, derivePlanObjectiveEntryId } from './unitflow-runtime-facade'
 import {
@@ -1210,7 +1211,21 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
   })
 
   describe('Prova 10: BuildX/UnitFlow em Worktree YOLO vs SUPERVISED com executável controlado (sem cota externa)', () => {
+    const ensureWindowsSupervisorReady = () => {
+      if (process.platform !== 'win32') return null
+      const require = createRequire(path.join(process.cwd(), 'package.json'))
+      const { ensureProduction } = require('./scripts/cli-execution/build.cjs') as {
+        ensureProduction: (root?: string) => { executable: string; receipt: string; rebuilt: boolean }
+      }
+      return ensureProduction(process.cwd())
+    }
+
     it('injeta --always-approve e perfil 600s em YOLO sem AUTO_AUTHORIZED_NOT_REQUESTED ou diálogo, e omite em SUPERVISED', async () => {
+      const supervisorArtifact = ensureWindowsSupervisorReady()
+      if (supervisorArtifact) {
+        expect(fs.existsSync(supervisorArtifact.executable)).toBe(true)
+        expect(fs.existsSync(supervisorArtifact.receipt)).toBe(true)
+      }
       const yoloTemp = makeTempDir('unitflow-yolo-controlled-')
       const repoMain = path.join(yoloTemp, 'main')
       const repoSibling = path.join(yoloTemp, 'sibling')
@@ -1456,6 +1471,6 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
         process.env.PATH = originalPath ?? ''
         try { fs.rmSync(yoloTemp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }) } catch {}
       }
-    }, 45000)
+    }, 115000)
   })
 })
