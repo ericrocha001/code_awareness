@@ -5,6 +5,8 @@ import * as os from 'node:os'
 import * as path from 'node:path'
 import type {
   CancelExecutorAttemptInput,
+  EconomicCandidateProbeInput,
+  EconomicCandidateSignal,
   ExecutorAvailabilityResult,
   ExecutorEvent,
   ExecutorPreparationResult,
@@ -17,7 +19,13 @@ import type {
   StartExecutorAttemptInput
 } from '../../../../shared/types/buildx/execution-types'
 import type { CliPolicy } from '../../../../shared/types/cli-policy-types'
-import { normalizeExecutorSelection, type UnitExecutorPort } from '../../execution/executor-port'
+import {
+  normalizeExecutorSelection,
+  sanitizeExecutorDiagnostics,
+  type EconomicCandidateDescriptor,
+  type EconomicCandidateProvider,
+  type UnitExecutorPort
+} from '../../execution/executor-port'
 import { sanitizeDiagnostics } from './cline-free-catalog'
 import {
   CLINE_DEFAULT_TIMEOUT_MS,
@@ -305,6 +313,15 @@ function buildWorkerEnvironment(
   return env
 }
 
+export class ClineCatalogProbeError extends Error {
+  constructor(
+    readonly errorCode: string | undefined,
+    message: string
+  ) {
+    super(message)
+  }
+}
+
 export async function probeFreeClineCatalogSelection(options?: {
   readonly requestedModelId?: string | null
   readonly workerPath?: string
@@ -376,7 +393,12 @@ export async function probeFreeClineCatalogSelection(options?: {
         })
       } else if (msg.type === 'catalog_result' && msg.requestId === requestId) {
         if (!msg.ok || !msg.selectedModelId) {
-          finish(new Error(msg.errorMessage ?? msg.errorCode ?? 'FREE_CATALOG_UNAVAILABLE'))
+          finish(
+            new ClineCatalogProbeError(
+              msg.errorCode,
+              msg.errorMessage ?? msg.errorCode ?? 'FREE_CATALOG_UNAVAILABLE'
+            )
+          )
         } else {
           finish(undefined, {
             selectedModelId: msg.selectedModelId,
@@ -404,8 +426,9 @@ export async function probeFreeClineCatalogSelection(options?: {
   })
 }
 
-export class ClineSdkExecutorAdapter implements UnitExecutorPort {
+export class ClineSdkExecutorAdapter implements UnitExecutorPort, EconomicCandidateProvider {
   readonly identity: ExecutorSelection
+  readonly economicDescriptor: EconomicCandidateDescriptor
   private readonly options: ClineSdkExecutorAdapterOptions
   private readonly launcher: ClineUtilityLauncher
   private readonly workerPath: string
@@ -429,6 +452,11 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
         modelId: options?.modelId ?? null
       })
     )
+    this.economicDescriptor = Object.freeze({
+      executorId: 'cline-sdk',
+      providerId: this.identity.providerId ?? DEFAULT_CLINE_PROVIDER_ID,
+      requiresExternalTransfer: true
+    })
   }
 
   static async createForLiveFreeAttempt(
@@ -462,6 +490,116 @@ export class ClineSdkExecutorAdapter implements UnitExecutorPort {
       return { available: false, reason: `CLINE_WORKER_NOT_FOUND: ${this.workerPath}` }
     }
     return { available: true }
+  }
+
+  async probeEconomicCandidate(input: EconomicCandidateProbeInput): Promise<EconomicCandidateSignal> {
+    const probedAt = input.nowIso ?? new Date().toISOString()
+    const avail = this.checkAvailability(input.repositoryId)
+    if (!avail.available) {
+      return {
+        selection: this.identity,
+        eligible: false,
+        hostAuthorized: avail.reason !== 'CLINE_REPOSITORY_MISMATCH',
+        toolCapable: false,
+        privacyCompatible: true,
+        requiresExternalTransfer: true,
+        costTier: 'UNKNOWN',
+        quotaStatus: 'UNKNOWN',
+        reason: sanitizeExecutorDiagnostics(avail.reason ?? 'CLINE_EXECUTOR_UNAVAILABLE'),
+        source: 'CLINE_ADAPTER_AVAILABILITY',
+        probedAt
+      }
+    }
+
+    if (input.worktree) {
+      const wtCheck = await this.validateWorktreeAndPolicy({
+        repositoryId: input.repositoryId,
+        worktreeId: input.worktree.worktreeId,
+        generation: input.worktree.generation,
+        branch: input.worktree.branch,
+        fallbackPath: input.worktree.path
+      })
+      if (!wtCheck.ok) {
+        return {
+          selection: this.identity,
+          eligible: false,
+          hostAuthorized: false,
+          toolCapable: false,
+          privacyCompatible: true,
+          requiresExternalTransfer: true,
+          costTier: 'UNKNOWN',
+          quotaStatus: 'UNKNOWN',
+          reason: sanitizeExecutorDiagnostics(wtCheck.reason),
+          source: 'CLINE_WORKTREE_POLICY_CHECK',
+          probedAt
+        }
+      }
+    }
+
+    const targetModelId = input.requestedModelId?.trim() || this.identity.modelId || null
+    try {
+      const probed = await probeFreeClineCatalogSelection({
+        requestedModelId: targetModelId,
+        workerPath: this.workerPath,
+        launcher: this.launcher,
+        apiBaseUrl: this.options.apiBaseUrl,
+        settingsFilePath: this.options.settingsFilePath,
+        requireAuth: true
+      })
+      return {
+        selection: Object.freeze(
+          normalizeExecutorSelection({
+            executorId: this.identity.executorId,
+            providerId: this.identity.providerId ?? DEFAULT_CLINE_PROVIDER_ID,
+            modelId: probed.selectedModelId
+          })
+        ),
+        eligible: true,
+        hostAuthorized: true,
+        toolCapable: true,
+        privacyCompatible: true,
+        requiresExternalTransfer: true,
+        costTier: 'VERIFIED_ZERO',
+        verifiedZeroModels: Object.freeze([...probed.availableFreeModelIds]),
+        quotaStatus: 'UNKNOWN',
+        reason: 'CLINE_FREE_LIVE_ZERO_PRICED_VERIFIED',
+        source: 'CLINE_LIVE_FREE_CATALOG',
+        probedAt
+      }
+    } catch (err) {
+      const rawMsg = err instanceof Error ? err.message : String(err ?? 'FREE_CATALOG_UNAVAILABLE')
+      const cleanReason = sanitizeExecutorDiagnostics(rawMsg)
+      const errorCode = err instanceof ClineCatalogProbeError ? err.errorCode : undefined
+      const isAuth =
+        errorCode === 'CLINE_AUTHENTICATION_FAILED' ||
+        /CLINE_AUTHENTICATION_FAILED|oauth|token|reauth|401|403/i.test(cleanReason)
+      const isCharged = /not zero-priced/i.test(cleanReason)
+      const lacksTools = /required tool support|tool-capable/i.test(cleanReason)
+      const reason =
+        isAuth && !cleanReason.includes('CLINE_AUTHENTICATION_FAILED')
+          ? `CLINE_AUTHENTICATION_FAILED: ${cleanReason}`
+          : cleanReason
+
+      return {
+        selection: Object.freeze(
+          normalizeExecutorSelection({
+            executorId: this.identity.executorId,
+            providerId: this.identity.providerId ?? DEFAULT_CLINE_PROVIDER_ID,
+            modelId: targetModelId
+          })
+        ),
+        eligible: false,
+        hostAuthorized: !isAuth,
+        toolCapable: !lacksTools,
+        privacyCompatible: true,
+        requiresExternalTransfer: true,
+        costTier: isCharged ? 'CHARGED' : 'UNKNOWN',
+        quotaStatus: 'UNKNOWN',
+        reason,
+        source: 'CLINE_LIVE_FREE_CATALOG',
+        probedAt
+      }
+    }
   }
 
   async prepareAttempt(input: PrepareExecutorAttemptInput): Promise<ExecutorPreparationResult> {
