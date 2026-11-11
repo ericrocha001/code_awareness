@@ -62,6 +62,9 @@ import { isInstallationConfigured } from './integrations/installation-configured
 import { registerChannelHandlers } from './ipc/channel-handler'
 import { SessionMemoryCentralService } from './buildx/smc'
 import { UnitFlowRuntimeFacade } from './buildx/unitflow/unitflow-runtime-facade'
+import type { UnitExecutorResolver } from './buildx/execution/executor-port'
+import { GrokExecutorAdapter } from './buildx/adapters/grok'
+import { ClineSdkExecutorAdapter, DEFAULT_CLINE_EXECUTOR_ID } from './buildx/adapters/cline'
 import { registerLocalMcpClientHandlers } from './ipc/local-mcp-client-handler'
 import { createDesktopClientSetup } from './local-mcp-clients/desktop-client-setup'
 import { ChannelFunctionalHealthMonitor } from './mcp/channel-functional-health'
@@ -664,12 +667,53 @@ app.whenReady().then(async () => {
       isActive: () => activeProjects?.getState().project?.id === project.id && activeProjects.getState().revision === gitProjectRevision
     })
     activeProjects!.updateCapability(revision, 'channel', { state: 'INITIALIZING' })
+    const grokExecutor = new GrokExecutorAdapter(activeCliExecution)
+    const clineSdkExecutors = new Map<string, ClineSdkExecutorAdapter>()
+    const unitflowExecutorResolver: UnitExecutorResolver = (repositoryId, selection) => {
+      if (selection?.executorId === DEFAULT_CLINE_EXECUTOR_ID) {
+        const key = `${repositoryId}:${selection.modelId ?? ''}`
+        let adapter = clineSdkExecutors.get(key)
+        if (!adapter) {
+          adapter = new ClineSdkExecutorAdapter({
+            repositoryId,
+            modelId: selection.modelId ?? null,
+            workerPath: join(__dirname, 'cline-sdk-worker.js'),
+            runtimeStorageBaseDir: join(app.getPath('userData'), 'cline-sdk-runtime'),
+            getPolicy: ({ repositoryId: repoId, path: targetPath }) =>
+              cliTrustPolicy.getPolicy({ repositoryId: repoId, path: targetPath }),
+            resolveWorktree: async ({ worktreeId, generation }) => {
+              if (!gitOperations.worktrees) throw new Error('WORKTREE_IDENTITY_UNAVAILABLE')
+              const resolved = await resolveCliWorktree(gitOperations.worktrees, gitService, { worktreeId, generation })
+              return { path: resolved.directory, branch: resolved.identity.branch ?? undefined, reference: false }
+            },
+            approvalHandler: async (req) => {
+              if (!mainWindow || mainWindow.isDestroyed() || !sessionIsCurrent()) return false
+              const response = await dialog.showMessageBox(mainWindow, {
+                type: 'question',
+                title: 'Autorizar edição do Cline SDK na worktree',
+                message: `Autorizar ${req.toolName} na worktree vinculada?`,
+                detail: `${req.summary}\nTentativa: ${req.attemptId}`,
+                buttons: ['Recusar', 'Autorizar esta ação'],
+                defaultId: 0,
+                cancelId: 0,
+                noLink: true
+              })
+              return response.response === 1 && sessionIsCurrent()
+            }
+          })
+          clineSdkExecutors.set(key, adapter)
+        }
+        return adapter
+      }
+      return grokExecutor
+    }
     const unitflowRuntime = gitRepositoryId
       ? new UnitFlowRuntimeFacade({
           repositoryId: gitRepositoryId,
           repoRoot: project.path,
           smcService: sessionMemoryCentral,
           gitOperations,
+          executor: unitflowExecutorResolver,
           cliExecution: activeCliExecution,
           validationLedger,
           stagingDirectory: join(app.getPath('userData'), 'buildx-staging'),

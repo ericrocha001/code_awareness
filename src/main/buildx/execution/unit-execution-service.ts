@@ -415,6 +415,8 @@ export class UnitExecutionService {
       }
     }
 
+    const boundWorktreePath = await this.workspaceService.getWorktreePath(validRepoId, attempt.worktreeId)
+
     // Retain prompt file until attempt terminates or fails admission
     this.stageService.retainStage(options.stageOperationId, cleanAttemptId)
 
@@ -430,7 +432,8 @@ export class UnitExecutionService {
         worktree: {
           worktreeId: attempt.worktreeId,
           generation: attempt.generation,
-          branch: attempt.branch
+          branch: attempt.branch,
+          ...(boundWorktreePath ? { path: boundWorktreePath } : {})
         },
         prompt: {
           stageOperationId: options.stageOperationId,
