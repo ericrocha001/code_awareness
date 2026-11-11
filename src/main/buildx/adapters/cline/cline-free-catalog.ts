@@ -4,6 +4,7 @@ import type {
   ExecutorBillingRecord,
   ExecutorUsageProvenance
 } from '../../../../shared/types/buildx/execution-types'
+import { sanitizeExecutorDiagnostics } from '../../execution/executor-port'
 import { CLINE_OFFICIAL_API_BASE_URL } from './cline-sdk-protocol'
 
 export interface CatalogModelPricing {
@@ -406,10 +407,7 @@ export function classifyClineBillingTwoDimensional(input: {
 }
 
 export function sanitizeDiagnostics(message: string): string {
-  return message
-    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
-    .replace(/workos:[^\s"']+/gi, '[REDACTED_WORKOS_TOKEN]')
-    .replace(/eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+/g, '[REDACTED_JWT]')
+  return sanitizeExecutorDiagnostics(message)
 }
 
 export function classifyClineErrorReason(

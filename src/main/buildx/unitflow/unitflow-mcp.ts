@@ -15,6 +15,7 @@ import {
   ExecutionInvalidAttemptIdError
 } from '../execution/execution-errors'
 import { validatePublicExecutorSelection } from '../execution/executor-port'
+import { validateEconomicSelectionPolicy } from '../execution/economic-selection'
 import {
   BuildXWorkspaceInvalidError,
   BuildXWorkspaceNotFoundError,
@@ -27,7 +28,8 @@ const ALLOWED_START_NEXT_ARGS = new Set([
   'reservationId',
   'attemptId',
   'stageOperationId',
-  'executorSelection'
+  'executorSelection',
+  'economicSelection'
 ])
 
 function readOnlyTool(
@@ -193,6 +195,37 @@ export const START_NEXT_UNITFLOW_UNIT_TOOL = mutationTool(
         }
       },
       required: ['executorId'],
+      additionalProperties: false
+    },
+    economicSelection: {
+      type: 'object',
+      description: 'Optional economic executor selection policy (mutually exclusive with executorSelection). Prioritizes verified zero-cost candidates without implicit fallback unless requested.',
+      properties: {
+        mode: {
+          type: 'string',
+          enum: ['VERIFIED_ZERO_FIRST'],
+          description: 'Economic selection strategy ("VERIFIED_ZERO_FIRST").'
+        },
+        allowUnknownCostFallback: {
+          type: 'boolean',
+          description: 'When true, allows falling back to an eligible host-authorized UNKNOWN-cost executor when no VERIFIED_ZERO candidate is available. Default false.'
+        },
+        allowedExecutorIds: {
+          type: 'array',
+          minItems: 1,
+          items: {
+            type: 'string',
+            enum: ['grok-cli', 'cline-sdk']
+          },
+          description: 'Optional allowlist of candidate executor identifiers.'
+        },
+        privacy: {
+          type: 'string',
+          enum: ['HOST_POLICY', 'NO_EXTERNAL_CODE'],
+          description: 'Privacy constraint. "NO_EXTERNAL_CODE" blocks candidates that require external code transfer.'
+        }
+      },
+      required: ['mode'],
       additionalProperties: false
     }
   },
@@ -432,12 +465,28 @@ export async function executeBuildxUnitflowTool(
           return failure('INVALID_ARGUMENT', `Unexpected argument(s) for start_next_unitflow_unit: ${unexpectedKeys.join(', ')}`)
         }
 
+        if (rawArgs.executorSelection !== undefined && rawArgs.economicSelection !== undefined) {
+          return failure(
+            'INVALID_ARGUMENT',
+            'executorSelection and economicSelection are mutually exclusive'
+          )
+        }
+
         let executorSelection: ReturnType<typeof validatePublicExecutorSelection> | undefined
         if (rawArgs.executorSelection !== undefined) {
           try {
             executorSelection = validatePublicExecutorSelection(rawArgs.executorSelection)
           } catch (err: any) {
             return failure('INVALID_ARGUMENT', err?.message ?? 'Invalid executorSelection')
+          }
+        }
+
+        let economicSelection: ReturnType<typeof validateEconomicSelectionPolicy> | undefined
+        if (rawArgs.economicSelection !== undefined) {
+          try {
+            economicSelection = validateEconomicSelectionPolicy(rawArgs.economicSelection)
+          } catch (err: any) {
+            return failure('INVALID_ARGUMENT', err?.message ?? 'Invalid economicSelection')
           }
         }
 
@@ -451,7 +500,8 @@ export async function executeBuildxUnitflowTool(
           reservationId,
           attemptId,
           stageOperationId,
-          ...(executorSelection ? { executorSelection } : {})
+          ...(executorSelection ? { executorSelection } : {}),
+          ...(economicSelection ? { economicSelection } : {})
         })
         return ok(result)
       }

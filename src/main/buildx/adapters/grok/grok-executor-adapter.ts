@@ -1,5 +1,7 @@
 import type {
   CancelExecutorAttemptInput,
+  EconomicCandidateProbeInput,
+  EconomicCandidateSignal,
   ExecutorAvailabilityResult,
   ExecutorEvent,
   ExecutorEventKind,
@@ -17,6 +19,9 @@ import type { CliPolicy } from '../../../../shared/types/cli-policy-types'
 import type { CliExecutionSnapshot } from '../../../cli-execution/cli-execution-types'
 import {
   normalizeExecutorSelection,
+  sanitizeExecutorDiagnostics,
+  type EconomicCandidateDescriptor,
+  type EconomicCandidateProvider,
   type UnitExecutorPort
 } from '../../execution/executor-port'
 import type { CliExecutionPort, CliExecutionResolver } from '../../execution/grok-cli-bridge'
@@ -133,8 +138,9 @@ function isTerminalStatus(status: ExecutorRunStatus): boolean {
   )
 }
 
-export class GrokExecutorAdapter implements UnitExecutorPort {
+export class GrokExecutorAdapter implements UnitExecutorPort, EconomicCandidateProvider {
   readonly identity: ExecutorSelection
+  readonly economicDescriptor: EconomicCandidateDescriptor
   private readonly cliResolver: CliExecutionResolver
   private readonly listeners = new Map<string, Set<(event: ExecutorEvent) => void>>()
 
@@ -149,6 +155,11 @@ export class GrokExecutorAdapter implements UnitExecutorPort {
         modelId: options?.modelId ?? null
       })
     )
+    this.economicDescriptor = Object.freeze({
+      executorId: 'grok-cli',
+      providerId: this.identity.providerId ?? DEFAULT_GROK_PROVIDER_ID,
+      requiresExternalTransfer: true
+    })
 
     if (typeof cliServiceOrResolver === 'function') {
       this.cliResolver = cliServiceOrResolver
@@ -187,6 +198,93 @@ export class GrokExecutorAdapter implements UnitExecutorPort {
   async checkAvailability(repositoryId: string): Promise<ExecutorAvailabilityResult> {
     const resolved = await this.resolveCliService(repositoryId)
     return resolved.availability
+  }
+
+  async probeEconomicCandidate(input: EconomicCandidateProbeInput): Promise<EconomicCandidateSignal> {
+    const probedAt = input.nowIso ?? new Date().toISOString()
+    const { cliService, availability } = await this.resolveCliService(input.repositoryId)
+    if (!cliService) {
+      return {
+        selection: this.identity,
+        eligible: false,
+        hostAuthorized: false,
+        toolCapable: false,
+        privacyCompatible: true,
+        requiresExternalTransfer: true,
+        costTier: 'UNKNOWN',
+        quotaStatus: 'UNKNOWN',
+        reason: sanitizeExecutorDiagnostics(availability.reason ?? 'CLI_UNAVAILABLE'),
+        source: 'GROK_LOCAL_CLI_READINESS',
+        probedAt
+      }
+    }
+
+    if (input.worktree) {
+      if (typeof cliService.getPolicyForWorktree !== 'function') {
+        return {
+          selection: this.identity,
+          eligible: false,
+          hostAuthorized: false,
+          toolCapable: false,
+          privacyCompatible: true,
+          requiresExternalTransfer: true,
+          costTier: 'UNKNOWN',
+          quotaStatus: 'UNKNOWN',
+          reason: 'CLI_WORKTREE_POLICY_UNAVAILABLE',
+          source: 'GROK_WORKTREE_POLICY_CHECK',
+          probedAt
+        }
+      }
+      try {
+        const policy = await cliService.getPolicyForWorktree({
+          worktreeId: input.worktree.worktreeId,
+          generation: input.worktree.generation
+        })
+        if (!policy || !policy.mode) {
+          return {
+            selection: this.identity,
+            eligible: false,
+            hostAuthorized: false,
+            toolCapable: false,
+            privacyCompatible: true,
+            requiresExternalTransfer: true,
+            costTier: 'UNKNOWN',
+            quotaStatus: 'UNKNOWN',
+            reason: 'CLI_WORKTREE_POLICY_UNAVAILABLE',
+            source: 'GROK_WORKTREE_POLICY_CHECK',
+            probedAt
+          }
+        }
+      } catch (err: any) {
+        return {
+          selection: this.identity,
+          eligible: false,
+          hostAuthorized: false,
+          toolCapable: false,
+          privacyCompatible: true,
+          requiresExternalTransfer: true,
+          costTier: 'UNKNOWN',
+          quotaStatus: 'UNKNOWN',
+          reason: sanitizeExecutorDiagnostics(`CLI_POLICY_ERROR: ${err?.message ?? String(err)}`),
+          source: 'GROK_WORKTREE_POLICY_CHECK',
+          probedAt
+        }
+      }
+    }
+
+    return {
+      selection: this.identity,
+      eligible: true,
+      hostAuthorized: true,
+      toolCapable: true,
+      privacyCompatible: true,
+      requiresExternalTransfer: true,
+      costTier: 'UNKNOWN',
+      quotaStatus: 'UNKNOWN',
+      reason: 'GROK_LOCAL_CLI_READY_COST_UNKNOWN',
+      source: 'GROK_LOCAL_CLI_READINESS',
+      probedAt
+    }
   }
 
   async prepareAttempt(input: PrepareExecutorAttemptInput): Promise<ExecutorPreparationResult> {

@@ -218,6 +218,7 @@ export interface ExecutionAttemptRecord {
   readonly status: ExecutionAttemptStatus
   readonly revision: number
   readonly executorSelection?: ExecutorSelection
+  readonly economicDecision?: PersistedEconomicDecisionRecord
   readonly createdAt: string
   readonly updatedAt: string
 }
@@ -225,6 +226,7 @@ export interface ExecutionAttemptRecord {
 export interface PrepareExecutionAttemptOptions {
   readonly attemptId: string
   readonly executorSelection?: ExecutorSelection
+  readonly economicDecision?: EconomicSelectionDecision
 }
 
 export type GrokCliPreAdmissionStatus =
@@ -420,4 +422,96 @@ export interface SettleExecutionAttemptStoreInput {
     readonly body: string
     readonly kind: 'RESULT' | 'PENDING'
   }
+}
+
+export type EconomicSelectionMode = 'VERIFIED_ZERO_FIRST'
+
+export type EconomicPrivacyMode = 'HOST_POLICY' | 'NO_EXTERNAL_CODE'
+
+export type EconomicSelectableExecutorId = 'grok-cli' | 'cline-sdk'
+
+export interface EconomicSelectionPolicy {
+  readonly mode: EconomicSelectionMode
+  readonly allowUnknownCostFallback?: boolean
+  readonly allowedExecutorIds?: readonly EconomicSelectableExecutorId[]
+  readonly privacy?: EconomicPrivacyMode
+}
+
+export interface NormalizedEconomicSelectionPolicy {
+  readonly mode: EconomicSelectionMode
+  readonly allowUnknownCostFallback: boolean
+  readonly allowedExecutorIds: readonly EconomicSelectableExecutorId[] | null
+  readonly privacy: EconomicPrivacyMode
+}
+
+export type EconomicCandidateCostTier = 'VERIFIED_ZERO' | 'CHARGED' | 'UNKNOWN'
+
+export type EconomicCandidateQuotaStatus =
+  | 'VERIFIED_AVAILABLE'
+  | 'UNVERIFIED'
+  | 'EXHAUSTED'
+  | 'UNKNOWN'
+
+export interface EconomicCandidateProbeInput {
+  readonly repositoryId: string
+  readonly requestedModelId?: string | null
+  readonly worktree?: ExecutorWorktreeTarget
+  readonly nowIso?: string
+}
+
+export interface EconomicCandidateSignal {
+  readonly selection: ExecutorSelection
+  readonly eligible: boolean
+  readonly hostAuthorized: boolean
+  readonly toolCapable: boolean
+  readonly privacyCompatible: boolean
+  readonly requiresExternalTransfer: boolean
+  readonly costTier: EconomicCandidateCostTier
+  readonly verifiedZeroModels?: readonly string[]
+  readonly quotaStatus: EconomicCandidateQuotaStatus
+  readonly reason: string
+  readonly source: string
+  readonly probedAt: string
+}
+
+export interface EconomicCandidateRejection {
+  readonly executorId: string
+  readonly providerId: string | null
+  readonly modelId: string | null
+  readonly costTier: EconomicCandidateCostTier
+  readonly reason: string
+  readonly probedAt: string
+  readonly source: string
+}
+
+export interface EconomicSelectionDecision {
+  readonly status: 'SELECTED' | 'UNAVAILABLE'
+  readonly policy: NormalizedEconomicSelectionPolicy
+  readonly selection: ExecutorSelection | null
+  readonly costTier: EconomicCandidateCostTier | null
+  readonly quotaStatus: EconomicCandidateQuotaStatus | null
+  readonly reason: string
+  readonly tieBreakRule: string
+  readonly source: string | null
+  readonly probedAt: string
+  readonly candidateCount: number
+  readonly verifiedZeroModelsCount?: number
+  readonly rejections: readonly EconomicCandidateRejection[]
+}
+
+export interface PersistedEconomicDecisionRecord {
+  readonly decisionEntryId: string
+  readonly attemptId: string
+  readonly unitId: string
+  readonly policy: NormalizedEconomicSelectionPolicy
+  readonly selection: ExecutorSelection
+  readonly costTier: EconomicCandidateCostTier
+  readonly quotaStatus: EconomicCandidateQuotaStatus
+  readonly reason: string
+  readonly tieBreakRule: string
+  readonly source: string | null
+  readonly probedAt: string
+  readonly candidateCount: number
+  readonly verifiedZeroModelsCount?: number
+  readonly rejections: readonly EconomicCandidateRejection[]
 }

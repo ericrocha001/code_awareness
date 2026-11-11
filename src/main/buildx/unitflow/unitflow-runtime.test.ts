@@ -26,6 +26,7 @@ import type { GitOperationsPort } from '../execution/workspace-binding-service'
 import type { CliExecutionPort } from '../execution/grok-cli-bridge'
 import { EventEmitter } from 'node:events'
 import type { UnitExecutorPort, UnitExecutorResolver } from '../execution/executor-port'
+import { ECONOMIC_TIE_BREAK_RULE } from '../execution/economic-selection'
 import { GrokExecutorAdapter } from '../adapters/grok/grok-executor-adapter'
 import {
   ClineSdkExecutorAdapter,
@@ -232,7 +233,10 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
     })
   }
 
-  function createAdapter(facade: UnitFlowRuntimeFacade): ChannelMcpAdapter {
+  function createAdapter(
+    facade: UnitFlowRuntimeFacade,
+    customSmc: SessionMemoryCentralService = smcService
+  ): ChannelMcpAdapter {
     return new ChannelMcpAdapter(
       {
         projectId: repositoryId,
@@ -246,7 +250,7 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
           getSymbolDependencies: async () => ({ sources: [] }),
           getSymbolHierarchy: async () => ({ targets: [] })
         } as any,
-        sessionMemoryCentral: smcService,
+        sessionMemoryCentral: customSmc,
         unitflowRuntime: facade
       },
       undefined,
@@ -2065,6 +2069,817 @@ describe('BuildX UnitFlow Runtime & MCP Integration — Provas Mínimas', () => 
         await h.mcp.callTool('settle_unitflow_unit', { sessionId, attemptId: attempt2Sup })
       )
       expect(settleU2.attemptStatus).toBe('COMPLETED')
+    })
+  })
+
+  describe('Prova 12: Seleção econômica no MCP, decisão na SMC, privacidade, fallback e replay (U2)', () => {
+    class MockEconomicUtilityWorker extends EventEmitter implements SpawnedClineWorker {
+      killed = false
+      constructor(readonly pid: number | undefined = undefined) {
+        super()
+      }
+      postMessage(_message: ClineWorkerRequest): void {}
+      kill(): boolean {
+        this.killed = true
+        setImmediate(() => this.emit('exit', 1))
+        return true
+      }
+      emitReady(): void {
+        this.emit('spawn')
+        this.emit('message', { type: 'ready' } satisfies ClineWorkerMessage)
+      }
+      emitWorkerMessage(message: ClineWorkerMessage): void {
+        this.emit('message', message)
+      }
+    }
+
+    function createEconomicHarness(initial?: {
+      readonly clineFreeModels?: readonly string[]
+      readonly clineProbeError?: { errorCode?: string; error: string }
+      readonly hasGrokPolicyLookup?: boolean
+      readonly grokEnabled?: boolean
+      readonly smcService?: SessionMemoryCentralService
+    }) {
+      const activeSmc = initial?.smcService ?? smcService
+      const fakeWorkerPath = path.join(tempDir, `fake-econ-worker-${randomUUID()}.js`)
+      fs.writeFileSync(fakeWorkerPath, '// mock worker\n', 'utf8')
+      const runtimeStorageBaseDir = path.join(tempDir, `cline-econ-runtime-${randomUUID()}`)
+      fs.mkdirSync(runtimeStorageBaseDir, { recursive: true })
+
+      let clineFreeModels = [...(initial?.clineFreeModels ?? ['free/economic-alpha', 'free/economic-beta'])]
+      let clineProbeError = initial?.clineProbeError ?? null
+      let hasGrokPolicyLookup = initial?.hasGrokPolicyLookup ?? true
+      let grokEnabled = initial?.grokEnabled ?? true
+      let currentPolicy: CliPolicy = {
+        mode: 'AUTONOMOUS_TRUSTED',
+        scope: 'REPOSITORY_WORKTREES',
+        revision: 'econ-yolo-1',
+        rule: 'local-repository-worktree-trust'
+      }
+      let currentWorktree = {
+        path: worktreePath,
+        branch: 'feature-work',
+        reference: false
+      }
+      let invalidateWorktreeOnPrepare = false
+
+      let probeForkCount = 0
+      let prepareForkCount = 0
+      let startForkCount = 0
+      let grokPolicyCalls = 0
+      let grokStartCount = 0
+
+      const persistedAttemptAtSpawn = new Map<string, ReturnType<typeof activeSmc.getExecutionAttempt>>()
+      const pendingWorkers = new Map<
+        string,
+        {
+          worker: MockEconomicUtilityWorker
+          req: ClineStartAttemptRequest
+          exitPromise: Promise<void>
+        }
+      >()
+
+      const buildGrokCliPort = (withPolicyLookup: boolean): CliExecutionPort => ({
+        isEnabled: () => grokEnabled,
+        getRepositoryId: () => repositoryId,
+        prepare: async (input) => ({
+          ...(await mockCli.prepare(input)),
+          policy: currentPolicy,
+          autoAuthorized: Boolean(input.args?.includes('--always-approve'))
+        }),
+        start: (input) => mockCli.start!(input),
+        get: (input) => mockCli.get!(input),
+        cancel: (input) => mockCli.cancel!(input),
+        ...(withPolicyLookup
+          ? {
+              getPolicyForWorktree: async () => {
+                grokPolicyCalls++
+                return currentPolicy
+              }
+            }
+          : {})
+      })
+
+      const grokCliTarget = buildGrokCliPort(hasGrokPolicyLookup)
+
+      let activeGrokBase = new GrokExecutorAdapter(grokCliTarget)
+      const wrappedGrok: UnitExecutorPort & {
+        readonly economicDescriptor: GrokExecutorAdapter['economicDescriptor']
+        probeEconomicCandidate: GrokExecutorAdapter['probeEconomicCandidate']
+      } = {
+        identity: activeGrokBase.identity,
+        economicDescriptor: activeGrokBase.economicDescriptor,
+        probeEconomicCandidate: (input) => activeGrokBase.probeEconomicCandidate(input),
+        checkAvailability: (repoId) => activeGrokBase.checkAvailability(repoId),
+        prepareAttempt: (input) => activeGrokBase.prepareAttempt(input),
+        startAttempt: async (input) => {
+          grokStartCount++
+          persistedAttemptAtSpawn.set(input.attemptId, activeSmc.getExecutionAttempt(repositoryId, input.attemptId))
+          return await activeGrokBase.startAttempt(input)
+        },
+        observeAttempt: (input) => activeGrokBase.observeAttempt(input),
+        cancelAttempt: (input) => activeGrokBase.cancelAttempt(input)
+      }
+
+      const clineLauncher: ClineUtilityLauncher = {
+        isAvailable: () => true,
+        fork: () => {
+          const worker = new MockEconomicUtilityWorker()
+          const exitPromise = new Promise<void>((resolve) => {
+            worker.once('exit', () => resolve())
+          })
+          worker.postMessage = (req: ClineWorkerRequest) => {
+            if (req.type === 'probe_free_catalog') {
+              probeForkCount++
+              if (clineProbeError) {
+                worker.emitWorkerMessage({
+                  type: 'catalog_result',
+                  requestId: req.requestId,
+                  ok: false,
+                  errorCode: clineProbeError.errorCode,
+                  errorMessage: clineProbeError.error
+                })
+                worker.emit('exit', 1)
+                return
+              }
+              worker.emitWorkerMessage({
+                type: 'catalog_result',
+                requestId: req.requestId,
+                ok: clineFreeModels.length > 0,
+                ...(clineFreeModels.length > 0
+                  ? {
+                      selectedModelId: clineFreeModels[0],
+                      availableFreeModelIds: clineFreeModels,
+                      accountId: 'workos:secret-must-not-persist'
+                    }
+                  : {
+                      errorCode: 'CLINE_NO_FREE_MODELS',
+                      errorMessage: 'No free models'
+                    })
+              })
+              worker.emit('exit', clineFreeModels.length > 0 ? 0 : 1)
+            } else if (req.type === 'prepare_attempt') {
+              prepareForkCount++
+              if (invalidateWorktreeOnPrepare) {
+                invalidateWorktreeOnPrepare = false
+                currentWorktree = { ...currentWorktree, reference: true }
+              }
+              worker.emitWorkerMessage({
+                type: 'prepare_result',
+                requestId: req.requestId,
+                ok: true,
+                status: 'READY',
+                modelId: req.requestedModelId ?? clineFreeModels[0]
+              })
+              worker.emit('exit', 0)
+            } else if (req.type === 'start_attempt') {
+              startForkCount++
+              persistedAttemptAtSpawn.set(req.attemptId, activeSmc.getExecutionAttempt(repositoryId, req.attemptId))
+              pendingWorkers.set(req.attemptId, { worker, req, exitPromise })
+              worker.emitWorkerMessage({
+                type: 'attempt_started',
+                attemptId: req.attemptId,
+                clineSessionId: `cline-econ-${req.attemptId}`,
+                lockedModelId: req.modelId,
+                pid: 778899
+              })
+            }
+          }
+          setImmediate(() => worker.emitReady())
+          return worker
+        }
+      }
+
+      const clineOptionsBase = {
+        repositoryId,
+        workerPath: fakeWorkerPath,
+        runtimeStorageBaseDir,
+        launcher: clineLauncher,
+        getPolicy: () => currentPolicy,
+        resolveWorktree: async () => currentWorktree,
+        approvalHandler: async () => true
+      }
+
+      const clineAdapters = new Map<string, ClineSdkExecutorAdapter>()
+      const executorResolver: UnitExecutorResolver = async (repoId, selection) => {
+        if (!selection || selection.executorId === wrappedGrok.identity.executorId) {
+          return wrappedGrok
+        }
+        if (selection.executorId === DEFAULT_CLINE_EXECUTOR_ID) {
+          const modelId = selection.modelId ?? clineFreeModels[0]
+          const key = `${repoId}:${modelId ?? ''}`
+          let adapter = clineAdapters.get(key)
+          if (!adapter) {
+            adapter = new ClineSdkExecutorAdapter({
+              ...clineOptionsBase,
+              repositoryId: repoId,
+              modelId
+            })
+            clineAdapters.set(key, adapter)
+          }
+          return adapter
+        }
+        return null
+      }
+
+      const facade = new UnitFlowRuntimeFacade({
+        repositoryId,
+        repoRoot: worktreePath,
+        smcService: activeSmc,
+        gitOperations: mockGit,
+        cliExecution: grokCliTarget,
+        executor: executorResolver,
+        economicProviders: () => [
+          new ClineSdkExecutorAdapter(clineOptionsBase),
+          wrappedGrok
+        ],
+        validationLedger: ledger,
+        stagingDirectory: path.join(tempDir, 'prompt-staging')
+      })
+
+      const mcp = createAdapter(facade, activeSmc)
+
+      async function finishWorker(attemptId: string, status: 'SUCCEEDED' | 'FAILED', reason?: string): Promise<void> {
+        const entry = pendingWorkers.get(attemptId)
+        if (!entry) throw new Error(`Missing mock worker for attempt ${attemptId}`)
+        entry.worker.emitWorkerMessage({
+          type: 'attempt_terminal',
+          attemptId,
+          clineSessionId: `cline-econ-${attemptId}`,
+          status,
+          ...(reason ? { reason } : {}),
+          cleanup: { sessionDeleted: true, coreDisposed: true, dirRemoved: true },
+          durationMs: 11
+        })
+        fs.rmSync(entry.req.isolatedStorageRoot, { recursive: true, force: true })
+        entry.worker.emit('exit', status === 'SUCCEEDED' ? 0 : 1)
+        await entry.exitPromise
+      }
+
+      return {
+        mcp,
+        getCounts: () => ({ probeForkCount, prepareForkCount, startForkCount, grokPolicyCalls, grokStartCount }),
+        getPersistedAtSpawn: (attemptId: string) => persistedAttemptAtSpawn.get(attemptId),
+        setClineFreeModels: (models: readonly string[]) => {
+          clineFreeModels = [...models]
+        },
+        setClineProbeError: (err: { errorCode?: string; error: string } | null) => {
+          clineProbeError = err
+        },
+        setHasGrokPolicyLookup: (value: boolean) => {
+          hasGrokPolicyLookup = value
+          activeGrokBase = new GrokExecutorAdapter(buildGrokCliPort(value))
+        },
+        setGrokEnabled: (enabled: boolean) => {
+          grokEnabled = enabled
+        },
+        setInvalidateWorktreeOnPrepare: (val: boolean) => {
+          invalidateWorktreeOnPrepare = val
+        },
+        finishWorker
+      }
+    }
+
+    it('expõe economicSelection estrito e mutuamente exclusivo no MCP e preserva Grok legado quando omitido', async () => {
+      const h = createEconomicHarness()
+      const startTool = h.mcp.listTools().find((t) => t.name === 'start_next_unitflow_unit')
+      const props = startTool!.inputSchema.properties as Record<string, any>
+      expect(props).toHaveProperty('economicSelection')
+      expect(startTool!.inputSchema.required).not.toContain('economicSelection')
+      expect(props.economicSelection.additionalProperties).toBe(false)
+      expect(props.economicSelection.properties.mode.enum).toEqual(['VERIFIED_ZERO_FIRST'])
+      expect(props.economicSelection.properties.privacy.enum).toEqual(['HOST_POLICY', 'NO_EXTERNAL_CODE'])
+      expect(props.economicSelection.properties).not.toHaveProperty('maxPriceUsd')
+      expect(props.economicSelection.properties).not.toHaveProperty('maxTokens')
+
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unit1Id = randomUUID()
+      parseMcpResult(await h.mcp.callTool('create_buildx_session', { sessionId }))
+      parseMcpResult(await h.mcp.callTool('bind_unitflow_workspace', { sessionId, worktreeId }))
+      parseMcpResult(
+        await h.mcp.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'U2 Schema & Mutual Exclusion',
+          objective: 'Validate schema & exclusion',
+          units: [{ unitId: unit1Id, position: 0, title: 'U1', objective: 'Work', acceptanceCriteria: 'PASS' }]
+        })
+      )
+
+      const invalidCases = [
+        { economicSelection: { mode: 'CHEAPEST' } },
+        { economicSelection: { mode: 'VERIFIED_ZERO_FIRST', maxPriceUsd: 0.05 } },
+        { economicSelection: { mode: 'VERIFIED_ZERO_FIRST', privacy: 'AIRGAPPED' } },
+        {
+          executorSelection: { executorId: 'grok-cli', providerId: 'xai' },
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST' }
+        }
+      ]
+
+      for (const extra of invalidCases) {
+        const res = await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: randomUUID(),
+          attemptId: randomUUID(),
+          stageOperationId: randomUUID(),
+          ...extra
+        })
+        expect(res.isError).toBe(true)
+        const payload = JSON.parse((res.content[0] as { type: 'text'; text: string }).text)
+        expect(payload.code).toBe('INVALID_ARGUMENT')
+        expect(h.getCounts().probeForkCount).toBe(0)
+        expect(smcService.getActiveReservation(repositoryId, sessionId)).toBeNull()
+        expect(h.getCounts().startForkCount).toBe(0)
+        expect(h.getCounts().grokStartCount).toBe(0)
+      }
+
+      // Legacy omitted call stays on grok-cli with zero Cline probe calls
+      const attemptLegacy = randomUUID()
+      const resLegacy = randomUUID()
+      const legacyStart = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: resLegacy,
+          attemptId: attemptLegacy,
+          stageOperationId: randomUUID()
+        })
+      )
+      expect(legacyStart.status).toBe('RUNNING')
+      expect(h.getCounts().probeForkCount).toBe(0)
+      expect(h.getCounts().grokStartCount).toBe(1)
+
+      // Applying economicSelection on a legacy/non-economic attempt fails closed with ECONOMIC_SELECTION_CONFLICT
+      const conflictRunning = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: resLegacy,
+          attemptId: attemptLegacy,
+          stageOperationId: randomUUID(),
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST' }
+        })
+      )
+      expect(conflictRunning.status).toBe('UNAVAILABLE')
+      expect(conflictRunning.reason).toBe('ECONOMIC_SELECTION_CONFLICT')
+      expect(h.getCounts().probeForkCount).toBe(0)
+      expect(h.getCounts().grokStartCount).toBe(1)
+    })
+
+    it('seleciona VERIFIED_ZERO via MCP, persiste DECISION na SMC antes do spawn, protege replay e mantém prova CURRENT para aceite', async () => {
+      const h = createEconomicHarness()
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unit1Id = randomUUID()
+
+      parseMcpResult(await h.mcp.callTool('create_buildx_session', { sessionId }))
+      parseMcpResult(await h.mcp.callTool('bind_unitflow_workspace', { sessionId, worktreeId }))
+      parseMcpResult(
+        await h.mcp.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'U2 Happy Path & Replay',
+          objective: 'Select free model via MCP, persist DECISION, protect replay',
+          units: [{ unitId: unit1Id, position: 0, title: 'U1', objective: 'Free execution', acceptanceCriteria: 'PASS' }]
+        })
+      )
+
+      const res1 = randomUUID()
+      const attempt1 = randomUUID()
+      const stage1 = randomUUID()
+      const started = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+        })
+      )
+
+      expect(started.status).toBe('RUNNING')
+      expect(started.executorSelection).toEqual({
+        executorId: 'cline-sdk',
+        providerId: 'cline',
+        modelId: 'free/economic-alpha'
+      })
+      expect(started.economicDecision).toMatchObject({
+        attemptId: attempt1,
+        unitId: unit1Id,
+        costTier: 'VERIFIED_ZERO',
+        tieBreakRule: ECONOMIC_TIE_BREAK_RULE,
+        selection: {
+          executorId: 'cline-sdk',
+          providerId: 'cline',
+          modelId: 'free/economic-alpha'
+        }
+      })
+      expect(h.getCounts()).toEqual({
+        probeForkCount: 1,
+        prepareForkCount: 1,
+        startForkCount: 1,
+        grokPolicyCalls: 1,
+        grokStartCount: 0
+      })
+
+      // Decision and pinned selection MUST already be persisted in SMC BEFORE spawn
+      const persistedAtSpawn = h.getPersistedAtSpawn(attempt1)
+      expect(persistedAtSpawn?.executorSelection).toEqual({
+        executorId: 'cline-sdk',
+        providerId: 'cline',
+        modelId: 'free/economic-alpha'
+      })
+      expect(persistedAtSpawn?.economicDecision?.decisionEntryId).toBe(started.economicDecision.decisionEntryId)
+
+      const smcEntry = smcService.getEntry(
+        repositoryId,
+        sessionId,
+        started.economicDecision.decisionEntryId
+      )
+      expect(smcEntry?.kind).toBe('DECISION')
+      expect(smcEntry?.provenance.emitterId).toBe('buildx-economic-selector')
+      expect(smcEntry?.body).not.toContain('workos:secret')
+
+      // Idempotent replay (compatible economicSelection AND omitted) reuses persisted decision with zero new probes/spawns
+      const replaySame = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+        })
+      )
+      expect(replaySame.replayed).toBe(true)
+      expect(replaySame.economicDecision.decisionEntryId).toBe(started.economicDecision.decisionEntryId)
+
+      const replayOmitted = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1
+        })
+      )
+      expect(replayOmitted.replayed).toBe(true)
+      expect(replayOmitted.executorSelection).toEqual(started.executorSelection)
+      expect(h.getCounts().probeForkCount).toBe(1)
+      expect(h.getCounts().startForkCount).toBe(1)
+
+      // Conflicting replay: divergent economicSelection OR mixing explicit executorSelection while RUNNING
+      const conflictPolicy = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: false }
+        })
+      )
+      expect(conflictPolicy.status).toBe('UNAVAILABLE')
+      expect(conflictPolicy.reason).toBe('ECONOMIC_SELECTION_CONFLICT')
+
+      const conflictMix = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: res1,
+          attemptId: attempt1,
+          stageOperationId: stage1,
+          executorSelection: { executorId: 'cline-sdk', providerId: 'cline', modelId: 'free/economic-alpha' }
+        })
+      )
+      expect(conflictMix.status).toBe('UNAVAILABLE')
+      expect(conflictMix.reason).toBe('ECONOMIC_SELECTION_CONFLICT')
+      expect(h.getCounts().probeForkCount).toBe(1)
+      expect(h.getCounts().startForkCount).toBe(1)
+
+      // Complete and verify CURRENT proof requirement on acceptance + terminal conflict guard
+      await h.finishWorker(attempt1, 'SUCCEEDED')
+      const settled = parseMcpResult(
+        await h.mcp.callTool('settle_unitflow_unit', { sessionId, attemptId: attempt1 })
+      )
+      expect(settled.attemptStatus).toBe('COMPLETED')
+
+      const acceptWithoutProof = await h.mcp.callTool('accept_unitflow_unit', {
+        sessionId,
+        attemptId: attempt1,
+        operationId: randomUUID(),
+        proofIds: [],
+        summary: 'Missing proof must fail'
+      })
+      expect(acceptWithoutProof.isError).toBe(true)
+
+      const proof = ledger.recordProof({
+        kind: 'TARGETED_TEST',
+        producer: 'IMPLEMENTER',
+        status: 'PASSED',
+        startedAt: new Date(Date.now() - 500).toISOString(),
+        finishedAt: new Date().toISOString(),
+        durationMs: 500,
+        scope: ['test/u2-economic'],
+        summary: 'U2 mock unit passed',
+        commandProfile: {
+          command: 'npm run test:u2',
+          checkout: {
+            repositoryId,
+            worktreeId,
+            generation,
+            head: currentHead,
+            issuer: 'VALIDATION_EXECUTION',
+            runId: randomUUID()
+          }
+        }
+      })
+      const accepted = parseMcpResult(
+        await h.mcp.callTool('accept_unitflow_unit', {
+          sessionId,
+          attemptId: attempt1,
+          operationId: randomUUID(),
+          proofIds: [proof.proofId],
+          summary: 'Accepted with CURRENT proof'
+        })
+      )
+      expect(accepted.status).toBe('ACCEPTED')
+
+      const settledDivergent = await h.mcp.callTool('start_next_unitflow_unit', {
+        sessionId,
+        planId,
+        reservationId: res1,
+        attemptId: attempt1,
+        stageOperationId: stage1,
+        economicSelection: { mode: 'VERIFIED_ZERO_FIRST', privacy: 'NO_EXTERNAL_CODE' }
+      })
+      expect(settledDivergent.isError).toBe(true)
+      expect(parseMcpResult(settledDivergent).message).toContain('ECONOMIC_SELECTION_CONFLICT')
+    })
+
+    it('aplica privacidade NO_EXTERNAL_CODE, bloqueia fallback sem política explícita ou sem getPolicyForWorktree (Gate Adicional) e permite fallback Grok autorizado', async () => {
+      const h = createEconomicHarness({ clineFreeModels: [], clineProbeError: { errorCode: 'CLINE_NO_FREE_MODELS', error: 'none' } })
+      const sessionId = randomUUID()
+      const planId = randomUUID()
+      const unit1Id = randomUUID()
+
+      parseMcpResult(await h.mcp.callTool('create_buildx_session', { sessionId }))
+      parseMcpResult(await h.mcp.callTool('bind_unitflow_workspace', { sessionId, worktreeId }))
+      parseMcpResult(
+        await h.mcp.callTool('prepare_unitflow_plan', {
+          sessionId,
+          planId,
+          title: 'U2 Privacy & Fallback Gate',
+          objective: 'Test privacy, fallback opt-in, and Additional Gate',
+          units: [{ unitId: unit1Id, position: 0, title: 'U1', objective: 'Fallback checks', acceptanceCriteria: 'PASS' }]
+        })
+      )
+
+      // 1. NO_EXTERNAL_CODE prefilters BEFORE any probe, reservation, or spawn
+      const privRes = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: randomUUID(),
+          attemptId: randomUUID(),
+          stageOperationId: randomUUID(),
+          economicSelection: {
+            mode: 'VERIFIED_ZERO_FIRST',
+            allowUnknownCostFallback: true,
+            privacy: 'NO_EXTERNAL_CODE'
+          }
+        })
+      )
+      expect(privRes.status).toBe('UNAVAILABLE')
+      expect(privRes.reason).toBe('PRIVACY_NO_EXTERNAL_CODE_FORBIDDEN')
+      expect(h.getCounts()).toEqual({
+        probeForkCount: 0,
+        prepareForkCount: 0,
+        startForkCount: 0,
+        grokPolicyCalls: 0,
+        grokStartCount: 0
+      })
+      expect(smcService.getActiveReservation(repositoryId, sessionId)).toBeNull()
+
+      // 2. No free model + allowUnknownCostFallback=false refuses BEFORE reservation/spawn
+      const noFallbackRes = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: randomUUID(),
+          attemptId: randomUUID(),
+          stageOperationId: randomUUID(),
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: false }
+        })
+      )
+      expect(noFallbackRes.status).toBe('UNAVAILABLE')
+      expect(noFallbackRes.reason).toContain('UNKNOWN_COST_FALLBACK_DISABLED')
+      expect(smcService.getActiveReservation(repositoryId, sessionId)).toBeNull()
+      expect(h.getCounts().grokStartCount).toBe(0)
+
+      // 3. Additional Gate via MCP: allowUnknownCostFallback=true WITHOUT getPolicyForWorktree fails closed BEFORE reservation/spawn
+      h.setHasGrokPolicyLookup(false)
+      const noPolicyLookupRes = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: randomUUID(),
+          attemptId: randomUUID(),
+          stageOperationId: randomUUID(),
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+        })
+      )
+      expect(noPolicyLookupRes.status).toBe('UNAVAILABLE')
+      expect(noPolicyLookupRes.reason).toContain('CLI_WORKTREE_POLICY_UNAVAILABLE')
+      expect(smcService.getActiveReservation(repositoryId, sessionId)).toBeNull()
+      expect(h.getCounts().grokStartCount).toBe(0)
+
+      // 4. With valid getPolicyForWorktree and allowUnknownCostFallback=true, routes to grok-cli UNKNOWN & persists DECISION
+      h.setHasGrokPolicyLookup(true)
+      const attemptFallback = randomUUID()
+      const fallbackRes = parseMcpResult(
+        await h.mcp.callTool('start_next_unitflow_unit', {
+          sessionId,
+          planId,
+          reservationId: randomUUID(),
+          attemptId: attemptFallback,
+          stageOperationId: randomUUID(),
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+        })
+      )
+      expect(fallbackRes.status).toBe('RUNNING')
+      expect(fallbackRes.executorSelection).toEqual({
+        executorId: 'grok-cli',
+        providerId: 'xai',
+        modelId: null
+      })
+      expect(fallbackRes.economicDecision.costTier).toBe('UNKNOWN')
+      expect(fallbackRes.economicDecision.reason).toBe('SELECTED_UNKNOWN_COST_FALLBACK')
+      expect(h.getCounts().grokStartCount).toBe(1)
+      expect(h.getPersistedAtSpawn(attemptFallback)?.economicDecision?.decisionEntryId).toBe(
+        fallbackRes.economicDecision.decisionEntryId
+      )
+    })
+
+    it('faz rollback atômico e impede spawn se persistência de DECISION na SMC falhar, e não faz failover silencioso no mesmo attempt', async () => {
+      // Part A: SMC DECISION persistence failure aborts transaction before spawn (isolated SMC)
+      const smcPartA = new SessionMemoryCentralService(path.join(tempDir, 'smc-part-a'))
+      try {
+        const hA = createEconomicHarness({ smcService: smcPartA })
+        const sessionA = randomUUID()
+        const planA = randomUUID()
+        const unitA = randomUUID()
+        parseMcpResult(await hA.mcp.callTool('create_buildx_session', { sessionId: sessionA }))
+        parseMcpResult(await hA.mcp.callTool('bind_unitflow_workspace', { sessionId: sessionA, worktreeId }))
+        parseMcpResult(
+          await hA.mcp.callTool('prepare_unitflow_plan', {
+            sessionId: sessionA,
+            planId: planA,
+            title: 'U2 SMC Decision Atomicity',
+            objective: 'Rollback if DECISION insert fails',
+            units: [{ unitId: unitA, position: 0, title: 'U1', objective: 'Fail SMC', acceptanceCriteria: 'PASS' }]
+          })
+        )
+
+        const rawDb = (smcPartA.getStore(repositoryId) as any).db
+        rawDb.exec(`
+          CREATE TEMP TRIGGER fail_economic_decision_insert
+          BEFORE INSERT ON smc_entries
+          WHEN NEW.emitter_id = 'buildx-economic-selector'
+          BEGIN
+            SELECT RAISE(ABORT, 'SIMULATED_SMC_DECISION_PERSIST_FAILURE');
+          END;
+        `)
+
+        const failAttempt = randomUUID()
+        const smcFailRes = await hA.mcp.callTool('start_next_unitflow_unit', {
+          sessionId: sessionA,
+          planId: planA,
+          reservationId: randomUUID(),
+          attemptId: failAttempt,
+          stageOperationId: randomUUID(),
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+        })
+        rawDb.exec('DROP TRIGGER IF EXISTS fail_economic_decision_insert;')
+
+        expect(smcFailRes.isError).toBe(true)
+        expect(smcPartA.getExecutionAttempt(repositoryId, failAttempt)).toBeNull()
+        expect(hA.getCounts().startForkCount).toBe(0)
+        expect(hA.getCounts().grokStartCount).toBe(0)
+      } finally {
+        smcPartA.close()
+      }
+
+      // Part B: Worktree drift between prepare and start refuses cline-sdk WITHOUT silent fallback to Grok (isolated SMC)
+      const smcPartB = new SessionMemoryCentralService(path.join(tempDir, 'smc-part-b'))
+      try {
+        const hB = createEconomicHarness({ smcService: smcPartB })
+        const sessionB = randomUUID()
+        const planB = randomUUID()
+        const unitB = randomUUID()
+        parseMcpResult(await hB.mcp.callTool('create_buildx_session', { sessionId: sessionB }))
+        parseMcpResult(await hB.mcp.callTool('bind_unitflow_workspace', { sessionId: sessionB, worktreeId }))
+        parseMcpResult(
+          await hB.mcp.callTool('prepare_unitflow_plan', {
+            sessionId: sessionB,
+            planId: planB,
+            title: 'U2 Drift No Silent Failover',
+            objective: 'Verify pre-start worktree drift refuses without silent Grok fallback',
+            units: [{ unitId: unitB, position: 0, title: 'U1', objective: 'Drift refusal', acceptanceCriteria: 'PASS' }]
+          })
+        )
+
+        hB.setInvalidateWorktreeOnPrepare(true)
+        const driftAttempt = randomUUID()
+        const driftRes = parseMcpResult(
+          await hB.mcp.callTool('start_next_unitflow_unit', {
+            sessionId: sessionB,
+            planId: planB,
+            reservationId: randomUUID(),
+            attemptId: driftAttempt,
+            stageOperationId: randomUUID(),
+            economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+          })
+        )
+        expect(driftRes.status).toBe('REFUSED')
+        expect(driftRes.reason).toBe('REFERENCE_CHECKOUT_FORBIDDEN')
+        expect(hB.getCounts().startForkCount).toBe(0)
+        expect(hB.getCounts().grokStartCount).toBe(0)
+      } finally {
+        smcPartB.close()
+      }
+
+      // Part C: Mid-run 429 fails attempt cleanly WITHOUT silent Grok switch; reconcile + new attempt runs fresh economic selection
+      const h2 = createEconomicHarness()
+      const sessionC = randomUUID()
+      const planC = randomUUID()
+      const unitC = randomUUID()
+      parseMcpResult(await h2.mcp.callTool('create_buildx_session', { sessionId: sessionC }))
+      parseMcpResult(await h2.mcp.callTool('bind_unitflow_workspace', { sessionId: sessionC, worktreeId }))
+      parseMcpResult(
+        await h2.mcp.callTool('prepare_unitflow_plan', {
+          sessionId: sessionC,
+          planId: planC,
+          title: 'U2 429 & Reconcile Retry',
+          objective: 'Verify 429 stops attempt and retry chooses fallback explicitly',
+          units: [{ unitId: unitC, position: 0, title: 'U1', objective: 'Retry fallback', acceptanceCriteria: 'PASS' }]
+        })
+      )
+
+      const attempt429 = randomUUID()
+      const start429 = parseMcpResult(
+        await h2.mcp.callTool('start_next_unitflow_unit', {
+          sessionId: sessionC,
+          planId: planC,
+          reservationId: randomUUID(),
+          attemptId: attempt429,
+          stageOperationId: randomUUID(),
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+        })
+      )
+      expect(start429.status).toBe('RUNNING')
+      await h2.finishWorker(attempt429, 'FAILED', 'HTTP 429 quota exceeded')
+      const settle429 = parseMcpResult(
+        await h2.mcp.callTool('settle_unitflow_unit', { sessionId: sessionC, attemptId: attempt429 })
+      )
+      expect(settle429.attemptStatus).toBe('FAILED')
+      expect(h2.getCounts().grokStartCount).toBe(0)
+
+      parseMcpResult(
+        await h2.mcp.callTool('reconcile_unitflow_unit', {
+          sessionId: sessionC,
+          attemptId: attempt429,
+          operationId: randomUUID(),
+          summary: 'Reconcile 429 quota exhaustion',
+          action: 'RETRY_SAME_UNIT'
+        })
+      )
+
+      // On fresh attempt with Cline exhausted/unavailable, economic selector picks Grok in a NEW DECISION
+      h2.setClineProbeError({ errorCode: 'CLINE_NO_FREE_MODELS', error: 'quota exhausted' })
+      const attemptRetry = randomUUID()
+      const retryRes = parseMcpResult(
+        await h2.mcp.callTool('start_next_unitflow_unit', {
+          sessionId: sessionC,
+          planId: planC,
+          reservationId: randomUUID(),
+          attemptId: attemptRetry,
+          stageOperationId: randomUUID(),
+          economicSelection: { mode: 'VERIFIED_ZERO_FIRST', allowUnknownCostFallback: true }
+        })
+      )
+      expect(retryRes.status).toBe('RUNNING')
+      expect(retryRes.executorSelection).toEqual({
+        executorId: 'grok-cli',
+        providerId: 'xai',
+        modelId: null
+      })
+      expect(retryRes.economicDecision.attemptId).toBe(attemptRetry)
+      expect(retryRes.economicDecision.costTier).toBe('UNKNOWN')
+      expect(h2.getCounts().grokStartCount).toBe(1)
     })
   })
 })

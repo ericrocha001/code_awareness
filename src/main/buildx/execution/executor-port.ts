@@ -1,5 +1,8 @@
 import type {
   CancelExecutorAttemptInput,
+  EconomicCandidateProbeInput,
+  EconomicCandidateSignal,
+  EconomicSelectableExecutorId,
   ExecutorAvailabilityResult,
   ExecutorEvent,
   ExecutorPreparationResult,
@@ -10,6 +13,27 @@ import type {
   PrepareExecutorAttemptInput,
   StartExecutorAttemptInput
 } from '../../../shared/types/buildx/execution-types'
+
+export interface EconomicCandidateDescriptor {
+  readonly executorId: EconomicSelectableExecutorId
+  readonly providerId: string | null
+  readonly requiresExternalTransfer: boolean
+}
+
+export interface EconomicCandidateProvider {
+  readonly economicDescriptor: EconomicCandidateDescriptor
+  probeEconomicCandidate(
+    input: EconomicCandidateProbeInput
+  ): Promise<EconomicCandidateSignal> | EconomicCandidateSignal
+}
+
+export function sanitizeExecutorDiagnostics(message: string): string {
+  return message
+    .replace(/Bearer\s+\S+/gi, 'Bearer [REDACTED]')
+    .replace(/workos:[^\s"']+/gi, '[REDACTED_WORKOS_TOKEN]')
+    .replace(/eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+/g, '[REDACTED_JWT]')
+    .replace(/\b(?:xai|sk)-[A-Za-z0-9\-_]{8,}\b/g, '[REDACTED_API_KEY]')
+}
 
 export interface UnitExecutorPort {
   readonly identity: ExecutorSelection

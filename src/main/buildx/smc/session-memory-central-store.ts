@@ -40,16 +40,23 @@ import type {
   SaveWorkspaceBindingInput
 } from '../../../shared/types/buildx/workspace-types'
 import type {
+  EconomicSelectionDecision,
   ExecutionAttemptRecord,
   ExecutionAttemptStatus,
   ExecutorSelection,
+  PersistedEconomicDecisionRecord,
   SettleExecutionAttemptStoreInput
 } from '../../../shared/types/buildx/execution-types'
 import {
   executorSelectionsEqual,
   formatExecutorSelection,
-  normalizeExecutorSelection
+  normalizeExecutorSelection,
+  sanitizeExecutorDiagnostics
 } from '../execution/executor-port'
+import {
+  economicPoliciesEqual,
+  validateEconomicSelectionPolicy
+} from '../execution/economic-selection'
 import {
   BuildXWorkspaceBindingConflictError
 } from '../execution/workspace-binding-errors'
@@ -294,6 +301,7 @@ export interface PrepareExecutionAttemptInput {
   }
   readonly headObserved: string
   readonly executorSelection?: ExecutorSelection
+  readonly economicDecision?: EconomicSelectionDecision
 }
 
 interface SmcCursorPayload {
@@ -2104,8 +2112,145 @@ export class SessionMemoryCentralStore {
     return normalized
   }
 
+  private readPersistedEconomicDecision(attemptId: string): PersistedEconomicDecisionRecord | undefined {
+    const hasEntriesTable = Boolean(
+      this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'smc_entries'").get()
+    )
+    if (!hasEntriesTable) return undefined
+    const entryId = deterministicEntryId('economic-selection', attemptId.trim().toLowerCase())
+    const row = this.db.prepare(`
+      SELECT entry_id, body FROM smc_entries WHERE entry_id = ?
+    `).get(entryId) as { entry_id: string; body: string } | undefined
+    if (!row) return undefined
+    try {
+      const parsed = JSON.parse(row.body)
+      const policy = validateEconomicSelectionPolicy(parsed.policy)
+      const selection = normalizeExecutorSelection({
+        executorId: parsed.selection?.executorId,
+        providerId: parsed.selection?.providerId ?? null,
+        modelId: parsed.selection?.modelId ?? null
+      })
+      if (
+        typeof parsed.attemptId !== 'string' ||
+        typeof parsed.unitId !== 'string' ||
+        typeof parsed.costTier !== 'string' ||
+        typeof parsed.quotaStatus !== 'string'
+      ) {
+        return undefined
+      }
+      return {
+        decisionEntryId: row.entry_id,
+        attemptId: parsed.attemptId,
+        unitId: parsed.unitId,
+        policy,
+        selection,
+        costTier: parsed.costTier,
+        quotaStatus: parsed.quotaStatus,
+        reason: typeof parsed.reason === 'string' ? parsed.reason : '',
+        tieBreakRule: typeof parsed.tieBreakRule === 'string' ? parsed.tieBreakRule : '',
+        source: typeof parsed.source === 'string' ? parsed.source : null,
+        probedAt: typeof parsed.probedAt === 'string' ? parsed.probedAt : '',
+        candidateCount: typeof parsed.candidateCount === 'number' ? parsed.candidateCount : 0,
+        ...(typeof parsed.verifiedZeroModelsCount === 'number'
+          ? { verifiedZeroModelsCount: parsed.verifiedZeroModelsCount }
+          : {}),
+        rejections: Array.isArray(parsed.rejections) ? parsed.rejections : []
+      }
+    } catch {
+      return undefined
+    }
+  }
+
+  private writePersistedEconomicDecision(
+    sessionId: string,
+    attemptId: string,
+    unitId: string,
+    decision: EconomicSelectionDecision,
+    now: string
+  ): PersistedEconomicDecisionRecord {
+    if (decision.status !== 'SELECTED' || !decision.selection || !decision.costTier || !decision.quotaStatus) {
+      throw new ExecutionAttemptConflictError('ECONOMIC_SELECTION_INVALID: cannot persist non-selected economic decision')
+    }
+    const policy = validateEconomicSelectionPolicy(decision.policy)
+    const selection = normalizeExecutorSelection(decision.selection)
+    const entryId = deterministicEntryId('economic-selection', attemptId)
+    const existing = this.readPersistedEconomicDecision(attemptId)
+    if (existing) {
+      if (
+        !economicPoliciesEqual(existing.policy, policy) ||
+        !executorSelectionsEqual(existing.selection, selection)
+      ) {
+        throw new ExecutionAttemptConflictError(
+          `ECONOMIC_SELECTION_CONFLICT: Attempt "${attemptId}" already has persisted economic decision`
+        )
+      }
+      return existing
+    }
+
+    const sanitizedRejections = (decision.rejections ?? []).slice(0, 16).map((item) => ({
+      executorId: item.executorId,
+      providerId: item.providerId ?? null,
+      modelId: item.modelId ?? null,
+      costTier: item.costTier,
+      reason: sanitizeExecutorDiagnostics(item.reason).slice(0, 240),
+      probedAt: item.probedAt,
+      source: sanitizeExecutorDiagnostics(item.source).slice(0, 120)
+    }))
+
+    const sanitizedReason = sanitizeExecutorDiagnostics(decision.reason).slice(0, 320)
+    const title = `Economic selection: ${selection.executorId}${selection.modelId ? `/${selection.modelId}` : ''}`
+    const body = JSON.stringify({
+      attemptId,
+      unitId,
+      policy,
+      selection,
+      costTier: decision.costTier,
+      quotaStatus: decision.quotaStatus,
+      reason: sanitizedReason,
+      tieBreakRule: decision.tieBreakRule,
+      source: decision.source ? sanitizeExecutorDiagnostics(decision.source).slice(0, 120) : null,
+      probedAt: decision.probedAt,
+      candidateCount: decision.candidateCount,
+      ...(typeof decision.verifiedZeroModelsCount === 'number'
+        ? { verifiedZeroModelsCount: decision.verifiedZeroModelsCount }
+        : {}),
+      rejections: sanitizedRejections
+    })
+    const referencesJson = JSON.stringify([
+      { kind: 'OTHER', target: attemptId },
+      { kind: 'OTHER', target: unitId }
+    ])
+
+    this.db.prepare(`
+      INSERT INTO smc_entries (
+        entry_id, session_id, kind, title, body,
+        emitter_role, emitter_id, references_json, supersedes_entry_id, created_at
+      ) VALUES (?, ?, 'DECISION', ?, ?, 'SYSTEM', 'buildx-economic-selector', ?, NULL, ?)
+    `).run(entryId, sessionId, title, body, referencesJson, now)
+
+    return {
+      decisionEntryId: entryId,
+      attemptId,
+      unitId,
+      policy,
+      selection,
+      costTier: decision.costTier,
+      quotaStatus: decision.quotaStatus,
+      reason: sanitizedReason,
+      tieBreakRule: decision.tieBreakRule,
+      source: decision.source ? sanitizeExecutorDiagnostics(decision.source).slice(0, 120) : null,
+      probedAt: decision.probedAt,
+      candidateCount: decision.candidateCount,
+      ...(typeof decision.verifiedZeroModelsCount === 'number'
+        ? { verifiedZeroModelsCount: decision.verifiedZeroModelsCount }
+        : {}),
+      rejections: sanitizedRejections
+    }
+  }
+
   private mapRawToExecutionAttemptRecord(row: RawExecutionAttemptRow): ExecutionAttemptRecord {
     const executorSelection = this.readPersistedExecutorSelection(row.attempt_id)
+    const economicDecision = this.readPersistedEconomicDecision(row.attempt_id)
     return {
       attemptId: row.attempt_id,
       repositoryId: row.repository_id,
@@ -2120,6 +2265,7 @@ export class SessionMemoryCentralStore {
       status: row.status as ExecutionAttemptStatus,
       revision: row.revision,
       ...(executorSelection ? { executorSelection } : {}),
+      ...(economicDecision ? { economicDecision } : {}),
       createdAt: row.created_at,
       updatedAt: row.updated_at
     }
@@ -2154,6 +2300,28 @@ export class SessionMemoryCentralStore {
       }
     }
 
+    let validatedEconomicDecision: EconomicSelectionDecision | undefined
+    if (input.economicDecision !== undefined) {
+      if (
+        input.economicDecision.status !== 'SELECTED' ||
+        !input.economicDecision.selection ||
+        !input.economicDecision.costTier ||
+        !input.economicDecision.quotaStatus
+      ) {
+        throw new ExecutionAttemptConflictError(
+          'ECONOMIC_SELECTION_INVALID: prepareExecutionAttempt requires a SELECTED economicDecision'
+        )
+      }
+      const decisionSelection = normalizeExecutorSelection(input.economicDecision.selection)
+      if (normalizedSelection && !executorSelectionsEqual(normalizedSelection, decisionSelection)) {
+        throw new ExecutionAttemptConflictError(
+          `ECONOMIC_SELECTION_CONFLICT: executorSelection (${formatExecutorSelection(normalizedSelection)}) diverges from economicDecision (${formatExecutorSelection(decisionSelection)})`
+        )
+      }
+      normalizedSelection = normalizedSelection ?? decisionSelection
+      validatedEconomicDecision = input.economicDecision
+    }
+
     return this.db.transaction((): ExecutionAttemptRecord => {
       // 1. Replay check dentro da transação
       const existing = this.db.prepare(`
@@ -2166,6 +2334,18 @@ export class SessionMemoryCentralStore {
           existing.session_id === cleanSessionId &&
           existing.reservation_id === cleanReservationId
         ) {
+          const existingEconomic = this.readPersistedEconomicDecision(cleanAttemptId)
+          if (validatedEconomicDecision) {
+            if (
+              !existingEconomic ||
+              !economicPoliciesEqual(existingEconomic.policy, validatedEconomicDecision.policy)
+            ) {
+              throw new ExecutionAttemptIdConflictError(
+                cleanAttemptId,
+                `ECONOMIC_SELECTION_CONFLICT: attempt already exists with incompatible economic decision`
+              )
+            }
+          }
           if (normalizedSelection) {
             const existingSelection = this.readPersistedExecutorSelection(cleanAttemptId)
             if (!existingSelection || !executorSelectionsEqual(existingSelection, normalizedSelection)) {
@@ -2345,6 +2525,16 @@ export class SessionMemoryCentralStore {
         this.writePersistedExecutorSelection(cleanSessionId, cleanAttemptId, normalizedSelection, now)
       }
 
+      const persistedEconomicDecision = validatedEconomicDecision
+        ? this.writePersistedEconomicDecision(
+            cleanSessionId,
+            cleanAttemptId,
+            resRow.unit_id,
+            validatedEconomicDecision,
+            now
+          )
+        : undefined
+
       return {
         attemptId: cleanAttemptId,
         repositoryId: this.repositoryId,
@@ -2359,6 +2549,7 @@ export class SessionMemoryCentralStore {
         status: 'PREPARED',
         revision: 1,
         ...(normalizedSelection ? { executorSelection: normalizedSelection } : {}),
+        ...(persistedEconomicDecision ? { economicDecision: persistedEconomicDecision } : {}),
         createdAt: now,
         updatedAt: now
       }

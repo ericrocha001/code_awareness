@@ -1,8 +1,10 @@
 import type {
+  EconomicSelectionDecision,
   ExecutionAttemptRecord,
   ExecutorSelection,
   PrepareExecutionAttemptOptions
 } from '../../../shared/types/buildx/execution-types'
+import { economicPoliciesEqual } from './economic-selection'
 import {
   executorSelectionsEqual,
   formatExecutorSelection,
@@ -98,6 +100,28 @@ export class ExecutionAttemptService {
       }
     }
 
+    let validatedEconomicDecision: EconomicSelectionDecision | undefined
+    if (options.economicDecision !== undefined) {
+      if (
+        options.economicDecision.status !== 'SELECTED' ||
+        !options.economicDecision.selection ||
+        !options.economicDecision.costTier ||
+        !options.economicDecision.quotaStatus
+      ) {
+        throw new ExecutionAttemptConflictError(
+          'ECONOMIC_SELECTION_INVALID: prepareExecutionAttempt requires a SELECTED economicDecision'
+        )
+      }
+      const decisionSelection = normalizeExecutorSelection(options.economicDecision.selection)
+      if (normalizedSelection && !executorSelectionsEqual(normalizedSelection, decisionSelection)) {
+        throw new ExecutionAttemptConflictError(
+          `ECONOMIC_SELECTION_CONFLICT: executorSelection (${formatExecutorSelection(normalizedSelection)}) diverges from economicDecision (${formatExecutorSelection(decisionSelection)})`
+        )
+      }
+      normalizedSelection = normalizedSelection ?? decisionSelection
+      validatedEconomicDecision = options.economicDecision
+    }
+
     const store = this.smcService.getStore(validRepoId)
 
     // 1. Replay check imediato (idempotente sem tocar Git)
@@ -108,6 +132,17 @@ export class ExecutionAttemptService {
         existing.sessionId === cleanSessionId &&
         existing.reservationId === cleanReservationId
       ) {
+        if (validatedEconomicDecision) {
+          if (
+            !existing.economicDecision ||
+            !economicPoliciesEqual(existing.economicDecision.policy, validatedEconomicDecision.policy)
+          ) {
+            throw new ExecutionAttemptIdConflictError(
+              cleanAttemptId,
+              'ECONOMIC_SELECTION_CONFLICT: attempt already exists with incompatible economic decision'
+            )
+          }
+        }
         if (normalizedSelection) {
           if (!existing.executorSelection || !executorSelectionsEqual(existing.executorSelection, normalizedSelection)) {
             throw new ExecutionAttemptIdConflictError(
@@ -209,7 +244,8 @@ export class ExecutionAttemptService {
         branch: inspectResult.binding.branch
       },
       headObserved: inspectResult.currentHead,
-      ...(normalizedSelection ? { executorSelection: normalizedSelection } : {})
+      ...(normalizedSelection ? { executorSelection: normalizedSelection } : {}),
+      ...(validatedEconomicDecision ? { economicDecision: validatedEconomicDecision } : {})
     })
   }
 
