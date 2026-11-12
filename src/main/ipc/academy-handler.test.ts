@@ -27,6 +27,7 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
 
     bootstrapOpenAiPlugin: vi.fn(), getOpenAiPublicationState: vi.fn(), listOpenAiReleases: vi.fn(),
     prepareOpenAiRelease: vi.fn(), confirmOpenAiUpload: vi.fn(), getOpenAiRelease: vi.fn(() => ({ artifactPath: 'C:/release.zip' })),
+    getGeminiExportState: vi.fn(() => ({ latestExport: null })), prepareGeminiExport: vi.fn(async () => ({ exportId: 'g1' })), getGeminiExportArtifactPath: vi.fn(async () => 'C:/academy-gemini.zip'),
     approvePublicSkills: vi.fn(async () => []), getPublicationPreference: vi.fn(() => ({ autoIncludeGlobal: false, revision: 0, updatedAt: null })),
     setPublicationPreference: vi.fn(async (autoIncludeGlobal, confirmed) => ({ autoIncludeGlobal, revision: confirmed ? 1 : 0, updatedAt: '2026-11-12T00:00:00Z' })),
     store: { listDestinations: vi.fn(() => [{ id: 'repo', path: 'C:/repo' }]) }
@@ -36,6 +37,7 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:snapshot', 'academy:create', 'academy:update', 'academy:import-destination', 'academy:resolve-conflict']))
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:distribution-health', 'academy:distribution-states', 'academy:distribution-reconcile', 'academy:delivery-status']))
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:openai-state', 'academy:openai-prepare', 'academy:openai-confirm-upload', 'academy:openai-reveal', 'academy:approve-public-batch', 'academy:publication-preference', 'academy:publication-preference-set']))
+  expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:gemini-export-state', 'academy:gemini-export-prepare', 'academy:gemini-export-reveal']))
   await handlers.get('academy:create')!({}, { package: { skillMd: 'x', artifacts: {} }, scope: 'GLOBAL' })
   expect(service.saveNewSkill).toHaveBeenCalledWith(expect.objectContaining({ origin: 'UI' }))
   await handlers.get('academy:update')!({}, { skillId: 'id', expectedVersion: 1, package: { skillMd: 'x', artifacts: {} } })
@@ -51,4 +53,8 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
   expect(handlers.get('academy:publication-preference')!({})).toEqual({ autoIncludeGlobal: false, revision: 0, updatedAt: null })
   await handlers.get('academy:publication-preference-set')!({}, true, true)
   expect(service.setPublicationPreference).toHaveBeenCalledWith(true, true)
+  expect(handlers.get('academy:gemini-export-state')!({})).toEqual({ latestExport: null })
+  expect(service.getGeminiExportState).toHaveBeenCalled()
+  await handlers.get('academy:gemini-export-prepare')!({})
+  expect(service.prepareGeminiExport).toHaveBeenCalled()
 })

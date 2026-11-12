@@ -191,6 +191,41 @@ beforeEach(() => {
     })),
     confirmAcademyOpenAiUpload: vi.fn(async () => ({ ...openAiRelease, status: 'UPLOADED_UNVERIFIED' as const })),
     revealAcademyOpenAiPackage: vi.fn(async () => true),
+    getAcademyGeminiExportState: vi.fn(async () => ({
+      latestExport: {
+        exportId: 'gemini-export-1',
+        exportedAt: detail.createdAt,
+        snapshotHash: 'snapshot',
+        artifactPath: 'C:/gemini/academy-gemini.zip',
+        artifactHash: 'g'.repeat(64),
+        skillCount: 1,
+        totalBytes: 1024,
+        skills: [{ name: 'alpha', zipSha256: 'sha', entryCount: 2, byteLength: 512 }]
+      },
+      coverage: {
+        catalog: 1,
+        eligible: 1,
+        includedInLastZip: 1,
+        awaitingZip: 0,
+        notApplicable: 0,
+        excluded: []
+      },
+      canonicalSnapshotHash: 'snapshot',
+      drifted: false,
+      artifactAvailable: true,
+      lastError: null
+    })),
+    prepareAcademyGeminiExport: vi.fn(async () => ({
+      exportId: 'gemini-export-2',
+      exportedAt: detail.createdAt,
+      snapshotHash: 'snapshot',
+      artifactPath: 'C:/gemini/academy-gemini.zip',
+      artifactHash: 'g'.repeat(64),
+      skillCount: 1,
+      totalBytes: 1024,
+      skills: [{ name: 'alpha', zipSha256: 'sha', entryCount: 2, byteLength: 512 }]
+    })),
+    revealAcademyGeminiExport: vi.fn(async () => 'C:/gemini/academy-gemini.zip'),
     getAcademyGitStatus: vi.fn(async () => ({
       profile: null,
       repository: { id: 'repo', name: 'Academy', fullName: 'ericrocha001/Academy', visibility: 'PRIVATE', checkoutPath: 'C:/Academy', branch: 'main' },
@@ -210,6 +245,11 @@ afterEach(cleanup)
 const openSkillsSurface = async () => {
   const skillsTab = await screen.findByRole('button', { name: 'Skills' })
   fireEvent.click(skillsTab)
+}
+
+const openGeminiSurface = async () => {
+  const geminiTab = await screen.findByRole('button', { name: 'Gemini' })
+  fireEvent.click(geminiTab)
 }
 
 const selectAlpha = async () => {
@@ -235,6 +275,69 @@ it('opens directly on the 1-click Plugin ChatGPT surface without the legacy Oper
 
   fireEvent.click(within(region).getByRole('button', { name: 'Regerar ZIP' }))
   await waitFor(() => expect(window.codeAwareness.prepareAcademyOpenAiRelease).toHaveBeenCalled())
+})
+
+it('navigates to Gemini surface and supports 1-click export and reveal', async () => {
+  render(<AcademyView />)
+  await openGeminiSurface()
+  const region = await screen.findByRole('region', { name: 'Exportação Gemini' })
+  expect(within(region).getByText('Pacote Gemini pronto para importação')).toBeTruthy()
+  expect(screen.getByTestId('academy-gemini-coverage-summary').textContent).toContain('1 Skill compatível para Gemini')
+
+  fireEvent.click(within(region).getByRole('button', { name: 'Regerar ZIP' }))
+  await waitFor(() => expect(window.codeAwareness.prepareAcademyGeminiExport).toHaveBeenCalled())
+
+  fireEvent.click(within(region).getByRole('button', { name: 'Abrir ZIP' }))
+  await waitFor(() => expect(window.codeAwareness.revealAcademyGeminiExport).toHaveBeenCalled())
+})
+
+it('reviews excluded Gemini skills and displays incompatibility details', async () => {
+  vi.mocked(window.codeAwareness.getAcademyGeminiExportState).mockResolvedValueOnce({
+    latestExport: null,
+    coverage: {
+      catalog: 3,
+      eligible: 1,
+      includedInLastZip: null,
+      awaitingZip: 1,
+      notApplicable: 0,
+      excluded: [
+        {
+          skillId: 'skill-incomp',
+          name: 'incomp-skill',
+          version: 1,
+          reason: 'INCOMPATIBLE',
+          action: 'VIEW_SKILL',
+          details: "Arquivo 'scripts/run.py' não suportado pelo Gemini Web."
+        },
+        {
+          skillId: 'skill-priv',
+          name: 'priv-skill',
+          version: 2,
+          reason: 'PRIVATE',
+          action: 'APPROVE_PUBLICATION',
+          details: 'Skill privada sem aprovação para publicação.'
+        }
+      ]
+    },
+    canonicalSnapshotHash: 'hash',
+    drifted: true,
+    artifactAvailable: false,
+    lastError: null
+  })
+
+  render(<AcademyView />)
+  await openGeminiSurface()
+  const region = await screen.findByRole('region', { name: 'Exportação Gemini' })
+  expect(within(region).getByText(/2 Skills fora do pacote/)).toBeTruthy()
+
+  fireEvent.click(within(region).getByRole('button', { name: 'Revisar' }))
+  const modal = await screen.findByRole('dialog', { name: 'Revisar Skills fora do pacote Gemini' })
+  expect(within(modal).getByText("Arquivo 'scripts/run.py' não suportado pelo Gemini Web.")).toBeTruthy()
+  expect(within(modal).getByText('Incompatível com Gemini')).toBeTruthy()
+  expect(within(modal).getByText('Privada · Requer aprovação')).toBeTruthy()
+
+  fireEvent.click(within(modal).getByRole('button', { name: 'Aprovar publicação' }))
+  await waitFor(() => expect(window.codeAwareness.approveAcademyPublicSkill).toHaveBeenCalledWith('skill-priv', 2, true))
 })
 
 it('shows empty and stale ZIP states distinctly and confirms manual upload only intentionally', async () => {

@@ -16,7 +16,8 @@ import type {
   AcademySkillDetail,
   AcademySkillScope,
   AcademySkillVersion,
-  AcademySnapshot
+  AcademySnapshot,
+  AcademyGeminiExportState
 } from '../../../../shared/types/academy-types'
 import type { AcademyManifestPreview } from '../../../../shared/types/academy-publication-types'
 import type { RepositoryRecord } from '../../../../shared/types/repository-catalog-types'
@@ -30,6 +31,8 @@ import {
   DestinationManager,
   PluginOverviewSurface,
   PluginReviewModal,
+  GeminiOverviewSurface,
+  GeminiReviewModal,
   SkillCatalog,
   SkillWorkspace
 } from './AcademyPanels'
@@ -111,6 +114,11 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [reviewOpen, setReviewOpen] = useState(false)
   const [selectedReviewIds, setSelectedReviewIds] = useState<string[]>([])
+  const [geminiExport, setGeminiExport] = useState<AcademyGeminiExportState | null>(null)
+  const [geminiPreparing, setGeminiPreparing] = useState(false)
+  const [geminiError, setGeminiError] = useState<string | null>(null)
+  const [geminiReviewOpen, setGeminiReviewOpen] = useState(false)
+  const [geminiSelectedReviewIds, setGeminiSelectedReviewIds] = useState<string[]>([])
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
   const [conflictReview, setConflictReview] = useState<AcademyConflictReview | null>(null)
@@ -239,6 +247,9 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     if (window.codeAwareness.getAcademyPublicationPreference) {
       void readProjection('preference', () => window.codeAwareness.getAcademyPublicationPreference(), setPublicationPreference)
     }
+    if (window.codeAwareness.getAcademyGeminiExportState) {
+      void readProjection('gemini', () => window.codeAwareness.getAcademyGeminiExportState(), setGeminiExport)
+    }
     if (loadReleases || settingsOpen) {
       void readProjection('releases', () => window.codeAwareness.listAcademyOpenAiReleases(), setOpenAiReleases)
     }
@@ -348,6 +359,9 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           void readProjection('preference', () => window.codeAwareness.getAcademyPublicationPreference(), setPublicationPreference)
         }
         void readProjection('releases', () => window.codeAwareness.listAcademyOpenAiReleases(), setOpenAiReleases)
+        if (window.codeAwareness.getAcademyGeminiExportState) {
+          void readProjection('gemini', () => window.codeAwareness.getAcademyGeminiExportState(), setGeminiExport)
+        }
       }
       if (!event || event.kind === 'distribution') {
         void readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution)
@@ -364,6 +378,9 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           if (id && !latestSelection.current.isEditing && nextSnapshot.skills.some(item => item.id === id)) void loadSkill(id)
         }).catch(() => {})
         void readProjection('openAi', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication)
+        if (window.codeAwareness.getAcademyGeminiExportState) {
+          void readProjection('gemini', () => window.codeAwareness.getAcademyGeminiExportState(), setGeminiExport)
+        }
       }
     })
     return () => {
@@ -738,6 +755,54 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     })
   }
 
+  const prepareGeminiExport = () => {
+    guardDraft(async () => {
+      setGeminiPreparing(true)
+      setGeminiError(null)
+      try {
+        const receipt = await window.codeAwareness.prepareAcademyGeminiExport()
+        readSecondaryProjections(false)
+        showMessage(`Pacote Gemini pronto (${receipt.skillCount} Skills).`)
+      } catch (err) {
+        setGeminiError(err instanceof Error ? err.message : String(err))
+      } finally {
+        setGeminiPreparing(false)
+      }
+    })
+  }
+
+  const revealGeminiExport = () => void (async () => {
+    try {
+      await window.codeAwareness.revealAcademyGeminiExport()
+    } catch (err) {
+      reportError(err)
+    }
+  })()
+
+  const approveBatchFromGeminiReview = () => {
+    const excluded = geminiExport?.coverage?.excluded ?? []
+    const items = excluded
+      .filter(item => item.reason === 'PRIVATE' && geminiSelectedReviewIds.includes(item.skillId))
+      .map(item => ({ skillId: item.skillId, expectedVersion: item.version }))
+    if (!items.length || !window.codeAwareness.approveAcademyPublicSkills) return
+    setConfirmation({
+      title: `Aprovar ${items.length} Skills para publicação?`,
+      description: 'As Skills selecionadas ficarão elegíveis para o pacote Gemini e para o catálogo público.',
+      confirmLabel: 'Aprovar selecionadas',
+      onConfirm: async () => {
+        setReviewBusy(true)
+        try {
+          await window.codeAwareness.approveAcademyPublicSkills(items, true)
+          setGeminiSelectedReviewIds([])
+          await refresh(selected?.id)
+          showMessage(`${items.length} Skills aprovadas para publicação.`)
+        } finally {
+          setReviewBusy(false)
+        }
+      }
+    })
+  }
+
   const gitHasAlert = Boolean(
     snapshot.conflicts.length > 0 ||
     gitStatus?.lastError ||
@@ -775,6 +840,17 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           onOpenReview={() => setReviewOpen(true)}
           onOpenSettings={() => setSettingsOpen(true)}
           onOpenSkills={() => setSurface('SKILLS')}
+        />
+      ) : surface === 'GEMINI' ? (
+        <GeminiOverviewSurface
+          hydration={hydration}
+          geminiExport={geminiExport}
+          preparing={geminiPreparing}
+          geminiError={geminiError}
+          onPrepareExport={prepareGeminiExport}
+          onRevealExport={revealGeminiExport}
+          onOpenReview={() => setGeminiReviewOpen(true)}
+          onOpenSkills={() => guardDraft(() => setSurface('SKILLS'))}
         />
       ) : (
         <div className="academy-body">
@@ -854,6 +930,27 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           }}
           onRequestToggleAutoInclude={requestToggleAutoInclude}
           onClose={() => setReviewOpen(false)}
+        />
+      )}
+
+      {geminiReviewOpen && (
+        <GeminiReviewModal
+          excluded={geminiExport?.coverage?.excluded ?? []}
+          notApplicableCount={geminiExport?.coverage?.notApplicable ?? 0}
+          selectedIds={geminiSelectedReviewIds}
+          busy={reviewBusy}
+          onToggleSelected={id =>
+            setGeminiSelectedReviewIds(cur => cur.includes(id) ? cur.filter(item => item !== id) : [...cur, id])
+          }
+          onApproveSingle={(id, ver) => void approveSingleFromReview(id, ver)}
+          onApproveBatch={approveBatchFromGeminiReview}
+          onEnableSkill={id => void enableSkillFromReview(id)}
+          onOpenSkill={id => {
+            setGeminiReviewOpen(false)
+            setSurface('SKILLS')
+            guardDraft(() => void choose(id))
+          }}
+          onClose={() => setGeminiReviewOpen(false)}
         />
       )}
 

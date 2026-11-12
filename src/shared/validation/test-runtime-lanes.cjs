@@ -78,6 +78,7 @@ const nativeTestFiles = Object.freeze([
   'src/main/academy/academy-real-openai-release.test.ts',
   'src/main/academy/publication/academy-plugin-package-revision-service.test.ts',
   'src/main/academy/git/academy-git-sync-service.test.ts',
+  'src/main/academy/export/academy-gemini-export-service.test.ts',
   'src/main/core/codemap-membership.e2e.test.ts',
   'src/main/system-health/codemap-maintenance-ledger.e2e.test.ts',
   'src/main/repository-catalog/repository-catalog.test.ts',

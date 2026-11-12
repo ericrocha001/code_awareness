@@ -1,4 +1,5 @@
 import { BrowserWindow, ipcMain, shell } from 'electron'
+import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AcademyCreateInput, AcademyPackage, AcademyUpdateInput } from '../../shared/types/academy-types'
 import type { AcademyService } from '../academy/academy-service'
@@ -76,6 +77,14 @@ export function registerAcademyHandlers(service: AcademyService): void {
     if (!release.artifactPath) throw new Error('OPENAI_RELEASE_ARTIFACT_MISSING')
     shell.showItemInFolder(release.artifactPath)
     return true
+  })
+  ipcMain.handle('academy:gemini-export-state', () => service.getGeminiExportState())
+  ipcMain.handle('academy:gemini-export-prepare', () => service.prepareGeminiExport())
+  ipcMain.handle('academy:gemini-export-reveal', async () => {
+    const path = await service.getGeminiExportArtifactPath()
+    if (!path || !existsSync(path)) throw new Error('GEMINI_EXPORT_ARTIFACT_MISSING')
+    shell.showItemInFolder(path)
+    return path
   })
   ipcMain.handle('academy:git-status', () => {
     return service.gitSync?.getStatus() ?? {

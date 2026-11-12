@@ -454,6 +454,23 @@ body[data-theme='light'] .academy-view,
   background: rgba(245, 158, 11, 0.1);
 }
 
+.academy-badge.scope {
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.academy-badge.warning {
+  border-color: rgba(239, 68, 68, 0.45);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.academy-review-details {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
 .academy-workspace {
   padding: 16px 20px;
   overflow: auto;

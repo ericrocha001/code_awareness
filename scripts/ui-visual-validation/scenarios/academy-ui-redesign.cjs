@@ -192,6 +192,43 @@ exports.run = async ctx => {
 
     await ctx.evaluate(() => {
       const tabs = [...document.querySelectorAll('.academy-surface-tab')]
+      tabs.find(tab => tab.textContent?.trim() === 'Gemini')?.click()
+    })
+    await ctx.waitFor(() => !!document.querySelector('[aria-label="Exportação Gemini"]'))
+    await ctx.overflow()
+
+    ctx.check('Gemini surface renders with coverage summary and excluded notices', await ctx.evaluate(() =>
+      !!document.querySelector('[aria-label="Exportação Gemini"]') &&
+      !!document.querySelector('[data-testid="academy-gemini-coverage-summary"]')
+    ))
+    await ctx.capture('gemini-overview-empty-dark')
+
+    const hasGeminiExcluded = await ctx.evaluate(() => !!document.querySelector('[aria-label="Exportação Gemini"] .academy-excluded-notice button'))
+    if (hasGeminiExcluded) {
+      await ctx.click('[aria-label="Exportação Gemini"] .academy-excluded-notice button')
+      await ctx.waitFor(() => !!document.querySelector('[role="dialog"][aria-label="Revisar Skills fora do pacote Gemini"]'))
+      await ctx.capture('gemini-review-modal-dark')
+      await ctx.click('[role="dialog"][aria-label="Revisar Skills fora do pacote Gemini"] .academy-drawer-header button')
+      await ctx.waitFor(() => !document.querySelector('[role="dialog"][aria-label="Revisar Skills fora do pacote Gemini"]'))
+    }
+
+    await ctx.click('[aria-label="Exportação Gemini"] .academy-plugin-cta-row button')
+    const geminiDeadline = Date.now() + 25000
+    while (Date.now() < geminiDeadline) {
+      if (await ctx.evaluate(() => Boolean(document.querySelector('[aria-label="Exportação Gemini"] .academy-plugin-cta-row')?.textContent?.includes('Abrir ZIP')))) break
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+    await ctx.waitFor(() => Boolean(document.querySelector('[aria-label="Exportação Gemini"] .academy-plugin-cta-row')?.textContent?.includes('Abrir ZIP')))
+    await ctx.overflow()
+
+    ctx.check('1-click Gemini master ZIP generation updates Result zone and creates academy-gemini.zip', await ctx.evaluate(() =>
+      !!document.querySelector('[aria-label="Exportação Gemini"] .academy-plugin-result') &&
+      document.querySelector('[aria-label="Exportação Gemini"] .academy-plugin-cta-row')?.textContent?.includes('Abrir ZIP')
+    ))
+    await ctx.capture('gemini-overview-ready-dark')
+
+    await ctx.evaluate(() => {
+      const tabs = [...document.querySelectorAll('.academy-surface-tab')]
       tabs.find(tab => tab.textContent?.trim() === 'Skills')?.click()
     })
     await ctx.waitFor(() => document.querySelectorAll('.academy-skill-item').length === 55)
