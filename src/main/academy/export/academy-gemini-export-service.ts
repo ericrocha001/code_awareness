@@ -1,5 +1,4 @@
-import { randomUUID } from 'node:crypto'
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type {
   AcademyGeminiExportReceipt,
@@ -9,11 +8,12 @@ import type { AcademyStore } from '../academy-store'
 import {
   buildCanonicalGeminiSnapshot,
   buildGeminiCoverage,
-  createGeminiMasterZip,
-  createGeminiSkillZip,
+  executeGeminiExport,
   geminiInclusion,
-  hashGeminiSnapshot
+  hashGeminiSnapshot,
+  type AcademyGeminiExportTask
 } from './gemini-export-model'
+import type { AcademyPluginExecutor } from '../publication/academy-plugin-executor'
 
 export class AcademyGeminiExportService {
   readonly exportDirectory: string
@@ -22,13 +22,15 @@ export class AcademyGeminiExportService {
 
   private latestReceipt: AcademyGeminiExportReceipt | null = null
   private lastError: string | null = null
-  private prepareFlight: Promise<AcademyGeminiExportReceipt> | null = null
+  private readonly flights = new Map<string, Promise<AcademyGeminiExportReceipt>>()
+  private executionTail: Promise<unknown> = Promise.resolve()
   private readonly changeListeners = new Set<() => void>()
 
   constructor(
     private readonly store: AcademyStore,
     academyDatabasePath: string,
-    private readonly downloadsPath?: string
+    private readonly downloadsPath?: string,
+    private readonly executor?: AcademyPluginExecutor
   ) {
     this.exportDirectory = join(dirname(academyDatabasePath), 'gemini-export')
     this.receiptPath = join(this.exportDirectory, 'latest.json')
@@ -91,71 +93,71 @@ export class AcademyGeminiExportService {
   }
 
   async prepareExport(): Promise<AcademyGeminiExportReceipt> {
-    if (this.prepareFlight) {
-      return this.prepareFlight
+    const canonicalSnapshot = buildCanonicalGeminiSnapshot(this.store)
+    const snapshotHash = hashGeminiSnapshot(canonicalSnapshot)
+
+    const pending = this.flights.get(snapshotHash)
+    if (pending) {
+      return pending
     }
 
     const flight = (async () => {
-      try {
-        this.lastError = null
+      await this.executionTail.catch(() => {})
 
-        const eligible = this.store
-          .list()
-          .filter((skill) => geminiInclusion(this.store, skill).status === 'INCLUDED')
-          .sort((a, b) => a.name.localeCompare(b.name))
+      this.lastError = null
 
-        const skillZips = eligible.map((skill) => {
+      const currentSnapshot = buildCanonicalGeminiSnapshot(this.store)
+      const currentSnapshotHash = hashGeminiSnapshot(currentSnapshot)
+
+      const eligible = this.store
+        .list()
+        .filter((skill) => geminiInclusion(this.store, skill).status === 'INCLUDED')
+        .sort((a, b) => a.name.localeCompare(b.name))
+
+      const task: AcademyGeminiExportTask = {
+        kind: 'gemini-export',
+        exportDirectory: this.exportDirectory,
+        masterZipPath: this.masterZipPath,
+        receiptPath: this.receiptPath,
+        downloadsPath: this.downloadsPath,
+        snapshotHash: currentSnapshotHash,
+        skills: eligible.map((skill) => {
           const detail = this.store.get(skill.id)
-          return createGeminiSkillZip(detail)
-        })
-
-        const master = createGeminiMasterZip(skillZips)
-
-        mkdirSync(this.exportDirectory, { recursive: true })
-        writeFileSync(this.masterZipPath, master.masterBuffer)
-
-        if (this.downloadsPath && existsSync(this.downloadsPath)) {
-          try {
-            copyFileSync(this.masterZipPath, join(this.downloadsPath, 'academy-gemini.zip'))
-          } catch {
-            // Ignore failure to copy to downloads
+          return {
+            id: skill.id,
+            name: skill.name,
+            packageHash: detail.current.packageHash,
+            package: detail.current.package
           }
+        })
+      }
+
+      try {
+        let receipt: AcademyGeminiExportReceipt
+        if (this.executor && this.executor.hasWorker()) {
+          const result = await this.executor.run(task)
+          receipt = result.receipt!
+        } else {
+          const result = await executeGeminiExport(task)
+          receipt = result.receipt!
         }
 
-        const canonicalSnapshot = buildCanonicalGeminiSnapshot(this.store)
-        const snapshotHash = hashGeminiSnapshot(canonicalSnapshot)
-
-        const receipt: AcademyGeminiExportReceipt = {
-          exportId: randomUUID(),
-          exportedAt: new Date().toISOString(),
-          snapshotHash,
-          artifactPath: this.masterZipPath,
-          artifactHash: master.masterHash,
-          skillCount: skillZips.length,
-          totalBytes: master.totalBytes,
-          skills: skillZips.map((s) => ({
-            name: s.name,
-            zipSha256: s.zipSha256,
-            entryCount: s.entryCount,
-            byteLength: s.byteLength
-          }))
-        }
-
-        writeFileSync(this.receiptPath, JSON.stringify(receipt, null, 2), 'utf8')
         this.latestReceipt = receipt
         this.emitChange()
-
         return receipt
       } catch (error) {
         this.lastError = error instanceof Error ? error.message : String(error)
         this.emitChange()
         throw error
-      } finally {
-        this.prepareFlight = null
       }
     })()
 
-    this.prepareFlight = flight
+    this.flights.set(snapshotHash, flight)
+    this.executionTail = flight.catch(() => {})
+    void flight.finally(() => {
+      this.flights.delete(snapshotHash)
+    })
+
     return flight
   }
 

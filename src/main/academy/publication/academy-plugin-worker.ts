@@ -12,19 +12,22 @@ import { assertSourcePath } from '../git/academy-git-materializer'
 import { buildGitOpenAiInput, canonicalJson, gitOpenAiValidationProfile, sha256 } from './openai-plugin-model'
 import { createDeterministicZip, readZipEntries, type ZipEntry } from './deterministic-zip'
 import { validateOpenAiPluginPackage } from './openai-plugin-validator'
+import { executeGeminiExport, type AcademyGeminiExportTask } from '../export/gemini-export-model'
 
-export interface AcademyPluginTask {
-  kind: 'inventory' | 'build' | 'verify' | 'source-check'
-  snapshotJson?: string
-  suppliedSnapshot?: AcademyGitSourceSnapshot
-  projection?: AcademyBuildProjection
-  profile: AcademyOpenAiPluginProfile
-  storageRoot?: string
-  artifactPath?: string
-  expectedZipSha?: string
-  downloadsPath?: string
-  sealed?: { entries: Array<{ path: string; data: string }>; fingerprint: string }
-}
+export type AcademyPluginTask =
+  | {
+      kind: 'inventory' | 'build' | 'verify' | 'source-check'
+      snapshotJson?: string
+      suppliedSnapshot?: AcademyGitSourceSnapshot
+      projection?: AcademyBuildProjection
+      profile: AcademyOpenAiPluginProfile
+      storageRoot?: string
+      artifactPath?: string
+      expectedZipSha?: string
+      downloadsPath?: string
+      sealed?: { entries: Array<{ path: string; data: string }>; fingerprint: string }
+    }
+  | AcademyGeminiExportTask
 
 function safeArtifact(root: string, file: string): void {
   const rel = relative(root, file)
@@ -52,6 +55,11 @@ async function promote(file: string, bytes: Buffer, expectedHash: string): Promi
 }
 
 async function execute(task: AcademyPluginTask) {
+  if (task.kind === 'gemini-export') {
+    return executeGeminiExport(task, (name, durationMs) => {
+      parentPort?.postMessage({ phase: name, durationMs })
+    })
+  }
   const phases: Record<string, number> = {}
   let start = performance.now()
   const phase = (name: string) => { phases[name] = performance.now() - start; parentPort?.postMessage({ phase: name, durationMs: phases[name] }); start = performance.now() }

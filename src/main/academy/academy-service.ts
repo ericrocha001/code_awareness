@@ -12,6 +12,7 @@ import { observeStableSkillDirectory, readSkillDirectory, removeSkillDirectory, 
 import { AcademyDistributionService } from './distribution/academy-distribution-service'
 import { OpenAiPluginPublicationService } from './publication/openai-plugin-publication-service'
 import { AcademyPluginPackageRevisionService } from './publication/academy-plugin-package-revision-service'
+import { AcademyPluginExecutor } from './publication/academy-plugin-executor'
 import { AcademyGeminiExportService } from './export/academy-gemini-export-service'
 import { canonicalJson } from './publication/openai-plugin-model'
 import type { AcademyGitSyncService } from './git/academy-git-sync-service'
@@ -49,9 +50,10 @@ export class AcademyService {
     this.projections = new AcademyProjectionService(this.store)
     this.distribution = new AcademyDistributionService(this.store)
     this.packageRevisions = new AcademyPluginPackageRevisionService(this.store)
+    const pluginExecutor = new AcademyPluginExecutor(pluginWorkerPath)
     this.openAiPublication = new OpenAiPluginPublicationService(this.store, this.packageRevisions, databasePath, downloadsPath, pluginWorkerPath)
     this.openAiPublication.onOperationChange(() => this.emitDistributionChange('publication'))
-    this.geminiExport = new AcademyGeminiExportService(this.store, databasePath, downloadsPath)
+    this.geminiExport = new AcademyGeminiExportService(this.store, databasePath, downloadsPath, pluginExecutor)
     this.geminiExport.onChange(() => this.emitDistributionChange('publication'))
     this.importer = new AcademyImporter(this.store)
     this.watcher = new AcademyWatcher(this.store, this.projections)

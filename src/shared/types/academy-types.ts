@@ -103,6 +103,7 @@ export interface AcademyGeminiCoverage {
 
 export interface AcademyGeminiSkillExportEntry {
   name: string
+  packageHash?: string
   zipSha256: string
   entryCount: number
   byteLength: number

@@ -1,7 +1,8 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { buildSync } from 'esbuild'
 import { AcademyStore } from '../academy-store'
 import { AcademyGeminiExportService } from './academy-gemini-export-service'
 import {
@@ -12,6 +13,7 @@ import {
   buildGeminiCoverage
 } from './gemini-export-model'
 import { readZipEntries } from '../publication/deterministic-zip'
+import { AcademyPluginExecutor } from '../publication/academy-plugin-executor'
 import type { AcademyPackage, AcademySkillDetail } from '../../../shared/types/academy-types'
 
 function makePackage(name: string, description: string, artifacts: Record<string, string> = {}): AcademyPackage {
@@ -31,6 +33,7 @@ describe('Gemini Export Packager & Service', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'gemini-export-test-'))
     dbPath = join(tempDir, 'academy.db')
     downloadsDir = join(tempDir, 'downloads')
+    mkdirSync(downloadsDir, { recursive: true })
     store = new AcademyStore(dbPath)
   })
 
@@ -45,6 +48,24 @@ describe('Gemini Export Packager & Service', () => {
         package: makePackage('code-reviewer', 'Reviews code changes', {
           'references/checklist.md': '# Checklist\nReview items',
           'data/config.json': '{"maxLines": 500}'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const result = validateGeminiSkill(skill)
+      expect(result.valid).toBe(true)
+    })
+
+    it('approves code, document, spreadsheet, and modern image extensions per Gemini Web documentation', () => {
+      const skill = store.create({
+        package: makePackage('full-stack-assistant', 'Full stack assistant', {
+          'src/index.ts': 'export const a = 1',
+          'src/app.js': 'console.log("hi")',
+          'scripts/calc.py': 'def run(): pass',
+          'db/schema.sql': 'SELECT 1;',
+          'data/metrics.xlsx': 'fake-xlsx-bytes',
+          'slides/pitch.pptx': 'fake-pptx-bytes',
+          'images/screenshot.heic': 'fake-heic-bytes'
         }),
         scope: 'GLOBAL',
         origin: 'UI'
@@ -79,17 +100,44 @@ describe('Gemini Export Packager & Service', () => {
       expect(result.details).toContain('kebab-case')
     })
 
-    it('rejects skill with incompatible artifact extensions like .ts or .py', () => {
+    it('rejects skill with unsupported executable artifact extensions like .sh, .exe, or .bin', () => {
       const skill = store.create({
-        package: makePackage('python-helper', 'Helper with script', {
-          'scripts/run.py': 'print("hello")'
+        package: makePackage('shell-helper', 'Helper with script', {
+          'scripts/run.sh': '#!/bin/bash\necho hi'
         }),
         scope: 'GLOBAL',
         origin: 'UI'
       })
       const result = validateGeminiSkill(skill)
       expect(result.valid).toBe(false)
-      expect(result.details).toContain('.py')
+      expect(result.details).toContain('.sh')
+      expect(result.details).toContain('não suportada pelo Gemini Web')
+    })
+
+    it('rejects skill with audio or video files not allowed in ZIPs', () => {
+      const audioSkill = store.create({
+        package: makePackage('audio-skill', 'Has audio', {
+          'assets/intro.mp3': 'fake-mp3'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const audioResult = validateGeminiSkill(audioSkill)
+      expect(audioResult.valid).toBe(false)
+      expect(audioResult.details).toContain('.mp3')
+      expect(audioResult.details).toContain('áudio/vídeo')
+
+      const videoSkill = store.create({
+        package: makePackage('video-skill', 'Has video', {
+          'assets/demo.mp4': 'fake-mp4'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      const videoResult = validateGeminiSkill(videoSkill)
+      expect(videoResult.valid).toBe(false)
+      expect(videoResult.details).toContain('.mp4')
+      expect(videoResult.details).toContain('áudio/vídeo')
     })
 
     it('identifies exclusion reasons accurately in geminiInclusion', () => {
@@ -192,7 +240,6 @@ describe('Gemini Export Packager & Service', () => {
       const entries = readZipEntries(master.masterBuffer)
       expect(entries.map((e) => e.path)).toEqual(['skill-alpha.zip', 'skill-beta.zip'])
 
-      // verify that unpacking skill-alpha.zip yields SKILL.md at its root
       const alphaInnerEntries = readZipEntries(entries[0].data)
       expect(alphaInnerEntries.some((e) => e.path === 'SKILL.md')).toBe(true)
     })
@@ -219,7 +266,7 @@ describe('Gemini Export Packager & Service', () => {
         keepPrivate: true
       })
       const excludedIncompatible = store.create({
-        package: makePackage('delta-script', 'Delta with py', { 'test.py': 'pass' }),
+        package: makePackage('delta-script', 'Delta with sh', { 'test.sh': '#!/bin/bash\nexit 0' }),
         scope: 'GLOBAL',
         origin: 'UI'
       })
@@ -248,7 +295,6 @@ describe('Gemini Export Packager & Service', () => {
       expect(afterState.drifted).toBe(false)
       expect(afterState.coverage.awaitingZip).toBe(0)
 
-      // Verify receipt on disk matches
       const diskReceipt = JSON.parse(readFileSync(service.receiptPath, 'utf8'))
       expect(diskReceipt.exportId).toBe(receipt.exportId)
       expect(diskReceipt.artifactHash).toBe(receipt.artifactHash)
@@ -279,6 +325,56 @@ describe('Gemini Export Packager & Service', () => {
       expect(stateAfterUpdate.coverage.awaitingZip).toBe(1)
     })
 
+    it('supports sequential regeneration after skills change', async () => {
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+
+      const skill = store.create({
+        package: makePackage('evolving-skill', 'Initial version 1', {
+          'notes.md': '# Notes V1'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      const receipt1 = await service.prepareExport()
+      expect(receipt1.skillCount).toBe(1)
+      expect(service.getState().drifted).toBe(false)
+
+      // Update skill with modified content
+      store.update({
+        skillId: skill.id,
+        expectedVersion: skill.currentVersion,
+        package: makePackage('evolving-skill', 'Updated version 2', {
+          'notes.md': '# Notes V2 updated'
+        }),
+        origin: 'UI'
+      })
+
+      const driftedState = service.getState()
+      expect(driftedState.drifted).toBe(true)
+      expect(driftedState.coverage.awaitingZip).toBe(1)
+
+      // Sequential regeneration
+      const receipt2 = await service.prepareExport()
+      expect(receipt2.skillCount).toBe(1)
+      expect(receipt2.snapshotHash).not.toBe(receipt1.snapshotHash)
+      expect(receipt2.artifactHash).not.toBe(receipt1.artifactHash)
+
+      const settledState = service.getState()
+      expect(settledState.drifted).toBe(false)
+      expect(settledState.coverage.awaitingZip).toBe(0)
+
+      // Verify that master zip on disk contains updated content
+      const masterEntries = readZipEntries(readFileSync(receipt2.artifactPath))
+      const innerZipEntry = masterEntries.find((e) => e.path === 'evolving-skill.zip')
+      expect(innerZipEntry).toBeDefined()
+      const innerEntries = readZipEntries(innerZipEntry!.data)
+      const notesEntry = innerEntries.find((e) => e.path === 'notes.md')
+      expect(notesEntry).toBeDefined()
+      expect(notesEntry!.data.toString('utf8')).toContain('Notes V2 updated')
+    })
+
     it('joins concurrent prepareExport flights', async () => {
       const service = new AcademyGeminiExportService(store, dbPath)
 
@@ -292,6 +388,39 @@ describe('Gemini Export Packager & Service', () => {
       const [r1, r2] = await Promise.all([service.prepareExport(), service.prepareExport()])
       expect(r1.exportId).toBe(r2.exportId)
       expect(r1.artifactHash).toBe(r2.artifactHash)
+    })
+
+    it('offloads compression and writing to worker thread via AcademyPluginExecutor when available', async () => {
+      const workerPath = join(tempDir, 'gemini-worker.cjs')
+      buildSync({
+        entryPoints: ['src/main/academy/publication/academy-plugin-worker.ts'],
+        bundle: true,
+        platform: 'node',
+        format: 'cjs',
+        outfile: workerPath
+      })
+
+      const executor = new AcademyPluginExecutor(workerPath)
+      expect(executor.hasWorker()).toBe(true)
+
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+
+      const skill = store.create({
+        package: makePackage('worker-tested-skill', 'Tested with worker thread', {
+          'code.ts': 'export const workerTest = true'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      const receipt = await service.prepareExport()
+      expect(receipt.skillCount).toBe(1)
+      expect(existsSync(receipt.artifactPath)).toBe(true)
+      expect(existsSync(join(downloadsDir, 'academy-gemini.zip'))).toBe(true)
+
+      const masterEntries = readZipEntries(readFileSync(receipt.artifactPath))
+      expect(masterEntries.map((e) => e.path)).toEqual(['worker-tested-skill.zip'])
     })
   })
 })

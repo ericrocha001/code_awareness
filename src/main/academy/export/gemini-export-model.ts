@@ -1,24 +1,41 @@
-import { createHash } from 'node:crypto'
-import { extname, posix } from 'node:path'
+import { createHash, randomUUID } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { copyFile, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { extname, join, posix } from 'node:path'
 import type {
   AcademyGeminiCoverage,
   AcademyGeminiExcludedSkill,
   AcademyGeminiExclusionReason,
   AcademyGeminiExportReceipt,
   AcademyGeminiSkillExportEntry,
+  AcademyPackage,
   AcademySkillDetail,
   AcademySkillSummary
 } from '../../../shared/types/academy-types'
 import type { AcademyStore } from '../academy-store'
 import { createDeterministicZip, type ZipEntry } from '../publication/deterministic-zip'
+import type { AcademyPluginTaskResult } from '../publication/academy-plugin-executor'
 
 export const GEMINI_MAX_SKILL_BYTES = 100 * 1024 * 1024 // 100 MB
 
 export const GEMINI_ALLOWED_EXTENSIONS = new Set<string>([
-  // Docs / Text
-  '.md', '.txt', '.rtf', '.html', '.htm', '.csv', '.tsv', '.pdf', '.docx', '.doc', '.json', '.yaml', '.yml', '.xml',
+  // Documents & Plain Text
+  '.doc', '.docx', '.dot', '.dotx', '.hwp', '.hwpx', '.pdf', '.rtf', '.txt', '.md',
+  // Spreadsheets & Tabular Data
+  '.csv', '.tsv', '.xls', '.xlsx',
+  // Presentations
+  '.pptx',
+  // Code & Structured Data
+  '.c', '.cpp', '.cs', '.css', '.go', '.html', '.htm', '.java', '.js', '.json', '.jsx', '.php', '.py', '.rb', '.rs', '.sql', '.ts', '.tsx', '.xml', '.yaml', '.yml',
   // Images
-  '.png', '.jpg', '.jpeg', '.webp'
+  '.png', '.jpg', '.jpeg', '.webp', '.heic', '.heif'
+])
+
+export const GEMINI_REJECTED_AUDIO_VIDEO_EXTENSIONS = new Set<string>([
+  // Audio
+  '.mp3', '.wav', '.aac', '.flac', '.ogg', '.m4a', '.wma',
+  // Video
+  '.mp4', '.mov', '.avi', '.mkv', '.webm', '.flv', '.wmv'
 ])
 
 export const GEMINI_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
@@ -70,6 +87,12 @@ export function validateGeminiSkill(detail: AcademySkillDetail): GeminiValidatio
     }
 
     const ext = extname(path).toLowerCase()
+    if (GEMINI_REJECTED_AUDIO_VIDEO_EXTENSIONS.has(ext)) {
+      return {
+        valid: false,
+        details: `Arquivo '${path}' possui extensão '${ext}' (áudio/vídeo), não suportada dentro de arquivos ZIP no Gemini Web.`
+      }
+    }
     if (!GEMINI_ALLOWED_EXTENSIONS.has(ext)) {
       return {
         valid: false,
@@ -208,9 +231,13 @@ export function buildGeminiCoverage(
       const shipped = shippedSkills.get(skill.name)
       if (!shipped) {
         awaitingZip++
+      } else if (shipped.packageHash) {
+        if (shipped.packageHash !== skill.current.packageHash) {
+          awaitingZip++
+        }
       } else {
-        const skillZip = createGeminiSkillZip(skill)
-        if (skillZip.zipSha256 !== shipped.zipSha256) {
+        const expectedCount = Object.keys(skill.current.package.artifacts ?? {}).length + 1
+        if (shipped.entryCount !== expectedCount) {
           awaitingZip++
         }
       }
@@ -243,7 +270,7 @@ export interface GeneratedGeminiSkillZip {
   byteLength: number
 }
 
-export function createGeminiSkillZip(detail: AcademySkillDetail): GeneratedGeminiSkillZip {
+export function createGeminiSkillZip(detail: { name: string; current: { package: AcademyPackage } }): GeneratedGeminiSkillZip {
   const entries: ZipEntry[] = [
     {
       path: 'SKILL.md',
@@ -289,5 +316,103 @@ export function createGeminiMasterZip(skillZips: GeneratedGeminiSkillZip[]): Gen
     masterBuffer,
     masterHash: sha256(masterBuffer),
     totalBytes: masterBuffer.length
+  }
+}
+
+export interface AcademyGeminiExportTask {
+  kind: 'gemini-export'
+  exportDirectory: string
+  masterZipPath: string
+  receiptPath: string
+  downloadsPath?: string
+  snapshotHash: string
+  skills: Array<{
+    id: string
+    name: string
+    packageHash: string
+    package: AcademyPackage
+  }>
+}
+
+async function atomicWrite(filePath: string, buffer: Buffer): Promise<void> {
+  const temporary = `${filePath}.${randomUUID()}.tmp`
+  await writeFile(temporary, buffer)
+  try {
+    await rename(temporary, filePath)
+  } catch {
+    await copyFile(temporary, filePath)
+    await unlink(temporary).catch(() => {})
+  }
+}
+
+export async function executeGeminiExport(
+  task: AcademyGeminiExportTask,
+  phase?: (name: string, durationMs: number) => void
+): Promise<AcademyPluginTaskResult> {
+  const phases: Record<string, number> = {}
+  let start = performance.now()
+  const recordPhase = (name: string) => {
+    const elapsed = performance.now() - start
+    phases[name] = elapsed
+    phase?.(name, elapsed)
+    start = performance.now()
+  }
+
+  const skillZips: Array<GeneratedGeminiSkillZip & { packageHash: string }> = []
+  for (const skill of task.skills) {
+    const generated = createGeminiSkillZip({
+      name: skill.name,
+      current: { package: skill.package }
+    })
+    skillZips.push({
+      ...generated,
+      packageHash: skill.packageHash
+    })
+  }
+  recordPhase('skillCompressionMs')
+
+  const master = createGeminiMasterZip(skillZips)
+  recordPhase('masterCompressionMs')
+
+  await mkdir(task.exportDirectory, { recursive: true })
+  await atomicWrite(task.masterZipPath, master.masterBuffer)
+
+  if (task.downloadsPath) {
+    try {
+      await mkdir(task.downloadsPath, { recursive: true })
+      const dest = join(task.downloadsPath, 'academy-gemini.zip')
+      await atomicWrite(dest, master.masterBuffer)
+    } catch {
+      // Ignore download destination failure
+    }
+  }
+  recordPhase('diskWriteMs')
+
+  const receipt: AcademyGeminiExportReceipt = {
+    exportId: randomUUID(),
+    exportedAt: new Date().toISOString(),
+    snapshotHash: task.snapshotHash,
+    artifactPath: task.masterZipPath,
+    artifactHash: master.masterHash,
+    skillCount: skillZips.length,
+    totalBytes: master.totalBytes,
+    skills: skillZips.map((s) => ({
+      name: s.name,
+      packageHash: s.packageHash,
+      zipSha256: s.zipSha256,
+      entryCount: s.entryCount,
+      byteLength: s.byteLength
+    }))
+  }
+
+  const receiptJson = Buffer.from(JSON.stringify(receipt, null, 2), 'utf8')
+  await atomicWrite(task.receiptPath, receiptJson)
+  recordPhase('receiptWriteMs')
+
+  return {
+    artifactPath: task.masterZipPath,
+    artifactHash: master.masterHash,
+    receipt,
+    phases
   }
 }
