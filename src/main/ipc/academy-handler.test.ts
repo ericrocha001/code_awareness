@@ -27,13 +27,15 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
 
     bootstrapOpenAiPlugin: vi.fn(), getOpenAiPublicationState: vi.fn(), listOpenAiReleases: vi.fn(),
     prepareOpenAiRelease: vi.fn(), confirmOpenAiUpload: vi.fn(), getOpenAiRelease: vi.fn(() => ({ artifactPath: 'C:/release.zip' })),
+    approvePublicSkills: vi.fn(async () => []), getPublicationPreference: vi.fn(() => ({ autoIncludeGlobal: false, revision: 0, updatedAt: null })),
+    setPublicationPreference: vi.fn(async (autoIncludeGlobal, confirmed) => ({ autoIncludeGlobal, revision: confirmed ? 1 : 0, updatedAt: '2026-11-12T00:00:00Z' })),
     store: { listDestinations: vi.fn(() => [{ id: 'repo', path: 'C:/repo' }]) }
   }
   registerAcademyHandlers(service as any)
   const handlers = new Map(handle.mock.calls.map(([channel, handler]) => [channel, handler]))
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:snapshot', 'academy:create', 'academy:update', 'academy:import-destination', 'academy:resolve-conflict']))
   expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:distribution-health', 'academy:distribution-states', 'academy:distribution-reconcile', 'academy:delivery-status']))
-  expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:openai-state', 'academy:openai-prepare', 'academy:openai-confirm-upload', 'academy:openai-reveal']))
+  expect([...handlers.keys()]).toEqual(expect.arrayContaining(['academy:openai-state', 'academy:openai-prepare', 'academy:openai-confirm-upload', 'academy:openai-reveal', 'academy:approve-public-batch', 'academy:publication-preference', 'academy:publication-preference-set']))
   await handlers.get('academy:create')!({}, { package: { skillMd: 'x', artifacts: {} }, scope: 'GLOBAL' })
   expect(service.saveNewSkill).toHaveBeenCalledWith(expect.objectContaining({ origin: 'UI' }))
   await handlers.get('academy:update')!({}, { skillId: 'id', expectedVersion: 1, package: { skillMd: 'x', artifacts: {} } })
@@ -44,4 +46,9 @@ it('registers the bounded Academy IPC surface and stamps UI origin server-side',
   expect(service.import).toHaveBeenCalledWith(join('C:/repo', '.skills'), 'repo')
   await handlers.get('academy:openai-confirm-upload')!({}, 'release', 'hash')
   expect(service.confirmOpenAiUpload).toHaveBeenCalledWith('release', 'hash')
+  await handlers.get('academy:approve-public-batch')!({}, [{ skillId: 's1', expectedVersion: 1 }], true)
+  expect(service.approvePublicSkills).toHaveBeenCalledWith([{ skillId: 's1', expectedVersion: 1 }], true)
+  expect(handlers.get('academy:publication-preference')!({})).toEqual({ autoIncludeGlobal: false, revision: 0, updatedAt: null })
+  await handlers.get('academy:publication-preference-set')!({}, true, true)
+  expect(service.setPublicationPreference).toHaveBeenCalledWith(true, true)
 })

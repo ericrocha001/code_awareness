@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { AcademyOpenAiPluginProfile, AcademyOpenAiReleaseDelta, AcademyOpenAiSnapshotEntry } from '../../../shared/types/academy-types'
+import type { AcademyOpenAiPluginProfile, AcademyOpenAiReleaseDelta, AcademyOpenAiSnapshotEntry, AcademyPluginExclusionReason, AcademySkillSummary } from '../../../shared/types/academy-types'
 import type { AcademyStore } from '../academy-store'
 import { AcademyError, hashAcademyPackage } from '../academy-package'
 import type { AcademyGitSourceSnapshot } from '../../../shared/types/academy-git-source-types'
@@ -19,6 +19,14 @@ export function canonicalJson(value: unknown): string {
 
 export function sha256(value: Buffer | string): string { return createHash('sha256').update(value).digest('hex') }
 
+export function pluginInclusion(store: AcademyStore, skill: AcademySkillSummary): 'INCLUDED' | 'NOT_APPLICABLE' | AcademyPluginExclusionReason {
+  if (skill.scope !== 'GLOBAL') return 'NOT_APPLICABLE'
+  if (!store.usesGitFirst() && store.isDeleted(skill.id)) return 'REMOVED'
+  if (skill.status !== 'ACTIVE') return 'DISABLED'
+  if (store.usesGitFirst()) return 'INCLUDED'
+  return store.publicationEligibility(skill.id) === 'APPROVED' ? 'INCLUDED' : 'PRIVATE'
+}
+
 export function buildCanonicalOpenAiSnapshot(store: AcademyStore | null, source?: AcademyGitSourceSnapshot): AcademyOpenAiSnapshotEntry[] {
   const authority = source || store?.usesLocalAuthority() ? null : store?.getGitAuthority()
   const git = source ?? (authority ? store!.getGitSnapshot(authority.repositoryId, authority.processedCommitSha) : null)
@@ -28,7 +36,7 @@ export function buildCanonicalOpenAiSnapshot(store: AcademyStore | null, source?
     return { skillId: binding.skillId, name: skill.name, academyVersion: binding.version, packageHash: skill.packageHash }
   }).sort((left, right) => left.skillId.localeCompare(right.skillId))
   if (!store || store.usesGitFirst()) return []
-  return store.list(store.usesLocalAuthority() ? undefined : 'ACTIVE').filter((skill) => skill.scope === 'GLOBAL' && (!store.usesLocalAuthority() || store.publicationEligibility(skill.id) === 'APPROVED' && !store.isDeleted(skill.id))).map((skill) => {
+  return store.list().filter((skill) => pluginInclusion(store, skill) === 'INCLUDED').map((skill) => {
     const detail = store.get(skill.id)
     return { skillId: skill.id, name: skill.name, academyVersion: skill.currentVersion, packageHash: detail.current.packageHash }
   }).sort((left, right) => left.skillId.localeCompare(right.skillId))

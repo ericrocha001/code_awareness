@@ -5,7 +5,7 @@ import Database from 'better-sqlite3'
 import type { AcademyBuildProjection, AcademyGitSnapshotHeader } from '../../shared/types/academy-publication-types'
 import type { AcademyGitAuthority, AcademyGitSkillSource, AcademyGitSourceSnapshot } from '../../shared/types/academy-git-source-types'
 import type { AcademyGitPublicationState, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
-import type { AcademyConflict, AcademyCreateInput, AcademyDestination, AcademyDistributionState, AcademyDistributionStatus, AcademyDistributionTarget, AcademyGitProfile, AcademyGitSyncState, AcademyMarketplaceState, AcademyMarketplaceTakeoverStatus, AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiRelease, AcademyOpenAiReleaseStatus, AcademyPackage, AcademyPluginPackageRevision, AcademySkillDetail, AcademySkillScope, AcademySkillStatus, AcademySkillSummary, AcademySkillVersion, AcademyUpdateInput, AcademyVersionOrigin } from '../../shared/types/academy-types'
+import type { AcademyConflict, AcademyCreateInput, AcademyPublicationPreference, AcademyPublicationSource, AcademyDestination, AcademyDistributionState, AcademyDistributionStatus, AcademyDistributionTarget, AcademyGitProfile, AcademyGitSyncState, AcademyMarketplaceState, AcademyMarketplaceTakeoverStatus, AcademyOpenAiDeletionSemantics, AcademyOpenAiPluginProfile, AcademyOpenAiRelease, AcademyOpenAiReleaseStatus, AcademyPackage, AcademyPluginPackageRevision, AcademySkillDetail, AcademySkillScope, AcademySkillStatus, AcademySkillSummary, AcademySkillVersion, AcademyUpdateInput, AcademyVersionOrigin } from '../../shared/types/academy-types'
 import { AcademyError, hashAcademyPackage, normalizeAcademyPackage, parseSkillMetadata } from './academy-package'
 import { validateAcademyIdentities, type AcademyIdentityCatalog } from '../../shared/academy-identity.cjs'
 import { buildOpenAiManifest, canonicalJson, sha256 } from './publication/openai-plugin-model'
@@ -67,7 +67,7 @@ export class AcademyStore {
       const snapshot = this.getGitSnapshot(authority.repositoryId, expectedCommit)
       if (snapshot?.authoredFiles['plugin.json']) this.adoptAuthoredMetadata(snapshot.authoredFiles)
       for (const source of this.getGitSkillSources()) {
-        this.db.prepare("INSERT INTO academy_publication_eligibility VALUES(?,'APPROVED') ON CONFLICT(skill_id) DO NOTHING").run(source.skillId)
+        this.recordEligibility(source.skillId, 'GIT_SOURCE', null, false)
         if (!source.available && !this.isDeleted(source.skillId)) this.deleteGlobalSkill(source.skillId, this.get(source.skillId).currentVersion)
       }
     }).immediate()
@@ -250,10 +250,58 @@ export class AcademyStore {
       if (skill.currentVersion !== expectedVersion) throw new AcademyError('VERSION_CONFLICT')
       if (skill.scope !== 'GLOBAL') throw new AcademyError('GLOBAL_SKILL_REQUIRED')
       if (this.publicationEligibility(skillId) === 'APPROVED') return
-      this.db.prepare("INSERT INTO academy_publication_eligibility VALUES(?,'APPROVED') ON CONFLICT(skill_id) DO UPDATE SET eligibility='APPROVED'").run(skillId)
+      this.recordEligibility(skillId, 'MANUAL', null, true)
       this.advanceCatalog()
     }).immediate()
     return this.get(skillId)
+  }
+
+  approvePublicSkills(items: Array<{ skillId: string; expectedVersion: number }>): AcademySkillDetail[] {
+    if (!items.length || new Set(items.map(item => item.skillId)).size !== items.length) throw new AcademyError('INVALID_ARGUMENT')
+    this.db.transaction(() => {
+      for (const { skillId, expectedVersion } of items) {
+        const skill = this.get(skillId)
+        if (skill.currentVersion !== expectedVersion) throw new AcademyError('VERSION_CONFLICT', 'Skill changed since it was reviewed', { skillId })
+        if (skill.scope !== 'GLOBAL') throw new AcademyError('GLOBAL_SKILL_REQUIRED')
+        if (this.isDeleted(skillId)) throw new AcademyError('SKILL_DELETED_RECONCILIATION_REQUIRED')
+        if (this.publicationEligibility(skillId) !== 'APPROVED') this.recordEligibility(skillId, 'MANUAL', null, true)
+      }
+      this.advanceCatalog()
+    }).immediate()
+    return items.map(item => this.get(item.skillId))
+  }
+
+  private recordEligibility(skillId: string, source: 'MANUAL' | 'AUTO_PREFERENCE' | 'GIT_SOURCE', preferenceRevision: number | null, replace: boolean): void {
+    this.db.prepare(`INSERT INTO academy_publication_eligibility(skill_id,eligibility,source,preference_revision,decided_at) VALUES(?,'APPROVED',?,?,?)
+      ON CONFLICT(skill_id) DO ${replace ? "UPDATE SET eligibility='APPROVED',source=excluded.source,preference_revision=excluded.preference_revision,decided_at=excluded.decided_at" : 'NOTHING'}`)
+      .run(skillId, source, preferenceRevision, new Date().toISOString())
+  }
+
+  publicationSource(skillId: string): AcademyPublicationSource | null {
+    const row = this.db.prepare("SELECT source FROM academy_publication_eligibility WHERE skill_id=? AND eligibility='APPROVED'").get(skillId) as Row | undefined
+    return row ? row.source ?? 'LEGACY' : null
+  }
+
+  getPublicationPreference(): AcademyPublicationPreference {
+    const row = this.db.prepare('SELECT * FROM academy_publication_preference WHERE id=1').get() as Row | undefined
+    return { autoIncludeGlobal: Boolean(row?.auto_include_global), revision: row?.revision ?? 0, authority: row?.authority ?? null, consentVersion: row?.consent_version ?? null, updatedAt: row?.updated_at ?? null }
+  }
+
+  setPublicationPreference(enabled: boolean, authority: 'ELECTRON_OPERATOR', consentVersion: string): AcademyPublicationPreference {
+    this.db.transaction(() => {
+      const current = this.getPublicationPreference()
+      if (current.autoIncludeGlobal === enabled) return
+      const revision = current.revision + 1, now = new Date().toISOString()
+      this.db.prepare(`INSERT INTO academy_publication_preference(id,auto_include_global,revision,authority,consent_version,updated_at) VALUES(1,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET auto_include_global=excluded.auto_include_global,revision=excluded.revision,authority=excluded.authority,consent_version=excluded.consent_version,updated_at=excluded.updated_at`).run(enabled ? 1 : 0, revision, authority, consentVersion, now)
+      this.db.prepare('INSERT INTO academy_publication_preference_log(revision,auto_include_global,authority,consent_version,decided_at) VALUES(?,?,?,?,?)').run(revision, enabled ? 1 : 0, authority, consentVersion, now)
+    }).immediate()
+    return this.getPublicationPreference()
+  }
+
+  listPublicationPreferenceLog(): Array<{ revision: number; autoIncludeGlobal: boolean; authority: string; consentVersion: string; decidedAt: string }> {
+    return (this.db.prepare('SELECT * FROM academy_publication_preference_log ORDER BY revision').all() as Row[])
+      .map(row => ({ revision: row.revision, autoIncludeGlobal: Boolean(row.auto_include_global), authority: row.authority, consentVersion: row.consent_version, decidedAt: row.decided_at }))
   }
 
   constructor(readonly databasePath: string) {
@@ -403,6 +451,14 @@ export class AcademyStore {
         skill_id TEXT PRIMARY KEY REFERENCES academy_skills(id),
         eligibility TEXT NOT NULL CHECK(eligibility IN ('PRIVATE','APPROVED'))
       );
+      CREATE TABLE IF NOT EXISTS academy_publication_preference (
+        id INTEGER PRIMARY KEY CHECK(id=1), auto_include_global INTEGER NOT NULL CHECK(auto_include_global IN (0,1)),
+        revision INTEGER NOT NULL, authority TEXT NOT NULL, consent_version TEXT NOT NULL, updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS academy_publication_preference_log (
+        revision INTEGER PRIMARY KEY, auto_include_global INTEGER NOT NULL, authority TEXT NOT NULL,
+        consent_version TEXT NOT NULL, decided_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS academy_tombstones (
         skill_id TEXT PRIMARY KEY REFERENCES academy_skills(id), path TEXT NOT NULL,
         base_hash TEXT NOT NULL, revision INTEGER NOT NULL
@@ -416,6 +472,8 @@ export class AcademyStore {
     `)
     const catalogColumns = this.db.prepare('PRAGMA table_info(academy_catalog)').all() as Row[]
     for (const column of ['authored_json', 'metadata_conflict_json']) if (!catalogColumns.some(item => item.name === column)) this.db.exec(`ALTER TABLE academy_catalog ADD COLUMN ${column} TEXT`)
+    const eligibilityColumns = this.db.prepare('PRAGMA table_info(academy_publication_eligibility)').all() as Row[]
+    for (const [column, type] of [['source', 'TEXT'], ['preference_revision', 'INTEGER'], ['decided_at', 'TEXT']]) if (!eligibilityColumns.some(item => item.name === column)) this.db.exec(`ALTER TABLE academy_publication_eligibility ADD COLUMN ${column} ${type}`)
   }
 
   private migrateDistributionTargets(): void {
@@ -485,7 +543,11 @@ export class AcademyStore {
         this.db.prepare('INSERT INTO academy_skills(id,name,description,status,scope,current_version,created_at,updated_at) VALUES (?, ?, ?, ?, ?, 1, ?, ?)').run(id, metadata.name, metadata.description, 'ACTIVE', input.scope, now, now)
         this.insertVersion(id, 1, pkg, hash, input.origin, now)
         this.replaceProjects(id, input.projectIds ?? [])
-        if (input.scope === 'GLOBAL') this.advanceCatalog()
+        if (input.scope === 'GLOBAL') {
+          this.advanceCatalog()
+          const preference = this.getPublicationPreference()
+          if (!importedId && !input.keepPrivate && preference.autoIncludeGlobal && (input.origin === 'UI' || input.origin === 'MCP')) this.recordEligibility(id, 'AUTO_PREFERENCE', preference.revision, true)
+        }
       })()
     } catch (error: any) {
       if (String(error?.message).includes('academy_skill_name')) throw new AcademyError('DUPLICATE_SKILL_NAME', `Canonical skill already exists: ${metadata.name}`)
@@ -1231,7 +1293,7 @@ export class AcademyStore {
             this.db.prepare(`INSERT INTO academy_git_skill_sources VALUES(?,?,?,?,?,1) ON CONFLICT(repository_id,path)
               DO UPDATE SET source_commit_sha=excluded.source_commit_sha, available=1`).run(snapshot.repositoryId, skill.path, detail.id, legacyBaselineVersion, introducedVersion || !source ? snapshot.sourceCommitSha : source.sourceCommitSha)
             if ((introducedVersion || this.usesLocalAuthority() && authority) && detail.current.packageHash === skill.packageHash) this.db.prepare('INSERT OR IGNORE INTO academy_git_version_sources VALUES(?,?,?,?,?)').run(detail.id, detail.currentVersion, snapshot.sourceCommitSha, snapshot.managedTreeHash, detail.current.packageHash)
-            this.db.prepare("INSERT INTO academy_publication_eligibility VALUES(?,'APPROVED') ON CONFLICT(skill_id) DO NOTHING").run(detail.id)
+            this.recordEligibility(detail.id, 'GIT_SOURCE', null, false)
           }
           for (const source of sources.filter(item => item.available && item.repositoryId === snapshot.repositoryId && !snapshot.skills.some(skill => snapshot.identities ? snapshot.identities.skills.some(entry => entry.skillId === item.skillId && entry.path === skill.path && entry.state === 'PRESENT') : skill.path === item.path))) {
             if (this.usesLocalAuthority()) {
@@ -1272,7 +1334,7 @@ export class AcademyStore {
     const gitManaged = row.scope === 'GLOBAL' && this.getGitAuthority()
     const source = gitManaged ? this.db.prepare('SELECT * FROM academy_git_skill_sources WHERE skill_id=?').get(row.id) as Row | undefined : undefined
     const sourceState: AcademySkillSummary['source'] = gitManaged ? { state: source ? source.available ? 'CONFIRMED' : 'REMOVED' : 'LEGACY_PRIVATE', sourceCommitSha: source?.source_commit_sha ?? null, path: source?.path ?? null } : undefined
-    return { id: row.id, name: row.name, description: row.description, status: row.status, stateRevision: row.state_revision, scope: row.scope, currentVersion: row.current_version, projectIds: projects.map((entry) => entry.destination_id), createdAt: row.created_at, updatedAt: row.updated_at, ...(this.usesLocalAuthority() && row.scope === 'GLOBAL' ? { catalogRevision: this.catalogRevision(), publicationEligibility: this.publicationEligibility(row.id) } : {}), ...(sourceState ? { source: sourceState } : {}) }
+    return { id: row.id, name: row.name, description: row.description, status: row.status, stateRevision: row.state_revision, scope: row.scope, currentVersion: row.current_version, projectIds: projects.map((entry) => entry.destination_id), createdAt: row.created_at, updatedAt: row.updated_at, ...(!this.usesGitFirst() && row.scope === 'GLOBAL' ? { ...(this.usesLocalAuthority() ? { catalogRevision: this.catalogRevision() } : {}), publicationEligibility: this.publicationEligibility(row.id), publicationSource: this.publicationSource(row.id) ?? undefined } : {}), ...(sourceState ? { source: sourceState } : {}) }
   }
 }
 

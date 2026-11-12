@@ -18,10 +18,11 @@ function setup() {
   const store = new AcademyStore(join(root, 'academy.db'))
   const logoPath = join(root, 'logo.png')
   writeFileSync(logoPath, Buffer.from('logo-v1'))
-  store.create({
+  const alpha = store.create({
     package: { skillMd: '---\nname: alpha\ndescription: Alpha\n---\n# Alpha\n', artifacts: {} },
     scope: 'GLOBAL', origin: 'IMPORT'
   })
+  store.approvePublicSkill(alpha.id, alpha.currentVersion)
   const profile = store.createOpenAiPluginProfile({
     name: 'academy-skills', displayName: 'Academy Skills', description: 'Academy skills',
     author: { name: 'Academy' },
@@ -70,10 +71,11 @@ describe('AcademyPluginPackageRevisionService', () => {
     writeFileSync(logoPath, Buffer.from('logo-v2'))
     expect(service.resolveCurrent().version).toBe('0.1.6')
 
-    store.create({
+    const beta = store.create({
       package: { skillMd: '---\nname: beta\ndescription: Beta\n---\n# Beta\n', artifacts: {} },
       scope: 'GLOBAL', origin: 'UI'
     })
+    store.approvePublicSkill(beta.id, beta.currentVersion)
     expect(service.resolveCurrent().version).toBe('0.2.0')
     store.close()
   })

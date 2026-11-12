@@ -1,141 +1,584 @@
 import React from 'react'
 import { gitPresentation, releasePresentation } from './academy-presentation'
-import {
-  BookOpen,
-  Box,
-  Check,
-  ChevronRight,
-  CircleAlert,
-  Cloud,
-  Code2,
-  FileCode2,
-  FolderGit2,
-  GitBranch,
-  History,
-  Package,
-  PanelRightOpen,
-  Pencil,
-  Plus,
-  RefreshCw,
-  Search,
-  Settings2,
-  ShieldCheck,
-  Trash2,
-  X
-} from 'lucide-react'
+import { Button } from '../shared/Button/Button'
+import { ContextHelp } from '../shared/ContextHelp/ContextHelp'
 import type {
   AcademyConflictSummary,
   AcademyDestination,
   AcademyDistributionHealth,
   AcademyDistributionState,
+  AcademyDistributionTarget,
+  AcademyDistributionTargetHealth,
   AcademyGitStatusProjection,
   AcademyOpenAiPublicationState,
+  AcademyOpenAiRelease,
   AcademyPackageDistributionState,
+  AcademyPluginExcludedSkill,
+  AcademyPublicationPreference,
   AcademySkillDetail,
   AcademySkillScope,
   AcademySkillSummary,
   AcademySkillVersion
 } from '../../../../shared/types/academy-types'
+import type { AcademyPersistedPublication } from '../../../../shared/types/academy-bootstrap-types'
 import type { RepositoryRecord } from '../../../../shared/types/repository-catalog-types'
 import { AcademyConflicts } from './AcademyConflicts'
 
-export type AcademyTab = 'skill' | 'files' | 'overview' | 'history'
+export type AcademySurface = 'PLUGIN' | 'SKILLS'
+export type AcademyTab = 'skill' | 'history'
 
-const formatDate = (value: string | null | undefined) => value ? new Date(value).toLocaleString() : 'Ainda não executado'
-const friendlyState = (value: string) => value.replaceAll('_', ' ').toLocaleLowerCase().replace(/^./, (character) => character.toUpperCase())
-
-const StatusBadge: React.FC<{ tone?: 'success' | 'warning' | 'danger' | 'info' | 'neutral'; children: React.ReactNode }> = ({ tone = 'neutral', children }) => (
-  <span className={`academy-badge academy-badge-${tone}`}>{children}</span>
-)
-
-const RailCard: React.FC<{ icon: React.ReactNode; title: string; count?: string; action?: React.ReactNode; children: React.ReactNode; className?: string }> = ({ icon, title, count, action, children, className = '' }) => (
-  <section className={`academy-rail-card ${className}`}>
-    <header className="academy-rail-card-header">
-      <span className="academy-rail-card-icon" aria-hidden="true">{icon}</span>
-      <h2>{title}</h2>
-      {count && <span className="academy-count">{count}</span>}
-      {action}
-    </header>
-    {children}
-  </section>
-)
-
-interface AcademyHeaderProps {
-  conflictCount: number
-  onOpenCatalog: () => void
-  onOpenOperations: () => void
+function resolveCurrentRelease(publication: AcademyOpenAiPublicationState | null): AcademyOpenAiRelease | null {
+  return publication?.selectedRelease ?? publication?.latestPrepared ?? null
 }
 
-export const AcademyHeader: React.FC<AcademyHeaderProps> = ({ conflictCount, onOpenCatalog, onOpenOperations }) => (
+function isPublicationStale(publication: AcademyOpenAiPublicationState | null, release: AcademyOpenAiRelease | null): boolean {
+  return Boolean(publication?.drifted || release?.status === 'STALE')
+}
+
+function describeTarget(target: AcademyDistributionTarget): string {
+  if (target === 'FILESYSTEM_NATIVE') return 'Filesystem local'
+  if (target === 'CLAUDE_CODE') return 'Claude Code'
+  return 'Antigravity'
+}
+
+function describePackageDelivery(state: AcademyDistributionState): { label: string; tone: 'success' | 'warning' | 'danger' } {
+  if (state.status === 'CURRENT') return { label: `Atualizado (v${state.canonicalVersion})`, tone: 'success' }
+  if (state.status === 'ERROR') return { label: state.errorMessage ?? 'Erro de distribuição', tone: 'danger' }
+  return { label: `Reconciliação pendente (${state.status.toLowerCase()})`, tone: 'warning' }
+}
+
+function describeReconciliation(target: AcademyDistributionTargetHealth): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
+  const total = target.current + target.pending + target.drifted + target.missing + target.error
+  if (total === 0) return { label: 'Sem destinos aplicáveis', tone: 'neutral' }
+  if (target.error > 0) return { label: `${target.error} com erro · ${target.current}/${total}`, tone: 'danger' }
+  if (target.convergence === 'CONVERGED') return { label: `${target.current}/${total} atualizado`, tone: 'success' }
+  return { label: `${target.current}/${total} convergente`, tone: 'warning' }
+}
+
+export function skillPluginStatus(
+  skill: AcademySkillSummary,
+  openAiPublication: AcademyOpenAiPublicationState | null
+): { label: string; tone: 'included' | 'pending' | 'private' | 'disabled' | 'neutral' } {
+  if (skill.scope !== 'GLOBAL') return { label: 'Não aplicável', tone: 'neutral' }
+  if (skill.status !== 'ACTIVE') return { label: 'Fora do plugin · Desativada', tone: 'disabled' }
+  if (skill.publicationEligibility === 'PRIVATE') return { label: 'Privada · Fora do plugin', tone: 'private' }
+  if (skill.publicationEligibility === 'APPROVED') {
+    const release = resolveCurrentRelease(openAiPublication)
+    const stale = isPublicationStale(openAiPublication, release)
+    const inLastZip = Boolean(
+      release &&
+      !stale &&
+      openAiPublication?.artifactAvailable &&
+      release.snapshot.some(entry => entry.skillId === skill.id && entry.academyVersion === skill.currentVersion)
+    )
+    if (release && !stale && release.snapshot.some(entry => entry.skillId === skill.id && entry.academyVersion === skill.currentVersion)) {
+      return { label: inLastZip ? 'Incluída no plugin' : 'Incluída (ZIP pendente)', tone: 'included' }
+    }
+    return { label: 'Aguardando geração do ZIP', tone: 'pending' }
+  }
+  return skill.source?.state === 'CONFIRMED'
+    ? { label: 'Incluída via Git', tone: 'included' }
+    : { label: 'Aguardando cutover/aprovação', tone: 'pending' }
+}
+
+interface AcademyHeaderProps {
+  surface: AcademySurface
+  onSurfaceChange: (next: AcademySurface) => void
+  gitHasAlert: boolean
+  onOpenSettings: () => void
+  onOpenCatalog: () => void
+}
+
+export const AcademyHeader: React.FC<AcademyHeaderProps> = ({
+  surface,
+  onSurfaceChange,
+  gitHasAlert,
+  onOpenSettings,
+  onOpenCatalog
+}) => (
   <header className="academy-header">
-    <div className="academy-title-block">
-      <span className="academy-title-icon" aria-hidden="true"><BookOpen size={28} /></span>
+    <div className="academy-header-brand">
       <div>
-        <h1>Academy</h1>
-        <p>Gerencie, desenvolva e distribua Skills para o ecossistema Code Awareness.</p>
+        <h2>Academy</h2>
+        <p className="academy-header-subtitle">Empacote e mantenha suas Skills para o ChatGPT</p>
       </div>
+      <nav className="academy-surface-nav" aria-label="Navegação da Academy">
+        <button
+          type="button"
+          className={`academy-surface-tab${surface === 'PLUGIN' ? ' active' : ''}`}
+          aria-pressed={surface === 'PLUGIN'}
+          onClick={() => onSurfaceChange('PLUGIN')}
+        >
+          Plugin ChatGPT
+        </button>
+        <button
+          type="button"
+          className={`academy-surface-tab${surface === 'SKILLS' ? ' active' : ''}`}
+          aria-pressed={surface === 'SKILLS'}
+          onClick={() => onSurfaceChange('SKILLS')}
+        >
+          Skills
+        </button>
+      </nav>
     </div>
-    <div className="academy-header-controls">
-      <button className="academy-mobile-control academy-secondary-button" onClick={onOpenCatalog}>Skills</button>
-      <button className="academy-mobile-control academy-icon-button" aria-label="Abrir operações" onClick={onOpenOperations}>
-        <PanelRightOpen size={18} />
-        {conflictCount > 0 && <span className="academy-notification-dot" />}
+    <div className="academy-header-actions">
+      {surface === 'SKILLS' && (
+        <button type="button" className="academy-compact-trigger" onClick={onOpenCatalog}>
+          Catálogo
+        </button>
+      )}
+      <button
+        type="button"
+        className={`academy-settings-trigger${gitHasAlert ? ' has-alert' : ''}`}
+        aria-label="Configurações"
+        onClick={onOpenSettings}
+      >
+        <span>Configurações</span>
+        {gitHasAlert && <span className="academy-settings-dot" aria-hidden="true" />}
       </button>
     </div>
   </header>
 )
 
+interface PluginOverviewSurfaceProps {
+  hydration: 'LOADING' | 'READY' | 'ERROR'
+  openAiPublication: AcademyOpenAiPublicationState | null
+  preference: AcademyPublicationPreference | null
+  skillCount: number
+  preparing: boolean
+  pluginError: string | null
+  onPrepareRelease: () => void
+  onRevealRelease: (release: AcademyOpenAiRelease) => void
+  onConfirmUpload: (release: AcademyOpenAiRelease) => void
+  onOpenReview: () => void
+  onOpenSettings: () => void
+  onOpenSkills: () => void
+}
+
+export const PluginOverviewSurface: React.FC<PluginOverviewSurfaceProps> = ({
+  hydration,
+  openAiPublication,
+  preference,
+  skillCount,
+  preparing,
+  pluginError,
+  onPrepareRelease,
+  onRevealRelease,
+  onConfirmUpload,
+  onOpenReview,
+  onOpenSettings,
+  onOpenSkills
+}) => {
+  const release = resolveCurrentRelease(openAiPublication)
+  const stale = isPublicationStale(openAiPublication, release)
+  const coverage = openAiPublication?.coverage ?? null
+  const excluded = coverage?.excluded ?? []
+  const privateCount = excluded.filter(item => item.reason === 'PRIVATE').length
+  const disabledCount = excluded.filter(item => item.reason === 'DISABLED').length
+  const removedCount = excluded.filter(item => item.reason === 'REMOVED').length
+  const currentZipReady = Boolean(release && !stale && openAiPublication?.artifactAvailable)
+  const releaseSignal = releasePresentation(release, Boolean(openAiPublication?.drifted))
+
+  const exclusionParts: string[] = []
+  if (privateCount > 0) exclusionParts.push(`${privateCount} privada${privateCount > 1 ? 's' : ''}`)
+  if (disabledCount > 0) exclusionParts.push(`${disabledCount} desativada${disabledCount > 1 ? 's' : ''}`)
+  if (removedCount > 0) exclusionParts.push(`${removedCount} removida${removedCount > 1 ? 's' : ''}`)
+
+  const eligibleCount = coverage?.eligible ?? skillCount
+  const catalogCount = coverage?.catalog ?? skillCount
+  const notApplicableCount = coverage?.notApplicable ?? 0
+  const awaitingZipCount = coverage?.awaitingZip ?? 0
+
+  const headline = preparing
+    ? 'Gerando ZIP do plugin ChatGPT…'
+    : currentZipReady
+      ? 'Plugin ChatGPT pronto para abrir'
+      : release
+        ? 'Atualização pronta para novo ZIP'
+        : 'Empacote suas Skills em um clique'
+
+  const nextStepText = currentZipReady
+    ? 'Envie o ZIP manualmente em ChatGPT → Configurações → Plugins quando quiser publicar.'
+    : awaitingZipCount > 0
+      ? 'Gere o ZIP atualizado para incluir todas as Skills aprovadas no arquivo.'
+      : 'Gere o pacote local a qualquer momento; edição de Skills continua na aba secundária.'
+
+  return (
+    <section className="academy-plugin-shell" aria-label="Plugin ChatGPT">
+      <div className="academy-plugin-stage">
+        <div className="academy-plugin-action">
+          <div className="academy-plugin-eyebrow-row">
+            <span className="academy-plugin-eyebrow">Plugin ChatGPT</span>
+            <ContextHelp label="Como funciona o Plugin ChatGPT" hint="Inclusão automática e segurança">
+              Apenas Skills com escopo GLOBAL ativas e autorizadas entram no ZIP local do plugin. Skills de projeto, privadas ou desativadas ficam fora do pacote.
+            </ContextHelp>
+          </div>
+          <h3 className="academy-plugin-title">{headline}</h3>
+          <p className="academy-plugin-coverage-summary" data-testid="academy-coverage-summary">
+            <strong>{hydration === 'LOADING' ? 'Carregando catálogo…' : `${eligibleCount} ${eligibleCount === 1 ? 'Skill global' : 'Skills globais'} no plugin`}</strong>
+            {hydration !== 'LOADING' && (
+              <span>
+                {' '}· {catalogCount} no catálogo{notApplicableCount > 0 ? ` · ${notApplicableCount} de projeto (não aplicável)` : ''}
+              </span>
+            )}
+          </p>
+
+          {excluded.length > 0 && (
+            <div className="academy-excluded-notice" data-ui-state="warning">
+              <div className="academy-excluded-copy">
+                <strong>
+                  {excluded.length} {excluded.length === 1 ? 'Skill fora do plugin' : 'Skills fora do plugin'}
+                </strong>
+                <span> ({exclusionParts.join(' · ')})</span>
+              </div>
+              <Button variant="outline" intent="neutral" size="compact" onClick={onOpenReview}>
+                Revisar
+              </Button>
+            </div>
+          )}
+
+          <p className="academy-policy-caption">
+            {preference?.autoIncludeGlobal
+              ? 'Autorização única ativa: novas Skills globais (UI e MCP) entram automaticamente no plugin.'
+              : 'Política segura: novas Skills globais nascem privadas até aprovação explícita.'}{' '}
+            <button type="button" className="academy-inline-link" onClick={onOpenReview}>
+              Gerenciar autorização
+            </button>
+          </p>
+
+          <div className="academy-plugin-cta-row">
+            {preparing ? (
+              <Button variant="solid" intent="primary" size="comfortable" disabled>
+                Gerando plugin…
+              </Button>
+            ) : currentZipReady && release ? (
+              <>
+                <Button variant="solid" intent="primary" size="comfortable" onClick={() => onRevealRelease(release)}>
+                  Abrir ZIP
+                </Button>
+                <Button variant="ghost" intent="neutral" size="compact" onClick={onPrepareRelease}>
+                  Regerar ZIP
+                </Button>
+              </>
+            ) : (
+              <Button variant="solid" intent="primary" size="comfortable" onClick={onPrepareRelease}>
+                {release ? 'Gerar ZIP atualizado' : 'Gerar plugin'}
+              </Button>
+            )}
+          </div>
+
+          {(pluginError || openAiPublication?.sourceError || openAiPublication?.operation?.error || release?.blockedReason) && (
+            <div className="academy-plugin-diagnostic" data-ui-state="error" role="status">
+              {pluginError || openAiPublication?.sourceError || openAiPublication?.operation?.error || release?.blockedReason}
+            </div>
+          )}
+        </div>
+
+        <aside className="academy-plugin-result" aria-label="Resultado do pacote local">
+          <div className="academy-plugin-result-header">
+            <span>Pacote local</span>
+            {release && <span className={`academy-signal ${releaseSignal.tone}`}>{releaseSignal.label}</span>}
+          </div>
+          {release ? (
+            <div className="academy-plugin-result-body">
+              <div className="academy-plugin-version-row">
+                <strong className="academy-plugin-version">v{release.pluginVersion}</strong>
+                <span>{release.snapshot.length} {release.snapshot.length === 1 ? 'Skill empacotada' : 'Skills empacotadas'}</span>
+              </div>
+              <p className="academy-plugin-freshness">
+                {awaitingZipCount > 0
+                  ? `${awaitingZipCount} ${awaitingZipCount === 1 ? 'alteração aprovada aguarda' : 'alterações aprovadas aguardam'} novo ZIP.`
+                  : openAiPublication?.artifactAvailable
+                    ? 'Arquivo ZIP gerado no computador e pronto para envio manual.'
+                    : 'Arquivo ZIP não encontrado no disco. Clique para gerar novamente.'}
+              </p>
+              <div className="academy-plugin-result-actions">
+                {openAiPublication?.artifactAvailable && (
+                  <Button variant="outline" intent="neutral" size="compact" onClick={() => onRevealRelease(release)}>
+                    Mostrar ZIP
+                  </Button>
+                )}
+                {release.status === 'READY_TO_UPLOAD' && release.artifactHash && (
+                  <Button variant="subtle" intent="neutral" size="compact" onClick={() => onConfirmUpload(release)}>
+                    Confirmar envio ao ChatGPT
+                  </Button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="academy-plugin-empty">
+              <strong>Nenhum ZIP gerado ainda</strong>
+              <p>Use um clique para empacotar as Skills globais autorizadas em um arquivo ZIP local.</p>
+            </div>
+          )}
+        </aside>
+      </div>
+
+      <footer className="academy-plugin-footer">
+        <span>{nextStepText}</span>
+        <div className="academy-plugin-footer-actions">
+          <button type="button" className="academy-inline-link" onClick={onOpenSkills}>
+            Editar ou criar Skills
+          </button>
+          <button type="button" className="academy-inline-link" onClick={onOpenSettings}>
+            Opções avançadas
+          </button>
+        </div>
+      </footer>
+    </section>
+  )
+}
+
+interface PluginReviewModalProps {
+  excluded: AcademyPluginExcludedSkill[]
+  notApplicableCount: number
+  selectedIds: string[]
+  preference: AcademyPublicationPreference | null
+  busy: boolean
+  onToggleSelected: (skillId: string) => void
+  onApproveSingle: (skillId: string, expectedVersion: number) => void
+  onApproveBatch: () => void
+  onEnableSkill: (skillId: string) => void
+  onOpenSkill: (skillId: string) => void
+  onRequestToggleAutoInclude: (nextEnabled: boolean) => void
+  onClose: () => void
+}
+
+export const PluginReviewModal: React.FC<PluginReviewModalProps> = ({
+  excluded,
+  notApplicableCount,
+  selectedIds,
+  preference,
+  busy,
+  onToggleSelected,
+  onApproveSingle,
+  onApproveBatch,
+  onEnableSkill,
+  onOpenSkill,
+  onRequestToggleAutoInclude,
+  onClose
+}) => {
+  const privateItems = excluded.filter(item => item.reason === 'PRIVATE')
+  const reasonLabel = (reason: AcademyPluginExcludedSkill['reason']) =>
+    reason === 'PRIVATE' ? 'Privada · Fora do plugin' : reason === 'DISABLED' ? 'Desativada' : 'Removida localmente'
+
+  return (
+    <div className="academy-modal-backdrop" role="dialog" aria-modal="true" aria-label="Revisar Skills fora do plugin">
+      <div className="academy-modal academy-modal-wide">
+        <div className="academy-drawer-header">
+          <div>
+            <h3>Skills fora do plugin ChatGPT</h3>
+            <p className="academy-modal-subcopy">
+              {excluded.length > 0
+                ? 'Veja o motivo de cada exclusão e inclua somente o que desejar publicar.'
+                : 'Todas as Skills globais ativas estão autorizadas para o plugin.'}
+              {notApplicableCount > 0 ? ` (${notApplicableCount} com escopo PROJECT nunca entram no plugin.)` : ''}
+            </p>
+          </div>
+          <Button variant="ghost" intent="neutral" size="compact" onClick={onClose}>
+            Fechar
+          </Button>
+        </div>
+
+        <div className="academy-preference-card">
+          <div className="academy-preference-copy">
+            <strong>Incluir automaticamente novas Skills globais no plugin ChatGPT</strong>
+            <p>
+              {preference?.autoIncludeGlobal
+                ? `Autorização única ativa (revisão ${preference.revision}). Novas Skills globais criadas na UI ou via MCP entram automaticamente, exceto quando marcadas como privadas.`
+                : 'Desativada por segurança. Novas Skills globais criadas na UI ou via MCP permanecem privadas até aprovação explícita.'}
+            </p>
+          </div>
+          {preference?.autoIncludeGlobal ? (
+            <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={() => onRequestToggleAutoInclude(false)}>
+              Revogar autorização automática
+            </Button>
+          ) : (
+            <Button variant="solid" intent="primary" size="compact" disabled={busy} onClick={() => onRequestToggleAutoInclude(true)}>
+              Autorizar inclusão automática
+            </Button>
+          )}
+        </div>
+
+        <div className="academy-review-list">
+          {excluded.length === 0 ? (
+            <p className="academy-empty-note">Nenhuma Skill global excluída no momento.</p>
+          ) : (
+            excluded.map(item => (
+              <div key={item.skillId} className="academy-review-row">
+                <div className="academy-review-info">
+                  {item.reason === 'PRIVATE' && (
+                    <input
+                      type="checkbox"
+                      aria-label={`Selecionar ${item.name} para inclusão`}
+                      checked={selectedIds.includes(item.skillId)}
+                      onChange={() => onToggleSelected(item.skillId)}
+                    />
+                  )}
+                  <div>
+                    <strong>{item.name}</strong>
+                    <div className="academy-review-reason">
+                      <span className="academy-badge scope">{reasonLabel(item.reason)}</span>
+                      <span>v{item.version}</span>
+                    </div>
+                  </div>
+                </div>
+                <div className="academy-review-actions">
+                  {item.reason === 'PRIVATE' && (
+                    <Button
+                      variant="solid"
+                      intent="primary"
+                      size="compact"
+                      disabled={busy}
+                      onClick={() => onApproveSingle(item.skillId, item.version)}
+                    >
+                      Incluir no plugin
+                    </Button>
+                  )}
+                  {item.reason === 'DISABLED' && (
+                    <Button
+                      variant="outline"
+                      intent="neutral"
+                      size="compact"
+                      disabled={busy}
+                      onClick={() => onEnableSkill(item.skillId)}
+                    >
+                      Reativar Skill
+                    </Button>
+                  )}
+                  <Button variant="ghost" intent="neutral" size="compact" onClick={() => onOpenSkill(item.skillId)}>
+                    Ver em Skills
+                  </Button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {privateItems.length > 0 && (
+          <div className="academy-modal-actions">
+            <Button
+              variant="solid"
+              intent="primary"
+              size="comfortable"
+              disabled={busy || selectedIds.length === 0}
+              onClick={onApproveBatch}
+            >
+              Incluir selecionadas no plugin ({selectedIds.length})
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 interface SkillCatalogProps {
   query: string
   status: 'ALL' | 'ACTIVE' | 'DISABLED'
+  scopeFilter: 'ALL' | AcademySkillScope
   onQueryChange: (value: string) => void
   onStatusChange: (value: 'ALL' | 'ACTIVE' | 'DISABLED') => void
+  onScopeFilterChange: (value: 'ALL' | AcademySkillScope) => void
   onCreate: () => void
   skills: AcademySkillSummary[]
+  openAiPublication: AcademyOpenAiPublicationState | null
   selectedId: string | null
   open: boolean
   onClose: () => void
   onSelect: (id: string) => void
 }
 
-export const SkillCatalog: React.FC<SkillCatalogProps> = ({ query, status, onQueryChange, onStatusChange, onCreate, skills, selectedId, open, onClose, onSelect }) => (
-  <aside className={`academy-catalog ${open ? 'is-open' : ''}`} aria-label="Catálogo de Skills">
-    <div className="academy-pane-header">
-      <div><h2>Skills</h2><span className="academy-count" aria-label={`${skills.length} Skills`}>{skills.length}</span></div>
-      <button className="academy-primary-button" onClick={onCreate}><Plus size={17} />Nova Skill</button>
-      <button className="academy-mobile-control academy-icon-button" aria-label="Fechar catálogo" onClick={onClose}><X size={18} /></button>
-    </div>
-    <div className="academy-catalog-search">
-      <label className="academy-search"><Search size={17} aria-hidden="true" /><input aria-label="Buscar Skills" placeholder="Buscar skills..." value={query} onChange={event => onQueryChange(event.target.value)} /></label>
-      <select aria-label="Filtrar por status" value={status} onChange={event => onStatusChange(event.target.value as SkillCatalogProps['status'])}><option value="ALL">Todas</option><option value="ACTIVE">Ativas</option><option value="DISABLED">Desativadas</option></select>
-    </div>
-    <ul className="academy-skill-list">
-      {skills.map((skill) => (
-        <li key={skill.id} className="academy-skill-row">
-          <button className={`academy-skill-item ${selectedId === skill.id ? 'selected' : ''}`} aria-current={selectedId === skill.id ? 'true' : undefined} onClick={() => onSelect(skill.id)}>
-            <span className="academy-skill-file" aria-hidden="true"><FileCode2 size={20} /></span>
-            <span className="academy-skill-copy">
-              <span className="academy-skill-name-row">
-                <strong title={skill.name}>{skill.name}</strong>
-                <span className={`academy-catalog-state ${skill.status === 'ACTIVE' ? '' : 'is-disabled'}`} title={skill.status === 'ACTIVE' ? 'Ativa' : 'Desativada'}><span aria-hidden="true">●</span><span className="sr-only">{skill.status === 'ACTIVE' ? 'Ativa' : 'Desativada'}</span></span>
-              </span>
-              <small>{skill.description}</small>
-            </span>
+export const SkillCatalog: React.FC<SkillCatalogProps> = ({
+  query,
+  status,
+  scopeFilter,
+  onQueryChange,
+  onStatusChange,
+  onScopeFilterChange,
+  onCreate,
+  skills,
+  openAiPublication,
+  selectedId,
+  open,
+  onClose,
+  onSelect
+}) => (
+  <aside className={`academy-catalog${open ? ' open' : ''}`} aria-label="Catálogo de Skills">
+    <div className="academy-catalog-controls">
+      <div className="academy-catalog-top">
+        <Button variant="solid" intent="primary" size="compact" className="academy-grow-button" onClick={onCreate}>
+          Nova Skill
+        </Button>
+        {open && (
+          <button type="button" className="academy-drawer-close" onClick={onClose}>
+            Fechar
           </button>
-        </li>
-      ))}
-    </ul>
-    {skills.length === 0 && <div className="academy-empty-compact">Nenhuma Skill corresponde ao filtro.</div>}
+        )}
+      </div>
+      <input
+        type="search"
+        aria-label="Buscar Skills"
+        value={query}
+        onChange={event => onQueryChange(event.target.value)}
+        placeholder="Buscar por nome ou descrição"
+      />
+      <div className="academy-catalog-filters">
+        <select
+          aria-label="Filtrar por status"
+          value={status}
+          onChange={event => onStatusChange(event.target.value as SkillCatalogProps['status'])}
+        >
+          <option value="ALL">Todos status</option>
+          <option value="ACTIVE">Ativas</option>
+          <option value="DISABLED">Desativadas</option>
+        </select>
+        <select
+          aria-label="Filtrar por escopo"
+          value={scopeFilter}
+          onChange={event => onScopeFilterChange(event.target.value as SkillCatalogProps['scopeFilter'])}
+        >
+          <option value="ALL">Todos escopos</option>
+          <option value="GLOBAL">GLOBAL</option>
+          <option value="PROJECT">PROJECT</option>
+        </select>
+      </div>
+    </div>
+    <div className="academy-skill-list">
+      {skills.length === 0 ? (
+        <p className="academy-empty-list">Nenhuma Skill corresponde aos filtros.</p>
+      ) : (
+        skills.map(skill => {
+          const pluginState = skillPluginStatus(skill, openAiPublication)
+          return (
+            <button
+              type="button"
+              key={skill.id}
+              className={`academy-skill-item${selectedId === skill.id ? ' selected' : ''}`}
+              onClick={() => onSelect(skill.id)}
+            >
+              <div className="academy-skill-row">
+                <strong>{skill.name}</strong>
+                <span>v{skill.currentVersion}</span>
+              </div>
+              <div className="academy-skill-badges">
+                <span className="academy-badge scope">{skill.scope}</span>
+                <span className={`academy-badge plugin-${pluginState.tone}`}>{pluginState.label}</span>
+              </div>
+            </button>
+          )
+        })
+      )}
+    </div>
   </aside>
 )
 
 interface SkillWorkspaceProps {
-  artifacts: Record<string, string>
-  onOpenArtifact: (path: string) => void
-  onAddArtifact: () => void
-  dirty: boolean
-  saving: boolean
   selected: AcademySkillDetail | null
+  openAiPublication: AcademyOpenAiPublicationState | null
+  autoIncludeGlobal: boolean
+  keepPrivate: boolean
+  onKeepPrivateChange: (value: boolean) => void
   isEditing: boolean
   activeTab: AcademyTab
   skillMd: string
@@ -147,233 +590,576 @@ interface SkillWorkspaceProps {
   onTabChange: (tab: AcademyTab) => void
   onSkillMdChange: (value: string) => void
   onScopeChange: (scope: AcademySkillScope) => void
-  onProjectIdsChange: (ids: string[]) => void
+  onProjectIdsChange: (projectIds: string[]) => void
   onEdit: () => void
   onSave: () => void
   onCancel: () => void
   activationPending: boolean
   onSetEnabled: () => void
-  onRemoveFromGit?: () => void
-  onApprovePublic?: () => void
+  onRemoveFromGit: () => void
+  onApprovePublic: () => void
+  onRequestDeleteGlobal: () => void
+  artifacts: Record<string, string>
+  onOpenArtifact: (path: string) => void
+  onAddArtifact: () => void
+  dirty: boolean
+  saving: boolean
 }
 
-export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({ selected, isEditing, activeTab, skillMd, scope, projectIds, destinations, history, distribution, onTabChange, onSkillMdChange, onScopeChange, onProjectIdsChange, onEdit, onSave, onCancel, activationPending, onSetEnabled, onRemoveFromGit, onApprovePublic, artifacts, onOpenArtifact, onAddArtifact, dirty, saving }) => {
-  if (!selected && !isEditing) {
-    return <main className="academy-skill-workspace academy-workspace-empty">
-      <span className="academy-empty-icon"><FileCode2 size={30} /></span>
-      <h2>Selecione uma Skill</h2>
-      <p>Escolha um item do catálogo ou crie uma nova Skill para começar.</p>
+export const SkillWorkspace: React.FC<SkillWorkspaceProps> = ({
+  selected,
+  openAiPublication,
+  autoIncludeGlobal,
+  keepPrivate,
+  onKeepPrivateChange,
+  isEditing,
+  activeTab,
+  skillMd,
+  scope,
+  projectIds,
+  destinations,
+  history,
+  distribution,
+  onTabChange,
+  onSkillMdChange,
+  onScopeChange,
+  onProjectIdsChange,
+  onEdit,
+  onSave,
+  onCancel,
+  activationPending,
+  onSetEnabled,
+  onRemoveFromGit,
+  onApprovePublic,
+  onRequestDeleteGlobal,
+  artifacts,
+  onOpenArtifact,
+  onAddArtifact,
+  dirty,
+  saving
+}) => {
+  const pluginState = selected ? skillPluginStatus(selected, openAiPublication) : null
+
+  return (
+    <main className="academy-workspace" aria-label="Editor de Skill">
+      {!selected && !isEditing ? (
+        <div className="academy-workspace-empty">
+          <h3>Selecione uma Skill para visualizar ou editar</h3>
+          <p>Ou crie uma nova Skill com o botão "Nova Skill" no catálogo.</p>
+        </div>
+      ) : (
+        <>
+          <div className="academy-workspace-header">
+            <div className="academy-workspace-title-block">
+              <h3>{selected ? selected.name : 'Nova Skill'}</h3>
+              <span className="academy-workspace-meta">
+                {selected ? `v${selected.currentVersion} · ` : ''}
+                {isEditing ? scope : selected?.scope}
+                {selected ? ` · ${selected.status === 'ACTIVE' ? 'Ativa' : 'Desativada'}` : ''}
+                {dirty ? ' · rascunho não salvo' : ''}
+              </span>
+            </div>
+            <div className="academy-actions">
+              {selected && !isEditing && (
+                <>
+                  <Button variant="solid" intent="primary" size="compact" onClick={onEdit}>
+                    Editar
+                  </Button>
+                  <Button
+                    variant="outline"
+                    intent="neutral"
+                    size="compact"
+                    disabled={activationPending}
+                    onClick={onSetEnabled}
+                  >
+                    {activationPending ? 'Atualizando…' : selected.status === 'ACTIVE' ? 'Desativar' : 'Ativar'}
+                  </Button>
+                  {selected.scope === 'GLOBAL' && selected.source?.state === 'CONFIRMED' && (
+                    <Button variant="outline" intent="danger" size="compact" onClick={onRemoveFromGit}>
+                      Remover do Git
+                    </Button>
+                  )}
+                  {selected.catalogRevision !== undefined && selected.scope === 'GLOBAL' && (
+                    <Button variant="outline" intent="danger" size="compact" onClick={onRequestDeleteGlobal}>
+                      Excluir global
+                    </Button>
+                  )}
+                </>
+              )}
+              {isEditing && (
+                <>
+                  <Button variant="solid" intent="primary" size="compact" disabled={saving || (Boolean(selected) && !dirty)} onClick={onSave}>
+                    {saving ? 'Salvando…' : 'Salvar'}
+                  </Button>
+                  <Button variant="outline" intent="neutral" size="compact" disabled={saving} onClick={onCancel}>
+                    Cancelar
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {selected && !isEditing && pluginState && (
+            <div className="academy-skill-plugin-bar" data-plugin-tone={pluginState.tone}>
+              <div className="academy-skill-plugin-copy">
+                <strong>Plugin ChatGPT: {pluginState.label}</strong>
+                {selected.scope === 'PROJECT' && <span> · Skills de projeto não são publicadas no plugin.</span>}
+                {selected.scope === 'GLOBAL' && selected.publicationEligibility === 'PRIVATE' && (
+                  <span> · Requer autorização explícita para entrar no ZIP e no Git.</span>
+                )}
+              </div>
+              {selected.scope === 'GLOBAL' && selected.publicationEligibility === 'PRIVATE' && (
+                <Button variant="solid" intent="primary" size="compact" onClick={onApprovePublic}>
+                  Incluir no plugin
+                </Button>
+              )}
+            </div>
+          )}
+
+          <div className="academy-tabs">
+            <button type="button" className={activeTab === 'skill' ? 'active' : ''} onClick={() => onTabChange('skill')}>
+              SKILL.md
+            </button>
+            <button type="button" className={activeTab === 'history' ? 'active' : ''} onClick={() => onTabChange('history')}>
+              Histórico ({history.length})
+            </button>
+          </div>
+
+          {activeTab === 'skill' && (
+            <div className="academy-skill-tab">
+              {isEditing && (
+                <div className="academy-scope-box">
+                  <div className="academy-scope-controls">
+                    <label htmlFor="academy-scope-select">Escopo</label>
+                    <select
+                      id="academy-scope-select"
+                      value={scope}
+                      onChange={event => onScopeChange(event.target.value as AcademySkillScope)}
+                    >
+                      <option value="GLOBAL">GLOBAL (todos os destinos)</option>
+                      <option value="PROJECT">PROJECT (projetos selecionados)</option>
+                    </select>
+                  </div>
+                  {!selected && scope === 'GLOBAL' && (
+                    <label className="academy-keep-private-toggle">
+                      <input
+                        type="checkbox"
+                        checked={keepPrivate}
+                        onChange={event => onKeepPrivateChange(event.target.checked)}
+                      />
+                      <span>
+                        {autoIncludeGlobal
+                          ? 'Manter privada (não incluir automaticamente no plugin ChatGPT)'
+                          : 'Nasce privada por padrão (não incluir automaticamente no plugin)'}
+                      </span>
+                    </label>
+                  )}
+                  {scope === 'PROJECT' && (
+                    <div className="academy-project-checks">
+                      {destinations.map(destination => (
+                        <label key={destination.id} className="academy-check-row">
+                          <input
+                            type="checkbox"
+                            checked={projectIds.includes(destination.id)}
+                            onChange={event =>
+                              onProjectIdsChange(
+                                event.target.checked
+                                  ? [...projectIds, destination.id]
+                                  : projectIds.filter(item => item !== destination.id)
+                              )
+                            }
+                          />
+                          <span>{destination.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {isEditing ? (
+                <textarea
+                  className="academy-editor-textarea"
+                  aria-label="Conteúdo do SKILL.md"
+                  value={skillMd}
+                  onChange={event => onSkillMdChange(event.target.value)}
+                  rows={16}
+                />
+              ) : (
+                <pre className="academy-readonly-skill">{selected?.current.package.skillMd ?? ''}</pre>
+              )}
+
+              <section className="academy-artifacts" aria-label="Artefatos da Skill">
+                <div className="academy-subhead">
+                  <h4>Artefatos</h4>
+                  <Button variant="outline" intent="neutral" size="compact" onClick={onAddArtifact}>
+                    Adicionar artefato
+                  </Button>
+                </div>
+                {Object.keys(artifacts).length === 0 ? (
+                  <p className="academy-empty-note">Nenhum artefato complementar.</p>
+                ) : (
+                  <div className="academy-artifact-list">
+                    {Object.keys(artifacts).sort().map(path => (
+                      <button
+                        type="button"
+                        key={path}
+                        className="academy-artifact-chip"
+                        onClick={() => onOpenArtifact(path)}
+                      >
+                        {path}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </section>
+
+              {selected && !isEditing && distribution.length > 0 && (
+                <section className="academy-skill-delivery-list">
+                  <h4>Destinos locais</h4>
+                  {distribution.map(state => {
+                    const text = describePackageDelivery(state)
+                    return (
+                      <div key={state.destinationId + state.target} className="academy-inline-delivery-row">
+                        <span>{state.exposureName} ({describeTarget(state.target)})</span>
+                        <span className={`academy-signal ${text.tone}`}>{text.label}</span>
+                      </div>
+                    )
+                  })}
+                </section>
+              )}
+            </div>
+          )}
+
+          {activeTab === 'history' && (
+            <div className="academy-history-list">
+              {history.map(version => (
+                <div key={version.version} className="academy-history-item">
+                  <div className="academy-history-header">
+                    <strong>v{version.version}</strong>
+                    <span>{version.origin} · {new Date(version.createdAt).toLocaleString()}</span>
+                  </div>
+                  <pre>{version.package.skillMd}</pre>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
     </main>
-  }
-
-  const title = selected?.name ?? 'Nova Skill'
-  const description = selected?.description ?? 'Defina o contrato procedural desta nova Skill.'
-
-  return <main className="academy-skill-workspace">
-    <header className="academy-skill-header">
-      <span className="academy-skill-hero-icon" aria-hidden="true"><FileCode2 size={27} /></span>
-      <div className="academy-skill-heading">
-        <div className="academy-skill-title-line">
-          <h2>{title}</h2>
-          <StatusBadge tone={!selected || selected.status === 'DISABLED' ? 'neutral' : 'success'}>{selected ? selected.status === 'ACTIVE' ? 'Ativa' : 'Desativada' : 'Rascunho'}</StatusBadge>
-        </div>
-        <p>{selected ? `v${selected.currentVersion} · ${scope === 'GLOBAL' ? 'Global' : 'Projetos'}` : 'Nova Skill · ainda não persistida'}</p>
-      </div>
-      <div className="academy-skill-actions">
-        {!isEditing && <button className="academy-secondary-button" onClick={onEdit}><Pencil size={16} />Editar</button>}
-      </div>
-    </header>
-
-    <nav className="academy-tabs" aria-label="Conteúdo da Skill">
-      <button aria-current={activeTab === 'skill' ? 'page' : undefined} className={activeTab === 'skill' ? 'active' : ''} onClick={() => onTabChange('skill')}><FileCode2 size={16} />Definição</button>
-      <button aria-current={activeTab === 'files' ? 'page' : undefined} className={activeTab === 'files' ? 'active' : ''} onClick={() => onTabChange('files')}><Code2 size={16} />Arquivos</button>
-      <button aria-current={['overview', 'history'].includes(activeTab) ? 'page' : undefined} className={['overview', 'history'].includes(activeTab) ? 'active' : ''} onClick={() => onTabChange('overview')}><ShieldCheck size={16} />Contexto</button>
-    </nav>
-
-    <fieldset disabled={saving} className="academy-skill-content">
-      {activeTab === 'skill' && <>
-      {!isEditing && <div className="academy-definition-summary"><span>Descrição</span><p>{description}</p></div>}
-      <section className="academy-code-surface" aria-label="Conteúdo de SKILL.md">
-        <header><FileCode2 size={15} /><span>SKILL.md</span>{selected && <small>v{selected.currentVersion}</small>}</header>
-        {isEditing
-          ? <textarea aria-label="Editar SKILL.md" autoFocus value={skillMd} onChange={(event) => onSkillMdChange(event.target.value)} />
-          : <pre tabIndex={0} aria-label="Ler SKILL.md" onDoubleClick={onEdit} onKeyDown={event => { if (event.key === 'Enter') onEdit() }}>{skillMd}</pre>}
-        <footer><span>Markdown</span><span>{skillMd.split(/\r?\n/).length} linhas</span></footer>
-      </section></>}
-
-      {activeTab === 'files' && <section className="academy-files" aria-label="Arquivos da Skill">
-        <div className="academy-section-heading"><h3>Artefatos textuais</h3><button className="academy-secondary-button" onClick={onAddArtifact}><Plus size={16} />Adicionar artefato</button></div>
-        <div className="academy-artifact-list"><button onClick={() => onTabChange('skill')}><span><FileCode2 size={17} /><strong>SKILL.md</strong></span><small>Definição</small></button>{Object.keys(artifacts).map(path => <button key={path} onClick={() => onOpenArtifact(path)}><span><Code2 size={17} /><strong title={path}>{path}</strong></span><small>Editar texto</small></button>)}</div>
-      </section>}
-
-      {activeTab === 'overview' && <section className="academy-overview" aria-label="Visão geral da Skill">
-        <div className="academy-section-heading"><h3>Contexto da Skill</h3><button className="academy-secondary-button" onClick={() => onTabChange('history')}><History size={16} />Histórico</button></div>
-        {selected && <button className="academy-secondary-button" role="switch" aria-label="Ativação da Skill selecionada" aria-checked={selected.status === 'ACTIVE'} disabled={activationPending || isEditing} onClick={onSetEnabled}>{activationPending ? 'Salvando…' : selected.status === 'ACTIVE' ? 'Desativar Skill' : 'Ativar Skill'}</button>}
-        {selected?.publicationEligibility && <p>Publicação: {selected.publicationEligibility === 'PRIVATE' ? 'Privada — requer aprovação explícita para Git e plugin.' : 'Elegível para Git e plugin; sincronização e upload são independentes.'}</p>}
-        {selected?.publicationEligibility === 'PRIVATE' && !isEditing && <button className="academy-secondary-button" onClick={onApprovePublic}>Aprovar publicação pública</button>}
-        {selected?.current.contentState === 'DELETED' && <p>Skill excluída. Identidade e histórico preservados; a ativação não restaura o conteúdo.</p>}
-        {selected?.source && <p>Fonte: {selected.source.state} · {selected.source.sourceCommitSha?.slice(0, 8) ?? 'legado privado'}</p>}
-        {selected && (selected.catalogRevision !== undefined || selected.source?.state === 'CONFIRMED') && !isEditing && selected.current.contentState !== 'DELETED' && <button className="academy-danger-button" onClick={onRemoveFromGit}>{selected.catalogRevision !== undefined ? 'Excluir Skill' : 'Preparar remoção do Git'}</button>}
-        <div className="academy-metadata-grid">
-          <div><span>Versão</span><strong>{selected ? `v${selected.currentVersion}` : 'Novo draft'}</strong></div>
-          <div><span>Status</span><strong>{selected?.status ?? 'Não persistida'}</strong></div>
-          <div><span>Origem</span><strong>{selected?.current.origin ?? 'UI'}</strong></div>
-          <div><span>Criada em</span><strong>{selected ? formatDate(selected.createdAt) : 'Ao salvar'}</strong></div>
-          <div><span>Atualizada em</span><strong>{selected ? formatDate(selected.updatedAt) : 'Ao salvar'}</strong></div>
-          <div><span>Distribuição</span><strong>{distribution.length > 0 ? `${distribution.filter((item) => item.status === 'CURRENT').length}/${distribution.length} current` : 'Sem destino aplicável'}</strong></div>
-        </div>
-        <div className="academy-scope-panel">
-          <div><h3>Escopo</h3><p>Controle onde esta Skill fica disponível.</p></div>
-          {isEditing ? <select aria-label="Escopo" value={scope} onChange={(event) => onScopeChange(event.target.value as AcademySkillScope)}><option value="GLOBAL">Global</option><option value="PROJECT">Projetos</option></select> : <StatusBadge tone="info">{scope}</StatusBadge>}
-        </div>
-        {scope === 'PROJECT' && <fieldset className="academy-project-scope" disabled={!isEditing}>
-          <legend>Projetos associados</legend>
-          {destinations.map((destination) => <label key={destination.id}><input type="checkbox" checked={projectIds.includes(destination.id)} onChange={(event) => onProjectIdsChange(event.target.checked ? [...projectIds, destination.id] : projectIds.filter((id) => id !== destination.id))} />{destination.name}</label>)}
-        </fieldset>}
-        {selected && distribution.length > 0 && <div className="academy-distribution-list">
-          {distribution.map((state) => <div key={`${state.destinationId}:${state.target}`}><span><strong>{state.destinationName}</strong><small>{state.target}</small></span><StatusBadge tone={state.status === 'CURRENT' ? 'success' : state.status === 'ERROR' ? 'danger' : 'warning'}>{state.status}</StatusBadge></div>)}
-        </div>}
-      </section>}
-
-      {activeTab === 'history' && <section className="academy-history" aria-label="Histórico imutável">
-        <button className="academy-secondary-button" onClick={() => onTabChange('overview')}>Voltar ao contexto</button>
-        <h3>Histórico imutável</h3>
-        {history.length === 0 ? <p>Nenhuma versão persistida.</p> : <ol>{history.map((item) => <li key={item.version}><span className="academy-version-node">v{item.version}</span><div><strong>{friendlyState(item.origin)}</strong><small>{formatDate(item.createdAt)}</small></div></li>)}</ol>}
-      </section>}
-    </fieldset>
-    {isEditing && <footer className="academy-edit-footer"><span role="status">{saving ? 'Salvando…' : dirty ? 'Alterações não salvas' : 'Sem alterações'}</span><button className="academy-secondary-button" disabled={saving} onClick={onCancel}>Cancelar</button><button className="academy-primary-button" disabled={saving || !dirty} onClick={onSave}><Check size={16} />Salvar</button></footer>}
-  </main>
+  )
 }
 
-interface OperationsRailProps {
-  hydration?: 'LOADING' | 'READY' | 'ERROR'
-  knownPublication?: import('../../../../shared/types/academy-bootstrap-types').AcademyPersistedPublication | null
-  open: boolean
-  destinations: AcademyDestination[]
-  conflicts: AcademyConflictSummary[]
-  distribution: AcademyDistributionHealth
-  packageDistribution: AcademyPackageDistributionState | null
+interface AcademySettingsDrawerProps {
+  hydration: 'LOADING' | 'READY' | 'ERROR'
   openAiPublication: AcademyOpenAiPublicationState | null
+  openAiReleases: AcademyOpenAiRelease[]
+  preference: AcademyPublicationPreference | null
+  packageDistribution: AcademyPackageDistributionState | null
   gitStatus: AcademyGitStatusProjection | null
   eligibleRepos: RepositoryRecord[]
   selectedRepoId: string
+  destinations: AcademyDestination[]
+  conflicts: AcademyConflictSummary[]
+  distribution: AcademyDistributionHealth
+  knownPublication?: AcademyPersistedPublication | null
+  busy: boolean
   onSelectedRepoChange: (id: string) => void
-  onClose: () => void
-  onOpenDestinations: () => void
-  onReconcile: () => void
-  onPrepareRelease: () => void
-  packagePending?: boolean
-  onRevalidateRelease?: () => void
-  onRebuildRelease?: () => void
-  onPrepareManifestVersion?: () => void
+  onRequestToggleAutoInclude: (nextEnabled: boolean) => void
   onBootstrapPlugin: () => void
-  onRevealRelease: () => void
-  onConfirmUpload: () => void
+  onConfirmUpload: (release: AcademyOpenAiRelease) => void
+  onRebuildRelease: (release: AcademyOpenAiRelease) => void
+  onPrepareManifestVersion: (kind: 'PATCH' | 'MINOR' | 'MAJOR') => void
   onBindRepository: () => void
   onSyncGit: () => void
-  onPublishCandidate?: () => void
-  onLocalCutover?: () => void
-  onGitAutomation?: (autoPublish: boolean, autoUpdate: boolean) => void
-  onResolveGitConflict: () => void
+  onPublishGit: () => void
+  onPublishCandidate: () => void
+  onLocalCutover: () => void
+  onGitAutomation: (next: { autoPublish: boolean; autoUpdate: boolean }) => void
   onOpenGit: () => void
+  onReviewGitConflict: (path: string) => void
   onReviewConflict: (id: string) => void
   onPreviewConflictBatch: () => void
+  onOpenDestinations: () => void
+  onReconcile: () => void
+  onClose: () => void
 }
 
-export const OperationsRail: React.FC<OperationsRailProps> = ({ hydration = 'READY', knownPublication, open, destinations, conflicts, distribution, packageDistribution, openAiPublication, gitStatus, eligibleRepos, selectedRepoId, onSelectedRepoChange, onClose, onOpenDestinations, onReconcile, onPrepareRelease, packagePending, onRevalidateRelease, onRebuildRelease, onPrepareManifestVersion, onBootstrapPlugin, onRevealRelease, onConfirmUpload, onBindRepository, onSyncGit, onPublishCandidate, onGitAutomation, onResolveGitConflict, onOpenGit, onReviewConflict, onPreviewConflictBatch, onLocalCutover }) => {
-  const release = openAiPublication?.selectedRelease
-  const loading = hydration !== 'READY'
-  const configured = Boolean(gitStatus?.profile || gitStatus?.repository)
-  const check = gitStatus?.remoteCheck
-  const gitName = gitStatus?.repository?.fullName ?? gitStatus?.lastKnown?.repositoryId ?? (loading ? 'Carregando configuração…' : 'Não configurado')
+export const AcademySettingsDrawer: React.FC<AcademySettingsDrawerProps> = ({
+  hydration,
+  openAiPublication,
+  openAiReleases,
+  preference,
+  packageDistribution,
+  gitStatus,
+  eligibleRepos,
+  selectedRepoId,
+  destinations,
+  conflicts,
+  distribution,
+  knownPublication,
+  busy,
+  onSelectedRepoChange,
+  onRequestToggleAutoInclude,
+  onBootstrapPlugin,
+  onConfirmUpload,
+  onRebuildRelease,
+  onPrepareManifestVersion,
+  onBindRepository,
+  onSyncGit,
+  onPublishGit,
+  onPublishCandidate,
+  onLocalCutover,
+  onGitAutomation,
+  onOpenGit,
+  onReviewGitConflict,
+  onReviewConflict,
+  onPreviewConflictBatch,
+  onOpenDestinations,
+  onReconcile,
+  onClose
+}) => {
   const git = gitPresentation(gitStatus, hydration)
-  const plugin = releasePresentation(release ?? knownPublication?.release, openAiPublication?.drifted ?? false)
-  const gitLabel = git.label
-  return <aside className={`academy-operations ${open ? 'is-open' : ''}`} aria-label="Operações da Academy">
-    <div className="academy-operations-mobile-header"><strong>Operações</strong><button className="academy-icon-button" aria-label="Fechar operações" onClick={onClose}><X size={18} /></button></div>
-    <section className="academy-health" aria-label="Estado operacional da Academy">
-      <div><Pencil size={17} /><span>Edição local</span><StatusBadge tone={gitStatus?.convergence?.cutover === 'LOCAL' ? 'success' : 'neutral'}>{loading ? 'Carregando…' : gitStatus?.convergence?.cutover === 'LOCAL' ? 'Ativa' : gitStatus?.convergence?.cutover === 'PENDING' ? 'Migração pendente' : configured ? 'Git-first · legado' : 'Não configurada'}</StatusBadge></div>
-      <div><GitBranch size={17} /><span>Git</span><StatusBadge tone={git.tone}>{git.label}</StatusBadge></div>
-      <div><Package size={17} /><span>Release do plugin</span><StatusBadge tone={plugin.tone}>{plugin.label}</StatusBadge></div>
-      <div><ShieldCheck size={17} /><span>Conflitos</span><StatusBadge tone={loading ? 'neutral' : conflicts.length || gitStatus?.syncState === 'CONFLICT' ? 'danger' : 'neutral'}>{loading ? 'Carregando…' : conflicts.length ? conflicts.length + ' na distribuição' : gitStatus?.syncState === 'CONFLICT' ? 'Revisão Git necessária' : 'Nenhum registrado localmente'}</StatusBadge></div>
-    </section>
-    <section className="academy-exceptions" aria-label="Ações necessárias">
-      {gitStatus?.convergence?.cutover === 'PENDING' && <button className="academy-secondary-button" onClick={onLocalCutover}>Migrar para edição local</button>}
-      {gitStatus?.syncState === 'CONFLICT' && <button className="academy-danger-button" data-academy-action="resolve-git" onClick={onResolveGitConflict}>Resolver conflito Git</button>}
-      {gitStatus?.syncState === 'PR_PENDING' && <p>Branch candidata aguardando revisão de PR. Abertura e merge são ações separadas.</p>}
-      {gitStatus?.lastError && <p className="academy-inline-error">{gitStatus.lastError}</p>}
-      {check?.state === 'FAILED' && <p className="academy-inline-error">Falha ao verificar GitHub. {check.error}</p>}
-      {(check?.state === 'FAILED' || ['OFFLINE', 'ERROR', 'REMOTE_CHANGES', 'REMOTE_DIVERGED'].includes(gitStatus?.syncState ?? '')) && <button className="academy-secondary-button" onClick={onSyncGit}>Verificar Git novamente</button>}
-      {openAiPublication?.versionPreflight && <p className="academy-release-preflight">{openAiPublication.versionPreflight.message}{openAiPublication.versionPreflight.suggestedVersion && <button className="academy-secondary-button" onClick={onPrepareManifestVersion}>Preparar nova versão do manifesto</button>}</p>}
-      {openAiPublication?.sourceError && <p className="academy-inline-error">{openAiPublication.sourceError}</p>}
-      {openAiPublication?.operation?.phase === 'ERROR' && <p className="academy-inline-error">{openAiPublication.operation.error}</p>}
-      {packagePending && <p role="status">Preparando e verificando pacote…</p>}
-      {release?.status === 'READY_TO_UPLOAD' && <div className="academy-upload-ready"><p>ZIP preparado · v{release.pluginVersion}. Entrega manual pendente.</p><div className="academy-inline-actions"><button disabled={!release.artifactPath} onClick={onRevealRelease}>Revelar pacote</button><button onClick={onConfirmUpload}>Confirmar upload manual</button></div></div>}
-      {packageDistribution?.hosted.status === 'HOSTED_UPDATE_AVAILABLE' && <p>Hosted fallback: atualização disponível. Preparação e upload em Avançado.</p>}
-    </section>
-    {conflicts.length > 0 && <RailCard icon={<CircleAlert size={18} />} title="Conflitos" count={`${conflicts.length}`} className="academy-conflict-card">
-      <AcademyConflicts conflicts={conflicts} destinations={destinations} onReview={onReviewConflict} onPreviewBatch={onPreviewConflictBatch} />
-    </RailCard>}
+  const release = resolveCurrentRelease(openAiPublication)
+  const recentReleases = openAiReleases.slice(0, 5)
+  const gitErrorDescription =
+    gitStatus?.lastError === 'WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED'
+      ? 'Alterações externas detectadas no workspace privado do Git; nenhum arquivo externo foi sobrescrito.'
+      : gitStatus?.lastError === 'WORKSPACE_UNCOMMITTED_RECOVERY_REQUIRED'
+        ? 'O workspace privado tem arquivos pendentes de recuperação antes de prosseguir com o Git.'
+        : gitStatus?.lastError
 
-    <RailCard icon={<Package size={18} />} title="Distribuição global">
-      <div className="academy-distribution-summary">
-        <div><span className="academy-summary-icon"><Box size={17} /></span><span><strong>Academy Skills</strong><small>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version} · ${packageDistribution.skillCount} Skills` : 'Pacote não disponível'}</small></span><StatusBadge tone="neutral">{packageDistribution?.packageRevision ? 'Local' : 'Não disponível'}</StatusBadge></div>
-        {distribution.targets.map((target) => <div key={target.target}><span className="academy-summary-icon"><Cloud size={17} /></span><span><strong>{friendlyState(target.target)}</strong><small>{target.current} current · {target.error} error</small></span><StatusBadge tone={target.current + target.pending + target.drifted + target.missing + target.error === 0 ? 'neutral' : target.error ? 'danger' : target.convergence === 'CONVERGED' ? 'success' : 'warning'}>{target.current + target.pending + target.drifted + target.missing + target.error === 0 ? 'Sem destinos aplicáveis' : target.convergence}</StatusBadge></div>)}
-        <div><span className="academy-summary-icon"><Package size={17} /></span><span><strong>Marketplace</strong><small>{packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'Git Managed' : packageDistribution?.marketplace.mode === 'SOURCE_AVAILABLE' ? 'Source Available' : 'Pending Evidence'}</small></span><StatusBadge tone={packageDistribution?.marketplace.mode === 'GIT_MANAGED' ? 'info' : 'neutral'}>{packageDistribution?.marketplace.mode ?? 'Não verificado'}</StatusBadge></div>
-      </div>
-    </RailCard>
-
-    {gitStatus?.profile && gitStatus.publication && <RailCard icon={<RefreshCw size={18} />} title="Automação">        <label className="academy-git-option"><input type="checkbox" checked={gitStatus.publication?.autoPublish ?? false} onChange={event => onGitAutomation?.(event.target.checked, gitStatus.publication?.autoUpdate ?? false)} />Publicação automática de edições locais</label>
-        <label className="academy-git-option"><input type="checkbox" checked={gitStatus.publication?.autoUpdate ?? false} onChange={event => onGitAutomation?.(gitStatus.publication?.autoPublish ?? false, event.target.checked)} />Atualização automática do remoto</label>
-</RailCard>}
-    <details className="academy-advanced"><summary><Settings2 size={17} />Avançado</summary><div className="academy-advanced-content">    <RailCard icon={<FolderGit2 size={18} />} title="Destinos de Distribuição" count={`${destinations.length}`} action={<button className="academy-card-action" onClick={onOpenDestinations}><Settings2 size={15} />Gerenciar</button>}>
-      <div className="academy-compact-list">
-        {destinations.slice(0, 4).map((destination) => <div key={destination.id}><span><FolderGit2 size={15} />{destination.name}</span><StatusBadge tone={destination.reconciliationStatus === 'SYNCED' ? 'success' : destination.reconciliationStatus === 'ERROR' ? 'danger' : 'warning'}>{destination.reconciliationStatus}</StatusBadge></div>)}
-      </div>
-      {destinations.length > 4 && <button className="academy-text-action" onClick={onOpenDestinations}>Ver todos os destinos <ChevronRight size={14} /></button>}
-    </RailCard>
-
-
-    <RailCard icon={<GitBranch size={18} />} title="GitHub Sync">
-      <button className="academy-secondary-button" aria-label="Reconciliar distribuição" onClick={onReconcile}>Reconciliar distribuição</button>
-      {gitStatus?.convergence && <p className="academy-muted">Revisão local {gitStatus.convergence.localRevision} · convergida {gitStatus.convergence.lastConvergedRevision ?? 'ainda não confirmada'} · {gitStatus.convergence.freshness}</p>}
-
-      <div className="academy-git-summary"><div><strong>{gitName}</strong><small>{configured ? `${gitStatus?.profile?.branch ?? gitStatus?.repository?.branch} · ${gitStatus?.lastCommitSha?.slice(0, 8) ?? 'sem commit confirmado'}` : loading ? 'Lendo o estado persistido' : 'Vincule um repository elegível'}</small></div><StatusBadge tone={git.tone}>{gitLabel}</StatusBadge></div>
-      {!configured && !loading && eligibleRepos.length > 0 && <div className="academy-git-bind"><select aria-label="Repository da Academy" value={selectedRepoId} onChange={(event) => onSelectedRepoChange(event.target.value)}>{eligibleRepos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}</select><button onClick={onBindRepository}>Vincular</button></div>}
-      {gitStatus?.repository && <>
-        <small className="academy-muted">Última confirmação remota: {formatDate(gitStatus.lastSyncAt)} · {gitStatus.publication?.remoteHead?.slice(0, 8) ?? 'sem observação'}</small>
-        {gitStatus.publication?.pendingCommit && <small className="academy-muted">Commit local pendente: {gitStatus.publication.pendingCommit.slice(0, 8)}</small>}
-        {Boolean(gitStatus.publication?.conflictPaths.length) && <small>Revisão necessária: {gitStatus.publication?.conflictPaths.join(', ')}</small>}
-        <div className="academy-inline-actions">
-          {gitStatus.syncState === 'CONFLICT' ? <button data-academy-action="resolve-git" onClick={onResolveGitConflict}>Resolver</button>
-            : gitStatus.syncState === 'PR_PENDING' ? <span>Aguardando revisão de PR</span>
-            : <button data-academy-action="sync-git" onClick={onSyncGit}>{gitStatus.syncState === 'LOCAL_CHANGES' ? 'Publicar' : 'Atualizar'}</button>}
-          <button onClick={onOpenGit}>Abrir workspace</button>
-          {['LOCAL_CHANGES', 'PR_PENDING'].includes(gitStatus.syncState) && !gitStatus.publication?.candidateBranch && <button onClick={onPublishCandidate}>Publicar branch para revisão</button>}
+  return (
+    <div className="academy-modal-backdrop" role="dialog" aria-modal="true" aria-label="Configurações da Academy">
+      <div className="academy-settings-drawer">
+        <div className="academy-drawer-header">
+          <div>
+            <h3>Configurações</h3>
+            <p className="academy-modal-subcopy">Política do plugin, sincronização Git e destinos locais.</p>
+          </div>
+          <Button variant="ghost" intent="neutral" size="compact" onClick={onClose}>
+            Fechar
+          </Button>
         </div>
-        {gitStatus.publication?.candidateBranch && <p>Branch publicada: {gitStatus.publication.candidateBranch}. Abertura e merge de PR são ações separadas.</p>}
-      </>}
-    </RailCard>
 
-    <RailCard icon={<Cloud size={18} />} title="Hosted ZIP fallback" className="academy-fallback-card">
-      <div className="academy-hosted-summary"><span><strong>Hosted Personal</strong><small>Hospedagem manual de fallback</small></span><StatusBadge tone={packageDistribution?.hosted.status === 'CURRENT' ? 'success' : 'warning'}>{packageDistribution?.hosted.status === 'HOSTED_UPDATE_AVAILABLE' ? 'UPDATE' : packageDistribution?.hosted.status ?? knownPublication?.release?.status ?? (loading ? 'Carregando…' : knownPublication?.publishedVersion ? 'Registrado' : 'UNCONFIGURED')}</StatusBadge></div>
-      <div className="academy-hosted-versions"><span>Hosted <strong>{packageDistribution?.hosted.version || knownPublication?.publishedVersion ? `v${packageDistribution?.hosted.version ?? knownPublication?.publishedVersion}` : '—'}</strong></span><span>Package <strong>{packageDistribution?.packageRevision ? `v${packageDistribution.packageRevision.version}` : knownPublication?.release ? `v${knownPublication.release.version}` : '—'}</strong></span></div>
-      {!openAiPublication && knownPublication?.release && <p className="academy-muted">Release registrada: v{knownPublication.release.version} · {knownPublication.release.status} · {knownPublication.release.sourceCommitSha?.slice(0, 12) ?? 'Legado sem SHA Git'}. Detalhes do pacote em carregamento.</p>}
-      {packagePending && <p role="status">{openAiPublication?.operation?.phase === 'PREPARING_PACKAGE' ? 'Preparando e verificando o ZIP…' : 'Verificando a fonte e a versão…'}</p>}
-      {!packagePending && openAiPublication?.operation?.phase === 'READY' && <p role="status">Pacote pronto.</p>}
-      {release && <p className="academy-muted">v{release.pluginVersion} · {release.status}{release.source ? ` · ${release.source.branch}@${release.source.sourceCommitSha.slice(0, 12)}` : ' · Legado sem SHA Git'}</p>}
-      {release?.source && <p className="academy-muted">{release.source.remoteConfirmation === 'CACHED' ? 'Rebuild em cache; atualidade remota não verificada' : 'Fonte observada no remoto'} · {formatDate(release.source.confirmedAt)} · {Math.max(0, Math.floor((Date.now() - Date.parse(release.source.confirmedAt)) / 1000))} s atrás nesta leitura{gitStatus?.syncState === 'OFFLINE' || gitStatus?.syncState === 'UNKNOWN' ? ' · Remoto não revalidado' : ''}</p>}
-      <div className="academy-inline-actions">
-        {openAiPublication?.profile ? <button disabled={packagePending} onClick={onPrepareRelease}>Prepare ZIP fallback</button> : <button disabled={loading || Boolean(knownPublication?.publishedVersion)} onClick={onBootstrapPlugin}>{loading || knownPublication?.publishedVersion ? 'Carregando detalhes do plugin…' : 'Registrar plugin existente'}</button>}
-        {gitStatus?.repository && <button disabled={packagePending} onClick={onRevalidateRelease}>Revalidar fonte e preparar ZIP</button>}
-        {release?.source && <button disabled={packagePending} onClick={onRebuildRelease}>Rebuild do commit em cache</button>}
-        <button disabled={!release?.artifactPath} onClick={onRevealRelease}>Reveal Package</button>
-        <button disabled={release?.status !== 'READY_TO_UPLOAD'} onClick={onConfirmUpload}>Confirm Upload</button>
+        <div className="academy-settings-sections">
+          <section className="academy-settings-section" aria-label="Política e pacote OpenAI">
+            <h4>Plugin ChatGPT e autorização</h4>
+            <div className="academy-preference-card">
+              <div className="academy-preference-copy">
+                <strong>Incluir automaticamente novas Skills globais no plugin ChatGPT</strong>
+                <p>
+                  {preference?.autoIncludeGlobal
+                    ? `Autorização ativa (revisão ${preference.revision}). Novas Skills globais criadas na UI ou via MCP ficam elegíveis automaticamente, salvo se marcadas como privadas.`
+                    : 'Desativada. Novas Skills globais permanecem privadas até aprovação explícita. Skills PROJECT nunca são publicadas.'}
+                </p>
+              </div>
+              {preference?.autoIncludeGlobal ? (
+                <Button variant="outline" intent="neutral" size="compact" disabled={busy} onClick={() => onRequestToggleAutoInclude(false)}>
+                  Revogar
+                </Button>
+              ) : (
+                <Button variant="solid" intent="primary" size="compact" disabled={busy} onClick={() => onRequestToggleAutoInclude(true)}>
+                  Ativar autorização
+                </Button>
+              )}
+            </div>
+
+            <div className="academy-settings-actions-row">
+              {!openAiPublication?.profile && (
+                <Button variant="outline" intent="neutral" size="compact" onClick={onBootstrapPlugin}>
+                  Configurar manifesto OpenAI
+                </Button>
+              )}
+              {release?.status === 'READY_TO_UPLOAD' && release.artifactHash && (
+                <Button variant="outline" intent="neutral" size="compact" onClick={() => onConfirmUpload(release)}>
+                  Confirmar envio manual (v{release.pluginVersion})
+                </Button>
+              )}
+              {gitStatus?.repository && (
+                <Button variant="ghost" intent="neutral" size="compact" onClick={() => onPrepareManifestVersion('PATCH')}>
+                  Atualizar versão do manifesto (Git)
+                </Button>
+              )}
+            </div>
+
+            {packageDistribution && packageDistribution.hosted.status !== 'UNCONFIGURED' && (
+              <p className="academy-settings-note">
+                Distribuição de pacote hospedado: {packageDistribution.hosted.status}
+                {packageDistribution.hosted.version ? ` (v${packageDistribution.hosted.version})` : ''}
+              </p>
+            )}
+
+            {recentReleases.length > 0 && (
+              <div className="academy-settings-releases">
+                <strong>Releases locais recentes</strong>
+                {recentReleases.map(item => {
+                  const statusLabel = releasePresentation(item, false)
+                  return (
+                    <div key={item.id} className="academy-settings-release-row">
+                      <span>v{item.pluginVersion} · {item.snapshot.length} Skills</span>
+                      <div className="academy-settings-release-right">
+                        <span className={`academy-signal ${statusLabel.tone}`}>{statusLabel.label}</span>
+                        {item.source?.sourceCommitSha && (
+                          <Button variant="ghost" intent="neutral" size="compact" onClick={() => onRebuildRelease(item)}>
+                            Reconstruir commit
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="academy-settings-section" aria-label="Sincronização Git">
+            <div className="academy-settings-row-header">
+              <h4>Sincronização Git (secundário)</h4>
+              <span className={`academy-signal ${git.tone}`}>{git.label}</span>
+            </div>
+            {gitErrorDescription && (
+              <div className="academy-settings-alert" data-ui-state="warning">
+                {gitErrorDescription}
+              </div>
+            )}
+            {gitStatus?.remoteCheck?.state === 'FAILED' && gitStatus.remoteCheck.error && (
+              <div className="academy-settings-alert" data-ui-state="warning">
+                Falha ao verificar GitHub: {gitStatus.remoteCheck.error}
+              </div>
+            )}
+            {knownPublication && gitStatus?.syncState === 'UNKNOWN' && (
+              <p className="academy-settings-note">
+                Último estado conhecido: {gitStatus.lastKnown ? `${gitStatus.lastKnown.repositoryId} (${gitStatus.lastKnown.branch})` : knownPublication.publishedVersion ? `v${knownPublication.publishedVersion}` : 'local'}
+              </p>
+            )}
+            <div className="academy-settings-git-bind">
+              <label htmlFor="academy-settings-repo">Repositório</label>
+              <div className="academy-settings-git-select-row">
+                <select
+                  id="academy-settings-repo"
+                  value={selectedRepoId}
+                  onChange={event => onSelectedRepoChange(event.target.value)}
+                >
+                  <option value="">Selecionar repositório GitHub</option>
+                  {eligibleRepos.map(repo => (
+                    <option key={repo.id} value={repo.id}>
+                      {repo.github?.fullName ?? repo.name}
+                    </option>
+                  ))}
+                </select>
+                <Button variant="outline" intent="neutral" size="compact" disabled={!selectedRepoId} onClick={onBindRepository}>
+                  Conectar
+                </Button>
+              </div>
+            </div>
+
+            {gitStatus?.repository && (
+              <div className="academy-settings-actions-row">
+                <Button variant="outline" intent="neutral" size="compact" onClick={onSyncGit}>
+                  Sincronizar
+                </Button>
+                <Button variant="outline" intent="neutral" size="compact" onClick={onPublishGit}>
+                  Publicar no Git
+                </Button>
+                <Button variant="ghost" intent="neutral" size="compact" onClick={onPublishCandidate}>
+                  Publicar candidato PR
+                </Button>
+                <Button variant="ghost" intent="neutral" size="compact" onClick={onOpenGit}>
+                  Abrir repositório
+                </Button>
+                {gitStatus.convergence?.cutover === 'PENDING' && (
+                  <Button variant="solid" intent="primary" size="compact" onClick={onLocalCutover}>
+                    Concluir cutover local
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {gitStatus?.publication && (
+              <div className="academy-settings-automation">
+                <label className="academy-check-row">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(gitStatus.publication.autoPublish)}
+                    onChange={event =>
+                      onGitAutomation({
+                        autoPublish: event.target.checked,
+                        autoUpdate: Boolean(gitStatus.publication?.autoUpdate)
+                      })
+                    }
+                  />
+                  <span>Publicar automaticamente alterações aprovadas no Git</span>
+                </label>
+                <label className="academy-check-row">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(gitStatus.publication.autoUpdate)}
+                    onChange={event =>
+                      onGitAutomation({
+                        autoPublish: Boolean(gitStatus.publication?.autoPublish),
+                        autoUpdate: event.target.checked
+                      })
+                    }
+                  />
+                  <span>Atualizar automaticamente quando o remoto avançar</span>
+                </label>
+              </div>
+            )}
+
+            {gitStatus?.publication?.conflictPaths && gitStatus.publication.conflictPaths.length > 0 && (
+              <div className="academy-settings-conflicts">
+                <strong>Conflitos de merge Git</strong>
+                {gitStatus.publication.conflictPaths.map(path => (
+                  <div key={path} className="academy-inline-delivery-row">
+                    <span>{path}</span>
+                    <Button variant="outline" intent="neutral" size="compact" onClick={() => onReviewGitConflict(path)}>
+                      Revisar
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <AcademyConflicts
+              conflicts={conflicts}
+              destinations={destinations}
+              onReview={onReviewConflict}
+              onPreviewBatch={onPreviewConflictBatch}
+            />
+          </section>
+
+          <section className="academy-settings-section" aria-label="Destinos locais">
+            <div className="academy-settings-row-header">
+              <h4>Destinos locais</h4>
+              <span>{destinations.length} cadastrados</span>
+            </div>
+            {distribution.targets.length > 0 && (
+              <div className="academy-settings-targets">
+                {distribution.targets.map(target => {
+                  const summary = describeReconciliation(target)
+                  return (
+                    <div key={target.target} className="academy-inline-delivery-row">
+                      <span>{describeTarget(target.target)}</span>
+                      <span className={`academy-signal ${summary.tone}`}>{summary.label}</span>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+            <div className="academy-settings-actions-row">
+              <Button variant="outline" intent="neutral" size="compact" onClick={onOpenDestinations}>
+                Gerenciar destinos e importar
+              </Button>
+              <Button variant="ghost" intent="neutral" size="compact" onClick={onReconcile}>
+                Reconciliar destinos
+              </Button>
+            </div>
+          </section>
+        </div>
       </div>
-      {release && <details className="academy-technical-details"><summary>Detalhes técnicos</summary><dl><dt>Status</dt><dd>{release.status}</dd><dt>ZIP SHA-256</dt><dd>{release.artifactHash ?? 'não produzido'}</dd>{release.source && <><dt>Commit de origem</dt><dd>{release.source.sourceCommitSha}</dd><dt>Repository / branch</dt><dd>{release.source.sourceRepositoryId} / {release.source.branch}</dd></>}<dt>Path</dt><dd>{release.artifactPath ?? '—'}</dd></dl></details>}
-    </RailCard>
-    </div></details>
-  </aside>
+    </div>
+  )
 }
 
 interface ArtifactEditorProps {
@@ -387,14 +1173,47 @@ interface ArtifactEditorProps {
   onClose: () => void
 }
 
-export const ArtifactEditor: React.FC<ArtifactEditorProps> = ({ mode, path, content, onPathChange, onContentChange, onSave, onRequestRemove, onClose }) => (
-  <div className="academy-overlay" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose() }}>
-    <section className="academy-drawer" role="dialog" aria-modal="true" aria-labelledby="academy-artifact-title">
-      <header><div><span>Artefato textual</span><h2 id="academy-artifact-title">{mode === 'create' ? 'Novo artefato' : path}</h2></div><button className="academy-icon-button" aria-label="Fechar editor de artefato" onClick={onClose}><X size={18} /></button></header>
-      <label>Caminho relativo<input aria-label="Caminho do artefato" disabled={mode === 'edit'} placeholder="references/guide.md" value={path} onChange={(event) => onPathChange(event.target.value)} /></label>
-      <label className="academy-artifact-content">Conteúdo<textarea aria-label="Conteúdo do artefato" value={content} onChange={(event) => onContentChange(event.target.value)} /></label>
-      <footer>{mode === 'edit' && <button className="academy-danger-button" onClick={onRequestRemove}><Trash2 size={16} />Remover</button>}<span /><button className="academy-secondary-button" onClick={onClose}>Cancelar</button><button className="academy-primary-button" disabled={!path.trim()} onClick={onSave}>Salvar no draft</button></footer>
-    </section>
+export const ArtifactEditor: React.FC<ArtifactEditorProps> = ({
+  mode,
+  path,
+  content,
+  onPathChange,
+  onContentChange,
+  onSave,
+  onRequestRemove,
+  onClose
+}) => (
+  <div className="academy-modal-backdrop" role="dialog" aria-modal="true" aria-label="Artefato">
+    <div className="academy-modal">
+      <div className="academy-drawer-header">
+        <h3>{mode === 'create' ? 'Novo artefato' : path}</h3>
+        <button type="button" className="academy-drawer-close" onClick={onClose}>
+          Fechar
+        </button>
+      </div>
+      <label className="academy-field">
+        <span>Caminho relativo</span>
+        <input
+          value={path}
+          onChange={event => onPathChange(event.target.value)}
+          placeholder="references/guide.md"
+        />
+      </label>
+      <label className="academy-field">
+        <span>Conteúdo</span>
+        <textarea value={content} onChange={event => onContentChange(event.target.value)} rows={12} />
+      </label>
+      <div className="academy-modal-actions">
+        {mode === 'edit' && (
+          <Button variant="outline" intent="danger" size="compact" onClick={onRequestRemove}>
+            Remover
+          </Button>
+        )}
+        <Button variant="solid" intent="primary" size="compact" onClick={onSave}>
+          Aplicar no rascunho
+        </Button>
+      </div>
+    </div>
   </div>
 )
 
@@ -405,17 +1224,48 @@ interface DestinationManagerProps {
   onClose: () => void
 }
 
-export const DestinationManager: React.FC<DestinationManagerProps> = ({ destinations, onToggle, onImport, onClose }) => (
-  <div className="academy-overlay" role="presentation" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose() }}>
-    <section className="academy-drawer academy-destination-drawer" role="dialog" aria-modal="true" aria-labelledby="academy-destinations-title">
-      <header><div><span>Academy</span><h2 id="academy-destinations-title">Destinos de Distribuição</h2></div><button className="academy-icon-button" aria-label="Fechar destinos" onClick={onClose}><X size={18} /></button></header>
-      <div className="academy-destination-manager">{destinations.map((destination) => <article key={destination.id}>
-        <label><input type="checkbox" checked={destination.enabled} onChange={(event) => onToggle(destination.id, event.target.checked)} /><span><strong>{destination.name}</strong><small>{destination.path}</small></span></label>
-        <StatusBadge tone={destination.reconciliationStatus === 'SYNCED' ? 'success' : destination.reconciliationStatus === 'ERROR' ? 'danger' : 'warning'}>{destination.reconciliationStatus}</StatusBadge>
-        <button onClick={() => onImport(destination.id)}>Importar .skills</button>
-        {destination.lastError && <p>{destination.lastError}</p>}
-      </article>)}</div>
-    </section>
+export const DestinationManager: React.FC<DestinationManagerProps> = ({
+  destinations,
+  onToggle,
+  onImport,
+  onClose
+}) => (
+  <div className="academy-modal-backdrop" role="dialog" aria-modal="true" aria-label="Destinos Academy">
+    <div className="academy-modal">
+      <div className="academy-drawer-header">
+        <h3>Destinos registrados</h3>
+        <button type="button" className="academy-drawer-close" onClick={onClose}>
+          Fechar
+        </button>
+      </div>
+      <div className="academy-destination-list">
+        {destinations.length === 0 ? (
+          <p className="academy-empty-note">Nenhum destino registrado.</p>
+        ) : (
+          destinations.map(destination => (
+            <div key={destination.id} className="academy-destination-row">
+              <div>
+                <strong>{destination.name}</strong>
+                <span>{destination.path}</span>
+              </div>
+              <div className="academy-destination-actions">
+                <Button variant="outline" intent="neutral" size="compact" onClick={() => onImport(destination.id)}>
+                  Importar .skills
+                </Button>
+                <Button
+                  variant="outline"
+                  intent="neutral"
+                  size="compact"
+                  onClick={() => onToggle(destination.id, !destination.enabled)}
+                >
+                  {destination.enabled ? 'Desabilitar' : 'Habilitar'}
+                </Button>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
   </div>
 )
 
@@ -428,13 +1278,32 @@ interface ConfirmationDialogProps {
   onCancel: () => void
 }
 
-export const ConfirmationDialog: React.FC<ConfirmationDialogProps> = ({ title, description, confirmLabel, destructive, onConfirm, onCancel }) => (
-  <div className="academy-overlay academy-confirm-overlay" role="presentation">
-    <section className="academy-confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="academy-confirm-title" aria-describedby="academy-confirm-description">
-      <span className={`academy-confirm-icon ${destructive ? 'danger' : ''}`}>{destructive ? <Trash2 size={22} /> : <Check size={22} />}</span>
-      <h2 id="academy-confirm-title">{title}</h2>
-      <p id="academy-confirm-description">{description}</p>
-      <div><button className="academy-secondary-button" onClick={onCancel}>Cancelar</button><button className={destructive ? 'academy-danger-button' : 'academy-primary-button'} onClick={onConfirm}>{confirmLabel}</button></div>
-    </section>
+export const ConfirmationDialog: React.FC<ConfirmationDialogProps> = ({
+  title,
+  description,
+  confirmLabel,
+  destructive,
+  onConfirm,
+  onCancel
+}) => (
+  <div className="academy-modal-backdrop" role={destructive ? 'alertdialog' : 'dialog'} aria-modal="true" aria-label={title}>
+    <div className="academy-modal academy-confirm-modal">
+      <h3>{title}</h3>
+      <p>{description}</p>
+      <div className="academy-modal-actions">
+        <Button variant="outline" intent="neutral" size="compact" onClick={onCancel}>
+          Cancelar
+        </Button>
+        {destructive ? (
+          <Button variant="solid" intent="danger" size="compact" onClick={onConfirm}>
+            {confirmLabel}
+          </Button>
+        ) : (
+          <Button variant="solid" intent="primary" size="compact" onClick={onConfirm}>
+            {confirmLabel}
+          </Button>
+        )}
+      </div>
+    </div>
   </div>
 )

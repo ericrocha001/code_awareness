@@ -51,9 +51,44 @@ export interface AcademyImpactFreshnessInput {
   candidateHash?: string
 }
 
+export type AcademyPublicationSource = 'MANUAL' | 'AUTO_PREFERENCE' | 'GIT_SOURCE' | 'LEGACY'
+
+export interface AcademyPublicationPreference {
+  autoIncludeGlobal: boolean
+  revision: number
+  authority: 'ELECTRON_OPERATOR' | null
+  consentVersion: string | null
+  updatedAt: string | null
+}
+
+export type AcademyPluginExclusionReason = 'PRIVATE' | 'DISABLED' | 'REMOVED'
+
+export interface AcademyPluginExcludedSkill {
+  skillId: string
+  name: string
+  version: number
+  reason: AcademyPluginExclusionReason
+  action: 'APPROVE_PUBLICATION' | 'ENABLE_SKILL' | 'REINTRODUCE_SKILL'
+}
+
+export interface AcademyPluginCoverage {
+  catalog: number
+  eligible: number
+  includedInLastZip: number | null
+  awaitingZip: number
+  notApplicable: number
+  excluded: AcademyPluginExcludedSkill[]
+  preference: AcademyPublicationPreference
+}
+
+export type AcademyPublicationOutcome =
+  | { included: true; reason: 'APPROVED_BY_PREFERENCE' | 'APPROVED_EXPLICITLY' }
+  | { included: false; reason: 'PRIVATE_NO_AUTHORIZATION' | 'PRIVATE_BY_CHOICE' | 'PROJECT_SCOPE'; action?: 'APPROVE_PUBLICATION' }
+
 export interface AcademySkillSummary {
   catalogRevision?: number
   publicationEligibility?: 'PRIVATE' | 'APPROVED'
+  publicationSource?: AcademyPublicationSource
   source?: { state: 'CONFIRMED' | 'REMOVED' | 'LEGACY_PRIVATE'; sourceCommitSha: string | null; path: string | null }
   id: string
   name: string
@@ -152,12 +187,14 @@ export interface AcademyCreateInput {
   package: AcademyPackage
   scope: AcademySkillScope
   projectIds?: string[]
+  keepPrivate?: boolean
   origin: AcademyVersionOrigin
 }
 
 export interface AcademyMutationReceipt {
   catalogRevision?: number
   publicationEligibility?: 'PRIVATE' | 'APPROVED'
+  publication?: AcademyPublicationOutcome
   state: 'PERSISTED'
   skillId: string
   name: string
@@ -347,6 +384,8 @@ export interface AcademyOpenAiPublicationState {
   latestUploaded: AcademyOpenAiRelease | null
   selectedRelease: AcademyOpenAiRelease | null
   publicSkillCount: number
+  coverage?: AcademyPluginCoverage
+  artifactAvailable?: boolean
   canonicalSnapshotHash: string | null
   drifted: boolean
   currentPackageRevision: AcademyPluginPackageRevision | null

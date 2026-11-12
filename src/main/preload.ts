@@ -1,6 +1,5 @@
 import type { ContinuumBundleQuick, ContinuumBundleReceipt } from '../shared/types/continuum-bundle-types'
-import type { AcademyDraftReceipt } from '../shared/types/academy-types'
-import type { AcademyGitConflictReview } from '../shared/types/academy-types'
+import type { AcademyDraftReceipt, AcademyGitConflictReview, AcademyPublicationPreference } from '../shared/types/academy-types'
 import type { BuilderRequest, BuilderPreview, BuilderReceipt, BundleComponent, BundleResult, BundleComposition } from '../shared/types/continuum-builder-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../shared/types/continuum-tag-types'
 /*
@@ -108,6 +107,9 @@ contextBridge.exposeInMainWorld('codeAwareness', {
   getAcademyDraft: (name: string): Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }> => ipcRenderer.invoke('academy:git-draft', name),
   completeAcademyLocalCutover: (confirmed: boolean): Promise<AcademyGitStatusProjection> => ipcRenderer.invoke('academy:local-cutover', confirmed),
   approveAcademyPublicSkill: (id: string, version: number, confirmed: boolean): Promise<AcademySkillDetail> => ipcRenderer.invoke('academy:approve-public', id, version, confirmed),
+  approveAcademyPublicSkills: (items: Array<{ skillId: string; expectedVersion: number }>, confirmed: boolean): Promise<AcademySkillDetail[]> => ipcRenderer.invoke('academy:approve-public-batch', items, confirmed),
+  getAcademyPublicationPreference: (): Promise<AcademyPublicationPreference> => ipcRenderer.invoke('academy:publication-preference'),
+  setAcademyPublicationPreference: (autoIncludeGlobal: boolean, confirmed: boolean): Promise<AcademyPublicationPreference> => ipcRenderer.invoke('academy:publication-preference-set', autoIncludeGlobal, confirmed),
   deleteAcademyGlobalSkill: (id: string, version: number, confirmed: boolean): Promise<unknown> => ipcRenderer.invoke('academy:delete-global', id, version, confirmed),
   onAcademyChanged: (callback: (event?: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => void): (() => void) => {
     const listener = (_event: Electron.IpcRendererEvent, payload: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => callback(payload)
