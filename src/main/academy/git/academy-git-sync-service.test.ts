@@ -433,6 +433,39 @@ describe('Academy Git-first source', () => {
     expect(readFileSync(join(workspace, 'notes.txt'), 'utf8')).toBe('external operator note')
   }, 60000)
 
+  it('halts with WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED and preserves staged edits when working tree matches HEAD', async () => {
+    const f = await fixture()
+    await f.sync.bindRepository(f.record.id)
+    await f.sync.completeLocalCutover(true)
+    const cutover = await f.sync.publish()
+    expect(cutover.syncState, cutover.lastError ?? '').toBe('SYNCED')
+    const workspace = cutover.publication!.workspacePath!
+
+    const originalSkill = readFileSync(join(workspace, 'skills/alpha/SKILL.md'), 'utf8')
+    const stagedExternal = pkg('staged external edit').skillMd
+    writeFile(workspace, 'skills/alpha/SKILL.md', stagedExternal)
+    await gitExec(workspace, ['add', '--', 'skills/alpha/SKILL.md'])
+    writeFile(workspace, 'skills/alpha/SKILL.md', originalSkill)
+
+    const initialStaged = (await f.git.readCommitFile(workspace, await f.git.writeIndexTree(workspace), 'skills/alpha/SKILL.md', 1024 * 1024))?.toString('utf8')
+    expect(initialStaged).toBe(stagedExternal)
+    expect(readFileSync(join(workspace, 'skills/alpha/SKILL.md'), 'utf8')).toBe(originalSkill)
+
+    const status = await f.sync.syncNow()
+    expect(status.syncState).toBe('LOCAL_CHANGES')
+    expect(status.lastError).toBe('WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED')
+    expect((await f.git.readCommitFile(workspace, await f.git.writeIndexTree(workspace), 'skills/alpha/SKILL.md', 1024 * 1024))?.toString('utf8')).toBe(stagedExternal)
+    expect(readFileSync(join(workspace, 'skills/alpha/SKILL.md'), 'utf8')).toBe(originalSkill)
+
+    const updated = f.store.update({ skillId: f.skill.id, expectedVersion: 1, package: pkg('local academy edit'), origin: 'UI' })
+    f.store.approvePublicSkill(updated.id, updated.currentVersion)
+    const afterLocalUpdate = await f.sync.syncNow()
+    expect(afterLocalUpdate.syncState).toBe('LOCAL_CHANGES')
+    expect(afterLocalUpdate.lastError).toBe('WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED')
+    expect((await f.git.readCommitFile(workspace, await f.git.writeIndexTree(workspace), 'skills/alpha/SKILL.md', 1024 * 1024))?.toString('utf8')).toBe(stagedExternal)
+    expect(readFileSync(join(workspace, 'skills/alpha/SKILL.md'), 'utf8')).toBe(originalSkill)
+  }, 60000)
+
   it('requires verified checkpoint and observation freshness for SYNCED and stops autoPublish cleanly on non-retryable state', async () => {
     const f = await fixture()
     await f.sync.bindRepository(f.record.id)

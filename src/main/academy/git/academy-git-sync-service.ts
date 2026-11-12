@@ -58,6 +58,15 @@ function isAcademyAuthoredPath(relativePath: string): boolean {
   return relativePath === IDENTITY_PATH || relativePath === 'plugin.json' || relativePath === 'assets/logo.png' || relativePath.startsWith('skills/')
 }
 
+function bytesEqual(left: Buffer | null, right: Buffer | null): boolean {
+  return left === null ? right === null : right !== null && left.equals(right)
+}
+
+function isProvenWorkspaceState(actual: Buffer | null, head: Buffer | null, desired: Buffer | null | undefined): boolean {
+  if (bytesEqual(actual, head)) return true
+  return desired !== undefined && bytesEqual(actual, desired)
+}
+
 const NON_RETRYABLE_SYNC_ERRORS = new Set([
   'WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED',
   'PUBLICATION_ELIGIBILITY_APPROVAL_REQUIRED',
@@ -484,6 +493,7 @@ export class AcademyGitSyncService {
     const root = state.workspacePath!
     const statusOutput = await this.git.getOperationsStatus(root)
     if (!statusOutput) return 'CLEAN'
+    if (await this.git.getGitOperation(root)) return 'EXTERNAL'
     const dirtyEntries = parsePorcelainStatusZ(statusOutput)
     if (!dirtyEntries.length) return 'UNRECOVERABLE'
     const dirtyPaths: string[] = []
@@ -495,27 +505,41 @@ export class AcademyGitSyncService {
     }
     const desired = this.store.usesLocalAuthority() ? this.buildDesiredLocalCatalog(snapshot) : null
     const headCommit = await this.git.resolveCommit(root, 'HEAD')
-    for (const entryPath of dirtyPaths) {
-      const fullPath = join(root, entryPath)
-      const exists = existsSync(fullPath)
-      if (exists && lstatSync(fullPath).isSymbolicLink()) return 'EXTERNAL'
-      const diskBytes = exists ? readFileSync(fullPath) : null
-      const headBytes = headCommit ? await this.git.readCommitFile(root, headCommit, entryPath, 8 * 1024 * 1024) : null
-      const desiredBytes = desired ? desired.expectedFiles.get(entryPath) : undefined
-      if (diskBytes === null) {
-        if (!desired || (desiredBytes !== undefined && desiredBytes !== null)) return 'EXTERNAL'
-        continue
+    let stagedTree: string
+    try {
+      stagedTree = await this.git.writeIndexTree(root)
+    } catch {
+      return 'EXTERNAL'
+    }
+    const uniqueDirtyPaths = [...new Set(dirtyPaths)]
+    for (const entryPath of uniqueDirtyPaths) {
+      let diskBytes: Buffer | null = null
+      try {
+        const stat = lstatSync(join(root, entryPath))
+        if (stat.isSymbolicLink() || !stat.isFile() || stat.size > 8 * 1024 * 1024) return 'EXTERNAL'
+        diskBytes = readFileSync(join(root, entryPath))
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return 'EXTERNAL'
       }
-      const matchesDesired = Boolean(desiredBytes && diskBytes.equals(desiredBytes))
-      const matchesHead = Boolean(headBytes && diskBytes.equals(headBytes))
-      if (!matchesDesired && !matchesHead) return 'EXTERNAL'
+      let headBytes: Buffer | null
+      let indexBytes: Buffer | null
+      try {
+        headBytes = headCommit ? await this.git.readCommitFile(root, headCommit, entryPath, 8 * 1024 * 1024) : null
+        indexBytes = await this.git.readCommitFile(root, stagedTree, entryPath, 8 * 1024 * 1024)
+      } catch {
+        return 'EXTERNAL'
+      }
+      const desiredBytes = desired ? (desired.expectedFiles.get(entryPath) ?? null) : undefined
+      if (!isProvenWorkspaceState(diskBytes, headBytes, desiredBytes) || !isProvenWorkspaceState(indexBytes, headBytes, desiredBytes)) {
+        return 'EXTERNAL'
+      }
     }
     if (!desired) {
-      await this.git.stagePaths(root, [...new Set(dirtyPaths)])
+      await this.git.stagePaths(root, uniqueDirtyPaths)
       return (await this.git.getOperationsStatus(root)) ? 'UNRECOVERABLE' : 'RECOVERED'
     }
     try {
-      const { staged, indexRevision, expectedHead } = await this.applyLocalCatalog(state, snapshot, desired, dirtyPaths)
+      const { staged, indexRevision, expectedHead } = await this.applyLocalCatalog(state, snapshot, desired, uniqueDirtyPaths)
       if (sha256(staged) === snapshot.managedTreeHash && expectedHead === snapshot.sourceCommitSha) {
         if (await this.git.getOperationsStatus(root)) return 'UNRECOVERABLE'
         state.localHead = expectedHead
