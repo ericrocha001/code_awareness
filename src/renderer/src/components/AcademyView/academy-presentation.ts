@@ -5,6 +5,8 @@ type Signal = { label: string; tone: 'success' | 'warning' | 'danger' | 'info' |
 export function gitPresentation(git: AcademyGitStatusProjection | null, hydration: string): Signal {
   if (hydration !== 'READY') return { label: hydration === 'ERROR' ? 'Estado indisponível' : 'Carregando…', tone: 'neutral' }
   if (!git || git.syncState === 'UNCONFIGURED') return { label: 'Não configurado', tone: 'neutral' }
+  if (git.lastError === 'WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED') return { label: 'Alterações externas no workspace · revisão necessária', tone: 'warning' }
+  if (git.lastError === 'WORKSPACE_UNCOMMITTED_RECOVERY_REQUIRED') return { label: 'Recuperação de workspace pendente', tone: 'warning' }
   if (git.syncState === 'CONFLICT') return { label: 'Conflito · revisão necessária', tone: 'danger' }
   if (git.syncState === 'PR_PENDING') return { label: 'Aguardando revisão de PR', tone: 'warning' }
   if (git.syncState === 'OFFLINE') return { label: 'Offline · verificação pendente', tone: 'warning' }

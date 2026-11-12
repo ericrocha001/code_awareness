@@ -485,5 +485,57 @@ describe('AcademyStore', () => {
     expect(profile?.syncState).toBe('DIRTY')
     reopened.close()
   })
+
+  it('governs autoIncludeGlobal single consent, keepPrivate opt-out, revocation, and atomic batch CAS approval', () => {
+    const store = open()
+    try {
+      expect(store.getPublicationPreference()).toEqual({ autoIncludeGlobal: false, revision: 0, authority: null, consentVersion: null, updatedAt: null })
+
+      const privateByDefault = store.create({ package: pkg('alpha', '# Alpha'), scope: 'GLOBAL', origin: 'UI' })
+      expect(privateByDefault.publicationEligibility).toBe('PRIVATE')
+      expect(privateByDefault.publicationSource).toBeUndefined()
+
+      const enabled = store.setPublicationPreference(true, 'ELECTRON_OPERATOR', '1')
+      expect(enabled).toMatchObject({ autoIncludeGlobal: true, revision: 1, authority: 'ELECTRON_OPERATOR', consentVersion: '1' })
+      expect(enabled.updatedAt).toBeTruthy()
+
+      const autoUi = store.create({ package: pkg('beta', '# Beta'), scope: 'GLOBAL', origin: 'UI' })
+      expect(autoUi.publicationEligibility).toBe('APPROVED')
+      expect(autoUi.publicationSource).toBe('AUTO_PREFERENCE')
+
+      const autoMcp = store.create({ package: pkg('gamma', '# Gamma'), scope: 'GLOBAL', origin: 'MCP' })
+      expect(autoMcp.publicationEligibility).toBe('APPROVED')
+      expect(autoMcp.publicationSource).toBe('AUTO_PREFERENCE')
+
+      const optedOut = store.create({ package: pkg('delta', '# Delta'), scope: 'GLOBAL', origin: 'UI', keepPrivate: true })
+      expect(optedOut.publicationEligibility).toBe('PRIVATE')
+      expect(optedOut.publicationSource).toBeUndefined()
+
+      const dest = store.upsertDestination('C:/proj-pref', 'proj-pref')
+      const projectSkill = store.create({ package: pkg('proj-skill', '# Project'), scope: 'PROJECT', projectIds: [dest.id], origin: 'UI' })
+      expect(projectSkill.publicationEligibility).toBeUndefined()
+      expect(store.publicationEligibility(projectSkill.id)).toBe('PRIVATE')
+
+      const revoked = store.setPublicationPreference(false, 'ELECTRON_OPERATOR', '1')
+      expect(revoked).toMatchObject({ autoIncludeGlobal: false, revision: 2 })
+      expect(store.listPublicationPreferenceLog().map((entry) => [entry.revision, entry.autoIncludeGlobal])).toEqual([[1, true], [2, false]])
+
+      const afterRevoke = store.create({ package: pkg('epsilon', '# Epsilon'), scope: 'GLOBAL', origin: 'MCP' })
+      expect(afterRevoke.publicationEligibility).toBe('PRIVATE')
+      expect(store.get(autoUi.id).publicationEligibility).toBe('APPROVED')
+
+      expect(() => store.approvePublicSkills([{ skillId: privateByDefault.id, expectedVersion: 99 }, { skillId: optedOut.id, expectedVersion: 1 }])).toThrow(expect.objectContaining({ code: 'VERSION_CONFLICT' }))
+      expect(store.get(optedOut.id).publicationEligibility).toBe('PRIVATE')
+
+      const batch = store.approvePublicSkills([
+        { skillId: privateByDefault.id, expectedVersion: privateByDefault.currentVersion },
+        { skillId: optedOut.id, expectedVersion: optedOut.currentVersion }
+      ])
+      expect(batch.map((item) => [item.name, item.publicationEligibility, item.publicationSource])).toEqual([
+        ['alpha', 'APPROVED', 'MANUAL'],
+        ['delta', 'APPROVED', 'MANUAL']
+      ])
+    } finally { store.close() }
+  })
 })
 

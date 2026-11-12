@@ -106,4 +106,45 @@ describe('Academy MCP administration', () => {
     expect(JSON.parse(textContent(listed.content[0]))).toEqual([])
     service.close()
   })
+
+  it('enforces single-consent publication preference and batch CAS approval across MCP without exposing preference override', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'academy-mcp-pub-')); roots.push(root)
+    const service = new AcademyService(join(root, 'academy.db'))
+    try {
+      const toolNames = ACADEMY_MCP_TOOLS.map((tool) => tool.name)
+      expect(toolNames).not.toContain('set_academy_publication_preference')
+      expect(toolNames).toContain('approve_academy_publications')
+
+      const createdPrivate = JSON.parse(textContent((await executeAcademyTool(service, 'create_academy_skill', {
+        package: { skillMd: '---\nname: mcp-priv\ndescription: Private\n---\n# Priv\n', artifacts: {} },
+        scope: 'GLOBAL'
+      })).content[0]))
+      expect(createdPrivate.publication).toMatchObject({ included: false, reason: 'PRIVATE_NO_AUTHORIZATION', action: 'APPROVE_PUBLICATION' })
+
+      expect(service.setPublicationPreference(true, true).autoIncludeGlobal).toBe(true)
+
+      const createdAuto = JSON.parse(textContent((await executeAcademyTool(service, 'create_academy_skill', {
+        package: { skillMd: '---\nname: mcp-auto\ndescription: Auto\n---\n# Auto\n', artifacts: {} },
+        scope: 'GLOBAL'
+      })).content[0]))
+      expect(createdAuto.publication).toMatchObject({ included: true, reason: 'APPROVED_BY_PREFERENCE' })
+
+      const createdKeepPrivate = JSON.parse(textContent((await executeAcademyTool(service, 'create_academy_skill', {
+        package: { skillMd: '---\nname: mcp-keep\ndescription: Keep\n---\n# Keep\n', artifacts: {} },
+        scope: 'GLOBAL',
+        keepPrivate: true
+      })).content[0]))
+      expect(createdKeepPrivate.publication).toMatchObject({ included: false, reason: 'PRIVATE_BY_CHOICE', action: 'APPROVE_PUBLICATION' })
+
+      const approved = JSON.parse(textContent((await executeAcademyTool(service, 'approve_academy_publications', {
+        items: [
+          { skillId: createdPrivate.id, expectedVersion: 1 },
+          { skillId: createdKeepPrivate.id, expectedVersion: 1 }
+        ],
+        confirmed: true
+      })).content[0]))
+      expect(approved).toHaveLength(2)
+      expect(approved.every((item: { publicationEligibility: string }) => item.publicationEligibility === 'APPROVED')).toBe(true)
+    } finally { await service.close() }
+  })
 })

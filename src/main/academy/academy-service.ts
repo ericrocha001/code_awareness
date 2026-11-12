@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { createTwoFilesPatch } from 'diff'
 import { basename, join, resolve } from 'node:path'
-import type { AcademyConflictBatch, AcademyConflictReview, AcademyCreateInput, AcademyPackage, AcademySnapshot, AcademyUpdateInput, AcademySkillDetail, AcademyMutationReceipt, AcademySkillDeliveryStatus, AcademySkillDeliveryDestinationStatus, AcademyDeliveryConvergence, AcademyDistributionTarget } from '../../shared/types/academy-types'
+import type { AcademyConflictBatch, AcademyConflictReview, AcademyCreateInput, AcademyPackage, AcademySnapshot, AcademyUpdateInput, AcademySkillDetail, AcademyMutationReceipt, AcademySkillDeliveryStatus, AcademySkillDeliveryDestinationStatus, AcademyDeliveryConvergence, AcademyDistributionTarget, AcademyPublicationOutcome } from '../../shared/types/academy-types'
 import { AcademyImporter } from './academy-importer'
 import { AcademyProjectionService } from './academy-projection-service'
 import { AcademyStore } from './academy-store'
@@ -19,6 +19,7 @@ import type { AcademyOpenAiRelease } from '../../shared/types/academy-types'
 import { analyzeAcademyImpact, verifyAcademyImpact } from './academy-impact'
 import type { AcademyDraftReceipt, AcademyHistoryOptions, AcademyHistoryResult, AcademySkillVersion, AcademySkillVersionMetadata } from '../../shared/types/academy-types'
 
+const PUBLICATION_CONSENT_VERSION = 'auto-include-global-skills/v1'
 const TARGETS: AcademyDistributionTarget[] = ['FILESYSTEM_NATIVE', 'CLAUDE_CODE', 'ANTIGRAVITY']
 
 export class AcademyService {
@@ -207,6 +208,12 @@ export class AcademyService {
     }
   }
 
+  describePublication(value: AcademySkillDetail): AcademyPublicationOutcome {
+    if (value.scope !== 'GLOBAL') return { included: false, reason: 'PROJECT_SCOPE' }
+    if (value.publicationEligibility === 'APPROVED') return { included: true, reason: value.publicationSource === 'AUTO_PREFERENCE' ? 'APPROVED_BY_PREFERENCE' : 'APPROVED_EXPLICITLY' }
+    return { included: false, reason: this.store.getPublicationPreference().autoIncludeGlobal ? 'PRIVATE_BY_CHOICE' : 'PRIVATE_NO_AUTHORIZATION', action: 'APPROVE_PUBLICATION' }
+  }
+
   private immediateReceipt(value: AcademySkillDetail): AcademyMutationReceipt {
     const destinations = this.store.listDestinations().filter(
       destination => destination.enabled && this.store.isAssigned(value.id, destination.id)
@@ -221,6 +228,7 @@ export class AcademyService {
       scope: value.scope,
       catalogRevision: value.catalogRevision,
       publicationEligibility: value.publicationEligibility,
+      publication: this.describePublication(value),
       projectIds: value.projectIds,
       distribution: { status: distributionStatus }
     }
@@ -281,6 +289,25 @@ export class AcademyService {
     this.emitCanonicalChange()
     this.gitSync?.scheduleLocalChange()
     return skill
+  }
+
+  approvePublicSkills(items: Array<{ skillId: string; expectedVersion: number }>, confirmed: boolean) {
+    this.assertNotClosed()
+    if (confirmed !== true) throw new AcademyError('PUBLICATION_ELIGIBILITY_APPROVAL_REQUIRED')
+    const skills = this.store.approvePublicSkills(items)
+    this.emitCanonicalChange()
+    this.gitSync?.scheduleLocalChange()
+    return skills
+  }
+
+  getPublicationPreference() { return this.store.getPublicationPreference() }
+
+  setPublicationPreference(enabled: boolean, confirmed: boolean) {
+    this.assertNotClosed()
+    if (typeof enabled !== 'boolean' || enabled && confirmed !== true) throw new AcademyError('PUBLICATION_PREFERENCE_AUTHORIZATION_REQUIRED')
+    const value = this.store.setPublicationPreference(enabled, 'ELECTRON_OPERATOR', PUBLICATION_CONSENT_VERSION)
+    this.emitCanonicalChange()
+    return value
   }
 
   deleteGlobalSkill(skillId: string, expectedVersion: number, confirmed: boolean) {

@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { mkdir } from 'node:fs/promises'
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdir, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import type { AcademyCreateInput, AcademyDraftReceipt, AcademyGitConflictReview, AcademyGitPublicationState, AcademyGitStatusProjection, AcademyGitSyncState, AcademyUpdateInput } from '../../../shared/types/academy-types'
 import type { AcademyGitBuildSource, AcademyGitSourceSnapshot } from '../../../shared/types/academy-git-source-types'
@@ -29,6 +29,47 @@ export interface AcademyGitRepositoryPort {
   listEligibleRepositories(): RepositoryRecord[]
 }
 export interface AcademyDestinationExcluder { excludeDestination(checkoutPath: string): Promise<void> }
+
+interface PorcelainStatusEntry {
+  xy: string
+  path: string
+  origPath?: string
+}
+
+function parsePorcelainStatusZ(output: string): PorcelainStatusEntry[] {
+  const tokens = output.split('\0')
+  const entries: PorcelainStatusEntry[] = []
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]
+    if (!token || token.length < 4) continue
+    const xy = token.slice(0, 2)
+    const path = token.slice(3)
+    let origPath: string | undefined
+    if (xy[0] === 'R' || xy[0] === 'C' || xy[1] === 'R' || xy[1] === 'C') {
+      origPath = tokens[++i]
+    }
+    entries.push({ xy, path, origPath })
+  }
+  return entries
+}
+
+function isAcademyAuthoredPath(relativePath: string): boolean {
+  if (!relativePath || relativePath.includes('\\') || relativePath.split('/').some(segment => !segment || segment === '.' || segment === '..')) return false
+  return relativePath === IDENTITY_PATH || relativePath === 'plugin.json' || relativePath === 'assets/logo.png' || relativePath.startsWith('skills/')
+}
+
+const NON_RETRYABLE_SYNC_ERRORS = new Set([
+  'WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED',
+  'PUBLICATION_ELIGIBILITY_APPROVAL_REQUIRED',
+  'GIT_MIGRATION_RECONCILIATION_REQUIRED',
+  'GIT_WORKSPACE_CONFLICT_REVIEW_REQUIRED',
+  'GIT_RESOLUTION_REVIEW_REQUIRED',
+  'REMOTE_CHANGED_REVIEW_REQUIRED',
+  'CONFIRMATION_REQUIRED',
+  'ACADEMY_CUTOVER_PENDING',
+  'VERSION_CONFLICT',
+  'AUTOMATION_AUTHORIZATION_STALE'
+])
 
 export function projectAcademyGitStatus(status: AcademyGitStatusProjection) {
   return { state: status.syncState, repositoryId: status.profile?.githubRepositoryId ?? null, branch: status.profile?.branch ?? null,
@@ -60,12 +101,23 @@ export class AcademyGitSyncService {
     this.localChangePending = true
     if (this.localChange) return
     this.localChange = Promise.resolve().then(async () => {
+      let retries = 0
       while (this.localChangePending && !this.closing) {
         this.localChangePending = false
-        const before = this.store.getGitAuthority()?.processedCommitSha
+        const beforeCommit = this.store.getGitAuthority()?.processedCommitSha
+        const beforeRevision = this.store.getConvergenceCheckpoint()?.revision ?? null
         const status = await this.publish()
-        if (status.lastError || ['CONFLICT', 'PR_PENDING', 'OFFLINE'].includes(status.syncState)) break
-        if (status.convergence?.pending && this.store.getGitAuthority()?.processedCommitSha !== before) this.localChangePending = true
+        if (['CONFLICT', 'PR_PENDING', 'OFFLINE'].includes(status.syncState)) break
+        if (status.lastError) {
+          if (NON_RETRYABLE_SYNC_ERRORS.has(status.lastError) || status.lastError.startsWith('KNOWN_SECRET:') || retries >= 3) break
+          retries += 1
+          await new Promise((resolve) => setTimeout(resolve, 40 * retries))
+          if (!this.closing) this.localChangePending = true
+          continue
+        }
+        const progressed = this.store.getGitAuthority()?.processedCommitSha !== beforeCommit || (this.store.getConvergenceCheckpoint()?.revision ?? null) !== beforeRevision
+        if (progressed) retries = 0
+        if (status.convergence?.pending && progressed) this.localChangePending = true
       }
     }).catch(() => {}).finally(() => { this.localChange = null })
   }
@@ -125,12 +177,25 @@ export class AcademyGitSyncService {
       confirmedAt: publication?.verifiedAt ?? null, result: publication?.businessState ?? 'UNKNOWN' as const,
       autoPublish: publication?.autoPublish ?? false, autoUpdate: publication?.autoUpdate ?? false, localHead: publication?.localHead ?? null } : null
     const checkpoint = this.store.getConvergenceCheckpoint()
-    const pending = this.store.usesLocalAuthority() && (!checkpoint || checkpoint.fingerprint !== this.store.replicatedFingerprint())
+    const authority = this.store.getGitAuthority()
+    const checkpointValid = Boolean(
+      checkpoint &&
+      profile &&
+      authority &&
+      authority.repositoryId === profile.githubRepositoryId &&
+      checkpoint.repositoryId === profile.githubRepositoryId &&
+      checkpoint.branch === profile.branch &&
+      checkpoint.commit === publication?.remoteHead &&
+      checkpoint.revision === this.store.catalogRevision() &&
+      checkpoint.fingerprint === this.store.replicatedFingerprint()
+    )
+    const pending = this.store.usesLocalAuthority() && !checkpointValid
     const freshness = this.check.state !== 'OK' ? 'UNVERIFIED' : !this.observation || Date.now() - this.observation.at > 30000 ? 'STALE_OBSERVATION' : 'OBSERVED'
+    const verifiedSynced = freshness === 'OBSERVED' && publication?.localHead === publication?.remoteHead && (!this.store.usesLocalAuthority() || checkpointValid) && !this.operationError
     return { profile, publication, convergence: { localRevision: this.store.catalogRevision(), lastConvergedRevision: checkpoint?.revision ?? null,
       pending, freshness, cutover: this.store.usesLocalAuthority() ? 'LOCAL' : 'PENDING' }, repository: record && profile ? { id: record.id, name: record.name, fullName: record.github?.fullName ?? record.name,
       visibility: record.github?.visibility ?? 'PUBLIC', checkoutPath: publication?.migrationComplete ? publication.workspacePath! : publication?.migrationCandidatePath ?? '', branch: profile.branch } : null,
-      syncState: this.check.state === 'FAILED' ? 'OFFLINE' : publication?.businessState === 'CONFLICT' || publication?.businessState === 'PR_PENDING' ? publication.businessState : pending ? 'LOCAL_CHANGES' : publication?.businessState === 'SYNCED' && freshness !== 'OBSERVED' ? 'UNKNOWN' : publication?.businessState ?? (profile ? 'UNKNOWN' : 'UNCONFIGURED'), lastSyncAt: publication?.verifiedAt ?? null,
+      syncState: this.check.state === 'FAILED' ? 'OFFLINE' : publication?.businessState === 'CONFLICT' || publication?.businessState === 'PR_PENDING' ? publication.businessState : pending ? 'LOCAL_CHANGES' : publication?.businessState === 'SYNCED' && !verifiedSynced ? 'UNKNOWN' : publication?.businessState ?? (profile ? 'UNKNOWN' : 'UNCONFIGURED'), lastSyncAt: publication?.verifiedAt ?? null,
       lastCommitSha: this.store.getGitAuthority()?.repositoryId === profile?.githubRepositoryId ? this.store.getGitAuthority()?.processedCommitSha ?? null : null,
       lastError: this.operationError ?? this.check.error ?? profile?.lastError ?? null,
       lastKnown, remoteCheck: { ...this.check }, provenance: 'ACADEMY_SQLITE',
@@ -299,7 +364,12 @@ export class AcademyGitSyncService {
       state.conflictPaths = await this.git.unmergedPaths(root)
       state.phase = 'CONFLICT'; this.save(state, 'CONFLICT', 'GIT_RESOLUTION_REVIEW_REQUIRED'); return
     }
-    if (await this.git.getOperationsStatus(root)) { this.save(state, 'LOCAL_CHANGES', 'WORKSPACE_UNCOMMITTED_RECOVERY_REQUIRED'); return }
+    if (await this.git.getOperationsStatus(root)) {
+      const recovery = await this.recoverWorkspace(state, snapshot)
+      if (recovery === 'EXTERNAL') { this.save(state, 'LOCAL_CHANGES', 'WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED'); return }
+      if (recovery === 'UNRECOVERABLE' || await this.git.getOperationsStatus(root)) { this.save(state, 'LOCAL_CHANGES', 'WORKSPACE_UNCOMMITTED_RECOVERY_REQUIRED'); return }
+      if (state.businessState === 'SYNCED') return
+    }
     state.localHead = await this.git.resolveCommit(root, 'HEAD')
     if (state.localHead === snapshot.sourceCommitSha) {
       state.pendingCommit = null
@@ -330,11 +400,7 @@ export class AcademyGitSyncService {
     })
   }
 
-  private async prepareLocalCommit(state: AcademyGitPublicationState, snapshot: AcademyGitSourceSnapshot): Promise<void> {
-    if (!state.migrationComplete) return
-    const root = state.workspacePath!
-    if (!this.store.usesLocalAuthority()) return
-    if (state.localHead !== snapshot.sourceCommitSha || await this.git.getOperationsStatus(root)) return
+  private buildDesiredLocalCatalog(snapshot: AcademyGitSourceSnapshot) {
     const catalog = this.store.localIdentityCatalog()
     const conflicts = new Set(this.store.listConflicts().filter(conflict => conflict.origin === 'GIT').map(conflict => conflict.skillId))
     if (conflicts.size) {
@@ -356,34 +422,136 @@ export class AcademyGitSyncService {
     const metadata = this.store.localAuthoredMetadata()
     const paths = [...new Set([...snapshot.skills.map(skill => skill.path), ...entries.map(skill => `skills/${skill.name}`), IDENTITY_PATH,
       ...(metadata && !this.store.hasManifestConflict() ? ['plugin.json', ...(metadata.logo || snapshot.authoredFiles['assets/logo.png'] ? ['assets/logo.png'] : [])] : [])])]
-    assertPublicationPaths(root, [...paths, '.git'])
-    await new AcademyGitMaterializer().materialize(root, entries)
-    await mkdir(join(root, '.academy'), { recursive: true })
+    const expectedFiles = new Map<string, Buffer | null>()
+    for (const entry of entries) {
+      expectedFiles.set(`skills/${entry.name}/SKILL.md`, Buffer.from(entry.package.skillMd, 'utf8'))
+      for (const [relativePath, text] of Object.entries(entry.package.artifacts)) {
+        expectedFiles.set(`skills/${entry.name}/${relativePath}`, Buffer.from(text, 'utf8'))
+      }
+    }
     const sealedFiles = new Map<string, Buffer | null>([[IDENTITY_PATH, Buffer.from(canonicalJson(catalog) + '\n')]])
-    writeFileSync(join(root, IDENTITY_PATH), sealedFiles.get(IDENTITY_PATH)!)
+    expectedFiles.set(IDENTITY_PATH, sealedFiles.get(IDENTITY_PATH)!)
     if (metadata && !this.store.hasManifestConflict()) {
       const version = this.store.getCurrentPluginPackageRevision()?.version ?? this.store.getOpenAiPluginProfile()?.publishedVersion ?? JSON.parse(Buffer.from(snapshot.authoredFiles['plugin.json'], 'base64').toString('utf8')).version
       const manifestBytes = Buffer.from(canonicalJson({ ...metadata.manifest, version }) + '\n')
       sealedFiles.set('plugin.json', manifestBytes)
-      writeFileSync(join(root, 'plugin.json'), manifestBytes)
+      expectedFiles.set('plugin.json', manifestBytes)
       if (metadata.logo) {
-        await mkdir(join(root, 'assets'), { recursive: true })
         const logoBytes = Buffer.from(metadata.logo, 'base64')
         sealedFiles.set('assets/logo.png', logoBytes)
-        writeFileSync(join(root, 'assets/logo.png'), logoBytes)
+        expectedFiles.set('assets/logo.png', logoBytes)
       } else if (snapshot.authoredFiles['assets/logo.png']) {
         sealedFiles.set('assets/logo.png', null)
-        if (existsSync(join(root, 'assets/logo.png'))) await import('node:fs/promises').then(fs => fs.unlink(join(root, 'assets/logo.png')))
+        expectedFiles.set('assets/logo.png', null)
       }
     }
-    await this.git.stagePaths(root, paths)
+    return { revision, entries, metadata, paths, sealedFiles, expectedFiles }
+  }
+
+  private async applyLocalCatalog(
+    state: AcademyGitPublicationState,
+    snapshot: AcademyGitSourceSnapshot,
+    desired: ReturnType<AcademyGitSyncService['buildDesiredLocalCatalog']>,
+    extraPaths: string[] = []
+  ): Promise<{ staged: string; indexRevision: string; expectedHead: string | null }> {
+    const root = state.workspacePath!
+    const expectedHead = await this.git.resolveCommit(root, 'HEAD')
+    const allPaths = [...new Set([...desired.paths, ...extraPaths])]
+    assertPublicationPaths(root, [...allPaths, '.git'])
+    await new AcademyGitMaterializer().materialize(root, desired.entries)
+    await mkdir(join(root, '.academy'), { recursive: true })
+    writeFileSync(join(root, IDENTITY_PATH), desired.sealedFiles.get(IDENTITY_PATH)!)
+    if (desired.metadata && !this.store.hasManifestConflict()) {
+      writeFileSync(join(root, 'plugin.json'), desired.sealedFiles.get('plugin.json')!)
+      const logoBytes = desired.sealedFiles.get('assets/logo.png')
+      if (logoBytes) {
+        await mkdir(join(root, 'assets'), { recursive: true })
+        writeFileSync(join(root, 'assets/logo.png'), logoBytes)
+      } else if (logoBytes === null && existsSync(join(root, 'assets/logo.png'))) {
+        await unlink(join(root, 'assets/logo.png'))
+      }
+    }
+    await this.git.stagePaths(root, allPaths)
     const indexRevision = await this.git.getIndexRevision(root)
     const tree = await this.git.writeIndexTree(root)
-    for (const entry of entries) await verifyStagedAcademyPackage(this.git, root, tree, entry.name, entry.package)
-    for (const [path, bytes] of sealedFiles) await verifyStagedAcademyFile(this.git, root, tree, path, bytes)
-    if (this.store.catalogRevision() !== revision) throw new AcademyError('ACADEMY_LOCAL_REVISION_CHANGED')
-    const staged = await this.git.readManagedTree(root, tree, ACADEMY_AUTHORED_PATHS)
-    if (sha256(staged) === snapshot.managedTreeHash) { this.store.confirmConvergence(snapshot); await this.classify(state, snapshot); return }
+    for (const entry of desired.entries) await verifyStagedAcademyPackage(this.git, root, tree, entry.name, entry.package)
+    for (const [path, bytes] of desired.sealedFiles) await verifyStagedAcademyFile(this.git, root, tree, path, bytes)
+    if (this.store.catalogRevision() !== desired.revision || await this.git.resolveCommit(root, 'HEAD') !== expectedHead) throw new AcademyError('ACADEMY_LOCAL_REVISION_CHANGED')
+    return { staged: await this.git.readManagedTree(root, tree, ACADEMY_AUTHORED_PATHS), indexRevision, expectedHead }
+  }
+
+  private async recoverWorkspace(state: AcademyGitPublicationState, snapshot: AcademyGitSourceSnapshot): Promise<'CLEAN' | 'RECOVERED' | 'EXTERNAL' | 'UNRECOVERABLE'> {
+    const root = state.workspacePath!
+    const statusOutput = await this.git.getOperationsStatus(root)
+    if (!statusOutput) return 'CLEAN'
+    const dirtyEntries = parsePorcelainStatusZ(statusOutput)
+    if (!dirtyEntries.length) return 'UNRECOVERABLE'
+    const dirtyPaths: string[] = []
+    for (const entry of dirtyEntries) {
+      if (entry.xy.includes('U') || entry.xy === 'DD' || entry.xy === 'AA') return 'EXTERNAL'
+      if (!isAcademyAuthoredPath(entry.path) || (entry.origPath && !isAcademyAuthoredPath(entry.origPath))) return 'EXTERNAL'
+      dirtyPaths.push(entry.path)
+      if (entry.origPath) dirtyPaths.push(entry.origPath)
+    }
+    const desired = this.store.usesLocalAuthority() ? this.buildDesiredLocalCatalog(snapshot) : null
+    const headCommit = await this.git.resolveCommit(root, 'HEAD')
+    for (const entryPath of dirtyPaths) {
+      const fullPath = join(root, entryPath)
+      const exists = existsSync(fullPath)
+      if (exists && lstatSync(fullPath).isSymbolicLink()) return 'EXTERNAL'
+      const diskBytes = exists ? readFileSync(fullPath) : null
+      const headBytes = headCommit ? await this.git.readCommitFile(root, headCommit, entryPath, 8 * 1024 * 1024) : null
+      const desiredBytes = desired ? desired.expectedFiles.get(entryPath) : undefined
+      if (diskBytes === null) {
+        if (!desired || (desiredBytes !== undefined && desiredBytes !== null)) return 'EXTERNAL'
+        continue
+      }
+      const matchesDesired = Boolean(desiredBytes && diskBytes.equals(desiredBytes))
+      const matchesHead = Boolean(headBytes && diskBytes.equals(headBytes))
+      if (!matchesDesired && !matchesHead) return 'EXTERNAL'
+    }
+    if (!desired) {
+      await this.git.stagePaths(root, [...new Set(dirtyPaths)])
+      return (await this.git.getOperationsStatus(root)) ? 'UNRECOVERABLE' : 'RECOVERED'
+    }
+    try {
+      const { staged, indexRevision, expectedHead } = await this.applyLocalCatalog(state, snapshot, desired, dirtyPaths)
+      if (sha256(staged) === snapshot.managedTreeHash && expectedHead === snapshot.sourceCommitSha) {
+        if (await this.git.getOperationsStatus(root)) return 'UNRECOVERABLE'
+        state.localHead = expectedHead
+        state.pendingCommit = null
+        this.save(state, this.store.confirmConvergence(snapshot) ? 'SYNCED' : 'LOCAL_CHANGES')
+        return 'RECOVERED'
+      }
+      if (!expectedHead || (expectedHead !== snapshot.sourceCommitSha && !await this.git.isAncestor(root, snapshot.sourceCommitSha, expectedHead))) {
+        return 'UNRECOVERABLE'
+      }
+      state.localHead = await this.git.commitInspectedIndex(root, 'Academy: reconcile local catalog', expectedHead, indexRevision)
+      state.pendingCommit = state.localHead
+      if (await this.git.getOperationsStatus(root)) return 'UNRECOVERABLE'
+      this.save(state, 'LOCAL_CHANGES')
+      return 'RECOVERED'
+    } catch {
+      return 'UNRECOVERABLE'
+    }
+  }
+
+  private async prepareLocalCommit(state: AcademyGitPublicationState, snapshot: AcademyGitSourceSnapshot): Promise<void> {
+    if (!state.migrationComplete) return
+    const root = state.workspacePath!
+    if (!this.store.usesLocalAuthority()) return
+    if (state.localHead !== snapshot.sourceCommitSha || await this.git.getOperationsStatus(root)) return
+    const desired = this.buildDesiredLocalCatalog(snapshot)
+    const { staged, indexRevision } = await this.applyLocalCatalog(state, snapshot, desired)
+    if (sha256(staged) === snapshot.managedTreeHash) {
+      if (this.store.confirmConvergence(snapshot)) {
+        state.pendingCommit = null
+        this.save(state, 'SYNCED')
+      } else {
+        await this.classify(state, snapshot)
+      }
+      return
+    }
     state.localHead = await this.git.commitInspectedIndex(root, 'Academy: reconcile local catalog', snapshot.sourceCommitSha, indexRevision)
     state.pendingCommit = state.localHead; this.save(state, 'LOCAL_CHANGES')
   }

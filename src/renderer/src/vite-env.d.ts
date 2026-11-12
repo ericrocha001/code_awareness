@@ -1,6 +1,5 @@
 import type { ContinuumBundleQuick, ContinuumBundleReceipt } from '../../shared/types/continuum-bundle-types'
-import type { AcademyDraftReceipt } from '../../shared/types/academy-types'
-import type { AcademyGitConflictReview } from '../../shared/types/academy-types'
+import type { AcademyDraftReceipt, AcademyGitConflictReview, AcademyPublicationPreference } from '../../shared/types/academy-types'
 import type { BuilderRequest, BuilderPreview, BuilderReceipt, BundleComponent, BundleResult, BundleComposition } from '../../shared/types/continuum-builder-types'
 import type { ContinuumTag, ContinuumTagMutation } from '../../shared/types/continuum-tag-types'
 /*
@@ -84,6 +83,9 @@ declare global {
       getAcademyDraft: (name: string) => Promise<{ package: AcademyPackage | null; workspaceCommitSha: string; sourceBaseCommitSha: string }>
       completeAcademyLocalCutover: (confirmed: boolean) => Promise<AcademyGitStatusProjection>
       approveAcademyPublicSkill: (id: string, version: number, confirmed: boolean) => Promise<AcademySkillDetail>
+      approveAcademyPublicSkills: (items: Array<{ skillId: string; expectedVersion: number }>, confirmed: boolean) => Promise<AcademySkillDetail[]>
+      getAcademyPublicationPreference: () => Promise<AcademyPublicationPreference>
+      setAcademyPublicationPreference: (autoIncludeGlobal: boolean, confirmed: boolean) => Promise<AcademyPublicationPreference>
       deleteAcademyGlobalSkill: (id: string, version: number, confirmed: boolean) => Promise<unknown>
       onAcademyChanged: (callback: (event?: { kind: 'catalog' | 'distribution' | 'git' | 'publication' }) => void) => (() => void)
       publishAcademyGit: (expected: { localHead: string; remoteHead: string | null }) => Promise<AcademyGitStatusProjection>

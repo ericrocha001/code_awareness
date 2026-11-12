@@ -1,55 +1,80 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import type { AcademyPersistedPublication } from '../../../../shared/types/academy-bootstrap-types'
 import type {
-  AcademyConflictReview,
   AcademyConflictBatch,
+  AcademyConflictReview,
   AcademyDistributionHealth,
   AcademyDistributionState,
-  AcademyGitStatusProjection,
+  AcademyDraftReceipt,
   AcademyGitConflictReview,
+  AcademyGitStatusProjection,
   AcademyOpenAiPublicationState,
+  AcademyOpenAiRelease,
   AcademyPackage,
   AcademyPackageDistributionState,
+  AcademyPublicationPreference,
   AcademySkillDetail,
   AcademySkillScope,
-  AcademySnapshot,
-  AcademySkillVersion
+  AcademySkillVersion,
+  AcademySnapshot
 } from '../../../../shared/types/academy-types'
+import type { AcademyManifestPreview } from '../../../../shared/types/academy-publication-types'
 import type { RepositoryRecord } from '../../../../shared/types/repository-catalog-types'
 import {
   AcademyHeader,
+  AcademySettingsDrawer,
+  type AcademySurface,
+  type AcademyTab,
   ArtifactEditor,
   ConfirmationDialog,
   DestinationManager,
-  OperationsRail,
+  PluginOverviewSurface,
+  PluginReviewModal,
   SkillCatalog,
-  SkillWorkspace,
-  type AcademyTab
+  SkillWorkspace
 } from './AcademyPanels'
 import './AcademyView.css'
 import { AcademyConflictInspector } from './AcademyConflicts'
-import { gitPresentation } from './academy-presentation'
 import { useAcademyFocus } from './useAcademyFocus'
-
-const emptyPackage: AcademyPackage = {
-  skillMd: '---\nname: new-skill\ndescription: Describe when this skill should be used.\n---\n\n# New skill\n',
-  artifacts: {}
-}
-
-type ArtifactDraft = { mode: 'create' | 'edit'; originalPath: string | null; path: string; content: string }
-type Confirmation = { title: string; description: string; confirmLabel: string; destructive?: boolean; action: () => Promise<void> | void }
 
 export type AcademyNavigationGuard = (proceed: () => void) => void
 
-export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNavigationGuard | null) => void }> = ({ onNavigationGuardChange }) => {
+interface ArtifactDraft {
+  mode: 'create' | 'edit'
+  originalPath: string | null
+  path: string
+  content: string
+}
+
+interface Confirmation {
+  title: string
+  description: string
+  confirmLabel: string
+  destructive?: boolean
+  onConfirm: () => Promise<void>
+}
+
+const emptyPackage: AcademyPackage = {
+  skillMd: '---\nname: nova-skill\ndescription: Descreva quando usar esta Skill\n---\n\n# Nova Skill\n',
+  artifacts: {}
+}
+
+export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNavigationGuard | null) => void }> = ({
+  onNavigationGuardChange
+}) => {
+  const [surface, setSurface] = useState<AcademySurface>('PLUGIN')
   const [snapshot, setSnapshot] = useState<AcademySnapshot>({ skills: [], destinations: [], conflicts: [] })
   const [selected, setSelected] = useState<AcademySkillDetail | null>(null)
   const [history, setHistory] = useState<AcademySkillVersion[]>([])
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState<'ALL' | 'ACTIVE' | 'DISABLED'>('ALL')
+  const [scopeFilter, setScopeFilter] = useState<'ALL' | AcademySkillScope>('ALL')
   const [activationPending, setActivationPending] = useState<string | null>(null)
   const [packagePending, setPackagePending] = useState(false)
+  const [reviewBusy, setReviewBusy] = useState(false)
+  const [pluginError, setPluginError] = useState<string | null>(null)
   const [scope, setScope] = useState<AcademySkillScope>('GLOBAL')
+  const [keepPrivate, setKeepPrivate] = useState(false)
   const [projectIds, setProjectIds] = useState<string[]>([])
   const [skillMd, setSkillMd] = useState(emptyPackage.skillMd)
   const [artifacts, setArtifacts] = useState<Record<string, string>>({})
@@ -57,7 +82,9 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
   const [distribution, setDistribution] = useState<AcademyDistributionHealth>({ targets: [] })
   const [skillDistribution, setSkillDistribution] = useState<AcademyDistributionState[]>([])
   const [openAiPublication, setOpenAiPublication] = useState<AcademyOpenAiPublicationState | null>(null)
+  const [openAiReleases, setOpenAiReleases] = useState<AcademyOpenAiRelease[]>([])
   const [packageDistribution, setPackageDistribution] = useState<AcademyPackageDistributionState | null>(null)
+  const [publicationPreference, setPublicationPreference] = useState<AcademyPublicationPreference | null>(null)
   const [gitStatus, setGitStatus] = useState<AcademyGitStatusProjection | null>(null)
   const [hydration, setHydration] = useState<'LOADING' | 'READY' | 'ERROR'>('LOADING')
   const [knownPublication, setKnownPublication] = useState<AcademyPersistedPublication | null>(null)
@@ -77,60 +104,102 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
   const [draftCommit, setDraftCommit] = useState<string>()
   const [gitReview, setGitReview] = useState<AcademyGitConflictReview | null>(null)
   const [gitResolution, setGitResolution] = useState('')
-  const [manifestPreview, setManifestPreview] = useState<import('../../../../shared/types/academy-publication-types').AcademyManifestPreview | null>(null)
+  const [manifestPreview, setManifestPreview] = useState<AcademyManifestPreview | null>(null)
   const [activeTab, setActiveTab] = useState<AcademyTab>('skill')
   const [artifactDraft, setArtifactDraft] = useState<ArtifactDraft | null>(null)
   const [destinationsOpen, setDestinationsOpen] = useState(false)
-  const [operationsOpen, setOperationsOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [reviewOpen, setReviewOpen] = useState(false)
+  const [selectedReviewIds, setSelectedReviewIds] = useState<string[]>([])
   const [catalogOpen, setCatalogOpen] = useState(false)
   const [confirmation, setConfirmation] = useState<Confirmation | null>(null)
   const [conflictReview, setConflictReview] = useState<AcademyConflictReview | null>(null)
   const [conflictBatch, setConflictBatch] = useState<AcademyConflictBatch | null>(null)
   const [conflictBusy, setConflictBusy] = useState(false)
-  latestSelection.current = { id: selected?.id, isEditing }
+
   const draftValue = JSON.stringify({ skillMd, artifacts, scope, projectIds })
   const dirty = isEditing && draftValue !== editBaseline
-  const artifactDirty = Boolean(artifactDraft && (artifactDraft.path !== (artifactDraft.originalPath ?? '') || artifactDraft.content !== (artifactDraft.originalPath ? artifacts[artifactDraft.originalPath] : '')))
+  const artifactDirty = Boolean(
+    artifactDraft &&
+    (artifactDraft.path !== (artifactDraft.originalPath ?? '') ||
+      artifactDraft.content !== (artifactDraft.originalPath ? artifacts[artifactDraft.originalPath] : ''))
+  )
+
   const closeArtifact = () => {
-    if (artifactDirty) setConfirmation({ title: 'Descartar alterações do arquivo?', description: 'As alterações deste arquivo ainda não foram aplicadas ao draft da Skill.', confirmLabel: 'Descartar arquivo', destructive: true, action: () => setArtifactDraft(null) })
-    else setArtifactDraft(null)
+    if (!artifactDirty) { setArtifactDraft(null); return }
+    setConfirmation({
+      title: 'Descartar alterações do artefato?',
+      description: 'O artefato editado tem alterações não aplicadas.',
+      confirmLabel: 'Descartar',
+      destructive: true,
+      onConfirm: async () => setArtifactDraft(null)
+    })
   }
-  const modalKey = confirmation ? 'confirm' : artifactDraft ? 'artifact' : destinationsOpen ? 'destinations' : manifestPreview ? 'manifest' : gitReview ? 'git' : conflictReview || conflictBatch ? 'conflict' : ''
-  useAcademyFocus(modalKey, confirmation ? '[role="alertdialog"]' : '[role="dialog"]', () => {
-    if (confirmation) setConfirmation(null)
-    else if (artifactDraft) closeArtifact()
-    else if (destinationsOpen) setDestinationsOpen(false)
-    else if (manifestPreview) setManifestPreview(null)
-    else if (gitReview) setGitReview(null)
-    else { setConflictReview(null); setConflictBatch(null) }
+
+  const modalKey = confirmation
+    ? 'confirm'
+    : artifactDraft
+      ? 'artifact'
+      : destinationsOpen
+        ? 'destinations'
+        : manifestPreview
+          ? 'manifest'
+          : gitReview
+            ? 'git'
+            : conflictReview || conflictBatch
+              ? 'conflict'
+              : reviewOpen
+                ? 'review'
+                : settingsOpen
+                  ? 'settings'
+                  : catalogOpen
+                    ? 'catalog'
+                    : ''
+
+  useAcademyFocus(modalKey, 'input, textarea, select, button', () => {
+    if (confirmation) { setConfirmation(null); return }
+    if (artifactDraft) { closeArtifact(); return }
+    if (destinationsOpen) { setDestinationsOpen(false); return }
+    if (manifestPreview) { setManifestPreview(null); return }
+    if (gitReview) { setGitReview(null); return }
+    if (conflictReview || conflictBatch) { setConflictReview(null); setConflictBatch(null); return }
+    if (reviewOpen) { setReviewOpen(false); return }
+    if (settingsOpen) { setSettingsOpen(false); return }
+    if (catalogOpen) setCatalogOpen(false)
   })
-  useAcademyFocus(!modalKey && operationsOpen && window.matchMedia?.('(max-width: 1279px)').matches ? 'operations' : '', '.academy-operations', () => setOperationsOpen(false))
-  useAcademyFocus(!modalKey && catalogOpen && window.matchMedia?.('(max-width: 720px)').matches ? 'catalog' : '', '.academy-catalog', () => setCatalogOpen(false))
 
   const guardDraft = (proceed: () => void) => {
-    if (saving) return
     if (!dirty && !artifactDirty) { proceed(); return }
-    setConfirmation({ title: 'Descartar alterações não salvas?', description: 'O texto e os arquivos alterados ainda não foram persistidos. Volte à edição para salvar ou confirme o descarte.', confirmLabel: 'Descartar alterações', destructive: true, action: proceed })
+    setConfirmation({
+      title: 'Descartar alterações não salvas?',
+      description: 'As alterações no rascunho atual serão perdidas.',
+      confirmLabel: 'Descartar',
+      destructive: true,
+      onConfirm: async () => { setArtifactDraft(null); setIsEditing(false); proceed() }
+    })
   }
 
   useEffect(() => {
-    onNavigationGuardChange?.(guardDraft)
-    const beforeUnload = (event: BeforeUnloadEvent) => { if (dirty || artifactDirty || saving) { event.preventDefault(); event.returnValue = '' } }
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      if (dirty || artifactDirty || saving) { event.preventDefault(); event.returnValue = '' }
+    }
     window.addEventListener('beforeunload', beforeUnload)
-    return () => { onNavigationGuardChange?.(null); window.removeEventListener('beforeunload', beforeUnload) }
-  }, [dirty, artifactDirty, saving, onNavigationGuardChange])
+    return () => window.removeEventListener('beforeunload', beforeUnload)
+  }, [dirty, artifactDirty, saving])
 
   const showMessage = (text: string, kind: 'success' | 'error' = 'success') => setMessage({ text, kind })
   const reportError = (error: unknown) => showMessage(error instanceof Error ? error.message : String(error), 'error')
 
   useEffect(() => {
-    if (!message || message.kind === 'error') return
+    if (!message) return
     const timer = window.setTimeout(() => setMessage(null), 4500)
     return () => window.clearTimeout(timer)
   }, [message])
 
   const applyGit = (next: AcademyGitStatusProjection) => setGitStatus(current => {
-    if ((next.remoteCheck?.generation ?? 0) < (current?.remoteCheck?.generation ?? 0)) return current
+    const cur = current?.remoteCheck, nxt = next.remoteCheck
+    if (cur && nxt && nxt.generation < cur.generation) return current
+    if (cur && nxt && nxt.generation === cur.generation && cur.state === 'FAILED' && nxt.state === 'CHECKING') return current
     return next
   })
 
@@ -139,456 +208,886 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     try {
       const value = await read()
       if (mounted.current && sequences.current[key] === sequence) apply(value)
-    } catch (error) { if (mounted.current && sequences.current[key] === sequence) throw error }
+    } catch {}
   }
 
   const loadSkill = async (id: string, preserveEdits = false) => {
     const sequence = sequences.current.detail = (sequences.current.detail ?? 0) + 1
     const detail = await window.codeAwareness.getAcademySkill(id)
-    if (!mounted.current || sequences.current.detail !== sequence || preserveEdits && latestSelection.current.isEditing) return detail
+    if (!mounted.current || sequences.current.detail !== sequence) return
     setSelected(detail)
-    setSkillMd(detail.current.package.skillMd)
-    setArtifacts(detail.current.package.artifacts)
-    setScope(detail.scope)
-    setProjectIds(detail.projectIds)
-    const [versions, states] = await Promise.all([window.codeAwareness.getAcademyHistory(id), window.codeAwareness.listAcademyDistributionStates(id)])
-    if (mounted.current && sequences.current.detail === sequence) { setHistory(versions); setSkillDistribution(states) }
-    return detail
+    if (!preserveEdits && !latestSelection.current.isEditing) {
+      setScope(detail.scope)
+      setProjectIds(detail.projectIds)
+      setSkillMd(detail.current.package.skillMd)
+      setArtifacts(detail.current.package.artifacts)
+      setIsEditing(false)
+    }
+    const [versions, states] = await Promise.all([
+      window.codeAwareness.getAcademyHistory(id),
+      window.codeAwareness.listAcademyDistributionStates(id)
+    ])
+    if (!mounted.current || sequences.current.detail !== sequence) return
+    setHistory(versions)
+    setSkillDistribution(states)
+  }
+
+  const readSecondaryProjections = (loadReleases = false) => {
+    void readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution)
+    void readProjection('openAi', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication)
+    void readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution)
+    if (window.codeAwareness.getAcademyPublicationPreference) {
+      void readProjection('preference', () => window.codeAwareness.getAcademyPublicationPreference(), setPublicationPreference)
+    }
+    if (loadReleases || settingsOpen) {
+      void readProjection('releases', () => window.codeAwareness.listAcademyOpenAiReleases(), setOpenAiReleases)
+    }
   }
 
   const refresh = async (selectId?: string) => {
-    await Promise.all([
-      readProjection('catalog', () => window.codeAwareness.getAcademySnapshot(), setSnapshot),
-      readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution),
-      readProjection('publication', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication),
-      readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution),
-      readProjection('git', () => window.codeAwareness.getAcademyGitStatus(), applyGit)
+    const sequence = sequences.current.snapshot = (sequences.current.snapshot ?? 0) + 1
+    const [nextSnapshot, nextGit, nextRepos] = await Promise.all([
+      window.codeAwareness.getAcademySnapshot(),
+      window.codeAwareness.getAcademyGitStatus().catch(() => null),
+      window.codeAwareness.listAcademyGitEligibleRepositories().catch(() => [])
     ])
+    if (!mounted.current || sequences.current.snapshot !== sequence) return
+    setSnapshot(nextSnapshot)
+    if (nextGit) {
+      applyGit(nextGit)
+      if (!selectedRepoId && nextGit.repository?.id) setSelectedRepoId(nextGit.repository.id)
+    }
+    setEligibleRepos(nextRepos)
     const id = selectId ?? latestSelection.current.id
-    if (id && !latestSelection.current.isEditing) await loadSkill(id, true)
+    if (id && nextSnapshot.skills.some(item => item.id === id)) {
+      await loadSkill(id, latestSelection.current.isEditing && !selectId)
+    } else if (!latestSelection.current.isEditing) {
+      setSelected(null); setHistory([]); setSkillDistribution([])
+    }
+    readSecondaryProjections()
   }
 
   const observe = () => {
-    if (!painted.current || remoteFlight.current) return
-    remoteFlight.current = window.codeAwareness.checkAcademyGit().then(next => {
-      if (!mounted.current) return
-      applyGit(next)
-      if (!firstRemote.current) {
-        firstRemote.current = true
-        console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'REMOTE_CHECK_COMPLETE', elapsedMs: performance.now() - startedAt.current, state: next.remoteCheck?.state ?? next.syncState, requestId: next.remoteCheck?.requestId }))
+    if (remoteFlight.current) return
+    remoteFlight.current = (async () => {
+      try {
+        const next = await window.codeAwareness.checkAcademyGit()
+        if (mounted.current && next) applyGit(next)
+        if (!firstRemote.current) {
+          firstRemote.current = true
+          console.info('[Academy hydration]', JSON.stringify({
+            initializationId,
+            milestone: 'REMOTE_CHECK_COMPLETE',
+            elapsedMs: performance.now() - startedAt.current,
+            state: next?.remoteCheck?.state ?? next?.syncState,
+            requestId: next?.remoteCheck?.requestId ?? null
+          }))
+          window.dispatchEvent(new CustomEvent('academy:perf', {
+            detail: { phase: 'first-remote-status', durationMs: performance.now() - startedAt.current }
+          }))
+        }
+      } catch (error) {
+        if (!firstRemote.current) {
+          firstRemote.current = true
+          console.info('[Academy hydration]', JSON.stringify({
+            initializationId,
+            milestone: 'REMOTE_CHECK_COMPLETE',
+            elapsedMs: performance.now() - startedAt.current,
+            state: 'FAILED',
+            error: String(error)
+          }))
+        }
+      } finally {
+        remoteFlight.current = null
       }
-    }).catch(error => {
-      if (!firstRemote.current) {
-        firstRemote.current = true
-        console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'REMOTE_CHECK_COMPLETE', elapsedMs: performance.now() - startedAt.current, state: 'FAILED', error: String(error) }))
-      }
-      if (mounted.current) reportError(error)
-    }).finally(() => { remoteFlight.current = null })
+    })()
   }
 
   useEffect(() => {
     mounted.current = true
     const sequence = sequences.current.bootstrap = (sequences.current.bootstrap ?? 0) + 1
-    void window.codeAwareness.getAcademyBootstrapState(initializationId).then(state => {
-      if (!mounted.current || sequences.current.bootstrap !== sequence) return
-      setSnapshot(state.snapshot); applyGit(state.git); setKnownPublication(state.publication); setHydration('READY')
-      console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'STORE_RESPONSE', elapsedMs: performance.now() - startedAt.current, storeDurationMs: state.storeDurationMs, provenance: state.provenance }))
-    }).catch(error => { if (mounted.current && sequences.current.bootstrap === sequence) { setHydration('ERROR'); reportError(error) } })
+    void (async () => {
+      try {
+        const boot = await window.codeAwareness.getAcademyBootstrapState(initializationId)
+        if (!mounted.current || sequences.current.bootstrap !== sequence) return
+        setSnapshot(boot.snapshot)
+        setKnownPublication(boot.publication)
+        applyGit(boot.git)
+        if (boot.git?.repository?.id) setSelectedRepoId(boot.git.repository.id)
+        setHydration('READY')
+        console.info('[Academy hydration]', JSON.stringify({
+          initializationId,
+          milestone: 'STORE_RESPONSE',
+          elapsedMs: performance.now() - startedAt.current,
+          storeDurationMs: boot.storeDurationMs,
+          provenance: boot.provenance
+        }))
+        const firstId = boot.snapshot.skills[0]?.id
+        if (firstId) void loadSkill(firstId)
+        void readProjection('repositories', () => window.codeAwareness.listAcademyGitEligibleRepositories(), repos => {
+          setEligibleRepos(repos)
+          setSelectedRepoId(cur => cur || repos[0]?.id || '')
+        })
+        readSecondaryProjections()
+        observe()
+      } catch (error) {
+        if (!mounted.current) return
+        setHydration('ERROR')
+        reportError(error)
+      }
+    })()
+
     window.addEventListener('focus', observe)
     window.addEventListener('online', observe)
-    return () => { mounted.current = false; painted.current = false; window.removeEventListener('focus', observe); window.removeEventListener('online', observe) }
-  }, [])
+    const unsubscribe = window.codeAwareness.onAcademyChanged?.(event => {
+      if (!event || event.kind === 'git') void readProjection('git', () => window.codeAwareness.getAcademyGitStatus(), applyGit)
+      if (!event || event.kind === 'publication') {
+        void readProjection('openAi', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication)
+        void readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution)
+        if (window.codeAwareness.getAcademyPublicationPreference) {
+          void readProjection('preference', () => window.codeAwareness.getAcademyPublicationPreference(), setPublicationPreference)
+        }
+        void readProjection('releases', () => window.codeAwareness.listAcademyOpenAiReleases(), setOpenAiReleases)
+      }
+      if (!event || event.kind === 'distribution') {
+        void readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution)
+        if (latestSelection.current.id) {
+          void readProjection('skillDistribution', () => window.codeAwareness.listAcademyDistributionStates(latestSelection.current.id), setSkillDistribution)
+        }
+      }
+      if (!event || event.kind === 'catalog') {
+        const sequenceSnapshot = sequences.current.snapshot = (sequences.current.snapshot ?? 0) + 1
+        void window.codeAwareness.getAcademySnapshot().then(nextSnapshot => {
+          if (!mounted.current || sequences.current.snapshot !== sequenceSnapshot) return
+          setSnapshot(nextSnapshot)
+          const id = latestSelection.current.id
+          if (id && !latestSelection.current.isEditing && nextSnapshot.skills.some(item => item.id === id)) void loadSkill(id)
+        }).catch(() => {})
+        void readProjection('openAi', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication)
+      }
+    })
+    return () => {
+      mounted.current = false
+      window.removeEventListener('focus', observe)
+      window.removeEventListener('online', observe)
+      unsubscribe?.()
+    }
+  }, [initializationId])
 
+  useEffect(() => { latestSelection.current = { id: selected?.id, isEditing } }, [selected?.id, isEditing])
   useEffect(() => {
     if (hydration !== 'READY' || painted.current) return
-    let frame = requestAnimationFrame(() => {
-      frame = requestAnimationFrame(() => {
-        if (!mounted.current) return
-        painted.current = true
-        console.info('[Academy hydration]', JSON.stringify({ initializationId, milestone: 'FIRST_USEFUL_PAINT', elapsedMs: performance.now() - startedAt.current }))
-        void Promise.all([
-          readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution),
-          readProjection('publication', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication),
-          readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution),
-          readProjection('repositories', () => window.codeAwareness.listAcademyGitEligibleRepositories(), repos => { setEligibleRepos(repos); setSelectedRepoId(value => value || repos[0]?.id || '') })
-        ]).catch(reportError)
-        observe()
-      })
-    })
-    return () => cancelAnimationFrame(frame)
-  }, [hydration])
-
-  const visible = useMemo(() => snapshot.skills.filter((skill) =>
-    (status === 'ALL' || skill.status === status)
-    && `${skill.name} ${skill.description}`.toLowerCase().includes(query.toLowerCase())
-  ), [snapshot.skills, status, query])
+    painted.current = true
+    console.info('[Academy hydration]', JSON.stringify({
+      initializationId,
+      milestone: 'FIRST_USEFUL_PAINT',
+      elapsedMs: performance.now() - startedAt.current
+    }))
+    window.dispatchEvent(new CustomEvent('academy:perf', {
+      detail: { phase: 'first-paint', durationMs: performance.now() - startedAt.current }
+    }))
+  }, [hydration, initializationId])
 
   useEffect(() => {
-    const pending = new Set<string>()
-    let scheduled = false
-    return window.codeAwareness.onAcademyChanged?.(event => {
-      if (!painted.current) return
-      pending.add(event?.kind ?? 'all')
-      if (scheduled) return
-      scheduled = true
-      queueMicrotask(() => {
-        scheduled = false
-        if (!mounted.current) return
-        const kinds = new Set(pending); pending.clear()
-        const tasks: Promise<unknown>[] = []
-        if (kinds.has('all')) tasks.push(refresh())
-        else {
-          if (kinds.has('git')) tasks.push(readProjection('git', () => window.codeAwareness.getAcademyGitStatus(), applyGit))
-          if (kinds.has('catalog')) {
-            tasks.push(readProjection('catalog', () => window.codeAwareness.getAcademySnapshot(), setSnapshot))
-            if (latestSelection.current.id && !latestSelection.current.isEditing) tasks.push(loadSkill(latestSelection.current.id, true))
-          }
-          if (kinds.has('catalog') || kinds.has('publication')) {
-            tasks.push(readProjection('publication', () => window.codeAwareness.getAcademyOpenAiPublicationState(), setOpenAiPublication))
-            tasks.push(readProjection('package', () => window.codeAwareness.getAcademyPackageDistributionState(), setPackageDistribution))
-          }
-          if (kinds.has('distribution')) tasks.push(readProjection('distribution', () => window.codeAwareness.getAcademyDistributionHealth(), setDistribution))
-        }
-        void Promise.all(tasks).catch(reportError)
-      })
-    })
-  }, [])
+    onNavigationGuardChange?.(dirty || artifactDirty ? guardDraft : null)
+    return () => onNavigationGuardChange?.(null)
+  }, [dirty, artifactDirty, onNavigationGuardChange])
+
+  useEffect(() => {
+    if (settingsOpen) {
+      void readProjection('releases', () => window.codeAwareness.listAcademyOpenAiReleases(), setOpenAiReleases)
+    }
+  }, [settingsOpen])
+
+  useEffect(() => {
+    const excludedIds = new Set((openAiPublication?.coverage?.excluded ?? []).filter(item => item.reason === 'PRIVATE').map(item => item.skillId))
+    setSelectedReviewIds(current => current.filter(id => excludedIds.has(id)))
+  }, [openAiPublication?.coverage?.excluded])
+
+  const visible = useMemo(
+    () => snapshot.skills.filter(skill =>
+      (status === 'ALL' || skill.status === status) &&
+      (scopeFilter === 'ALL' || skill.scope === scopeFilter) &&
+      (!query.trim() || skill.name.toLowerCase().includes(query.toLowerCase()) || skill.description.toLowerCase().includes(query.toLowerCase()))
+    ),
+    [snapshot.skills, status, scopeFilter, query]
+  )
 
   const choose = async (id: string) => {
-    const request = sequences.current.selection = (sequences.current.selection ?? 0) + 1
-    sequences.current.edit = (sequences.current.edit ?? 0) + 1
-    latestSelection.current.id = id
-    try {
-      await loadSkill(id)
-      if (!mounted.current || sequences.current.selection !== request) return
-      setIsEditing(false)
-      setActiveTab('skill')
-      setCatalogOpen(false)
-      setMessage(null)
-    } catch (error) { if (mounted.current && sequences.current.selection === request) reportError(error) }
+    setCatalogOpen(false)
+    setActiveTab('skill')
+    setDraftCommit(undefined)
+    await loadSkill(id)
   }
 
   const createNew = () => {
-    for (const key of ['detail', 'selection', 'edit']) sequences.current[key] = (sequences.current[key] ?? 0) + 1
-    setDraftCommit(undefined)
-    setEditBaseline('')
+    setSurface('SKILLS')
+    setCatalogOpen(false)
     setSelected(null)
     setHistory([])
     setSkillDistribution([])
+    setActiveTab('skill')
+    setScope('GLOBAL')
+    setKeepPrivate(false)
+    setProjectIds([])
     setSkillMd(emptyPackage.skillMd)
     setArtifacts({})
-    setScope('GLOBAL')
-    setProjectIds([])
+    setEditBaseline(JSON.stringify({ skillMd: emptyPackage.skillMd, artifacts: {}, scope: 'GLOBAL', projectIds: [] }))
+    setDraftCommit(undefined)
     setIsEditing(true)
-    setActiveTab('skill')
-    setCatalogOpen(false)
-    setMessage(null)
+  }
+
+  const editSkill = async () => {
+    if (!selected) return
+    const gitMode = Boolean(gitStatus?.repository && gitStatus.convergence?.cutover !== 'LOCAL' && selected.scope === 'GLOBAL')
+    if (gitMode) {
+      try {
+        const draft = await window.codeAwareness.getAcademyDraft(selected.name)
+        const pkg = draft.package ?? selected.current.package
+        setScope(selected.scope); setProjectIds(selected.projectIds)
+        setSkillMd(pkg.skillMd); setArtifacts(pkg.artifacts)
+        setEditBaseline(JSON.stringify({ skillMd: pkg.skillMd, artifacts: pkg.artifacts, scope: selected.scope, projectIds: selected.projectIds }))
+        setDraftCommit(draft.workspaceCommitSha); setIsEditing(true); return
+      } catch (error) { reportError(error); return }
+    }
+    setScope(selected.scope)
+    setProjectIds(selected.projectIds)
+    setSkillMd(selected.current.package.skillMd)
+    setArtifacts(selected.current.package.artifacts)
+    setEditBaseline(JSON.stringify({
+      skillMd: selected.current.package.skillMd,
+      artifacts: selected.current.package.artifacts,
+      scope: selected.scope,
+      projectIds: selected.projectIds
+    }))
+    setDraftCommit(undefined)
+    setIsEditing(true)
   }
 
   const cancelEditing = () => {
-    sequences.current.edit = (sequences.current.edit ?? 0) + 1
     if (selected) {
-      setSkillMd(selected.current.package.skillMd)
-      setArtifacts(selected.current.package.artifacts)
       setScope(selected.scope)
       setProjectIds(selected.projectIds)
-      setIsEditing(false)
-      return
+      setSkillMd(selected.current.package.skillMd)
+      setArtifacts(selected.current.package.artifacts)
     }
-    setSkillMd(emptyPackage.skillMd)
-    setArtifacts({})
-    setScope('GLOBAL')
-    setProjectIds([])
+    setDraftCommit(undefined)
     setIsEditing(false)
   }
 
   const save = async () => {
-    if (saving || !dirty) return
+    if (saving || (selected && !dirty)) return
     setSaving(true)
     try {
-      const detail = selected
-        ? await window.codeAwareness.updateAcademySkill({ skillId: selected.id, expectedVersion: selected.currentVersion, expectedDraftCommitSha: draftCommit, package: { skillMd, artifacts }, scope, projectIds })
-        : await window.codeAwareness.createAcademySkill({ expectedDraftCommitSha: draftCommit, package: { skillMd, artifacts }, scope, projectIds })
-      if ('state' in detail && detail.state === 'DRAFT_SAVED') {
-        setDraftCommit(detail.workspaceCommitSha)
-        setEditBaseline(draftValue)
-        showMessage('Rascunho salvo em commit local. Publicação pendente.')
-        applyGit(await window.codeAwareness.getAcademyGitStatus())
+      const result = selected
+        ? await window.codeAwareness.updateAcademySkill({
+          skillId: selected.id,
+          expectedVersion: selected.currentVersion,
+          expectedDraftCommitSha: draftCommit,
+          package: { skillMd, artifacts },
+          scope,
+          projectIds: scope === 'PROJECT' ? projectIds : []
+        })
+        : await window.codeAwareness.createAcademySkill({
+          package: { skillMd, artifacts },
+          scope,
+          projectIds: scope === 'PROJECT' ? projectIds : [],
+          ...(scope === 'GLOBAL' && keepPrivate ? { keepPrivate: true } : {})
+        })
+      setIsEditing(false); setDraftCommit(undefined)
+      if ((result as AcademyDraftReceipt).state === 'DRAFT_SAVED') {
+        const receipt = result as AcademyDraftReceipt
+        showMessage(`Rascunho salvo em revisão no Git (${receipt.workspaceCommitSha.slice(0, 7)}). Versão canônica permanece em v${selected?.currentVersion ?? 1}.`)
+        await refresh(selected?.id)
         return
       }
-      if (!('id' in detail)) return
-      setIsEditing(false)
-      const delivery = await window.codeAwareness.getAcademyDeliveryStatus(detail.id, detail.currentVersion).catch(() => null)
-      const deliveryText = detail.status === 'DISABLED'
-        ? 'Skill desativada; reconciliação local separada'
-        : delivery?.status === 'NOT_APPLICABLE'
-        ? 'sem destinos aplicáveis'
-        : delivery?.status === 'CONVERGED'
-        ? 'distribuída'
-        : 'distribuição pendente'
-      showMessage(`Versão ${detail.currentVersion} salva (${deliveryText}).${detail.publicationEligibility === 'PRIVATE' ? ' Publicação pública requer aprovação explícita.' : ''}`)
+      const detail = result as AcademySkillDetail
       await refresh(detail.id)
+      const deliveryText =
+        detail.publicationEligibility === 'APPROVED'
+          ? 'Incluída para o plugin ChatGPT.'
+          : detail.publicationEligibility === 'PRIVATE'
+            ? 'Salva como privada (fora do plugin até aprovação).'
+            : 'Salva no escopo de projeto.'
+      showMessage(`Versão ${detail.currentVersion} salva. ${deliveryText}`)
     } catch (error) { reportError(error) }
     finally { setSaving(false) }
   }
 
-  const editSkill = async () => {
-    const request = sequences.current.edit = (sequences.current.edit ?? 0) + 1
-    const selectedId = selected?.id
-    try {
-      if (selected?.scope === 'GLOBAL' && selected.catalogRevision === undefined && window.codeAwareness.getAcademyDraft) {
-        const draft = await window.codeAwareness.getAcademyDraft(selected.name)
-        if (!mounted.current || request !== sequences.current.edit || selectedId !== latestSelection.current.id) return
-        setDraftCommit(draft.workspaceCommitSha)
-        if (draft.package) { setSkillMd(draft.package.skillMd); setArtifacts(draft.package.artifacts) }
-        setEditBaseline(JSON.stringify({ skillMd: draft.package?.skillMd ?? skillMd, artifacts: draft.package?.artifacts ?? artifacts, scope, projectIds }))
-      } else {
-        setEditBaseline(draftValue)
-      }
-      setIsEditing(true)
-    } catch (error) { reportError(error) }
-  }
-
-  const requestPublicApproval = () => selected && setConfirmation({ title: `Aprovar publicação de ${selected.name}?`, description: 'Esta autorização permite incluir o conteúdo atual e suas próximas edições no repositório Git e no plugin públicos. Salvar e ativar continuam independentes desta autorização.', confirmLabel: 'Aprovar publicação', action: async () => {
-    await window.codeAwareness.approveAcademyPublicSkill(selected.id, selected.currentVersion, true)
-    await refresh(selected.id)
-  } })
-
-  const requestGitRemoval = async () => {
-    if (!selected) return
-    try {
-      if (gitStatus?.convergence?.cutover === 'LOCAL') {
-        setConfirmation({ title: `Excluir ${selected.name}?`, description: 'A exclusão será persistida localmente com tombstone. Identidade e todas as versões serão preservadas. A sincronização Git é separada.', confirmLabel: 'Excluir Skill', destructive: true, action: async () => {
-          await window.codeAwareness.deleteAcademyGlobalSkill(selected.id, selected.currentVersion, true)
-          await refresh(selected.id)
-        } })
-        return
-      }
-      const draft = await window.codeAwareness.getAcademyDraft(selected.name)
-      setConfirmation({ title: `Preparar remoção de ${selected.name}?`, description: 'A remoção será salva como commit privado. O conteúdo oficial e o histórico permanecem até a publicação na main. A preferência de ativação local é independente.', confirmLabel: 'Salvar remoção no workspace', destructive: true, action: async () => {
-        const result = await window.codeAwareness.deleteAcademyGitDraft({ skillId: selected.id, expectedVersion: selected.currentVersion, expectedDraftCommitSha: draft.workspaceCommitSha, confirmed: true })
-        applyGit(result); showMessage(result.lastError ?? 'Remoção salva; publicação pendente.', result.lastError ? 'error' : 'success')
-      } })
-    } catch (error) { reportError(error) }
-  }
-
-  const setEnabled = async (skill: AcademySkillDetail | AcademySnapshot['skills'][number]) => {
+  const setEnabled = async (item: AcademySkillDetail, expected = item.stateRevision) => {
     if (activationPending) return
-    setActivationPending(skill.id)
+    setActivationPending(item.id)
+    const next = item.status !== 'ACTIVE'
     try {
-      const detail = await window.codeAwareness.setAcademySkillEnabled(skill.id, skill.status !== 'ACTIVE', skill.stateRevision)
-      showMessage(`Skill ${detail.status === 'ACTIVE' ? 'ativada' : 'desativada'}. Reconciliação local agendada; publicação do plugin é separada.`)
-      await refresh(selected?.id)
+      const updated = await window.codeAwareness.setAcademySkillEnabled(item.id, next, expected)
+      setSelected(updated)
+      showMessage(next ? 'Skill ativada.' : 'Skill desativada.')
+      await refresh(item.id)
     } catch (error) {
-      await refresh(selected?.id).catch(() => {})
       reportError(error)
+      if (String(error).includes('STATE_REVISION_CONFLICT')) await refresh(item.id)
     } finally { setActivationPending(null) }
   }
 
-  const openArtifact = (path: string) => {
-    if (path === 'SKILL.md') {
-      setActiveTab('skill')
-      return
-    }
-    if (!isEditing) setEditBaseline(draftValue)
-    setArtifactDraft({ mode: 'edit', originalPath: path, path, content: artifacts[path] })
-  }
-
-  const saveArtifactDraft = () => {
+  const applyArtifact = () => {
     if (!artifactDraft) return
-    const path = artifactDraft.path.trim()
-    if (!path) return
-    if (artifactDraft.mode === 'create' && path in artifacts) {
-      showMessage(`O artefato ${path} já existe.`, 'error')
-      return
-    }
+    const nextPath = artifactDraft.path.trim().replaceAll('\\', '/')
+    if (!nextPath) { showMessage('Informe o caminho do artefato.', 'error'); return }
     const next = { ...artifacts }
-    if (artifactDraft.originalPath && artifactDraft.originalPath !== path) delete next[artifactDraft.originalPath]
-    next[path] = artifactDraft.content
-    setArtifacts(next)
-    setArtifactDraft(null)
-    setIsEditing(true)
-    showMessage('Artefato atualizado no draft.')
+    if (artifactDraft.originalPath && artifactDraft.originalPath !== nextPath) delete next[artifactDraft.originalPath]
+    next[nextPath] = artifactDraft.content
+    setArtifacts(next); setArtifactDraft(null); setIsEditing(true)
   }
 
   const requestRemoveArtifact = () => {
     if (!artifactDraft?.originalPath) return
-    const path = artifactDraft.originalPath
+    const target = artifactDraft.originalPath
     setConfirmation({
       title: 'Remover artefato?',
-      description: `${path} será removido do draft. A alteração só será persistida quando a Skill for salva.`,
+      description: `O artefato "${target}" será removido do rascunho ao salvar.`,
       confirmLabel: 'Remover',
       destructive: true,
-      action: () => {
+      onConfirm: async () => {
         const next = { ...artifacts }
-        delete next[path]
-        setArtifacts(next)
-        setArtifactDraft(null)
-        setIsEditing(true)
+        delete next[target]
+        setArtifacts(next); setArtifactDraft(null); setIsEditing(true)
       }
     })
   }
 
-  const prepareOpenAiRelease = async (sourceCommitSha?: string, force = false) => {
-    if (packagePending) return
-    setPackagePending(true)
-    try {
-      const release = await window.codeAwareness.prepareAcademyOpenAiRelease(sourceCommitSha ? { mode: 'REBUILD', sourceCommitSha } : force ? { mode: 'LATEST', force: true } : { mode: 'LATEST' })
-      showMessage(`Release ${release.pluginVersion}: ${release.status}`)
-      await refresh(selected?.id)
-    } catch (error) { reportError(error) }
-    finally { setPackagePending(false) }
+  const requestGitRemoval = () => {
+    if (!selected || !gitStatus?.publication?.workspacePath) return
+    const target = selected
+    setConfirmation({
+      title: 'Propor remoção no Git?',
+      description: `Cria um draft removendo ${target.name}. O repositório remoto só muda após publish explícito e versões históricas permanecem preservadas.`,
+      confirmLabel: 'Propor remoção',
+      destructive: true,
+      onConfirm: async () => {
+        const draft = await window.codeAwareness.getAcademyDraft(target.name)
+        const next = await window.codeAwareness.deleteAcademyGitDraft({
+          skillId: target.id,
+          expectedVersion: target.currentVersion,
+          expectedDraftCommitSha: draft.workspaceCommitSha,
+          confirmed: true
+        })
+        applyGit(next)
+        await refresh(target.id)
+        showMessage('Remoção proposta no workspace Git.')
+      }
+    })
   }
 
-  const requestConfirmOpenAiUpload = () => {
-    const release = openAiPublication?.selectedRelease
-    if (!release?.artifactHash || release.status !== 'READY_TO_UPLOAD') return
+  const requestPublicApproval = () => {
+    if (!selected) return
+    const target = selected
     setConfirmation({
-      title: 'Confirmar upload manual?',
-      description: `Confirme somente depois de enviar o ZIP ${release.pluginVersion} (${release.artifactHash.slice(0, 12)}…).`,
-      confirmLabel: 'Confirmar upload',
-      action: async () => {
+      title: 'Incluir Skill no plugin ChatGPT?',
+      description: `${target.name} v${target.currentVersion} passará a entrar no ZIP do plugin ChatGPT (e na publicação pública caso o Git esteja conectado).`,
+      confirmLabel: 'Incluir no plugin',
+      onConfirm: async () => {
+        await window.codeAwareness.approveAcademyPublicSkill(target.id, target.currentVersion, true)
+        await refresh(target.id)
+        showMessage(`${target.name} incluída no plugin ChatGPT.`)
+      }
+    })
+  }
+
+  const approveSingleFromReview = async (skillId: string, expectedVersion: number) => {
+    setReviewBusy(true)
+    try {
+      await window.codeAwareness.approveAcademyPublicSkill(skillId, expectedVersion, true)
+      await refresh(selected?.id)
+      showMessage('Skill incluída no plugin ChatGPT.')
+    } catch (error) { reportError(error) }
+    finally { setReviewBusy(false) }
+  }
+
+  const approveBatchFromReview = () => {
+    const excluded = openAiPublication?.coverage?.excluded ?? []
+    const items = excluded
+      .filter(item => item.reason === 'PRIVATE' && selectedReviewIds.includes(item.skillId))
+      .map(item => ({ skillId: item.skillId, expectedVersion: item.version }))
+    if (!items.length || !window.codeAwareness.approveAcademyPublicSkills) return
+    setConfirmation({
+      title: `Incluir ${items.length} Skills no plugin?`,
+      description: 'As Skills selecionadas ficarão elegíveis para o ZIP do plugin ChatGPT e para o catálogo público.',
+      confirmLabel: 'Incluir selecionadas',
+      onConfirm: async () => {
+        setReviewBusy(true)
         try {
-          await window.codeAwareness.confirmAcademyOpenAiUpload(release.id, release.artifactHash!)
-          showMessage('Upload manual registrado como UPLOADED_UNVERIFIED.')
+          await window.codeAwareness.approveAcademyPublicSkills(items, true)
+          setSelectedReviewIds([])
           await refresh(selected?.id)
-        } catch (error) { reportError(error) }
+          showMessage(`${items.length} Skills incluídas no plugin ChatGPT.`)
+        } finally { setReviewBusy(false) }
+      }
+    })
+  }
+
+  const enableSkillFromReview = async (skillId: string) => {
+    const stateRevision = snapshot.skills.find(item => item.id === skillId)?.stateRevision ?? 1
+    setReviewBusy(true)
+    try {
+      await window.codeAwareness.setAcademySkillEnabled(skillId, true, stateRevision)
+      await refresh(selected?.id)
+      showMessage('Skill reativada.')
+    } catch (error) { reportError(error) }
+    finally { setReviewBusy(false) }
+  }
+
+  const requestToggleAutoInclude = (nextEnabled: boolean) => {
+    setConfirmation({
+      title: nextEnabled ? 'Autorizar inclusão automática de novas Skills globais?' : 'Revogar inclusão automática?',
+      description: nextEnabled
+        ? 'Ao confirmar, novas Skills GLOBAL criadas pela UI ou via MCP entrarão automaticamente no plugin ChatGPT (e no catálogo público do Git), exceto se marcadas como privadas. Skills PROJECT permanecem sempre locais. Você pode revogar quando quiser.'
+        : 'Novas Skills globais voltarão a nascer privadas até aprovação individual. Skills já aprovadas continuam incluídas.',
+      confirmLabel: nextEnabled ? 'Ativar autorização única' : 'Revogar autorização',
+      onConfirm: async () => {
+        setReviewBusy(true)
+        try {
+          const updated = await window.codeAwareness.setAcademyPublicationPreference(nextEnabled, true)
+          setPublicationPreference(updated)
+          await refresh(selected?.id)
+          showMessage(nextEnabled ? 'Inclusão automática ativada (UI e MCP).' : 'Inclusão automática revogada.')
+        } finally { setReviewBusy(false) }
+      }
+    })
+  }
+
+  const requestDeleteGlobal = () => {
+    if (!selected) return
+    const target = selected
+    setConfirmation({
+      title: 'Excluir Skill global?',
+      description: `Exclui ${target.name} v${target.currentVersion} do catálogo ativo (histórico imutável permanece preservado).`,
+      confirmLabel: 'Excluir',
+      destructive: true,
+      onConfirm: async () => {
+        await window.codeAwareness.deleteAcademyGlobalSkill(target.id, target.currentVersion, true)
+        setSelected(null)
+        await refresh()
+        showMessage(`${target.name} removida do catálogo global.`)
       }
     })
   }
 
   const handleConfirmation = async () => {
-    const action = confirmation?.action
+    const action = confirmation
     setConfirmation(null)
-    if (action) await action()
+    if (!action) return
+    try { await action.onConfirm() } catch (error) { reportError(error) }
   }
 
-  const requestConflictResolution = (resolution: 'CANONICAL' | 'DIVERGENT') => {
-    if (!conflictReview) return
-    const review = conflictReview
+  const runPluginAction = async (action: () => Promise<void>) => {
+    setPackagePending(true)
+    setPluginError(null)
+    try {
+      await action()
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error)
+      setPluginError(msg)
+      reportError(error)
+    } finally { setPackagePending(false) }
+  }
+
+  const preparePluginRelease = () => void runPluginAction(async () => {
+    const release = await window.codeAwareness.prepareAcademyOpenAiRelease(
+      gitStatus?.repository ? { mode: 'LATEST', force: true } : undefined
+    )
+    readSecondaryProjections(true)
+    showMessage(`ZIP do plugin v${release.pluginVersion} pronto (${release.snapshot.length} Skills).`)
+  })
+
+  const revealPluginRelease = (release: AcademyOpenAiRelease) => void (async () => {
+    try {
+      await window.codeAwareness.revealAcademyOpenAiPackage(release.id)
+    } catch (error) { reportError(error) }
+  })()
+
+  const confirmPluginUpload = (release: AcademyOpenAiRelease) => {
+    if (!release.artifactHash) return
     setConfirmation({
-      title: resolution === 'CANONICAL' ? 'Manter versão canônica?' : 'Adotar divergência como versão canônica?',
-      description: resolution === 'CANONICAL' ? `Manter v${review.currentVersion} de ${review.conflict.skillName} e sincronizar ${review.conflict.projectionPath ?? 'os destinos aplicáveis'}. O conteúdo local revisado será substituído.` : `O conteúdo divergente inspecionado se tornará uma nova versão canônica de ${review.conflict.skillName} e será distribuído aos destinos aplicáveis.`,
-      confirmLabel: resolution === 'CANONICAL' ? 'Confirmar canônica' : 'Confirmar adoção',
-      destructive: resolution === 'DIVERGENT',
-      action: async () => {
-        setConflictBusy(true)
-        try {
-          const detail = await window.codeAwareness.resolveAcademyConflict(review.conflict.id, resolution, undefined, { token: review.token, confirmed: true })
-          setConflictReview(null)
-          await refresh(resolution === 'DIVERGENT' ? detail.id : undefined)
-        } catch (error) { reportError(error) } finally { setConflictBusy(false) }
+      title: 'Confirmar envio manual ao ChatGPT?',
+      description: `Marca a release v${release.pluginVersion} como enviada após você ter feito o upload manual no ChatGPT.`,
+      confirmLabel: 'Confirmar envio',
+      onConfirm: async () => {
+        await window.codeAwareness.confirmAcademyOpenAiUpload(release.id, release.artifactHash!)
+        readSecondaryProjections(true)
+        showMessage(`Envio manual v${release.pluginVersion} registrado (aguardando verificação).`)
       }
     })
   }
 
-  const requestBatchResolution = () => {
-    if (!conflictBatch) return
-    const batch = conflictBatch
-    setConfirmation({ title: 'Confirmar saneamento seguro?', description: `Manter as versões canônicas e resolver ${batch.entries.length} ocorrências certificadas. ${batch.excluded} ocorrências permanecerão para revisão individual.`, confirmLabel: 'Confirmar lote', action: async () => {
-      setConflictBusy(true)
-      try {
-        const result = await window.codeAwareness.resolveAcademyConflictBatch(batch.token, true)
-        showMessage(`${result.resolved} registros resolvidos; ${result.remaining} ocorrências restantes.`)
-        setConflictBatch(null); await refresh()
-      } catch (error) { reportError(error) } finally { setConflictBusy(false) }
-    } })
+  const rebuildRelease = (release: AcademyOpenAiRelease) => {
+    if (!release.source?.sourceCommitSha) return
+    setConfirmation({
+      title: `Reconstruir pacote do commit ${release.source.sourceCommitSha.slice(0, 7)}?`,
+      description: 'Usa o snapshot histórico verificado offline sem mover o catálogo principal.',
+      confirmLabel: 'Reconstruir ZIP',
+      onConfirm: async () => {
+        await runPluginAction(async () => {
+          const rebuilt = await window.codeAwareness.prepareAcademyOpenAiRelease({
+            mode: 'REBUILD',
+            sourceCommitSha: release.source!.sourceCommitSha
+          })
+          readSecondaryProjections(true)
+          showMessage(`Pacote v${rebuilt.pluginVersion} reconstruído (${rebuilt.artifactHash?.slice(0, 8)}).`)
+        })
+      }
+    })
   }
 
-  return <section className="academy-view">
-    {hydration !== 'READY' && <p role="status">{hydration === 'ERROR' ? 'Não foi possível carregar o estado da Academy.' : 'Carregando Academy do estado local…'}</p>}
-    <AcademyHeader conflictCount={snapshot.conflicts.length} onOpenCatalog={() => setCatalogOpen(true)} onOpenOperations={() => setOperationsOpen(true)} />
-    <div className="academy-layout">
-      <SkillCatalog query={query} status={status} onQueryChange={setQuery} onStatusChange={setStatus} onCreate={() => guardDraft(createNew)} skills={visible} selectedId={selected?.id ?? null} open={catalogOpen} onClose={() => setCatalogOpen(false)} onSelect={id => { if (id !== selected?.id) guardDraft(() => void choose(id)) }} />
-      <SkillWorkspace selected={selected} isEditing={isEditing} activeTab={activeTab} skillMd={skillMd} scope={scope} projectIds={projectIds} destinations={snapshot.destinations} history={history} distribution={skillDistribution} onTabChange={setActiveTab} onSkillMdChange={setSkillMd} onScopeChange={setScope} onProjectIdsChange={setProjectIds} onEdit={() => void editSkill()} onSave={() => void save()} onCancel={() => guardDraft(cancelEditing)} activationPending={activationPending !== null} onSetEnabled={() => selected && void setEnabled(selected)} onRemoveFromGit={() => void requestGitRemoval()} onApprovePublic={requestPublicApproval} artifacts={artifacts} onOpenArtifact={openArtifact} onAddArtifact={() => { if (!isEditing) setEditBaseline(draftValue); setArtifactDraft({ mode: 'create', originalPath: null, path: '', content: '' }) }} dirty={dirty} saving={saving} />
-      <OperationsRail
-        hydration={hydration}
-        knownPublication={knownPublication}
-        open={operationsOpen} destinations={snapshot.destinations} conflicts={snapshot.conflicts} distribution={distribution} packageDistribution={packageDistribution} openAiPublication={openAiPublication} gitStatus={gitStatus} eligibleRepos={eligibleRepos} selectedRepoId={selectedRepoId} onSelectedRepoChange={setSelectedRepoId} onClose={() => setOperationsOpen(false)} onOpenDestinations={() => setDestinationsOpen(true)}
-        onReconcile={() => void (async () => { try { await window.codeAwareness.reconcileAcademyDistribution(); showMessage('Distribuição reconciliada.'); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
-        onPrepareRelease={() => void prepareOpenAiRelease()}
-        packagePending={packagePending}
-        onRevalidateRelease={() => void prepareOpenAiRelease(undefined, true)}
-        onRebuildRelease={() => void prepareOpenAiRelease(openAiPublication?.selectedRelease?.source?.sourceCommitSha)}
-        onPrepareManifestVersion={() => void window.codeAwareness.previewAcademyManifestVersion().then(setManifestPreview).catch(reportError)}
-        onBootstrapPlugin={() => void (async () => { try { await window.codeAwareness.bootstrapAcademyOpenAiPlugin(); await refresh(selected?.id) } catch (error) { reportError(error) } })()}
-        onRevealRelease={() => { const release = openAiPublication?.selectedRelease; if (release) void window.codeAwareness.revealAcademyOpenAiPackage(release.id) }}
-        onConfirmUpload={requestConfirmOpenAiUpload}
-        onBindRepository={() => void (async () => { try { applyGit(await window.codeAwareness.bindAcademyGitRepository(selectedRepoId)) } catch (error) { reportError(error) } })()}
-        onSyncGit={() => void (async () => { try { const result = gitStatus?.syncState === 'LOCAL_CHANGES' ? await window.codeAwareness.publishAcademyGit({ localHead: gitStatus.publication!.localHead!, remoteHead: gitStatus.publication!.remoteHead }) : await window.codeAwareness.syncAcademyGitNow(); applyGit(result); await refresh(selected?.id); showMessage(result.lastError ?? gitPresentation(result, 'READY').label, gitPresentation(result, 'READY').tone === 'success' ? 'success' : 'error') } catch (error) { reportError(error) } })()}
-        onGitAutomation={(autoPublish, autoUpdate) => setConfirmation({ title: 'Autorizar sincronização automática?', description: `${gitStatus?.repository?.fullName}:${gitStatus?.profile?.branch}. Publicação de Saves: ${autoPublish ? 'habilitada' : 'desabilitada'}; atualização remota: ${autoUpdate ? 'habilitada' : 'desabilitada'}.`, confirmLabel: 'Salvar preferência', action: async () => {
-          const profile = gitStatus?.profile
-          if (profile) applyGit(await window.codeAwareness.configureAcademyGitAutomation({ autoPublish, autoUpdate, confirmed: true, expectedRepositoryId: profile.githubRepositoryId, expectedBranch: profile.branch }))
-        } })}
-        onOpenGit={() => void window.codeAwareness.openAcademyGitRepository()}
-        onLocalCutover={() => setConfirmation({ title: 'Migrar para edição local?', description: 'O cutover exige main confirmada e workspace sem drafts ou candidatas pendentes. Skills privadas, versões e releases serão preservadas.', confirmLabel: 'Verificar e migrar', action: async () => {
-          const result = await window.codeAwareness.completeAcademyLocalCutover(true)
-          applyGit(result)
-          await refresh(selected?.id)
-          if (result.lastError) reportError(new Error(result.lastError))
-        } })}
-        onPublishCandidate={() => {
-          const head = gitStatus?.publication?.localHead
-          if (!head) return
-          const branch = `academy/edits-${head.slice(0, 12)}`
-          setConfirmation({ title: 'Publicar branch candidata?', description: `${gitStatus?.repository?.fullName}:${branch}. Esta ação publica os commits locais para revisão; não abre nem mescla um PR.`, confirmLabel: 'Publicar branch', action: async () => {
-            const result = await window.codeAwareness.publishAcademyGitCandidate({ branch, expectedHead: head, confirmed: true })
-            applyGit(result); showMessage(result.lastError ?? 'Branch publicada; revisão e PR pendentes.', result.lastError ? 'error' : 'success')
-          } })
+  const gitHasAlert = Boolean(
+    snapshot.conflicts.length > 0 ||
+    gitStatus?.lastError ||
+    gitStatus?.syncState === 'CONFLICT' ||
+    gitStatus?.syncState === 'ERROR' ||
+    (gitStatus?.publication?.conflictPaths?.length ?? 0) > 0
+  )
+
+  return (
+    <div className="academy-view">
+      <AcademyHeader
+        surface={surface}
+        onSurfaceChange={next => {
+          if (next === surface) return
+          guardDraft(() => setSurface(next))
         }}
-        onResolveGitConflict={() => {
-          const state = gitStatus?.publication
-          if (!state || state.phase !== 'CONFLICT') return
-          if (state.migrationComplete) {
+        gitHasAlert={gitHasAlert}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onOpenCatalog={() => setCatalogOpen(true)}
+      />
+
+      {message && <div className={`academy-feedback ${message.kind}`} role="status">{message.text}</div>}
+
+      {surface === 'PLUGIN' ? (
+        <PluginOverviewSurface
+          hydration={hydration}
+          openAiPublication={openAiPublication}
+          preference={publicationPreference}
+          skillCount={snapshot.skills.filter(item => item.scope === 'GLOBAL' && item.status === 'ACTIVE').length}
+          preparing={packagePending}
+          pluginError={pluginError}
+          onPrepareRelease={preparePluginRelease}
+          onRevealRelease={revealPluginRelease}
+          onConfirmUpload={confirmPluginUpload}
+          onOpenReview={() => setReviewOpen(true)}
+          onOpenSettings={() => setSettingsOpen(true)}
+          onOpenSkills={() => setSurface('SKILLS')}
+        />
+      ) : (
+        <div className="academy-body">
+          <SkillCatalog
+            query={query}
+            status={status}
+            scopeFilter={scopeFilter}
+            onQueryChange={setQuery}
+            onStatusChange={setStatus}
+            onScopeFilterChange={setScopeFilter}
+            onCreate={() => guardDraft(createNew)}
+            skills={visible}
+            openAiPublication={openAiPublication}
+            selectedId={selected?.id ?? null}
+            open={catalogOpen}
+            onClose={() => setCatalogOpen(false)}
+            onSelect={id => { if (id !== selected?.id) guardDraft(() => void choose(id)) }}
+          />
+          <SkillWorkspace
+            selected={selected}
+            openAiPublication={openAiPublication}
+            autoIncludeGlobal={Boolean(publicationPreference?.autoIncludeGlobal)}
+            keepPrivate={keepPrivate}
+            onKeepPrivateChange={setKeepPrivate}
+            isEditing={isEditing}
+            activeTab={activeTab}
+            skillMd={skillMd}
+            scope={scope}
+            projectIds={projectIds}
+            destinations={snapshot.destinations}
+            history={history}
+            distribution={skillDistribution}
+            onTabChange={setActiveTab}
+            onSkillMdChange={setSkillMd}
+            onScopeChange={setScope}
+            onProjectIdsChange={setProjectIds}
+            onEdit={() => void editSkill()}
+            onSave={() => void save()}
+            onCancel={() => guardDraft(cancelEditing)}
+            activationPending={activationPending !== null}
+            onSetEnabled={() => selected && void setEnabled(selected)}
+            onRemoveFromGit={requestGitRemoval}
+            onApprovePublic={requestPublicApproval}
+            onRequestDeleteGlobal={requestDeleteGlobal}
+            artifacts={artifacts}
+            onOpenArtifact={path => {
+              if (!isEditing) setEditBaseline(draftValue)
+              setArtifactDraft({ mode: 'edit', originalPath: path, path, content: artifacts[path] ?? '' })
+            }}
+            onAddArtifact={() => {
+              if (!isEditing) setEditBaseline(draftValue)
+              setArtifactDraft({ mode: 'create', originalPath: null, path: '', content: '' })
+            }}
+            dirty={dirty}
+            saving={saving}
+          />
+        </div>
+      )}
+
+      {reviewOpen && (
+        <PluginReviewModal
+          excluded={openAiPublication?.coverage?.excluded ?? []}
+          notApplicableCount={openAiPublication?.coverage?.notApplicable ?? 0}
+          selectedIds={selectedReviewIds}
+          preference={publicationPreference}
+          busy={reviewBusy}
+          onToggleSelected={id =>
+            setSelectedReviewIds(cur => cur.includes(id) ? cur.filter(item => item !== id) : [...cur, id])
+          }
+          onApproveSingle={(id, ver) => void approveSingleFromReview(id, ver)}
+          onApproveBatch={approveBatchFromReview}
+          onEnableSkill={id => void enableSkillFromReview(id)}
+          onOpenSkill={id => {
+            setReviewOpen(false)
+            setSurface('SKILLS')
+            guardDraft(() => void choose(id))
+          }}
+          onRequestToggleAutoInclude={requestToggleAutoInclude}
+          onClose={() => setReviewOpen(false)}
+        />
+      )}
+
+      {settingsOpen && (
+        <AcademySettingsDrawer
+          hydration={hydration}
+          openAiPublication={openAiPublication}
+          openAiReleases={openAiReleases}
+          preference={publicationPreference}
+          packageDistribution={packageDistribution}
+          gitStatus={gitStatus}
+          eligibleRepos={eligibleRepos}
+          selectedRepoId={selectedRepoId}
+          destinations={snapshot.destinations}
+          conflicts={snapshot.conflicts}
+          distribution={distribution}
+          knownPublication={knownPublication}
+          busy={packagePending || reviewBusy}
+          onSelectedRepoChange={setSelectedRepoId}
+          onRequestToggleAutoInclude={requestToggleAutoInclude}
+          onBootstrapPlugin={() => void (async () => {
+            try { await window.codeAwareness.bootstrapAcademyOpenAiPlugin(); readSecondaryProjections(true); showMessage('Manifesto OpenAI inicializado.') }
+            catch (error) { reportError(error) }
+          })()}
+          onConfirmUpload={confirmPluginUpload}
+          onRebuildRelease={rebuildRelease}
+          onPrepareManifestVersion={kind => void (async () => {
+            try { setManifestPreview(await window.codeAwareness.previewAcademyManifestVersion(kind)) }
+            catch (error) { reportError(error) }
+          })()}
+          onBindRepository={() => void (async () => {
+            if (!selectedRepoId) return
+            try { applyGit(await window.codeAwareness.bindAcademyGitRepository(selectedRepoId)); await refresh(selected?.id); showMessage('Repositório conectado.') }
+            catch (error) { reportError(error) }
+          })()}
+          onSyncGit={() => void (async () => {
+            try { applyGit(await window.codeAwareness.syncAcademyGitNow()); await refresh(selected?.id); showMessage('Sincronização Git concluída.') }
+            catch (error) { reportError(error) }
+          })()}
+          onPublishGit={() => void (async () => {
+            const localHead = gitStatus?.publication?.localHead
+            if (!localHead) return
+            try { applyGit(await window.codeAwareness.publishAcademyGit({ localHead, remoteHead: gitStatus?.publication?.remoteHead ?? null })); await refresh(selected?.id); showMessage('Alterações publicadas no Git.') }
+            catch (error) { reportError(error) }
+          })()}
+          onPublishCandidate={() => void (async () => {
+            const expectedHead = gitStatus?.publication?.localHead
+            if (!expectedHead) return
+            setConfirmation({
+              title: 'Publicar candidato para Pull Request?',
+              description: 'Envia um branch separado para revisão por Pull Request sem modificar o branch principal.',
+              confirmLabel: 'Publicar candidato',
+              onConfirm: async () => {
+                applyGit(await window.codeAwareness.publishAcademyGitCandidate({ branch: `academy/review-${Date.now()}`, expectedHead, confirmed: true }))
+                await refresh(selected?.id)
+                showMessage('Branch candidato publicado.')
+              }
+            })
+          })()}
+          onLocalCutover={() => setConfirmation({
+            title: 'Concluir cutover para autoridade SQLite?',
+            description: 'Move edições futuras de Skills globais para aprovação explícita local preservando histórico imutável do Git.',
+            confirmLabel: 'Concluir cutover',
+            onConfirm: async () => {
+              applyGit(await window.codeAwareness.completeAcademyLocalCutover(true))
+              await refresh(selected?.id)
+              showMessage('Cutover local concluído.')
+            }
+          })}
+          onGitAutomation={next => {
+            const repoId = gitStatus?.repository?.id, branch = gitStatus?.repository?.branch
+            if (!repoId || !branch) return
             void (async () => {
               try {
-                const result = await window.codeAwareness.resolveAcademyGitConflict(state.remoteHead, state.localHead!)
-                applyGit(result)
-                const path = result.publication?.conflictPaths[0]
-                if (path) { const review = await window.codeAwareness.reviewAcademyGitConflict(path); setGitReview(review); setGitResolution(review.working ?? '') }
+                applyGit(await window.codeAwareness.configureAcademyGitAutomation({
+                  ...next, confirmed: true, expectedRepositoryId: repoId, expectedBranch: branch
+                }))
+                showMessage('Automação Git atualizada.')
               } catch (error) { reportError(error) }
             })()
-            return
-          }
-          setConfirmation({ title: 'Confirmar main revisada?', description: `Revise as diferenças em ${state.conflictPaths.join(', ')}. Adotar main ${state.remoteHead?.slice(0, 8)} preservará todas as versões legadas e os candidatos privados.`, confirmLabel: 'Adotar main revisada', action: async () => {
-            const result = await window.codeAwareness.completeAcademyGitMigration(state.remoteHead!, state.migrationCandidateHash!, true)
-            applyGit(result)
-            showMessage(result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'Git sincronizado.' : result.lastError ?? 'Verificação remota pendente.', result.syncState === 'SYNCED' && result.publication?.phase === 'CONFIRMED' ? 'success' : 'error')
-          } })
-        }}
-        onReviewConflict={(id) => void (async () => { try { setConflictReview(await window.codeAwareness.reviewAcademyConflict(id)); setConflictBatch(null) } catch (error) { reportError(error) } })()}
-        onPreviewConflictBatch={() => void (async () => { try { setConflictBatch(await window.codeAwareness.previewAcademyConflictBatch()); setConflictReview(null) } catch (error) { reportError(error) } })()}
-      />
-    </div>
+          }}
+          onOpenGit={() => void window.codeAwareness.openAcademyGitRepository()}
+          onReviewGitConflict={path => void (async () => {
+            try { const review = await window.codeAwareness.reviewAcademyGitConflict(path); setGitReview(review); setGitResolution(review.local ?? '') }
+            catch (error) { reportError(error) }
+          })()}
+          onReviewConflict={id => void (async () => {
+            try { setConflictReview(await window.codeAwareness.reviewAcademyConflict(id)) }
+            catch (error) { reportError(error) }
+          })()}
+          onPreviewConflictBatch={() => void (async () => {
+            try { setConflictBatch(await window.codeAwareness.previewAcademyConflictBatch()) }
+            catch (error) { reportError(error) }
+          })()}
+          onOpenDestinations={() => setDestinationsOpen(true)}
+          onReconcile={() => void (async () => {
+            try {
+              const res = await window.codeAwareness.reconcileAcademyDistribution()
+              setDistribution(res.health)
+              if (selected) setSkillDistribution(res.states.filter(item => item.skillId === selected.id))
+              await refresh(selected?.id)
+              showMessage('Destinos reconciliados.')
+            } catch (error) { reportError(error) }
+          })()}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
 
-    {(conflictReview || conflictBatch) && <AcademyConflictInspector review={conflictReview} batch={conflictBatch} busy={conflictBusy} onClose={() => { setConflictReview(null); setConflictBatch(null) }} onResolve={requestConflictResolution} onResolveBatch={requestBatchResolution} />}
-    {message && <div className={`academy-toast ${message.kind}`} role="status"><span>{message.kind === 'success' ? '✓' : '!'}</span>{message.text}<button aria-label="Fechar mensagem" onClick={() => setMessage(null)}>×</button></div>}
-    {artifactDraft && <ArtifactEditor mode={artifactDraft.mode} path={artifactDraft.path} content={artifactDraft.content} onPathChange={(path) => setArtifactDraft({ ...artifactDraft, path })} onContentChange={(content) => setArtifactDraft({ ...artifactDraft, content })} onSave={saveArtifactDraft} onRequestRemove={requestRemoveArtifact} onClose={closeArtifact} />}
-    {destinationsOpen && <DestinationManager destinations={snapshot.destinations} onClose={() => setDestinationsOpen(false)} onToggle={(id, enabled) => void (async () => { try { await window.codeAwareness.setAcademyDestinationEnabled(id, enabled); await refresh(selected?.id) } catch (error) { reportError(error) } })()} onImport={(id) => void (async () => { try { const result = await window.codeAwareness.importAcademyDestination(id); showMessage(`Importação: ${result.filter((item) => item.result === 'IMPORTED').length} importadas, ${result.filter((item) => item.result === 'INVALID').length} inválidas.`); await refresh(selected?.id) } catch (error) { reportError(error) } })()} />}
-    {confirmation && <ConfirmationDialog title={confirmation.title} description={confirmation.description} confirmLabel={confirmation.confirmLabel} destructive={confirmation.destructive} onCancel={() => setConfirmation(null)} onConfirm={() => void handleConfirmation()} />}
-    {manifestPreview && <div className="academy-overlay"><section className="academy-drawer" role="dialog" aria-label="Revisar versão do manifesto">
-      <header><h2>Manifesto {manifestPreview.previousVersion} → {manifestPreview.newVersion}</h2></header>
-      <p>{manifestPreview.branch} · fonte {manifestPreview.sourceCommitSha.slice(0, 12)}. A revisão altera somente plugin.json no workspace privado. Publique e confirme o commit na branch remota antes de preparar o ZIP.</p>
-      <label>Progressão semver<select aria-label="Progressão semver" defaultValue="" onChange={event => void window.codeAwareness.previewAcademyManifestVersion(event.target.value as 'PATCH' | 'MINOR' | 'MAJOR').then(setManifestPreview).catch(reportError)}><option value="" disabled>Sugestão pelo delta</option><option value="PATCH">Patch</option><option value="MINOR">Minor</option><option value="MAJOR">Major</option></select></label>
-      <details><summary>Revisar antes e depois de plugin.json</summary><pre>{manifestPreview.before}</pre><pre>{manifestPreview.after}</pre></details>
-      <footer><button onClick={() => setManifestPreview(null)}>Cancelar</button><button onClick={() => void (async () => {
-        try { const result = await window.codeAwareness.saveAcademyManifestVersion({ preview: manifestPreview, confirmed: true }); applyGit(result); setManifestPreview(null); showMessage(result.lastError ?? 'Versão salva no workspace. Publique a revisão no Git antes de preparar o ZIP.', result.lastError ? 'error' : 'success') }
-        catch (error) { reportError(error) }
-      })()}>Salvar revisão no workspace</button></footer>
-    </section></div>}
-    {gitReview && <div className="academy-modal-backdrop"><section className="academy-drawer academy-git-conflict" role="dialog" aria-label="Revisar conflito Git">
-      <h2>Reconciliar {gitReview.path}</h2>
-      <details><summary>Base, local e remoto</summary><h3>Base</h3><pre>{gitReview.base ?? 'Arquivo ausente'}</pre><h3>Local</h3><pre>{gitReview.local ?? 'Arquivo ausente'}</pre><h3>Remoto</h3><pre>{gitReview.remote ?? 'Arquivo ausente'}</pre></details>
-      <label>Conteúdo reconciliado<textarea aria-label="Conteúdo reconciliado" value={gitResolution} onChange={event => setGitResolution(event.target.value)} /></label>
-      <div className="academy-inline-actions"><button onClick={() => setGitReview(null)}>Fechar</button><button onClick={() => void (async () => {
-        try {
-          const result = await window.codeAwareness.resolveAcademyGitConflictPath({ path: gitReview.path, head: gitReview.head, revision: gitReview.revision, content: gitResolution, confirmed: true })
-          applyGit(result)
-          const path = result.publication?.conflictPaths[0]
-          if (path) { const next = await window.codeAwareness.reviewAcademyGitConflict(path); setGitReview(next); setGitResolution(next.working ?? '') }
-          else { setGitReview(null); showMessage(result.lastError ?? 'Reconciliação salva; publicação pendente.', result.lastError ? 'error' : 'success') }
-        } catch (error) { reportError(error) }
-      })()}>Confirmar conteúdo revisado</button></div>
-    </section></div>}
-  </section>
+      {artifactDraft && (
+        <ArtifactEditor
+          mode={artifactDraft.mode}
+          path={artifactDraft.path}
+          content={artifactDraft.content}
+          onPathChange={path => setArtifactDraft({ ...artifactDraft, path })}
+          onContentChange={content => setArtifactDraft({ ...artifactDraft, content })}
+          onSave={applyArtifact}
+          onRequestRemove={requestRemoveArtifact}
+          onClose={closeArtifact}
+        />
+      )}
+
+      {destinationsOpen && (
+        <DestinationManager
+          destinations={snapshot.destinations}
+          onClose={() => setDestinationsOpen(false)}
+          onToggle={(id, enabled) => void (async () => {
+            try { await window.codeAwareness.setAcademyDestinationEnabled(id, enabled); await refresh(selected?.id) }
+            catch (error) { reportError(error) }
+          })()}
+          onImport={id => void (async () => {
+            try {
+              const result = await window.codeAwareness.importAcademyDestination(id)
+              showMessage(`Importação: ${result.filter(item => item.result === 'IMPORTED').length} importadas, ${result.filter(item => item.result === 'INVALID').length} inválidas.`)
+              await refresh(selected?.id)
+            } catch (error) { reportError(error) }
+          })()}
+        />
+      )}
+
+      {manifestPreview && (
+        <ConfirmationDialog
+          title={`Atualizar versão para ${manifestPreview.newVersion}?`}
+          description={`Registra versão ${manifestPreview.newVersion} (${manifestPreview.previousVersion} → ${manifestPreview.newVersion}) no rascunho de manifesto (${manifestPreview.branch}).`}
+          confirmLabel="Salvar revisão"
+          onCancel={() => setManifestPreview(null)}
+          onConfirm={() => void (async () => {
+            const preview = manifestPreview
+            setManifestPreview(null)
+            try {
+              applyGit(await window.codeAwareness.saveAcademyManifestVersion({ preview, confirmed: true }))
+              showMessage(`Revisão de manifesto ${preview.newVersion} salva.`)
+            } catch (error) { reportError(error) }
+          })()}
+        />
+      )}
+
+      {gitReview && (
+        <div className="academy-modal-backdrop" role="dialog" aria-modal="true" aria-label={`Conflito ${gitReview.path}`}>
+          <div className="academy-modal">
+            <div className="academy-drawer-header">
+              <h3>Revisar conflito: {gitReview.path}</h3>
+              <button type="button" className="academy-drawer-close" onClick={() => setGitReview(null)}>
+                Fechar
+              </button>
+            </div>
+            <label className="academy-field">
+              <span>Conteúdo resolvido</span>
+              <textarea value={gitResolution} onChange={event => setGitResolution(event.target.value)} rows={12} />
+            </label>
+            <div className="academy-modal-actions">
+              <button type="button" className="academy-secondary-button" onClick={() => setGitReview(null)}>
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="academy-primary-button"
+                onClick={() => void (async () => {
+                  try {
+                    applyGit(await window.codeAwareness.resolveAcademyGitConflictPath({
+                      path: gitReview.path, head: gitReview.head, revision: gitReview.revision, content: gitResolution, confirmed: true
+                    }))
+                    setGitReview(null)
+                    await refresh(selected?.id)
+                    showMessage('Conflito resolvido no workspace Git.')
+                  } catch (error) { reportError(error) }
+                })()}
+              >
+                Aplicar resolução
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {(conflictReview || conflictBatch) && (
+        <AcademyConflictInspector
+          review={conflictReview}
+          batch={conflictBatch}
+          busy={conflictBusy}
+          onClose={() => { setConflictReview(null); setConflictBatch(null) }}
+          onResolve={resolution => {
+            if (!conflictReview) return
+            setConflictBusy(true)
+            void window.codeAwareness.resolveAcademyConflict(
+              conflictReview.conflict.id, resolution, undefined, { token: conflictReview.token, confirmed: true }
+            ).then(async () => {
+              setConflictReview(null)
+              await refresh(selected?.id)
+              showMessage('Conflito resolvido.')
+            }).catch(reportError).finally(() => setConflictBusy(false))
+          }}
+          onResolveBatch={() => {
+            if (!conflictBatch) return
+            setConflictBusy(true)
+            void window.codeAwareness.resolveAcademyConflictBatch(conflictBatch.token, true)
+              .then(async res => {
+                setConflictBatch(null)
+                await refresh(selected?.id)
+                showMessage(`${res.resolved} conflitos resolvidos.`)
+              }).catch(reportError).finally(() => setConflictBusy(false))
+          }}
+        />
+      )}
+
+      {confirmation && (
+        <ConfirmationDialog
+          title={confirmation.title}
+          description={confirmation.description}
+          confirmLabel={confirmation.confirmLabel}
+          destructive={confirmation.destructive}
+          onCancel={() => setConfirmation(null)}
+          onConfirm={() => void handleConfirmation()}
+        />
+      )}
+    </div>
+  )
 }

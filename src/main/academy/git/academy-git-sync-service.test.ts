@@ -13,7 +13,7 @@ import { readAcademyGitSnapshot } from './academy-git-snapshot'
 const roots: string[] = []
 const stores: AcademyStore[] = []
 const synchronizers: AcademyGitSyncService[] = []
-afterEach(async () => { for (const sync of synchronizers.splice(0)) await sync.close(); vi.restoreAllMocks(); for (const store of stores.splice(0)) store.close(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(async () => { for (const sync of synchronizers.splice(0)) await sync.close(); vi.restoreAllMocks(); for (const store of stores.splice(0)) store.close(); for (const root of roots.splice(0)) { try { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) } catch {} } })
 const pkg = (text = 'canonical', name = 'alpha') => ({ skillMd: `---\nname: ${name}\ndescription: Test skill\n---\n${text}\n`, artifacts: {} })
 
 async function fixture(local = 'canonical') {
@@ -376,4 +376,79 @@ describe('Academy Git-first source', () => {
     expect(result.syncState).not.toBe('SYNCED')
     expect(f.store.get(f.skill.id).currentVersion).toBe(1)
   }, 30000)
+
+  it('recovers idempotently from an interrupted prepareLocalCommit workspace and updates convergence checkpoint', async () => {
+    const f = await fixture()
+    await f.sync.bindRepository(f.record.id)
+    await f.sync.completeLocalCutover(true)
+    const cutover = await f.sync.publish()
+    expect(cutover.syncState, cutover.lastError ?? '').toBe('SYNCED')
+    const workspace = cutover.publication!.workspacePath!
+
+    const updated = f.store.update({ skillId: f.skill.id, expectedVersion: 1, package: pkg('recovered content'), origin: 'UI' })
+    f.store.approvePublicSkill(updated.id, updated.currentVersion)
+    writeFile(workspace, 'skills/alpha/SKILL.md', updated.current.package.skillMd)
+    expect(await f.git.getOperationsStatus(workspace)).not.toBe('')
+
+    const recovered = await f.sync.syncNow()
+    expect(recovered.lastError).toBeNull()
+    expect(recovered.syncState).toBe('LOCAL_CHANGES')
+    expect(await f.git.getOperationsStatus(workspace)).toBe('')
+
+    const published = await f.sync.publish()
+    expect(published.syncState, published.lastError ?? '').toBe('SYNCED')
+    expect(published.convergence?.pending).toBe(false)
+    expect(published.convergence?.lastConvergedRevision).toBe(published.convergence?.localRevision)
+
+    writeFile(workspace, '.academy/identities.json', readFileSync(join(workspace, '.academy/identities.json'), 'utf8'))
+    await gitExec(workspace, ['add', '--', '.academy/identities.json'])
+    const stillSynced = await f.sync.syncNow()
+    expect(stillSynced.syncState, stillSynced.lastError ?? '').toBe('SYNCED')
+    expect(stillSynced.lastError).toBeNull()
+  }, 60000)
+
+  it('preserves unknown external workspace edits byte-for-byte without false SYNCED or destructive reset', async () => {
+    const f = await fixture()
+    await f.sync.bindRepository(f.record.id)
+    await f.sync.completeLocalCutover(true)
+    const cutover = await f.sync.publish()
+    expect(cutover.syncState).toBe('SYNCED')
+    const workspace = cutover.publication!.workspacePath!
+
+    writeFile(workspace, 'notes.txt', 'external operator note')
+    const originalSkill = readFileSync(join(workspace, 'skills/alpha/SKILL.md'), 'utf8')
+    const externalSkill = pkg('uncommitted external edit').skillMd
+    writeFile(workspace, 'skills/alpha/SKILL.md', externalSkill)
+
+    const status = await f.sync.syncNow()
+    expect(status.syncState).toBe('LOCAL_CHANGES')
+    expect(status.lastError).toBe('WORKSPACE_EXTERNAL_CHANGES_REVIEW_REQUIRED')
+    expect(readFileSync(join(workspace, 'notes.txt'), 'utf8')).toBe('external operator note')
+    expect(readFileSync(join(workspace, 'skills/alpha/SKILL.md'), 'utf8')).toBe(externalSkill)
+    expect(originalSkill).not.toBe(externalSkill)
+
+    const blocked = await f.sync.publish()
+    expect(blocked.lastError).toBe('GIT_PUBLICATION_REQUIRES_RECONCILIATION')
+    expect(blocked.syncState).toBe('LOCAL_CHANGES')
+    expect(readFileSync(join(workspace, 'notes.txt'), 'utf8')).toBe('external operator note')
+  }, 60000)
+
+  it('requires verified checkpoint and observation freshness for SYNCED and stops autoPublish cleanly on non-retryable state', async () => {
+    const f = await fixture()
+    await f.sync.bindRepository(f.record.id)
+    await f.sync.completeLocalCutover(true)
+    await f.sync.publish()
+    const configured = await f.sync.configureAutomation({
+      autoPublish: true, autoUpdate: false, confirmed: true,
+      expectedRepositoryId: f.record.github!.repositoryId, expectedBranch: 'main'
+    })
+    expect(configured.syncState).toBe('SYNCED')
+
+    vi.spyOn(f.transport, 'push').mockRejectedValue(new Error('GH006 protected branch requires pull request'))
+    const v2 = f.store.update({ skillId: f.skill.id, expectedVersion: 1, package: pkg('pr blocked'), origin: 'UI' })
+    f.store.approvePublicSkill(v2.id, v2.currentVersion)
+    f.sync.scheduleLocalChange()
+    await vi.waitFor(() => expect(f.sync.getStatus().syncState).toBe('PR_PENDING'), { timeout: 15000 })
+    expect(f.transport.push).toHaveBeenCalledTimes(1)
+  }, 60000)
 })

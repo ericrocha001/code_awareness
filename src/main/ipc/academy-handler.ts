@@ -20,6 +20,9 @@ export function registerAcademyHandlers(service: AcademyService): void {
   ipcMain.handle('academy:git-draft', (_event, name: string) => service.gitSync?.getDraft(name))
   ipcMain.handle('academy:local-cutover', (_event, confirmed: boolean) => service.gitSync?.completeLocalCutover(confirmed))
   ipcMain.handle('academy:approve-public', (_event, id: string, version: number, confirmed: boolean) => service.approvePublicSkill(id, version, confirmed))
+  ipcMain.handle('academy:approve-public-batch', (_event, items: Array<{ skillId: string; expectedVersion: number }>, confirmed: boolean) => service.approvePublicSkills(items, confirmed))
+  ipcMain.handle('academy:publication-preference', () => service.getPublicationPreference())
+  ipcMain.handle('academy:publication-preference-set', (_event, enabled: boolean, confirmed: boolean) => service.setPublicationPreference(enabled, confirmed))
   ipcMain.handle('academy:delete-global', (_event, id: string, version: number, confirmed: boolean) => service.deleteGlobalSkill(id, version, confirmed))
   ipcMain.handle('academy:git-publish', (_event, expected: { localHead: string; remoteHead: string | null }) => {
     if (!expected || !/^[a-f0-9]{40,64}$/.test(expected.localHead) || !expected.remoteHead || !/^[a-f0-9]{40,64}$/.test(expected.remoteHead)) throw new Error('PUBLICATION_REVIEW_REQUIRED')

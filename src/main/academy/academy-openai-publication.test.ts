@@ -16,7 +16,7 @@ import { calculateOpenAiDelta, hashOpenAiSnapshot, nextOpenAiPluginVersion, sha2
 import { validateOpenAiPluginPackage } from './publication/openai-plugin-validator'
 
 const roots: string[] = []
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
+afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) try { rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }) } catch {} })
 
 const skillMd = (name: string, body = 'v1') => `---\nname: ${name}\ndescription: Use ${name}.\n---\n\n# ${name}\n\n${body}\n`
 
@@ -33,6 +33,7 @@ async function fixture() {
   buildSync({ entryPoints: ['src/main/academy/publication/academy-plugin-worker.ts'], bundle: true, platform: 'node', format: 'cjs', outfile: workerPath })
   const service = new AcademyService(join(root, 'academy', 'academy.db'), join(root, 'Downloads'), 2000, workerPath)
   const global = await service.create({ package: { skillMd: skillMd('global-skill'), artifacts: { 'references/guide.md': 'guide' } }, scope: 'GLOBAL', origin: 'UI' })
+  service.store.approvePublicSkill(global.id, global.currentVersion)
   const project = await service.create({ package: { skillMd: skillMd('project-skill'), artifacts: {} }, scope: 'PROJECT', origin: 'UI' })
   const archived = await service.create({ package: { skillMd: skillMd('archived-skill'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
   await service.archive(archived.id, archived.currentVersion)
@@ -487,6 +488,7 @@ describe('Academy OpenAI plugin publication', () => {
       'assets/mcp.json': '{"example":true}\n'
     }
     const skill = await service.create({ package: { skillMd: skillMd('worktree-execution'), artifacts }, scope: 'GLOBAL', origin: 'UI' })
+    service.store.approvePublicSkill(skill.id, skill.currentVersion)
     const canonical = service.get(skill.id)
     try {
       const release = await service.prepareOpenAiRelease()
@@ -567,7 +569,8 @@ describe('Academy OpenAI plugin publication', () => {
 
   it('allows non-destructive additions while deletion semantics remain unknown', async () => {
     const { service } = await fixture()
-    await service.create({ package: { skillMd: skillMd('added-skill'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+    const added = await service.create({ package: { skillMd: skillMd('added-skill'), artifacts: {} }, scope: 'GLOBAL', origin: 'UI' })
+    service.store.approvePublicSkill(added.id, added.currentVersion)
     const release = await service.prepareOpenAiRelease()
     expect(release).toMatchObject({ pluginVersion: '0.2.0', status: 'READY_TO_UPLOAD' })
     expect(release.delta.added.map((item) => item.name)).toEqual(['added-skill'])
@@ -614,5 +617,58 @@ describe('Academy OpenAI plugin publication', () => {
     expect(hashOpenAiSnapshot(reopened.getOpenAiRelease(release.id).snapshot)).toBe(release.snapshotHash)
     reopened.close()
     expect(root).toBeTruthy()
+  })
+
+  it('projects explicit plugin coverage counts, distinguishes exclusion reasons, and tracks ZIP availability offline', async () => {
+    const { root, service } = await fixture()
+    try {
+      const dest = service.store.upsertDestination(join(root, 'proj'), 'proj')
+      const privateSkill = service.store.create({
+        package: { skillMd: '---\nname: priv-skill\ndescription: Private\n---\n# Priv\n', artifacts: {} },
+        scope: 'GLOBAL', origin: 'UI'
+      })
+      const disabledSkill = service.store.create({
+        package: { skillMd: '---\nname: disabled-skill\ndescription: Disabled\n---\n# Disabled\n', artifacts: {} },
+        scope: 'GLOBAL', origin: 'UI'
+      })
+      service.store.approvePublicSkill(disabledSkill.id, 1)
+      service.store.setEnabled(disabledSkill.id, false, 1)
+      service.store.create({
+        package: { skillMd: '---\nname: local-proj\ndescription: Project\n---\n# Project\n', artifacts: {} },
+        scope: 'PROJECT', projectIds: [dest.id], origin: 'UI'
+      })
+
+      const beforeZip = service.getOpenAiPublicationState()
+      expect(beforeZip.artifactAvailable).toBe(false)
+      expect(beforeZip.coverage).toMatchObject({
+        catalog: 6, eligible: 1, includedInLastZip: 1, awaitingZip: 0, notApplicable: 2
+      })
+      expect(beforeZip.coverage?.excluded.map((item) => [item.name, item.reason])).toEqual([
+        ['archived-skill', 'DISABLED'],
+        ['disabled-skill', 'DISABLED'],
+        ['priv-skill', 'PRIVATE']
+      ])
+
+      const release = await service.prepareOpenAiRelease()
+      expect(release.status).toBe('READY_TO_UPLOAD')
+      expect(release.snapshot.map((entry) => entry.name)).toEqual(['global-skill'])
+
+      const afterZip = service.getOpenAiPublicationState()
+      expect(afterZip.artifactAvailable).toBe(true)
+      expect(afterZip.drifted).toBe(false)
+      expect(afterZip.coverage).toMatchObject({
+        catalog: 6, eligible: 1, includedInLastZip: 1, awaitingZip: 0, notApplicable: 2
+      })
+
+      rmSync(release.artifactPath!)
+      expect(service.getOpenAiPublicationState().artifactAvailable).toBe(false)
+
+      service.approvePublicSkills([{ skillId: privateSkill.id, expectedVersion: 1 }], true)
+      const pendingNew = service.getOpenAiPublicationState()
+      expect(pendingNew.drifted).toBe(true)
+      expect(pendingNew.coverage).toMatchObject({
+        catalog: 6, eligible: 2, includedInLastZip: 1, awaitingZip: 1, notApplicable: 2
+      })
+    } finally { await service.close() }
   })
 })

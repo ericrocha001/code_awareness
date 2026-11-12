@@ -10,6 +10,7 @@ import type { AcademyPluginPackageRevisionService } from './academy-plugin-packa
 import { createDeterministicZip, readZipEntries, type ZipEntry } from './deterministic-zip'
 import { buildCanonicalOpenAiSnapshot, buildOpenAiManifest, calculateOpenAiDelta, canonicalJson, hashOpenAiSnapshot, sha256 } from './openai-plugin-model'
 import { validateOpenAiPluginPackage } from './openai-plugin-validator'
+import { buildPluginCoverage } from './academy-plugin-coverage'
 import type { AcademyGitBuildReceipt, AcademyGitBuildSource } from '../../../shared/types/academy-git-source-types'
 import type { AcademyBuildProjection, AcademyGitSnapshotHeader, AcademyPublicationOperation } from '../../../shared/types/academy-publication-types'
 import { AcademyPluginExecutor, type AcademyPluginTaskResult } from './academy-plugin-executor'
@@ -123,7 +124,8 @@ export class OpenAiPluginPublicationService {
       : profile.publishedVersion === (currentPackageRevision?.version ?? header?.manifest?.version ?? profile.publishedVersion) && versionPreflight?.outcome !== 'VERSION_ALREADY_USED_FOR_OTHER_CONTENT' ? 'CURRENT' : 'HOSTED_UPDATE_AVAILABLE'
     return {
       profile, latestPrepared, latestUploaded, selectedRelease, sourceError, versionPreflight, operation: this.operation,
-      publicSkillCount: canonical.length, canonicalSnapshotHash,
+      publicSkillCount: canonical.length, coverage: buildPluginCoverage(this.store, selectedRelease),
+      artifactAvailable: Boolean(selectedRelease?.artifactPath && existsSync(selectedRelease.artifactPath)), canonicalSnapshotHash,
       drifted: Boolean(selectedRelease && canonicalSnapshotHash !== selectedRelease.snapshotHash),
       currentPackageRevision,
       hostedStatus
