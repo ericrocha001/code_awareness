@@ -5,7 +5,7 @@ const crypto = require('node:crypto')
 const readline = require('node:readline')
 const { spawn, spawnSync } = require('node:child_process')
 const { receiptDigest } = require('../src/shared/validation/test-output-receipt.cjs')
-const { validationConnection, registerReceipt, reconcileReceipts } = require('./local-agent/validation.cjs')
+const { validationConnection, registerReceipt, reconcileReceipts, pendingReceiptIds } = require('./local-agent/validation.cjs')
 const { publicError } = require('./local-agent/discovery.cjs')
 
 const root = path.resolve(__dirname, '..')
@@ -217,7 +217,17 @@ async function run(command, args = [], options = {}) {
     save()
     if (receipt.registration.state === 'PERSISTED') {
       try { receipt.reconciliation = await reconcileReceipts({ cwd: path.resolve(options.cwd || root), connection, exclude: id, limit: 3 }) } catch (error) { diagnostics.push(publicError(error)) }
+    } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
+      try {
+        const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id }).pending
+        if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
+      } catch { }
     }
+  } else if (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) {
+    try {
+      const pending = pendingReceiptIds(path.resolve(options.cwd || root), { limit: 1, exclude: id }).pending
+      if (pending > 0) receipt.reconciliation = { reconciled: [], remaining: pending }
+    } catch { }
   }
   return receipt
 }
@@ -288,15 +298,16 @@ async function cli() {
     console.log(JSON.stringify(await registerReceipt(id, { cwd: root, profile, association }))); return
   }
   if (action === 'reconcile') {
-    let id, limit, profile
+    let id, limit, cursor, profile
     while (args.length) {
       const flag = args.shift(), value = args.shift()
       if (flag === '--receipt') id = value
       else if (flag === '--limit') limit = Number(value)
+      else if (flag === '--cursor') cursor = value
       else if (flag === '--profile') profile = value
       else throw new Error('Invalid reconcile option')
     }
-    console.log(JSON.stringify(await reconcileReceipts({ cwd: root, profile, id, ...(limit === undefined ? {} : { limit }) }))); return
+    console.log(JSON.stringify(await reconcileReceipts({ cwd: root, profile, id, ...(limit === undefined ? {} : { limit }), ...(cursor ? { cursor } : {}) }))); return
   }
   if (action === 'observe') {
     const id = args.shift(); let afterState
