@@ -168,12 +168,8 @@ export class ValidationLedger {
 
     // If deduplicationKey is provided, check for existing record
     if (input.deduplicationKey) {
-      const existing = this.db
-        .prepare('SELECT * FROM validation_proofs WHERE deduplication_key = ?')
-        .get(input.deduplicationKey) as LedgerRow | undefined
-      if (existing) {
-        return rowToProof(existing)
-      }
+      const existing = this.getProofByDeduplicationKey(input.deduplicationKey)
+      if (existing) return existing
     }
 
     const proofId = `proof-${randomUUID()}`
@@ -234,14 +230,29 @@ export class ValidationLedger {
   recordReceiptProof(input: RecordProofInput): ValidationProof {
     return this.db.transaction(() => {
       const proof = this.recordProof(input)
-      const expected = { ...input, sourceFingerprint: input.sourceFingerprint ?? null, runtimeInstanceId: input.runtimeInstanceId ?? null,
-        metrics: input.metrics ?? null, commandProfile: input.commandProfile ?? null, evidenceFor: input.evidenceFor ?? [], deduplicationKey: input.deduplicationKey ?? null }
-      const { proofId: _id, recordedAt: _at, ...stored } = proof
-      for (const key of Object.keys(expected) as (keyof typeof expected)[]) {
-        if (JSON.stringify(expected[key]) !== JSON.stringify(stored[key])) throw new Error('RECEIPT_IDENTITY_CONFLICT')
-      }
+      this.assertReceiptProof(input, proof)
       return proof
     }).immediate()
+  }
+
+  lookupReceiptProof(input: RecordProofInput): ValidationProof | null {
+    const proof = input.deduplicationKey ? this.getProofByDeduplicationKey(input.deduplicationKey) : null
+    if (proof) this.assertReceiptProof(input, proof)
+    return proof
+  }
+
+  private assertReceiptProof(input: RecordProofInput, proof: ValidationProof): void {
+    const expected = { ...input, sourceFingerprint: input.sourceFingerprint ?? null, runtimeInstanceId: input.runtimeInstanceId ?? null,
+      metrics: input.metrics ?? null, commandProfile: input.commandProfile ?? null, evidenceFor: input.evidenceFor ?? [], deduplicationKey: input.deduplicationKey ?? null }
+    for (const key of Object.keys(expected) as (keyof typeof expected)[]) {
+      if (JSON.stringify(expected[key]) !== JSON.stringify(proof[key])) throw new Error('RECEIPT_IDENTITY_CONFLICT')
+    }
+  }
+
+  private getProofByDeduplicationKey(key: string): ValidationProof | null {
+    const row = this.db.prepare('SELECT * FROM validation_proofs WHERE deduplication_key = ?')
+      .get(key) as LedgerRow | undefined
+    return row ? rowToProof(row) : null
   }
 
   getProof(proofId: string): ValidationProof | null {

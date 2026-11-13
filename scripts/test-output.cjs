@@ -109,7 +109,7 @@ async function run(command, args = [], options = {}) {
   const association = options.association || { kind: process.env.CODE_AWARENESS_VALIDATION_KIND || 'TARGETED_TEST', scope: ['checkout'],
     evidenceFor: process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? JSON.parse(process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR) : [] }
   if (!options.evidenceRoot && options.register !== false && (options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR)) {
-    try { connection = await validationConnection(receipt.cwd, options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
+    try { connection = await validationConnection(path.resolve(options.cwd || root), options.profile); before = await connection.snapshot() } catch (error) { registrationDiagnostic = publicError(error); diagnostics.push(registrationDiagnostic) }
   }
   receipt.ledger = { association, identity: connection?.identity || null, before, after: null }
   receipt.ledgerDiagnostics = diagnostics
@@ -209,7 +209,7 @@ async function run(command, args = [], options = {}) {
   receipt.registration = { state: 'REGISTRATION_PENDING', reason: options.association || process.env.CODE_AWARENESS_VALIDATION_EVIDENCE_FOR ? registrationDiagnostic?.code || 'APP_UNAVAILABLE' : 'REGISTRATION_NOT_REQUESTED', ...(registrationDiagnostic ? { diagnostic: registrationDiagnostic } : {}) }
   save()
   if (connection) {
-    try { receipt.registration = await connection.register(id) }
+    try { receipt.registration = await connection.register(id, receipt.digest) }
     catch (error) { receipt.registration = { state: 'REGISTRATION_PENDING', reason: publicError(error).code, diagnostic: publicError(error) } }
     save()
   }

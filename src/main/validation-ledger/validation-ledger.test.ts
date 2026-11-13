@@ -77,7 +77,8 @@ describe('Validation Ledger — Permanent Harness', () => {
       expect((await reopened.getProofWithFreshness(proof.proofId))?.freshness).toBe('RUNTIME_HISTORICAL')
       expect(reopened.getProof(proof.proofId)?.commandProfile?.source).toEqual(source)
       const missing = reopened.recordProof(baseProof({ sourceFingerprint: validationSourceFingerprint(source), commandProfile: { command: 'test', cwd: source.cwd, source } }))
-      rmSync(sourceDir, { recursive: true, force: true })
+      if (process.platform === 'win32') execFileSync('node', ['-e', "require('node:fs').rmSync(process.argv[1], { recursive: true, force: true, maxRetries: 5 })", sourceDir], { windowsHide: true })
+      else rmSync(sourceDir, { recursive: true, force: true })
       expect((await reopened.getProofWithFreshness(missing.proofId))?.freshness).toBe('UNVERIFIABLE')
     } finally {
       await execution?.shutdown()
