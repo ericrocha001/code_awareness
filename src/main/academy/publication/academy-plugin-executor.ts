@@ -11,6 +11,7 @@ export interface AcademyGeminiWorkerExcludedSkill {
   name: string
   version: number
   packageHash: string
+  profileVersion: string
   details: string
 }
 
@@ -40,7 +41,7 @@ export class AcademyPluginExecutor {
 
   private execute(task: AcademyPluginTask, phase?: (name: string, durationMs: number) => void): Promise<AcademyPluginTaskResult> {
     return new Promise((resolve, reject) => {
-      const worker = new Worker(this.workerPath, { workerData: task, resourceLimits: { maxOldGenerationSizeMb: 256 } })
+      const worker = new Worker(this.workerPath, { workerData: task, resourceLimits: { maxOldGenerationSizeMb: 768 } })
       let completed = false
       const timer = setTimeout(() => finish(new AcademyError('ACADEMY_PACKAGE_OPERATION_TIMEOUT')), 120000)
       const finish = (error?: Error, result?: AcademyPluginTaskResult) => {

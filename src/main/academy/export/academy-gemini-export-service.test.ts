@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
+import { describe, expect, it, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest'
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -32,10 +32,29 @@ function makePackage(name: string, description: string, artifacts: Record<string
 }
 
 describe('Gemini Export Packager & Service', () => {
+  let workerDir: string
+  let workerPath: string
   let tempDir: string
   let dbPath: string
   let downloadsDir: string
   let store: AcademyStore
+  let executor: AcademyPluginExecutor
+
+  beforeAll(() => {
+    workerDir = mkdtempSync(join(tmpdir(), 'gemini-worker-bin-'))
+    workerPath = join(workerDir, 'gemini-worker.cjs')
+    buildSync({
+      entryPoints: ['src/main/academy/publication/academy-plugin-worker.ts'],
+      bundle: true,
+      platform: 'node',
+      format: 'cjs',
+      outfile: workerPath
+    })
+  })
+
+  afterAll(() => {
+    rmSync(workerDir, { recursive: true, force: true })
+  })
 
   beforeEach(() => {
     tempDir = mkdtempSync(join(tmpdir(), 'gemini-export-test-'))
@@ -43,6 +62,7 @@ describe('Gemini Export Packager & Service', () => {
     downloadsDir = join(tempDir, 'downloads')
     mkdirSync(downloadsDir, { recursive: true })
     store = new AcademyStore(dbPath)
+    executor = new AcademyPluginExecutor(workerPath)
   })
 
   afterEach(() => {
@@ -222,7 +242,7 @@ describe('Gemini Export Packager & Service', () => {
       const artifactsBefore = { ...detailBefore.current.package.artifacts }
 
       // Perform full export
-      const service = new AcademyGeminiExportService(store, dbPath)
+      const service = new AcademyGeminiExportService(store, dbPath, undefined, executor)
       const receipt = await service.prepareExport()
 
       // Verify receipt shows 1 skill exported, 1 adapted
@@ -525,7 +545,7 @@ console.log(template);
 
   describe('AcademyGeminiExportService', () => {
     it('manages full lifecycle: coverage, export generation, persistence, and receipt', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       const valid1 = store.create({
         package: makePackage('alpha-skill', 'Alpha skill'),
@@ -579,7 +599,7 @@ console.log(template);
     })
 
     it('detects drift when eligible skills are updated', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath)
+      const service = new AcademyGeminiExportService(store, dbPath, undefined, executor)
 
       const skill = store.create({
         package: makePackage('evolving-skill', 'Initial version'),
@@ -604,7 +624,7 @@ console.log(template);
     })
 
     it('supports sequential regeneration after skills change', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       const skill = store.create({
         package: makePackage('evolving-skill', 'Initial version 1', {
@@ -654,7 +674,7 @@ console.log(template);
     })
 
     it('joins concurrent prepareExport flights', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath)
+      const service = new AcademyGeminiExportService(store, dbPath, undefined, executor)
 
       const skill = store.create({
         package: makePackage('flight-skill', 'Flight test'),
@@ -702,7 +722,7 @@ console.log(template);
     })
 
     it('manages flight rejection cleanly without unhandled rejection and recovers on retry', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       const skill = store.create({
         package: makePackage('resilient-skill', 'Tests failure and recovery'),
@@ -746,7 +766,7 @@ console.log(template);
     })
 
     it('preserves previous valid export on intermediate write and promotion failures', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       const skill = store.create({
         package: makePackage('preserved-skill', 'Version 1 baseline content'),
@@ -803,7 +823,7 @@ console.log(template);
     })
 
     it('detects drift when receipt has a different profile version', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       const skill = store.create({
         package: makePackage('versioned-skill', 'Test profile versioning'),
@@ -823,14 +843,14 @@ console.log(template);
       await writeFile(service.receiptPath, JSON.stringify(diskReceipt, null, 2))
 
       // New service instance loading the legacy receipt
-      const serviceLegacy = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const serviceLegacy = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
       const legacyState = serviceLegacy.getState()
       expect(legacyState.drifted).toBe(true)
       expect(legacyState.coverage.awaitingZip).toBe(1)
     })
 
     it('calculates state and coverage quickly on the main thread without script conversion', () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       // Create skill with script that requires adaptation
       const skill1 = store.create({
@@ -873,7 +893,7 @@ console.log(template);
     })
 
     it('never traverses script contents during Main state queries and caches by version, packageHash, and profile', () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       const s1 = store.create({
         package: makePackage('cached-script-one', 'First script skill', {
@@ -978,8 +998,8 @@ console.log(template);
       }
     })
 
-    it('excludes only packages whose derived content exceeds 100 MB during export while keeping valid skills', async () => {
-      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+    it('persists worker exclusions in the receipt across service restarts and invalidates on skill or profile changes', async () => {
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
 
       const healthy = store.create({
         package: makePackage('healthy-skill', 'Small valid skill', {
@@ -1005,15 +1025,147 @@ console.log(template);
       expect(receipt.skills.map((s) => s.name)).toEqual(['healthy-skill'])
       expect(existsSync(receipt.artifactPath)).toBe(true)
 
-      const postExportState = service.getState()
-      expect(postExportState.drifted).toBe(false)
-      expect(postExportState.coverage.eligible).toBe(1)
-      expect(postExportState.coverage.awaitingZip).toBe(0)
-      expect(
-        postExportState.coverage.excluded.some(
-          (e) => e.name === 'oversized-derived-skill' && e.reason === 'INCOMPATIBLE' && e.details?.includes('100MB')
-        )
-      ).toBe(true)
-    }, 20000)
+      // 1. Receipt on disk persists exclusion bound to skillId, version, packageHash, and profileVersion
+      const diskReceipt = JSON.parse(readFileSync(service.receiptPath, 'utf8'))
+      expect(diskReceipt.excludedSkills).toEqual([
+        expect.objectContaining({
+          skillId: oversized.id,
+          name: 'oversized-derived-skill',
+          version: oversized.currentVersion,
+          packageHash: oversized.current.packageHash,
+          profileVersion: GEMINI_ADAPTATION_PROFILE_VERSION,
+          details: expect.stringContaining('100MB')
+        })
+      ])
+
+      // 2. Simulate full process restart: close DB, open fresh AcademyStore + AcademyGeminiExportService
+      store.close()
+      const restartedStore = new AcademyStore(dbPath)
+      const restartedService = new AcademyGeminiExportService(restartedStore, dbPath, downloadsDir, executor)
+
+      const originalGet = restartedStore.get.bind(restartedStore)
+      const restartedGetSpy = vi.spyOn(restartedStore, 'get').mockImplementation((id: string) => {
+        if (id === oversized.id) {
+          throw new Error('RESTART_MUST_NOT_LOAD_EXCLUDED_OVERSIZED_SKILL')
+        }
+        return originalGet(id)
+      })
+      const byteLengthSpy = vi.spyOn(Buffer, 'byteLength')
+
+      try {
+        const restartedState = restartedService.getState()
+        expect(restartedState.coverage.eligible).toBe(1)
+        expect(restartedState.coverage.awaitingZip).toBe(0)
+        expect(restartedState.drifted).toBe(false)
+        expect(restartedState.coverage.excluded).toEqual([
+          expect.objectContaining({
+            skillId: oversized.id,
+            name: 'oversized-derived-skill',
+            version: oversized.currentVersion,
+            reason: 'INCOMPATIBLE',
+            details: expect.stringContaining('100MB')
+          })
+        ])
+        expect(restartedGetSpy).not.toHaveBeenCalledWith(oversized.id)
+        expect(byteLengthSpy).not.toHaveBeenCalled()
+
+        // 3. Profile change invalidates persisted exclusion and requires fresh evaluation
+        restartedGetSpy.mockRestore()
+        byteLengthSpy.mockRestore()
+        const invalidationGetSpy = vi.spyOn(restartedStore, 'get')
+        const differentProfileEval = evaluateGeminiCatalog(restartedStore, restartedState.latestExport, 'v2-next-profile')
+        expect(differentProfileEval.coverage.eligible).toBe(2)
+        expect(differentProfileEval.coverage.awaitingZip).toBe(2)
+        expect(invalidationGetSpy).toHaveBeenCalledWith(oversized.id)
+        invalidationGetSpy.mockRestore()
+
+        // 4. Updating the oversized skill to a smaller valid package invalidates its persisted exclusion
+        restartedStore.update({
+          skillId: oversized.id,
+          expectedVersion: oversized.currentVersion,
+          package: makePackage('oversized-derived-skill', 'Now small and valid', {
+            'src/huge.ts': 'export const compact = true;'
+          }),
+          origin: 'UI'
+        })
+        const afterShrinkState = restartedService.getState()
+        expect(afterShrinkState.coverage.eligible).toBe(2)
+        expect(afterShrinkState.coverage.excluded).toHaveLength(0)
+        expect(afterShrinkState.coverage.awaitingZip).toBe(1)
+        expect(afterShrinkState.drifted).toBe(true)
+
+        // 5. Legacy receipts without excludedSkills remain readable and compatible
+        const { writeFileSync } = await import('node:fs')
+        const legacyReceipt = { ...diskReceipt }
+        delete legacyReceipt.excludedSkills
+        writeFileSync(restartedService.receiptPath, JSON.stringify(legacyReceipt, null, 2))
+        const legacyCompatibleService = new AcademyGeminiExportService(restartedStore, dbPath, downloadsDir, executor)
+        expect(legacyCompatibleService.getState().latestExport?.exportId).toBe(receipt.exportId)
+      } finally {
+        restartedGetSpy.mockRestore()
+        byteLengthSpy.mockRestore()
+        restartedStore.close()
+      }
+    }, 30000)
+
+    it('fails fast with recoverable error and preserves previous ZIP/receipt when worker is unavailable (no Main fallback)', async () => {
+      // 1. Produce a valid initial export using a real worker
+      const serviceWithWorker = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+      const skill = store.create({
+        package: makePackage('worker-only-skill', 'Requires worker execution', {
+          'src/task.ts': 'export const run = () => 1;'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill.id, skill.currentVersion)
+
+      const initialReceipt = await serviceWithWorker.prepareExport()
+      const initialZipBytes = readFileSync(initialReceipt.artifactPath)
+      const initialReceiptBytes = readFileSync(serviceWithWorker.receiptPath)
+
+      // 2. Update skill so export becomes drifted, then initialize service with missing worker
+      store.update({
+        skillId: skill.id,
+        expectedVersion: skill.currentVersion,
+        package: makePackage('worker-only-skill', 'Version 2 needs worker', {
+          'src/task.ts': 'export const run = () => 2;'
+        }),
+        origin: 'UI'
+      })
+
+      const unavailableExecutor = new AcademyPluginExecutor(join(tempDir, 'missing-academy-worker.cjs'))
+      expect(unavailableExecutor.hasWorker()).toBe(false)
+      const serviceWithoutWorker = new AcademyGeminiExportService(store, dbPath, downloadsDir, unavailableExecutor)
+
+      const getSpy = vi.spyOn(store, 'get')
+      const byteLengthSpy = vi.spyOn(Buffer, 'byteLength')
+
+      try {
+        await expect(serviceWithoutWorker.prepareExport()).rejects.toMatchObject({
+          code: 'GEMINI_EXPORT_WORKER_UNAVAILABLE'
+        })
+        expect(getSpy).not.toHaveBeenCalled()
+        expect(byteLengthSpy).not.toHaveBeenCalled()
+      } finally {
+        getSpy.mockRestore()
+        byteLengthSpy.mockRestore()
+      }
+
+      // Previous valid ZIP and receipt are untouched; state exposes recoverable error cleanly
+      expect(readFileSync(initialReceipt.artifactPath)).toEqual(initialZipBytes)
+      expect(readFileSync(serviceWithoutWorker.receiptPath)).toEqual(initialReceiptBytes)
+      const failedState = serviceWithoutWorker.getState()
+      expect(failedState.lastError).toContain('GEMINI_EXPORT_WORKER_UNAVAILABLE')
+      expect(failedState.latestExport?.exportId).toBe(initialReceipt.exportId)
+      expect(failedState.artifactAvailable).toBe(true)
+
+      // Recovery succeeds once a valid worker executor is available
+      const recoveredService = new AcademyGeminiExportService(store, dbPath, downloadsDir, executor)
+      const recoveredReceipt = await recoveredService.prepareExport()
+      expect(recoveredReceipt.artifactHash).not.toBe(initialReceipt.artifactHash)
+      expect(recoveredService.getState().lastError).toBeNull()
+      expect(recoveredService.getState().drifted).toBe(false)
+    })
   })
 })

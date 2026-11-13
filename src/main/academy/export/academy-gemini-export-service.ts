@@ -4,21 +4,25 @@ import type {
   AcademyGeminiExportReceipt,
   AcademyGeminiExportState
 } from '../../../shared/types/academy-types'
+import { AcademyError } from '../academy-package'
 import type { AcademyStore } from '../academy-store'
 import {
+  clearGeminiEvaluationCache,
   evaluateGeminiCatalog,
-  executeGeminiExport,
+  getActiveWorkerExclusions,
   recordGeminiWorkerExclusion,
+  restoreGeminiReceiptExclusions,
   GEMINI_ADAPTATION_PROFILE_VERSION,
   type AcademyGeminiExportTask
 } from './gemini-export-model'
-import type { AcademyPluginExecutor } from '../publication/academy-plugin-executor'
+import { AcademyPluginExecutor } from '../publication/academy-plugin-executor'
 
 export class AcademyGeminiExportService {
   readonly exportDirectory: string
   readonly receiptPath: string
   readonly masterZipPath: string
 
+  private readonly executor: AcademyPluginExecutor
   private latestReceipt: AcademyGeminiExportReceipt | null = null
   private lastError: string | null = null
   private readonly flights = new Map<string, Promise<AcademyGeminiExportReceipt>>()
@@ -29,12 +33,15 @@ export class AcademyGeminiExportService {
     private readonly store: AcademyStore,
     academyDatabasePath: string,
     private readonly downloadsPath?: string,
-    private readonly executor?: AcademyPluginExecutor
+    executor?: AcademyPluginExecutor
   ) {
+    this.executor = executor ?? new AcademyPluginExecutor()
     this.exportDirectory = join(dirname(academyDatabasePath), 'gemini-export')
     this.receiptPath = join(this.exportDirectory, 'latest.json')
     this.masterZipPath = join(this.exportDirectory, 'academy-gemini.zip')
+    clearGeminiEvaluationCache(this.store)
     this.latestReceipt = this.loadReceipt()
+    restoreGeminiReceiptExclusions(this.store, this.latestReceipt, GEMINI_ADAPTATION_PROFILE_VERSION)
   }
 
   onChange(listener: () => void): () => void {
@@ -94,7 +101,21 @@ export class AcademyGeminiExportService {
     }
   }
 
+  private workerUnavailableError(): AcademyError {
+    return new AcademyError(
+      'GEMINI_EXPORT_WORKER_UNAVAILABLE',
+      'GEMINI_EXPORT_WORKER_UNAVAILABLE: Worker de exportação Gemini indisponível. A geração do pacote requer execução fora do processo principal.'
+    )
+  }
+
   async prepareExport(taskOverrides?: Partial<AcademyGeminiExportTask>): Promise<AcademyGeminiExportReceipt> {
+    if (!this.executor || !this.executor.hasWorker()) {
+      const error = this.workerUnavailableError()
+      this.lastError = error.message
+      this.emitChange()
+      return Promise.reject(error)
+    }
+
     const initialEvaluation = evaluateGeminiCatalog(this.store, this.latestReceipt, GEMINI_ADAPTATION_PROFILE_VERSION)
     const snapshotHash = initialEvaluation.canonicalSnapshotHash
 
@@ -108,38 +129,41 @@ export class AcademyGeminiExportService {
 
       this.lastError = null
 
-      const currentEvaluation = evaluateGeminiCatalog(this.store, this.latestReceipt, GEMINI_ADAPTATION_PROFILE_VERSION)
-      const currentSnapshotHash = currentEvaluation.canonicalSnapshotHash
-
-      const eligible = [...currentEvaluation.eligibleSkills].sort((a, b) => a.name.localeCompare(b.name))
-      const profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
-
-      const task: AcademyGeminiExportTask = {
-        kind: 'gemini-export',
-        exportDirectory: this.exportDirectory,
-        masterZipPath: this.masterZipPath,
-        receiptPath: this.receiptPath,
-        downloadsPath: this.downloadsPath,
-        snapshotHash: currentSnapshotHash,
-        profileVersion,
-        skills: eligible.map((skill) => {
-          const detail = this.store.get(skill.id)
-          return {
-            id: skill.id,
-            name: skill.name,
-            version: skill.currentVersion,
-            packageHash: detail.current.packageHash,
-            package: detail.current.package
-          }
-        }),
-        ...taskOverrides
-      }
-
       try {
-        const result =
-          this.executor && this.executor.hasWorker()
-            ? await this.executor.run(task)
-            : await executeGeminiExport(task)
+        if (!this.executor || !this.executor.hasWorker()) {
+          throw this.workerUnavailableError()
+        }
+
+        const currentEvaluation = evaluateGeminiCatalog(this.store, this.latestReceipt, GEMINI_ADAPTATION_PROFILE_VERSION)
+        const currentSnapshotHash = currentEvaluation.canonicalSnapshotHash
+
+        const eligible = [...currentEvaluation.eligibleSkills].sort((a, b) => a.name.localeCompare(b.name))
+        const profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
+        const carriedExcludedSkills = getActiveWorkerExclusions(this.store, profileVersion)
+
+        const task: AcademyGeminiExportTask = {
+          kind: 'gemini-export',
+          exportDirectory: this.exportDirectory,
+          masterZipPath: this.masterZipPath,
+          receiptPath: this.receiptPath,
+          downloadsPath: this.downloadsPath,
+          snapshotHash: currentSnapshotHash,
+          profileVersion,
+          skills: eligible.map((skill) => {
+            const detail = this.store.get(skill.id)
+            return {
+              id: skill.id,
+              name: skill.name,
+              version: skill.currentVersion,
+              packageHash: detail.current.packageHash,
+              package: detail.current.package
+            }
+          }),
+          ...(carriedExcludedSkills.length > 0 ? { carriedExcludedSkills } : {}),
+          ...taskOverrides
+        }
+
+        const result = await this.executor.run(task)
 
         if (result.excludedSkills?.length) {
           for (const exclusion of result.excludedSkills) {

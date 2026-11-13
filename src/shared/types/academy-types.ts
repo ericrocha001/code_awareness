@@ -111,6 +111,15 @@ export interface AcademyGeminiSkillExportEntry {
   adaptedFiles?: Array<{ originalPath: string; adaptedPath: string; language?: string }>
 }
 
+export interface AcademyGeminiReceiptExcludedSkill {
+  skillId: string
+  name: string
+  version: number
+  packageHash: string
+  profileVersion: string
+  details: string
+}
+
 export interface AcademyGeminiExportReceipt {
   exportId: string
   exportedAt: string
@@ -122,6 +131,7 @@ export interface AcademyGeminiExportReceipt {
   convertedCount?: number
   totalBytes: number
   skills: AcademyGeminiSkillExportEntry[]
+  excludedSkills?: AcademyGeminiReceiptExcludedSkill[]
 }
 
 export interface AcademyGeminiExportState {

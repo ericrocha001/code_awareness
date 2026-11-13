@@ -123,7 +123,10 @@ export function inferCodeLanguage(ext: string): string {
 }
 
 export function generateMarkdownFence(content: string): string {
-  const matches = content.match(/`+/g)
+  if (!content.includes('```')) {
+    return '```'
+  }
+  const matches = content.match(/`{3,}/g)
   let maxBackticks = 0
   if (matches) {
     for (const m of matches) {
@@ -425,6 +428,7 @@ interface CachedGeminiSkillEvaluation {
   profileVersion: string
   name: string
   artifactCount: number
+  workerExcluded?: boolean
   validation: GeminiValidationResult
 }
 
@@ -437,6 +441,10 @@ function getStoreCache(store: AcademyStore): Map<string, CachedGeminiSkillEvalua
     storeEvaluationCache.set(store, cache)
   }
   return cache
+}
+
+export function clearGeminiEvaluationCache(store: AcademyStore): void {
+  storeEvaluationCache.delete(store)
 }
 
 function getCurrentVersionPackageHash(store: AcademyStore, skill: AcademySkillSummary): string | null {
@@ -460,14 +468,96 @@ export function recordGeminiWorkerExclusion(
   cache.set(exclusion.skillId, {
     version: exclusion.version,
     packageHash: exclusion.packageHash,
-    profileVersion,
+    profileVersion: exclusion.profileVersion || profileVersion,
     name: exclusion.name,
     artifactCount: 0,
+    workerExcluded: true,
     validation: {
       valid: false,
       details: exclusion.details
     }
   })
+}
+
+/**
+ * Restaura no cache em memória as exclusões apuradas pelo worker e persistidas
+ * no recibo, mantendo o vínculo estrito com version, packageHash e profileVersion.
+ */
+export function restoreGeminiReceiptExclusions(
+  store: AcademyStore,
+  receipt: AcademyGeminiExportReceipt | null,
+  currentProfileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
+): void {
+  if (!receipt?.excludedSkills?.length) return
+  if (receipt.profileVersion && receipt.profileVersion !== currentProfileVersion) return
+
+  const cache = getStoreCache(store)
+  for (const item of receipt.excludedSkills) {
+    if (
+      !item ||
+      typeof item.skillId !== 'string' ||
+      typeof item.name !== 'string' ||
+      typeof item.version !== 'number' ||
+      typeof item.packageHash !== 'string' ||
+      typeof item.profileVersion !== 'string' ||
+      typeof item.details !== 'string'
+    ) {
+      continue
+    }
+    if (item.profileVersion !== currentProfileVersion) continue
+
+    const existing = cache.get(item.skillId)
+    if (
+      existing &&
+      existing.workerExcluded &&
+      existing.version === item.version &&
+      existing.packageHash === item.packageHash &&
+      existing.profileVersion === item.profileVersion &&
+      existing.name === item.name
+    ) {
+      continue
+    }
+    recordGeminiWorkerExclusion(store, item, currentProfileVersion)
+  }
+}
+
+/**
+ * Retorna exclusões apuradas pelo worker que continuam válidas para a versão,
+ * hash e perfil correntes, evitando perda de exclusões em reexportações parciais.
+ */
+export function getActiveWorkerExclusions(
+  store: AcademyStore,
+  profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
+): AcademyGeminiWorkerExcludedSkill[] {
+  const cache = storeEvaluationCache.get(store)
+  if (!cache || cache.size === 0) return []
+
+  const skillsById = new Map(store.list().map((s) => [s.id, s]))
+  const active: AcademyGeminiWorkerExcludedSkill[] = []
+
+  for (const [skillId, entry] of cache.entries()) {
+    if (!entry.workerExcluded || entry.profileVersion !== profileVersion || entry.validation.valid) {
+      continue
+    }
+    const skill = skillsById.get(skillId)
+    if (!skill || skill.currentVersion !== entry.version || skill.name !== entry.name) {
+      continue
+    }
+    const metadataHash = getCurrentVersionPackageHash(store, skill)
+    if (!metadataHash || metadataHash !== entry.packageHash) {
+      continue
+    }
+    active.push({
+      skillId,
+      name: entry.name,
+      version: entry.version,
+      packageHash: entry.packageHash,
+      profileVersion: entry.profileVersion,
+      details: entry.validation.details ?? 'Incompatível para exportação Gemini.'
+    })
+  }
+
+  return active
 }
 
 interface EvaluatedGeminiSkill {
@@ -629,6 +719,7 @@ export function evaluateGeminiCatalog(
   latestExport: AcademyGeminiExportReceipt | null,
   profileVersion = GEMINI_ADAPTATION_PROFILE_VERSION
 ): GeminiCatalogEvaluation {
+  restoreGeminiReceiptExclusions(store, latestExport, profileVersion)
   const gitFirst = store.usesGitFirst()
   const skills = store.list()
 
@@ -839,6 +930,7 @@ export interface AcademyGeminiExportTask {
     packageHash: string
     package: AcademyPackage
   }>
+  carriedExcludedSkills?: AcademyGeminiWorkerExcludedSkill[]
   _failStage?: 'stage-zip' | 'stage-receipt' | 'promote'
 }
 
@@ -866,7 +958,12 @@ export async function executeGeminiExport(
 
   const profileVersion = task.profileVersion ?? GEMINI_ADAPTATION_PROFILE_VERSION
   const skillZips: Array<GeneratedGeminiSkillZip & { packageHash: string }> = []
-  const excludedSkills: AcademyGeminiWorkerExcludedSkill[] = []
+  const excludedById = new Map<string, AcademyGeminiWorkerExcludedSkill>()
+  for (const carried of task.carriedExcludedSkills ?? []) {
+    if (carried.profileVersion === profileVersion) {
+      excludedById.set(carried.skillId, carried)
+    }
+  }
   const includedEntries: CanonicalGeminiSnapshotEntry[] = []
   let convertedCount = 0
 
@@ -889,28 +986,28 @@ export async function executeGeminiExport(
         academyVersion: skill.version,
         packageHash: skill.packageHash
       })
+      excludedById.delete(skill.id)
     } catch (error) {
-      excludedSkills.push({
+      excludedById.set(skill.id, {
         skillId: skill.id,
         name: skill.name,
         version: skill.version,
         packageHash: skill.packageHash,
+        profileVersion,
         details: error instanceof Error ? error.message : String(error)
       })
     }
   }
   recordPhase('skillCompressionMs')
 
+  const excludedSkills = [...excludedById.values()].sort((a, b) => a.name.localeCompare(b.name))
   const master = createGeminiMasterZip(skillZips)
   recordPhase('masterCompressionMs')
 
-  const snapshotHash =
-    excludedSkills.length > 0
-      ? hashGeminiSnapshot({
-          profileVersion,
-          entries: includedEntries.sort((a, b) => a.skillId.localeCompare(b.skillId))
-        })
-      : task.snapshotHash
+  const snapshotHash = hashGeminiSnapshot({
+    profileVersion,
+    entries: includedEntries.sort((a, b) => a.skillId.localeCompare(b.skillId))
+  })
 
   const receipt: AcademyGeminiExportReceipt = {
     exportId: randomUUID(),
@@ -929,7 +1026,8 @@ export async function executeGeminiExport(
       entryCount: s.entryCount,
       byteLength: s.byteLength,
       adaptedFiles: s.adaptedFiles.length > 0 ? s.adaptedFiles : undefined
-    }))
+    })),
+    ...(excludedSkills.length > 0 ? { excludedSkills } : {})
   }
   const receiptJson = Buffer.from(JSON.stringify(receipt, null, 2), 'utf8')
 
