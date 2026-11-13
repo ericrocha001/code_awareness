@@ -1,5 +1,6 @@
-import { createHash } from 'node:crypto'
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs'
+import { sameDeliveryScope, deliveryAnchor, deliveryContextRequest, type DeliveryAnchor, type DeliveryContextRequest, type DeliveryProjectionPage } from '../../shared/types/delivery-context-types'
+import { createHash, randomUUID } from 'node:crypto'
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, writeFileSync, renameSync, lstatSync, readdirSync }  from 'node:fs'
 import { join } from 'node:path'
 import { PullRequestError, type CreatePullRequestInput, type PullRequestApproval, type PullRequestContext, type PullRequestSummary } from '../../shared/types/github-pr-types'
 import type { GitHubApiClient } from './github-api-client'
@@ -13,6 +14,7 @@ export interface PullRequestDependencies {
 }
 
 export interface PullRequestExecutionContext {
+  prepareDelivery?(request: DeliveryContextRequest, worktreeId?: string): Promise<DeliveryAnchor>
   isActive(): boolean
   inspectWorktree?(id: string): Promise<{ branch: string | null; head: string | null }>
 }
@@ -27,7 +29,7 @@ export class GitHubPullRequests {
   async create(input: CreatePullRequestInput, execution: PullRequestExecutionContext) {
     validateCreatePullRequest(input)
     const context = await this.resolve()
-    const fingerprint = hash(JSON.stringify([context.repositoryId, context.repository.toLowerCase(), input.headBranch, input.baseBranch, input.expectedHeadSha, input.title, input.body, input.worktreeId ?? null]))
+    const fingerprint = hash(JSON.stringify([context.repositoryId, context.repository.toLowerCase(), input.headBranch, input.baseBranch, input.expectedHeadSha, input.title, input.body, input.worktreeId ?? null, ...(input.deliveryContext ? [deliveryContextRequest.parse(input.deliveryContext)] : [])]))
     if (!this.dependencies) throw new PullRequestError('AUTHORIZATION_REQUIRED')
     const directory = join(this.dependencies.receiptDirectory, hash(context.repositoryId))
     const operationPath = join(directory, `${hash(input.operationId)}.json`)
@@ -65,9 +67,15 @@ export class GitHubPullRequests {
     if (raced) return { status: 'EXISTING_OPEN' as const, operationId: input.operationId, replayed: false, pullRequest: raced }
     if (Date.now() >= Date.parse(expiresAt)) throw new PullRequestError('AUTHORIZATION_EXPIRED')
     if (!execution.isActive()) throw new PullRequestError('PROJECT_CHANGED')
+    let anchor: DeliveryAnchor | undefined
+    if (input.deliveryContext) {
+      if (!execution.prepareDelivery) throw new PullRequestError('DELIVERY_CONTEXT_INVALID')
+      anchor = await execution.prepareDelivery(input.deliveryContext, input.worktreeId)
+      if (anchor.repositoryId !== context.repositoryId || anchor.snapshot.head !== input.expectedHeadSha || anchor.snapshot.branchRef !== 'refs/heads/' + input.headBranch || input.worktreeId && anchor.snapshot.worktreeId !== input.worktreeId) throw new PullRequestError('DELIVERY_CONTEXT_STALE')
+    }
     try {
       mkdirSync(directory, { recursive: true, mode: 0o700 })
-      if (!claim(operationPath, { fingerprint, operation: 'CREATE_PULL_REQUEST', preparedAt: new Date().toISOString() })) throw new PullRequestError('OUTCOME_UNKNOWN')
+      if (!claim(operationPath, { fingerprint, operationId: input.operationId, ...(anchor ? { deliveryContext: anchor } : {}), operation: 'CREATE_PULL_REQUEST', preparedAt: new Date().toISOString() })) throw new PullRequestError('OUTCOME_UNKNOWN')
       // A persistent head claim fences other operation IDs and process restarts after an uncertain POST.
       if (!claim(join(directory, `head-${hash(context.repository.toLowerCase() + ':' + input.headBranch)}.json`), { operationId: input.operationId, fingerprint })) throw new PullRequestError('OUTCOME_UNKNOWN')
     } catch (error) {
@@ -83,6 +91,7 @@ export class GitHubPullRequests {
       this.assertCompatible(context, input, verified)
       const reconciled = await this.reconcile(context, input)
       if (!reconciled || reconciled.number !== verified.number) throw new PullRequestError('PR_IDENTITY_CONFLICT')
+      if (anchor) await this.completeDelivery(operationPath, fingerprint, reconciled, execution)
       return { status: 'CREATED' as const, operationId: input.operationId, replayed: false, pullRequest: reconciled }
     } catch (error) {
       if (error instanceof PullRequestError && ['AUTHORIZATION_EXPIRED', 'PROJECT_CHANGED'].includes(error.code)) throw error
@@ -94,6 +103,18 @@ export class GitHubPullRequests {
       }
       throw new PullRequestError('OUTCOME_UNKNOWN')
     }
+  }
+
+  private async completeDelivery(path: string, fingerprint: string, pr: PullRequestSummary, execution: PullRequestExecutionContext) {
+    const receipt = JSON.parse(readFileSync(path, 'utf8'))
+    if (receipt.fingerprint !== fingerprint || receipt.completedAt) return
+    const parsed = deliveryAnchor.safeParse(receipt.deliveryContext)
+    if (!parsed.success || !execution.prepareDelivery) return
+    let verified = false
+    try { const after = await execution.prepareDelivery({ bindingArtifactId: parsed.data.bindingArtifactId, bindingRevision: parsed.data.bindingRevision, planArtifactId: parsed.data.planArtifactId, planRevision: parsed.data.planRevision, executionId: parsed.data.executionId }, parsed.data.snapshot.worktreeId); verified = sameDeliveryScope(parsed.data, after) && after.snapshot.head === pr.head.sha } catch {}
+    const temporary = path + '.' + randomUUID() + '.tmp'
+    if (!claim(temporary, { ...receipt, deliveryVerified: verified, completedAt: new Date().toISOString(), result: { number: pr.number, repository: pr.head.repository, headSha: pr.head.sha } })) throw new PullRequestError('RECEIPT_UNAVAILABLE')
+    renameSync(temporary, path)
   }
 
   private async verify(context: PullRequestContext, input: CreatePullRequestInput, execution: PullRequestExecutionContext, mutation = true) {
@@ -141,6 +162,7 @@ export function validateBranch(value: unknown): asserts value is string {
 }
 
 export function validateCreatePullRequest(input: CreatePullRequestInput) {
+  if (input.deliveryContext !== undefined && !deliveryContextRequest.safeParse(input.deliveryContext).success) throw new PullRequestError('INVALID_ARGUMENT')
   validateBranch(input.headBranch)
   validateBranch(input.baseBranch)
   if (input.headBranch === input.baseBranch || typeof input.expectedHeadSha !== 'string' || !/^[a-f0-9]{40}$/.test(input.expectedHeadSha)) throw new PullRequestError('INVALID_ARGUMENT')
@@ -160,4 +182,21 @@ export function claim(path: string, value: unknown): boolean {
   }
   try { writeFileSync(descriptor, JSON.stringify(value)); fsyncSync(descriptor) } finally { closeSync(descriptor) }
   return true
+}
+
+export function pullRequestDeliveryPage(directory: string, repositoryId: string, after = ''): DeliveryProjectionPage {
+  if (after && !/^[a-f0-9]{64}\.json$/.test(after)) throw new Error('INVALID_CURSOR')
+  const root = join(directory, hash(repositoryId)); let names: string[]
+  try { if (lstatSync(root).isSymbolicLink()) throw new Error('INVALID_RECEIPT_DIRECTORY'); names = readdirSync(root).filter(name => /^[a-f0-9]{64}\.json$/.test(name) && name > after).sort() }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { observations: [] }; throw error }
+  const observations: DeliveryProjectionPage['observations'] = []
+  for (const name of names.slice(0, 20)) {
+    const path = join(root, name), stat = lstatSync(path)
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 65536) continue
+    let receipt: any; try { receipt = JSON.parse(readFileSync(path, 'utf8')) } catch { continue }
+    const parsed = deliveryAnchor.safeParse(receipt.deliveryContext), result = receipt.result
+    if (!parsed.success || parsed.data.repositoryId !== repositoryId || receipt.deliveryVerified !== true || receipt.operation !== 'CREATE_PULL_REQUEST' || !receipt.completedAt || typeof receipt.operationId !== 'string' || typeof receipt.fingerprint !== 'string' || !result || !Number.isSafeInteger(result.number) || result.number < 1 || typeof result.repository !== 'string' || result.headSha !== parsed.data.snapshot.head) continue
+    observations.push({ receiptId: hash(JSON.stringify(receipt)), operationId: receipt.operationId, operation: 'CREATE_PULL_REQUEST', argumentFingerprint: receipt.fingerprint, anchor: parsed.data, pullRequest: result.number, headSha: result.headSha, repository: result.repository })
+  }
+  return { observations, ...(names.length > 20 ? { nextCursor: names[19] } : {}) }
 }

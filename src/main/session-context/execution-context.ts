@@ -62,6 +62,16 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
   if (selector) selectedNodes.add(store.registry.key(selector))
   const nodes = graph.nodes.filter(node => selectedNodes.has(node.key))
   const more = offset + edges.length < graph.edges.length
+  const deliveryLinks = graph.paths.map(path => path.edges.map(id => graph.edges.find(edge => edge.id === id)!))
+  const isUsable = (link: (typeof graph.edges)[number]) => link.state !== 'STALE' && link.state !== 'UNKNOWN'
+  const mixesDeclaredExecution = (links: typeof graph.edges) => links.some(link => link.evidenceKind === 'EXECUTION_MEMBERSHIP') &&
+    links.some(link => link.evidenceKind === 'OPERATION_EXECUTION_CONTEXT')
+  const documented = deliveryLinks.some(links => links.every(isUsable) && !mixesDeclaredExecution(links) && (
+    links.some(link => link.evidenceKind === 'CONTINUUM_REVISIONED_RELATION') &&
+    links.some(link => link.evidenceKind === 'OPERATION_EXECUTION_CONTEXT' && link.relation === 'delivery-context') ||
+    links.some(link => link.evidenceKind === 'HANDOFF_DECLARED' && (link.to.startsWith('PR:') || link.to.startsWith('COMMIT:') && links.some(member => member.evidenceKind === 'GITHUB_COMMIT_LIST')))
+  ))
+  const branchContextOnly = graph.edges.some(link => link.evidenceKind === 'BRANCH_CONTEXT_ONLY' && isUsable(link))
   const result = { repositoryId: store.repositoryId, selector: query.selector, revision, mode: query.mode,
     state: graph.nodes.length ? 'INDEX_SNAPSHOT' : 'RECONCILIATION_PENDING', partial: more || graph.bounded || coverage.state === 'PARTIAL', coverage,
     counts: Object.fromEntries(['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION', 'WORKTREE'].map(type => [type, graph.nodes.filter(node => node.type === type).length])), countsCoverage: graph.bounded ? 'BOUNDED' : 'OBSERVED_INDEX',
@@ -70,8 +80,13 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
       const links = path.edges.map(id => graph.edges.find(edge => edge.id === id)!)
       const first = links[0]
       const causal = links.length && links.every(edge => edge.confidenceClass === 'VERIFIED_CAUSAL' && edge.evidenceKind === first.evidenceKind && edge.evidenceRef === first.evidenceRef && edge.sourceRevision === first.sourceRevision)
-      return { ...path, confidenceClass: causal ? 'VERIFIED_CAUSAL' : links.length === 1 ? first.confidenceClass : 'CONTEXTUAL', meaning: causal ? 'SAME_OPERATION_EVIDENCE' : 'EXECUTION_CONTEXT_NOT_IMPLEMENTATION_PROOF' }
+      const rank = { UNKNOWN: 0, DECLARED: 1, DERIVED: 2, OBSERVED: 3, VERIFIED_CAUSAL: 4 }
+      const weakest = links.reduce((current, edge) => rank[edge.confidenceClass] < rank[current] ? edge.confidenceClass : current, first.confidenceClass)
+      return { ...path, ...(query.mode === 'RELATION_DETAIL' ? { evidenceClass: links.length > 1 ? 'DERIVED' : first.confidenceClass, weakestLink: weakest,
+        links: links.map(edge => ({ id: edge.id, evidenceKind: edge.evidenceKind, evidenceRef: edge.evidenceRef, source: edge.source, sourceRevision: edge.sourceRevision, freshness: edge.freshness, confidenceClass: edge.confidenceClass, state: edge.state })),
+        resolution: weakest === 'UNKNOWN' || !links.every(isUsable) || mixesDeclaredExecution(links) ? 'UNRESOLVED' : links.some(edge => edge.evidenceKind === 'BRANCH_CONTEXT_ONLY') ? 'BRANCH_CONTEXT_ONLY' : 'EVIDENCE_PATH' } : {}), confidenceClass: causal ? 'VERIFIED_CAUSAL' : links.length === 1 ? first.confidenceClass : 'CONTEXTUAL', meaning: causal ? 'SAME_OPERATION_EVIDENCE' : 'EXECUTION_CONTEXT_NOT_IMPLEMENTATION_PROOF' }
     }), sourceCoverage,
+    ...(query.mode === 'RELATION_DETAIL' ? { delivery: { state: documented ? 'DOCUMENTED' : branchContextOnly ? 'BRANCH_CONTEXT_ONLY' : 'UNRESOLVED', coverage: documented ? coverage.state : 'PARTIAL' } } : {}),
     captureCoverage: graph.nodes.some(node => node.type === 'CHECKPOINT') ? 'CHECKPOINT_OBSERVED' : 'CHECKPOINT_NOT_OBSERVED',
     freshness: 'LAST_KNOWN_NOT_RECHECKED', authorship: 'NOT_INFERRED',
     reconciliation: { backlog: store.registry.reconciliationBacklog(), state: 'EXPLICIT_REFRESH_AVAILABLE', tool: 'refresh_agent_sessions', arguments: { contextSelector: query.selector } },

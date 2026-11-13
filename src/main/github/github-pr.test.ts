@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GitHubApiClient } from './github-api-client'
 import { GitHubIntegrationService } from './github-integration-service'
-import { GitHubPullRequests } from './github-pull-requests'
+import { pullRequestDeliveryPage, GitHubPullRequests } from './github-pull-requests'
 import { executeGitHubPrTool, GITHUB_PR_TOOLS } from './github-pr-mcp'
 import { ChannelMcpAdapter } from '../mcp/channel-mcp-adapter'
 import type { CreatePullRequestInput } from '../../shared/types/github-pr-types'
@@ -215,4 +215,42 @@ describe('readiness and MCP binding', () => {
     const result = await executeGitHubPrTool({ createPullRequest } as any, '/active', 'create_pull_request', values, { isActive: () => true })
     expect(result.isError).toBe(true); expect(createPullRequest).not.toHaveBeenCalled()
   })
+})
+
+function deliveryAnchorFixture() {
+  const request = { bindingArtifactId: 'artifact-execution-branch-' + '1'.repeat(64), bindingRevision: 1, planArtifactId: 'artifact-11111111-1111-4111-8111-111111111111', planRevision: 1, executionId: 'execution-A' }
+  return { ...request, schemaVersion: 1 as const, repositoryId: context.repositoryId, planDigest: '2'.repeat(64), bindingDigest: '3'.repeat(64), classification: 'AUTHENTICATED_EXECUTION_CONTEXT' as const,
+    snapshot: { repositoryId: context.repositoryId, worktreeId: input.worktreeId!, worktreeGeneration: '4'.repeat(64), branchRef: 'refs/heads/' + input.headBranch, branchGeneration: '5'.repeat(64), branchRevision: '6'.repeat(64), fingerprint: '7'.repeat(64), head: sha } }
+}
+it('projects only authenticated opt-in approved PR receipts, retaining replay identity after restart', async () => {
+  const f = fixture(), anchor = deliveryAnchorFixture(), { schemaVersion, repositoryId, planDigest, bindingDigest, classification, snapshot, ...deliveryContext } = anchor
+  const prepareDelivery = vi.fn(async () => anchor)
+  const args = { ...input, deliveryContext }
+  expect(await f.build().create(args, { ...f.execution, prepareDelivery })).toMatchObject({ status: 'CREATED' })
+  expect(pullRequestDeliveryPage(f.receiptDirectory, context.repositoryId).observations).toMatchObject([{ operationId: input.operationId, pullRequest: 23, headSha: sha, anchor }])
+  prepareDelivery.mockRejectedValue(new Error('STALE'))
+  expect(await f.build().create(args, { ...f.execution, prepareDelivery })).toMatchObject({ replayed: true })
+  expect(pullRequestDeliveryPage(f.receiptDirectory, context.repositoryId).observations).toHaveLength(1)
+  expect(prepareDelivery).toHaveBeenCalledTimes(2)
+})
+it.each(['legacy', 'external', 'drift'])('does not attach execution context to %s PR operation', async scenario => {
+  const f = fixture(), anchor = deliveryAnchorFixture(), { schemaVersion, repositoryId, planDigest, bindingDigest, classification, snapshot, ...deliveryContext } = anchor
+  if (scenario === 'external') f.setPulls([summary()])
+  let calls = 0
+  const prepareDelivery = vi.fn(async () => ++calls === 1 ? anchor : { ...anchor, planRevision: 2 })
+  await f.build().create(scenario === 'legacy' ? input : { ...input, deliveryContext }, { ...f.execution, prepareDelivery })
+  expect(pullRequestDeliveryPage(f.receiptDirectory, context.repositoryId).observations).toEqual([])
+})
+
+it('does not bind an externally created PR after an uncertain governed POST', async () => {
+  const f = fixture(), anchor = deliveryAnchorFixture()
+  const { schemaVersion, repositoryId, planDigest, bindingDigest, classification, snapshot, ...deliveryContext } = anchor
+  const prepareDelivery = vi.fn(async () => anchor)
+  f.api.createPullRequest.mockImplementation(async () => { throw new Error('UNKNOWN_POST_OUTCOME') })
+  const args = { ...input, deliveryContext }, execution = { ...f.execution, prepareDelivery }
+  await expect(f.build().create(args, execution)).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' })
+  f.setPulls([summary()])
+  expect(await f.build().create(args, execution)).toMatchObject({ replayed: true, status: 'EXISTING_OPEN' })
+  expect(pullRequestDeliveryPage(f.receiptDirectory, context.repositoryId).observations).toEqual([])
+  expect(prepareDelivery).toHaveBeenCalledTimes(1)
 })

@@ -7,7 +7,7 @@ import type { GitHubAuthService, PendingGitHubAuthorization } from './github-aut
 import type { GitHubProductConfig } from './github-config'
 import type { GitHubConnectionMetadata, GitHubCredentialStore } from './github-credential-store'
 import { GitHubIntegrationError, githubErrorMessage, toGitHubIntegrationError } from './github-errors'
-import { GitHubPullRequests, type PullRequestDependencies, type PullRequestExecutionContext } from './github-pull-requests'
+import { pullRequestDeliveryPage, GitHubPullRequests, type PullRequestDependencies, type PullRequestExecutionContext } from './github-pull-requests'
 import { GitHubPrIntegration } from './github-pr-integration'
 import type { PullRequestMutationInput } from '../../shared/types/github-pr-types'
 import { PullRequestError, type CreatePullRequestInput, type PullRequestQuery } from '../../shared/types/github-pr-types'
@@ -164,6 +164,11 @@ export class GitHubIntegrationService {
     return new GitHubPrIntegration(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).status(operationId)
   }
 
+  async deliveryRepository(repoPath: string, repositoryId: string): Promise<string | undefined> {
+    const remote = await this.git.getRemoteUrl(repoPath), repository = remote ? normalizeGitHubOrigin(remote) : null
+    const record = this.catalog.findByPath(repoPath)
+    return repository && record?.id === repositoryId && (!record.github || record.github.fullName.toLowerCase() === repository.toLowerCase()) ? repository : undefined
+  }
   private async pullRequestContext(repoPath: string) {
     this.requireConfigured()
     if (!this.auth!.hasCredentials()) throw new GitHubIntegrationError('NOT_CONNECTED', githubErrorMessage('NOT_CONNECTED'))
@@ -198,6 +203,9 @@ export class GitHubIntegrationService {
     return { ...context, pullRequest: await this.api!.getPullRequest(context.repository, number) }
   }
 
+  deliveryProjectionPage(repositoryId: string, cursor?: string) {
+    return this.pullRequestDependencies ? pullRequestDeliveryPage(this.pullRequestDependencies.receiptDirectory, repositoryId, cursor) : { observations: [] }
+  }
   async createPullRequest(repoPath: string, input: CreatePullRequestInput, execution: PullRequestExecutionContext) {
     this.requireConfigured()
     return new GitHubPullRequests(this.api!, () => this.pullRequestContext(repoPath), this.pullRequestDependencies).create(input, execution)

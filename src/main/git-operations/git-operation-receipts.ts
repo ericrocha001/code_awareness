@@ -1,3 +1,4 @@
+import { sameDeliveryScope, type DeliveryAnchor } from '../../shared/types/delivery-context-types'
 import { createHash } from 'node:crypto'
 import type { GitService } from '../core/git-service'
 import type { GitOperationalResult } from '../../shared/types/git-management-types'
@@ -17,6 +18,8 @@ export interface GitOperationReceipt {
   status: 'PREPARED' | 'COMPLETED' | 'FAILED'
   createdAt: string
   completedAt?: string
+  deliveryContext?: DeliveryAnchor
+  deliveryVerified?: boolean
   result?: LegacyGitReceiptResult
 }
 
@@ -41,11 +44,11 @@ export function isReceiptedGitMutation(name: string, args: Record<string, unknow
 export class GitOperationReceipts {
   constructor(private readonly root: string, private readonly git: GitService) {}
 
-  async execute(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>): Promise<LegacyGitReceiptResult> {
-    return encodeGitReceiptResult(await this.executeResult(operationId, operation, args, async () => decodeGitReceiptResult(await mutate())))
+  async execute(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<LegacyGitReceiptResult>, prepareDelivery?: () => Promise<DeliveryAnchor>): Promise<LegacyGitReceiptResult> {
+    return encodeGitReceiptResult(await this.executeResult(operationId, operation, args, async () => decodeGitReceiptResult(await mutate()), prepareDelivery))
   }
 
-  async executeResult(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<GitOperationalResult>): Promise<GitOperationalResult> {
+  async executeResult(operationId: string, operation: string, args: Record<string, unknown>, mutate: () => Promise<GitOperationalResult>, prepareDelivery?: () => Promise<DeliveryAnchor>): Promise<GitOperationalResult> {
     const operationalFailure = (value: Record<string, unknown>): GitOperationalResult => ({ value, isError: true })
     const fingerprint = gitReceiptFingerprint(operation, args)
     const recover = (receipt: GitOperationReceipt): GitOperationalResult => {
@@ -56,7 +59,8 @@ export class GitOperationReceipts {
     }
     const existing = await this.git.readOperationReceipt(this.root, operationId)
     if (existing) return recover(existing.receipt)
-    const receipt: GitOperationReceipt = { operationId, operation, argumentFingerprint: fingerprint, status: 'PREPARED', createdAt: new Date().toISOString() }
+    const deliveryContext = prepareDelivery ? await prepareDelivery() : undefined
+    const receipt: GitOperationReceipt = { operationId, operation, argumentFingerprint: fingerprint, status: 'PREPARED', createdAt: new Date().toISOString(), ...(deliveryContext ? { deliveryContext } : {}) }
     const prepared = await this.git.prepareOperationReceipt(this.root, receipt)
     if (!prepared.created) return recover(prepared.receipt)
     const result = await mutate()
@@ -74,7 +78,11 @@ export class GitOperationReceipts {
     if (operation === 'manage_worktree') for (const code of ['WORKTREE_SCOPE_NOT_GRANTED', 'WORKTREE_NOT_MANAGED', 'WORKTREE_LOCKED', 'WORKTREE_PRESERVATION_REQUIRED', 'DIRTY_WORKTREE']) safeFailures.add(code)
     if (['integrate_worktree', 'publish_worktree', 'start_worktree_validation', 'resolve_worktree_conflict'].includes(operation)) for (const code of ['WORKTREE_SCOPE_NOT_GRANTED', 'WORKTREE_NOT_MANAGED', 'WORKTREE_PREVIEW_STALE', 'WORKTREE_PREVIEW_NOT_FOUND', 'WORKTREE_INTEGRATION_VALIDATION_REQUIRED', 'WORKTREE_INTEGRATION_INVALID', 'WORKTREE_TARGET_OWNERSHIP_REQUIRED', 'DIRTY_WORKTREE', 'WORKTREE_VALIDATION_BUSY', 'WORKTREE_VALIDATION_CAPACITY']) safeFailures.add(code)
     if (result.isError && !safeFailures.has(String(value.code))) return operationalFailure({ code: 'OPERATION_OUTCOME_UNKNOWN', operationId, retryability: 'NOT_SAFE', recommendedAction: 'RECONCILE_OPERATION' })
-    const completed = { ...receipt, status: result.isError ? 'FAILED' as const : 'COMPLETED' as const, result: encodeGitReceiptResult(result), completedAt: new Date().toISOString() }
+    let deliveryVerified = false
+    if (deliveryContext && prepareDelivery && !result.isError) {
+      try { const after = await prepareDelivery(); deliveryVerified = sameDeliveryScope(deliveryContext, after) && after.snapshot.head === value.sha } catch {}
+    }
+    const completed = { ...receipt, ...(deliveryContext ? { deliveryVerified } : {}), status: result.isError ? 'FAILED' as const : 'COMPLETED' as const, result: encodeGitReceiptResult(result), completedAt: new Date().toISOString() }
     try { await this.git.completeOperationReceipt(this.root, completed, prepared.sha) }
     catch { return operationalFailure({ code: 'OPERATION_OUTCOME_UNKNOWN', operationId, retryability: 'NOT_SAFE', recommendedAction: 'RECONCILE_OPERATION' }) }
     return { ...result, value: { ...value, operationId, replayed: false } }
