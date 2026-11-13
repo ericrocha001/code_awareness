@@ -16,6 +16,7 @@ export interface RegistryBatch {
 }
 export type RegistryReader = (request: { selector?: RegistryEntity; neighbors?: RegistryEntity[]; cursors: Record<string, string> }) => Promise<RegistryBatch[]>
 type ObservedEdge = RegistryEdge & { sourceSystem: string; sourceRevision: string; observedAt: string; state: string }
+type NativeAuditEdge = { id: string; source: string; sourceRevision: string; fromId: string; toId: string; payload: string; integrity: string }
 export const REGISTRY_SCHEMA = `
  CREATE TABLE IF NOT EXISTS registry_entities(id TEXT PRIMARY KEY, kind TEXT NOT NULL, externalId TEXT NOT NULL, localSessionId TEXT, UNIQUE(kind,externalId));
  CREATE TABLE IF NOT EXISTS registry_edges(id TEXT PRIMARY KEY, source TEXT NOT NULL, sourceRevision TEXT NOT NULL,
@@ -132,10 +133,81 @@ export class CheckpointRegistry {
       return JSON.parse(row.payload) as RegistryEdge
     }).filter(edge => edge.evidenceKind === evidenceKind)
   }
-  nativeSessions(offset: number, limit: number): { provider: string; providerSessionId: string; agent: string; origin: string; aliasState: string; deepen: object }[] {
+  nativeSessions(offset: number, limit: number, accountHash?: string) {
     const rows = this.db.prepare("SELECT externalId FROM registry_entities WHERE kind='SESSION' AND externalId LIKE 'codex-native:%' ORDER BY externalId LIMIT ? OFFSET ?").all(limit, offset) as { externalId: string }[]
-    return rows.map(row => ({ provider: 'codex-native', providerSessionId: row.externalId.slice(13), agent: 'codex', origin: 'NATIVE_HOOK', aliasState: 'NOT_RECONCILED',
-      deepen: { tool: 'discover_execution_context', arguments: { selector: { type: 'SESSION', provider: 'codex-native', id: row.externalId.slice(13) } } } }))
+    return rows.filter(row => this.visible({ kind: 'SESSION', id: row.externalId }, accountHash)).map(row => this.nativeSession(row.externalId))
+  }
+
+  nativeDeliverySessions(selector: RegistryEntity, accountHash?: string) {
+    if (selector.kind !== 'PR' && selector.kind !== 'COMMIT') throw new Error('INVALID_ARGUMENT')
+    const target = this.key(selector)
+    const prSource = 'GITHUB:PR:' + selector.id
+    const membership = selector.kind === 'PR'
+      ? this.db.prepare(`SELECT e.* FROM registry_edges e
+          JOIN registry_sources page ON page.source=e.source AND page.revision=e.sourceRevision AND page.status='COMPLETE'
+          JOIN registry_sources pr ON pr.source=? AND pr.revision=e.sourceRevision AND pr.status IN ('COMPLETE','PARTIAL')
+          WHERE e.toId=? AND e.state='OBSERVED' AND e.source LIKE ? AND json_extract(e.payload,'$.evidenceKind')='GITHUB_COMMIT_LIST'
+          ORDER BY e.id LIMIT 201`).all(prSource, target, prSource + ':%') as NativeAuditEdge[]
+      : []
+    const commits = new Map<string, NativeAuditEdge | null>()
+    if (selector.kind === 'COMMIT') commits.set(target, null)
+    for (const row of membership.slice(0, 200)) {
+      const edge = this.nativeAuditEdge(row)
+      const page = row.source.slice(prSource.length + 1)
+      if (edge.from.kind !== 'COMMIT' || !/^[a-f0-9]{40}$/.test(edge.from.id) || edge.to.kind !== 'PR' || edge.relation !== 'member-of' || edge.freshness !== 'OBSERVED_SNAPSHOT' ||
+          !/^[1-9][0-9]*$/.test(page) || edge.evidenceRef !== `PR:${selector.id}:${row.sourceRevision}:${page}`) continue
+      commits.set(row.fromId, row)
+    }
+    const reasons = new Set<string>()
+    if (selector.kind === 'PR' && this.source(prSource)?.status !== 'COMPLETE') reasons.add('GITHUB_PR_COVERAGE_PARTIAL')
+    if (membership.length > 200) reasons.add('GRAPH_LIMIT_REACHED')
+    const candidates = commits.size ? this.db.prepare(`SELECT committed.* FROM registry_edges committed
+      JOIN registry_sources source ON source.source=committed.source AND source.revision=committed.sourceRevision AND source.status='COMPLETE'
+      WHERE committed.toId IN (SELECT value FROM json_each(?)) AND committed.state='OBSERVED'
+        AND committed.source LIKE 'NATIVE_GIT:%' AND json_extract(committed.payload,'$.evidenceKind')='NATIVE_GIT_CAUSAL'
+      ORDER BY committed.id LIMIT 201`).all(JSON.stringify([...commits.keys()])) as NativeAuditEdge[] : []
+    if (candidates.length > 200) reasons.add('GRAPH_LIMIT_REACHED')
+    const sessions = new Map<string, ReturnType<CheckpointRegistry['nativeSession']> & { evidence: object }>()
+    for (const committed of candidates.slice(0, 200)) {
+      const commit = this.nativeAuditEdge(committed)
+      const invocationId = committed.source.slice('NATIVE_GIT:'.length)
+      if (!/^[a-f0-9]{64}$/.test(invocationId) || commit.from.kind !== 'EXECUTION' || commit.from.id !== 'native-invocation:' + invocationId ||
+          commit.to.kind !== 'COMMIT' || !/^[a-f0-9]{40}$/.test(commit.to.id) || commit.relation !== 'committed' || commit.digest !== committed.sourceRevision ||
+          commit.freshness !== 'OBSERVED_SNAPSHOT' || !/^[a-f0-9]{40,64}$/.test(commit.evidenceRef)) continue
+      const witnesses = this.db.prepare(`SELECT * FROM registry_edges WHERE toId=? AND source=? AND sourceRevision=? AND state='OBSERVED'
+        ORDER BY id LIMIT 2`).all(committed.fromId, committed.source, committed.sourceRevision) as NativeAuditEdge[]
+      if (witnesses.length !== 1) continue
+      const invoked = this.nativeAuditEdge(witnesses[0])
+      if (invoked.relation !== 'invoked' || invoked.evidenceKind !== 'NATIVE_GIT_CAUSAL' || invoked.digest !== commit.digest ||
+          invoked.evidenceRef !== commit.evidenceRef || invoked.freshness !== commit.freshness ||
+          invoked.from.kind !== 'SESSION' || !/^codex-native:[a-f0-9]{64}$/.test(invoked.from.id) || !this.visible(invoked.from, accountHash)) continue
+      const member = commits.get(committed.toId)
+      if (!sessions.has(invoked.from.id)) sessions.set(invoked.from.id, {
+        ...this.nativeSession(invoked.from.id), evidence: {
+          native: { kind: 'NATIVE_GIT_CAUSAL', state: 'VERIFIED_CAUSAL', revision: committed.sourceRevision, commitSha: commit.to.id },
+          ...(member ? { membership: { kind: 'GITHUB_COMMIT_LIST', state: 'VERIFIED', revision: member.sourceRevision } } : {})
+        }
+      })
+    }
+    for (const source of this.coverageSources()) {
+      if (['NATIVE_HOOK', 'ENTIRE_REFS', ...(selector.kind === 'PR' ? ['GITHUB', 'GITHUB_DISCOVERY'] : [])].includes(source.source) &&
+          ['PARTIAL', 'UNAVAILABLE', 'UNSUPPORTED', 'NETWORK_NOT_AUTHORIZED'].includes(source.status)) reasons.add(source.source + '_' + source.status)
+    }
+    const rows = [...sessions.values()].sort((a, b) => a.providerSessionId.localeCompare(b.providerSessionId))
+    return { rows, reasons: [...reasons].sort(), revision: digest(JSON.stringify([rows, [...reasons].sort(), candidates.map(row => row.id), membership.map(row => row.id)])) }
+  }
+
+  private nativeAuditEdge(row: NativeAuditEdge): RegistryEdge {
+    if (digest(row.payload) !== row.integrity) throw new Error('REGISTRY_INTEGRITY_FAILED')
+    const edge = JSON.parse(row.payload) as RegistryEdge
+    if (this.key(edge.from) !== row.fromId || this.key(edge.to) !== row.toId) throw new Error('REGISTRY_INTEGRITY_FAILED')
+    return edge
+  }
+
+  private nativeSession(externalId: string) {
+    const id = externalId.slice(13)
+    return { provider: 'codex-native', providerSessionId: id, agent: 'codex', origin: 'NATIVE_HOOK', aliasState: 'NOT_RECONCILED',
+      deepen: { tool: 'discover_execution_context', arguments: { selector: { type: 'SESSION', provider: 'codex-native', id } } } }
   }
   readSnapshot<T>(read: () => T): T { return this.db.transaction(read).deferred() }
   key(entity: RegistryEntity): string {
