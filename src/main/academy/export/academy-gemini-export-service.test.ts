@@ -12,6 +12,7 @@ import {
   geminiInclusion,
   buildGeminiCoverage,
   adaptGeminiPackage,
+  preflightGeminiPackage,
   generateMarkdownFence,
   formatAdaptedReferenceMarkdown,
   GEMINI_ADAPTATION_PROFILE_VERSION
@@ -298,6 +299,68 @@ console.log(template);
       const adaptation = adaptGeminiPackage(collisionPackage)
       expect(adaptation.rejectionReason).toBeDefined()
       expect(adaptation.rejectionReason).toContain('Colisão de caminho')
+    })
+
+    it('detects case-insensitive collisions between original files', () => {
+      const collisionPackage = makePackage('case-collision', 'Colliding case', {
+        'scripts/runner.js': 'console.log(1);',
+        'scripts/RUNNER.JS': 'console.log(2);'
+      })
+      const adaptation = adaptGeminiPackage(collisionPackage)
+      expect(adaptation.rejectionReason).toBeDefined()
+      expect(adaptation.rejectionReason).toContain('Colisão de caminho')
+    })
+
+    it('detects case-insensitive collision with SKILL.md', () => {
+      const collisionPackage = makePackage('skill-collision', 'Colliding skill.md', {
+        'skill.md': '# Overwrite attempt'
+      })
+      const adaptation = adaptGeminiPackage(collisionPackage)
+      expect(adaptation.rejectionReason).toBeDefined()
+      expect(adaptation.rejectionReason).toContain("Artefato não pode sobrescrever 'SKILL.md'")
+    })
+
+    it('detects case-insensitive collisions between adapted script and original Markdown', () => {
+      // 1. Script then Markdown with differing case
+      const collision1 = makePackage('case-collision-1', 'Test', {
+        'scripts/Tool.ts': 'export const a = 1;',
+        'references/scripts/tool.ts.md': '# Existing lowercase'
+      })
+      const adaptation1 = adaptGeminiPackage(collision1)
+      expect(adaptation1.rejectionReason).toBeDefined()
+      expect(adaptation1.rejectionReason).toContain('Colisão de caminho')
+
+      // 2. Markdown first then Script with differing case
+      const collision2 = makePackage('case-collision-2', 'Test', {
+        'references/scripts/TOOL.ts.md': '# Existing uppercase',
+        'scripts/tool.ts': 'export const a = 1;'
+      })
+      const adaptation2 = adaptGeminiPackage(collision2)
+      expect(adaptation2.rejectionReason).toBeDefined()
+      expect(adaptation2.rejectionReason).toContain('Colisão de caminho')
+    })
+
+    it('detects case-insensitive collisions between two adapted scripts', () => {
+      const collisionPackage = makePackage('script-collision', 'Colliding script targets', {
+        'src/Worker.ts': 'export const a = 1;',
+        'src/worker.ts': 'export const b = 2;'
+      })
+      const adaptation = adaptGeminiPackage(collisionPackage)
+      expect(adaptation.rejectionReason).toBeDefined()
+      expect(adaptation.rejectionReason).toContain('Colisão de caminho')
+    })
+
+    it('preflightGeminiPackage performs lightweight validation without string allocations', () => {
+      const canonical = makePackage('preflight-skill', 'Preflight check', {
+        'src/handler.ts': 'export const h = 1;',
+        'assets/info.txt': 'info text',
+        'run.sh': '#!/bin/sh\necho hi'
+      })
+
+      const preflight = preflightGeminiPackage(canonical)
+      expect(preflight.valid).toBe(true)
+      expect(preflight.adaptedFileCount).toBe(1)
+      expect(preflight.totalBytes).toBeGreaterThan(0)
     })
   })
 
@@ -669,6 +732,49 @@ console.log(template);
       const legacyState = serviceLegacy.getState()
       expect(legacyState.drifted).toBe(true)
       expect(legacyState.coverage.awaitingZip).toBe(1)
+    })
+
+    it('calculates state and coverage quickly on the main thread without script conversion', () => {
+      const service = new AcademyGeminiExportService(store, dbPath, downloadsDir)
+
+      // Create skill with script that requires adaptation
+      const skill1 = store.create({
+        package: makePackage('script-skill', 'Skill with typescript', {
+          'src/index.ts': 'export const run = () => true;',
+          'docs/readme.md': '# Readme'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill1.id, skill1.currentVersion)
+
+      // Create skill with native files only
+      const skill2 = store.create({
+        package: makePackage('native-skill', 'Skill with native files', {
+          'run.sh': '#!/bin/sh\necho ok',
+          'docs/guide.txt': 'guidance'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill2.id, skill2.currentVersion)
+
+      // Create skill with incompatible binary (excluded)
+      const skill3 = store.create({
+        package: makePackage('binary-skill', 'Skill with binary', {
+          'tool.exe': 'MZ-binary'
+        }),
+        scope: 'GLOBAL',
+        origin: 'UI'
+      })
+      store.approvePublicSkill(skill3.id, skill3.currentVersion)
+
+      const state = service.getState()
+      expect(state.coverage.eligible).toBe(2)
+      expect(state.coverage.adaptedCount).toBe(1)
+      expect(state.coverage.excluded.some((e) => e.name === 'binary-skill')).toBe(true)
+      expect(state.coverage.awaitingZip).toBe(2)
+      expect(state.drifted).toBe(true)
     })
   })
 })

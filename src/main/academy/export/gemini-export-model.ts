@@ -171,69 +171,174 @@ export interface GeminiPackageAdaptationResult {
   rejectionReason?: string
 }
 
-export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPackageAdaptationResult {
-  const adaptedFiles: AdaptedFileMapping[] = []
-  const derivedArtifacts: Record<string, string> = {}
-  const occupiedPaths = new Set<string>()
+export interface GeminiPackagePreflightResult {
+  valid: boolean
+  rejectionReason?: string
+  adaptedFileCount: number
+  totalBytes: number
+}
 
-  for (const [rawPath, content] of Object.entries(canonicalPackage.artifacts ?? {})) {
+export function preflightGeminiPackage(canonicalPackage: AcademyPackage): GeminiPackagePreflightResult {
+  let totalBytes = Buffer.byteLength(canonicalPackage.skillMd ?? '', 'utf8')
+  let adaptedFileCount = 0
+
+  const originalArtifacts = Object.entries(canonicalPackage.artifacts ?? {})
+  const originalLowerMap = new Map<string, string>()
+
+  // 1. Validar caminhos de artefatos e verificar colisões entre arquivos originais (case-insensitive)
+  for (const [rawPath] of originalArtifacts) {
     if (rawPath.includes('\\') || rawPath.startsWith('/') || rawPath.split('/').includes('..')) {
       return {
-        package: canonicalPackage,
-        adaptedFiles: [],
-        rejectionReason: `Caminho de artefato inválido '${rawPath}': caminhos não podem conter barras invertidas, iniciar com barra ou conter '..'.`
+        valid: false,
+        rejectionReason: `Caminho de artefato inválido '${rawPath}': caminhos não podem conter barras invertidas, iniciar com barra ou conter '..'.`,
+        adaptedFileCount: 0,
+        totalBytes: 0
       }
     }
     const normalized = posix.normalize(rawPath)
-    if (normalized === 'SKILL.md') {
+    const normalizedLower = normalized.toLowerCase()
+
+    if (normalizedLower === 'skill.md') {
       return {
-        package: canonicalPackage,
-        adaptedFiles: [],
-        rejectionReason: `Artefato não pode sobrescrever 'SKILL.md'.`
+        valid: false,
+        rejectionReason: `Artefato não pode sobrescrever 'SKILL.md'.`,
+        adaptedFileCount: 0,
+        totalBytes: 0
       }
     }
 
+    if (originalLowerMap.has(normalizedLower)) {
+      return {
+        valid: false,
+        rejectionReason: `Colisão de caminho: '${rawPath}' colide (não sensível a maiúsculas) com '${originalLowerMap.get(normalizedLower)}'.`,
+        adaptedFileCount: 0,
+        totalBytes: 0
+      }
+    }
+    originalLowerMap.set(normalizedLower, rawPath)
+  }
+
+  // 2. Validar extensões, conteúdo e verificar colisões de destino no ZIP (case-insensitive)
+  const zipDestinationsLower = new Map<string, string>()
+  zipDestinationsLower.set('skill.md', 'SKILL.md')
+
+  for (const [rawPath, content] of originalArtifacts) {
+    const normalized = posix.normalize(rawPath)
+    const normalizedLower = normalized.toLowerCase()
     const ext = extname(normalized).toLowerCase()
 
     if (GEMINI_REJECTED_AUDIO_VIDEO_EXTENSIONS.has(ext)) {
       return {
-        package: canonicalPackage,
-        adaptedFiles: [],
-        rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext}' (áudio/vídeo), não suportada dentro de arquivos ZIP no Gemini Web.`
+        valid: false,
+        rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext}' (áudio/vídeo), não suportada dentro de arquivos ZIP no Gemini Web.`,
+        adaptedFileCount: 0,
+        totalBytes: 0
       }
     }
 
     if (GEMINI_REJECTED_BINARY_EXTENSIONS.has(ext) || content.includes('\0')) {
       return {
-        package: canonicalPackage,
-        adaptedFiles: [],
-        rejectionReason: `Arquivo '${rawPath}' é binário ou não conversível para referência textual no Gemini Web.`
+        valid: false,
+        rejectionReason: `Arquivo '${rawPath}' é binário ou não conversível para referência textual no Gemini Web.`,
+        adaptedFileCount: 0,
+        totalBytes: 0
       }
     }
 
     if (GEMINI_NATIVE_ALLOWED_EXTENSIONS.has(ext)) {
-      if (occupiedPaths.has(normalized)) {
+      if (zipDestinationsLower.has(normalizedLower)) {
         return {
-          package: canonicalPackage,
-          adaptedFiles: [],
-          rejectionReason: `Colisão de caminho: '${normalized}' já está registrado no pacote.`
+          valid: false,
+          rejectionReason: `Colisão de caminho: '${normalized}' já está registrado no pacote.`,
+          adaptedFileCount: 0,
+          totalBytes: 0
         }
       }
-      occupiedPaths.add(normalized)
+      zipDestinationsLower.set(normalizedLower, normalized)
+      totalBytes += Buffer.byteLength(content, 'utf8')
+      continue
+    }
+
+    if (GEMINI_ADAPTABLE_CODE_EXTENSIONS.has(ext)) {
+      const adaptedPath = mapAdaptedPath(normalized)
+      const adaptedLower = adaptedPath.toLowerCase()
+
+      if (zipDestinationsLower.has(adaptedLower)) {
+        return {
+          valid: false,
+          rejectionReason: `Colisão de caminho ao adaptar '${rawPath}' para '${adaptedPath}': caminho de destino já ocupado.`,
+          adaptedFileCount: 0,
+          totalBytes: 0
+        }
+      }
+      if (originalLowerMap.has(adaptedLower)) {
+        return {
+          valid: false,
+          rejectionReason: `Colisão de caminho ao adaptar '${rawPath}' para '${adaptedPath}': caminho de destino colide com arquivo original '${originalLowerMap.get(adaptedLower)}'.`,
+          adaptedFileCount: 0,
+          totalBytes: 0
+        }
+      }
+
+      zipDestinationsLower.set(adaptedLower, adaptedPath)
+      adaptedFileCount++
+      // Estimativa leve de bytes: conteúdo + overhead de disclaimer/fences (~350B)
+      totalBytes += Buffer.byteLength(content, 'utf8') + 350
+      continue
+    }
+
+    return {
+      valid: false,
+      rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext || '(sem extensão)'}' não suportada pelo Gemini Web.`,
+      adaptedFileCount: 0,
+      totalBytes: 0
+    }
+  }
+
+  if (adaptedFileCount > 0) {
+    totalBytes += adaptedFileCount * 120 + 300
+  }
+
+  if (totalBytes > GEMINI_MAX_SKILL_BYTES) {
+    return {
+      valid: false,
+      rejectionReason: `Tamanho total da Skill (${totalBytes} bytes) excede o limite de 100MB do Gemini Web.`,
+      adaptedFileCount,
+      totalBytes
+    }
+  }
+
+  return {
+    valid: true,
+    adaptedFileCount,
+    totalBytes
+  }
+}
+
+export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPackageAdaptationResult {
+  const preflight = preflightGeminiPackage(canonicalPackage)
+  if (!preflight.valid) {
+    return {
+      package: canonicalPackage,
+      adaptedFiles: [],
+      rejectionReason: preflight.rejectionReason
+    }
+  }
+
+  const adaptedFiles: AdaptedFileMapping[] = []
+  const derivedArtifacts: Record<string, string> = {}
+
+  for (const [rawPath, content] of Object.entries(canonicalPackage.artifacts ?? {})) {
+    const normalized = posix.normalize(rawPath)
+    const ext = extname(normalized).toLowerCase()
+
+    if (GEMINI_NATIVE_ALLOWED_EXTENSIONS.has(ext)) {
       derivedArtifacts[normalized] = content
       continue
     }
 
     if (GEMINI_ADAPTABLE_CODE_EXTENSIONS.has(ext)) {
       const adaptedPath = mapAdaptedPath(normalized)
-      if (occupiedPaths.has(adaptedPath) || (canonicalPackage.artifacts && adaptedPath in canonicalPackage.artifacts)) {
-        return {
-          package: canonicalPackage,
-          adaptedFiles: [],
-          rejectionReason: `Colisão de caminho ao adaptar '${rawPath}' para '${adaptedPath}': caminho de destino já ocupado.`
-        }
-      }
-      occupiedPaths.add(adaptedPath)
       const language = inferCodeLanguage(ext)
       const referenceContent = formatAdaptedReferenceMarkdown(rawPath, content, language)
       derivedArtifacts[adaptedPath] = referenceContent
@@ -243,12 +348,6 @@ export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPack
         language
       })
       continue
-    }
-
-    return {
-      package: canonicalPackage,
-      adaptedFiles: [],
-      rejectionReason: `Arquivo '${rawPath}' possui extensão '${ext || '(sem extensão)'}' não suportada pelo Gemini Web.`
     }
   }
 
@@ -286,6 +385,7 @@ export function adaptGeminiPackage(canonicalPackage: AcademyPackage): GeminiPack
 export interface GeminiValidationResult {
   valid: boolean
   details?: string
+  adaptedFileCount?: number
 }
 
 export function validateGeminiSkill(detail: AcademySkillDetail): GeminiValidationResult {
@@ -296,28 +396,15 @@ export function validateGeminiSkill(detail: AcademySkillDetail): GeminiValidatio
     }
   }
 
-  const adaptation = adaptGeminiPackage(detail.current.package)
-  if (adaptation.rejectionReason) {
+  const preflight = preflightGeminiPackage(detail.current.package)
+  if (!preflight.valid) {
     return {
       valid: false,
-      details: adaptation.rejectionReason
+      details: preflight.rejectionReason
     }
   }
 
-  const derived = adaptation.package
-  let totalBytes = Buffer.byteLength(derived.skillMd, 'utf8')
-  for (const content of Object.values(derived.artifacts ?? {})) {
-    totalBytes += Buffer.byteLength(content, 'utf8')
-  }
-
-  if (totalBytes > GEMINI_MAX_SKILL_BYTES) {
-    return {
-      valid: false,
-      details: `Tamanho total da Skill (${totalBytes} bytes) excede o limite de 100MB do Gemini Web.`
-    }
-  }
-
-  return { valid: true }
+  return { valid: true, adaptedFileCount: preflight.adaptedFileCount }
 }
 
 export interface GeminiInclusionResult {
@@ -325,6 +412,7 @@ export interface GeminiInclusionResult {
   reason?: AcademyGeminiExclusionReason
   details?: string
   action?: AcademyGeminiExcludedSkill['action']
+  adaptedFileCount?: number
 }
 
 export function geminiInclusion(store: AcademyStore, skill: AcademySkillSummary): GeminiInclusionResult {
@@ -367,7 +455,7 @@ export function geminiInclusion(store: AcademyStore, skill: AcademySkillSummary)
     }
   }
 
-  return { status: 'INCLUDED' }
+  return { status: 'INCLUDED', adaptedFileCount: validation.adaptedFileCount }
 }
 
 export interface CanonicalGeminiSnapshotEntry {
@@ -429,9 +517,7 @@ export function buildGeminiCoverage(
       notApplicable++
     } else if (inclusion.status === 'INCLUDED') {
       includedIds.add(skill.id)
-      const detail = store.get(skill.id)
-      const adaptation = adaptGeminiPackage(detail.current.package)
-      if (adaptation.adaptedFiles.length > 0) {
+      if ((inclusion.adaptedFileCount ?? 0) > 0) {
         adaptedCount++
       }
     } else if (inclusion.status === 'EXCLUDED' && inclusion.reason) {
@@ -461,8 +547,7 @@ export function buildGeminiCoverage(
             awaitingZip++
           }
         } else {
-          const adaptation = adaptGeminiPackage(skill.current.package)
-          const expectedCount = Object.keys(adaptation.package.artifacts ?? {}).length + 1
+          const expectedCount = Object.keys(skill.current.package.artifacts ?? {}).length + 1
           if (shipped.entryCount !== expectedCount) {
             awaitingZip++
           }
