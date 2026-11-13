@@ -134,3 +134,23 @@ export function nativeCaptureDiagnostics(registry: CheckpointRegistry, root?: st
         unresolvedGaps: window.gapRevision === value.gapRevision ? 0 : null, lossAttribution: 'UNASSIGNED_LOSSES_REMAIN_UNKNOWN' })) } : {}
   } catch { return {} }
 }
+
+const correlationConflictReasons = [
+  'INVOCATION_INCOMPLETE', 'INVOCATION_AMBIGUOUS', 'INVOCATION_ORDER_INVALID',
+  'CAPTURE_CONFIGURATION_CHANGED', 'CAPTURE_ENVELOPE_UNPROVEN', 'CAPTURE_PARTIAL', 'CAPTURE_WINDOW_UNPROVEN',
+  'RECEIPT_AMBIGUOUS', 'RECEIPT_MISMATCH', 'RECEIPT_UNAVAILABLE', 'RECEIPT_UNVERIFIED',
+  'REPLAY_NOT_AUTHORSHIP', 'REPLAY_NOT_CAUSAL', 'RESULT_UNCONFIRMED', 'GIT_OBJECT_UNVERIFIED'
+] as const
+
+export function nativeCorrelationSourceCoverage(registry: Pick<CheckpointRegistry, 'source'>, visibleInvocationIds: readonly string[]) {
+  const ids = [...new Set(visibleInvocationIds.filter(id => hash.test(id)))].slice(0, 2)
+  return ids.flatMap(id => ['NATIVE_GIT', 'NATIVE_ARTIFACT'].flatMap(kind => {
+    const source = kind + ':' + id, state = registry.source(source)
+    if (state?.status !== 'COMPLETE' && state?.status !== 'CONFLICT') return []
+    const reasonCode = state.status === 'CONFLICT'
+      ? correlationConflictReasons.find(reason => reason === state.cursor) ?? 'NATIVE_CONFLICT_UNCLASSIFIED'
+      : undefined
+    return [{ source, scope: 'VISIBLE_NATIVE_INVOCATION' as const, status: state.status, observedAt: state.observedAt,
+      ...(reasonCode ? { reasonCode } : {}), pending: reasonCode === 'INVOCATION_INCOMPLETE' || reasonCode === 'RECEIPT_UNAVAILABLE' }]
+  }))
+}

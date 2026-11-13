@@ -8,11 +8,12 @@ import { executeGetArtifact } from '../continuum/continuum-mcp'
 import { SessionStore, sessionStorePath } from './store'
 import { sourceFingerprint, type SessionTargetResolver } from './target'
 import { SessionContextClient } from './client'
+import { executeSessionTool } from './mcp'
 import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, recordNativeGap, spoolNativeHook, type NativeHookBinding, type NativeHookEnvelope } from './native-hooks'
 import { nativeObservationBatch } from './native-hook-ingestion'
 import { correlateNativeArtifact } from './native-artifact-correlation'
 import { stampNativeCapture } from './native-capture-window'
-import { persistNativeCapture, readNativeGapHistory } from './native-hook-diagnostics'
+import { nativeCorrelationSourceCoverage, persistNativeCapture, readNativeGapHistory } from './native-hook-diagnostics'
 import type { PublicationProvenancePort } from '../../shared/types/publication-provenance-types'
 import type { ArtifactReceipt } from '../continuum/continuum-types'
 const closes: (() => void)[] = []
@@ -203,4 +204,59 @@ it('does not write a causal association after cancellation while readback is in 
   await expect(result).rejects.toThrow('PROJECT_CONTEXT_CHANGED')
   expect(associated).toBe(false)
   expect(f.service.get(receipt.artifactId)!.provenance.nativeArtifact).toBeUndefined()
+})
+
+it('U3 rejects temporal inversion and tampered envelope readback on complete late pairs', async () => {
+  for (const mode of ['order', 'readback']) {
+    const f = setup(), receipt = f.service.publish(markdown()), pair = f.events(receipt)
+    const event = (value: NativeHookEnvelope, observedAt: string) => { const { digest: _digest, ...body } = value; const changed = { ...body, observedAt }; return { ...changed, digest: nativeDigest(JSON.stringify(changed)) } }
+    const pre = mode === 'order' ? event(pair[0], '2026-11-02T00:00:01.000Z') : pair[0]
+    const post = mode === 'order' ? event(pair[1], '2026-11-02T00:00:00.000Z') : pair[1]
+    f.observe(pre); expect(await f.correlate(pre)).toBe('INVOCATION_INCOMPLETE'); f.observe(post)
+    if (mode === 'readback') {
+      const db = new Database(f.path)
+      try { db.prepare('UPDATE registry_sources SET cursor=? WHERE source=?').run('{}', 'NATIVE_HOOK:' + pre.eventId) } finally { db.close() }
+    }
+    const reason = mode === 'order' ? 'INVOCATION_ORDER_INVALID' : 'CAPTURE_ENVELOPE_UNPROVEN'
+    expect(await f.correlate(post)).toBe(reason); f.restart(); expect(await f.correlate(post)).toBe(reason)
+    expect(f.service.get(receipt.artifactId)!.provenance.nativeArtifact).toBeUndefined()
+  }
+})
+
+it('U3 projects allowlisted source reasons for visible invocations only and retains them after restart', async () => {
+  const f = setup(), receipt = f.service.publish(markdown()), [pre, post] = f.events(receipt)
+  f.observe(pre); expect(await f.correlate(pre)).toBe('INVOCATION_INCOMPLETE')
+  const invocation = pre.invocationId!, source = 'NATIVE_ARTIFACT:' + invocation
+  const coverage = (ids: string[]) => nativeCorrelationSourceCoverage(f.sessions().registry, ids)
+  const query = async (selector: object) => {
+    const result = await executeSessionTool(f.sessions(), { refresh: async () => { throw new Error('UNEXPECTED_REFRESH') } }, 'discover_execution_context', { selector, mode: 'RELATION_DETAIL', depth: 1 }, () => {})
+    expect(result.isError).toBeFalsy(); return JSON.parse(result.content[0].text)
+  }
+  const selector = { type: 'INVOCATION', id: invocation }
+  const partial = await query(selector)
+  expect(partial.sourceCoverage).toContainEqual(expect.objectContaining({ source, status: 'CONFLICT', reasonCode: 'INVOCATION_INCOMPLETE' }))
+  expect(partial.reconciliation.backlog).toMatchObject({ pending: true, details: expect.arrayContaining([expect.objectContaining({ source, pending: true })]) })
+  expect((await query({ type: 'INVOCATION', id: '0'.repeat(64) })).sourceCoverage.some((value: { source: string }) => value.source === source)).toBe(false)
+  expect(coverage([])).toEqual([])
+  expect(coverage([invocation, invocation, 'private-path'])).toEqual([expect.objectContaining({ source, status: 'CONFLICT', reasonCode: 'INVOCATION_INCOMPLETE', pending: true })])
+  f.restart(); expect(coverage([invocation])[0].reasonCode).toBe('INVOCATION_INCOMPLETE')
+  const unknownId = 'f'.repeat(64)
+  f.sessions().registry.apply({ repositoryId: f.binding.repositoryId, source: 'NATIVE_GIT:' + unknownId, revision: nativeDigest('unknown'), status: 'CONFLICT', cursor: 'PRIVATE_PAYLOAD', edges: [] }, undefined)
+  expect(coverage([invocation])).toHaveLength(1)
+  expect(coverage([unknownId])[0]).toMatchObject({ reasonCode: 'NATIVE_CONFLICT_UNCLASSIFIED', pending: false })
+  expect(JSON.stringify(coverage([unknownId]))).not.toContain('PRIVATE_PAYLOAD')
+  f.observe(post); expect(await f.correlate(post)).toBe('VERIFIED')
+  expect(coverage([invocation])[0]).toMatchObject({ source, status: 'COMPLETE', pending: false })
+  expect(coverage([invocation])[0].reasonCode).toBeUndefined()
+  f.restart()
+  const artifact = { type: 'ARTIFACT', id: receipt.artifactId, revision: 1 }
+  for (const key of [selector, artifact]) expect((await query(key)).edges).toContainEqual(expect.objectContaining({ evidenceKind: 'NATIVE_ARTIFACT_CAUSAL', confidenceClass: 'VERIFIED_CAUSAL', relation: 'published' }))
+  const window = () => f.sessions().registry.nativeCaptureWindows(f.binding.worktreeId, f.binding.generation).find(item => item.epoch === pre.capture!.epoch)
+  expect(window()).toMatchObject({ causalEdges: { current: 3, withdrawn: 0 }, denominator: null })
+  recordNativeGap(f.binding.spool, 'SPOOL_FULL')
+  expect(await f.correlate(post)).toBe('CAPTURE_PARTIAL')
+  f.restart()
+  expect(window()).toMatchObject({ causalEdges: { current: 0, withdrawn: 3 }, denominator: null })
+  expect((await query(selector)).sourceCoverage).toContainEqual(expect.objectContaining({ source, status: 'CONFLICT', reasonCode: 'CAPTURE_PARTIAL' }))
+  expect((await query(artifact)).edges.filter((edge: { confidenceClass: string }) => edge.confidenceClass === 'VERIFIED_CAUSAL')).toEqual([])
 })

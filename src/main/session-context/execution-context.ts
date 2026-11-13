@@ -3,6 +3,7 @@ import type { RegistryEntity } from './checkpoint-registry'
 import type { SessionStore } from './store'
 import { digest } from './privacy'
 import { sessionIdentity } from './session-identity'
+import { nativeCorrelationSourceCoverage } from './native-hook-diagnostics'
 
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/)
 export const executionSelector = z.discriminatedUnion('type', [
@@ -34,16 +35,18 @@ export function discoverExecutionContext(store: SessionStore, query: z.infer<typ
 function contextSnapshot(store: SessionStore, query: z.infer<typeof executionContextQuery>, accountHash: string | undefined, pageLimit: number) {
   const selector = executionEntity(store, query.selector, accountHash)
   const graph = selector ? store.registry.contextGraph(selector, accountHash, query.depth) : { nodes: [], edges: [], paths: [], bounded: false }
-  const sourceCoverage = store.registry.coverageSources().map(s => {
+  const nativeSources = nativeCorrelationSourceCoverage(store.registry, graph.nodes.flatMap(node =>
+    node.type === 'EXECUTION' && node.id.startsWith('native-invocation:') ? [node.id.slice('native-invocation:'.length)] : []))
+  const sourceCoverage = [...store.registry.coverageSources().map(s => {
     let diagnostic: { reasonCode?: string; stage?: string } = {}
     try { diagnostic = JSON.parse(store.registry.source(s.source + ':DIAGNOSTIC')?.cursor ?? '{}') } catch {}
     return { source: s.source, status: s.status, observedAt: s.observedAt,
       ...(typeof diagnostic.reasonCode === 'string' && /^[A-Z_]{1,80}$/.test(diagnostic.reasonCode) ? { reasonCode: diagnostic.reasonCode } : {}),
       ...(typeof diagnostic.stage === 'string' && /^[A-Z_]{1,80}$/.test(diagnostic.stage) ? { stage: diagnostic.stage } : {}) }
-  })
+  }), ...nativeSources.map(({ pending: _pending, ...source }) => source)]
   const reasons = new Set<string>()
   if (graph.bounded) reasons.add('GRAPH_LIMIT_REACHED')
-  for (const source of sourceCoverage) if (['PARTIAL','UNAVAILABLE','UNSUPPORTED','NETWORK_NOT_AUTHORIZED'].includes(source.status)) reasons.add(source.source + '_' + source.status)
+  for (const source of sourceCoverage) if (['PARTIAL','UNAVAILABLE','UNSUPPORTED','NETWORK_NOT_AUTHORIZED','CONFLICT'].includes(source.status)) reasons.add(source.source + '_' + source.status)
   for (const node of graph.nodes) if (node.type === 'WORKTREE' && node.generation) {
     try {
       const capture = JSON.parse(store.registry.source(`NATIVE_CAPTURE:${node.id}:${node.generation}`)?.cursor ?? '{}')
@@ -72,6 +75,8 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
     links.some(link => link.evidenceKind === 'HANDOFF_DECLARED' && (link.to.startsWith('PR:') || link.to.startsWith('COMMIT:') && links.some(member => member.evidenceKind === 'GITHUB_COMMIT_LIST')))
   ))
   const branchContextOnly = graph.edges.some(link => link.evidenceKind === 'BRANCH_CONTEXT_ONLY' && isUsable(link))
+  const backlog = store.registry.reconciliationBacklog()
+  const nativeBacklog = nativeSources.filter(source => source.status === 'CONFLICT').map(({ status: _status, observedAt, ...source }) => ({ ...source, lastAttemptAt: observedAt }))
   const result = { repositoryId: store.repositoryId, selector: query.selector, revision, mode: query.mode,
     state: graph.nodes.length ? 'INDEX_SNAPSHOT' : 'RECONCILIATION_PENDING', partial: more || graph.bounded || coverage.state === 'PARTIAL', coverage,
     counts: Object.fromEntries(['PR', 'COMMIT', 'CHECKPOINT', 'SESSION', 'ARTIFACT', 'PROOF', 'EXECUTION', 'WORKTREE'].map(type => [type, graph.nodes.filter(node => node.type === type).length])), countsCoverage: graph.bounded ? 'BOUNDED' : 'OBSERVED_INDEX',
@@ -89,7 +94,7 @@ function contextSnapshot(store: SessionStore, query: z.infer<typeof executionCon
     ...(query.mode === 'RELATION_DETAIL' ? { delivery: { state: documented ? 'DOCUMENTED' : branchContextOnly ? 'BRANCH_CONTEXT_ONLY' : 'UNRESOLVED', coverage: documented ? coverage.state : 'PARTIAL' } } : {}),
     captureCoverage: graph.nodes.some(node => node.type === 'CHECKPOINT') ? 'CHECKPOINT_OBSERVED' : 'CHECKPOINT_NOT_OBSERVED',
     freshness: 'LAST_KNOWN_NOT_RECHECKED', authorship: 'NOT_INFERRED',
-    reconciliation: { backlog: store.registry.reconciliationBacklog(), state: 'EXPLICIT_REFRESH_AVAILABLE', tool: 'refresh_agent_sessions', arguments: { contextSelector: query.selector } },
+    reconciliation: { backlog: { ...backlog, pending: backlog.pending || nativeBacklog.some(source => source.pending), details: [...backlog.details, ...nativeBacklog] }, state: 'EXPLICIT_REFRESH_AVAILABLE', tool: 'refresh_agent_sessions', arguments: { contextSelector: query.selector } },
     ...(more ? { nextCursor: store.cursor(scope, offset + edges.length) } : {}),
     discovery: { depth: query.depth, nextStep: 'SELECT_NEIGHBOR', suggestions: 'SEPARATE_FROM_CONFIRMED_EDGES' },
     ...(graph.bounded ? { continuation: 'Select a node with depth=1 for its bounded immediate neighborhood.' } : {}) }

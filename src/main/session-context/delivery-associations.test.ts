@@ -16,6 +16,11 @@ import { ValidationLedger } from '../validation-ledger/validation-ledger'
 import { SessionStore, sessionStorePath } from './store'
 import { registrySources, handoffTargets } from './registry-sources'
 import { executeSessionTool } from './mcp'
+import { nativeDigest, nativeGitIdentity, normalizeNativeHook, prepareNativeSpool, type NativeHookBinding } from './native-hooks'
+import { startCaptureFixture } from './fixtures/native-capture-fixture'
+import { nativeObservationBatch } from './native-hook-ingestion'
+import { correlateNativeGit } from './native-git-correlation'
+import Database from 'better-sqlite3'
 const cleanup: (() => Promise<void>)[] = []
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close() })
 async function fixture() {
@@ -174,6 +179,38 @@ it('accepts opt-in only through authenticated callback and preserves all argumen
   const { operationId: _operationId, ...fingerprintArgs } = args
   expect(receipt.argumentFingerprint).toBe(gitReceiptFingerprint('commit_git_changes', fingerprintArgs))
   expect((await operations.deliveryProjectionPage()).observations).toHaveLength(1)
+
+  const snapshot = await f.observe(), spool = join(f.root, '.code-awareness/native-hooks/spool')
+  prepareNativeSpool(spool)
+  const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'fixture', worktreeId: snapshot.worktreeId,
+    generation: snapshot.worktreeGeneration, ...nativeGitIdentity(f.root), spool, gitCommitTool: 'mcp__code_awareness_local__commit_git_changes' }
+  const path = sessionStorePath(join(f.root, '.git'), 'fixture')
+  let sessions = new SessionStore(path, 'fixture')
+  try {
+    const session = 'governed-delivery-fixture', sessionId = nativeDigest(JSON.stringify(['fixture', 'codex', session]))
+    const stamp = startCaptureFixture(sessions.registry, binding, sessionId)
+    const payload = { session_id: session, cwd: f.root, tool_name: binding.gitCommitTool, tool_use_id: 'governed-call', tool_input: args }
+    const pre = stamp(normalizeNativeHook({ ...payload, hook_event_name: 'PreToolUse' }, binding))
+    const post = stamp(normalizeNativeHook({ ...payload, hook_event_name: 'PostToolUse', tool_response: result }, binding))
+    expect(pre.git?.fingerprint).toBe(receipt.argumentFingerprint)
+    expect(post.git).toMatchObject({ sha: await f.git.getCurrentCommitHash(f.root), replayed: false, fingerprint: receipt.argumentFingerprint })
+    const invocationId = pre.invocationId!, sha = post.git!.sha!
+    sessions.registry.apply(nativeObservationBatch(pre), undefined)
+    expect(await correlateNativeGit(sessions.registry, binding, invocationId, f.git, () => {})).toBe('INVOCATION_INCOMPLETE')
+    sessions.registry.apply(nativeObservationBatch(post), undefined)
+    expect(await correlateNativeGit(sessions.registry, binding, invocationId, f.git, () => {})).toBe('VERIFIED')
+    sessions.close(); sessions = new SessionStore(path, 'fixture')
+    for (const selector of [{ type: 'INVOCATION', id: invocationId }, { type: 'COMMIT', id: sha }]) {
+      const graph = await executeSessionTool(sessions, { refresh: vi.fn() }, 'discover_execution_context', { selector, mode: 'RELATION_DETAIL', depth: 1 }, () => {})
+      expect(graph.isError, graph.content[0].text).toBeFalsy()
+      expect(JSON.parse(graph.content[0].text).edges).toContainEqual(expect.objectContaining({ evidenceKind: 'NATIVE_GIT_CAUSAL', confidenceClass: 'VERIFIED_CAUSAL', relation: 'committed' }))
+    }
+    const db = new Database(path, { readonly: true })
+    try {
+      expect(db.pragma('foreign_key_check')).toEqual([])
+      expect(db.prepare('SELECT state FROM registry_edges WHERE source=? ORDER BY id').all('NATIVE_GIT:' + invocationId)).toEqual([{ state: 'OBSERVED' }, { state: 'OBSERVED' }])
+    } finally { db.close() }
+  } finally { sessions.close() }
 }, 60000)
 
 it('keeps a binding on a shared branch contextual and rejects a delivery observation', async () => {

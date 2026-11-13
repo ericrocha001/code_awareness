@@ -59,6 +59,21 @@ export function nativeInvocationWindow(registry: CheckpointRegistry, binding: Na
   const edges = registry.directEvidence(invocation, 'NATIVE_CAPTURE_WINDOW')
   if (edges.length !== 2 || edges[0].evidenceRef !== edges[1].evidenceRef || !['PreToolUse', 'PostToolUse'].every(relation => edges.some(edge => edge.relation === relation))) return 'CAPTURE_WINDOW_UNPROVEN'
   const capture = JSON.parse(edges[0].evidenceRef) as NonNullable<NativeHookEnvelope['capture']>
+  try {
+    const observations = registry.directEvidence(invocation, 'NATIVE_HOOK_OBSERVED').filter(edge => edge.relation === 'invocation')
+    if (observations.length !== 2) return 'CAPTURE_ENVELOPE_UNPROVEN'
+    const events = observations.map(edge => {
+      const source = registry.source('NATIVE_HOOK:' + edge.evidenceRef)
+      const event = parseNativeEnvelope(source?.cursor ?? '')
+      if (source?.revision !== event.digest || edge.digest !== event.digest || event.eventId !== edge.evidenceRef || event.repositoryId !== binding.repositoryId ||
+        event.worktreeId !== binding.worktreeId || event.generation !== binding.generation || 'native-invocation:' + event.invocationId !== invocation.id ||
+        'codex-native:' + event.sessionId !== session.id || JSON.stringify(event.capture) !== JSON.stringify(capture)) throw new Error('CAPTURE_ENVELOPE_UNPROVEN')
+      return event
+    })
+    const pre = events.find(event => event.event === 'PreToolUse'), post = events.find(event => event.event === 'PostToolUse')
+    if (!pre || !post) return 'CAPTURE_ENVELOPE_UNPROVEN'
+    if (Date.parse(pre.observedAt) > Date.parse(post.observedAt)) return 'INVOCATION_ORDER_INVALID'
+  } catch { return 'CAPTURE_ENVELOPE_UNPROVEN' }
   if (capture.configuration !== nativeCaptureConfiguration(binding)) return 'CAPTURE_CONFIGURATION_CHANGED'
   const boundary = registry.directEvidence({ kind: 'EXECUTION', id: 'native-window:' + capture.epoch }, 'NATIVE_CAPTURE_BOUNDARY')
   if (boundary.length !== 2 || !boundary.some(edge => edge.to.kind === 'SESSION' && edge.to.id === session.id) ||

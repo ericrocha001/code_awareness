@@ -36,6 +36,6 @@ export function nativeHookReadiness(registry: CheckpointRegistry, root: string, 
   }
   return { schemaVersion: 1, ...target, installation,
     trust: authorization, execution, captureReadiness,
-    nextEvidence: installation.state === 'MISSING' ? 'REQUEST_INSTALLATION_APPROVAL' : installation.state !== 'CONFIGURED' ? 'INSPECT_INSTALLATION_READ_ONLY' : execution.state === 'FAILED' ? 'INSPECT_FAILED_EVENT_READ_ONLY' :
+    nextEvidence: installation.repairability === 'REPAIRABLE' ? 'REQUEST_REPAIR_APPROVAL' : installation.state === 'MISSING' ? 'REQUEST_INSTALLATION_APPROVAL' : installation.state !== 'CONFIGURED' ? 'INSPECT_INSTALLATION_READ_ONLY' : execution.state === 'FAILED' ? 'INSPECT_FAILED_EVENT_READ_ONLY' :
       trust.state === 'UNTRUSTED' || trust.state === 'PARTIAL' ? 'REQUEST_CLIENT_AUTHORIZATION_REVIEW' : trust.state === 'TRUSTED' && execution.state === 'UNOBSERVED' ? 'OBSERVE_REAL_WORKFLOW_WITH_CONSENT' : 'REQUEST_CLIENT_INSPECTION' }
 }

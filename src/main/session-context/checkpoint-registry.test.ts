@@ -183,9 +183,10 @@ it('requires matching native invocation, fresh Git receipt and exact object befo
   const binding: NativeHookBinding = { schema: 1, enabled: true, repositoryId: 'repo', worktreeId: '1'.repeat(64), generation: '2'.repeat(64), root: f.base, commonDirectory: f.base, directoryIdentity: '3'.repeat(64), spool: f.base }
   const invocationId = '4'.repeat(64), fingerprint = '5'.repeat(64), parent = '6'.repeat(40), sessionId = '7'.repeat(64)
   const stamp = startCaptureFixture(registry, binding, sessionId)
+  const captureTime = Date.now()
   const observe = (event: 'PreToolUse' | 'PostToolUse', replayed = false) => {
     const envelope: NativeHookEnvelope = { schema: 1, source: 'CODEX_NATIVE_HOOK', repositoryId: 'repo', worktreeId: binding.worktreeId, generation: binding.generation,
-      sessionId, event, invocationId, observedAt: new Date().toISOString(), eventId: digest(event + replayed), digest: digest('payload' + event + replayed),
+      sessionId, event, invocationId, observedAt: new Date(captureTime + (event === 'PostToolUse' ? 1 : 0)).toISOString(), eventId: digest(event + replayed), digest: digest('payload' + event + replayed),
       git: { operationId: 'commit-proof', fingerprint, expectedHead: parent, ...(event === 'PostToolUse' ? { sha: commit, parent, replayed } : {}) } }
     const batch = nativeObservationBatch(stamp(envelope)); registry.apply(batch, undefined)
   }
