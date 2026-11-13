@@ -60,9 +60,8 @@ function receiptFile(cwd, id) {
 function readReceipt(cwd, id) {
   const file = receiptFile(cwd, id)
   const receipt = JSON.parse(fs.readFileSync(file, 'utf8'))
-  if (receipt.id !== id || !digestPattern.test(receipt.digest) || receiptDigest(receipt) !== receipt.digest) {
-    throw invalid('INVALID_RECEIPT')
-  }
+  if (receipt.id !== id || !digestPattern.test(receipt.digest)) throw invalid('INVALID_RECEIPT')
+  if (receiptDigest(receipt) !== receipt.digest) throw invalid('RECEIPT_INTEGRITY_ERROR')
   return { file, receipt }
 }
 
@@ -171,8 +170,18 @@ async function reconcileReceipts({ cwd = process.cwd(), profile, id, limit = 5, 
 }
 
 async function registerReceipt(id, { cwd = process.cwd(), profile, association } = {}) {
-  const [outcome] = (await reconcileReceipts({ cwd, profile, id, association })).reconciled
-  return outcome
+  const { file, receipt } = readReceipt(cwd, id)
+  const connection = await validationConnection(cwd, profile)
+  if (identityConflict(receipt, connection)) throw invalid('RECEIPT_IDENTITY_MISMATCH')
+  let result = await connection.lookup(id, receipt.digest, association)
+  if (result.state === 'NOT_FOUND') result = await connection.lookup(id, receipt.digest, association)
+  if (result.state === 'NOT_FOUND') result = await connection.register(id, receipt.digest, association)
+  if (result.state === 'PERSISTED' || result.state === 'REGISTRATION_PENDING') {
+    if (receipt.registration?.state !== 'PERSISTED') persistRegistration(file, receipt, result)
+    return result
+  }
+  const code = result.code || 'RECEIPT_LOOKUP_UNAVAILABLE'
+  throw Object.assign(new Error(code), { code, stage: 'response', reason: 'SERVER_REJECTED', operation: 'lookup' })
 }
 
 module.exports = { validationConnection, registerReceipt, reconcileReceipts, pendingReceiptIds }
