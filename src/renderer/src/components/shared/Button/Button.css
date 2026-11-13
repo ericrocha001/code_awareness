@@ -52,3 +52,32 @@
 .ui-button--compact { min-height: var(--ui-control-compact-height); padding: 4px 12px; }
 .ui-button--icon { width: var(--ui-control-height); height: var(--ui-control-height); padding: 0; flex-shrink: 0; }
 .ui-button--icon.ui-button--compact { width: var(--ui-control-compact-height); height: var(--ui-control-compact-height); }
+
+.btn-spinner {
+  display: inline-block;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: btn-spin 0.8s linear infinite;
+}
+
+.btn-busy-status {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+[data-busy="true"] { position: relative; cursor: progress; }
+
+@keyframes btn-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .btn-spinner { animation: none; border-right-color: currentColor; border-style: dotted; }
+}

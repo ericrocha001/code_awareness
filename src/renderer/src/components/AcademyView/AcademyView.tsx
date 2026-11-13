@@ -78,6 +78,8 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
   const [scopeFilter, setScopeFilter] = useState<'ALL' | AcademySkillScope>('ALL')
   const [activationPending, setActivationPending] = useState<string | null>(null)
   const [packagePending, setPackagePending] = useState(false)
+  const [downloading, setDownloading] = useState<'PLUGIN' | 'GEMINI' | null>(null)
+  const downloadInFlight = useRef(false)
   const [reviewBusy, setReviewBusy] = useState(false)
   const [pluginError, setPluginError] = useState<string | null>(null)
   const [scope, setScope] = useState<AcademySkillScope>('GLOBAL')
@@ -718,8 +720,8 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     try { await action.onConfirm() } catch (error) { reportError(error) }
   }
 
-  const runPluginAction = async (action: () => Promise<void>) => {
-    setPackagePending(true)
+  const runPluginAction = async (action: () => Promise<void>, tracksPreparation = true) => {
+    if (tracksPreparation) setPackagePending(true)
     setPluginError(null)
     try {
       await action()
@@ -727,7 +729,7 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
       const msg = error instanceof Error ? error.message : String(error)
       setPluginError(msg)
       reportError(error)
-    } finally { setPackagePending(false) }
+    } finally { if (tracksPreparation) setPackagePending(false) }
   }
 
   const preparePluginRelease = () => void runPluginAction(async () => {
@@ -744,7 +746,17 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     } catch (error) { reportError(error) }
   })()
 
-  const downloadPluginRelease = (release: AcademyOpenAiRelease) => void runPluginAction(async () => {
+  const runDownload = async (target: 'PLUGIN' | 'GEMINI', action: () => Promise<void>) => {
+    if (downloadInFlight.current) return
+    downloadInFlight.current = true
+    setDownloading(target)
+    try { await action() } finally {
+      downloadInFlight.current = false
+      setDownloading(null)
+    }
+  }
+
+  const downloadPluginRelease = (release: AcademyOpenAiRelease) => void runDownload('PLUGIN', () => runPluginAction(async () => {
     const updated = await window.codeAwareness.downloadAcademyOpenAiPackage(release.id)
     readSecondaryProjections(true)
     if (
@@ -756,7 +768,7 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     } else {
       showMessage(`ZIP v${updated.pluginVersion} salvo em Downloads.`)
     }
-  })
+  }, false))
 
   const revokePluginUpload = (release: AcademyOpenAiRelease) => void runPluginAction(async () => {
     const updated = await window.codeAwareness.revokeAcademyOpenAiUpload(release.id)
@@ -860,7 +872,7 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
     showMessage(`Modo Gemini alterado para ${mode === 'FULL' ? 'Completo' : mode === 'INCREMENTAL' ? 'Incremental' : 'Gatilhos MCP'}.`)
   })
 
-  const downloadGeminiExport = () => void runGeminiAction(async () => {
+  const downloadGeminiExport = () => void runDownload('GEMINI', () => runGeminiAction(async () => {
     const nextState = await window.codeAwareness.downloadAcademyGeminiExport()
     setGeminiExport(nextState)
     if (nextState.lastError) {
@@ -872,7 +884,7 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
         ? 'Pacote Gemini baixado e importação assumida automaticamente.'
         : 'Pacote Gemini salvo em Downloads.'
     )
-  })
+  }))
 
   const confirmGeminiImport = (skillIds?: string[]) => void runGeminiAction(async () => {
     const mode = geminiExport?.mode ?? 'FULL'
@@ -977,6 +989,7 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           preference={publicationPreference}
           skillCount={snapshot.skills.filter(item => item.scope === 'GLOBAL' && item.status === 'ACTIVE').length}
           preparing={packagePending}
+          downloading={downloading === 'PLUGIN'}
           pluginError={pluginError}
           onPrepareRelease={preparePluginRelease}
           onRevealRelease={revealPluginRelease}
@@ -993,6 +1006,7 @@ export const AcademyView: React.FC<{ onNavigationGuardChange?: (guard: AcademyNa
           geminiExport={geminiExport}
           preparing={geminiPreparing}
           busy={geminiBusy}
+          downloading={downloading === 'GEMINI'}
           geminiError={geminiError}
           onPrepareExport={prepareGeminiExport}
           onRevealExport={revealGeminiExport}
